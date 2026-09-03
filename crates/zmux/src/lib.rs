@@ -18,6 +18,7 @@ pub mod paths;
 pub mod persistence;
 pub mod protocol;
 pub mod reconnect;
+pub mod remote;
 pub mod retention;
 
 pub mod client;
@@ -35,7 +36,6 @@ pub mod upgrade;
 
 use std::ffi::OsString;
 
-#[cfg(feature = "session-persistence")]
 use anyhow::Context as _;
 use anyhow::Result;
 
@@ -87,6 +87,10 @@ fn usage(no_mux: bool) -> String {
         format_help_table([
             ("list", "List the available background session catalogs"),
             (
+                "endpoint --json",
+                "Print the running daemon endpoint as JSON",
+            ),
+            (
                 "reconnect SESSION_ID",
                 "Open a backgrounded session in a Zetta window",
             ),
@@ -94,6 +98,14 @@ fn usage(no_mux: bool) -> String {
     } else {
         format_help_table([
             ("list", "List the sessions this multiplexer is holding"),
+            (
+                "endpoint --json",
+                "Print the running daemon endpoint as machine-readable JSON",
+            ),
+            (
+                "attach SSH_TARGET SESSION_ID",
+                "Open a shared remote session through OpenSSH",
+            ),
             (
                 "resume SESSION",
                 "Restore an encrypted disk record with fresh shells; original processes are not resumed",
@@ -127,6 +139,15 @@ fn usage(no_mux: bool) -> String {
     let options = if no_mux {
         format_help_table([
             ("-j, --json", "Print machine-readable JSON (with list)"),
+            (
+                "-I, --ids-only",
+                "Print one numeric session ID per line (with list)",
+            ),
+            (
+                "-H, --ssh-target TARGET",
+                "OpenSSH destination for a remote list or administration command",
+            ),
+            ("-p, --port PORT", "SSH port for a remote command"),
             ("-h, --help", "Print help"),
             (
                 "-v, --version",
@@ -144,6 +165,15 @@ fn usage(no_mux: bool) -> String {
                 "Stop even while sessions are running (with stop)",
             ),
             ("-j, --json", "Print machine-readable JSON (with list)"),
+            (
+                "-I, --ids-only",
+                "Print one numeric session ID per line (with list)",
+            ),
+            (
+                "-H, --ssh-target TARGET",
+                "OpenSSH destination for a remote list or administration command",
+            ),
+            ("-p, --port PORT", "SSH port for a remote command"),
             (
                 "-r, --retention MODE",
                 "What to keep of a detached pane's output:\nnone, memory (default), or disk",
@@ -313,13 +343,36 @@ fn ensure_unambiguous_session_id(
     Ok(())
 }
 
+fn print_remote_sessions(sessions: &[protocol::BackgroundSessionSummary]) {
+    if sessions.is_empty() {
+        println!("No remote sessions.");
+        return;
+    }
+    for session in sessions {
+        let protected = if session.authentication_required {
+            ", protected"
+        } else {
+            ""
+        };
+        println!(
+            "{}  {}  ({} pane{}{})",
+            session.id,
+            session.title,
+            session.panes.len(),
+            if session.panes.len() == 1 { "" } else { "s" },
+            protected,
+        );
+    }
+}
+
 /// Client-side settings that only the caller can know.
 ///
 /// `zmux` is deliberately free of Zetta's configuration format — a session
 /// holder on a small remote host has no business parsing it — but the identity
 /// a user configured once should not have to be retyped as `--identity` on every
-/// command. So the binaries built beside Zetta pass what they have already
-/// parsed, and the standalone one passes nothing.
+/// command. So the binary built beside Zetta passes what it has already parsed,
+/// falling back to the conventional SSH identity when needed; the standalone
+/// binary applies the same fallback without reading Zetta's configuration.
 #[derive(Clone, Debug, Default)]
 pub struct ClientDefaults {
     /// Age identity files, as `--identity` would have given them. Used to open a
@@ -336,10 +389,15 @@ pub fn run(arguments: &[OsString]) -> Result<()> {
 pub fn run_with_defaults(arguments: &[OsString], defaults: ClientDefaults) -> Result<()> {
     let no_mux = no_mux_environment();
     let mut json = false;
+    let mut ids_only = false;
     let mut daemon = false;
     let mut retention = retention::Retention::default();
     let mut command: Option<String> = None;
     let mut session: Option<SessionArgument> = None;
+    let mut remote_target: Option<String> = None;
+    let mut expect_remote_target = false;
+    let mut port: Option<u16> = None;
+    let mut expect_port = false;
     let mut expect_retention = false;
     let mut expect_retention_bytes = false;
     let mut retention_bytes = None;
@@ -390,11 +448,59 @@ pub fn run_with_defaults(arguments: &[OsString], defaults: ClientDefaults) -> Re
             expect_identity = false;
             continue;
         }
+        if expect_remote_target {
+            anyhow::ensure!(
+                remote_target.is_none(),
+                "--ssh-target may only be specified once"
+            );
+            anyhow::ensure!(!argument.is_empty(), "--ssh-target requires a destination");
+            remote_target = Some(argument.into_owned());
+            expect_remote_target = false;
+            continue;
+        }
+        if expect_port {
+            anyhow::ensure!(port.is_none(), "--port may only be specified once");
+            port = Some(
+                argument
+                    .parse::<u16>()
+                    .map_err(|_| anyhow::anyhow!("--port must be a number from 1 to 65535"))?,
+            );
+            anyhow::ensure!(port != Some(0), "--port must be between 1 and 65535");
+            expect_port = false;
+            continue;
+        }
         match argument.as_ref() {
             "--json" | "-j" => json = true,
+            "--ids-only" | "-I" => ids_only = true,
             "--force" | "-f" => force = true,
             "--retention" | "-r" => expect_retention = true,
             "--identity" | "-i" => expect_identity = true,
+            "--ssh-target" | "-H" => expect_remote_target = true,
+            "--port" | "-p" => expect_port = true,
+            value if value.starts_with("--ssh-target=") => {
+                anyhow::ensure!(
+                    remote_target.is_none(),
+                    "--ssh-target may only be specified once"
+                );
+                let target = value
+                    .split_once('=')
+                    .map(|(_, target)| target)
+                    .unwrap_or_default();
+                anyhow::ensure!(!target.is_empty(), "--ssh-target requires a destination");
+                remote_target = Some(target.to_owned());
+            }
+            value if value.starts_with("--port=") => {
+                anyhow::ensure!(port.is_none(), "--port may only be specified once");
+                let value = value
+                    .split_once('=')
+                    .map(|(_, value)| value)
+                    .unwrap_or_default();
+                let parsed = value
+                    .parse::<u16>()
+                    .map_err(|_| anyhow::anyhow!("--port must be a number from 1 to 65535"))?;
+                anyhow::ensure!(parsed != 0, "--port must be between 1 and 65535");
+                port = Some(parsed);
+            }
             value if value.starts_with("--identity=") => {
                 let path = value
                     .split_once('=')
@@ -524,11 +630,19 @@ pub fn run_with_defaults(arguments: &[OsString], defaults: ClientDefaults) -> Re
                 );
                 return Ok(());
             }
-            value @ ("list" | "stop" | "reconnect" | "resume" | "share" | "unshare" | "kill"
-            | "forget")
+            value @ ("list" | "endpoint" | "attach" | "stop" | "reconnect" | "resume" | "share"
+            | "unshare" | "kill" | "forget")
                 if command.is_none() =>
             {
                 command = Some(value.to_owned());
+            }
+            value if !value.starts_with('-') && command.as_deref() == Some("attach") => {
+                if remote_target.is_none() {
+                    remote_target = Some(value.to_owned());
+                } else {
+                    anyhow::ensure!(session.is_none(), "only one session may be given");
+                    session = Some(SessionArgument::parse(&argument)?);
+                }
             }
             value
                 if !value.starts_with('-')
@@ -545,10 +659,33 @@ pub fn run_with_defaults(arguments: &[OsString], defaults: ClientDefaults) -> Re
     }
     anyhow::ensure!(!expect_retention, "--retention requires a mode");
     anyhow::ensure!(!expect_identity, "--identity requires a path");
+    anyhow::ensure!(!expect_remote_target, "--ssh-target requires a destination");
+    anyhow::ensure!(!expect_port, "--port requires a value");
     anyhow::ensure!(
         identity_paths.len() == configured_identity_count
-            || matches!(command.as_deref(), Some("resume") | Some("reconnect")),
-        "--identity is only valid with the resume and reconnect commands"
+            || matches!(command.as_deref(), Some("resume" | "reconnect"))
+            || (remote_target.is_some()
+                && matches!(
+                    command.as_deref(),
+                    Some("list" | "attach" | "kill" | "share" | "unshare" | "forget")
+                )),
+        "--identity is only valid with resume, reconnect, or remote commands"
+    );
+    anyhow::ensure!(
+        !ids_only || command.as_deref() == Some("list"),
+        "--ids-only is only valid with list"
+    );
+    anyhow::ensure!(
+        remote_target.is_none()
+            || matches!(
+                command.as_deref(),
+                Some("list" | "attach" | "kill" | "share" | "unshare" | "forget")
+            ),
+        "--ssh-target is only valid with list, attach, share, unshare, kill, or forget"
+    );
+    anyhow::ensure!(
+        port.is_none() || remote_target.is_some(),
+        "--port requires a remote SSH target"
     );
     anyhow::ensure!(
         !expect_retention_bytes,
@@ -611,6 +748,29 @@ pub fn run_with_defaults(arguments: &[OsString], defaults: ClientDefaults) -> Re
     let _ = (retention, daemon_options, resume_from, resume_ready);
 
     match command.as_deref() {
+        Some("endpoint") => {
+            anyhow::ensure!(
+                json,
+                "endpoint requires --json so its output stays machine-readable"
+            );
+            anyhow::ensure!(
+                remote_target.is_none(),
+                "endpoint is a local daemon command"
+            );
+            anyhow::ensure!(port.is_none(), "endpoint is a local daemon command");
+            let endpoint =
+                transport::Endpoint::read(&server::endpoint_path(&paths::session_catalog_dir()))?;
+            println!("{}", serde_json::to_string(&endpoint)?);
+            Ok(())
+        }
+        Some("attach") => {
+            let target = remote_target.context("attach requires an SSH target")?;
+            let session = session.context("attach requires a numeric remote session ID")?;
+            let SessionArgument::Bare(session_id) = session else {
+                anyhow::bail!("remote session IDs must be numeric");
+            };
+            reconnect::run_remote_attach(&target, port, session_id, &identity_paths)
+        }
         Some("reconnect") => {
             let session = session.context_missing()?;
             reconnect::run_reconnect_session(&session.to_string(), &identity_paths)
@@ -659,6 +819,13 @@ pub fn run_with_defaults(arguments: &[OsString], defaults: ClientDefaults) -> Re
         }
         Some("kill") => {
             let session = session.context_missing()?;
+            if let Some(target) = remote_target.as_deref() {
+                let SessionArgument::Bare(session_id) = session else {
+                    anyhow::bail!("remote session IDs must be numeric");
+                };
+                reconnect::run_remote_admin("kill", target, port, session_id, &identity_paths)?;
+                return Ok(());
+            }
             let directory = paths::session_catalog_dir();
             if let Some(client) = client::Client::connect_existing()? {
                 let session = resolve_session_id(&client, session, &directory)?;
@@ -692,6 +859,19 @@ pub fn run_with_defaults(arguments: &[OsString], defaults: ClientDefaults) -> Re
         command @ (Some("share") | Some("unshare")) => {
             let shared = command == Some("share");
             let session = session.context_missing()?;
+            if let Some(target) = remote_target.as_deref() {
+                let SessionArgument::Bare(session_id) = session else {
+                    anyhow::bail!("remote session IDs must be numeric");
+                };
+                reconnect::run_remote_admin(
+                    if shared { "share" } else { "unshare" },
+                    target,
+                    port,
+                    session_id,
+                    &identity_paths,
+                )?;
+                return Ok(());
+            }
             let Some(client) = client::Client::connect_existing()? else {
                 anyhow::bail!("no multiplexer is running");
             };
@@ -719,6 +899,13 @@ pub fn run_with_defaults(arguments: &[OsString], defaults: ClientDefaults) -> Re
         }
         Some("forget") => {
             let session = session.context_missing()?;
+            if let Some(target) = remote_target.as_deref() {
+                let SessionArgument::Bare(session_id) = session else {
+                    anyhow::bail!("remote session IDs must be numeric");
+                };
+                reconnect::run_remote_admin("forget", target, port, session_id, &identity_paths)?;
+                return Ok(());
+            }
             #[cfg(feature = "session-persistence")]
             {
                 let directory = paths::session_catalog_dir();
@@ -763,7 +950,47 @@ pub fn run_with_defaults(arguments: &[OsString], defaults: ClientDefaults) -> Re
                 }
             }
         }
-        Some("list") | None => catalog::print_session_catalogs(&paths::session_catalog_dir(), json),
+        Some("list") | None if remote_target.is_some() => {
+            anyhow::ensure!(
+                !json || !ids_only,
+                "--json and --ids-only cannot be combined"
+            );
+            let target = remote::RemoteTarget::new(
+                remote_target
+                    .as_deref()
+                    .expect("remote target was checked by the match guard"),
+            )
+            .with_port(port);
+            let client = client::Client::connect_remote(target)
+                .context("connecting to the remote multiplexer")?;
+            let sessions = client.list()?;
+            if ids_only {
+                for session in sessions {
+                    println!("{}", session.id);
+                }
+            } else if json {
+                println!("{}", serde_json::to_string(&sessions)?);
+            } else {
+                print_remote_sessions(&sessions);
+            }
+            Ok(())
+        }
+        Some("list") | None => {
+            anyhow::ensure!(
+                !json || !ids_only,
+                "--json and --ids-only cannot be combined"
+            );
+            if ids_only {
+                for catalog in catalog::read_session_catalogs(&paths::session_catalog_dir())? {
+                    for session in catalog.sessions {
+                        println!("{}", session.id);
+                    }
+                }
+                Ok(())
+            } else {
+                catalog::print_session_catalogs(&paths::session_catalog_dir(), json)
+            }
+        }
         Some(unknown) => anyhow::bail!("unknown mux command {unknown:?}"),
     }
 }

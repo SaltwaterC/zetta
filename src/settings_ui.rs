@@ -83,8 +83,9 @@ pub(crate) enum SettingsToggle {
     ProfileVisibility(usize),
     ProfileDraftVisibility,
     /// Protect background sessions with the configured age key instead of a
-    /// typed secret. Offered only when a recipient and an identity are both set,
-    /// because without them it would mint sessions nobody can reattach.
+    /// typed secret. Offered only when a recipient and an effective identity are
+    /// available, because without them it would mint sessions nobody can
+    /// reattach.
     #[cfg(feature = "session-persistence")]
     SessionAutoProtect,
     #[cfg(target_os = "macos")]

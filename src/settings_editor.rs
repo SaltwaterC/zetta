@@ -1260,7 +1260,7 @@ pub struct ConfigurationForm {
     pub session_persistence_identity: TextField,
     /// Whether background sessions are protected with the configured age key
     /// instead of a secret typed into a dialog. Only meaningful, and only
-    /// offered, alongside a recipient and an identity.
+    /// offered, alongside a recipient and an effective identity.
     pub session_persistence_auto_protect: bool,
     #[cfg(feature = "http-server")]
     pub http_server_port: TextField,
@@ -1274,13 +1274,15 @@ impl ConfigurationForm {
     /// Whether the automatic-protection toggle should be shown at all.
     ///
     /// Read from the form rather than the loaded configuration, so the toggle
-    /// appears as soon as a recipient and an identity have been typed, and goes
-    /// away again if either is cleared. Both the page and the tab order ask this,
-    /// so a control that is not drawn is never a stop the focus ring lands on.
+    /// appears as soon as a recipient and an identity have been typed, or when
+    /// the conventional `~/.ssh/id_ed25519` identity is available. Both the
+    /// page and the tab order ask this, so a control that is not drawn is never
+    /// a stop the focus ring lands on.
     #[cfg(feature = "session-persistence")]
     pub fn session_auto_protect_is_offered(&self) -> bool {
         !self.session_persistence_recipients.text.trim().is_empty()
-            && !self.session_persistence_identity.text.trim().is_empty()
+            && (!self.session_persistence_identity.text.trim().is_empty()
+                || crate::config::default_session_identity_path().is_some())
     }
 
     pub fn load(path: &Path, config: &Config) -> Result<Self> {

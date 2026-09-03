@@ -47,8 +47,8 @@ pub struct RestorableSessionRecord {
 /// Version of the local Zetta process-control protocol used for requests
 /// between Zetta processes, including multiplexer-held session handoffs,
 /// explicit `new_window` launches, the two-phase `run_wait`/`run_complete`
-/// exchange, and registered project shell commands.
-pub const CONTROL_VERSION: u32 = 2;
+/// exchange, registered project shell commands, and remote SSH session attach.
+pub const CONTROL_VERSION: u32 = 3;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BackgroundSessionCatalog {

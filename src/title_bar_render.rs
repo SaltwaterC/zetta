@@ -958,6 +958,7 @@ impl Zetta {
                         .action("Open Keymap", Box::new(OpenKeymap))
                         .action("Open Templates", Box::new(OpenTemplates))
                         .action("Open Projects", Box::new(OpenProjects))
+                        .action("Open Remote Session", Box::new(OpenRemoteSession))
                         .separator()
                         .action_checked(
                             "Toggle Fullscreen",

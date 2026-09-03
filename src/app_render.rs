@@ -979,6 +979,7 @@ struct ZettaOverlays {
     theme_picker: Option<AnyElement>,
     overlay_style_picker: Option<AnyElement>,
     serial_console: Option<AnyElement>,
+    remote_session: Option<AnyElement>,
     session_authentication: Option<AnyElement>,
     close_confirmation: Option<AnyElement>,
 }
@@ -1050,6 +1051,11 @@ impl Zetta {
                 self.render_overlay_style_picker_overlay(window, cx),
             ),
             serial_console: modal_overlay(serial_console),
+            remote_session: modal_overlay(self.render_remote_session_overlay(
+                colors,
+                error_color,
+                handle,
+            )),
             session_authentication: modal_overlay(self.render_session_authentication_overlay(cx)),
             close_confirmation: modal_overlay(self.render_tab_close_confirmation_overlay(cx)),
         }
@@ -1122,6 +1128,7 @@ impl Zetta {
             .on_action(cx.listener(Self::toggle_tab_sharing))
             .on_action(cx.listener(Self::toggle_auto_background_tab))
             .on_action(cx.listener(Self::reconnect_session))
+            .on_action(cx.listener(Self::open_remote_session))
             .on_action(cx.listener(Self::close_active_pane))
             .on_action(cx.listener(Self::next_tab))
             .on_action(cx.listener(Self::previous_tab))
@@ -1359,6 +1366,9 @@ impl Zetta {
             .when(self.close_tab_confirmation.is_some(), |content| {
                 content.track_focus(&self.close_confirmation_focus)
             })
+            .when(self.remote_session_picker.is_some(), |content| {
+                content.track_focus(&self.remote_session_focus)
+            })
             .capture_key_up(cx.listener(Self::pane_resize_key_up))
             .on_key_down(cx.listener(Self::command_palette_key_down))
             .child(column);
@@ -1376,6 +1386,7 @@ impl Zetta {
             overlays.theme_picker,
             overlays.overlay_style_picker,
             overlays.serial_console,
+            overlays.remote_session,
             overlays.session_authentication,
             overlays.close_confirmation,
         ]

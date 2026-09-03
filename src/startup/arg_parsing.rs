@@ -50,7 +50,7 @@ pub(crate) enum StartupMode {
     },
     /// `zetta mux ...`, forwarded to the multiplexer so the subcommand and the
     /// `zmux` binary cannot accept different arguments. Startup supplies the
-    /// configured identity as a default for the commands that can need one; an
+    /// effective identity as a default for the commands that can need one; an
     /// explicit `-i/--identity` adds to it rather than replacing it.
     Mux(Vec<OsString>),
     SetTabIcon {

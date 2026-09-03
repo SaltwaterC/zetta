@@ -2684,6 +2684,54 @@ pub(crate) fn run() -> Result<()> {
                                 let _ = completion.send(ReconnectSessionResult::Rejected);
                             }
                         }
+                        ProcessControlCommand::OpenRemoteSession {
+                            target,
+                            port,
+                            session_id,
+                            secret,
+                            completion,
+                        } => {
+                            let mut completion = Some(completion);
+                            let dispatched = cx.update(|cx| {
+                                if !cx
+                                    .global::<ZettaProcessState>()
+                                    .control_server
+                                    .is_accepting()
+                                {
+                                    return false;
+                                }
+                                if cx.global::<ZettaProcessState>().windows.is_empty()
+                                    && open_dormant_or_new_window(cx).is_err()
+                                {
+                                    return false;
+                                }
+                                let Some(window_id) = cx
+                                    .global::<ZettaProcessState>()
+                                    .windows
+                                    .keys()
+                                    .next()
+                                    .copied()
+                                else {
+                                    return false;
+                                };
+                                gpui::WindowHandle::<Zetta>::new(window_id)
+                                    .update(cx, |zetta, window, cx| {
+                                        zetta.open_remote_session_from_cli(
+                                            target,
+                                            port,
+                                            session_id,
+                                            secret,
+                                            completion.take().expect("completion sender"),
+                                            window,
+                                            cx,
+                                        );
+                                    })
+                                    .is_ok()
+                            });
+                            if !dispatched && let Some(completion) = completion {
+                                let _ = completion.send(ReconnectSessionResult::Rejected);
+                            }
+                        }
                         ProcessControlCommand::ResumeDiskSession {
                             session_id,
                             identity_paths,

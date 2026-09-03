@@ -188,9 +188,10 @@ additionally writes encrypted age v1 metadata and scrollback when
 `persistence.recipients` is non-empty. Recipients may be native age X25519,
 ML-KEM-768/X25519, SSH Ed25519, SSH RSA, or `github:USER`; post-quantum
 recipients cannot be mixed with classical or SSH recipients. `identity` is
-the default client-side identity file for resuming a disk record; it is never
-sent to the daemon. With disk selected and no recipients, no persistence files
-are written.
+the client-side age identity for resuming a disk record; it is never sent to
+the daemon. When this field is absent or blank, an existing
+`~/.ssh/id_ed25519` is tried as the default age identity. With disk selected
+and no recipients, no persistence files are written.
 
 When disk retention includes a `github:USER` recipient and GitHub is temporarily
 unreachable, Zetta keeps the requested disk setting but configures the daemon
@@ -209,7 +210,10 @@ The setting is global to the daemon and is applied when a Zetta process
 connects or reloads configuration; an already-running daemon does not need to
 be restarted. Use `zmux list` to see opaque restorable records and
 `zmux resume SESSION -i PATH` to decrypt one;
-`-i/--identity` may be repeated. `"persist"` is rejected with a migration
+`-i/--identity` may be repeated. If no identity is configured, command-line
+`zmux` commands also try `~/.ssh/id_ed25519` when that private SSH key exists;
+an explicit `sessions.persistence.identity` takes precedence, while `-i` adds
+another identity to try. `"persist"` is rejected with a migration
 hint to `"disk"`.
 
 If an SSH identity produces an `unknown cipher "aes256-gcm@openssh.com"` error
@@ -221,18 +225,19 @@ compatibility](background-sessions.md#ssh-identity-cipher-compatibility).
 `persistence.auto_protect` replaces the secret dialog with your age key pair.
 Detaching, keeping, or sharing a tab then generates a 256-bit session key,
 protects the session with it exactly as a typed secret would, and seals that key
-to `persistence.recipients`. Reattaching opens the sealed key with
+to `persistence.recipients`. Reattaching opens the sealed key with the effective
 `persistence.identity`, so no secret is asked for in either direction — in a
-window, or from `zmux reconnect` and `zmux resume`.
+window, or from `zmux reconnect` and `zmux resume`. If the setting is absent or
+blank, the default `~/.ssh/id_ed25519` identity is used when that file exists.
 
 The session is still protected: attaching requires opening the sealed key, which
 requires the private key. The multiplexer is unchanged by this — it stores the
 same Argon2id verifier and never sees the identity.
 
-It needs both a recipient and an identity, and the settings page only offers the
-toggle once both are set, because either one missing would create sessions that
-cannot be reattached. It applies under every `sessions.retention` mode; only the
-recipients matter, not disk persistence.
+It needs both a recipient and an effective identity, and the settings page only
+offers the toggle once both are available, because either one missing would
+create sessions that cannot be reattached. It applies under every
+`sessions.retention` mode; only the recipients matter, not disk persistence.
 
 **Lose the identity and automatically protected sessions cannot be reattached.**
 There is no recovery path by design: the key exists only inside the envelope.

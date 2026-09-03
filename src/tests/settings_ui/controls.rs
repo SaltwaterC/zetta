@@ -367,8 +367,8 @@ fn the_persistence_fields_follow_the_session_block_rather_than_the_form_tail() {
     assert!(ring_bytes < identity && identity < opacity);
 }
 
-/// Without a recipient and an identity the toggle is not drawn, so it must not
-/// be a tab stop either — the focus ring would land on nothing.
+/// Without a recipient and an effective identity the toggle is not drawn, so it
+/// must not be a tab stop either — the focus ring would land on nothing.
 #[cfg(feature = "session-persistence")]
 #[test]
 fn the_automatic_protection_toggle_joins_the_tab_order_only_when_it_is_drawn() {

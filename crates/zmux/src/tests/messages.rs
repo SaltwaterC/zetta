@@ -69,6 +69,9 @@ fn an_envelope_round_trips() {
         version: PROTOCOL_VERSION,
         token: "abcd".to_owned(),
         client_process_id: std::process::id(),
+        client_id: ClientId::default(),
+        stream_only: false,
+        session_secret: None,
         request: Request::Kill { session_id: 9 },
     };
     let wire = serde_json::to_string(&envelope).unwrap();

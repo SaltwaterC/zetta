@@ -56,6 +56,7 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 signal-hook = "0.4.3"
 subtle = "2"
 sysinfo = "0.37"
+tempfile = "3"
 zeroize = "1"
 
 [target.'cfg(windows)'.dependencies]
@@ -69,9 +70,5 @@ windows = { version = "0.61", features = [
     "Win32_System_Threading",
 ] }
 
-[target.'cfg(not(target_os = "linux"))'.dependencies]
-tempfile = "3"
-
 [dev-dependencies]
-tempfile = "3"
 zmux = { path = ".", features = ["test-support"] }

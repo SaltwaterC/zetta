@@ -1455,10 +1455,9 @@ fn toggling_the_selected_root_node_clears_the_selection_without_panicking() {
     );
 }
 
-/// The automatic-protection toggle appears only once there is both something to
-/// seal a session key to and something to open it with. The page and the tab
-/// order both ask this, so a control that is not drawn is never a stop the
-/// keyboard lands on with nothing to show for it.
+/// The automatic-protection toggle appears only once there is something to seal
+/// a session key to and an effective identity to open it with. The conventional
+/// SSH identity counts when the identity field is blank.
 #[cfg(feature = "session-persistence")]
 #[test]
 fn the_automatic_protection_toggle_is_offered_only_with_a_recipient_and_an_identity() {
@@ -1468,10 +1467,16 @@ fn the_automatic_protection_toggle_is_offered_only_with_a_recipient_and_an_ident
     assert!(!form.session_auto_protect_is_offered());
 
     form.session_persistence_recipients = TextField::new("age1example".to_owned());
-    assert!(!form.session_auto_protect_is_offered());
+    assert_eq!(
+        form.session_auto_protect_is_offered(),
+        crate::config::default_session_identity_path().is_some()
+    );
 
     form.session_persistence_identity = TextField::new("   ".to_owned());
-    assert!(!form.session_auto_protect_is_offered());
+    assert_eq!(
+        form.session_auto_protect_is_offered(),
+        crate::config::default_session_identity_path().is_some()
+    );
 
     form.session_persistence_identity = TextField::new("~/keys/zetta.txt".to_owned());
     assert!(form.session_auto_protect_is_offered());

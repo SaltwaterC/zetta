@@ -13,14 +13,17 @@ use anyhow::{Context as _, Result};
 #[cfg(feature = "session-persistence")]
 use serde::Serializer;
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroize as _;
 #[cfg(feature = "session-persistence")]
-use zeroize::{Zeroize as _, Zeroizing};
+use zeroize::Zeroizing;
 
 use crate::{
     auth::SessionSecret,
     catalog::{parse_session_identifier, read_session_catalogs},
+    client::Client,
     paths,
     protocol::{BackgroundSessionCatalog, CONTROL_VERSION},
+    remote::RemoteTarget,
 };
 
 #[derive(Debug)]
@@ -70,6 +73,130 @@ pub fn run_reconnect_session(identifier: &str, identity_paths: &[PathBuf]) -> Re
         let _ = (identifier, identity_paths);
         anyhow::bail!("session reconnect is not supported on this platform");
     }
+}
+
+/// Opens a remote shared session in a running Zetta process.
+///
+/// The short-lived CLI owns the SSH discovery and secret resolution only long
+/// enough to validate the numeric session ID. The selected Zetta process gets
+/// the target and the zeroizing secret, then establishes its own long-lived
+/// runtime so closing this command cannot tear down the tab's data plane.
+pub fn run_remote_attach(
+    destination: &str,
+    port: Option<u16>,
+    session_id: u64,
+    identity_paths: &[PathBuf],
+) -> Result<()> {
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (destination, port, session_id, identity_paths);
+        anyhow::bail!("remote session attach is not supported on this platform");
+    }
+    #[cfg(any(unix, windows))]
+    {
+        let target = RemoteTarget::new(destination).with_port(port);
+        let client = Client::connect_remote(target.clone())
+            .context("connecting to the remote multiplexer")?;
+        let summary = client
+            .list()?
+            .into_iter()
+            .find(|session| session.id == session_id)
+            .with_context(|| {
+                format!("remote session {session_id} was not found or is not shared")
+            })?;
+        let secret = remote_session_secret(&summary, identity_paths)?;
+        let result =
+            request_remote_attach(destination, port, session_id, reconnect_origin(), secret)?;
+        match result {
+            ReconnectSessionResult::Reconnected => {
+                println!("Attached remote session {destination}:{session_id}.");
+                Ok(())
+            }
+            ReconnectSessionResult::AuthenticationFailed => anyhow::bail!(
+                "could not attach remote session {destination}:{session_id}: the session secret was incorrect"
+            ),
+            ReconnectSessionResult::SessionNotFound => anyhow::bail!(
+                "could not attach remote session {destination}:{session_id}: the session no longer exists"
+            ),
+            ReconnectSessionResult::StillStarting => anyhow::bail!(
+                "could not attach remote session {destination}:{session_id}: the session is still starting"
+            ),
+            ReconnectSessionResult::Rejected => anyhow::bail!(
+                "could not attach remote session {destination}:{session_id}: Zetta rejected the request"
+            ),
+        }
+    }
+}
+
+/// Performs a stream-safe administration operation against a remote daemon.
+/// Destructive operations still require the remote session's secret when it is
+/// protected; the secret is never placed in argv or the SSH command.
+pub fn run_remote_admin(
+    command: &str,
+    destination: &str,
+    port: Option<u16>,
+    session_id: u64,
+    identity_paths: &[PathBuf],
+) -> Result<()> {
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (command, destination, port, session_id, identity_paths);
+        anyhow::bail!("remote session administration is not supported on this platform");
+    }
+    #[cfg(any(unix, windows))]
+    {
+        let target = RemoteTarget::new(destination).with_port(port);
+        let client =
+            Client::connect_remote(target).context("connecting to the remote multiplexer")?;
+        let summary = client
+            .list()?
+            .into_iter()
+            .find(|session| session.id == session_id)
+            .with_context(|| {
+                format!("remote session {session_id} was not found or is not shared")
+            })?;
+        let secret = remote_session_secret(&summary, identity_paths)?;
+        match command {
+            "kill" => client.kill_with_secret(session_id, secret.as_ref())?,
+            "forget" => client.forget_with_secret(session_id, secret.as_ref())?,
+            "share" => {
+                client.set_session_scope_with_secret(session_id, true, None, secret.as_ref())?
+            }
+            "unshare" => {
+                client.set_session_scope_with_secret(session_id, false, None, secret.as_ref())?
+            }
+            _ => anyhow::bail!("unsupported remote administration command {command:?}"),
+        }
+        println!("Completed remote {command} for {destination}:{session_id}.");
+        Ok(())
+    }
+}
+
+#[cfg(any(unix, windows))]
+fn remote_session_secret(
+    summary: &crate::protocol::BackgroundSessionSummary,
+    identity_paths: &[PathBuf],
+) -> Result<Option<SessionSecret>> {
+    if !summary.authentication_required {
+        return Ok(None);
+    }
+    #[cfg(feature = "session-persistence")]
+    if let Some(envelope) = summary.key_envelope.as_deref() {
+        anyhow::ensure!(
+            !identity_paths.is_empty(),
+            "remote session {} is protected by an age identity, but no identity is configured; pass --identity PATH",
+            summary.id
+        );
+        let passphrases = prompt_for_identity_passphrases(identity_paths)?;
+        let identities = crate::persistence::IdentitySet::from_paths_with_passphrases(
+            identity_paths,
+            &passphrases,
+        )?;
+        return crate::auto_protect::open(envelope, &identities).map(Some);
+    }
+    #[cfg(not(feature = "session-persistence"))]
+    let _ = identity_paths;
+    crate::secret_prompt::prompt_for_reconnect_secret().map(Some)
 }
 
 #[cfg(any(unix, windows))]
@@ -506,6 +633,8 @@ fn send_resume_disk_session_request(
         runner_id: None,
         session_id: Some(session_id),
         secret: secret.as_ref().map(|secret| secret.expose().to_owned()),
+        ssh_target: None,
+        ssh_port: None,
         icon: None,
         pane_theme: None,
         pane_overlay: None,
@@ -559,6 +688,8 @@ fn send_reconnect_session_request(
         runner_id: Some(runner_id),
         session_id: Some(session_id),
         secret: secret.as_ref().map(|secret| secret.expose().to_owned()),
+        ssh_target: None,
+        ssh_port: None,
         icon: None,
         pane_theme: None,
         pane_overlay: None,
@@ -588,6 +719,101 @@ fn send_reconnect_session_request(
     });
     if let Some(secret) = request.secret.as_mut() {
         use zeroize::Zeroize as _;
+        secret.zeroize();
+    }
+    result
+}
+
+#[cfg(any(unix, windows))]
+fn request_remote_attach(
+    destination: &str,
+    port: Option<u16>,
+    session_id: u64,
+    origin: Option<ReconnectOrigin>,
+    secret: Option<SessionSecret>,
+) -> Result<ReconnectSessionResult> {
+    let directory = paths::session_catalog_dir();
+    let entries = fs::read_dir(&directory)
+        .with_context(|| format!("looking for a Zetta window in {}", directory.display()))?;
+    let mut endpoints = entries
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            let name = path.file_name()?.to_str()?;
+            (name.starts_with("control-") && name.ends_with(".json"))
+                .then(|| fs::read(path).ok())
+                .flatten()
+                .and_then(|contents| serde_json::from_slice::<ControlEndpoint>(&contents).ok())
+        })
+        .filter(|endpoint| {
+            endpoint.version == CONTROL_VERSION && process_is_running(endpoint.process_id)
+        })
+        .collect::<Vec<_>>();
+    anyhow::ensure!(
+        !endpoints.is_empty(),
+        "no running Zetta window accepted the remote session; open Zetta first"
+    );
+    if let Some(origin) = origin {
+        endpoints.sort_by_key(|endpoint| endpoint.process_id != origin.process_id);
+    }
+    let mut last_error = None;
+    for endpoint in endpoints {
+        match send_remote_attach_request(&endpoint, destination, port, session_id, secret.clone()) {
+            Ok(result) => return Ok(result),
+            Err(error) => last_error = Some(error),
+        }
+    }
+    Err(last_error
+        .unwrap_or_else(|| anyhow::anyhow!("no Zetta window accepted the remote session")))
+}
+
+#[cfg(any(unix, windows))]
+fn send_remote_attach_request(
+    endpoint: &ControlEndpoint,
+    destination: &str,
+    port: Option<u16>,
+    session_id: u64,
+    secret: Option<SessionSecret>,
+) -> Result<ReconnectSessionResult> {
+    let mut stream = ControlStream::connect(&endpoint.socket_path)?;
+    stream.set_read_timeout(Some(REMOTE_CONTROL_CLIENT_TIMEOUT))?;
+    stream.set_write_timeout(Some(REMOTE_CONTROL_CLIENT_TIMEOUT))?;
+    let mut request = ControlRequest {
+        token: endpoint.token.clone(),
+        command: "open_remote_session".to_owned(),
+        runner_id: None,
+        session_id: Some(session_id),
+        secret: secret.as_ref().map(|secret| secret.expose().to_owned()),
+        ssh_target: Some(destination.to_owned()),
+        ssh_port: port,
+        icon: None,
+        pane_theme: None,
+        pane_overlay: None,
+        pane_overlay_font_size: None,
+        pane_overlay_opacity: None,
+        pane_overlay_color: None,
+        attention_id: None,
+        attention_summary: None,
+        attention_body: None,
+        tab_name: None,
+        worktree_name: None,
+        config_path: None,
+        split: None,
+        profile: None,
+        theme: None,
+        pane_request: None,
+    };
+    let result = write_message(&mut stream, &request).and_then(|()| {
+        let response = read_message::<ControlResponse>(&mut stream)?;
+        Ok(match response.status.as_str() {
+            "ok" => ReconnectSessionResult::Reconnected,
+            "authentication_failed" => ReconnectSessionResult::AuthenticationFailed,
+            "session_not_found" => ReconnectSessionResult::SessionNotFound,
+            "session_starting" => ReconnectSessionResult::StillStarting,
+            _ => ReconnectSessionResult::Rejected,
+        })
+    });
+    if let Some(secret) = request.secret.as_mut() {
         secret.zeroize();
     }
     result
@@ -646,6 +872,8 @@ mod platform {
 #[cfg(any(unix, windows))]
 const CONTROL_CLIENT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 #[cfg(any(unix, windows))]
+const REMOTE_CONTROL_CLIENT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+#[cfg(any(unix, windows))]
 const MAX_CONTROL_MESSAGE_BYTES: usize = 256 * 1024;
 
 #[derive(Clone, Deserialize)]
@@ -663,6 +891,10 @@ struct ControlRequest {
     runner_id: Option<u64>,
     session_id: Option<u64>,
     secret: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ssh_target: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ssh_port: Option<u16>,
     icon: Option<String>,
     pane_theme: Option<String>,
     pane_overlay: Option<String>,

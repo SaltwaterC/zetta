@@ -313,7 +313,7 @@ pub(crate) fn render_settings_pages(
                 #[cfg(feature = "session-persistence")]
                 setting_row(
                     "Identity file",
-                    "Optional default age identity path used when resuming encrypted sessions",
+                    "Optional age identity path; ~/.ssh/id_ed25519 is used when this is blank and present",
                     SettingsControl::Input(SettingsInput::Configuration(
                         ConfigTextField::SessionPersistenceIdentity,
                     )),
@@ -324,9 +324,9 @@ pub(crate) fn render_settings_pages(
                     ),
                 ),
             ];
-            // Drawn only with a recipient and an identity to hand, under the same
-            // predicate that decides whether it is a tab stop, so what is on
-            // screen and what the keyboard reaches cannot disagree.
+            // Drawn only with a recipient and an effective identity to hand,
+            // under the same predicate that decides whether it is a tab stop,
+            // so what is on screen and what the keyboard reaches cannot disagree.
             #[cfg(feature = "session-persistence")]
             if configuration.session_auto_protect_is_offered() {
                 rows.push(setting_row(

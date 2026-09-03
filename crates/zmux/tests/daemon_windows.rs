@@ -1055,6 +1055,9 @@ fn impostor_request(
             version: PROTOCOL_VERSION,
             token: endpoint.token,
             client_process_id: claimed_process_id,
+            client_id: zmux::messages::ClientId::default(),
+            stream_only: false,
+            session_secret: None,
             request,
         })
         .expect("sending an impostor request");
@@ -1264,6 +1267,9 @@ fn a_windows_connection_with_the_wrong_token_gets_nothing() {
             version: PROTOCOL_VERSION,
             token: "0".repeat(64),
             client_process_id: std::process::id(),
+            client_id: zmux::messages::ClientId::default(),
+            stream_only: false,
+            session_secret: None,
             request: Request::List,
         })
         .expect("sending a request with the wrong token");

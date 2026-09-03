@@ -159,6 +159,7 @@ actions!(
         ToggleTabSharing,
         ToggleAutoBackgroundTab,
         ReconnectSession,
+        OpenRemoteSession,
         NextTab,
         PreviousTab,
         ToggleTabMoveMode,
@@ -380,6 +381,7 @@ mod pane_overlay;
 mod pane_render;
 mod pane_theme_picker;
 mod pane_view_state;
+mod remote_session_ui;
 mod stacked_panes;
 mod tab_bar_render;
 use tab_bar_render::*;

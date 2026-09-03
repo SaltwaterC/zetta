@@ -337,6 +337,76 @@ _zetta_complete() {
         done < <("${mux_list_command[@]}" 2>/dev/null | awk '$1 == "reconnect" && $2 == "id:" && $3 ~ /^[0-9]+:[0-9]+:[0-9]+$/ { print $3 }')
     }
 
+    _zetta_complete_ssh_targets() {
+        COMPREPLY=()
+        local config="${HOME:-}/.ssh/config"
+        [[ -r $config ]] || return
+        local host
+        while IFS= read -r host; do
+            [[ $host == "$current"* ]] && COMPREPLY+=("$host")
+        done < <(awk '
+            /^[[:space:]]*[Hh][Oo][Ss][Tt][[:space:]]+/ {
+                for (index = 2; index <= NF; index++)
+                    if ($index !~ /^!/ && $index !~ /[*?]/)
+                        print $index
+            }
+        ' "$config" 2>/dev/null)
+    }
+
+    _zetta_complete_remote_mux_session_ids() {
+        COMPREPLY=()
+        local target=$1 port=$2 session_id
+        local -a ssh_command=(ssh -T -o BatchMode=yes -o ConnectTimeout=3)
+        [[ -n $port ]] && ssh_command+=(-p "$port")
+        while IFS= read -r session_id; do
+            [[ $session_id =~ ^[0-9]+$ && $session_id == "$current"* ]] && COMPREPLY+=("$session_id")
+        done < <("${ssh_command[@]}" "$target" zmux list --ids-only 2>/dev/null)
+    }
+
+    _zetta_complete_mux_attach() {
+        local target='' port='' positional=0 token
+        local index
+        case ${COMP_WORDS[COMP_CWORD-1]} in
+            --ssh-target|-H)
+                _zetta_complete_ssh_targets
+                return
+                ;;
+            --port|-p)
+                COMPREPLY=()
+                return
+                ;;
+            --identity|-i)
+                COMPREPLY=( $(compgen -f -- "$current") )
+                return
+                ;;
+        esac
+        for (( index = 3; index < COMP_CWORD; index++ )); do
+            token=${COMP_WORDS[index]}
+            case $token in
+                --ssh-target|-H)
+                    (( index++ < COMP_CWORD )) && target=${COMP_WORDS[index]}
+                    ;;
+                --ssh-target=*) target=${token#*=} ;;
+                --port|-p)
+                    (( index++ < COMP_CWORD )) && port=${COMP_WORDS[index]}
+                    ;;
+                --port=*) port=${token#*=} ;;
+                --identity|-i) (( index++ )) ;;
+                --identity=*) ;;
+                --*) ;;
+                *)
+                    (( positional++ ))
+                    [[ -n $target ]] || target=$token
+                    ;;
+            esac
+        done
+        if [[ -n $target ]]; then
+            _zetta_complete_remote_mux_session_ids "$target" "$port"
+        else
+            _zetta_complete_ssh_targets
+        fi
+    }
+
     _zetta_complete_mux_restorable_ids() {
         COMPREPLY=()
         local session_id
@@ -482,6 +552,10 @@ _zetta_complete() {
             _zetta_complete_profiles
             return
             ;;
+        --ssh-target|-H)
+            _zetta_complete_ssh_targets
+            return
+            ;;
         --pane)
             if [[ $command == pane ]]; then
                 _zetta_complete_pane_labels
@@ -511,7 +585,9 @@ _zetta_complete() {
             return
             ;;
         -p)
-            if [[ $command == pane ]]; then
+            if [[ $command == mux && ${COMP_WORDS[2]} == attach ]]; then
+                COMPREPLY=()
+            elif [[ $command == pane ]]; then
                 _zetta_complete_pane_labels
             elif [[ $command == profile && $profile_operation == add ]]; then
                 COMPREPLY=()
@@ -851,16 +927,22 @@ _zetta_complete() {
         mux)
             if (( COMP_CWORD == 2 )); then
                 if [[ ${ZETTA_NO_MUX:-0} == 1 ]]; then
-                    _zetta_compgen 'list reconnect --json --help --version'
+                    _zetta_compgen 'list reconnect attach --json --ids-only --ssh-target --port --help --version'
                 else
-                    _zetta_compgen 'list stop reconnect resume share unshare kill forget --json --upgrade --help --version'
+                    _zetta_compgen 'list stop reconnect attach resume share unshare kill forget --json --upgrade --ids-only --ssh-target --port --identity --help --version'
                 fi
-            elif [[ ${ZETTA_NO_MUX:-0} == 1 && ${COMP_WORDS[2]} != reconnect && ${COMP_WORDS[2]} != list ]]; then
+            elif [[ ${ZETTA_NO_MUX:-0} == 1 && ${COMP_WORDS[2]} != reconnect && ${COMP_WORDS[2]} != list && ${COMP_WORDS[2]} != attach ]]; then
                 COMPREPLY=()
             elif [[ ${COMP_WORDS[2]} == stop ]]; then
                 _zetta_compgen '--force --help'
             elif [[ ${COMP_WORDS[2]} == reconnect ]] && (( COMP_CWORD == 3 )); then
                 _zetta_complete_mux_session_ids
+            elif [[ ${COMP_WORDS[2]} == attach ]]; then
+                if [[ $current == -* ]]; then
+                    _zetta_compgen '--ssh-target --port --identity --help'
+                else
+                    _zetta_complete_mux_attach
+                fi
             elif [[ ${COMP_WORDS[2]} == resume && $current != -* ]] && (( COMP_CWORD == 3 )); then
                 _zetta_complete_mux_restorable_ids
             elif [[ ${ZETTA_NO_MUX:-0} != 1 && ( ${COMP_WORDS[2]} == share || ${COMP_WORDS[2]} == unshare || ${COMP_WORDS[2]} == kill || ${COMP_WORDS[2]} == forget ) ]] && (( COMP_CWORD == 3 )); then
@@ -870,7 +952,7 @@ _zetta_complete() {
             elif [[ ${COMP_WORDS[2]} == resume || ${COMP_WORDS[2]} == reconnect ]]; then
                 _zetta_compgen '--identity --help'
             else
-                _zetta_compgen '--json --identity --help'
+                _zetta_compgen '--json --ids-only --ssh-target --port --identity --help'
             fi
             ;;
         init)

@@ -610,6 +610,73 @@ function __zetta_mux_restorable_ids
     $command_name $command_arguments 2>/dev/null | awk '$1 == "resume" && $2 == "id:" && $3 ~ /^[0-9]+$/ { print $3 }'
 end
 
+function __zetta_ssh_targets
+    set -l config "$HOME/.ssh/config"
+    test -r "$config"; or return
+    awk '
+        /^[[:space:]]*[Hh][Oo][Ss][Tt][[:space:]]+/ {
+            for (index = 2; index <= NF; index++)
+                if ($index !~ /^!/ && $index !~ /[*?]/)
+                    print $index
+        }
+    ' "$config" 2>/dev/null
+end
+
+function __zetta_mux_attach_arguments
+    set -l words (commandline -opc)
+    set -l command_index 3
+    if test "$words[1]" = zmux
+        set command_index 2
+    end
+    set -l target ''
+    set -l port ''
+    set -l start (math $command_index + 1)
+    set -l count (count $words)
+    set -l index $start
+    while test $index -le $count
+        set -l token $words[$index]
+        switch $token
+            case --ssh-target -H
+                set index (math $index + 1)
+                test $index -le $count; and set target $words[$index]
+            case '--ssh-target=*'
+                set target (string replace -- '--ssh-target=' '' $token)
+            case --port -p
+                set index (math $index + 1)
+                test $index -le $count; and set port $words[$index]
+            case '--port=*'
+                set port (string replace -- '--port=' '' $token)
+            case --identity -i
+                set index (math $index + 1)
+            case '--identity=*'
+            case '-*'
+            case '*'
+                test -n "$target"; or set target $token
+        end
+        set index (math $index + 1)
+    end
+
+    set -l previous ''
+    test $count -gt 0; and set previous $words[$count]
+    if contains -- $previous --port -p --identity -i
+        return
+    end
+    if contains -- $previous --ssh-target -H
+        __zetta_ssh_targets
+        return
+    end
+    if test -n "$target"
+        set -l ssh_command ssh -T -o BatchMode=yes -o ConnectTimeout=3
+        test -n "$port"; and set ssh_command $ssh_command -p $port
+        set -l prefix (commandline -ct)
+        command $ssh_command $target zmux list --ids-only 2>/dev/null \
+            | string match -r '^[0-9]+$' \
+            | string match -- "$prefix*"
+    else
+        __zetta_ssh_targets
+    end
+end
+
 function __zetta_mux_daemon_commands
     test "$ZETTA_NO_MUX" != 1
 end
@@ -735,9 +802,9 @@ function __zetta_long_options
             printf '%s\t%s\n' --help 'Print help'
         case mux
             if test "$ZETTA_NO_MUX" = 1
-                printf '%s\t%s\n' --json 'Print machine-readable JSON' --help 'Print help' --version 'Print version'
+                printf '%s\t%s\n' --json 'Print machine-readable JSON' --ids-only 'Print one numeric session ID per line' --ssh-target 'OpenSSH destination' --port 'SSH port' --help 'Print help' --version 'Print version'
             else
-                printf '%s\t%s\n' --json 'Print machine-readable JSON' --force 'Stop even while sessions are running' --upgrade 'Replace the multiplexer, keeping its sessions' --identity 'Age identity file for resume and reconnect' --help 'Print help' --version 'Print version'
+                printf '%s\t%s\n' --json 'Print machine-readable JSON' --ids-only 'Print one numeric session ID per line' --ssh-target 'OpenSSH destination' --port 'SSH port' --force 'Stop even while sessions are running' --upgrade 'Replace the multiplexer, keeping its sessions' --identity 'Age identity file for resume and reconnect' --help 'Print help' --version 'Print version'
             end
         case benchmark_output
             printf '%s\t%s\n' \
@@ -895,6 +962,7 @@ complete -c zetta -n '__fish_seen_subcommand_from terminal-size' -l json -d 'Pri
 complete -c zetta -n '__zetta_at_subcommand mux' -a list -d 'List the sessions the multiplexer is holding'
 complete -c zetta -n '__zetta_at_subcommand mux; and __zetta_mux_daemon_commands' -a stop -d 'Stop the multiplexer'
 complete -c zetta -n '__zetta_at_subcommand mux' -a reconnect -d 'Open a session in a Zetta window'
+complete -c zetta -n '__zetta_at_subcommand mux' -a attach -d 'Open a shared remote session through OpenSSH'
 complete -c zetta -n '__zetta_at_subcommand mux; and __zetta_mux_daemon_commands' -a resume -d 'Restore an encrypted disk session with fresh shells'
 complete -c zetta -n '__zetta_at_subcommand mux; and __zetta_mux_daemon_commands' -a share -d 'Let every Zetta process attach a backgrounded session'
 complete -c zetta -n '__zetta_at_subcommand mux; and __zetta_mux_daemon_commands' -a unshare -d 'Scope a session back to the window that held it'
@@ -906,9 +974,15 @@ complete -c zetta -n '__fish_seen_subcommand_from mux; and __fish_seen_subcomman
 complete -c zetta -n '__fish_seen_subcommand_from mux; and __zetta_mux_daemon_commands' -l force -d 'Stop even while sessions are running'
 complete -c zetta -n '__fish_seen_subcommand_from mux; and __zetta_mux_daemon_commands' -l upgrade -d 'Replace the multiplexer, keeping its sessions'
 complete -c zetta -n '__fish_seen_subcommand_from mux' -l json -d 'Print machine-readable JSON'
+complete -c zetta -n '__fish_seen_subcommand_from mux' -l ids-only -d 'Print one numeric session ID per line'
+complete -c zetta -n '__fish_seen_subcommand_from mux' -l ssh-target -r -a '(__zetta_ssh_targets)' -d 'OpenSSH destination'
+complete -c zetta -n '__fish_seen_subcommand_from mux' -l port -r -d 'SSH port'
+complete -c zetta -s H -r -a '(__zetta_ssh_targets)' -n '__fish_seen_subcommand_from mux; and __zetta_short_option -H' -d 'OpenSSH destination'
+complete -c zetta -s p -r -n '__fish_seen_subcommand_from mux; and __zetta_short_option -p' -d 'SSH port'
 complete -c zetta -n '__fish_seen_subcommand_from mux; and __zetta_mux_daemon_commands' -l identity -r -F -d 'Age identity file for resume and reconnect'
 complete -c zetta -n '__fish_seen_subcommand_from mux' -l help -d 'Print help'
 complete -c zetta -n '__fish_seen_subcommand_from mux' -a '(__zetta_long_options mux)'
+complete -c zetta -n '__fish_seen_subcommand_from mux attach' -a '(__zetta_mux_attach_arguments)' -d 'SSH target or remote session ID'
 complete -c zetta -n '__fish_seen_subcommand_from terminal-size' -l resize -d 'Resize the current pane'
 complete -c zetta -n '__fish_seen_subcommand_from terminal-size' -l columns -r -d 'Set pane width in columns'
 complete -c zetta -n '__fish_seen_subcommand_from terminal-size' -l rows -r -d 'Set pane height in rows'
@@ -1103,6 +1177,7 @@ complete -c zmux -f
 complete -c zmux -n '__fish_use_subcommand' -a list -d 'List the sessions the multiplexer is holding'
 complete -c zmux -n '__fish_use_subcommand; and __zetta_mux_daemon_commands' -a stop -d 'Stop the multiplexer'
 complete -c zmux -n '__fish_use_subcommand' -a reconnect -d 'Open a session in a Zetta window'
+complete -c zmux -n '__fish_use_subcommand' -a attach -d 'Open a shared remote session through OpenSSH'
 complete -c zmux -n '__fish_use_subcommand; and __zetta_mux_daemon_commands' -a resume -d 'Restore an encrypted disk session with fresh shells'
 complete -c zmux -n '__fish_use_subcommand; and __zetta_mux_daemon_commands' -a share -d 'Let every Zetta process attach a backgrounded session'
 complete -c zmux -n '__fish_use_subcommand; and __zetta_mux_daemon_commands' -a unshare -d 'Scope a session back to the window that held it'
@@ -1114,10 +1189,16 @@ complete -c zmux -n '__fish_seen_subcommand_from share unshare kill forget; and 
 complete -c zmux -n '__zetta_mux_daemon_commands' -l force -d 'Stop even while sessions are running'
 complete -c zmux -n '__zetta_mux_daemon_commands' -l upgrade -d 'Replace the multiplexer, keeping its sessions'
 complete -c zmux -l json -d 'Print machine-readable JSON'
+complete -c zmux -l ids-only -d 'Print one numeric session ID per line'
+complete -c zmux -l ssh-target -r -a '(__zetta_ssh_targets)' -d 'OpenSSH destination'
+complete -c zmux -l port -r -d 'SSH port'
+complete -c zmux -s H -r -a '(__zetta_ssh_targets)' -n '__fish_seen_subcommand_from attach; and __zetta_short_option -H' -d 'OpenSSH destination'
+complete -c zmux -s p -r -n '__fish_seen_subcommand_from attach; and __zetta_short_option -p' -d 'SSH port'
 complete -c zmux -l identity -r -F -d 'Age identity file for resume and reconnect'
 complete -c zmux -l help -d 'Print help'
 complete -c zmux -l version -d 'Print version'
 complete -c zmux -a '(__zetta_long_options mux)'
+complete -c zmux -n '__fish_seen_subcommand_from attach' -a '(__zetta_mux_attach_arguments)' -d 'SSH target or remote session ID'
 complete -c ztftp -f -a 'get put'
 complete -c ztftp -l port -r -d 'Server port'
 complete -c ztftp -l help -d 'Print help'

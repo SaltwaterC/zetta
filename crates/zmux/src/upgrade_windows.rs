@@ -18,7 +18,7 @@ use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
 
 /// Bumped whenever the private Windows handover changes shape.
-pub const HANDOVER_VERSION: u32 = 1;
+pub const HANDOVER_VERSION: u32 = 2;
 
 const READY_TIMEOUT: Duration = Duration::from_secs(10);
 const READY_POLL: Duration = Duration::from_millis(10);
@@ -81,6 +81,10 @@ pub enum AttachmentHandover {
 #[serde(deny_unknown_fields)]
 pub struct SharedClientHandover {
     pub process_id: u32,
+    #[serde(default)]
+    pub client_id: crate::messages::ClientId,
+    #[serde(default)]
+    pub stream_only: bool,
     pub columns: u16,
     pub lines: u16,
     pub input_sent: bool,

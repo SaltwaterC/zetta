@@ -51,17 +51,29 @@ fn automatic_protection_needs_the_flag_a_recipient_and_an_identity() {
         recipients: Vec::new(),
         ..complete.clone()
     };
-    let without_identity = SessionPersistenceConfig {
-        identity: None,
-        ..complete.clone()
-    };
-    for config in [&without_flag, &without_recipients, &without_identity] {
+    for config in [&without_flag, &without_recipients] {
         assert!(!config.auto_protect_is_configured());
         assert!(
             SessionAutoProtect::resolve(config).unwrap().is_none(),
             "{config:?} should not resolve to automatic protection"
         );
     }
+
+    let without_identity = SessionPersistenceConfig {
+        identity: None,
+        ..complete
+    };
+    let has_default_identity = crate::config::default_session_identity_path().is_some();
+    assert_eq!(
+        without_identity.auto_protect_is_configured(),
+        has_default_identity
+    );
+    assert_eq!(
+        SessionAutoProtect::resolve(&without_identity)
+            .unwrap()
+            .is_some(),
+        has_default_identity
+    );
 }
 
 /// A path that points at nothing is the same footgun as no path at all, and the

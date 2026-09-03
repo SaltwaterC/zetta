@@ -51,8 +51,11 @@ use crate::persistence::{DaemonOptionsFile, PersistenceOptions};
 // rather than typed, an envelope this crate only ever passes along. Neither
 // needs age, so detach, share and scope carry them in every build.
 use crate::auth::SessionAuthentication;
+use crate::auth::SessionSecret;
+use crate::messages::ClientId;
+use crate::remote::{RemoteTarget, RemoteTransport};
 #[cfg(feature = "session-persistence")]
-use crate::{auth::SessionSecret, secret_prompt};
+use crate::secret_prompt;
 
 /// How long to wait for a daemon this process just started to publish its
 /// endpoint. Generous, because the first start also creates the directory.
@@ -73,6 +76,20 @@ pub struct Client {
     /// `Endpoint` matters: a replacement publishes its own process id, and one
     /// day may publish a different socket.
     directory: PathBuf,
+    /// Present for a client that reaches a remote daemon through one
+    /// persistent stream-local SSH forward. The remote endpoint is refreshed
+    /// through this transport rather than read from the local session
+    /// directory.
+    remote: Option<Arc<RemoteTransport>>,
+    /// Stable across request connections and subscription reconnects.
+    client_id: ClientId,
+    /// Remote clients are deliberately restricted to the shared byte-stream
+    /// protocol. Local clients retain descriptor handover and PID ownership.
+    stream_only: bool,
+    /// An authenticated remote session key used by later control requests and
+    /// subscription reconciliation. It is shared by request clones and is
+    /// zeroized when the logical client is dropped.
+    session_secret: Arc<Mutex<Option<SessionSecret>>>,
 }
 
 /// The result of applying a retention policy to a daemon.
@@ -697,7 +714,84 @@ impl Client {
         Ok(Some(Self {
             endpoint: Mutex::new(endpoint),
             directory: directory.to_owned(),
+            remote: None,
+            client_id: ClientId::random()?,
+            stream_only: false,
+            session_secret: Arc::new(Mutex::new(None)),
         }))
+    }
+
+    /// Connects to a remote daemon through a persistent OpenSSH stream-local
+    /// forward. Remote clients never start or upgrade a daemon and never ask
+    /// the remote host for a descriptor.
+    pub fn connect_remote(target: RemoteTarget) -> Result<Self> {
+        let remote = Arc::new(RemoteTransport::new(target)?);
+        let endpoint = remote.endpoint()?;
+        Ok(Self {
+            endpoint: Mutex::new(endpoint),
+            directory: PathBuf::new(),
+            client_id: ClientId::random()?,
+            stream_only: true,
+            remote: Some(remote),
+            session_secret: Arc::new(Mutex::new(None)),
+        })
+    }
+
+    /// Testable variant of [`Self::connect_remote`] that uses a supplied SSH
+    /// executable.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn connect_remote_with_ssh_program(
+        target: RemoteTarget,
+        ssh_program: impl Into<PathBuf>,
+    ) -> Result<Self> {
+        let remote = Arc::new(RemoteTransport::with_ssh_program(target, ssh_program)?);
+        let endpoint = remote.endpoint()?;
+        Ok(Self {
+            endpoint: Mutex::new(endpoint),
+            directory: PathBuf::new(),
+            client_id: ClientId::random()?,
+            stream_only: true,
+            remote: Some(remote),
+            session_secret: Arc::new(Mutex::new(None)),
+        })
+    }
+
+    pub fn is_remote(&self) -> bool {
+        self.remote.is_some()
+    }
+
+    pub fn stream_only(&self) -> bool {
+        self.stream_only
+    }
+
+    pub fn remote_target(&self) -> Option<&RemoteTarget> {
+        self.remote.as_ref().map(|remote| remote.target())
+    }
+
+    /// Retains the session key needed by a remote runtime's later control
+    /// requests. It is never persisted or included in an SSH argument.
+    pub fn set_session_secret(&self, secret: Option<&SessionSecret>) {
+        if self.stream_only {
+            *self.session_secret.lock().unwrap() = secret.cloned();
+        }
+    }
+
+    pub fn session_secret(&self) -> Option<SessionSecret> {
+        self.session_secret.lock().unwrap().clone()
+    }
+
+    /// Makes a request-capable clone that retains the same logical client ID.
+    /// Subscription recovery uses this so a daemon replacement or remote SSH
+    /// forward restart does not look like a second viewer.
+    fn reconnect_client(&self) -> Self {
+        Self {
+            endpoint: Mutex::new(self.endpoint_snapshot()),
+            directory: self.directory.clone(),
+            remote: self.remote.clone(),
+            client_id: self.client_id.clone(),
+            stream_only: self.stream_only,
+            session_secret: self.session_secret.clone(),
+        }
     }
 
     /// Attaches a pane on behalf of another process.
@@ -713,7 +807,13 @@ impl Client {
         client_process_id: u32,
         secret: Option<String>,
     ) -> Result<AttachOutcome> {
-        self.attach_as_process(session_id, Some(pane_id), secret, client_process_id)
+        // Test callers use one `Client` to stand in for several processes. A
+        // real process has one logical client, but those stand-ins still need
+        // independent IDs so closing or resizing one shared connection cannot
+        // address the other one.
+        let mut client = self.reconnect_client();
+        client.client_id = ClientId::random()?;
+        client.attach_as_process(session_id, Some(pane_id), secret, client_process_id)
     }
 
     fn attach_as_process(
@@ -814,6 +914,11 @@ impl Client {
     /// before dispatching it.  Waiting for the file to change avoids replaying
     /// the same request against the same stale token in a tight loop.
     fn refresh_endpoint_after_token(&self, previous: &Endpoint, deadline: Instant) -> Result<()> {
+        if let Some(remote) = &self.remote {
+            let endpoint = remote.refresh()?;
+            *self.endpoint.lock().unwrap() = endpoint;
+            return Ok(());
+        }
         let path = endpoint_path(&self.directory);
         let mut last_error = None;
         loop {
@@ -858,12 +963,8 @@ impl Client {
                 Response::Error { message } => anyhow::bail!("{message}"),
                 other => anyhow::bail!("unexpected response to attestation: {other:?}"),
             }
-            connection.send(&Envelope {
-                version: PROTOCOL_VERSION,
-                token: self.endpoint_snapshot().token,
-                client_process_id,
-                request,
-            })?;
+            let endpoint = self.endpoint_snapshot();
+            connection.send(&self.envelope(endpoint.token, client_process_id, request, None))?;
             Ok(connection)
         }
         #[cfg(unix)]
@@ -892,14 +993,45 @@ impl Client {
         self.open_as_with_endpoint(request, client_process_id, &endpoint)
     }
 
+    fn open_with_session_secret(
+        &self,
+        request: Request,
+        secret: Option<&SessionSecret>,
+    ) -> Result<Connection> {
+        self.open_as_with_endpoint_and_secret(
+            request,
+            std::process::id(),
+            &self.endpoint_snapshot(),
+            secret,
+        )
+    }
+
     fn open_as_with_endpoint(
         &self,
         request: Request,
         client_process_id: u32,
         endpoint: &Endpoint,
     ) -> Result<Connection> {
-        let stream =
-            Stream::connect(&endpoint.socket_path).context("connecting to the multiplexer")?;
+        self.open_as_with_endpoint_and_secret(request, client_process_id, endpoint, None)
+    }
+
+    fn open_as_with_endpoint_and_secret(
+        &self,
+        request: Request,
+        client_process_id: u32,
+        endpoint: &Endpoint,
+        secret: Option<&SessionSecret>,
+    ) -> Result<Connection> {
+        let (endpoint, stream) = if let Some(remote) = &self.remote {
+            let (endpoint, stream) = remote.connect()?;
+            *self.endpoint.lock().unwrap() = endpoint.clone();
+            (endpoint, stream)
+        } else {
+            (
+                endpoint.clone(),
+                Stream::connect(&endpoint.socket_path).context("connecting to the multiplexer")?,
+            )
+        };
         stream
             .set_read_timeout(Some(REQUEST_TIMEOUT))
             .context("setting the multiplexer request read timeout")?;
@@ -907,15 +1039,28 @@ impl Client {
             .set_write_timeout(Some(REQUEST_TIMEOUT))
             .context("setting the multiplexer request write timeout")?;
         let mut connection = Connection::new(stream);
-        connection.send(&Envelope {
+        connection.send(&self.envelope(endpoint.token, client_process_id, request, secret))?;
+        Ok(connection)
+    }
+
+    fn envelope(
+        &self,
+        token: String,
+        client_process_id: u32,
+        request: Request,
+        secret: Option<&SessionSecret>,
+    ) -> Envelope {
+        Envelope {
             version: PROTOCOL_VERSION,
-            token: endpoint.token.clone(),
+            token,
             // Named so a platform without descriptor passing can duplicate a
             // terminal's handles into this process instead.
             client_process_id,
+            client_id: self.client_id.clone(),
+            stream_only: self.stream_only,
+            session_secret: secret.map(|secret| secret.expose().to_owned()),
             request,
-        })?;
-        Ok(connection)
+        }
     }
 
     fn ping_with_endpoint(&self, endpoint: &Endpoint) -> Result<()> {
@@ -956,12 +1101,26 @@ impl Client {
     /// Only meaningful where the console belongs to the multiplexer; on Unix
     /// the resize has already taken effect through the descriptor.
     pub fn resize(&self, session_id: u64, pane_id: u64, columns: u16, lines: u16) -> Result<()> {
-        let mut connection = self.open(Request::Resize {
-            session_id,
-            pane_id,
-            columns,
-            lines,
-        })?;
+        self.resize_with_secret(session_id, pane_id, columns, lines, None)
+    }
+
+    pub fn resize_with_secret(
+        &self,
+        session_id: u64,
+        pane_id: u64,
+        columns: u16,
+        lines: u16,
+        secret: Option<&SessionSecret>,
+    ) -> Result<()> {
+        let mut connection = self.open_with_session_secret(
+            Request::Resize {
+                session_id,
+                pane_id,
+                columns,
+                lines,
+            },
+            secret,
+        )?;
         match Self::receive(&mut connection)?.0 {
             Response::Ok => Ok(()),
             Response::Error { message } => anyhow::bail!("{message}"),
@@ -975,9 +1134,32 @@ impl Client {
         pane_id: u64,
         palette: ConsolePalette,
     ) -> Result<()> {
-        self.set_console_palette_as(session_id, pane_id, palette, std::process::id())
+        self.set_console_palette_with_secret(session_id, pane_id, palette, None)
     }
 
+    pub fn set_console_palette_with_secret(
+        &self,
+        session_id: u64,
+        pane_id: u64,
+        palette: ConsolePalette,
+        secret: Option<&SessionSecret>,
+    ) -> Result<()> {
+        let mut connection = self.open_with_session_secret(
+            Request::SetConsolePalette {
+                session_id,
+                pane_id,
+                palette,
+            },
+            secret,
+        )?;
+        match Self::receive(&mut connection)?.0 {
+            Response::Ok => Ok(()),
+            Response::Error { message } => anyhow::bail!("{message}"),
+            other => anyhow::bail!("unexpected palette response: {other:?}"),
+        }
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
     fn set_console_palette_as(
         &self,
         session_id: u64,
@@ -1090,6 +1272,22 @@ impl Client {
         self.attach_as_process(session_id, pane_id, secret, std::process::id())
     }
 
+    /// Attaches with a secret kept in zeroizing memory by the caller. The
+    /// serialized request is discarded as soon as the handshake is complete.
+    pub fn attach_with_secret(
+        &self,
+        session_id: u64,
+        pane_id: Option<u64>,
+        secret: Option<&SessionSecret>,
+    ) -> Result<AttachOutcome> {
+        self.attach_as_process(
+            session_id,
+            pane_id,
+            secret.map(|secret| secret.expose().to_owned()),
+            std::process::id(),
+        )
+    }
+
     /// Gives a session back to the multiplexer to hold.
     ///
     /// The caller must already have dropped the panes' descriptors: the
@@ -1174,15 +1372,30 @@ impl Client {
         protection: Option<&SessionAuthentication>,
         offered: bool,
     ) -> Result<()> {
-        let mut connection = self.open(Request::Share(crate::messages::ShareRequest {
-            session_id,
-            summary,
-            state,
-            verifier: protection.map(|protection| protection.verifier().to_owned()),
-            key_envelope: protection
-                .and_then(|protection| protection.key_envelope().map(str::to_owned)),
-            offered,
-        }))?;
+        self.share_with_secret(session_id, summary, state, protection, offered, None)
+    }
+
+    pub fn share_with_secret(
+        &self,
+        session_id: u64,
+        summary: BackgroundSessionSummary,
+        state: serde_json::Value,
+        protection: Option<&SessionAuthentication>,
+        offered: bool,
+        secret: Option<&SessionSecret>,
+    ) -> Result<()> {
+        let mut connection = self.open_with_session_secret(
+            Request::Share(crate::messages::ShareRequest {
+                session_id,
+                summary,
+                state,
+                verifier: protection.map(|protection| protection.verifier().to_owned()),
+                key_envelope: protection
+                    .and_then(|protection| protection.key_envelope().map(str::to_owned)),
+                offered,
+            }),
+            secret,
+        )?;
         match Self::receive(&mut connection)?.0 {
             Response::Ok => Ok(()),
             Response::Error { message } => anyhow::bail!("{message}"),
@@ -1191,7 +1404,14 @@ impl Client {
     }
 
     pub fn list(&self) -> Result<Vec<BackgroundSessionSummary>> {
-        let mut connection = self.open(Request::List)?;
+        self.list_with_secret(None)
+    }
+
+    pub fn list_with_secret(
+        &self,
+        secret: Option<&SessionSecret>,
+    ) -> Result<Vec<BackgroundSessionSummary>> {
+        let mut connection = self.open_with_session_secret(Request::List, secret)?;
         match Self::receive(&mut connection)?.0 {
             Response::Sessions { sessions, .. } => Ok(sessions),
             Response::Error { message } => anyhow::bail!("{message}"),
@@ -1330,7 +1550,11 @@ impl Client {
     }
 
     pub fn kill(&self, session_id: u64) -> Result<()> {
-        let mut connection = self.open(Request::Kill { session_id })?;
+        self.kill_with_secret(session_id, None)
+    }
+
+    pub fn kill_with_secret(&self, session_id: u64, secret: Option<&SessionSecret>) -> Result<()> {
+        let mut connection = self.open_with_session_secret(Request::Kill { session_id }, secret)?;
         match Self::receive(&mut connection)?.0 {
             Response::Ok => Ok(()),
             Response::Error { message } => anyhow::bail!("{message}"),
@@ -1349,13 +1573,26 @@ impl Client {
         shared: bool,
         protection: Option<&SessionAuthentication>,
     ) -> Result<()> {
-        let mut connection = self.open(Request::SetSessionScope {
-            session_id,
-            shared,
-            verifier: protection.map(|protection| protection.verifier().to_owned()),
-            key_envelope: protection
-                .and_then(|protection| protection.key_envelope().map(str::to_owned)),
-        })?;
+        self.set_session_scope_with_secret(session_id, shared, protection, None)
+    }
+
+    pub fn set_session_scope_with_secret(
+        &self,
+        session_id: u64,
+        shared: bool,
+        protection: Option<&SessionAuthentication>,
+        secret: Option<&SessionSecret>,
+    ) -> Result<()> {
+        let mut connection = self.open_with_session_secret(
+            Request::SetSessionScope {
+                session_id,
+                shared,
+                verifier: protection.map(|protection| protection.verifier().to_owned()),
+                key_envelope: protection
+                    .and_then(|protection| protection.key_envelope().map(str::to_owned)),
+            },
+            secret,
+        )?;
         match Self::receive(&mut connection)?.0 {
             Response::Ok => Ok(()),
             Response::Error { message } => anyhow::bail!("{message}"),
@@ -1364,7 +1601,16 @@ impl Client {
     }
 
     pub fn forget(&self, session_id: u64) -> Result<()> {
-        let mut connection = self.open(Request::Forget { session_id })?;
+        self.forget_with_secret(session_id, None)
+    }
+
+    pub fn forget_with_secret(
+        &self,
+        session_id: u64,
+        secret: Option<&SessionSecret>,
+    ) -> Result<()> {
+        let mut connection =
+            self.open_with_session_secret(Request::Forget { session_id }, secret)?;
         match Self::receive(&mut connection)?.0 {
             Response::Ok => Ok(()),
             Response::Error { message } => anyhow::bail!("{message}"),
@@ -1512,7 +1758,17 @@ impl Client {
 
     /// Asks what the multiplexer currently knows about these panes.
     pub fn pane_states(&self, pane_ids: Vec<u64>) -> Result<Vec<PaneStateReport>> {
-        let mut connection = self.open(Request::PaneStates { pane_ids })?;
+        let secret = self.session_secret();
+        self.pane_states_with_secret(pane_ids, secret.as_ref())
+    }
+
+    pub fn pane_states_with_secret(
+        &self,
+        pane_ids: Vec<u64>,
+        secret: Option<&SessionSecret>,
+    ) -> Result<Vec<PaneStateReport>> {
+        let mut connection =
+            self.open_with_session_secret(Request::PaneStates { pane_ids }, secret)?;
         match Self::receive(&mut connection)?.0 {
             Response::PaneStates { panes } => Ok(panes),
             Response::Error { message } => anyhow::bail!("{message}"),
@@ -1562,9 +1818,9 @@ impl Client {
             grants,
         };
         let dispatch = subscription.clone();
-        let directory = self.directory.clone();
+        let client = self.reconnect_client();
         thread::spawn(move || {
-            subscription_loop(directory, connection, dispatch);
+            subscription_loop(client, connection, dispatch);
         });
         Ok(subscription)
     }
@@ -1652,7 +1908,7 @@ const RESUBSCRIBE_MAX_DELAY: Duration = Duration::from_millis(500);
 ///
 /// Returns only once the grace period has passed with nothing to talk to, at
 /// which point the panes really are unreportable and are told so.
-fn subscription_loop(directory: PathBuf, first: Connection, subscription: Subscription) {
+fn subscription_loop(client: Client, first: Connection, subscription: Subscription) {
     let Subscription {
         exits: reporters,
         revokes,
@@ -1688,7 +1944,7 @@ fn subscription_loop(directory: PathBuf, first: Connection, subscription: Subscr
         } else {
             log::warn!("lost the multiplexer's event stream; trying to re-establish it");
         }
-        match resubscribe(&directory, &reporters, &revokes, &grants) {
+        match resubscribe(&client, &reporters, &revokes, &grants) {
             Some(Resubscribed::Connection(next)) => connection = next,
             // Nobody is left to tell. Reporting a disconnect here would be
             // writing into registries that no longer have an owner.
@@ -1734,7 +1990,7 @@ fn subscription_is_abandoned(
 
 /// Re-establishes the event stream, then reports whatever was missed.
 fn resubscribe(
-    directory: &std::path::Path,
+    client: &Client,
     reporters: &Arc<ExitReporters>,
     revokes: &Arc<PaneSignals>,
     grants: &Arc<PaneSignals>,
@@ -1745,9 +2001,7 @@ fn resubscribe(
         if subscription_is_abandoned(reporters, revokes, grants) {
             return Some(Resubscribed::Abandoned);
         }
-        if let Ok(Some(client)) = Client::connect_ready_at(directory)
-            && let Ok(connection) = client.open(Request::Subscribe)
-        {
+        if let Ok(connection) = client.open_ready(Request::Subscribe) {
             log::info!("re-established the multiplexer's event stream");
             // Subscribe first, then reconcile: an exit that happens between the
             // two arrives on the new subscription, whereas one reported between

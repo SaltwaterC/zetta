@@ -11,7 +11,7 @@ Zetta process ends.
 
 Terminal processes belong to `zmux`, a separate multiplexer that Zetta starts
 the first time it needs one. That is what lets a session outlive the window it
-was started in — and, in time, be attached from another machine.
+was started in — and be attached from another machine through OpenSSH.
 
 While a pane is on screen, `zmux` hands Zetta the terminal itself rather than
 copying its output, so an attached pane costs exactly what a locally spawned one
@@ -27,7 +27,8 @@ restore; output produced after that checkpoint is captured once the pane is
 being read by `zmux`.
 
 `zmux` is also reachable as `zetta mux`, and takes the same arguments either
-way:
+way. Remote attach/list commands use numeric IDs because the SSH destination
+already selects the catalog:
 
 ```sh
 zmux list             # the sessions being held
@@ -39,6 +40,8 @@ zmux kill SESSION_ID     # end a live session or discard a stale disk record
 zmux forget SESSION_ID   # remove a live session or stale disk record
 zmux stop             # stop the multiplexer, once nothing is running in it
 zmux --upgrade        # replace the multiplexer, keeping its sessions
+zmux attach HOST 42   # attach a shared session through OpenSSH
+zmux list -H HOST -I  # print remote IDs, one per line
 ```
 
 `SESSION_ID` accepts the short numeric session ID when it is unambiguous, and
@@ -47,12 +50,44 @@ case. The human-readable list shows both forms for an unambiguous session and
 only the full form when numeric IDs conflict. Shell completion offers the
 stable form for `share`, `reconnect`, `unshare`, `kill`, and `forget`.
 
+## Attach from another machine
+
+An offered/shared session can be opened through the remote host's normal
+OpenSSH destination:
+
+```sh
+zetta mux attach HOST SESSION_ID
+zetta mux attach -H HOST -p 2222 SESSION_ID
+zmux list -H HOST --ids-only
+zmux kill -H HOST SESSION_ID
+```
+
+`HOST` is passed to OpenSSH unchanged, so aliases, `user@host`, the SSH agent,
+`ProxyJump`, and `ControlMaster` settings from `~/.ssh/config` continue to
+apply. `ssh -T -N -L` keeps one stream-local forward alive for all panes; the
+remote daemon must expose its Unix socket to the SSH account and the SSH server
+must allow stream-local forwarding (`AllowStreamLocalForwarding`). The remote
+`zmux` must speak the same mux, endpoint, and process-control compatibility
+versions; Zetta queries it with `zmux endpoint --json` before forwarding.
+
+Remote panes are shared byte streams. They never receive a Unix descriptor or
+Windows handle, cannot take an exclusive grant, and remain live-only in Zetta:
+closing their tab disconnects that viewer but does not issue a remote
+`ClosePane`, while local background/detach actions report that the tab cannot be
+stored locally. Remote administration is limited to stream-safe list, attach,
+input, resize, pane state, share/unshare, kill, and forget operations. A
+protected session still needs its existing session secret (or the configured
+age identity for automatic protection); SSH authentication alone is not a
+session authorization.
+
 With disk retention, zmux list also shows opaque restorable records. They
 contain only an ID, timestamps, byte sizes, and protection state until an age
 identity decrypts the record. zmux resume SESSION -i PATH accepts repeatable
-identity files; the configured identity path is used by the Zetta picker, and
-by `zmux resume` and `zmux reconnect`, when one is set. An explicit `--identity`
-adds to the configured one rather than replacing it.
+identity files; the effective configured identity is used by the Zetta picker,
+and by `zmux resume` and `zmux reconnect`. When
+`sessions.persistence.identity` is absent or blank, an existing
+`~/.ssh/id_ed25519` is used as the default age identity. An explicit
+`--identity` adds to the configured/default identity rather than replacing it.
 
 Resuming a disk record is a fresh-shell restore, not a process checkpoint. A
 Zetta window creates new PTY-backed shells in the original zmux session ID,
@@ -87,8 +122,10 @@ when they reattach. With
 [`sessions.persistence.auto_protect`](configuration.md#protecting-sessions-with-your-key-instead-of-a-secret)
 the secret is generated instead: a 256-bit key, whose Argon2id verifier gates the
 session in the usual way, sealed to the configured recipients as an age v1 file.
-Reattaching opens that envelope with the configured identity and presents the
-key, so no prompt appears in a window or at a terminal.
+Reattaching opens that envelope with the effective identity and presents the
+key, so no prompt appears in a window or at a terminal. When
+`sessions.persistence.identity` is absent or blank, the effective identity is
+the existing `~/.ssh/id_ed25519`, when that file exists.
 
 The envelope travels with the verifier — in the published catalog, and inside the
 encrypted record — because a key that could not be recovered after the daemon

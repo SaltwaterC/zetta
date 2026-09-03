@@ -2,7 +2,9 @@
 //!
 //! `zmux` is deliberately free of Zetta's configuration format, but a user who
 //! set `sessions.persistence.identity` once should not have to repeat it as
-//! `--identity` on every `zmux resume` or `zmux reconnect`. The two entry points
+//! `--identity` on every `zmux resume`, `zmux reconnect`, or protected remote
+//! session command. When no identity is configured, the conventional
+//! `~/.ssh/id_ed25519` is used if it exists. The two entry points
 //! that ship with Zetta — the `zmux` binary and `zetta mux` — therefore read it
 //! here and pass it in as a [`zmux::ClientDefaults`].
 //!
@@ -17,30 +19,40 @@
 
 use std::path::PathBuf;
 
-/// The identity files a multiplexer command should try, from configuration.
+/// The identity files a multiplexer command should try, from configuration or
+/// the conventional `~/.ssh/id_ed25519` fallback.
 ///
-/// Empty when nothing is configured, when the file cannot be read, or when it is
-/// not valid JSON. A malformed configuration is the application's to report; a
-/// command line that says "no identity" and then fails to open a sealed session
-/// gives a clearer account of itself than one that refuses to run at all.
+/// An explicitly configured identity takes precedence, even when its path is
+/// missing, so the resulting error names the configured path. The fallback is
+/// used only when no identity is configured and the file exists.
 pub(crate) fn configured_identity_paths(config_path: Option<PathBuf>) -> Vec<PathBuf> {
+    configured_identity_paths_with_fallback(config_path, zmux::persistence::default_identity_path())
+}
+
+pub(crate) fn configured_identity_paths_with_fallback(
+    config_path: Option<PathBuf>,
+    fallback: Option<PathBuf>,
+) -> Vec<PathBuf> {
+    let fallback = || fallback.clone().into_iter().collect::<Vec<_>>();
     let path =
         config_path.unwrap_or_else(|| zmux::paths::platform_config_dir().join("config.json"));
     let Ok(contents) = std::fs::read_to_string(path) else {
-        return Vec::new();
+        return fallback();
     };
     let Ok(root) = serde_json::from_str::<serde_json::Value>(&contents) else {
-        return Vec::new();
+        return fallback();
     };
-    root.get("sessions")
+    let identity = root
+        .get("sessions")
         .and_then(|sessions| sessions.get("persistence"))
         .and_then(|persistence| persistence.get("identity"))
         .and_then(serde_json::Value::as_str)
         .map(str::trim)
-        .filter(|identity| !identity.is_empty())
+        .filter(|identity| !identity.is_empty());
+    identity
         .map(expand_home)
-        .into_iter()
-        .collect()
+        .map(|identity| vec![identity])
+        .unwrap_or_else(fallback)
 }
 
 /// Expands a leading `~/`, which is how an identity is conventionally written in
@@ -57,13 +69,16 @@ fn expand_home(path: &str) -> PathBuf {
 
 /// Whether a `zmux` command can need an identity, and so is worth reading
 /// configuration for. `resume` decrypts a disk record for fresh-shell restore;
-/// `reconnect` may have to
-/// open a session sealed to the user's key. Everything else — `list` above all —
-/// is a short-lived process that should not pay for a file it will not use.
+/// `reconnect` and remote commands may have to open a session sealed to the
+/// user's key. Everything else — `list` above all — is a short-lived process
+/// that should not pay for a file it will not use.
 pub(crate) fn command_uses_an_identity(arguments: &[std::ffi::OsString]) -> bool {
-    arguments
-        .first()
-        .is_some_and(|argument| argument == "resume" || argument == "reconnect")
+    arguments.iter().any(|argument| {
+        matches!(
+            argument.to_str(),
+            Some("resume" | "reconnect" | "attach" | "kill" | "share" | "unshare" | "forget")
+        )
+    })
 }
 
 // Inline rather than in `src/tests/`, unlike the rest of `src/`: this file is
@@ -108,23 +123,43 @@ mod tests {
         for persistence in [r#"{}"#, r#"{"identity": null}"#, r#"{"identity": "  "}"#] {
             let (_directory, path) = config_with(persistence);
             assert!(
-                configured_identity_paths(Some(path)).is_empty(),
+                configured_identity_paths_with_fallback(Some(path), None).is_empty(),
                 "{persistence} should resolve to no identity"
             );
         }
     }
 
-    /// A command line that cannot read configuration says "no identity" and lets
-    /// the command explain itself, rather than refusing to run at all.
+    #[test]
+    fn uses_the_default_ssh_identity_when_no_identity_is_configured() {
+        let (_directory, path) = config_with(r#"{}"#);
+        let default = PathBuf::from("/home/test/.ssh/id_ed25519");
+        assert_eq!(
+            configured_identity_paths_with_fallback(Some(path), Some(default.clone())),
+            vec![default]
+        );
+    }
+
+    #[test]
+    fn an_explicit_identity_takes_precedence_over_the_default_ssh_identity() {
+        let (_directory, path) = config_with(r#"{"identity":"~/configured.txt"}"#);
+        let default = PathBuf::from("/home/test/.ssh/id_ed25519");
+        let resolved = configured_identity_paths_with_fallback(Some(path), Some(default));
+        assert_eq!(resolved.len(), 1);
+        assert!(resolved[0].ends_with("configured.txt"));
+        assert!(!resolved[0].ends_with("id_ed25519"));
+    }
+
+    /// A command line that cannot read configuration still uses an explicitly
+    /// supplied fallback, rather than refusing to run at all.
     #[test]
     fn an_unreadable_or_malformed_configuration_yields_no_identity() {
         let directory = tempfile::tempdir().unwrap();
         let missing = directory.path().join("absent.json");
-        assert!(configured_identity_paths(Some(missing)).is_empty());
+        assert!(configured_identity_paths_with_fallback(Some(missing), None).is_empty());
 
         let malformed = directory.path().join("malformed.json");
         std::fs::write(&malformed, "{ this is not json").unwrap();
-        assert!(configured_identity_paths(Some(malformed)).is_empty());
+        assert!(configured_identity_paths_with_fallback(Some(malformed), None).is_empty());
     }
 
     #[test]
@@ -132,7 +167,13 @@ mod tests {
         let arguments = |command: &str| vec![std::ffi::OsString::from(command)];
         assert!(command_uses_an_identity(&arguments("resume")));
         assert!(command_uses_an_identity(&arguments("reconnect")));
-        for command in ["list", "kill", "share", "stop", "forget"] {
+        for command in ["attach", "kill", "share", "unshare", "forget"] {
+            assert!(
+                command_uses_an_identity(&arguments(command)),
+                "{command} should load configuration"
+            );
+        }
+        for command in ["list", "stop"] {
             assert!(
                 !command_uses_an_identity(&arguments(command)),
                 "{command} should not load configuration"

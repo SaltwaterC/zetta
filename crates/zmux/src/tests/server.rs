@@ -57,18 +57,18 @@ fn a_protected_sessions_owner_has_to_be_vouched_for_not_claimed() {
     // owner used to be whatever the envelope said it was. Anyone able to read
     // the endpoint token could then name the real owner and detach, kill or
     // rescope a protected session without ever presenting its secret.
-    let session = session_owned_by(4321, true);
+    let mut session = session_owned_by(4321, true);
 
     assert!(
-        session_control_authorized(&session, Some(4321)),
+        session_control_authorized(&mut session, Some(4321), None),
         "the owner, vouched for, must still be authorized"
     );
     assert!(
-        !session_control_authorized(&session, Some(9999)),
+        !session_control_authorized(&mut session, Some(9999), None),
         "another process must not be authorized"
     );
     assert!(
-        !session_control_authorized(&session, None),
+        !session_control_authorized(&mut session, None, None),
         "an unvouched-for peer must not be authorized, whatever it claims"
     );
     // Holder-only controls — resize, palette — are stricter still: not even the
@@ -79,8 +79,8 @@ fn a_protected_sessions_owner_has_to_be_vouched_for_not_claimed() {
     // A session with no secret is a different question: any same-user process
     // can attach one for itself, so confirming which process is asking would
     // protect nothing, and controls stay open as they always were.
-    let open = session_owned_by(4321, false);
-    assert!(session_control_authorized(&open, None));
+    let mut open = session_owned_by(4321, false);
+    assert!(session_control_authorized(&mut open, None, None));
 }
 
 fn size(columns: u16, lines: u16) -> TerminalSize {

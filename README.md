@@ -21,6 +21,8 @@ for active development.
   with retained diagnostics for unexpected terminal exits
 - Shareable tabs: offer a tab that is still on screen and join it from another
   Zetta window, with both driving the same panes
+- Remote shared sessions over OpenSSH: `zetta mux attach HOST SESSION_ID`, with
+  SSH-config target completion and stream-only remote panes
 - Optional compact mode moves tabs into the title bar, keeps Menu, Profile,
   Broadcast, and Silent available, and preserves responsive tab sizing
 - Open paths or the complete pane scrollback in `$EDITOR`, with built-in vi as
@@ -280,7 +282,7 @@ pane controls are hidden while stacking is enabled.
 - [Configuration](docs/configuration.md): settings, projects, profiles,
   keymaps, fonts, and themes
 - [Background sessions](docs/background-sessions.md): detach, share, protect,
-  inspect, and reconnect sessions
+  inspect, reconnect, and attach remote sessions
 - [Compatibility versioning](docs/versioning.md): executable, protocol, and
   persisted-format version markers
 - [Shell integration](docs/shell-integration.md): command completion and the
@@ -293,6 +295,9 @@ pane controls are hidden while stacking is enabled.
 Use [`config.example.json`](config.example.json) and
 [`keymap.example.json`](keymap.example.json) as starting points for local
 customization.
+
+When `sessions.persistence.identity` is unset, Zetta also tries an existing
+`~/.ssh/id_ed25519` as the default age identity for protected session resume.
 
 ## Security notes
 

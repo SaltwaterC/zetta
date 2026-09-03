@@ -337,7 +337,7 @@ fn configure_retries_once_after_an_unsupported_request() {
     std::fs::write(
         &endpoint_path,
         serde_json::json!({
-            "version": 1,
+            "version": zmux::transport::ENDPOINT_VERSION,
             "protocol_version": zmux::messages::PROTOCOL_VERSION,
             "process_id": 4242,
             "socket_path": socket_path,

@@ -89,7 +89,7 @@ const CONTROL_CLIENT_TIMEOUT: Duration = Duration::from_secs(3);
 // is sized to keep an Argon2 verification under a quarter of it on slow
 // machines: memory-constrained VMs and debug builds can take seconds per
 // verification.
-const RECONNECT_COMPLETION_TIMEOUT: Duration = Duration::from_secs(16);
+const RECONNECT_COMPLETION_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ReconnectSessionResult {
@@ -183,6 +183,13 @@ pub(crate) enum ProcessControlCommand {
         runner_id: u64,
         session_id: u64,
         attention_id: Option<u64>,
+        secret: Option<SessionSecret>,
+        completion: Sender<ReconnectSessionResult>,
+    },
+    OpenRemoteSession {
+        target: String,
+        port: Option<u16>,
+        session_id: u64,
         secret: Option<SessionSecret>,
         completion: Sender<ReconnectSessionResult>,
     },
@@ -285,6 +292,12 @@ enum ControlRequestCommand {
         attention_id: Option<u64>,
         secret: Option<SessionSecret>,
     },
+    OpenRemoteSession {
+        target: String,
+        port: Option<u16>,
+        session_id: u64,
+        secret: Option<SessionSecret>,
+    },
     ResumeDiskSession {
         session_id: u64,
         identity_paths: Vec<PathBuf>,
@@ -346,6 +359,10 @@ struct ControlRequest {
     runner_id: Option<u64>,
     session_id: Option<u64>,
     secret: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ssh_target: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ssh_port: Option<u16>,
     icon: Option<String>,
     pane_theme: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -874,6 +891,32 @@ impl ProcessControlServer {
                                             runner_id,
                                             session_id,
                                             attention_id,
+                                            secret,
+                                            completion,
+                                        })
+                                        .is_ok()
+                                    {
+                                        wait_for_reconnect_completion(
+                                            &completed,
+                                            &stopping_for_thread,
+                                        )
+                                    } else {
+                                        ReconnectSessionResult::Rejected
+                                    };
+                                    reconnect_session_status(result)
+                                }
+                                Some(ControlRequestCommand::OpenRemoteSession {
+                                    target,
+                                    port,
+                                    session_id,
+                                    secret,
+                                }) => {
+                                    let (completion, completed) = channel();
+                                    let result = if commands
+                                        .unbounded_send(ProcessControlCommand::OpenRemoteSession {
+                                            target,
+                                            port,
+                                            session_id,
                                             secret,
                                             completion,
                                         })
@@ -1600,6 +1643,8 @@ fn control_request_has_new_window_payload(request: &ControlRequest) -> bool {
         && request.theme.is_none()
         && request.scope.is_none()
         && request.pane_request.is_none()
+        && request.ssh_target.is_none()
+        && request.ssh_port.is_none()
         && request
             .config_path
             .as_deref()
@@ -1616,6 +1661,38 @@ fn token_matches(supplied: &str, expected: &str) -> bool {
     // requires equal lengths to produce a meaningful choice, so gate on that
     // first. The length of the expected token is not itself a secret.
     supplied.len() == expected.len() && bool::from(supplied.ct_eq(expected))
+}
+
+fn control_request_has_remote_session_payload(request: &ControlRequest) -> bool {
+    request.runner_id.is_none()
+        && request.session_id.is_some_and(|session_id| session_id != 0)
+        && request.ssh_target.as_deref().is_some_and(|target| {
+            !target.is_empty() && !target.starts_with('-') && target.len() <= 4096
+        })
+        && request.ssh_port.is_none_or(|port| port != 0)
+        && request.icon.is_none()
+        && request.pane_theme.is_none()
+        && request.pane_id.is_none()
+        && request.pane_overlay.is_none()
+        && request.pane_overlay_font_size.is_none()
+        && request.pane_overlay_opacity.is_none()
+        && request.pane_overlay_color.is_none()
+        && request.attention_id.is_none()
+        && request.attention_summary.is_none()
+        && request.attention_body.is_none()
+        && request.tab_name.is_none()
+        && request.worktree_name.is_none()
+        && request.config_path.is_none()
+        && request.working_directory.is_none()
+        && request.split.is_none()
+        && request.profile.is_none()
+        && request.theme.is_none()
+        && request.scope.is_none()
+        && request.pane_request.is_none()
+        && request
+            .secret
+            .as_deref()
+            .is_none_or(|secret| !secret.is_empty())
 }
 
 fn decode_control_request(
@@ -1635,6 +1712,12 @@ fn decode_control_request(
         return None;
     }
     if request.command != "run_shell_command" && request.shell_command.is_some() {
+        zeroize_control_request_secrets(request);
+        return None;
+    }
+    if request.command != "open_remote_session"
+        && (request.ssh_target.is_some() || request.ssh_port.is_some())
+    {
         zeroize_control_request_secrets(request);
         return None;
     }
@@ -2039,6 +2122,14 @@ fn decode_control_request(
         {
             Some(ControlRequestCommand::ListPaneLabels {
                 attention_id: request.attention_id.take(),
+            })
+        }
+        "open_remote_session" if control_request_has_remote_session_payload(request) => {
+            Some(ControlRequestCommand::OpenRemoteSession {
+                target: request.ssh_target.take()?,
+                port: request.ssh_port.take(),
+                session_id: request.session_id.take()?,
+                secret: request.secret.take().map(SessionSecret::new),
             })
         }
         "reconnect_session"
@@ -2984,6 +3075,8 @@ impl RunWaitConnection {
             &mut self.stream,
             &ControlRequest {
                 token: self.token.clone(),
+                ssh_target: None,
+                ssh_port: None,
                 command: "run_complete".to_owned(),
                 runner_id: None,
                 session_id: Some(self.id),
@@ -3050,6 +3143,8 @@ pub(crate) fn request_process_run_wait(
         &mut stream,
         &ControlRequest {
             token: endpoint.token.clone(),
+            ssh_target: None,
+            ssh_port: None,
             command: "run_wait".to_owned(),
             runner_id: None,
             session_id: None,
@@ -3236,6 +3331,8 @@ fn send_open_window_request_with_command(
         &mut stream,
         &ControlRequest {
             token: endpoint.token.clone(),
+            ssh_target: None,
+            ssh_port: None,
             command: command.to_owned(),
             runner_id: None,
             session_id: None,
@@ -3283,6 +3380,8 @@ fn send_open_project_request_with_working_directory(
         &mut stream,
         &ControlRequest {
             token: endpoint.token.clone(),
+            ssh_target: None,
+            ssh_port: None,
             command: "open_project".to_owned(),
             runner_id: None,
             session_id: None,
@@ -3321,6 +3420,8 @@ fn send_reload_projects_request(endpoint: &ControlEndpoint) -> Result<bool> {
         &mut stream,
         &ControlRequest {
             token: endpoint.token.clone(),
+            ssh_target: None,
+            ssh_port: None,
             command: "reload_projects".to_owned(),
             runner_id: None,
             session_id: None,
@@ -3363,6 +3464,8 @@ fn send_get_silent_mode_request(
         &mut stream,
         &ControlRequest {
             token: endpoint.token.clone(),
+            ssh_target: None,
+            ssh_port: None,
             command: "get_silent_mode".to_owned(),
             runner_id: None,
             session_id: None,
@@ -3408,6 +3511,8 @@ fn send_set_tab_attention_request(
         &mut stream,
         &ControlRequest {
             token: endpoint.token.clone(),
+            ssh_target: None,
+            ssh_port: None,
             command: "set_tab_attention".to_owned(),
             runner_id: None,
             session_id: None,
@@ -3447,6 +3552,8 @@ fn send_set_tab_name_request(endpoint: &ControlEndpoint, request: &TabNameReques
         &mut stream,
         &ControlRequest {
             token: endpoint.token.clone(),
+            ssh_target: None,
+            ssh_port: None,
             command: "set_tab_name".to_owned(),
             runner_id: None,
             session_id: None,
@@ -3489,6 +3596,8 @@ fn send_set_worktree_name_request(
         &mut stream,
         &ControlRequest {
             token: endpoint.token.clone(),
+            ssh_target: None,
+            ssh_port: None,
             command: "set_worktree_name".to_owned(),
             runner_id: None,
             session_id: None,
@@ -3529,6 +3638,8 @@ fn send_focus_tab_request(endpoint: &ControlEndpoint, attention_id: u64) -> Resu
         &mut stream,
         &ControlRequest {
             token: endpoint.token.clone(),
+            ssh_target: None,
+            ssh_port: None,
             command: "focus_tab".to_owned(),
             runner_id: None,
             session_id: None,
@@ -3567,6 +3678,8 @@ fn send_run_pane_request(endpoint: &ControlEndpoint, request: &PaneCommand) -> R
         &mut stream,
         &ControlRequest {
             token: endpoint.token.clone(),
+            ssh_target: None,
+            ssh_port: None,
             command: "run_pane".to_owned(),
             runner_id: None,
             session_id: None,
@@ -3614,6 +3727,8 @@ fn send_run_shell_command_request(
         &mut stream,
         &ControlRequest {
             token: endpoint.token.clone(),
+            ssh_target: None,
+            ssh_port: None,
             command: "run_shell_command".to_owned(),
             runner_id: None,
             session_id: None,
@@ -3662,6 +3777,8 @@ fn send_open_command_request(
         &mut stream,
         &ControlRequest {
             token: endpoint.token.clone(),
+            ssh_target: None,
+            ssh_port: None,
             command: "open_command".to_owned(),
             runner_id: None,
             session_id: None,
@@ -3709,6 +3826,8 @@ fn send_list_pane_labels_request(
         &mut stream,
         &ControlRequest {
             token: endpoint.token.clone(),
+            ssh_target: None,
+            ssh_port: None,
             command: "list_panes".to_owned(),
             runner_id: None,
             session_id: None,
@@ -3756,6 +3875,8 @@ fn send_replace_pane_request(
         &mut stream,
         &ControlRequest {
             token: endpoint.token.clone(),
+            ssh_target: None,
+            ssh_port: None,
             command: "replace_pane".to_owned(),
             runner_id: None,
             session_id: None,
@@ -3797,6 +3918,8 @@ fn send_reload_configuration_request(
         &mut stream,
         &ControlRequest {
             token: endpoint.token.clone(),
+            ssh_target: None,
+            ssh_port: None,
             command: "reload_configuration".to_owned(),
             runner_id: None,
             session_id: None,
@@ -3835,6 +3958,8 @@ fn send_set_tab_icon_request(endpoint: &ControlEndpoint, icon: Option<IconName>)
         &mut stream,
         &ControlRequest {
             token: endpoint.token.clone(),
+            ssh_target: None,
+            ssh_port: None,
             command: "set_tab_icon".to_owned(),
             runner_id: None,
             session_id: None,
@@ -3880,6 +4005,8 @@ fn send_set_theme_request(
         &mut stream,
         &ControlRequest {
             token: endpoint.token.clone(),
+            ssh_target: None,
+            ssh_port: None,
             command: "set_theme".to_owned(),
             runner_id: None,
             session_id: None,
@@ -3918,6 +4045,8 @@ fn send_list_themes_request(endpoint: &ControlEndpoint) -> Result<Option<Vec<Str
         &mut stream,
         &ControlRequest {
             token: endpoint.token.clone(),
+            ssh_target: None,
+            ssh_port: None,
             command: "list_themes".to_owned(),
             runner_id: None,
             session_id: None,
@@ -3961,6 +4090,8 @@ fn send_get_pane_theme_request(
         &mut stream,
         &ControlRequest {
             token: endpoint.token.clone(),
+            ssh_target: None,
+            ssh_port: None,
             command: "get_pane_theme".to_owned(),
             runner_id: None,
             session_id: None,
@@ -4004,6 +4135,8 @@ fn send_set_overlay_request(
         &mut stream,
         &ControlRequest {
             token: endpoint.token.clone(),
+            ssh_target: None,
+            ssh_port: None,
             command: "set_overlay".to_owned(),
             runner_id: None,
             session_id: None,

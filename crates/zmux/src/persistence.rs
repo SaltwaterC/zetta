@@ -64,6 +64,16 @@ pub struct PersistenceOptions {
     pub identity: Option<PathBuf>,
 }
 
+/// The conventional local SSH identity used as the age fallback when a client
+/// has no configured identity. This is deliberately client-side discovery: the
+/// daemon never receives the path or the private key.
+pub fn default_identity_path() -> Option<PathBuf> {
+    let home =
+        std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from)?;
+    let path = home.join(".ssh").join("id_ed25519");
+    path.is_file().then_some(path)
+}
+
 /// Why resolving a configured recipient failed.
 ///
 /// A temporary failure means that the configuration is valid but the network

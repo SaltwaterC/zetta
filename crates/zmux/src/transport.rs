@@ -44,7 +44,7 @@ use crate::catalog::{create_private_dir, write_private_file};
 /// peer cannot make the daemon allocate without bound.
 pub const MAX_MESSAGE_BYTES: usize = 64 * 1024;
 
-pub const ENDPOINT_VERSION: u32 = 1;
+pub const ENDPOINT_VERSION: u32 = 2;
 
 /// How a client finds the daemon: the socket to connect to, and the token that
 /// authenticates the channel. Written `0600` inside the `0700` session

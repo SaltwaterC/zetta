@@ -87,17 +87,23 @@ pub struct SessionPersistenceConfig {
 #[cfg_attr(not(feature = "session-persistence"), allow(dead_code))]
 impl SessionPersistenceConfig {
     /// Whether automatic protection is asked for *and* has the two things it
-    /// needs. Deliberately free of I/O, because the settings page asks it while
-    /// deciding what to draw; whether the identity file is actually there is
-    /// settled once, when the recipients are resolved.
+    /// needs. A missing identity field may resolve to the conventional SSH
+    /// identity, but only when that file exists.
     pub fn auto_protect_is_configured(&self) -> bool {
-        self.auto_protect && !self.recipients.is_empty() && self.identity.is_some()
+        self.auto_protect && !self.recipients.is_empty() && self.resolved_identity().is_some()
     }
 
-    /// The configured identity with a leading `~/` expanded, which is how it is
-    /// written in configuration and how every reader of it has to resolve it.
+    /// The effective identity with a leading `~/` expanded.
+    ///
+    /// When the setting is absent or blank, an existing `~/.ssh/id_ed25519` is
+    /// used as the default age identity. An explicitly configured path wins,
+    /// even when that path does not exist, so callers can report its useful
+    /// name in an error.
     pub fn resolved_identity(&self) -> Option<PathBuf> {
-        let path = self.identity.clone()?;
+        let path = self
+            .identity
+            .clone()
+            .or_else(default_session_identity_path)?;
         let Some(relative) = path.to_str().and_then(|path| path.strip_prefix("~/")) else {
             return Some(path);
         };
@@ -735,7 +741,8 @@ impl Config {
                 if let Some(identity) = persistence.get("identity") {
                     config.sessions.persistence.identity = match identity {
                         Value::Null => None,
-                        Value::String(path) if !path.trim().is_empty() => Some(PathBuf::from(path)),
+                        Value::String(path) if path.trim().is_empty() => None,
+                        Value::String(path) => Some(PathBuf::from(path)),
                         _ => anyhow::bail!(
                             "sessions.persistence.identity must be a path string or null"
                         ),
@@ -2303,6 +2310,18 @@ fn home_dir() -> PathBuf {
     env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."))
+}
+
+/// The conventional local SSH identity used as the age fallback when no
+/// `sessions.persistence.identity` is configured. The file check keeps an
+/// absent convention from changing the identity set or enabling a setting
+/// that cannot be used.
+#[cfg_attr(not(feature = "session-persistence"), allow(dead_code))]
+pub(crate) fn default_session_identity_path() -> Option<PathBuf> {
+    let home =
+        env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from)?;
+    let path = home.join(".ssh").join("id_ed25519");
+    path.is_file().then_some(path)
 }
 
 #[cfg(test)]

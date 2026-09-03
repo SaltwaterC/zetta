@@ -279,6 +279,65 @@ _zmux_session_ids() {
     compadd -- "${(@f)$(${mux_list_command[@]} 2>/dev/null | awk '$1 == "reconnect" && $2 == "id:" && $3 ~ /^[0-9]+:[0-9]+:[0-9]+$/ { print $3 }')}"
 }
 
+_zmux_ssh_targets() {
+    local config="${HOME:-}/.ssh/config"
+    [[ -r $config ]] || return
+    compadd -- "${(@f)$(awk '
+        /^[[:space:]]*[Hh][Oo][Ss][Tt][[:space:]]+/ {
+            for (index = 2; index <= NF; index++)
+                if ($index !~ /^!/ && $index !~ /[*?]/)
+                    print $index
+        }
+    ' "$config" 2>/dev/null)}"
+}
+
+_zmux_remote_session_ids() {
+    local target=$1 port=$2
+    local -a ssh_command=(ssh -T -o BatchMode=yes -o ConnectTimeout=3)
+    [[ -n $port ]] && ssh_command+=(-p "$port")
+    compadd -- "${(@f)$(${ssh_command[@]} "$target" zmux list --ids-only 2>/dev/null | awk -v prefix="$PREFIX" '$0 ~ /^[0-9]+$/ && index($0, prefix) == 1 { print }')}"
+}
+
+_zmux_attach_arguments() {
+    local target='' port='' token
+    local index
+    case $words[CURRENT-1] in
+        --ssh-target|-H)
+            _zmux_ssh_targets
+            return
+            ;;
+        --port|-p)
+            return
+            ;;
+        --identity|-i)
+            _files
+            return
+            ;;
+    esac
+    for (( index = 4; index < CURRENT; index++ )); do
+        token=$words[index]
+        case $token in
+            --ssh-target|-H)
+                (( index++ < CURRENT )) && target=$words[index]
+                ;;
+            --ssh-target=*) target=${token#*=} ;;
+            --port|-p)
+                (( index++ < CURRENT )) && port=$words[index]
+                ;;
+            --port=*) port=${token#*=} ;;
+            --identity|-i) (( index++ )) ;;
+            --identity=*) ;;
+            --*) ;;
+            *) [[ -n $target ]] || target=$token ;;
+        esac
+    done
+    if [[ -n $target ]]; then
+        _zmux_remote_session_ids "$target" "$port"
+    else
+        _zmux_ssh_targets
+    fi
+}
+
 _zmux_restorable_ids() {
     local -a mux_list_command=(zetta mux list)
     [[ ${_zetta_mux_completion_command:-} == zmux ]] && mux_list_command=(zmux list)
@@ -463,6 +522,10 @@ _zetta() {
             _zetta_profiles
             return
             ;;
+        --ssh-target|-H)
+            _zmux_ssh_targets
+            return
+            ;;
         --pane)
             if [[ $words[2] == pane ]]; then
                 _zetta_pane_labels
@@ -470,7 +533,9 @@ _zetta() {
             return
             ;;
         -p)
-            if [[ $words[2] == pane ]]; then
+            if [[ $words[2] == mux && $words[3] == attach ]]; then
+                return
+            elif [[ $words[2] == pane ]]; then
                 _zetta_pane_labels
             elif [[ $words[2] == profile && $profile_operation == add ]]; then
                 return
@@ -734,13 +799,13 @@ _zetta() {
         mux)
             if (( CURRENT == 3 )); then
                 if [[ ${ZETTA_NO_MUX:-0} == 1 ]]; then
-                    compadd -S ' ' -- list reconnect
-                    _zetta_options --json --help --version
+                    compadd -S ' ' -- list reconnect attach
+                    _zetta_options --json --ids-only --ssh-target --port --help --version
                 else
-                    compadd -S ' ' -- list stop reconnect resume share unshare kill forget
-                    _zetta_options --json --upgrade --identity --help --version
+                    compadd -S ' ' -- list stop reconnect attach resume share unshare kill forget
+                    _zetta_options --json --ids-only --ssh-target --port --upgrade --identity --help --version
                 fi
-            elif [[ ${ZETTA_NO_MUX:-0} == 1 && ${words[3]} != reconnect && ${words[3]} != list ]]; then
+            elif [[ ${ZETTA_NO_MUX:-0} == 1 && ${words[3]} != reconnect && ${words[3]} != list && ${words[3]} != attach ]]; then
                 return
             elif [[ ${words[3]} == stop ]]; then
                 _zetta_options --force --help
@@ -752,6 +817,12 @@ _zetta() {
                 fi
             elif [[ ${words[3]} == reconnect ]]; then
                 _zetta_options --identity --help
+            elif [[ ${words[3]} == attach ]]; then
+                if [[ $words[CURRENT] == -* ]]; then
+                    _zetta_options --ssh-target --port --identity --help
+                else
+                    _zmux_attach_arguments
+                fi
             elif [[ ${words[3]} == resume && $words[CURRENT] != -* ]]; then
                 if [[ $words[CURRENT-1] == --identity ]]; then
                     _files
@@ -763,7 +834,7 @@ _zetta() {
             elif [[ ${ZETTA_NO_MUX:-0} != 1 && ( ${words[3]} == share || ${words[3]} == unshare || ${words[3]} == kill || ${words[3]} == forget ) ]]; then
                 _zmux_session_ids
             else
-                _zetta_options --json --identity --help
+                _zetta_options --json --ids-only --ssh-target --port --identity --help
             fi
             ;;
         init)

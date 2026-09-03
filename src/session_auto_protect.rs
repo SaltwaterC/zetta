@@ -8,7 +8,7 @@
 //! [`zmux::auto_protect`] for the shape of it and why the envelope is carried
 //! rather than kept in memory.
 //!
-//! This module is the application's half: the resolved recipients and identity,
+//! This module is the application's half: the resolved recipients and effective identity,
 //! held together so that a window can seal and open without re-reading
 //! configuration or re-resolving a `github:` alias over the network on every
 //! detach.
@@ -79,7 +79,7 @@ impl SessionAutoProtect {
         zmux::auto_protect::seal(&self.recipients)
     }
 
-    /// Whether the configured identity is itself encrypted, and so cannot be
+    /// Whether the effective identity is itself encrypted, and so cannot be
     /// loaded without asking someone for its passphrase.
     ///
     /// The answer decides whether an unlock can be silent. Getting this wrong is

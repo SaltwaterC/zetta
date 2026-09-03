@@ -356,6 +356,14 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.mux_panes.is_remote_tab(tab_id) {
+            self.show_notice(
+                "Remote sessions are live-only and cannot be stored as local background sessions.",
+                cx,
+            );
+            self.focus_active(window, cx);
+            return;
+        }
         match self.existing_protection(tab_id) {
             Some(authentication) => {
                 self.apply_protected_session_action(tab_id, action, authentication, window, cx)
@@ -483,7 +491,7 @@ impl Zetta {
     /// unprotected session, a session protected by a typed secret, and — when
     /// automatic protection is not configured here — one this window simply
     /// cannot open, which is left to the dialog to report as a failed attempt.
-    /// An `Err` is a configured identity that could not open an envelope, which
+    /// An `Err` is an effective identity that could not open an envelope, which
     /// is worth saying plainly rather than turning into an unanswerable prompt.
     #[cfg(feature = "session-persistence")]
     fn recovered_session_secret(
@@ -643,6 +651,14 @@ impl Zetta {
             return;
         };
         let tab_id = tab.id;
+        if self.mux_panes.is_remote_tab(tab_id) {
+            self.show_notice(
+                "Remote sessions are already shared by the remote multiplexer and cannot be re-scoped from Zetta.",
+                cx,
+            );
+            self.focus_active(window, cx);
+            return;
+        }
         if self.no_mux {
             self.show_notice(
                 "Sharing requires the session multiplexer; restart without --no-mux to enable it.",
@@ -718,11 +734,17 @@ impl Zetta {
         cx: &App,
     ) -> anyhow::Result<bool> {
         let tab = &self.tabs[index];
-        let (Some(runtime), Some(session_id)) =
-            (self.mux.clone(), self.mux_panes.session_id(tab.id))
-        else {
+        let (Some(runtime), Some(session_id)) = (
+            self.mux_panes
+                .runtime_for_tab(tab.id)
+                .or_else(|| self.mux.clone()),
+            self.mux_panes.session_id(tab.id),
+        ) else {
             return Ok(false);
         };
+        if runtime.is_remote() {
+            return Ok(false);
+        }
         let protected = authentication.is_some()
             || tab
                 .close_policy
@@ -815,6 +837,13 @@ impl Zetta {
             return;
         };
         let tab_id = tab.id;
+        if self.mux_panes.is_remote_tab(tab_id) {
+            self.show_notice(
+                "Remote sessions are live-only and cannot be kept as local background sessions.",
+                cx,
+            );
+            return;
+        }
         if matches!(tab.close_policy, TabClosePolicy::Background { .. }) {
             self.tabs[self.active_tab].close_policy = TabClosePolicy::Close;
             cx.notify();
@@ -1534,6 +1563,42 @@ impl Zetta {
             let _ = completion.send(result);
         })
         .detach();
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn open_remote_session_from_cli(
+        &mut self,
+        target: String,
+        port: Option<u16>,
+        session_id: u64,
+        secret: Option<SessionSecret>,
+        completion: std::sync::mpsc::Sender<ReconnectSessionResult>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let result = {
+            let target = zmux::remote::RemoteTarget::new(target).with_port(port);
+            match self.attach_remote_multiplexer_session(target, session_id, secret, window, cx) {
+                Ok(AttachOutcomeSummary::Attached) => ReconnectSessionResult::Reconnected,
+                Ok(AttachOutcomeSummary::AuthenticationRequired)
+                | Ok(AttachOutcomeSummary::AuthenticationFailed) => {
+                    ReconnectSessionResult::AuthenticationFailed
+                }
+                Err(error) => {
+                    self.pane_output_error = Some(format!(
+                        "Could not attach the remote session {session_id}: {error:#}"
+                    ));
+                    cx.notify();
+                    ReconnectSessionResult::Rejected
+                }
+            }
+        };
+        if result == ReconnectSessionResult::Rejected
+            && let Some(error) = self.pane_output_error.take()
+        {
+            self.show_notice(error, cx);
+        }
+        let _ = completion.send(result);
     }
 
     pub(crate) fn background_session_authentication(
@@ -2765,13 +2830,20 @@ impl Zetta {
         if self.no_mux {
             return Ok(false);
         }
-        let (Some(runtime), Some(session_id)) =
-            (self.mux.clone(), self.mux_panes.session_id(tab.id))
-        else {
+        let (Some(runtime), Some(session_id)) = (
+            self.mux_panes
+                .runtime_for_tab(tab.id)
+                .or_else(|| self.mux.clone()),
+            self.mux_panes.session_id(tab.id),
+        ) else {
             anyhow::bail!(
                 "the tab has no daemon-owned session; start Zetta with --no-mux to use local session ownership"
             );
         };
+        anyhow::ensure!(
+            !runtime.is_remote(),
+            "remote sessions are live-only and cannot be stored as local background sessions"
+        );
 
         // Stacked terminals are task terminals, not interactive terminals, and
         // cannot be reattached yet. Stop their readers before releasing their
@@ -2911,14 +2983,35 @@ impl Zetta {
             anyhow::bail!("no multiplexer is running");
         };
 
+        self.attach_multiplexer_session_with_runtime(session_id, secret, runtime, window, cx)
+    }
+
+    pub(crate) fn attach_remote_multiplexer_session(
+        &mut self,
+        target: zmux::remote::RemoteTarget,
+        session_id: u64,
+        secret: Option<SessionSecret>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> anyhow::Result<AttachOutcomeSummary> {
+        let runtime = MuxRuntime::connect_remote(target)?;
+        self.attach_multiplexer_session_with_runtime(session_id, secret, runtime, window, cx)
+    }
+
+    fn attach_multiplexer_session_with_runtime(
+        &mut self,
+        session_id: u64,
+        secret: Option<SessionSecret>,
+        runtime: MuxRuntime,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> anyhow::Result<AttachOutcomeSummary> {
         // Starts from the session: which panes it has is part of what a
         // protected session's secret protects, so the multiplexer resolves the
         // first pane itself once the secret has been checked.
-        let first = runtime.client().attach(
-            session_id,
-            None,
-            secret.as_ref().map(|secret| secret.expose().to_owned()),
-        )?;
+        let first = runtime
+            .client()
+            .attach_with_secret(session_id, None, secret.as_ref())?;
         let (pane, state, summary) = match first {
             zmux::client::AttachOutcome::Attached {
                 pane,
@@ -2937,6 +3030,7 @@ impl Zetta {
                 return Ok(AttachOutcomeSummary::AuthenticationFailed);
             }
         };
+        runtime.set_session_secret(secret.as_ref());
 
         // A session the multiplexer holds but that has never been detached or
         // shared has published no layout, so there is nothing to rebuild a tab
@@ -2984,7 +3078,8 @@ impl Zetta {
             tab.process_title = Some(summary.title.clone());
         }
 
-        self.mux_panes.adopt_session(tab_id, session_id);
+        self.mux_panes
+            .adopt_session_with_runtime(tab_id, session_id, runtime.clone());
         // Pair the pane the multiplexer chose with the tab pane that named it,
         // rather than assuming it was the first one listed.
         let first_pane = state
@@ -2998,10 +3093,10 @@ impl Zetta {
             let Some(mux_pane_id) = pane_state.mux_pane_id else {
                 continue;
             };
-            match runtime.client().attach(
+            match runtime.client().attach_with_secret(
                 session_id,
                 Some(mux_pane_id),
-                secret.as_ref().map(|secret| secret.expose().to_owned()),
+                secret.as_ref(),
             )? {
                 zmux::client::AttachOutcome::Attached { pane, .. } => {
                     attached.push((pane_state.id, AttachedPaneKind::Exclusive(pane)))
@@ -3140,7 +3235,11 @@ impl Zetta {
                 AttachedPaneKind::Exclusive(attached) => {
                     let mux_pane_id = attached.pane_id;
                     match TerminalBuilder::new_attached(
-                        crate::mux::attached_pane_handover(attached, runtime.client().clone()),
+                        crate::mux::attached_pane_handover_with_secret(
+                            attached,
+                            runtime.client().clone(),
+                            runtime.session_secret(),
+                        ),
                         options,
                         cx.background_executor(),
                         PathStyle::local(),
@@ -3197,10 +3296,11 @@ impl Zetta {
                     )
                     .with_working_directory(working_directory.clone())
                     .with_replay(pane.replay.clone())
-                    .with_pty_control(crate::mux::mux_pty_control(
+                    .with_pty_control(crate::mux::mux_pty_control_with_secret(
                         runtime.client().clone(),
                         session_id,
                         mux_pane_id,
+                        runtime.session_secret(),
                     ));
                     (mux_pane_id, Some(built), None, Some(pane))
                 }
@@ -3322,7 +3422,6 @@ impl Zetta {
     /// the multiplexer: applying arbitrated sizes and routing the pane's
     /// exit report to its terminal.
     #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::too_many_arguments)]
     fn register_shared_pane(
         &mut self,
         tab_id: u64,
@@ -3341,20 +3440,23 @@ impl Zetta {
             SharedPaneEntry {
                 pane: pane.clone(),
                 mux_pane_id,
+                runtime: runtime.clone(),
             },
         );
-        // Every route into shared mode has to come through here, so every shared
-        // pane can be offered back when it turns out to be the last viewer — the
-        // mirror of `watch_for_revoke`'s rule for every route into holding one.
-        self.watch_for_grant(
-            tab_id,
-            pane_id,
-            session_id,
-            mux_pane_id,
-            runtime,
-            window,
-            cx,
-        );
+        if !runtime.is_remote() {
+            // Every local route into shared mode has to come through here, so
+            // every shared pane can be offered back when it turns out to be the
+            // last viewer. Remote panes are deliberately stream-only.
+            self.watch_for_grant(
+                tab_id,
+                pane_id,
+                session_id,
+                mux_pane_id,
+                runtime,
+                window,
+                cx,
+            );
+        }
         self.spawn_shared_pane_task(tab_id, pane_id, pane.clone(), exit_rx, window, cx);
     }
 
@@ -3454,12 +3556,12 @@ impl Zetta {
         report: zmux::client::PaneExitReport,
         cx: &mut Context<Self>,
     ) {
-        let mux_pane_id = self
-            .shared_panes
-            .get(&pane_id)
-            .map(|entry| entry.mux_pane_id);
-        self.shared_panes.remove(&pane_id);
-        if let Some(runtime) = &self.mux
+        let entry = self.shared_panes.remove(&pane_id);
+        let (mux_pane_id, runtime) = entry
+            .as_ref()
+            .map(|entry| (Some(entry.mux_pane_id), Some(entry.runtime.clone())))
+            .unwrap_or((None, None));
+        if let Some(runtime) = runtime.as_ref()
             && let Some(mux_pane_id) = mux_pane_id
         {
             runtime.reporters().forget_shared(mux_pane_id);
@@ -3523,14 +3625,13 @@ impl Zetta {
         let Some(entry) = self.shared_panes.remove(&pane_id) else {
             return;
         };
-        if let Some(runtime) = &self.mux {
-            runtime.reporters().forget_shared(entry.mux_pane_id);
-            runtime.revoke_reporters().forget(entry.mux_pane_id);
-            // The grant watcher too: an offer to hand back a pane this window no
-            // longer shows has nothing to hand back to, and the registration
-            // would outlive every other trace of the pane.
-            runtime.grant_reporters().forget(entry.mux_pane_id);
-        }
+        let runtime = entry.runtime;
+        runtime.reporters().forget_shared(entry.mux_pane_id);
+        runtime.revoke_reporters().forget(entry.mux_pane_id);
+        // The grant watcher too: an offer to hand back a pane this window no
+        // longer shows has nothing to hand back to, and the registration would
+        // outlive every other trace of the pane.
+        runtime.grant_reporters().forget(entry.mux_pane_id);
     }
 
     /// The multiplexer offered this pane's terminal back: this window is the only
@@ -3548,9 +3649,18 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(runtime) = self.mux.clone() else {
+        let Some(runtime) = self
+            .shared_panes
+            .get(&pane_id)
+            .map(|entry| entry.runtime.clone())
+            .or_else(|| self.mux_panes.runtime_for_tab(tab_id))
+            .or_else(|| self.mux.clone())
+        else {
             return;
         };
+        if runtime.is_remote() {
+            return;
+        }
         // Only a pane this window is actually sharing can be taken back, and only
         // while it still has the terminal the grant was offered for.
         if !self.shared_panes.contains_key(&pane_id) {
@@ -3633,7 +3743,11 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let handover = crate::mux::attached_pane_handover(attached, runtime.client().clone());
+        let handover = crate::mux::attached_pane_handover_with_secret(
+            attached,
+            runtime.client().clone(),
+            runtime.session_secret(),
+        );
         let child_events = match terminal.update(cx, |terminal, cx| {
             terminal.attach_pty(handover, options, cx)
         }) {
@@ -3685,9 +3799,16 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(runtime) = self.mux.clone() else {
+        let Some(runtime) = self
+            .mux_panes
+            .runtime_for_tab(tab_id)
+            .or_else(|| self.mux.clone())
+        else {
             return;
         };
+        if runtime.is_remote() {
+            return;
+        }
         let Some(terminal) = self
             .tabs
             .iter()

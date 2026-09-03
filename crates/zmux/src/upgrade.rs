@@ -34,7 +34,7 @@ use serde::{Deserialize, Serialize};
 /// Bumped whenever [`Handover`] changes shape. The replacement refuses a
 /// version it does not know rather than guessing at the layout of a session it
 /// is about to take responsibility for.
-pub const HANDOVER_VERSION: u32 = 5;
+pub const HANDOVER_VERSION: u32 = 6;
 
 /// Everything the next image needs to carry on.
 ///
@@ -143,6 +143,13 @@ pub enum AttachmentHandover {
 #[serde(deny_unknown_fields)]
 pub struct SharedClientHandover {
     pub process_id: u32,
+    /// The logical client survives request-connection and SSH-forward
+    /// reconnects, unlike the process ID which is shared by every pane in a
+    /// window and may be reported identically by forwarded peers.
+    #[serde(default)]
+    pub client_id: crate::messages::ClientId,
+    #[serde(default)]
+    pub stream_only: bool,
     pub columns: u16,
     pub lines: u16,
     /// Kept because a pane's exit reports which viewers typed into it, and an

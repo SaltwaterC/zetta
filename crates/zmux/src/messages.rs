@@ -14,7 +14,7 @@ use crate::protocol::{BackgroundSessionSummary, RestorableSessionRecord};
 
 /// The wire format, and what a client and a multiplexer compare before they
 /// trust each other to understand one another.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// Every request carries the endpoint token, which authenticates the *channel*
 /// only. It says nothing about whether a protected session may be attached —
@@ -40,7 +40,46 @@ pub struct Envelope {
     /// holding it.
     #[serde(default)]
     pub client_process_id: u32,
+    /// A stable identity for this logical client. Unlike the process ID it is
+    /// unique across clients using one process, and survives reconnects after
+    /// a daemon replacement or SSH forward restart.
+    #[serde(default)]
+    pub client_id: ClientId,
+    /// Remote clients cannot receive descriptors or participate in exclusive
+    /// handover. They attach through the shared byte-stream path only.
+    #[serde(default)]
+    pub stream_only: bool,
+    /// Authentication for stream-safe administrative requests. Attach keeps
+    /// its credential in [`Request::Attach`] because it is the first request
+    /// on the long-lived shared data connection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_secret: Option<String>,
     pub request: Request,
+}
+
+/// The logical identity of one mux client.
+///
+/// Process IDs are intentionally not enough: two panes opened through one
+/// remote Zetta process use the same process ID, and the SSH server may report
+/// the same peer process for every forwarded connection. A random ID gives
+/// shared-client routing and upgrade handover an unambiguous key without
+/// changing local PID ownership and liveness semantics.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ClientId(String);
+
+impl ClientId {
+    pub fn random() -> anyhow::Result<Self> {
+        Ok(Self(crate::transport::random_hex(16)?))
+    }
+
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

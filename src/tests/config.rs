@@ -485,8 +485,8 @@ fn automatic_session_protection_parses_and_is_off_by_default() {
 }
 
 /// The flag on its own is never enough: without a recipient there is nothing to
-/// seal a key to, and without an identity there is nothing to open it again.
-/// Either way the session would be protected by something nobody can produce.
+/// seal a key to, and without an effective identity there is nothing to open it
+/// again. The conventional SSH identity is effective when it exists.
 #[cfg(feature = "session-persistence")]
 #[test]
 fn automatic_protection_is_only_configured_with_a_recipient_and_an_identity() {
@@ -506,9 +506,12 @@ fn automatic_protection_is_only_configured_with_a_recipient_and_an_identity() {
     assert!(!configured(
         r#"{"sessions":{"persistence":{"identity":"/keys/id.txt","auto_protect":true}}}"#
     ));
-    assert!(!configured(
-        r#"{"sessions":{"persistence":{"recipients":["age1example"],"auto_protect":true}}}"#
-    ));
+    assert_eq!(
+        configured(
+            r#"{"sessions":{"persistence":{"recipients":["age1example"],"auto_protect":true}}}"#
+        ),
+        crate::config::default_session_identity_path().is_some()
+    );
 }
 
 #[cfg(feature = "session-persistence")]
@@ -1509,7 +1512,8 @@ fn validates_inactive_pane_opacity() {
 /// `src/mux_identity.rs` reads `sessions.persistence.identity` on its own so the
 /// `zmux` binary need not parse a whole configuration. This is what keeps the
 /// two readers agreeing about what that field means, including the `~/` shorthand
-/// they both have to expand.
+/// they both have to expand. Both readers also use the conventional SSH identity
+/// when the field is absent and that file exists.
 #[cfg(feature = "session-persistence")]
 #[test]
 fn the_command_line_identity_reader_agrees_with_the_configuration_parser() {
@@ -1530,8 +1534,8 @@ fn the_command_line_identity_reader_agrees_with_the_configuration_parser() {
     }
 }
 
-/// And they agree about absence, which is the case that decides whether a
-/// command asks for an identity at all.
+/// An absent field resolves to the same conventional identity in both readers
+/// when `~/.ssh/id_ed25519` exists, and to no identity otherwise.
 #[cfg(feature = "session-persistence")]
 #[test]
 fn both_identity_readers_treat_an_unset_identity_the_same_way() {
@@ -1539,23 +1543,19 @@ fn both_identity_readers_treat_an_unset_identity_the_same_way() {
     for document in [
         r#"{"sessions":{"persistence":{}}}"#,
         r#"{"sessions":{"persistence":{"identity":null}}}"#,
+        r#"{"sessions":{"persistence":{"identity":""}}}"#,
+        r#"{"sessions":{"persistence":{"identity":"  "}}}"#,
         r#"{}"#,
     ] {
         let path = directory.path().join("config.json");
         std::fs::write(&path, document).unwrap();
 
-        assert!(
-            Config::parse(document, None, None)
-                .unwrap()
-                .sessions
-                .persistence
-                .resolved_identity()
-                .is_none(),
-            "{document}"
-        );
-        assert!(
-            crate::mux_identity::configured_identity_paths(Some(path)).is_empty(),
-            "{document}"
-        );
+        let parsed = Config::parse(document, None, None)
+            .unwrap()
+            .sessions
+            .persistence
+            .resolved_identity();
+        let read = crate::mux_identity::configured_identity_paths(Some(path));
+        assert_eq!(read, parsed.into_iter().collect::<Vec<_>>(), "{document}");
     }
 }

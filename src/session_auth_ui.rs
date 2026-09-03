@@ -21,6 +21,9 @@ pub(crate) enum SessionAuthenticationPromptMode {
         runner_id: u64,
         session_id: u64,
     },
+    RemoteAttach {
+        session_id: u64,
+    },
     ResumeDisk {
         session_id: u64,
     },
@@ -35,6 +38,12 @@ pub(crate) enum SessionAuthenticationPromptMode {
     #[cfg(feature = "session-persistence")]
     UnlockSealedSession {
         runner_id: u64,
+        session_id: u64,
+    },
+    /// Asking for the passphrase of the local age identity that opens a
+    /// remotely published automatic-session key envelope.
+    #[cfg(feature = "session-persistence")]
+    UnlockRemoteSealedSession {
         session_id: u64,
     },
 }
@@ -154,6 +163,154 @@ impl Zetta {
             window,
             cx,
         );
+    }
+
+    pub(crate) fn prompt_to_attach_remote_session(
+        &mut self,
+        target: zmux::remote::RemoteTarget,
+        session_id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.remote_session_target = Some(target);
+        self.open_session_authentication_prompt(
+            SessionAuthenticationPromptMode::RemoteAttach { session_id },
+            window,
+            cx,
+        );
+    }
+
+    /// Opens an automatically protected remote session with the same age
+    /// identity used for local background sessions. The remote daemon only
+    /// ever receives the recovered session secret; the identity and its
+    /// private key stay in this process.
+    #[cfg(feature = "session-persistence")]
+    pub(crate) fn prompt_to_unlock_remote_session(
+        &mut self,
+        target: zmux::remote::RemoteTarget,
+        session_id: u64,
+        envelope: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(auto_protect) = self.auto_protect.clone() else {
+            self.show_notice(
+                "This remote session is protected by an age identity. Configure the matching identity before attaching.",
+                cx,
+            );
+            self.focus_active(window, cx);
+            return;
+        };
+        match auto_protect.identity_passphrase_required() {
+            Ok(true) => {
+                self.remote_session_target = Some(target);
+                self.remote_session_key_envelope = Some(envelope);
+                self.open_session_authentication_prompt(
+                    SessionAuthenticationPromptMode::UnlockRemoteSealedSession { session_id },
+                    window,
+                    cx,
+                );
+            }
+            Ok(false) => {
+                self.unlock_remote_sealed_session(
+                    target,
+                    session_id,
+                    envelope,
+                    auto_protect,
+                    None,
+                    window,
+                    cx,
+                );
+            }
+            Err(error) => {
+                self.show_notice(
+                    format!("Could not inspect your age identity: {error:#}"),
+                    cx,
+                );
+                self.focus_active(window, cx);
+            }
+        }
+    }
+
+    #[cfg(feature = "session-persistence")]
+    #[allow(clippy::too_many_arguments)]
+    fn unlock_remote_sealed_session(
+        &mut self,
+        target: zmux::remote::RemoteTarget,
+        session_id: u64,
+        envelope: String,
+        auto_protect: std::sync::Arc<crate::session_auto_protect::SessionAutoProtect>,
+        passphrase: Option<SessionSecret>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let generation = self.session_authentication_generation;
+        if let Some(prompt) = self.session_authentication.as_mut() {
+            prompt.working = true;
+            prompt.error = None;
+            prompt.secret.text.zeroize();
+            prompt.secret = TextField::default();
+        }
+        cx.spawn_in(window, async move |this, cx| {
+            let recovered = cx
+                .background_spawn(async move { auto_protect.open(&envelope, passphrase) })
+                .await;
+            this.update_in(cx, |this, window, cx| {
+                if this.session_authentication_generation != generation {
+                    return;
+                }
+                match recovered {
+                    Ok(secret) => match this.attach_remote_multiplexer_session(
+                        target,
+                        session_id,
+                        Some(secret),
+                        window,
+                        cx,
+                    ) {
+                        Ok(AttachOutcomeSummary::Attached) => {
+                            this.session_authentication = None;
+                            this.remote_session_target = None;
+                            this.remote_session_key_envelope = None;
+                            this.focus_active(window, cx);
+                        }
+                        Ok(AttachOutcomeSummary::AuthenticationRequired)
+                        | Ok(AttachOutcomeSummary::AuthenticationFailed) => {
+                            this.remote_auto_unlock_failed(
+                                "The remote session rejected its automatically recovered secret.",
+                                cx,
+                            );
+                        }
+                        Err(error) => this.remote_auto_unlock_failed(
+                            &format!("Could not attach the remote session: {error:#}"),
+                            cx,
+                        ),
+                    },
+                    Err(error) => this.remote_auto_unlock_failed(
+                        &format!(
+                            "Could not open the remote session with your age identity: {error:#}"
+                        ),
+                        cx,
+                    ),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    #[cfg(feature = "session-persistence")]
+    fn remote_auto_unlock_failed(&mut self, message: &str, cx: &mut Context<Self>) {
+        if let Some(prompt) = self.session_authentication.as_mut() {
+            prompt.working = false;
+            prompt.secret = TextField::default();
+            prompt.error = Some(message.to_owned());
+        } else {
+            self.remote_session_target = None;
+            self.remote_session_key_envelope = None;
+            self.show_notice(message, cx);
+        }
     }
 
     #[cfg(feature = "session-persistence")]
@@ -298,6 +455,61 @@ impl Zetta {
         cx.notify();
     }
 
+    #[cfg(feature = "session-persistence")]
+    fn submit_remote_sealed_session_passphrase(
+        &mut self,
+        session_id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (target, envelope, auto_protect, passphrase) = {
+            let target = self.remote_session_target.clone();
+            let envelope = self.remote_session_key_envelope.clone();
+            let auto_protect = self.auto_protect.clone();
+            let Some(prompt) = self.session_authentication.as_mut() else {
+                return;
+            };
+            let passphrase = Zeroizing::new(prompt.secret.text.clone());
+            if passphrase.is_empty() {
+                prompt.error = Some("Enter the identity passphrase.".into());
+                cx.notify();
+                return;
+            }
+            let Some(target) = target else {
+                prompt.error = Some("The remote SSH target is no longer available.".into());
+                cx.notify();
+                return;
+            };
+            let Some(envelope) = envelope else {
+                prompt.error = Some("The remote session key is no longer available.".into());
+                cx.notify();
+                return;
+            };
+            let Some(auto_protect) = auto_protect else {
+                prompt.error = Some("Automatic session protection is not configured.".into());
+                cx.notify();
+                return;
+            };
+            prompt.secret.text.zeroize();
+            prompt.error = None;
+            (
+                target,
+                envelope,
+                auto_protect,
+                SessionSecret::from_zeroizing(passphrase),
+            )
+        };
+        self.unlock_remote_sealed_session(
+            target,
+            session_id,
+            envelope,
+            auto_protect,
+            Some(passphrase),
+            window,
+            cx,
+        );
+    }
+
     fn open_session_authentication_prompt(
         &mut self,
         mode: SessionAuthenticationPromptMode,
@@ -332,15 +544,39 @@ impl Zetta {
                 self.apply_protected_session_action(tab_id, action, None, window, cx)
             }
             SessionAuthenticationPromptMode::Reconnect { .. }
+            | SessionAuthenticationPromptMode::RemoteAttach { .. }
             | SessionAuthenticationPromptMode::ResumeDisk { .. } => {}
             // There is no "without": the identity file is encrypted and its
             // passphrase is the only way to read it.
             #[cfg(feature = "session-persistence")]
             SessionAuthenticationPromptMode::UnlockSealedSession { .. } => {}
+            #[cfg(feature = "session-persistence")]
+            SessionAuthenticationPromptMode::UnlockRemoteSealedSession { .. } => {}
         }
     }
 
     fn dismiss_session_authentication(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let remote_attach = matches!(
+            self.session_authentication
+                .as_ref()
+                .map(|prompt| prompt.mode),
+            Some(SessionAuthenticationPromptMode::RemoteAttach { .. }),
+        );
+        #[cfg(feature = "session-persistence")]
+        let remote_attach = remote_attach
+            || matches!(
+                self.session_authentication
+                    .as_ref()
+                    .map(|prompt| prompt.mode),
+                Some(SessionAuthenticationPromptMode::UnlockRemoteSealedSession { .. }),
+            );
+        if remote_attach {
+            self.remote_session_target = None;
+            #[cfg(feature = "session-persistence")]
+            {
+                self.remote_session_key_envelope = None;
+            }
+        }
         self.session_authentication = None;
         self.session_authentication_generation =
             self.session_authentication_generation.wrapping_add(1);
@@ -384,6 +620,11 @@ impl Zetta {
             self.submit_sealed_session_passphrase(runner_id, session_id, window, cx);
             return;
         }
+        #[cfg(feature = "session-persistence")]
+        if let SessionAuthenticationPromptMode::UnlockRemoteSealedSession { session_id } = mode {
+            self.submit_remote_sealed_session_passphrase(session_id, window, cx);
+            return;
+        }
         let Some(prompt) = self.session_authentication.as_mut() else {
             return;
         };
@@ -403,7 +644,10 @@ impl Zetta {
                     }
                 }
             }
-            SessionAuthenticationPromptMode::Reconnect { .. } if secret.is_empty() => {
+            SessionAuthenticationPromptMode::Reconnect { .. }
+            | SessionAuthenticationPromptMode::RemoteAttach { .. }
+                if secret.is_empty() =>
+            {
                 prompt.error = Some("Enter the session secret.".into());
                 cx.notify();
                 return;
@@ -427,9 +671,16 @@ impl Zetta {
                 }
             }
             SessionAuthenticationPromptMode::Reconnect { .. } => {}
+            SessionAuthenticationPromptMode::RemoteAttach { .. } => {
+                unreachable!("remote attach is handled before the local verifier")
+            }
             #[cfg(feature = "session-persistence")]
             SessionAuthenticationPromptMode::UnlockSealedSession { .. } => {
                 unreachable!("the identity passphrase is handled before the verifier")
+            }
+            #[cfg(feature = "session-persistence")]
+            SessionAuthenticationPromptMode::UnlockRemoteSealedSession { .. } => {
+                unreachable!("the remote identity passphrase is handled before the verifier")
             }
         }
         #[cfg(feature = "session-persistence")]
@@ -479,6 +730,42 @@ impl Zetta {
             }
             return;
         }
+        if let SessionAuthenticationPromptMode::RemoteAttach { session_id } = mode {
+            let Some(target) = self.remote_session_target.clone() else {
+                if let Some(prompt) = self.session_authentication.as_mut() {
+                    prompt.working = false;
+                    prompt.error = Some("The remote SSH target is no longer available.".into());
+                }
+                cx.notify();
+                return;
+            };
+            let result = match self.attach_remote_multiplexer_session(
+                target,
+                session_id,
+                Some(SessionSecret::from_zeroizing(secret)),
+                window,
+                cx,
+            ) {
+                Ok(AttachOutcomeSummary::Attached) => {
+                    self.session_authentication = None;
+                    self.remote_session_target = None;
+                    cx.notify();
+                    return;
+                }
+                Ok(AttachOutcomeSummary::AuthenticationRequired)
+                | Ok(AttachOutcomeSummary::AuthenticationFailed) => {
+                    "Authentication failed.".to_owned()
+                }
+                Err(error) => format!("{error:#}"),
+            };
+            if let Some(prompt) = self.session_authentication.as_mut() {
+                prompt.working = false;
+                prompt.secret = TextField::default();
+                prompt.error = Some(result);
+            }
+            cx.notify();
+            return;
+        }
         let generation = self.session_authentication_generation;
         let verifier = match mode {
             SessionAuthenticationPromptMode::Protect { .. } => None,
@@ -486,10 +773,17 @@ impl Zetta {
                 runner_id,
                 session_id,
             } => self.process_background_session_authentication(runner_id, session_id, cx),
+            SessionAuthenticationPromptMode::RemoteAttach { .. } => {
+                unreachable!("remote attach is handled before the local verifier")
+            }
             SessionAuthenticationPromptMode::ResumeDisk { .. } => None,
             #[cfg(feature = "session-persistence")]
             SessionAuthenticationPromptMode::UnlockSealedSession { .. } => {
                 unreachable!("the identity passphrase is handled before the verifier")
+            }
+            #[cfg(feature = "session-persistence")]
+            SessionAuthenticationPromptMode::UnlockRemoteSealedSession { .. } => {
+                unreachable!("the remote identity passphrase is handled before the verifier")
             }
         };
         cx.spawn_in(window, async move |this, cx| {
@@ -502,12 +796,21 @@ impl Zetta {
                         SessionAuthenticationPromptMode::Reconnect { .. } => verifier
                             .context("the protected session is no longer available")
                             .map(|verifier| Outcome::Verified(verifier.verify(&secret))),
+                        SessionAuthenticationPromptMode::RemoteAttach { .. } => {
+                            unreachable!("remote attach is handled before the local verifier")
+                        }
                         SessionAuthenticationPromptMode::ResumeDisk { .. } => {
                             unreachable!("disk resume is handled before the background verifier")
                         }
                         #[cfg(feature = "session-persistence")]
                         SessionAuthenticationPromptMode::UnlockSealedSession { .. } => {
                             unreachable!("the identity passphrase is handled before the verifier")
+                        }
+                        #[cfg(feature = "session-persistence")]
+                        SessionAuthenticationPromptMode::UnlockRemoteSealedSession { .. } => {
+                            unreachable!(
+                                "the remote identity passphrase is handled before the verifier"
+                            )
                         }
                     }
                 })
@@ -681,9 +984,12 @@ impl Zetta {
         let can_tab_between_fields = match prompt.mode {
             SessionAuthenticationPromptMode::Protect { .. } => true,
             SessionAuthenticationPromptMode::Reconnect { .. } => false,
+            SessionAuthenticationPromptMode::RemoteAttach { .. } => false,
             // One field: the identity's passphrase, and nothing else to type.
             #[cfg(feature = "session-persistence")]
             SessionAuthenticationPromptMode::UnlockSealedSession { .. } => false,
+            #[cfg(feature = "session-persistence")]
+            SessionAuthenticationPromptMode::UnlockRemoteSealedSession { .. } => false,
             SessionAuthenticationPromptMode::ResumeDisk { .. } => {
                 prompt.disk_protected && prompt.disk_identity_index.is_some()
             }
@@ -806,14 +1112,18 @@ impl Zetta {
         let action = match prompt.mode {
             SessionAuthenticationPromptMode::Protect { action, .. } => Some(action),
             SessionAuthenticationPromptMode::Reconnect { .. }
+            | SessionAuthenticationPromptMode::RemoteAttach { .. }
             | SessionAuthenticationPromptMode::ResumeDisk { .. } => None,
             #[cfg(feature = "session-persistence")]
             SessionAuthenticationPromptMode::UnlockSealedSession { .. } => None,
+            #[cfg(feature = "session-persistence")]
+            SessionAuthenticationPromptMode::UnlockRemoteSealedSession { .. } => None,
         };
         #[cfg(feature = "session-persistence")]
         let unlocking_sealed_session = matches!(
             prompt.mode,
             SessionAuthenticationPromptMode::UnlockSealedSession { .. }
+                | SessionAuthenticationPromptMode::UnlockRemoteSealedSession { .. }
         );
         #[cfg(not(feature = "session-persistence"))]
         let unlocking_sealed_session = false;
@@ -898,9 +1208,13 @@ impl Zetta {
                                             "Enter the session secret after decrypting the disk record."
                                         }
                                     }
-                                    None => {
-                                        "Enter the secret chosen when this session was detached."
+                                    None if matches!(
+                                        prompt.mode,
+                                        SessionAuthenticationPromptMode::RemoteAttach { .. }
+                                    ) => {
+                                        "Enter the secret chosen when this remote session was shared."
                                     }
+                                    None => "Enter the secret chosen when this session was detached.",
                                 }),
                         )
                         .child(

@@ -26,6 +26,7 @@ use terminal::{ConsolePalette, PtyControl, PtyHandover, PtyProvider, PtySpawnReq
 #[cfg(feature = "session-persistence")]
 use zmux::persistence::PersistenceOptions;
 use zmux::{
+    auth::SessionSecret,
     client::{Client, ExitReporters, PaneSignals},
     messages::{SpawnRequest, TerminalSize},
     retention::Retention,
@@ -55,6 +56,7 @@ fn mux_recovery_generation_matches(
 #[derive(Clone)]
 pub(crate) struct MuxRuntime {
     client: Arc<Client>,
+    remote: bool,
     retention_state: Arc<Mutex<MuxRetentionState>>,
     reporters: Arc<ExitReporters>,
     revoke_reporters: Arc<PaneSignals>,
@@ -93,6 +95,7 @@ impl MuxRuntime {
             .context("subscribing to multiplexer events")?;
         Ok(Self {
             client,
+            remote: false,
             retention_state: Arc::new(Mutex::new(MuxRetentionState::exact(retention))),
             reporters: subscription.exits,
             revoke_reporters: subscription.revokes,
@@ -120,6 +123,7 @@ impl MuxRuntime {
             .context("subscribing to multiplexer events")?;
         Ok(Self {
             client,
+            remote: false,
             retention_state: Arc::new(Mutex::new(MuxRetentionState {
                 requested: retention,
                 effective: effective_retention,
@@ -142,6 +146,7 @@ impl MuxRuntime {
             .context("subscribing to multiplexer events")?;
         Ok(Self {
             client,
+            remote: false,
             retention_state: Arc::new(Mutex::new(MuxRetentionState::exact(Retention::Disk))),
             reporters: subscription.exits,
             revoke_reporters: subscription.revokes,
@@ -151,6 +156,47 @@ impl MuxRuntime {
 
     pub(crate) fn retention(&self) -> Retention {
         self.retention_state.lock().unwrap().effective
+    }
+
+    /// Connects to a remote daemon through its SSH stream-local forward.
+    ///
+    /// Remote sessions are live-only in Zetta: the remote daemon owns their
+    /// retention policy, while this runtime only keeps the forwarded client
+    /// and its shared event subscription alive for the tabs using it.
+    pub(crate) fn connect_remote(target: zmux::remote::RemoteTarget) -> Result<Self> {
+        let client = Arc::new(
+            Client::connect_remote(target).context("connecting to the remote multiplexer")?,
+        );
+        let subscription = client
+            .subscribe()
+            .context("subscribing to remote multiplexer events")?;
+        Ok(Self {
+            client,
+            remote: true,
+            retention_state: Arc::new(Mutex::new(MuxRetentionState::exact(Retention::Memory {
+                bytes: 0,
+            }))),
+            reporters: subscription.exits,
+            revoke_reporters: subscription.revokes,
+            grant_reporters: subscription.grants,
+        })
+    }
+
+    pub(crate) fn is_remote(&self) -> bool {
+        self.remote
+    }
+
+    /// Keeps the authenticated remote session key for platform control requests
+    /// that are separate from the shared byte-stream connection. Runtime clones
+    /// share one zeroizing value, so the key is removed with the last runtime.
+    pub(crate) fn set_session_secret(&self, secret: Option<&SessionSecret>) {
+        if self.remote {
+            self.client.set_session_secret(secret);
+        }
+    }
+
+    pub(crate) fn session_secret(&self) -> Option<SessionSecret> {
+        self.client.session_secret()
     }
 
     #[cfg(feature = "session-persistence")]
@@ -358,19 +404,32 @@ struct MuxPtyControl;
 
 impl MuxPtyControl {
     #[cfg(windows)]
-    fn new(client: Arc<Client>, session_id: u64, pane_id: u64) -> Arc<Self> {
+    fn new(
+        client: Arc<Client>,
+        session_id: u64,
+        pane_id: u64,
+        session_secret: Option<SessionSecret>,
+    ) -> Arc<Self> {
         let (requests, receiver) = std::sync::mpsc::channel();
         let _ = std::thread::Builder::new()
             .name(format!("zmux-control-{pane_id}"))
             .spawn(move || {
                 while let Ok(request) = receiver.recv() {
                     let result = match request {
-                        PtyControlRequest::Resize { columns, lines } => {
-                            client.resize(session_id, pane_id, columns, lines)
-                        }
-                        PtyControlRequest::Palette(palette) => {
-                            client.set_console_palette(session_id, pane_id, palette)
-                        }
+                        PtyControlRequest::Resize { columns, lines } => client.resize_with_secret(
+                            session_id,
+                            pane_id,
+                            columns,
+                            lines,
+                            session_secret.as_ref(),
+                        ),
+                        PtyControlRequest::Palette(palette) => client
+                            .set_console_palette_with_secret(
+                                session_id,
+                                pane_id,
+                                palette,
+                                session_secret.as_ref(),
+                            ),
                     };
                     if let Err(error) = result {
                         log::debug!("could not update multiplexer pane {pane_id}: {error:#}");
@@ -381,7 +440,12 @@ impl MuxPtyControl {
     }
 
     #[cfg(not(windows))]
-    fn new(_client: Arc<Client>, _session_id: u64, _pane_id: u64) -> Arc<Self> {
+    fn new(
+        _client: Arc<Client>,
+        _session_id: u64,
+        _pane_id: u64,
+        _session_secret: Option<SessionSecret>,
+    ) -> Arc<Self> {
         Arc::new(Self)
     }
 }
@@ -404,12 +468,13 @@ impl PtyControl for MuxPtyControl {
     }
 }
 
-pub(crate) fn mux_pty_control(
+pub(crate) fn mux_pty_control_with_secret(
     client: Arc<Client>,
     session_id: u64,
     pane_id: u64,
+    session_secret: Option<SessionSecret>,
 ) -> Arc<dyn PtyControl> {
-    MuxPtyControl::new(client, session_id, pane_id)
+    MuxPtyControl::new(client, session_id, pane_id, session_secret)
 }
 
 /// Turns what the multiplexer handed over into what a terminal is built from.
@@ -417,7 +482,16 @@ pub(crate) fn attached_pane_handover(
     pane: zmux::client::AttachedPane,
     client: Arc<Client>,
 ) -> PtyHandover {
-    let control = mux_pty_control(client, pane.session_id, pane.pane_id);
+    attached_pane_handover_with_secret(pane, client, None)
+}
+
+pub(crate) fn attached_pane_handover_with_secret(
+    pane: zmux::client::AttachedPane,
+    client: Arc<Client>,
+    session_secret: Option<SessionSecret>,
+) -> PtyHandover {
+    let control =
+        mux_pty_control_with_secret(client, pane.session_id, pane.pane_id, session_secret);
     PtyHandover {
         #[cfg(unix)]
         descriptor: pane.descriptor,
@@ -441,6 +515,7 @@ pub(crate) fn attached_pane_handover(
 pub(crate) struct MuxPanes {
     panes: HashMap<u64, u64>,
     sessions: HashMap<u64, MuxSession>,
+    runtimes: HashMap<u64, MuxRuntime>,
 }
 
 /// A pane this window is showing in shared mode.
@@ -453,6 +528,7 @@ pub(crate) struct MuxPanes {
 pub(crate) struct SharedPaneEntry {
     pub(crate) pane: Arc<zmux::client::SharedPane>,
     pub(crate) mux_pane_id: u64,
+    pub(crate) runtime: MuxRuntime,
 }
 
 impl MuxPanes {
@@ -467,6 +543,25 @@ impl MuxPanes {
             .insert(tab_id, MuxSession::from_id(session_id));
     }
 
+    pub(crate) fn adopt_session_with_runtime(
+        &mut self,
+        tab_id: u64,
+        session_id: u64,
+        runtime: MuxRuntime,
+    ) {
+        self.adopt_session(tab_id, session_id);
+        self.runtimes.insert(tab_id, runtime);
+    }
+
+    pub(crate) fn runtime_for_tab(&self, tab_id: u64) -> Option<MuxRuntime> {
+        self.runtimes.get(&tab_id).cloned()
+    }
+
+    pub(crate) fn is_remote_tab(&self, tab_id: u64) -> bool {
+        self.runtime_for_tab(tab_id)
+            .is_some_and(|runtime| runtime.is_remote())
+    }
+
     pub(crate) fn session_id(&self, tab_id: u64) -> Option<u64> {
         self.sessions.get(&tab_id)?.id()
     }
@@ -479,9 +574,12 @@ impl MuxPanes {
     /// tab reading the same pty as the first. Two readers of one terminal split
     /// its output between them arbitrarily.
     pub(crate) fn holds_session(&self, session_id: u64) -> bool {
-        self.sessions
-            .values()
-            .any(|session| session.id() == Some(session_id))
+        self.sessions.iter().any(|(tab_id, session)| {
+            self.runtimes
+                .get(tab_id)
+                .is_none_or(|runtime| !runtime.is_remote())
+                && session.id() == Some(session_id)
+        })
     }
 
     pub(crate) fn record(&mut self, pane_id: u64, mux_pane_id: u64) {
@@ -502,6 +600,7 @@ impl MuxPanes {
 
     pub(crate) fn forget_tab(&mut self, tab_id: u64) {
         self.sessions.remove(&tab_id);
+        self.runtimes.remove(&tab_id);
     }
 }
 
@@ -711,6 +810,9 @@ impl crate::Zetta {
         if self.no_mux {
             return Ok(None);
         }
+        if self.mux_panes.is_remote_tab(tab_id) {
+            anyhow::bail!("remote sessions cannot spawn additional panes");
+        }
         if self.mux.is_none() {
             match self
                 .launch_config
@@ -783,7 +885,11 @@ impl crate::Zetta {
         let Some(opened) = provider.opened() else {
             return;
         };
-        self.mux_panes.adopt_session(tab_id, opened.session_id);
+        self.mux_panes.adopt_session_with_runtime(
+            tab_id,
+            opened.session_id,
+            provider.runtime().clone(),
+        );
         self.mux_panes.record(pane_id, opened.pane_id);
         if let Some(events) = builder.take_child_events() {
             provider
@@ -815,7 +921,11 @@ impl crate::Zetta {
             return;
         };
         self.mux_panes.forget_pane(pane_id);
-        let Some(runtime) = self.mux.clone() else {
+        let Some(runtime) = self
+            .mux_panes
+            .runtime_for_tab(tab_id)
+            .or_else(|| self.mux.clone())
+        else {
             return;
         };
         // Locally first, and synchronously: a reporter left registered for a
@@ -823,6 +933,12 @@ impl crate::Zetta {
         // that has already gone.
         runtime.reporters().forget(mux_pane_id);
         runtime.revoke_reporters().forget(mux_pane_id);
+        if runtime.is_remote() {
+            // Remote panes are always shared byte streams. Dropping the
+            // SharedPane connection is the detach operation; sending a local
+            // ClosePane would terminate the remote user's process.
+            return;
+        }
         let Some(session_id) = self.mux_panes.session_id(tab_id) else {
             return;
         };

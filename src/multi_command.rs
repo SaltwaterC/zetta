@@ -540,6 +540,13 @@ fn ssh_config_hosts(path: &Path) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Host aliases offered by the remote-session picker. Keep this backed by the
+/// same parser as shell-command completion so Zetta never grows a second SSH
+/// configuration format.
+pub(crate) fn ssh_config_host_suggestions() -> Vec<String> {
+    ssh_config_hosts(&util::paths::home_dir().join(".ssh").join("config"))
+}
+
 pub(crate) fn load_completion_catalog(path: Option<OsString>, home: &Path) -> CompletionCatalog {
     static CATALOG: OnceLock<CompletionCatalog> = OnceLock::new();
     cached_completion_catalog(&CATALOG, || {

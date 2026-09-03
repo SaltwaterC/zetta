@@ -40,7 +40,9 @@ use std::os::fd::{AsRawFd as _, FromRawFd as _};
 use crate::{
     auth::SessionAuthentication,
     catalog::{SessionCatalogPublisher, create_private_dir},
-    messages::{Envelope, Event, PROTOCOL_VERSION, Request, Response, SpawnRequest, TerminalSize},
+    messages::{
+        ClientId, Envelope, Event, PROTOCOL_VERSION, Request, Response, SpawnRequest, TerminalSize,
+    },
     paths::session_catalog_dir,
     protocol::{BackgroundPaneLayout, BackgroundSessionSummary},
     retention::Retention,
@@ -152,6 +154,8 @@ enum Attachment {
 /// One client attached in shared mode.
 struct SharedClient {
     process_id: u32,
+    client_id: ClientId,
+    stream_only: bool,
     /// Frames queued for this client, written by its own relay thread.
     ///
     /// Deliberately not the connection itself. Writing to a viewer's socket from
@@ -370,7 +374,7 @@ pub struct Daemon {
     /// Keyed so a revoke can reach the one client holding a pane, instead of
     /// being broadcast to every subscriber. A client reconnecting subscribes
     /// again, replacing its earlier entry.
-    subscribers: Mutex<HashMap<u32, Connection>>,
+    subscribers: Mutex<HashMap<ClientId, Subscriber>>,
     catalog: Mutex<SessionCatalogPublisher>,
     retention: Mutex<Retention>,
     running: AtomicBool,
@@ -402,6 +406,11 @@ pub struct Daemon {
     persistence_enabled: AtomicBool,
     #[cfg(feature = "session-persistence")]
     restored: Mutex<Vec<RestoredSession>>,
+}
+
+struct Subscriber {
+    process_id: u32,
+    connection: Connection,
 }
 
 impl Daemon {
@@ -907,6 +916,10 @@ fn serve(daemon: &Arc<Daemon>, stream: Stream, token: &str) -> Result<()> {
         None => None,
     };
 
+    let client_id = envelope.client_id.clone();
+    let stream_only = envelope.stream_only;
+    let session_secret = envelope.session_secret;
+
     match envelope.request {
         Request::Ping => connection.send(&Response::Ok),
         Request::Subscribe => {
@@ -914,14 +927,21 @@ fn serve(daemon: &Arc<Daemon>, stream: Stream, token: &str) -> Result<()> {
             // holds a pane rather than broadcast to every subscriber. A client
             // that subscribes twice is the same process, so the later
             // connection replaces the earlier one.
-            daemon
-                .subscribers
-                .lock()
-                .unwrap()
-                .insert(envelope.client_process_id, connection);
+            daemon.subscribers.lock().unwrap().insert(
+                client_id,
+                Subscriber {
+                    process_id: envelope.client_process_id,
+                    connection,
+                },
+            );
             Ok(())
         }
         Request::Spawn(request) => {
+            if stream_only {
+                return connection.send(&Response::Error {
+                    message: "stream-only clients cannot spawn panes".to_owned(),
+                });
+            }
             let response = spawn(
                 daemon,
                 request,
@@ -949,6 +969,8 @@ fn serve(daemon: &Arc<Daemon>, stream: Stream, token: &str) -> Result<()> {
             pane_id,
             secret,
             envelope.client_process_id,
+            client_id.clone(),
+            stream_only,
             &mut connection,
         ),
         // A screen checkpoint from the client showing the pane. Its own
@@ -960,47 +982,68 @@ fn serve(daemon: &Arc<Daemon>, stream: Stream, token: &str) -> Result<()> {
             length,
             columns,
             lines,
-        } => snapshot(
-            daemon,
-            session_id,
-            pane_id,
-            length,
-            columns,
-            lines,
-            envelope.client_process_id,
-            peer_process_id,
-            &mut connection,
-        ),
+        } => {
+            if stream_only {
+                return connection.send(&Response::Error {
+                    message: "stream-only clients cannot perform exclusive handover".to_owned(),
+                });
+            }
+            snapshot(
+                daemon,
+                session_id,
+                pane_id,
+                length,
+                columns,
+                lines,
+                envelope.client_process_id,
+                peer_process_id,
+                &mut connection,
+            )
+        }
         Request::Input { .. } => connection.send(&Response::Error {
             message: "input belongs on a shared connection".to_owned(),
         }),
         Request::Attested { .. } | Request::Attest => connection.send(&Response::Error {
             message: "an attestation precedes a request, it does not replace one".to_owned(),
         }),
-        Request::Detach(request) => match detach(
-            daemon,
-            request,
-            envelope.client_process_id,
-            peer_process_id,
-            &mut connection,
-        ) {
-            Ok(()) => Ok(()),
-            Err(error) => connection.send(&Response::Error {
-                message: format!("{error:#}"),
-            }),
-        },
-        Request::Resume(request) => match resume(
-            daemon,
-            request,
-            envelope.client_process_id,
-            peer_process_id,
-            &mut connection,
-        ) {
-            Ok(()) => Ok(()),
-            Err(error) => connection.send(&Response::Error {
-                message: format!("{error:#}"),
-            }),
-        },
+        Request::Detach(request) => {
+            if stream_only {
+                return connection.send(&Response::Error {
+                    message: "stream-only clients cannot detach sessions".to_owned(),
+                });
+            }
+            match detach(
+                daemon,
+                request,
+                envelope.client_process_id,
+                peer_process_id,
+                &mut connection,
+            ) {
+                Ok(()) => Ok(()),
+                Err(error) => connection.send(&Response::Error {
+                    message: format!("{error:#}"),
+                }),
+            }
+        }
+        Request::Resume(request) => {
+            if stream_only {
+                return connection.send(&Response::Error {
+                    message: "stream-only clients cannot resume disk sessions".to_owned(),
+                });
+            }
+            match resume(
+                daemon,
+                request,
+                envelope.client_process_id,
+                peer_process_id,
+                &mut connection,
+            ) {
+                Ok(()) => Ok(()),
+                Err(error) => connection.send(&Response::Error {
+                    message: format!("{error:#}"),
+                }),
+            }
+        }
         Request::TakeExclusive {
             session_id,
             pane_id,
@@ -1009,6 +1052,8 @@ fn serve(daemon: &Arc<Daemon>, stream: Stream, token: &str) -> Result<()> {
             session_id,
             pane_id,
             envelope.client_process_id,
+            client_id,
+            stream_only,
             &mut connection,
         ),
         Request::Share(request) => share(
@@ -1016,6 +1061,7 @@ fn serve(daemon: &Arc<Daemon>, stream: Stream, token: &str) -> Result<()> {
             request,
             envelope.client_process_id,
             peer_process_id,
+            session_secret.as_deref(),
             &mut connection,
         ),
         Request::Resize {
@@ -1023,7 +1069,15 @@ fn serve(daemon: &Arc<Daemon>, stream: Stream, token: &str) -> Result<()> {
             pane_id,
             columns,
             lines,
-        } => match resize_pane(daemon, session_id, pane_id, columns, lines, peer_process_id) {
+        } => match resize_pane(
+            daemon,
+            session_id,
+            pane_id,
+            columns,
+            lines,
+            peer_process_id,
+            session_secret.as_deref(),
+        ) {
             Ok(()) => connection.send(&Response::Ok),
             Err(error) => connection.send(&Response::Error {
                 message: format!("{error:#}"),
@@ -1040,6 +1094,7 @@ fn serve(daemon: &Arc<Daemon>, stream: Stream, token: &str) -> Result<()> {
             palette,
             envelope.client_process_id,
             peer_process_id,
+            session_secret.as_deref(),
         ) {
             Ok(()) => connection.send(&Response::Ok),
             Err(error) => connection.send(&Response::Error {
@@ -1056,7 +1111,7 @@ fn serve(daemon: &Arc<Daemon>, stream: Stream, token: &str) -> Result<()> {
                 .lock()
                 .unwrap()
                 .iter()
-                .filter(|session| session.is_available())
+                .filter(|session| session.is_available() && (!stream_only || session.offered))
                 .map(|session| catalog_summary(session).for_public_catalog())
                 .collect();
             #[cfg(feature = "session-persistence")]
@@ -1096,19 +1151,31 @@ fn serve(daemon: &Arc<Daemon>, stream: Stream, token: &str) -> Result<()> {
             })
         }
         Request::PaneStates { pane_ids } => {
-            let panes = pane_states(daemon, &pane_ids, peer_process_id);
+            let panes = pane_states(
+                daemon,
+                &pane_ids,
+                peer_process_id,
+                session_secret.as_deref(),
+            );
             connection.send(&Response::PaneStates { panes })
         }
         Request::ClosePane {
             session_id,
             pane_id,
         } => {
+            if stream_only {
+                return connection.send(&Response::Error {
+                    message: "stream-only clients release panes by closing the shared connection"
+                        .to_owned(),
+                });
+            }
             match close_pane(
                 daemon,
                 session_id,
                 pane_id,
                 envelope.client_process_id,
                 peer_process_id,
+                session_secret.as_deref(),
             ) {
                 Ok(()) => connection.send(&Response::Ok),
                 Err(error) => connection.send(&Response::Error {
@@ -1116,7 +1183,12 @@ fn serve(daemon: &Arc<Daemon>, stream: Stream, token: &str) -> Result<()> {
                 }),
             }
         }
-        Request::Kill { session_id } => match kill(daemon, session_id, peer_process_id) {
+        Request::Kill { session_id } => match kill(
+            daemon,
+            session_id,
+            peer_process_id,
+            session_secret.as_deref(),
+        ) {
             Ok(()) => {
                 publish(daemon);
                 connection.send(&Response::Ok)
@@ -1137,6 +1209,8 @@ fn serve(daemon: &Arc<Daemon>, stream: Stream, token: &str) -> Result<()> {
             verifier,
             key_envelope,
             peer_process_id,
+            session_secret.as_deref(),
+            stream_only,
             &mut connection,
         ) {
             Ok(()) => Ok(()),
@@ -1144,7 +1218,12 @@ fn serve(daemon: &Arc<Daemon>, stream: Stream, token: &str) -> Result<()> {
                 message: format!("{error:#}"),
             }),
         },
-        Request::Forget { session_id } => match forget(daemon, session_id, peer_process_id) {
+        Request::Forget { session_id } => match forget(
+            daemon,
+            session_id,
+            peer_process_id,
+            session_secret.as_deref(),
+        ) {
             Ok(()) => {
                 publish(daemon);
                 connection.send(&Response::Ok)
@@ -1156,13 +1235,13 @@ fn serve(daemon: &Arc<Daemon>, stream: Stream, token: &str) -> Result<()> {
         Request::Configure {
             retention,
             persistence_recipients,
-        } => match configure_daemon(daemon, retention, persistence_recipients) {
+        } if !stream_only => match configure_daemon(daemon, retention, persistence_recipients) {
             Ok(()) => connection.send(&Response::Ok),
             Err(error) => connection.send(&Response::Error {
                 message: format!("{error:#}"),
             }),
         },
-        Request::Upgrade => {
+        Request::Upgrade if !stream_only => {
             #[cfg(any(unix, windows))]
             {
                 // Only returns when the replacement was refused: a successful
@@ -1190,7 +1269,7 @@ fn serve(daemon: &Arc<Daemon>, stream: Stream, token: &str) -> Result<()> {
                     .to_owned(),
             })
         }
-        Request::Shutdown => {
+        Request::Shutdown if !stream_only => {
             let held = daemon.sessions.lock().unwrap().len();
             if held > 0 {
                 // Answered rather than ignored. Replying `Ok` to a request that
@@ -1219,6 +1298,11 @@ fn serve(daemon: &Arc<Daemon>, stream: Stream, token: &str) -> Result<()> {
             // Unblock the accept loop so it observes the flag.
             let _ = Stream::connect(socket_path(&session_catalog_dir()));
             response
+        }
+        Request::Configure { .. } | Request::Upgrade | Request::Shutdown => {
+            connection.send(&Response::Error {
+                message: "this request is local-only".to_owned(),
+            })
         }
     }
 }
@@ -1567,6 +1651,8 @@ fn attach(
     pane_id: Option<u64>,
     secret: Option<String>,
     client_process_id: u32,
+    client_id: ClientId,
+    stream_only: bool,
     connection: &mut Connection,
 ) -> Result<()> {
     let mut sessions = daemon.sessions.lock().unwrap();
@@ -1575,6 +1661,14 @@ fn attach(
             message: format!("session {session_id} does not exist"),
         });
     };
+
+    if stream_only && !session.offered {
+        return connection.send(&Response::Error {
+            message: format!(
+                "session {session_id} is not shared; a remote client may only attach to an offered session"
+            ),
+        });
+    }
 
     // Whose session it is, before anything is revealed about it. A backgrounded
     // session belongs to the window that put it away; another process may only
@@ -1675,8 +1769,29 @@ fn attach(
     // be handed over directly. The latter preserves the original behaviour:
     // a client re-attaching — after a crash of its window, say — takes its
     // pane back rather than starting a revoke against itself.
-    if matches!(pane.attachment, Attachment::None)
-        || matches!(pane.attachment, Attachment::Exclusive(holder) if holder == client_process_id)
+    // Stream-only clients always join a shared relay. An offered pane may be
+    // idle, so initialize the shared attachment here rather than ever letting
+    // a remote request fall through to descriptor handover.
+    if stream_only && matches!(pane.attachment, Attachment::None) {
+        pane.attachment = Attachment::Shared(Vec::new());
+    }
+    if stream_only && matches!(pane.attachment, Attachment::Shared(_)) {
+        return attach_shared(
+            daemon,
+            sessions,
+            session_id,
+            pane_id,
+            client_process_id,
+            client_id,
+            true,
+            state,
+            summary,
+            connection,
+        );
+    }
+    if !stream_only
+        && (matches!(pane.attachment, Attachment::None)
+            || matches!(pane.attachment, Attachment::Exclusive(holder) if holder == client_process_id))
     {
         return attach_exclusive(
             daemon,
@@ -1696,6 +1811,8 @@ fn attach(
             session_id,
             pane_id,
             client_process_id,
+            client_id,
+            stream_only,
             state,
             summary,
             connection,
@@ -1717,8 +1834,9 @@ fn attach(
             };
             let subscribers = daemon.subscribers.lock().unwrap();
             let subscriber = subscribers
-                .get(&holder)
-                .map(|connection| connection.try_clone());
+                .values()
+                .find(|subscriber| subscriber.process_id == holder)
+                .map(|subscriber| subscriber.connection.try_clone());
             drop(subscribers);
             if let Some(Ok(mut subscriber)) = subscriber
                 && let Err(error) = subscriber.send(&revoke)
@@ -1795,6 +1913,8 @@ fn attach(
                     session_id,
                     pane_id,
                     client_process_id,
+                    client_id.clone(),
+                    stream_only,
                     state,
                     summary,
                     connection,
@@ -1802,6 +1922,21 @@ fn attach(
             }
             Attachment::None => {
                 finish_handover_waiter(pane, true);
+                if stream_only {
+                    pane.attachment = Attachment::Shared(Vec::new());
+                    return attach_shared(
+                        daemon,
+                        sessions,
+                        session_id,
+                        pane_id,
+                        client_process_id,
+                        client_id.clone(),
+                        true,
+                        state,
+                        summary,
+                        connection,
+                    );
+                }
                 return attach_exclusive(
                     daemon,
                     sessions,
@@ -1821,7 +1956,7 @@ fn attach(
                 // is another client holding the pane, which is exactly the case
                 // this function already handles from the top, so start over
                 // rather than treating it as impossible.
-                if holder == client_process_id {
+                if !stream_only && holder == client_process_id {
                     finish_handover_waiter(pane, true);
                     return attach_exclusive(
                         daemon,
@@ -1843,8 +1978,9 @@ fn attach(
                     .subscribers
                     .lock()
                     .unwrap()
-                    .get(&holder)
-                    .map(|connection| connection.try_clone());
+                    .values()
+                    .find(|subscriber| subscriber.process_id == holder)
+                    .map(|subscriber| subscriber.connection.try_clone());
                 if let Some(Ok(mut subscriber)) = subscriber
                     && let Err(error) = subscriber.send(&revoke)
                 {
@@ -1972,6 +2108,8 @@ fn attach_shared(
     session_id: u64,
     pane_id: u64,
     client_process_id: u32,
+    client_id: ClientId,
+    stream_only: bool,
     state: serde_json::Value,
     summary: Box<BackgroundSessionSummary>,
     connection: &mut Connection,
@@ -2007,6 +2145,8 @@ fn attach_shared(
     // the pane's effective size.
     clients.push(SharedClient {
         process_id: client_process_id,
+        client_id: client_id.clone(),
+        stream_only,
         relay,
         written_seen: 0,
         wrote_at: Instant::now(),
@@ -2015,11 +2155,6 @@ fn attach_shared(
         input_sent: false,
     });
     let (columns, lines) = effective_size(pane);
-    // Kept, not taken: every later viewer joins on the same screen, and the one
-    // that hands the pane over consumed it first, leaving everybody after it
-    // with nothing but the redraws the program happened to make since. A
-    // full-screen program redraws only what changed, so that is a screen of
-    // holes — its static text never arrives.
     // Kept, not consumed, and only the client that handed the pane over is
     // spared the screen it handed over. Taking the buffer left everybody who
     // joined afterwards with nothing but the redraws the program happened to
@@ -2055,8 +2190,15 @@ fn attach_shared(
     wake_drain(daemon);
 
     // Serve the shared connection until the client goes away.
-    let result = serve_shared(daemon, session_id, pane_id, client_process_id, connection);
-    remove_shared_client(daemon, session_id, pane_id, client_process_id);
+    let result = serve_shared(
+        daemon,
+        session_id,
+        pane_id,
+        client_process_id,
+        client_id.clone(),
+        connection,
+    );
+    remove_shared_client(daemon, session_id, pane_id, &client_id);
     result
 }
 
@@ -2116,8 +2258,6 @@ fn spawn_relay(connection: &Connection, client_process_id: u32) -> Result<Relay>
     }
     // Unbounded, with `queued` as the only bound: the limit that matters is how
     // many bytes are outstanding, and a channel can only count entries.
-    // Unbounded, with `queued` as the only bound: the limit that matters is how
-    // many bytes are outstanding, and a channel can only count entries.
     let (sender, frames) = async_channel::unbounded::<Arc<[u8]>>();
     let queued = Arc::new(AtomicUsize::new(0));
     let written = Arc::new(AtomicUsize::new(0));
@@ -2175,6 +2315,7 @@ fn serve_shared(
     session_id: u64,
     pane_id: u64,
     client_process_id: u32,
+    client_id: ClientId,
     connection: &mut Connection,
 ) -> Result<()> {
     loop {
@@ -2194,7 +2335,7 @@ fn serve_shared(
                     Attachment::Shared(clients) => {
                         let Some(client) = clients
                             .iter_mut()
-                            .find(|client| client.process_id == client_process_id)
+                            .find(|client| client.client_id == client_id)
                         else {
                             anyhow::bail!("client {client_process_id} is not shared on {pane_id}");
                         };
@@ -2232,7 +2373,7 @@ fn serve_shared(
                 if let Attachment::Shared(clients) = &mut pane.attachment {
                     if let Some(client) = clients
                         .iter_mut()
-                        .find(|client| client.process_id == client_process_id)
+                        .find(|client| client.client_id == client_id)
                     {
                         client.columns = columns;
                         client.lines = lines;
@@ -2286,8 +2427,15 @@ fn take_exclusive(
     session_id: u64,
     pane_id: u64,
     client_process_id: u32,
+    client_id: ClientId,
+    stream_only: bool,
     connection: &mut Connection,
 ) -> Result<()> {
+    if stream_only {
+        return connection.send(&Response::Error {
+            message: "stream-only clients cannot take an exclusive pane".to_owned(),
+        });
+    }
     let mut sessions = daemon.sessions.lock().unwrap();
     let Some(pane) = sessions
         .iter_mut()
@@ -2298,7 +2446,7 @@ fn take_exclusive(
             message: format!("session {session_id} has no pane {pane_id}"),
         });
     };
-    if !matches!(&pane.attachment, Attachment::Shared(clients) if clients.len() == 1 && clients[0].process_id == client_process_id)
+    if !matches!(&pane.attachment, Attachment::Shared(clients) if clients.len() == 1 && (clients[0].client_id == client_id || (!stream_only && clients[0].process_id == client_process_id)))
     {
         return connection.send(&Response::Error {
             message: format!("pane {pane_id} is not shared with client {client_process_id} alone"),
@@ -2314,7 +2462,9 @@ fn take_exclusive(
     // the others being read to.
     let relay = match &mut pane.attachment {
         Attachment::Shared(clients)
-            if clients.len() == 1 && clients[0].process_id == client_process_id =>
+            if clients.len() == 1
+                && (clients[0].client_id == client_id
+                    || (!stream_only && clients[0].process_id == client_process_id)) =>
         {
             let Attachment::Shared(mut clients) = std::mem::replace(
                 &mut pane.attachment,
@@ -2431,35 +2581,52 @@ fn offer_exclusive_if_alone(daemon: &Arc<Daemon>, session_id: u64, pane: &Pane) 
     let [client] = clients.as_slice() else {
         return;
     };
-    let client = client.process_id;
+    // A stream-only viewer must remain shared forever. It cannot receive a
+    // descriptor or complete the exclusive grant handshake.
+    if client.stream_only {
+        return;
+    }
+    let client_id = client.client_id.clone();
     let grant = Event::Grant {
         session_id,
         pane_id: pane.id,
     };
-    let subscriber = daemon
-        .subscribers
-        .lock()
-        .unwrap()
-        .get(&client)
-        .map(|connection| connection.try_clone());
-    if let Some(Ok(mut subscriber)) = subscriber
+    let subscriber = subscriber_connection(daemon, &client_id, client.process_id);
+    if let Some(mut subscriber) = subscriber
         && let Err(error) = subscriber.send(&grant)
     {
         log::debug!(
-            "offering pane {} back to client {client} failed: {error:#}",
-            pane.id
+            "offering pane {} back to client {} failed: {error:#}",
+            pane.id,
+            client_id.as_str()
         );
     }
 }
 
+/// Finds the subscription for a client event. Logical IDs are the primary key
+/// for remote clients, whose forwarded socket peer process is shared by every
+/// connection. Local ownership remains PID-based, though: a local process can
+/// create a short-lived `Client` for a handover while its long-lived
+/// subscription was opened by another `Client` value.
+fn subscriber_connection(
+    daemon: &Arc<Daemon>,
+    client_id: &ClientId,
+    process_id: u32,
+) -> Option<Connection> {
+    let subscribers = daemon.subscribers.lock().unwrap();
+    subscribers
+        .get(client_id)
+        .or_else(|| {
+            subscribers
+                .values()
+                .find(|subscriber| subscriber.process_id == process_id)
+        })
+        .and_then(|subscriber| subscriber.connection.try_clone().ok())
+}
+
 /// Drops a client from a pane's shared set, ending shared mode when it was
 /// the last one.
-fn remove_shared_client(
-    daemon: &Arc<Daemon>,
-    session_id: u64,
-    pane_id: u64,
-    client_process_id: u32,
-) {
+fn remove_shared_client(daemon: &Arc<Daemon>, session_id: u64, pane_id: u64, client_id: &ClientId) {
     let mut sessions = daemon.sessions.lock().unwrap();
     let Some(session) = sessions.iter_mut().find(|session| session.id == session_id) else {
         return;
@@ -2469,7 +2636,7 @@ fn remove_shared_client(
     };
     if let Attachment::Shared(clients) = &mut pane.attachment {
         let before = clients.len();
-        clients.retain(|client| client.process_id != client_process_id);
+        clients.retain(|client| &client.client_id != client_id);
         if clients.is_empty() && pane.handover_waiters == 0 {
             pane.attachment = Attachment::None;
             // Nobody is left to claim the handover, and the next one records
@@ -2792,7 +2959,7 @@ fn queue_for_shared_clients(
                 .relay
                 .queued
                 .fetch_sub(frame.len(), Ordering::Relaxed);
-            failed.push(client.process_id);
+            failed.push(client.client_id.clone());
         }
     }
     if failed.is_empty() {
@@ -2802,7 +2969,7 @@ fn queue_for_shared_clients(
         "dropped {} shared client(s) that stopped keeping up",
         failed.len()
     );
-    clients.retain(|client| !failed.contains(&client.process_id));
+    clients.retain(|client| !failed.contains(&client.client_id));
     collapse_empty_shared(attachment, handover_waiters);
 }
 
@@ -3041,7 +3208,7 @@ fn detach(
         });
     };
     anyhow::ensure!(
-        session_control_authorized(session, peer_process_id),
+        session_control_authorized(session, peer_process_id, None),
         "session {} is protected and can only be detached by its owner or current holder",
         request.session_id
     );
@@ -3160,6 +3327,7 @@ fn share(
     request: crate::messages::ShareRequest,
     client_process_id: u32,
     peer_process_id: Option<u32>,
+    session_secret: Option<&str>,
     connection: &mut Connection,
 ) -> Result<()> {
     let mut sessions = daemon.sessions.lock().unwrap();
@@ -3184,7 +3352,11 @@ fn share(
     } else {
         Some(client_process_id)
     };
-    if !holder_process_id.is_some_and(|process_id| session_is_held_by(session, process_id)) {
+    let holder_authorized =
+        holder_process_id.is_some_and(|process_id| session_is_held_by(session, process_id));
+    let secret_authorized = session.authentication.is_some()
+        && session_control_authorized(session, peer_process_id, session_secret);
+    if !holder_authorized && !secret_authorized {
         return connection.send(&Response::Error {
             message: format!(
                 "session {} cannot be shared by a client that is not showing it",
@@ -3208,7 +3380,8 @@ fn share(
         let viewers = shared_viewer_count(&pane.attachment);
         return connection.send(&Response::Error {
             message: format!(
-                "this session is still open in {} windows, so it cannot be scoped back to one;                  close it in the others first",
+                "this session is still open in {} windows, so it cannot be scoped back to one; \
+                 close it in the others first",
                 viewers
             ),
         });
@@ -3271,6 +3444,8 @@ fn set_session_scope(
     verifier: Option<String>,
     key_envelope: Option<String>,
     peer_process_id: Option<u32>,
+    session_secret: Option<&str>,
+    stream_only: bool,
     connection: &mut Connection,
 ) -> Result<()> {
     let mut sessions = daemon.sessions.lock().unwrap();
@@ -3291,8 +3466,9 @@ fn set_session_scope(
         });
     }
     anyhow::ensure!(
-        session_control_authorized(session, peer_process_id)
-            || stranded_session_may_be_offered(session, shared, verifier.is_some()),
+        session_control_authorized(session, peer_process_id, session_secret)
+            || (!stream_only
+                && stranded_session_may_be_offered(session, shared, verifier.is_some())),
         "session {session_id} is protected and can only be changed by its owner or current holder"
     );
     if let Some(verifier) = verifier {
@@ -3369,18 +3545,46 @@ fn stranded_session_may_be_offered(
     shared && !replaces_verifier && !session.owner.is_some_and(process_is_running)
 }
 
-fn session_control_authorized(session: &Session, peer_process_id: Option<u32>) -> bool {
+fn session_control_authorized(
+    session: &mut Session,
+    peer_process_id: Option<u32>,
+    session_secret: Option<&str>,
+) -> bool {
     if session.authentication.is_none() {
         return true;
     }
-    // Nothing vouched for this peer, so there is no identity to authorize. The
-    // envelope's own value is not a fallback: a same-user process can read the
-    // endpoint token and would otherwise only have to *name* the owner of a
-    // protected session to act as it.
-    let Some(process_id) = peer_process_id else {
+    if peer_process_id.is_some_and(|process_id| {
+        session.owner == Some(process_id) || session_is_held_by(session, process_id)
+    }) {
+        return true;
+    }
+    // Remote stream-only clients cannot prove a local PID through the SSH
+    // socket. Their session secret is the explicit authorization for safe
+    // administration, checked with the same constant-time Argon2 verifier and
+    // exponential refusal window used by attach/resume.
+    let Some(secret) = session_secret else {
         return false;
     };
-    session.owner == Some(process_id) || session_is_held_by(session, process_id)
+    let refused = session
+        .refuse_until
+        .is_some_and(|until| Instant::now() < until);
+    let verified = !refused
+        && session
+            .authentication
+            .as_ref()
+            .is_some_and(|authentication| authentication.verify(secret).is_some());
+    if verified {
+        session.failed_authentications = 0;
+        session.refuse_until = None;
+        return true;
+    }
+    if !refused {
+        session.failed_authentications = session.failed_authentications.saturating_add(1);
+        session.refuse_until = Instant::now().checked_add(
+            crate::auth::failed_authentication_delay(session.failed_authentications),
+        );
+    }
+    false
 }
 
 /// Whether this request's answer could depend on who the peer is, on a platform
@@ -3503,22 +3707,22 @@ fn resize_pane(
     columns: u16,
     lines: u16,
     peer_process_id: Option<u32>,
+    session_secret: Option<&str>,
 ) -> Result<()> {
     use alacritty_terminal::event::OnResize as _;
     let mut sessions = daemon.sessions.lock().unwrap();
-    let Some(session) = sessions.iter().find(|session| session.id == session_id) else {
+    let Some(session) = sessions.iter_mut().find(|session| session.id == session_id) else {
         anyhow::bail!("session {session_id} does not exist");
     };
-    if session.authentication.is_some() && !protected_holder_authorized(session, peer_process_id) {
+    if session.authentication.is_some()
+        && !protected_holder_authorized(session, peer_process_id)
+        && !session_control_authorized(session, peer_process_id, session_secret)
+    {
         anyhow::bail!(
-            "session {session_id} is protected and can only be resized by its current holder"
+            "session {session_id} is protected and can only be resized by its current holder or session secret"
         );
     }
-    let Some(pane) = sessions
-        .iter_mut()
-        .find(|session| session.id == session_id)
-        .and_then(|session| session.panes.iter_mut().find(|pane| pane.id == pane_id))
-    else {
+    let Some(pane) = session.panes.iter_mut().find(|pane| pane.id == pane_id) else {
         anyhow::bail!("session {session_id} has no pane {pane_id}");
     };
     pane.pty.on_resize(window_size(TerminalSize {
@@ -3551,24 +3755,33 @@ fn set_console_palette(
     palette: ConsolePalette,
     client_process_id: u32,
     peer_process_id: Option<u32>,
+    session_secret: Option<&str>,
 ) -> Result<()> {
-    let sessions = daemon.sessions.lock().unwrap();
-    let Some(session) = sessions.iter().find(|session| session.id == session_id) else {
+    let mut sessions = daemon.sessions.lock().unwrap();
+    let Some(session) = sessions.iter_mut().find(|session| session.id == session_id) else {
         anyhow::bail!("session {session_id} does not exist");
     };
+    let protected = session.authentication.is_some();
+    let holder_authorized = if protected {
+        protected_holder_authorized(session, peer_process_id)
+    } else {
+        Some(control_process_id(client_process_id, peer_process_id))
+            .is_some_and(|process_id| session_is_held_by(session, process_id))
+    };
+    let secret_authorized = protected
+        && !holder_authorized
+        && session_control_authorized(session, peer_process_id, session_secret);
+    if !holder_authorized && !secret_authorized {
+        if protected {
+            anyhow::bail!(
+                "session {session_id} is protected and can only be changed by its current holder or session secret"
+            );
+        }
+        anyhow::bail!("session {session_id} can only be changed by its current holder");
+    }
     let Some(pane) = session.panes.iter().find(|pane| pane.id == pane_id) else {
         anyhow::bail!("session {session_id} has no pane {pane_id}");
     };
-    // As with resizing: for a protected session only a vouched-for holder, and
-    // for one with no secret the claim it always was.
-    let holder_process_id = if session.authentication.is_some() {
-        peer_process_id
-    } else {
-        Some(control_process_id(client_process_id, peer_process_id))
-    };
-    if !holder_process_id.is_some_and(|process_id| pane_is_held_by(pane, process_id)) {
-        anyhow::bail!("pane {pane_id} is not held by this client");
-    }
     #[cfg(windows)]
     daemon
         .pty_host
@@ -3579,9 +3792,14 @@ fn set_console_palette(
     Ok(())
 }
 
-fn kill(daemon: &Arc<Daemon>, session_id: u64, peer_process_id: Option<u32>) -> Result<()> {
+fn kill(
+    daemon: &Arc<Daemon>,
+    session_id: u64,
+    peer_process_id: Option<u32>,
+    session_secret: Option<&str>,
+) -> Result<()> {
     let mut sessions = daemon.sessions.lock().unwrap();
-    let Some(session) = sessions.iter().find(|session| session.id == session_id) else {
+    let Some(session) = sessions.iter_mut().find(|session| session.id == session_id) else {
         drop(sessions);
         #[cfg(feature = "session-persistence")]
         {
@@ -3602,7 +3820,7 @@ fn kill(daemon: &Arc<Daemon>, session_id: u64, peer_process_id: Option<u32>) -> 
         anyhow::bail!("session {session_id} does not exist");
     };
     anyhow::ensure!(
-        session_control_authorized(session, peer_process_id),
+        session_control_authorized(session, peer_process_id, session_secret),
         "session {session_id} is protected and can only be ended by its owner or current holder"
     );
     // Dropping the panes drops their PTYs, which hangs up the children.
@@ -3625,11 +3843,16 @@ fn kill(daemon: &Arc<Daemon>, session_id: u64, peer_process_id: Option<u32>) -> 
     Ok(())
 }
 
-fn forget(daemon: &Arc<Daemon>, session_id: u64, peer_process_id: Option<u32>) -> Result<()> {
+fn forget(
+    daemon: &Arc<Daemon>,
+    session_id: u64,
+    peer_process_id: Option<u32>,
+    session_secret: Option<&str>,
+) -> Result<()> {
     let mut sessions = daemon.sessions.lock().unwrap();
-    if let Some(session) = sessions.iter().find(|session| session.id == session_id) {
+    if let Some(session) = sessions.iter_mut().find(|session| session.id == session_id) {
         anyhow::ensure!(
-            session_control_authorized(session, peer_process_id),
+            session_control_authorized(session, peer_process_id, session_secret),
             "session {session_id} is protected and can only be forgotten by its owner or current holder"
         );
         #[cfg(windows)]
@@ -3694,43 +3917,48 @@ fn pane_states(
     daemon: &Arc<Daemon>,
     pane_ids: &[u64],
     peer_process_id: Option<u32>,
+    session_secret: Option<&str>,
 ) -> Vec<crate::messages::PaneStateReport> {
-    let sessions = daemon.sessions.lock().unwrap();
+    let mut sessions = daemon.sessions.lock().unwrap();
     pane_ids
         .iter()
         .map(|&pane_id| {
-            let session = sessions
+            let session_index = sessions
                 .iter()
-                .find(|session| session.panes.iter().any(|pane| pane.id == pane_id));
-            if session.is_some_and(|session| {
-                session.authentication.is_some()
-                    && !session_control_authorized(session, peer_process_id)
-            }) {
-                return crate::messages::PaneStateReport {
-                    pane_id,
-                    unknown: true,
-                    exited: false,
-                    raw_status: None,
-                    input_sent: false,
+                .position(|session| session.panes.iter().any(|pane| pane.id == pane_id));
+            if let Some(index) = session_index {
+                let protected = {
+                    let session = &mut sessions[index];
+                    session.authentication.is_some()
+                        && !session_control_authorized(session, peer_process_id, session_secret)
+                };
+                if protected {
+                    return crate::messages::PaneStateReport {
+                        pane_id,
+                        unknown: true,
+                        exited: false,
+                        raw_status: None,
+                        input_sent: false,
+                    };
+                }
+                let pane = sessions[index].panes.iter().find(|pane| pane.id == pane_id);
+                return match pane {
+                    Some(pane) => crate::messages::PaneStateReport {
+                        pane_id,
+                        unknown: false,
+                        exited: pane.exited,
+                        raw_status: pane.exit_status,
+                        input_sent: shared_input_sent(&pane.attachment),
+                    },
+                    None => unreachable!("the session index was selected by pane id"),
                 };
             }
-            let pane =
-                session.and_then(|session| session.panes.iter().find(|pane| pane.id == pane_id));
-            match pane {
-                Some(pane) => crate::messages::PaneStateReport {
-                    pane_id,
-                    unknown: false,
-                    exited: pane.exited,
-                    raw_status: pane.exit_status,
-                    input_sent: shared_input_sent(&pane.attachment),
-                },
-                None => crate::messages::PaneStateReport {
-                    pane_id,
-                    unknown: true,
-                    exited: false,
-                    raw_status: None,
-                    input_sent: false,
-                },
+            crate::messages::PaneStateReport {
+                pane_id,
+                unknown: true,
+                exited: false,
+                raw_status: None,
+                input_sent: false,
             }
         })
         .collect()
@@ -3750,6 +3978,7 @@ fn close_pane(
     pane_id: u64,
     client_process_id: u32,
     peer_process_id: Option<u32>,
+    session_secret: Option<&str>,
 ) -> Result<()> {
     let client_process_id = control_process_id(client_process_id, peer_process_id);
     let mut sessions = daemon.sessions.lock().unwrap();
@@ -3757,7 +3986,7 @@ fn close_pane(
         anyhow::bail!("session {session_id} does not exist");
     };
     anyhow::ensure!(
-        session_control_authorized(session, peer_process_id),
+        session_control_authorized(session, peer_process_id, session_secret),
         "session {session_id} is protected and can only be changed by its owner or current holder"
     );
     let Some(pane) = session.panes.iter_mut().find(|pane| pane.id == pane_id) else {
@@ -3914,7 +4143,7 @@ fn unix_now() -> u64 {
 
 fn broadcast(daemon: &Arc<Daemon>, event: &Event) {
     let mut subscribers = daemon.subscribers.lock().unwrap();
-    subscribers.retain(|_, subscriber| subscriber.send(event).is_ok());
+    subscribers.retain(|_, subscriber| subscriber.connection.send(event).is_ok());
 }
 
 fn window_size(size: TerminalSize) -> WindowSize {
@@ -4273,7 +4502,7 @@ fn relay_backpressure(pane: &mut Pane, evicted: &mut bool) -> bool {
             // entirely was never noticed here at all, leaving the pane to stutter
             // until the write timeout eventually killed the relay seconds later.
             if backlog > 0 && now.duration_since(client.wrote_at) >= RELAY_STALL_TIMEOUT {
-                stalled.push(client.process_id);
+                stalled.push(client.client_id.clone());
                 continue;
             }
             if backlog >= RELAY_BACKPRESSURE_BYTES {
@@ -4285,7 +4514,7 @@ fn relay_backpressure(pane: &mut Pane, evicted: &mut bool) -> bool {
                 "dropping {} shared viewer(s) whose backlog stopped shrinking",
                 stalled.len()
             );
-            clients.retain(|client| !stalled.contains(&client.process_id));
+            clients.retain(|client| !stalled.contains(&client.client_id));
         }
     }
     if !stalled.is_empty() {
@@ -4889,6 +5118,8 @@ fn attachment_handover(attachment: &Attachment) -> crate::upgrade::AttachmentHan
                 .iter()
                 .map(|client| SharedClientHandover {
                     process_id: client.process_id,
+                    client_id: client.client_id.clone(),
+                    stream_only: client.stream_only,
                     columns: client.columns,
                     lines: client.lines,
                     input_sent: client.input_sent,

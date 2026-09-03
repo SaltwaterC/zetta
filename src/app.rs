@@ -611,6 +611,14 @@ pub(crate) struct Zetta {
     pub(crate) session_authentication_focus: gpui::FocusHandle,
     pub(crate) session_authentication: Option<SessionAuthenticationPrompt>,
     pub(crate) session_authentication_generation: u64,
+    pub(crate) remote_session_focus: gpui::FocusHandle,
+    pub(crate) remote_session_picker: Option<crate::remote_session_ui::RemoteSessionPicker>,
+    pub(crate) remote_session_target: Option<zmux::remote::RemoteTarget>,
+    #[cfg(feature = "session-persistence")]
+    /// Public age ciphertext kept while a remote automatically protected
+    /// session is being unlocked. The recovered session secret itself never
+    /// lives in app state; it stays in `SessionSecret`/`Zeroizing` values.
+    pub(crate) remote_session_key_envelope: Option<String>,
     pub(crate) close_confirmation_focus: gpui::FocusHandle,
     pub(crate) close_tab_confirmation: Option<CloseTabConfirmation>,
     pub(crate) active_tab: usize,
@@ -742,6 +750,11 @@ impl Zetta {
             self.serial_console = None;
         }
         self.session_authentication = None;
+        self.remote_session_target = None;
+        #[cfg(feature = "session-persistence")]
+        {
+            self.remote_session_key_envelope = None;
+        }
         self.close_tab_confirmation = None;
         self.tab_search = None;
         cx.notify();
@@ -864,6 +877,11 @@ impl Zetta {
             session_authentication_focus: cx.focus_handle(),
             session_authentication: None,
             session_authentication_generation: 0,
+            remote_session_focus: cx.focus_handle(),
+            remote_session_picker: None,
+            remote_session_target: None,
+            #[cfg(feature = "session-persistence")]
+            remote_session_key_envelope: None,
             close_confirmation_focus: cx.focus_handle(),
             close_tab_confirmation: None,
             active_tab: 0,

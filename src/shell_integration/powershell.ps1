@@ -236,6 +236,69 @@ $zmuxSessionIds = {
     } catch {}
 }
 
+$zettaSshTargets = {
+    $config = Join-Path $HOME '.ssh/config'
+    if (-not (Test-Path -LiteralPath $config -PathType Leaf)) { return }
+    try {
+        foreach ($line in Get-Content -LiteralPath $config -ErrorAction Stop) {
+            if ($line -match '^\s*[Hh][Oo][Ss][Tt]\s+(.+)$') {
+                foreach ($host in ($Matches[1] -split '\s+')) {
+                    if ($host -and $host -notmatch '^[!]' -and $host -notmatch '[*?]' -and
+                        $host.StartsWith([string]$wordToComplete, [StringComparison]::Ordinal)) {
+                        $host
+                    }
+                }
+            }
+        }
+    } catch {}
+}
+
+$zmuxRemoteSessionIds = {
+    param($target, $port, $prefix)
+    $sshArguments = @('-T', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=3')
+    if ($null -ne $port -and [string]$port -ne '') {
+        $sshArguments += @('-p', [string]$port)
+    }
+    try {
+        foreach ($line in @(& ssh @sshArguments $target zmux list --ids-only 2>$null)) {
+            $id = [string]$line
+            if ($id -match '^\d+$' -and $id.StartsWith([string]$prefix, [StringComparison]::Ordinal)) {
+                $id
+            }
+        }
+    } catch {}
+}
+
+$zettaMuxAttachArguments = {
+    param($wordToComplete, $words)
+    $target = ''
+    $port = ''
+    for ($index = 3; $index -lt ($words.Count - 1); $index++) {
+        $token = [string]$words[$index]
+        switch -Regex ($token) {
+            '^(--ssh-target|-H)$' {
+                if ($index + 1 -lt ($words.Count - 1)) { $target = [string]$words[++$index] }
+                continue
+            }
+            '^--ssh-target=' { $target = $token.Substring($token.IndexOf('=') + 1); continue }
+            '^(--port|-p)$' {
+                if ($index + 1 -lt ($words.Count - 1)) { $port = [string]$words[++$index] }
+                continue
+            }
+            '^--port=' { $port = $token.Substring($token.IndexOf('=') + 1); continue }
+            '^(--identity|-i)$' { $index++; continue }
+            '^--identity=' { continue }
+            '^-' { continue }
+            default { if ([string]::IsNullOrEmpty($target)) { $target = $token } }
+        }
+    }
+    if ([string]::IsNullOrEmpty($target)) {
+        & $zettaSshTargets
+    } else {
+        & $zmuxRemoteSessionIds $target $port $wordToComplete
+    }
+}
+
 $zmuxRestorableIds = {
     try {
         $lines = if ($commandName -eq 'zmux') { @(zmux list 2>$null) } else { @(zetta mux list 2>$null) }
@@ -446,6 +509,16 @@ $zettaCompletions = {
         $profileArguments = @($words | Select-Object -Skip ($profileIndex + 2) | Where-Object { $_ -notlike '-*' -and -not [string]::IsNullOrEmpty($_) })
         if ($profileArguments.Count -ge 2 -or ($profileArguments.Count -eq 1 -and [string]::IsNullOrEmpty($wordToComplete))) { & $zettaProfileThemes $configArguments }
         else { & $zettaProfiles $configArguments }
+    } elseif ($subcommand -eq 'mux' -and $words.Count -ge 3 -and $words[2] -eq 'attach' -and $wordToComplete -notlike '-*') {
+        if ($previous -in '--ssh-target', '-H') {
+            & $zettaSshTargets
+        } elseif ($previous -in '--port', '-p') {
+            @()
+        } elseif ($previous -in '--identity', '-i') {
+            @(Get-ChildItem -Name -Path "$wordToComplete*" -ErrorAction SilentlyContinue)
+        } else {
+            & $zettaMuxAttachArguments $wordToComplete $words
+        }
     } elseif ($subcommand -eq 'mux' -and $words.Count -ge 3 -and (
         $words[2] -eq 'reconnect' -or
         $words[2] -eq 'resume' -or
@@ -500,12 +573,13 @@ $zettaCompletions = {
             'mux' {
                 if ($words.Count -le 2) {
                     if ($noMux) { 'list', 'reconnect', '--json', '--help', '--version' }
-                    else { 'list', 'stop', 'reconnect', 'resume', 'share', 'unshare', 'kill', 'forget', '--json', '--upgrade', '--identity', '--help', '--version' }
+                    else { 'list', 'stop', 'reconnect', 'attach', 'resume', 'share', 'unshare', 'kill', 'forget', '--json', '--ids-only', '--ssh-target', '--port', '--upgrade', '--identity', '--help', '--version' }
                 }
-                elseif ($noMux -and $words[2] -notin 'list', 'reconnect') { @() }
+                elseif ($noMux -and $words[2] -notin 'list', 'reconnect', 'attach') { @() }
                 elseif ($words[2] -eq 'stop') { '--force', '--help' }
+                elseif ($words[2] -eq 'attach') { '--ssh-target', '--port', '--identity', '--help' }
                 elseif ($words[2] -in 'resume', 'reconnect') { '--identity', '--help' }
-                else { '--json', '--help' }
+                else { '--json', '--ids-only', '--ssh-target', '--port', '--help' }
             }
             'splits' { '--help' }
             'pane' {

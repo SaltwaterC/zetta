@@ -16,8 +16,9 @@ shortcuts for the clipboard; each has the same completion as its corresponding
 notification options while retaining all short aliases.
 
 `zmux`, the standalone multiplexer binary, gets the same completion as
-`zetta mux`, since the two take identical arguments.
-The mux command list includes `list`, `stop`, `reconnect`, `share`, `unshare`,
+`zetta mux`, since the two take identical arguments. Both also complete
+`attach` targets from `~/.ssh/config` and remote numeric session IDs.
+The mux command list includes `list`, `stop`, `reconnect`, `attach`, `share`, `unshare`,
 `kill`, and `forget`; the session argument for `reconnect`, `share`, `unshare`,
 `kill`, and `forget` is
 fetched dynamically from `zmux list`/`zetta mux list` in the full
@@ -26,9 +27,17 @@ compatibility shorthand. The root `--no-mux` opt-out is completed as a long opti
 its short `-n` spelling remains available to the parser without adding noise
 to completion candidates.
 
+For remote `attach` and stream-safe administration, target completion reads
+only local `Host` aliases and patterns from `~/.ssh/config`. After a target is
+selected, completion runs `ssh -T -o BatchMode=yes -o ConnectTimeout=3 TARGET
+zmux list --ids-only` only when the session-ID argument is being completed; it
+does not contact remote hosts while an ordinary prompt is rendered. An optional
+`--port`/`-p` is included in that bounded lookup, and the returned IDs are
+filtered by the current completion prefix.
+
 Inside a shell launched by `zetta --no-mux` (or `zetta -n`), the integration
-knows that no daemon owns that shell's background sessions. It offers only
-`list` and `reconnect` for `zetta mux` and `zmux`, and their `--json`, `--help`,
+knows that no daemon owns that shell's background sessions. It offers `attach`
+for remote sessions plus `list` and `reconnect` for local sessions, and their `--json`, `--help`,
 and `--version` options; daemon-only commands and options are omitted. The
 same reduced surface is shown by `zetta mux --help` in that shell.
 

@@ -57,6 +57,8 @@ fn handover() -> Handover {
                 attachment: AttachmentHandover::Shared {
                     clients: vec![SharedClientHandover {
                         process_id: 4321,
+                        client_id: crate::messages::ClientId::new("local-test"),
+                        stream_only: false,
                         columns: 100,
                         lines: 30,
                         input_sent: true,
