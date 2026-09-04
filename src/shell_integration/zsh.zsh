@@ -12,8 +12,135 @@ autoload -Uz add-zsh-hook
 (( ${zshaddhistory_functions[(I)__zetta_filter_startup_history]:-0} == 0 )) &&
     add-zsh-hook zshaddhistory __zetta_filter_startup_history
 
+function __zetta_run_path { command zetta "$@"; }
+
+function __zetta_run_owner {
+    if [[ -n ${ZETTA_HOST_EXECUTABLE:-} && -f "$ZETTA_HOST_EXECUTABLE" && -x "$ZETTA_HOST_EXECUTABLE" ]]; then
+        command "$ZETTA_HOST_EXECUTABLE" "$@"
+    else
+        command zetta "$@"
+    fi
+}
+
+function __zetta_profile_uses_owner {
+    local index=1 argument
+    while (( index <= $# )); do
+        argument=$argv[index]
+        case $argument in
+            --config|-c)
+                (( index += 2 ))
+                ;;
+            profile)
+                (( index++ ))
+                while (( index <= $# )); do
+                    argument=$argv[index]
+                    case $argument in
+                        --config|-c)
+                            (( index += 2 ))
+                            ;;
+                        --help|-h|list|themes)
+                            return 1
+                            ;;
+                        *)
+                            return 0
+                            ;;
+                    esac
+                done
+                return 1
+                ;;
+            *)
+                return 1
+                ;;
+        esac
+    done
+    return 1
+}
+
+function __zetta_should_use_owner {
+    (( $# == 0 )) && return 0
+
+    case $argv[1] in
+        pane|attention|notify|theme|overlay)
+            return 0
+            ;;
+        cmd)
+            (( $# >= 2 )) || return 1
+            case $argv[2] in
+                --list|-l|--help|-h)
+                    return 1
+                    ;;
+            esac
+            local index argument
+            for (( index = 3; index <= $#; index++ )); do
+                argument=$argv[index]
+                case $argument in
+                    --)
+                        return 0
+                        ;;
+                    --help|-h)
+                        return 1
+                        ;;
+                esac
+            done
+            return 0
+            ;;
+        project)
+            case $argv[2] in
+                add|remove|open)
+                    return 0
+                    ;;
+            esac
+            return 1
+            ;;
+        tabicon)
+            case $argv[2] in
+                --list|-l|--help|-h|'')
+                    return 1
+                    ;;
+                *)
+                    return 0
+                    ;;
+            esac
+            ;;
+        profile)
+            __zetta_profile_uses_owner "$@"
+            return $?
+            ;;
+    esac
+
+    local index=1 argument
+    while (( index <= $# )); do
+        argument=$argv[index]
+        case $argument in
+            --config|-c|--keymap|-k|--profile|-p|--split|-s|--theme|-t|--zetta-profile-actions-generation)
+                (( index += 2 ))
+                ;;
+            --new-window|-w|--command|-e|--replace-pane|-r)
+                return 0
+                ;;
+            profile)
+                __zetta_profile_uses_owner "$@"
+                return $?
+                ;;
+            --)
+                return 1
+                ;;
+            *)
+                return 1
+                ;;
+        esac
+    done
+    return 1
+}
+
 if [[ -n ${ZETTA_HOST_EXECUTABLE:-} ]]; then
-    function zetta { command "$ZETTA_HOST_EXECUTABLE" "$@"; }
+    function zetta {
+        if __zetta_should_use_owner "$@"; then
+            __zetta_run_owner "$@"
+        else
+            __zetta_run_path "$@"
+        fi
+    }
 fi
 
 if (( ! $+functions[__zetta_report_cwd] )); then

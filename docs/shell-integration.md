@@ -15,6 +15,23 @@ shortcuts for the clipboard; each has the same completion as its corresponding
 `zetta` command. The top-level `attention` command also completes its long
 notification options while retaining all short aliases.
 
+The `zetta` function uses the executable that owns the current terminal for
+commands that need to reach its running process: plain launches,
+`--new-window`, `--command`, `--replace-pane`, `pane`, `cmd NAME`, attention
+and notification commands, theme and overlay changes, tab-icon changes,
+project `open`/`add`/`remove`, and profile mutations. Standalone commands use
+the first `zetta` executable on `PATH`, including `vi`/`edit`, initialization,
+completion catalogs, benchmarks, `mux`, terminal-size, project and profile
+lists, CLI services, and worktree operations. The standalone route always
+uses `command zetta`, so it bypasses the function itself.
+
+`ZETTA_HOST_EXECUTABLE` remains available for the owner route. It is used only
+when it names an executable file; if the owning binary has been removed (for
+example, while an application is being replaced), owner commands fall back to
+`command zetta` as well. Native Bash, Zsh, and Fish terminals load the
+integration with `command zetta init ...`, so a stale owner path cannot prevent
+shell startup.
+
 `zmux`, the standalone multiplexer binary, gets the same completion as
 `zetta mux`, since the two take identical arguments. Both also complete
 `attach` targets from `~/.ssh/config` and remote numeric session IDs.

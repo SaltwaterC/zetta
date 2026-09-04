@@ -17,9 +17,125 @@ if not functions -q __zetta_remove_startup_history
     end
 end
 
+function __zetta_run_path
+    command zetta $argv
+end
+
+function __zetta_run_owner
+    if set -q ZETTA_HOST_EXECUTABLE
+        if test -f "$ZETTA_HOST_EXECUTABLE"; and test -x "$ZETTA_HOST_EXECUTABLE"
+            command "$ZETTA_HOST_EXECUTABLE" $argv
+            return
+        end
+    end
+    command zetta $argv
+end
+
+function __zetta_profile_uses_owner
+    set -l index 1
+    while test $index -le (count $argv)
+        set -l argument $argv[$index]
+        switch $argument
+            case --config -c
+                set index (math $index + 2)
+            case profile
+                set index (math $index + 1)
+                while test $index -le (count $argv)
+                    set argument $argv[$index]
+                    switch $argument
+                        case --config -c
+                            set index (math $index + 2)
+                        case --help -h list themes
+                            return 1
+                        case '*'
+                            return 0
+                    end
+                end
+                return 1
+            case '*'
+                return 1
+        end
+    end
+    return 1
+end
+
+function __zetta_should_use_owner
+    if test (count $argv) -eq 0
+        return 0
+    end
+
+    switch $argv[1]
+        case pane attention notify theme overlay
+            return 0
+        case cmd
+            if test (count $argv) -lt 2
+                return 1
+            end
+            switch $argv[2]
+                case --list -l --help -h
+                    return 1
+            end
+            set -l index 3
+            while test $index -le (count $argv)
+                switch $argv[$index]
+                    case --
+                        return 0
+                    case --help -h
+                        return 1
+                end
+                set index (math $index + 1)
+            end
+            return 0
+        case project
+            switch $argv[2]
+                case add remove open
+                    return 0
+            end
+            return 1
+        case tabicon
+            if test (count $argv) -lt 2
+                return 1
+            end
+            switch $argv[2]
+                case --list -l --help -h
+                    return 1
+                case '*'
+                    return 0
+            end
+            return 1
+        case profile
+            __zetta_profile_uses_owner $argv
+            return $status
+    end
+
+    set -l index 1
+    while test $index -le (count $argv)
+        set -l argument $argv[$index]
+        switch $argument
+            case --config -c --keymap -k --profile -p --split -s --theme -t --zetta-profile-actions-generation
+                set index (math $index + 2)
+            case --new-window --command --replace-pane
+                return 0
+            case profile
+                __zetta_profile_uses_owner $argv
+                return $status
+            case '*'
+                if test "$argument" = '-w'; or test "$argument" = '-e'; or test "$argument" = '-r'
+                    return 0
+                end
+                return 1
+        end
+    end
+    return 1
+end
+
 if set -q ZETTA_HOST_EXECUTABLE; and test -n "$ZETTA_HOST_EXECUTABLE"
     function zetta
-        command $ZETTA_HOST_EXECUTABLE $argv
+        if __zetta_should_use_owner $argv
+            __zetta_run_owner $argv
+        else
+            __zetta_run_path $argv
+        end
     end
 end
 

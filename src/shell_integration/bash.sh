@@ -1,6 +1,139 @@
 # Zetta shell integration for Bash.
+__zetta_run_path() {
+    command zetta "$@"
+}
+
+__zetta_run_owner() {
+    if [[ -n ${ZETTA_HOST_EXECUTABLE:-} && -f "$ZETTA_HOST_EXECUTABLE" && -x "$ZETTA_HOST_EXECUTABLE" ]]; then
+        command "$ZETTA_HOST_EXECUTABLE" "$@"
+    else
+        command zetta "$@"
+    fi
+}
+
+__zetta_profile_uses_owner() {
+    local -a profile_arguments=("$@")
+    local index=0 argument
+    while (( index < ${#profile_arguments[@]} )); do
+        argument=${profile_arguments[index]}
+        case $argument in
+            --config|-c)
+                (( index += 2 ))
+                ;;
+            profile)
+                (( index++ ))
+                while (( index < ${#profile_arguments[@]} )); do
+                    argument=${profile_arguments[index]}
+                    case $argument in
+                        --config|-c)
+                            (( index += 2 ))
+                            ;;
+                        --help|-h|list|themes)
+                            return 1
+                            ;;
+                        *)
+                            return 0
+                            ;;
+                    esac
+                done
+                return 1
+                ;;
+            *)
+                return 1
+                ;;
+        esac
+    done
+    return 1
+}
+
+__zetta_should_use_owner() {
+    if (( $# == 0 )); then
+        return 0
+    fi
+
+    case $1 in
+        pane|attention|notify|theme|overlay)
+            return 0
+            ;;
+        cmd)
+            [[ $# -ge 2 ]] || return 1
+            case $2 in
+                --list|-l|--help|-h)
+                    return 1
+                    ;;
+            esac
+            local index argument
+            for (( index = 3; index <= $#; index++ )); do
+                argument=${!index}
+                case $argument in
+                    --)
+                        return 0
+                        ;;
+                    --help|-h)
+                        return 1
+                        ;;
+                esac
+            done
+            return 0
+            ;;
+        project)
+            case ${2:-} in
+                add|remove|open)
+                    return 0
+                    ;;
+            esac
+            return 1
+            ;;
+        tabicon)
+            case ${2:-} in
+                --list|-l|--help|-h|'')
+                    return 1
+                    ;;
+                *)
+                    return 0
+                    ;;
+            esac
+            ;;
+        profile)
+            __zetta_profile_uses_owner "$@"
+            return $?
+            ;;
+    esac
+
+    local -a arguments=("$@")
+    local index=0 argument
+    while (( index < ${#arguments[@]} )); do
+        argument=${arguments[index]}
+        case $argument in
+            --config|-c|--keymap|-k|--profile|-p|--split|-s|--theme|-t|--zetta-profile-actions-generation)
+                (( index += 2 ))
+                ;;
+            --new-window|-w|--command|-e|--replace-pane|-r)
+                return 0
+                ;;
+            profile)
+                __zetta_profile_uses_owner "$@"
+                return $?
+                ;;
+            --)
+                return 1
+                ;;
+            *)
+                return 1
+                ;;
+        esac
+    done
+    return 1
+}
+
 if [[ -n ${ZETTA_HOST_EXECUTABLE:-} ]]; then
-    zetta() { command "$ZETTA_HOST_EXECUTABLE" "$@"; }
+    zetta() {
+        if __zetta_should_use_owner "$@"; then
+            __zetta_run_owner "$@"
+        else
+            __zetta_run_path "$@"
+        fi
+    }
 fi
 
 if [[ -z ${__ZETTA_CWD_TRACKING_INSTALLED:-} ]]; then

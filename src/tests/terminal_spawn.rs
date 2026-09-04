@@ -21,7 +21,7 @@ fn native_stacked_commands_use_one_interactive_shell_command() {
 
 #[cfg(not(windows))]
 #[test]
-fn native_shell_bootstrap_loads_the_owner_integration_only_when_needed() {
+fn native_shell_bootstrap_loads_path_integration_only_when_needed() {
     let command = String::from_utf8(
         shell_integration_startup_command(&Shell::Program("zsh".to_owned())).unwrap(),
     )
@@ -29,7 +29,8 @@ fn native_shell_bootstrap_loads_the_owner_integration_only_when_needed() {
     assert!(command.starts_with(
         "if [[ ${__ZETTA_LIFECYCLE_TRACKING_VERSION:-0} != 3 || ( -n ${ZETTA_PANE_ROUTING_ID:-${ZETTA_PANE_ID:-}} && ${__ZETTA_LIFECYCLE_TRACKING_ENABLED:-0} != 1 ) ]]; then "
     ));
-    assert!(command.contains(r#"eval "$("$ZETTA_HOST_EXECUTABLE" init zsh)"; fi"#));
+    assert!(command.contains(r#"eval "$(command zetta init zsh)"; fi"#));
+    assert!(!command.contains("ZETTA_HOST_EXECUTABLE"));
     assert!(command.ends_with('\r'));
     assert!(
         shell_integration_startup_command(&Shell::WithArguments {

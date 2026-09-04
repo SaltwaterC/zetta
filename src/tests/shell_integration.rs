@@ -532,6 +532,192 @@ fn vi_integration_is_conditional_and_has_cli_completion() {
     assert!(zsh.contains("_files"));
 }
 
+#[cfg(unix)]
+#[test]
+fn posix_zetta_routes_standalone_commands_to_path_and_live_commands_to_owner() {
+    use std::{io::Write as _, os::unix::fs::PermissionsExt, process::Stdio};
+
+    let _bash_test_lock = lock_bash_tests();
+    let temporary = tempfile::tempdir().unwrap();
+    let owner = temporary.path().join("owner-zetta");
+    let path_zetta = temporary.path().join("zetta");
+    let log = temporary.path().join("routing.log");
+    let fake_zetta = |path: &std::path::Path, label: &str| {
+        fs::write(
+            path,
+            format!(
+                r#"#!/bin/sh
+printf '%s:%s\n' '{label}' "$*" >> "$ZETTA_TEST_LOG"
+"#
+            ),
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(path, permissions).unwrap();
+    };
+    fake_zetta(&owner, "owner");
+    fake_zetta(&path_zetta, "path");
+
+    let mut path =
+        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).collect::<Vec<_>>();
+    path.insert(0, temporary.path().to_owned());
+    let path = std::env::join_paths(path).unwrap();
+
+    let cases = [
+        ("path", "zetta vi README.md"),
+        ("path", "zvi README.md"),
+        ("path", "zetta edit README.md"),
+        ("path", "zetta init bash"),
+        ("path", "zetta splits"),
+        ("path", "zetta mux list"),
+        ("path", "zetta benchmark output"),
+        ("path", "zetta terminal-size"),
+        ("path", "zetta profile list"),
+        ("path", "zetta profile themes"),
+        ("path", "zetta profile --config config.json list"),
+        ("path", "zetta project list"),
+        ("path", "zetta cmd --list"),
+        ("path", "zetta tabicon --list"),
+        ("path", "zetta serial list"),
+        ("path", "zetta http server --help"),
+        ("path", "zetta tftp get --help"),
+        ("path", "zetta copy --help"),
+        ("path", "zetta paste --help"),
+        ("path", "zetta wt status"),
+        ("path", "zetta --profile Demo"),
+        ("path", "zetta --profile Demo --split layout --theme Dark"),
+        ("path", "zetta --config config.json --keymap keymap.json"),
+        ("owner", "zetta"),
+        ("owner", "zetta --new-window"),
+        ("owner", "zetta --profile Demo --new-window"),
+        ("owner", "zetta --command sh -c true"),
+        ("owner", "zetta --replace-pane --split layout"),
+        ("owner", "zetta --profile Demo --replace-pane"),
+        ("owner", "zetta pane --list"),
+        ("owner", "zetta pane wait api -- true"),
+        ("owner", "zetta cmd build -- arg"),
+        ("owner", "zetta attention summary"),
+        ("owner", "zetta notify summary"),
+        ("owner", "zetta theme pane Dark"),
+        ("owner", "zetta overlay text"),
+        ("owner", "zetta tabicon star"),
+        ("owner", "zetta project open"),
+        ("owner", "zetta project add"),
+        ("owner", "zetta project remove"),
+        ("owner", "zetta profile disable Demo"),
+        (
+            "owner",
+            "zetta profile --config config.json theme Demo Dark",
+        ),
+        ("owner", "zetta -c config.json profile remove Demo"),
+    ];
+    let owner_cases = cases
+        .iter()
+        .filter(|(route, _)| *route == "owner")
+        .copied()
+        .collect::<Vec<_>>();
+    let deleted_owner_cases = owner_cases
+        .iter()
+        .map(|(_, command)| ("path", *command))
+        .collect::<Vec<_>>();
+
+    let run_shell = |shell: &str, host: &std::path::Path, selected_cases: &[(&str, &str)]| {
+        fs::write(&log, "").unwrap();
+        let commands = selected_cases
+            .iter()
+            .map(|(_, command)| *command)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let script = ShellIntegration::parse(shell).unwrap().script();
+        let prefix = if shell == "zsh" {
+            "function compdef { :; }\n"
+        } else {
+            ""
+        };
+        let driver = format!("{prefix}{script}\n{commands}\n");
+
+        let mut command = match shell {
+            "bash" => bash_completion_command(),
+            "zsh" => {
+                let mut command = clean_shell_command("zsh");
+                command.arg("-f");
+                command
+            }
+            "fish" => {
+                let mut command = clean_shell_command("fish");
+                command.arg("--no-config");
+                command
+            }
+            _ => unreachable!(),
+        };
+        let mut child = command
+            .env("PATH", &path)
+            .env("ZETTA_HOST_EXECUTABLE", host)
+            .env("ZETTA_TEST_LOG", &log)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(driver.as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "{shell} routing script failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let actual = String::from_utf8_lossy(&fs::read(&log).unwrap())
+            .lines()
+            .map(|line| line.split_once(':').unwrap().0.to_owned())
+            .collect::<Vec<_>>();
+        let expected = selected_cases
+            .iter()
+            .map(|(route, _)| (*route).to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            actual,
+            expected,
+            "{shell} routing did not match: {}",
+            fs::read_to_string(&log).unwrap()
+        );
+    };
+
+    for shell in ["bash", "zsh", "fish"] {
+        if (shell == "bash" && !bash_available())
+            || (shell != "bash"
+                && clean_shell_command(shell)
+                    .arg("--version")
+                    .output()
+                    .is_err())
+        {
+            continue;
+        }
+        run_shell(shell, &owner, &cases);
+    }
+
+    fs::remove_file(&owner).unwrap();
+    let deleted_owner = temporary.path().join("zetta (deleted)");
+    for shell in ["bash", "zsh", "fish"] {
+        if (shell == "bash" && !bash_available())
+            || (shell != "bash"
+                && clean_shell_command(shell)
+                    .arg("--version")
+                    .output()
+                    .is_err())
+        {
+            continue;
+        }
+        run_shell(shell, &deleted_owner, &deleted_owner_cases);
+    }
+}
+
 #[test]
 fn bash_does_not_repeat_options_and_completes_vi_files() {
     let _bash_test_lock = lock_bash_tests();
