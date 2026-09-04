@@ -366,6 +366,110 @@ fn configuration_defaults_round_trip_produces_minimal_output() {
     }
 }
 
+/// What the form writes has to parse back into the configuration it came from,
+/// and writing it a second time has to produce the same text.
+///
+/// This is what pins the file format's two halves together. `ConfigFile` reads
+/// what `to_json` writes, and `deny_unknown_fields` means a key that one half
+/// gains without the other is a parse error here rather than a setting that
+/// quietly stops surviving a visit to the settings page.
+#[test]
+fn a_written_configuration_parses_back_into_itself() {
+    let root = settings_test_path("zetta-configuration-fixed-point");
+    fs::write(
+        &root,
+        r#"{
+            "default_profile": "System",
+            "new_tab_profile": "inherit",
+            "working_directory": "/tmp/zetta-fixed-point",
+            "working_directory_scope": "pane",
+            "theme": "Solarized Light",
+            "dark_theme": "Solarized Dark",
+            "default_tab_icon": "star",
+            "terminal_font_size": 13.5,
+            "terminal_font_family": "Iosevka",
+            "max_scroll_history_lines": 4096,
+            "inactive_pane_opacity": 0.55,
+            "compact_mode": true,
+            "hide_pane_size": false,
+            "hide_title_bar_labels": true,
+            "hide_title_bar_buttons": true,
+            "pane_controls_position": "left",
+            "pane_controls_hidden_by_default": true,
+            "sessions": {
+                "retention": "memory",
+                "ring_bytes": 65536,
+                "persistence": { "recipients": ["age1example"], "identity": "~/keys/id.txt" }
+            },
+            "profiles": [
+                { "name": "Login shell", "program": "/bin/sh", "args": ["-l"], "theme": "Dracula" },
+                { "name": "System", "hidden": true }
+            ],
+            "pane_split_templates": {
+                "pair": { "layout": { "vertical": [{ "label": "left" }, { "label": "right" }] } }
+            }
+        }"#,
+    )
+    .unwrap();
+
+    let config = Config::load(Some(&root), None).unwrap();
+    let written = ConfigurationForm::load(&root, &config)
+        .unwrap()
+        .to_json()
+        .unwrap();
+
+    fs::write(&root, &written).unwrap();
+    let reparsed = Config::load(Some(&root), None).unwrap();
+    let rewritten = ConfigurationForm::load(&root, &reparsed)
+        .unwrap()
+        .to_json()
+        .unwrap();
+    fs::remove_file(&root).ok();
+
+    assert_eq!(written, rewritten, "writing the file again changed it");
+    assert_eq!(config.new_tab_profile, reparsed.new_tab_profile);
+    assert_eq!(config.working_directory, reparsed.working_directory);
+    assert_eq!(
+        config.working_directory_configured,
+        reparsed.working_directory_configured
+    );
+    assert_eq!(
+        config.working_directory_scope,
+        reparsed.working_directory_scope
+    );
+    assert_eq!(config.theme, reparsed.theme);
+    assert_eq!(config.dark_theme, reparsed.dark_theme);
+    assert_eq!(config.default_tab_icon, reparsed.default_tab_icon);
+    assert_eq!(config.terminal_font_size, reparsed.terminal_font_size);
+    assert_eq!(config.terminal_font_family, reparsed.terminal_font_family);
+    assert_eq!(
+        config.max_scroll_history_lines,
+        reparsed.max_scroll_history_lines
+    );
+    assert_eq!(config.inactive_pane_opacity, reparsed.inactive_pane_opacity);
+    assert_eq!(config.compact_mode, reparsed.compact_mode);
+    assert_eq!(config.hide_pane_size, reparsed.hide_pane_size);
+    assert_eq!(config.hide_title_bar_labels, reparsed.hide_title_bar_labels);
+    assert_eq!(
+        config.hide_title_bar_buttons,
+        reparsed.hide_title_bar_buttons
+    );
+    assert_eq!(config.hide_title_bar_menus, reparsed.hide_title_bar_menus);
+    assert_eq!(
+        config.pane_controls_position,
+        reparsed.pane_controls_position
+    );
+    assert_eq!(
+        config.pane_controls_hidden_by_default,
+        reparsed.pane_controls_hidden_by_default
+    );
+    assert_eq!(config.sessions, reparsed.sessions);
+    assert_eq!(config.profiles, reparsed.profiles);
+    assert_eq!(config.hidden_profiles, reparsed.hidden_profiles);
+    assert_eq!(config.default_profile, reparsed.default_profile);
+    assert_eq!(config.pane_split_templates, reparsed.pane_split_templates);
+}
+
 /// The automatic-protection toggle appears only once there is something to seal
 /// a session key to and an effective identity to open it with. The conventional
 /// SSH identity counts when the identity field is blank.

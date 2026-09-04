@@ -1,10 +1,19 @@
 //! Decoding a [`ControlRequest`] off the wire into the [`ControlRequestCommand`]
 //! the server acts on.
 //!
-//! [`ControlRequest`] is one wide struct for every command, so which fields a
-//! command may carry is enforced here rather than by the type: a request that
-//! names fields its command does not use is rejected outright. Every rejection
-//! path zeroizes the request's secrets before returning.
+//! [`ControlRequest`] is one wide struct shared by every command, so which
+//! fields a command may carry cannot be expressed by the type. It is expressed
+//! by [`allowed_control_fields`] instead: one table, checked once, rather than a
+//! chain of `is_none()` tests repeated per command. A field added to
+//! [`ControlRequest`] is rejected for every command until it is named there,
+//! which is the safe default.
+//!
+//! What the table cannot say is checked in the command's own arm: that a value
+//! is present, non-empty, non-zero, or consistent with another field.
+//!
+//! Every rejection zeroizes the request's secrets. [`decode_control_request`] is
+//! the only entry point and does that in one place, so everything below it just
+//! returns `None`.
 
 use super::*;
 
@@ -25,37 +34,160 @@ fn zeroize_control_request_secrets(request: &mut ControlRequest) {
     }
 }
 
-fn control_request_has_new_window_payload(request: &ControlRequest) -> bool {
-    request.runner_id.is_none()
-        && request.session_id.is_none()
-        && request.secret.is_none()
-        && request.icon.is_none()
-        && request.pane_theme.is_none()
-        && request.pane_id.is_none()
-        && request.pane_overlay.is_none()
-        && request.pane_overlay_font_size.is_none()
-        && request.pane_overlay_opacity.is_none()
-        && request.pane_overlay_color.is_none()
-        && request.attention_id.is_none()
-        && request.attention_summary.is_none()
-        && request.attention_body.is_none()
-        && request.tab_name.is_none()
-        && request.worktree_name.is_none()
-        && request.working_directory.is_none()
-        && request.split.is_none()
-        && request
-            .profile
-            .as_deref()
-            .is_none_or(|profile| !profile.is_empty())
-        && request.theme.is_none()
-        && request.scope.is_none()
-        && request.pane_request.is_none()
-        && request.ssh_target.is_none()
-        && request.ssh_port.is_none()
-        && request
-            .config_path
-            .as_deref()
-            .is_none_or(|token| token.len() <= MAX_ACTIVATION_TOKEN_BYTES)
+/// One bit per optional [`ControlRequest`] field.
+///
+/// The two mandatory fields, `token` and `command`, have no bit: every request
+/// carries them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ControlFields(u32);
+
+impl ControlFields {
+    /// Whether every field this set names is also named by `allowed`.
+    fn is_subset_of(self, allowed: Self) -> bool {
+        self.0 & !allowed.0 == 0
+    }
+}
+
+mod field {
+    pub(super) const RUNNER_ID: u32 = 1 << 0;
+    pub(super) const SESSION_ID: u32 = 1 << 1;
+    pub(super) const SECRET: u32 = 1 << 2;
+    pub(super) const SSH_TARGET: u32 = 1 << 3;
+    pub(super) const SSH_PORT: u32 = 1 << 4;
+    pub(super) const ICON: u32 = 1 << 5;
+    pub(super) const PANE_THEME: u32 = 1 << 6;
+    pub(super) const PANE_ID: u32 = 1 << 7;
+    pub(super) const PANE_OVERLAY: u32 = 1 << 8;
+    pub(super) const PANE_OVERLAY_FONT_SIZE: u32 = 1 << 9;
+    pub(super) const PANE_OVERLAY_OPACITY: u32 = 1 << 10;
+    pub(super) const PANE_OVERLAY_COLOR: u32 = 1 << 11;
+    pub(super) const ATTENTION_ID: u32 = 1 << 12;
+    pub(super) const ATTENTION_SUMMARY: u32 = 1 << 13;
+    pub(super) const ATTENTION_BODY: u32 = 1 << 14;
+    pub(super) const TAB_NAME: u32 = 1 << 15;
+    pub(super) const WORKTREE_NAME: u32 = 1 << 16;
+    pub(super) const CONFIG_PATH: u32 = 1 << 17;
+    pub(super) const WORKING_DIRECTORY: u32 = 1 << 18;
+    pub(super) const SPLIT: u32 = 1 << 19;
+    pub(super) const PROFILE: u32 = 1 << 20;
+    pub(super) const THEME: u32 = 1 << 21;
+    pub(super) const SCOPE: u32 = 1 << 22;
+    pub(super) const PANE_REQUEST: u32 = 1 << 23;
+    pub(super) const SHELL_COMMAND: u32 = 1 << 24;
+
+    /// The pane-styling fields that the oldest commands accept and never read.
+    ///
+    /// Their guards only ever asserted that `runner_id`, `session_id` and
+    /// `secret` were absent, so everything else was tolerated. Keeping that
+    /// exactly is what makes this table a refactor rather than a hardening;
+    /// narrowing one of these sets rejects requests that are accepted today and
+    /// belongs in its own change.
+    pub(super) const UNREAD_STYLE: u32 = ICON
+        | PANE_THEME
+        | PANE_OVERLAY
+        | PANE_OVERLAY_FONT_SIZE
+        | PANE_OVERLAY_OPACITY
+        | PANE_OVERLAY_COLOR
+        | SPLIT
+        | PROFILE
+        | THEME;
+}
+
+const fn bit(present: bool, field: u32) -> u32 {
+    if present { field } else { 0 }
+}
+
+/// The fields a request actually sets.
+fn control_request_fields(request: &ControlRequest) -> ControlFields {
+    ControlFields(
+        bit(request.runner_id.is_some(), field::RUNNER_ID)
+            | bit(request.session_id.is_some(), field::SESSION_ID)
+            | bit(request.secret.is_some(), field::SECRET)
+            | bit(request.ssh_target.is_some(), field::SSH_TARGET)
+            | bit(request.ssh_port.is_some(), field::SSH_PORT)
+            | bit(request.icon.is_some(), field::ICON)
+            | bit(request.pane_theme.is_some(), field::PANE_THEME)
+            | bit(request.pane_id.is_some(), field::PANE_ID)
+            | bit(request.pane_overlay.is_some(), field::PANE_OVERLAY)
+            | bit(
+                request.pane_overlay_font_size.is_some(),
+                field::PANE_OVERLAY_FONT_SIZE,
+            )
+            | bit(
+                request.pane_overlay_opacity.is_some(),
+                field::PANE_OVERLAY_OPACITY,
+            )
+            | bit(
+                request.pane_overlay_color.is_some(),
+                field::PANE_OVERLAY_COLOR,
+            )
+            | bit(request.attention_id.is_some(), field::ATTENTION_ID)
+            | bit(
+                request.attention_summary.is_some(),
+                field::ATTENTION_SUMMARY,
+            )
+            | bit(request.attention_body.is_some(), field::ATTENTION_BODY)
+            | bit(request.tab_name.is_some(), field::TAB_NAME)
+            | bit(request.worktree_name.is_some(), field::WORKTREE_NAME)
+            | bit(request.config_path.is_some(), field::CONFIG_PATH)
+            | bit(
+                request.working_directory.is_some(),
+                field::WORKING_DIRECTORY,
+            )
+            | bit(request.split.is_some(), field::SPLIT)
+            | bit(request.profile.is_some(), field::PROFILE)
+            | bit(request.theme.is_some(), field::THEME)
+            | bit(request.scope.is_some(), field::SCOPE)
+            | bit(request.pane_request.is_some(), field::PANE_REQUEST)
+            | bit(request.shell_command.is_some(), field::SHELL_COMMAND),
+    )
+}
+
+/// The fields each command may carry, or `None` for a command this Zetta does
+/// not serve.
+///
+/// This is the whole cross-field allow-list. Read it as "a `set_tab_name`
+/// request may name an attention target and a name, and nothing else"; a
+/// request that sets anything outside its command's row is rejected before the
+/// command is decoded.
+fn allowed_control_fields(command: &str) -> Option<ControlFields> {
+    use field::*;
+
+    Some(ControlFields(match command {
+        "reload_configuration" => CONFIG_PATH | SPLIT | PROFILE | THEME,
+        "open_window" => UNREAD_STYLE,
+        "new_window" => PROFILE | CONFIG_PATH,
+        "open_project" => CONFIG_PATH | WORKING_DIRECTORY,
+        "reload_projects" => 0,
+        "get_silent_mode" => ATTENTION_ID,
+        "replace_pane" => SPLIT | PROFILE | THEME,
+        "run_wait" => ATTENTION_ID | PANE_ID | CONFIG_PATH,
+        "run_complete" => SESSION_ID | CONFIG_PATH,
+        "run_pane" => PANE_REQUEST,
+        "run_shell_command" => SHELL_COMMAND,
+        "open_command" => CONFIG_PATH | PANE_REQUEST,
+        "list_panes" => ATTENTION_ID,
+        "open_remote_session" => SESSION_ID | SECRET | SSH_TARGET | SSH_PORT,
+        "reconnect_session" => RUNNER_ID | SESSION_ID | SECRET | ATTENTION_ID,
+        "resume_disk_session" => SESSION_ID | SECRET | CONFIG_PATH,
+        "set_tab_icon" => UNREAD_STYLE,
+        "set_theme" => UNREAD_STYLE | SCOPE,
+        "list_themes" => {
+            PANE_OVERLAY
+                | PANE_OVERLAY_FONT_SIZE
+                | PANE_OVERLAY_OPACITY
+                | PANE_OVERLAY_COLOR
+                | SPLIT
+                | PROFILE
+        }
+        "get_pane_theme" => ATTENTION_ID | PANE_ID,
+        "set_overlay" => UNREAD_STYLE,
+        "set_tab_attention" => ATTENTION_ID | ATTENTION_SUMMARY | ATTENTION_BODY,
+        "focus_tab" => ATTENTION_ID,
+        "set_tab_name" => ATTENTION_ID | TAB_NAME,
+        "set_worktree_name" => ATTENTION_ID | WORKTREE_NAME,
+        _ => return None,
+    }))
 }
 
 /// Compares the endpoint token without leaking how many leading bytes matched.
@@ -70,240 +202,83 @@ fn token_matches(supplied: &str, expected: &str) -> bool {
     supplied.len() == expected.len() && bool::from(supplied.ct_eq(expected))
 }
 
-fn control_request_has_remote_session_payload(request: &ControlRequest) -> bool {
-    request.runner_id.is_none()
-        && request.session_id.is_some_and(|session_id| session_id != 0)
-        && request.ssh_target.as_deref().is_some_and(|target| {
-            !target.is_empty() && !target.starts_with('-') && target.len() <= 4096
-        })
-        && request.ssh_port.is_none_or(|port| port != 0)
-        && request.icon.is_none()
-        && request.pane_theme.is_none()
-        && request.pane_id.is_none()
-        && request.pane_overlay.is_none()
-        && request.pane_overlay_font_size.is_none()
-        && request.pane_overlay_opacity.is_none()
-        && request.pane_overlay_color.is_none()
-        && request.attention_id.is_none()
-        && request.attention_summary.is_none()
-        && request.attention_body.is_none()
-        && request.tab_name.is_none()
-        && request.worktree_name.is_none()
-        && request.config_path.is_none()
-        && request.working_directory.is_none()
-        && request.split.is_none()
-        && request.profile.is_none()
-        && request.theme.is_none()
-        && request.scope.is_none()
-        && request.pane_request.is_none()
-        && request
-            .secret
-            .as_deref()
-            .is_none_or(|secret| !secret.is_empty())
-}
-
 fn decode_control_request(
     request: &mut ControlRequest,
     token: &str,
 ) -> Option<ControlRequestCommand> {
+    let command = decode_authenticated_request(request, token);
+    if command.is_none() {
+        zeroize_control_request_secrets(request);
+    }
+    command
+}
+
+fn decode_authenticated_request(
+    request: &mut ControlRequest,
+    token: &str,
+) -> Option<ControlRequestCommand> {
     if !token_matches(&request.token, token) {
-        zeroize_control_request_secrets(request);
         return None;
     }
-    if !matches!(
-        request.command.as_str(),
-        "run_pane" | "open_command" | "list_panes"
-    ) && request.pane_request.is_some()
-    {
-        zeroize_control_request_secrets(request);
+    let allowed = allowed_control_fields(&request.command)?;
+    if !control_request_fields(request).is_subset_of(allowed) {
         return None;
     }
-    if request.command != "run_shell_command" && request.shell_command.is_some() {
-        zeroize_control_request_secrets(request);
-        return None;
-    }
-    if request.command != "open_remote_session"
-        && (request.ssh_target.is_some() || request.ssh_port.is_some())
-    {
-        zeroize_control_request_secrets(request);
-        return None;
-    }
-    if !matches!(
-        request.command.as_str(),
-        "reload_configuration"
-            | "open_project"
-            | "resume_disk_session"
-            | "open_command"
-            | "run_wait"
-            | "run_complete"
-            | "new_window"
-    ) && request.config_path.is_some()
-    {
-        zeroize_control_request_secrets(request);
-        return None;
-    }
-    if request.command != "open_project" && request.working_directory.is_some() {
-        zeroize_control_request_secrets(request);
-        return None;
-    }
-    if request.command != "set_tab_name" && request.tab_name.is_some() {
-        zeroize_control_request_secrets(request);
-        return None;
-    }
-    if request.command != "set_worktree_name" && request.worktree_name.is_some() {
-        zeroize_control_request_secrets(request);
-        return None;
-    }
-    if request.command != "set_theme" && request.scope.is_some() {
-        zeroize_control_request_secrets(request);
-        return None;
-    }
-    if !matches!(request.command.as_str(), "get_pane_theme" | "run_wait")
-        && request.pane_id.is_some()
-    {
-        zeroize_control_request_secrets(request);
-        return None;
-    }
-    if (!matches!(
-        request.command.as_str(),
-        "set_tab_attention"
-            | "focus_tab"
-            | "set_tab_name"
-            | "set_worktree_name"
-            | "get_silent_mode"
-            | "get_pane_theme"
-            | "list_panes"
-            | "reconnect_session"
-            | "run_wait"
-    ) && request.attention_id.is_some())
-        || (request.command != "set_tab_attention"
-            && (request.attention_summary.is_some() || request.attention_body.is_some()))
-    {
-        zeroize_control_request_secrets(request);
-        return None;
-    }
-    let command = match request.command.as_str() {
-        "reload_configuration"
-            if request.runner_id.is_none()
-                && request.session_id.is_none()
-                && request.secret.is_none()
-                && request.icon.is_none()
-                && request.pane_theme.is_none()
-                && request.pane_overlay.is_none()
-                && request.pane_overlay_font_size.is_none()
-                && request.pane_overlay_opacity.is_none()
-                && request.pane_overlay_color.is_none() =>
-        {
-            request
-                .config_path
-                .take()
-                .filter(|path| !path.is_empty())
-                .map(|config_path| ControlRequestCommand::ReloadConfiguration { config_path })
-        }
-        "open_window"
-            if request.runner_id.is_none()
-                && request.session_id.is_none()
-                && request.secret.is_none() =>
-        {
-            Some(ControlRequestCommand::OpenWindow)
-        }
-        "new_window" if control_request_has_new_window_payload(request) => {
+    decode_control_command(request)
+}
+
+/// Turns a request whose fields are already known to be legal for its command
+/// into that command, checking the values the table cannot describe.
+fn decode_control_command(request: &mut ControlRequest) -> Option<ControlRequestCommand> {
+    match request.command.as_str() {
+        "reload_configuration" => request
+            .config_path
+            .take()
+            .filter(|path| !path.is_empty())
+            .map(|config_path| ControlRequestCommand::ReloadConfiguration { config_path }),
+        "open_window" => Some(ControlRequestCommand::OpenWindow),
+        "new_window" => {
+            let profile = request.profile.take();
+            if profile.as_deref().is_some_and(str::is_empty) {
+                return None;
+            }
+            let activation_token = request.config_path.take();
+            if activation_token
+                .as_deref()
+                .is_some_and(|token| token.len() > MAX_ACTIVATION_TOKEN_BYTES)
+            {
+                return None;
+            }
             Some(ControlRequestCommand::OpenNewWindow {
-                profile: request.profile.take(),
-                activation_token: request.config_path.take().filter(|token| !token.is_empty()),
+                profile,
+                activation_token: activation_token.filter(|token| !token.is_empty()),
             })
         }
-        "open_project"
-            if request.runner_id.is_none()
-                && request.session_id.is_none()
-                && request.secret.is_none()
-                && request.icon.is_none()
-                && request.pane_theme.is_none()
-                && request.pane_overlay.is_none()
-                && request.pane_overlay_font_size.is_none()
-                && request.pane_overlay_opacity.is_none()
-                && request.pane_overlay_color.is_none()
-                && request.attention_id.is_none()
-                && request.attention_summary.is_none()
-                && request.attention_body.is_none()
-                && request.tab_name.is_none()
-                && request.worktree_name.is_none()
-                && request.split.is_none()
-                && request.profile.is_none()
-                && request.theme.is_none()
-                && request.pane_request.is_none() =>
-        {
-            request
-                .config_path
-                .take()
-                .filter(|path| !path.is_empty())
-                .map(PathBuf::from)
-                .map(|root| {
-                    let working_directory = request
-                        .working_directory
-                        .take()
-                        .filter(|path| !path.is_empty())
-                        .map(PathBuf::from);
-                    ControlRequestCommand::OpenProject {
-                        root,
-                        working_directory,
-                    }
-                })
-        }
-        "reload_projects"
-            if request.runner_id.is_none()
-                && request.session_id.is_none()
-                && request.secret.is_none()
-                && request.icon.is_none()
-                && request.pane_theme.is_none()
-                && request.pane_overlay.is_none()
-                && request.pane_overlay_font_size.is_none()
-                && request.pane_overlay_opacity.is_none()
-                && request.pane_overlay_color.is_none()
-                && request.attention_id.is_none()
-                && request.attention_summary.is_none()
-                && request.attention_body.is_none()
-                && request.tab_name.is_none()
-                && request.worktree_name.is_none()
-                && request.config_path.is_none()
-                && request.split.is_none()
-                && request.profile.is_none()
-                && request.theme.is_none()
-                && request.pane_request.is_none() =>
-        {
-            Some(ControlRequestCommand::ReloadProjects)
-        }
-        "get_silent_mode"
-            if request.runner_id.is_none()
-                && request.session_id.is_none()
-                && request.secret.is_none()
-                && request.icon.is_none()
-                && request.pane_theme.is_none()
-                && request.pane_overlay.is_none()
-                && request.pane_overlay_font_size.is_none()
-                && request.pane_overlay_opacity.is_none()
-                && request.pane_overlay_color.is_none()
-                && request.split.is_none()
-                && request.profile.is_none()
-                && request.theme.is_none() =>
-        {
-            let attention_id = match request.attention_id.take() {
-                Some(0) => return None,
-                attention_id => attention_id,
-            };
+        "open_project" => request
+            .config_path
+            .take()
+            .filter(|path| !path.is_empty())
+            .map(PathBuf::from)
+            .map(|root| {
+                let working_directory = request
+                    .working_directory
+                    .take()
+                    .filter(|path| !path.is_empty())
+                    .map(PathBuf::from);
+                ControlRequestCommand::OpenProject {
+                    root,
+                    working_directory,
+                }
+            }),
+        "reload_projects" => Some(ControlRequestCommand::ReloadProjects),
+        "get_silent_mode" => {
+            let attention_id = request.attention_id.take();
+            if attention_id == Some(0) {
+                return None;
+            }
             Some(ControlRequestCommand::GetSilentMode { attention_id })
         }
-        "replace_pane"
-            if request.runner_id.is_none()
-                && request.session_id.is_none()
-                && request.secret.is_none()
-                && request.icon.is_none()
-                && request.pane_theme.is_none()
-                && request.pane_overlay.is_none()
-                && request.pane_overlay_font_size.is_none()
-                && request.pane_overlay_opacity.is_none()
-                && request.pane_overlay_color.is_none() =>
-        {
+        "replace_pane" => {
             let split = request.split.take();
             let profile = request.profile.take();
             let theme = request.theme.take();
@@ -318,48 +293,21 @@ fn decode_control_request(
                 theme,
             })
         }
-        "run_wait"
-            if request.runner_id.is_none()
-                && request.session_id.is_none()
-                && request.secret.is_none()
-                && request.icon.is_none()
-                && request.pane_theme.is_none()
-                && request.pane_overlay.is_none()
-                && request.pane_overlay_font_size.is_none()
-                && request.pane_overlay_opacity.is_none()
-                && request.pane_overlay_color.is_none()
-                && request.attention_summary.is_none()
-                && request.attention_body.is_none()
-                && request.tab_name.is_none()
-                && request.worktree_name.is_none()
-                && request.working_directory.is_none()
-                && request.split.is_none()
-                && request.profile.is_none()
-                && request.theme.is_none()
-                && request.scope.is_none()
-                && request.pane_request.is_none()
-                && request.attention_id.is_some()
-                && request.pane_id.is_some() =>
-        {
+        "run_wait" => {
             let owner = RunPaneIdentity::new(request.attention_id.take()?, request.pane_id.take()?);
             if owner.attention_id == 0 || owner.routing_id == 0 {
-                zeroize_control_request_secrets(request);
                 return None;
             }
             let mut encoded_payload = request.config_path.take()?;
             let payload = serde_json::from_str::<RunWaitPayload>(&encoded_payload);
             encoded_payload.zeroize();
-            let Ok(payload) = payload else {
-                zeroize_control_request_secrets(request);
-                return None;
-            };
+            let payload = payload.ok()?;
             if payload.dependencies.is_empty()
                 || payload.dependencies.iter().any(String::is_empty)
                 || payload.command.is_empty()
                 || payload.command.first().is_some_and(String::is_empty)
                 || pane_command_byte_len(&payload.command) > MAX_PANE_COMMAND_BYTES
             {
-                zeroize_control_request_secrets(request);
                 return None;
             }
             Some(ControlRequestCommand::RunWait {
@@ -371,117 +319,30 @@ fn decode_control_request(
                 },
             })
         }
-        "run_complete"
-            if request.runner_id.is_none()
-                && request.session_id.is_some()
-                && request.secret.is_none()
-                && request.icon.is_none()
-                && request.pane_theme.is_none()
-                && request.pane_id.is_none()
-                && request.pane_overlay.is_none()
-                && request.pane_overlay_font_size.is_none()
-                && request.pane_overlay_opacity.is_none()
-                && request.pane_overlay_color.is_none()
-                && request.attention_id.is_none()
-                && request.attention_summary.is_none()
-                && request.attention_body.is_none()
-                && request.tab_name.is_none()
-                && request.worktree_name.is_none()
-                && request.working_directory.is_none()
-                && request.split.is_none()
-                && request.profile.is_none()
-                && request.theme.is_none()
-                && request.scope.is_none()
-                && request.pane_request.is_none() =>
-        {
+        "run_complete" => {
             let id = request.session_id.take()?;
             if id == 0 {
-                zeroize_control_request_secrets(request);
                 return None;
             }
             let mut encoded_exit_code = request.config_path.take()?;
             let exit_code = serde_json::from_str::<Option<i32>>(&encoded_exit_code).ok();
             encoded_exit_code.zeroize();
-            let exit_code = exit_code?;
-            Some(ControlRequestCommand::RunComplete { id, exit_code })
+            Some(ControlRequestCommand::RunComplete {
+                id,
+                exit_code: exit_code?,
+            })
         }
-        "run_pane"
-            if request.runner_id.is_none()
-                && request.session_id.is_none()
-                && request.secret.is_none()
-                && request.icon.is_none()
-                && request.pane_theme.is_none()
-                && request.pane_overlay.is_none()
-                && request.pane_overlay_font_size.is_none()
-                && request.pane_overlay_opacity.is_none()
-                && request.pane_overlay_color.is_none()
-                && request.attention_id.is_none()
-                && request.attention_summary.is_none()
-                && request.attention_body.is_none()
-                && request.tab_name.is_none()
-                && request.worktree_name.is_none()
-                && request.config_path.is_none()
-                && request.split.is_none()
-                && request.profile.is_none()
-                && request.theme.is_none() =>
-        {
-            request
-                .pane_request
-                .take()
-                .and_then(PaneControlRequest::into_command)
-                .map(|request| ControlRequestCommand::RunPane { request })
-        }
-        "run_shell_command"
-            if request.runner_id.is_none()
-                && request.session_id.is_none()
-                && request.secret.is_none()
-                && request.icon.is_none()
-                && request.pane_theme.is_none()
-                && request.pane_id.is_none()
-                && request.pane_overlay.is_none()
-                && request.pane_overlay_font_size.is_none()
-                && request.pane_overlay_opacity.is_none()
-                && request.pane_overlay_color.is_none()
-                && request.attention_id.is_none()
-                && request.attention_summary.is_none()
-                && request.attention_body.is_none()
-                && request.tab_name.is_none()
-                && request.worktree_name.is_none()
-                && request.config_path.is_none()
-                && request.working_directory.is_none()
-                && request.split.is_none()
-                && request.profile.is_none()
-                && request.theme.is_none()
-                && request.scope.is_none()
-                && request.pane_request.is_none()
-                && request.shell_command.is_some() =>
-        {
-            request
-                .shell_command
-                .take()
-                .and_then(ShellCommandControlRequest::into_request)
-                .map(|request| ControlRequestCommand::RunShellCommand { request })
-        }
-        "open_command"
-            if request.runner_id.is_none()
-                && request.session_id.is_none()
-                && request.secret.is_none()
-                && request.icon.is_none()
-                && request.pane_theme.is_none()
-                && request.pane_overlay.is_none()
-                && request.pane_overlay_font_size.is_none()
-                && request.pane_overlay_opacity.is_none()
-                && request.pane_overlay_color.is_none()
-                && request.attention_id.is_none()
-                && request.attention_summary.is_none()
-                && request.attention_body.is_none()
-                && request.tab_name.is_none()
-                && request.worktree_name.is_none()
-                && request.split.is_none()
-                && request.profile.is_none()
-                && request.theme.is_none()
-                && request.scope.is_none() =>
-        {
+        "run_pane" => request
+            .pane_request
+            .take()
+            .and_then(PaneControlRequest::into_command)
+            .map(|request| ControlRequestCommand::RunPane { request }),
+        "run_shell_command" => request
+            .shell_command
+            .take()
+            .and_then(ShellCommandControlRequest::into_request)
+            .map(|request| ControlRequestCommand::RunShellCommand { request }),
+        "open_command" => {
             let working_directory = request
                 .config_path
                 .take()
@@ -504,62 +365,38 @@ fn decode_control_request(
                     working_directory,
                 })
         }
-        "list_panes"
-            if request.runner_id.is_none()
-                && request.session_id.is_none()
-                && request.secret.is_none()
-                && request.icon.is_none()
-                && request.pane_theme.is_none()
-                && request.pane_overlay.is_none()
-                && request.pane_overlay_font_size.is_none()
-                && request.pane_overlay_opacity.is_none()
-                && request.pane_overlay_color.is_none()
-                && request
-                    .attention_id
-                    .is_none_or(|attention_id| attention_id != 0)
-                && request.attention_summary.is_none()
-                && request.attention_body.is_none()
-                && request.tab_name.is_none()
-                && request.worktree_name.is_none()
-                && request.config_path.is_none()
-                && request.split.is_none()
-                && request.profile.is_none()
-                && request.theme.is_none()
-                && request.pane_request.is_none() =>
-        {
-            Some(ControlRequestCommand::ListPaneLabels {
-                attention_id: request.attention_id.take(),
-            })
+        "list_panes" => {
+            let attention_id = request.attention_id.take();
+            if attention_id == Some(0) {
+                return None;
+            }
+            Some(ControlRequestCommand::ListPaneLabels { attention_id })
         }
-        "open_remote_session" if control_request_has_remote_session_payload(request) => {
+        "open_remote_session" => {
+            let target = request.ssh_target.take().filter(|target| {
+                !target.is_empty() && !target.starts_with('-') && target.len() <= 4096
+            })?;
+            let port = request.ssh_port.take();
+            if port == Some(0) {
+                return None;
+            }
+            let session_id = request.session_id.take().filter(|id| *id != 0)?;
+            let secret = request.secret.take();
+            if secret.as_deref().is_some_and(str::is_empty) {
+                return None;
+            }
             Some(ControlRequestCommand::OpenRemoteSession {
-                target: request.ssh_target.take()?,
-                port: request.ssh_port.take(),
-                session_id: request.session_id.take()?,
-                secret: request.secret.take().map(SessionSecret::new),
+                target,
+                port,
+                session_id,
+                secret: secret.map(SessionSecret::new),
             })
         }
-        "reconnect_session"
-            if request.icon.is_none()
-                && request.pane_theme.is_none()
-                && request.pane_overlay.is_none()
-                && request.pane_overlay_font_size.is_none()
-                && request.pane_overlay_opacity.is_none()
-                && request.pane_overlay_color.is_none()
-                && request.attention_summary.is_none()
-                && request.attention_body.is_none()
-                && request.tab_name.is_none()
-                && request.worktree_name.is_none()
-                && request.config_path.is_none()
-                && request.split.is_none()
-                && request.profile.is_none()
-                && request.theme.is_none()
-                && request.pane_request.is_none() =>
-        {
-            let attention_id = match request.attention_id.take() {
-                Some(0) => return None,
-                attention_id => attention_id,
-            };
+        "reconnect_session" => {
+            let attention_id = request.attention_id.take();
+            if attention_id == Some(0) {
+                return None;
+            }
             request
                 .runner_id
                 .zip(request.session_id)
@@ -572,39 +409,15 @@ fn decode_control_request(
                     },
                 )
         }
-        "resume_disk_session"
-            if request.runner_id.is_none()
-                && request.session_id.is_some()
-                && request.icon.is_none()
-                && request.pane_theme.is_none()
-                && request.pane_overlay.is_none()
-                && request.pane_overlay_font_size.is_none()
-                && request.pane_overlay_opacity.is_none()
-                && request.pane_overlay_color.is_none()
-                && request.attention_id.is_none()
-                && request.attention_summary.is_none()
-                && request.attention_body.is_none()
-                && request.tab_name.is_none()
-                && request.worktree_name.is_none()
-                && request.split.is_none()
-                && request.profile.is_none()
-                && request.theme.is_none()
-                && request.pane_request.is_none() =>
-        {
+        "resume_disk_session" => {
             let session_id = request.session_id.take()?;
             // The standalone client sends a JSON object here. Keep the paths
             // and passphrases private to the authenticated local socket and
             // reject malformed or empty entries before they reach the GUI.
-            let Some(mut encoded_payload) = request.config_path.take() else {
-                zeroize_control_request_secrets(request);
-                return None;
-            };
+            let mut encoded_payload = request.config_path.take()?;
             let payload = serde_json::from_str::<ResumeIdentityPayload>(&encoded_payload);
             encoded_payload.zeroize();
-            let Ok(payload) = payload else {
-                zeroize_control_request_secrets(request);
-                return None;
-            };
+            let payload = payload.ok()?;
             let identity_paths = payload
                 .identity_paths
                 .into_iter()
@@ -622,7 +435,6 @@ fn decode_control_request(
                     .iter()
                     .any(|path| path.as_os_str().is_empty())
             {
-                zeroize_control_request_secrets(request);
                 return None;
             }
             Some(ControlRequestCommand::ResumeDiskSession {
@@ -632,22 +444,14 @@ fn decode_control_request(
                 secret: request.secret.take().map(SessionSecret::new),
             })
         }
-        "set_tab_icon"
-            if request.runner_id.is_none()
-                && request.session_id.is_none()
-                && request.secret.is_none() =>
-        {
+        "set_tab_icon" => {
             let icon = match request.icon.take() {
                 Some(icon) => Some(icon.parse().ok()?),
                 None => None,
             };
             Some(ControlRequestCommand::SetTabIcon { icon })
         }
-        "set_theme"
-            if request.runner_id.is_none()
-                && request.session_id.is_none()
-                && request.secret.is_none() =>
-        {
+        "set_theme" => {
             let scope = match request.scope.take()?.as_str() {
                 "pane" => crate::ThemeScope::Pane,
                 "tab" => crate::ThemeScope::Tab,
@@ -659,45 +463,18 @@ fn decode_control_request(
             }
             Some(ControlRequestCommand::SetTheme { scope, theme })
         }
-        "list_themes"
-            if request.runner_id.is_none()
-                && request.session_id.is_none()
-                && request.secret.is_none()
-                && request.icon.is_none()
-                && request.pane_theme.is_none()
-                && request.theme.is_none() =>
-        {
-            Some(ControlRequestCommand::ListThemes)
-        }
-        "get_pane_theme"
-            if request.runner_id.is_none()
-                && request.session_id.is_none()
-                && request.secret.is_none()
-                && request.icon.is_none()
-                && request.pane_theme.is_none()
-                && request.pane_overlay.is_none()
-                && request.pane_overlay_font_size.is_none()
-                && request.pane_overlay_opacity.is_none()
-                && request.pane_overlay_color.is_none()
-                && request.attention_summary.is_none()
-                && request.attention_body.is_none()
-                && request.tab_name.is_none()
-                && request.worktree_name.is_none()
-                && request.split.is_none()
-                && request.profile.is_none()
-                && request.theme.is_none()
-                && request.pane_id != Some(0) =>
-        {
+        "list_themes" => Some(ControlRequestCommand::ListThemes),
+        "get_pane_theme" => {
+            let pane_id = request.pane_id.take();
+            if pane_id == Some(0) {
+                return None;
+            }
             Some(ControlRequestCommand::GetPaneTheme {
                 attention_id: request.attention_id.take().filter(|id| *id != 0)?,
-                pane_id: request.pane_id.take(),
+                pane_id,
             })
         }
-        "set_overlay"
-            if request.runner_id.is_none()
-                && request.session_id.is_none()
-                && request.secret.is_none() =>
-        {
+        "set_overlay" => {
             let font_size = match request.pane_overlay_font_size.take() {
                 Some(name) => Some(OverlayFontSize::parse(&name)?),
                 None => None,
@@ -715,21 +492,7 @@ fn decode_control_request(
                 color: request.pane_overlay_color.take(),
             })
         }
-        "set_tab_attention"
-            if request.runner_id.is_none()
-                && request.session_id.is_none()
-                && request.secret.is_none()
-                && request.icon.is_none()
-                && request.pane_theme.is_none()
-                && request.pane_overlay.is_none()
-                && request.pane_overlay_font_size.is_none()
-                && request.pane_overlay_opacity.is_none()
-                && request.pane_overlay_color.is_none()
-                && request.config_path.is_none()
-                && request.split.is_none()
-                && request.profile.is_none()
-                && request.theme.is_none() =>
-        {
+        "set_tab_attention" => {
             let attention_id = request.attention_id.take().filter(|id| *id != 0)?;
             let summary = request
                 .attention_summary
@@ -741,86 +504,28 @@ fn decode_control_request(
                 body: request.attention_body.take(),
             })
         }
-        "focus_tab"
-            if request.runner_id.is_none()
-                && request.session_id.is_none()
-                && request.secret.is_none()
-                && request.icon.is_none()
-                && request.pane_theme.is_none()
-                && request.pane_overlay.is_none()
-                && request.pane_overlay_font_size.is_none()
-                && request.pane_overlay_opacity.is_none()
-                && request.pane_overlay_color.is_none()
-                && request.attention_summary.is_none()
-                && request.attention_body.is_none()
-                && request.config_path.is_none()
-                && request.tab_name.is_none()
-                && request.split.is_none()
-                && request.profile.is_none()
-                && request.theme.is_none() =>
-        {
+        "focus_tab" => Some(ControlRequestCommand::FocusTab {
+            attention_id: request.attention_id.take().filter(|id| *id != 0)?,
+        }),
+        "set_tab_name" => {
             let attention_id = request.attention_id.take().filter(|id| *id != 0)?;
-            Some(ControlRequestCommand::FocusTab { attention_id })
-        }
-        "set_tab_name"
-            if request.runner_id.is_none()
-                && request.session_id.is_none()
-                && request.secret.is_none()
-                && request.icon.is_none()
-                && request.pane_theme.is_none()
-                && request.pane_overlay.is_none()
-                && request.pane_overlay_font_size.is_none()
-                && request.pane_overlay_opacity.is_none()
-                && request.pane_overlay_color.is_none()
-                && request.config_path.is_none()
-                && request.attention_summary.is_none()
-                && request.attention_body.is_none()
-                && request.split.is_none()
-                && request.profile.is_none()
-                && request.theme.is_none() =>
-        {
-            let attention_id = request.attention_id.take().filter(|id| *id != 0)?;
-            if request.tab_name.as_deref().is_some_and(str::is_empty) {
+            let name = request.tab_name.take();
+            if name.as_deref().is_some_and(str::is_empty) {
                 return None;
             }
-            Some(ControlRequestCommand::SetTabName {
-                attention_id,
-                name: request.tab_name.take(),
-            })
+            Some(ControlRequestCommand::SetTabName { attention_id, name })
         }
-        "set_worktree_name"
-            if request.runner_id.is_none()
-                && request.session_id.is_none()
-                && request.secret.is_none()
-                && request.icon.is_none()
-                && request.pane_theme.is_none()
-                && request.pane_overlay.is_none()
-                && request.pane_overlay_font_size.is_none()
-                && request.pane_overlay_opacity.is_none()
-                && request.pane_overlay_color.is_none()
-                && request.config_path.is_none()
-                && request.attention_summary.is_none()
-                && request.attention_body.is_none()
-                && request.tab_name.is_none()
-                && request.split.is_none()
-                && request.profile.is_none()
-                && request.theme.is_none() =>
-        {
+        "set_worktree_name" => {
             let attention_id = request.attention_id.take().filter(|id| *id != 0)?;
-            if request.worktree_name.as_deref().is_some_and(str::is_empty) {
+            let name = request.worktree_name.take();
+            if name.as_deref().is_some_and(str::is_empty) {
                 return None;
             }
-            Some(ControlRequestCommand::SetWorktreeName {
-                attention_id,
-                name: request.worktree_name.take(),
-            })
+            Some(ControlRequestCommand::SetWorktreeName { attention_id, name })
         }
+        // `allowed_control_fields` has already rejected anything else.
         _ => None,
-    };
-    if command.is_none() {
-        zeroize_control_request_secrets(request);
     }
-    command
 }
 
 #[cfg(test)]

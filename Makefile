@@ -92,47 +92,56 @@ endif
 # TFTP is a convenient shorthand for disabling both the server and client.
 # Linux and FreeBSD default to Wayland; set X11=1 to include the X11 backend.
 tool_enabled = $(if $(filter 0 false no off,$(strip $(1))),,1)
-ifeq ($(OS),Windows_NT)
-BUILD_FEATURES := windows-gui
-else ifeq ($(UNAME_S),Darwin)
-BUILD_FEATURES :=
-else ifneq ($(filter Linux FreeBSD,$(UNAME_S)),)
-BUILD_FEATURES := wayland
-else
-BUILD_FEATURES :=
-endif
+
+# The capability features are the same whatever the target is; only the
+# windowing backend differs. Keeping them in their own list is what lets the
+# cross-check targets below build a feature set for a platform that is not the
+# host, without restating which capabilities are on.
+CAPABILITY_FEATURES :=
 ifneq ($(call tool_enabled,$(SERIAL)),)
-BUILD_FEATURES += serial-console
+CAPABILITY_FEATURES += serial-console
 endif
 ifneq ($(call tool_enabled,$(HTTP)),)
-BUILD_FEATURES += http-server
+CAPABILITY_FEATURES += http-server
 endif
 ifneq ($(call tool_enabled,$(TFTP_SERVER)),)
-BUILD_FEATURES += tftp-server
+CAPABILITY_FEATURES += tftp-server
 endif
 ifneq ($(call tool_enabled,$(TFTP_CLIENT)),)
-BUILD_FEATURES += tftp-client
+CAPABILITY_FEATURES += tftp-client
 endif
 ifneq ($(call tool_enabled,$(NOTIFY)),)
-BUILD_FEATURES += notifications
+CAPABILITY_FEATURES += notifications
 endif
 ifneq ($(call tool_enabled,$(CLIPBOARD)),)
-BUILD_FEATURES += clipboard
+CAPABILITY_FEATURES += clipboard
 endif
 ifneq ($(call tool_enabled,$(SYNTAX_HIGHLIGHTING)),)
-BUILD_FEATURES += syntax-highlighting
+CAPABILITY_FEATURES += syntax-highlighting
 endif
 ifneq ($(call tool_enabled,$(SESSION_PERSISTENCE)),)
-BUILD_FEATURES += session-persistence
+CAPABILITY_FEATURES += session-persistence
 endif
 ifneq ($(call tool_enabled,$(WORKTREE)),)
-BUILD_FEATURES += worktree
+CAPABILITY_FEATURES += worktree
+endif
+
+ifeq ($(OS),Windows_NT)
+PLATFORM_FEATURES := windows-gui
+else ifeq ($(UNAME_S),Darwin)
+PLATFORM_FEATURES :=
+else ifneq ($(filter Linux FreeBSD,$(UNAME_S)),)
+PLATFORM_FEATURES := wayland
+else
+PLATFORM_FEATURES :=
 endif
 ifneq ($(call tool_enabled,$(X11)),)
 ifneq ($(filter Linux FreeBSD,$(UNAME_S)),)
-BUILD_FEATURES += x11
+PLATFORM_FEATURES += x11
 endif
 endif
+
+BUILD_FEATURES := $(PLATFORM_FEATURES) $(CAPABILITY_FEATURES)
 
 export SERIAL HTTP TFTP TFTP_SERVER TFTP_CLIENT NOTIFY CLIPBOARD SYNTAX_HIGHLIGHTING SESSION_PERSISTENCE WORKTREE X11
 export CARGO_BUILD_JOBS
@@ -169,7 +178,10 @@ LINUX_USER_ZWT_PATH := $(LINUX_USER_BIN_DIR)/zwt
 
 WINDOWS_ZWT_ARGS := $(if $(call tool_enabled,$(WORKTREE)), -SourceZwtBinary "$(BUILD_TARGET_DIR)/zwt.exe",)
 
-.PHONY: all build fmt test lint install install-binary install-capabilities install-assets install-user-path uninstall \
+.PHONY: all build fmt test lint check-platforms check-features \
+	check-linux check-windows check-macos \
+	can-check-linux can-check-windows can-check-macos \
+	install install-binary install-capabilities install-assets install-user-path uninstall \
 	uninstall-binary uninstall-assets uninstall-user-path refresh-desktop-caches clean
 
 all: fmt lint test build
@@ -247,6 +259,150 @@ fmt:
 
 lint:
 	$(CARGO_RUN) clippy --locked --all-targets --no-default-features --features "$(BUILD_FEATURES)" -- -D warnings
+
+# Per-platform checking.
+#
+# `make test` compiles only the host's `cfg` arms, so a change to
+# `#[cfg(windows)]` or `#[cfg(target_os = "macos")]` code can pass every check
+# on one machine and still fail to build on another. Each target below checks
+# one platform: natively when that platform *is* the host, and through its
+# cross target otherwise. Zetta is developed from all three, so which of these
+# is the cheap one depends on where you are sitting.
+#
+# All of them pass `--all-targets`, so the tests behind those `cfg`s are
+# compiled too — a plain `cargo check` skips them, which is how test code that
+# does not build under a feature combination goes unnoticed.
+#
+# They check; they do not link or run. Running a platform's tests still needs a
+# machine of that platform, so a green `check-windows` is not a green Windows
+# test suite.
+ifeq ($(OS),Windows_NT)
+HOST_PLATFORM := windows
+else ifeq ($(UNAME_S),Darwin)
+HOST_PLATFORM := macos
+else ifeq ($(UNAME_S),Linux)
+HOST_PLATFORM := linux
+else
+HOST_PLATFORM := other
+endif
+
+CHECK_LINUX_TARGET := x86_64-unknown-linux-gnu
+CHECK_WINDOWS_TARGET := x86_64-pc-windows-gnu
+CHECK_MACOS_TARGET := x86_64-apple-darwin
+CHECK_LINUX_FEATURES := wayland $(CAPABILITY_FEATURES)
+CHECK_WINDOWS_FEATURES := windows-gui $(CAPABILITY_FEATURES)
+CHECK_MACOS_FEATURES := $(CAPABILITY_FEATURES)
+
+# A cross check needs more than the Rust target: aws-lc-sys, ring, tree-sitter
+# and wasmtime all compile C or assembly against the target's own headers, so
+# there has to be a C toolchain that can produce them. That is where a missing
+# prerequisite otherwise surfaces — several screens into a build script — so
+# each platform is probed for one first.
+#
+# `cc-rs` reads CC_<target with underscores>, which is also how osxcross and the
+# Homebrew cross-gcc packages are usually wired up, so an explicit setting
+# counts as well as a well-known binary on PATH.
+linux_cc_present = { [ -n "$$CC_x86_64_unknown_linux_gnu" ] || command -v x86_64-linux-gnu-gcc >/dev/null 2>&1; }
+windows_cc_present = { [ -n "$$CC_x86_64_pc_windows_gnu" ] || command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1; }
+macos_cc_present = { [ -n "$$CC_x86_64_apple_darwin" ] || command -v o64-clang >/dev/null 2>&1; }
+rust_target_installed = rustup target list --installed 2>/dev/null | grep -qx "$(1)"
+
+# Whether a platform is checkable at all, as an exit status and nothing else.
+# Kept apart from the check so `check-platforms` can tell "no toolchain here" from
+# "this platform does not compile", and report the second as the failure it is.
+can-check-linux:
+	@[ "$(HOST_PLATFORM)" = "linux" ] || { \
+		$(call rust_target_installed,$(CHECK_LINUX_TARGET)) && $(linux_cc_present); }
+
+can-check-windows:
+	@[ "$(HOST_PLATFORM)" = "windows" ] || { \
+		$(call rust_target_installed,$(CHECK_WINDOWS_TARGET)) && $(windows_cc_present); }
+
+can-check-macos:
+	@[ "$(HOST_PLATFORM)" = "macos" ] || { \
+		$(call rust_target_installed,$(CHECK_MACOS_TARGET)) && $(macos_cc_present); }
+
+check-linux:
+	@if [ "$(HOST_PLATFORM)" = "linux" ]; then exit 0; fi; \
+	$(call rust_target_installed,$(CHECK_LINUX_TARGET)) || { \
+		echo "$@: the $(CHECK_LINUX_TARGET) Rust target is not installed."; \
+		echo "  rustup target add $(CHECK_LINUX_TARGET)"; \
+		exit 1; }; \
+	$(linux_cc_present) || { \
+		echo "$@: no Linux cross toolchain (x86_64-linux-gnu-gcc)."; \
+		echo "  Dependencies compile C for the target, so the Rust target alone"; \
+		echo "  is not enough. On macOS: brew install"; \
+		echo "  messense/macos-cross-toolchains/x86_64-unknown-linux-gnu."; \
+		echo "  Otherwise point CC_x86_64_unknown_linux_gnu at a cross gcc."; \
+		exit 1; }
+	$(CARGO_RUN) check --locked --all-targets \
+		$(if $(filter linux,$(HOST_PLATFORM)),,--target $(CHECK_LINUX_TARGET)) \
+		--no-default-features --features "$(CHECK_LINUX_FEATURES)"
+
+check-windows:
+	@if [ "$(HOST_PLATFORM)" = "windows" ]; then exit 0; fi; \
+	$(call rust_target_installed,$(CHECK_WINDOWS_TARGET)) || { \
+		echo "$@: the $(CHECK_WINDOWS_TARGET) Rust target is not installed."; \
+		echo "  rustup target add $(CHECK_WINDOWS_TARGET)"; \
+		exit 1; }; \
+	$(windows_cc_present) || { \
+		echo "$@: no MinGW-w64 C toolchain (x86_64-w64-mingw32-gcc)."; \
+		echo "  Dependencies compile C for the target, so the Rust target alone"; \
+		echo "  is not enough. Install your platform's mingw-w64 package"; \
+		echo "  (apt/dnf mingw-w64, or brew install mingw-w64)."; \
+		exit 1; }
+	$(CARGO_RUN) check --locked --all-targets \
+		$(if $(filter windows,$(HOST_PLATFORM)),,--target $(CHECK_WINDOWS_TARGET)) \
+		--no-default-features --features "$(CHECK_WINDOWS_FEATURES)"
+
+check-macos:
+	@if [ "$(HOST_PLATFORM)" = "macos" ]; then exit 0; fi; \
+	$(call rust_target_installed,$(CHECK_MACOS_TARGET)) || { \
+		echo "$@: the $(CHECK_MACOS_TARGET) Rust target is not installed."; \
+		echo "  rustup target add $(CHECK_MACOS_TARGET)"; \
+		exit 1; }; \
+	$(macos_cc_present) || { \
+		echo "$@: no macOS cross toolchain."; \
+		echo "  The Rust target alone is not enough: dependencies compile C against"; \
+		echo "  the Apple SDK, which a Linux cc and a bare clang do not have — cc"; \
+		echo "  rejects -arch, and clang falls back to /usr/include and fails on"; \
+		echo "  glibc headers. Install osxcross with an Apple SDK, then put"; \
+		echo "  o64-clang on PATH or set CC_x86_64_apple_darwin to it."; \
+		exit 1; }
+	$(CARGO_RUN) check --locked --all-targets \
+		$(if $(filter macos,$(HOST_PLATFORM)),,--target $(CHECK_MACOS_TARGET)) \
+		--no-default-features --features "$(CHECK_MACOS_FEATURES)"
+
+# The two feature combinations AGENTS.md calls out: `x11` covers Linux
+# windowing-backend selection, and either one with no capability features
+# exercises every `cli_services`/`servers_enabled`/`tftp_enabled` gate.
+check-features:
+	$(CARGO_RUN) check --locked --all-targets --no-default-features --features x11
+	$(CARGO_RUN) check --locked --all-targets --no-default-features --features wayland
+
+# Every platform this machine can check. The host is always one of them; a
+# platform whose cross toolchain is missing is skipped rather than failing the
+# run, so this stays useful wherever it is invoked from. A platform that *can*
+# be checked and does not compile fails, which is the whole point. Run
+# `make check-linux`, `check-windows` or `check-macos` directly to be told what
+# a skip is missing.
+check-platforms: check-features
+	@failed=0; \
+	for platform in linux windows macos; do \
+		if $(MAKE) --no-print-directory can-check-$$platform >/dev/null 2>&1; then \
+			if $(MAKE) --no-print-directory check-$$platform; then \
+				printf "  \033[32m✓\033[0m %s%s\n" "$$platform" \
+					"$$([ "$$platform" = "$(HOST_PLATFORM)" ] && echo ' (host)')"; \
+			else \
+				printf "  \033[31m✗\033[0m %s\n" "$$platform"; \
+				failed=1; \
+			fi; \
+		else \
+			printf "  \033[33m—\033[0m %s (no toolchain; run 'make check-%s')\n" \
+				"$$platform" "$$platform"; \
+		fi; \
+	done; \
+	exit $$failed
 
 ifeq ($(OS),Windows_NT)
 build:

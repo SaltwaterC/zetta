@@ -405,6 +405,9 @@ fn a_command_still_running_at_detach_comes_back_saying_so() {
     );
 }
 
+/// Gated with the function it covers: `restore_prefill_from_commands` only
+/// exists in a build that can resume a stored session.
+#[cfg(feature = "session-persistence")]
 #[test]
 fn restore_prefill_prefers_pending_command_and_validates_fallbacks() {
     assert_eq!(

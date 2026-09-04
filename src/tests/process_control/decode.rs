@@ -1098,6 +1098,95 @@ fn disk_resume_requests_decode_identity_paths_from_the_private_payload() {
 }
 
 #[test]
+fn remote_session_requests_validate_the_ssh_destination_and_session_target() {
+    let mut remote = request("token", "open_remote_session");
+    remote.session_id = Some(42);
+    remote.ssh_target = Some("build-host".to_owned());
+    remote.ssh_port = Some(2222);
+    remote.secret = Some("session-secret".to_owned());
+    assert_eq!(
+        decode_control_request(&mut remote, "token"),
+        Some(ControlRequestCommand::OpenRemoteSession {
+            target: "build-host".to_owned(),
+            port: Some(2222),
+            session_id: 42,
+            secret: Some(SessionSecret::new("session-secret".to_owned())),
+        })
+    );
+    assert!(remote.secret.is_none());
+
+    let mut without_port = request("token", "open_remote_session");
+    without_port.session_id = Some(42);
+    without_port.ssh_target = Some("build-host".to_owned());
+    assert_eq!(
+        decode_control_request(&mut without_port, "token"),
+        Some(ControlRequestCommand::OpenRemoteSession {
+            target: "build-host".to_owned(),
+            port: None,
+            session_id: 42,
+            secret: None,
+        })
+    );
+
+    for invalid in [
+        // No destination, no session, or a session that names nothing.
+        request("token", "open_remote_session"),
+        ControlRequest {
+            ssh_target: Some("build-host".to_owned()),
+            ..request("token", "open_remote_session")
+        },
+        ControlRequest {
+            session_id: Some(0),
+            ssh_target: Some("build-host".to_owned()),
+            ..request("token", "open_remote_session")
+        },
+        // A destination that would be read as an ssh option, empty, or absurd.
+        ControlRequest {
+            session_id: Some(42),
+            ssh_target: Some("-oProxyCommand=touch /tmp/pwned".to_owned()),
+            ..request("token", "open_remote_session")
+        },
+        ControlRequest {
+            session_id: Some(42),
+            ssh_target: Some(String::new()),
+            ..request("token", "open_remote_session")
+        },
+        ControlRequest {
+            session_id: Some(42),
+            ssh_target: Some("h".repeat(4097)),
+            ..request("token", "open_remote_session")
+        },
+        ControlRequest {
+            session_id: Some(42),
+            ssh_target: Some("build-host".to_owned()),
+            ssh_port: Some(0),
+            ..request("token", "open_remote_session")
+        },
+        ControlRequest {
+            session_id: Some(42),
+            ssh_target: Some("build-host".to_owned()),
+            secret: Some(String::new()),
+            ..request("token", "open_remote_session")
+        },
+        // A field the command does not carry.
+        ControlRequest {
+            session_id: Some(42),
+            ssh_target: Some("build-host".to_owned()),
+            profile: Some("System".to_owned()),
+            ..request("token", "open_remote_session")
+        },
+    ] {
+        let mut invalid = invalid;
+        assert_eq!(decode_control_request(&mut invalid, "token"), None);
+    }
+
+    // The destination fields belong to this command alone.
+    let mut elsewhere = request("token", "open_window");
+    elsewhere.ssh_target = Some("build-host".to_owned());
+    assert_eq!(decode_control_request(&mut elsewhere, "token"), None);
+}
+
+#[test]
 fn reconnect_requests_can_target_the_originating_tab() {
     let mut reconnect_request = request("token", "reconnect_session");
     reconnect_request.runner_id = Some(7);

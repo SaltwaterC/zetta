@@ -1,8 +1,14 @@
 use super::*;
 
+/// Reads one entry of the file's `profiles` array, which is how the parser
+/// reaches [`ProfileFile::into_config`].
+fn parse_profile(value: serde_json::Value) -> Result<ProfileConfig> {
+    serde_json::from_value::<ProfileFile>(value)?.into_config()
+}
+
 #[test]
 fn parses_profile_with_arguments() {
-    let profile = parse_profile(&serde_json::json!({
+    let profile = parse_profile(serde_json::json!({
         "name": "WSL Ubuntu",
         "program": "wsl.exe",
         "args": ["-d", "Ubuntu"]
@@ -59,33 +65,6 @@ fn parses_dark_themes_for_global_profiles_and_pane_template_leaves() {
     assert_eq!(leaf.dark_theme.as_deref(), Some("Gruvbox Dark"));
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
-#[test]
-fn homebrew_shells_are_profiles_with_their_installed_program_paths() {
-    let prefix = tempfile::tempdir().unwrap();
-    let bin = prefix.path().join("bin");
-    fs::create_dir_all(&bin).unwrap();
-    fs::write(bin.join("brew"), "").unwrap();
-    fs::write(bin.join("fish"), "").unwrap();
-    fs::write(bin.join("bash"), "").unwrap();
-
-    let profiles = homebrew_shell_profiles([prefix.path().to_path_buf()]);
-
-    assert_eq!(profiles.len(), 2);
-    assert_eq!(profiles[0].name, "Bash (Homebrew)");
-    assert_eq!(
-        profiles[0].command,
-        Shell::Program(bin.join("bash").to_string_lossy().into_owned())
-    );
-    assert_eq!(profiles[1].name, "Fish (Homebrew)");
-    assert_eq!(
-        profiles[1].command,
-        Shell::Program(bin.join("fish").to_string_lossy().into_owned())
-    );
-    assert_eq!(profiles[0].icon, ProfileIcon::Bash);
-    assert_eq!(profiles[1].icon, ProfileIcon::Fish);
-}
-
 #[test]
 fn profile_icon_configuration_accepts_automatic_and_explicit_values() {
     let config = Config::parse(
@@ -121,63 +100,30 @@ fn profile_icon_configuration_accepts_automatic_and_explicit_values() {
     );
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
-#[test]
-fn path_resolved_homebrew_shells_match_direct_discovery() {
-    let prefix = tempfile::tempdir().unwrap();
-    let bin = prefix.path().join("bin");
-    fs::create_dir_all(&bin).unwrap();
-    fs::write(bin.join("brew"), "").unwrap();
-    fs::write(bin.join("bash"), "").unwrap();
-    fs::write(bin.join("fish"), "").unwrap();
-
-    let prefix_path = prefix.path().to_path_buf();
-    let direct_profiles = homebrew_shell_profiles([prefix_path.clone()]);
-    for program in ["bash", "fish"] {
-        let path = command_path_in(program, bin.as_os_str()).unwrap();
-        let path_profile =
-            homebrew_profile_for_path(&path, std::slice::from_ref(&prefix_path)).unwrap();
-        let direct_profile = direct_profiles
-            .iter()
-            .find(|profile| profile.command == Shell::Program(path.to_string_lossy().into_owned()))
-            .cloned()
-            .unwrap();
-
-        assert_eq!(path_profile, direct_profile);
-    }
-}
-
 #[test]
 fn configuration_uses_profile_terminology() {
     assert!(
-        validate_config_fields(&serde_json::json!({
-            "default_profile": "System",
-            "new_tab_profile": "default",
-            "profiles": []
-        }))
+        Config::parse(
+            r#"{"default_profile":"System","new_tab_profile":"default","profiles":[]}"#,
+            None,
+            None,
+        )
         .is_ok()
     );
 
-    let error = validate_config_fields(&serde_json::json!({
-        "default_shell": "System",
-        "shells": []
-    }))
-    .unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("unrecognized configuration field")
-    );
-
-    let keymap_error = validate_config_fields(&serde_json::json!({
-        "keymap": "custom-keymap.json"
-    }))
-    .unwrap_err();
-    assert!(
-        keymap_error
-            .to_string()
-            .contains("unrecognized configuration field")
-    );
+    // The shell-era names, and a keymap path that has never been a
+    // configuration key, are rejected by name.
+    for (document, field) in [
+        (r#"{"default_shell":"System"}"#, "default_shell"),
+        (r#"{"shells":[]}"#, "shells"),
+        (r#"{"keymap":"custom-keymap.json"}"#, "keymap"),
+    ] {
+        let error = format!("{:#}", Config::parse(document, None, None).unwrap_err());
+        assert!(
+            error.contains("unknown field") && error.contains(field),
+            "{document} was not rejected by name: {error}"
+        );
+    }
 }
 
 #[test]
@@ -391,12 +337,13 @@ fn validates_tftp_server_port() {
 
 #[test]
 fn session_authentication_is_not_a_mutable_global_configuration_value() {
-    let error =
-        Config::parse(r#"{"session_authentication":"replacement"}"#, None, None).unwrap_err();
+    let error = format!(
+        "{:#}",
+        Config::parse(r#"{"session_authentication":"replacement"}"#, None, None).unwrap_err()
+    );
     assert!(
-        error
-            .to_string()
-            .contains("unrecognized configuration field")
+        error.contains("unknown field `session_authentication`"),
+        "{error}"
     );
 }
 
@@ -481,7 +428,11 @@ fn automatic_session_protection_parses_and_is_off_by_default() {
         None,
     )
     .unwrap_err();
-    assert!(error.to_string().contains("auto_protect"));
+    let error = format!("{error:#}");
+    assert!(
+        error.contains("sessions.persistence.auto_protect") && error.contains("expected a boolean"),
+        "{error}"
+    );
 }
 
 /// The flag on its own is never enough: without a recipient there is nothing to
@@ -523,7 +474,10 @@ fn an_unrecognized_persistence_field_is_still_rejected() {
         None,
     )
     .unwrap_err();
-    assert!(error.to_string().contains("auto_protct"));
+    assert!(
+        format!("{error:#}").contains("unknown field `auto_protct`"),
+        "{error:#}"
+    );
 }
 
 #[cfg(not(feature = "session-persistence"))]
@@ -1143,7 +1097,7 @@ fn profile_theme_override_does_not_require_a_program() {
         dark_theme: None,
         icon: ProfileIcon::Zsh,
     }];
-    let profile = parse_profile(&serde_json::json!({
+    let profile = parse_profile(serde_json::json!({
         "name": "Zsh",
         "theme": "Solarized Dark"
     }))
@@ -1207,306 +1161,63 @@ fn hidden_profiles_do_not_consume_visible_profile_slots() {
     assert_eq!(visible_profile_index(&profiles, &hidden, 3), None);
 }
 
+/// The reported path reaches into the array, so a file with several profiles
+/// says which one is wrong rather than only that a profile is.
 #[test]
 fn profile_hidden_must_be_boolean() {
     let error = Config::parse(
-        r#"{"profiles":[{"name":"System","hidden":"yes"}]}"#,
+        r#"{"profiles":[{"name":"System"},{"name":"Zsh","hidden":"yes"}]}"#,
         None,
         None,
     )
     .unwrap_err();
+    let error = format!("{error:#}");
     assert!(
-        error
-            .to_string()
-            .contains("profile.hidden must be a boolean")
+        error.contains("profiles[1].hidden") && error.contains("expected a boolean"),
+        "{error}"
     );
-}
-
-#[test]
-fn parses_utf8_wsl_distribution_names() {
-    assert_eq!(
-        parse_wsl_distribution_names(b"Ubuntu\r\nDocker-Desktop\r\nDebian\r\nubuntu\r\n\r\n"),
-        ["Ubuntu", "Debian"]
-    );
-}
-
-#[test]
-fn parses_utf16_wsl_distribution_names() {
-    let output = "Ubuntu-24.04\r\nopenSUSE Tumbleweed\r\n"
-        .encode_utf16()
-        .flat_map(u16::to_le_bytes)
-        .collect::<Vec<_>>();
-
-    assert_eq!(
-        parse_wsl_distribution_names(&output),
-        ["Ubuntu-24.04", "openSUSE Tumbleweed"]
-    );
-}
-
-#[test]
-fn parses_big_endian_utf16_wsl_distribution_names() {
-    let mut output = vec![0xfe, 0xff];
-    output.extend("Debian\r\n".encode_utf16().flat_map(u16::to_be_bytes));
-
-    assert_eq!(parse_wsl_distribution_names(&output), ["Debian"]);
-}
-
-#[test]
-fn creates_a_profile_for_each_wsl_distribution() {
-    let profiles = wsl_profiles_from_output("wsl.exe", b"Ubuntu\r\nDebian\r\n");
-
-    assert_eq!(profiles.len(), 2);
-    assert_eq!(profiles[0].name, "WSL: Ubuntu");
-    assert_eq!(profiles[0].icon, ProfileIcon::Tux);
-    assert!(matches!(
-        profiles[0].command,
-        Shell::WithArguments {
-            ref program,
-            ref args,
-            ref title_override,
-        } if program == "wsl.exe"
-            && args == &["--distribution", "Ubuntu"]
-            && title_override.as_deref() == Some("WSL: Ubuntu")
-    ));
-}
-
-#[test]
-fn creates_msys2_profiles_for_installed_shells_using_the_launcher() {
-    let root = tempfile::tempdir().unwrap();
-    fs::write(root.path().join("msys2_shell.cmd"), "").unwrap();
-    fs::create_dir_all(root.path().join("usr/bin")).unwrap();
-    fs::write(root.path().join("usr/bin/bash.exe"), "").unwrap();
-    fs::write(root.path().join("usr/bin/zsh.exe"), "").unwrap();
-
-    let profiles = msys2_profiles(root.path());
-
-    assert_eq!(
-        profiles
-            .iter()
-            .map(|profile| profile.name.as_str())
-            .collect::<Vec<_>>(),
-        ["MSYS2", "MSYS2: Zsh"]
-    );
-    for (profile, shell) in profiles.iter().zip(["bash", "zsh"]) {
-        assert_eq!(
-            profile.icon,
-            if shell == "bash" {
-                ProfileIcon::Bash
-            } else {
-                ProfileIcon::Zsh
-            }
-        );
-        assert!(matches!(
-            profile.command,
-            Shell::WithArguments {
-                ref program,
-                ref args,
-                ..
-            } if program == "cmd.exe"
-                && args[..3] == ["/d", "/s", "/c"]
-                && args[3].starts_with("\"\"")
-                && args[3].contains("msys2_shell.cmd\" -defterm")
-                && args[3].contains("-defterm -here -no-start -msys -use-full-path")
-                && args[3].ends_with(&format!("-shell {shell}\""))
-        ));
-    }
-}
-
-#[test]
-fn omits_msys2_zsh_profile_when_zsh_is_not_installed() {
-    let root = tempfile::tempdir().unwrap();
-    fs::create_dir_all(root.path().join("usr/bin")).unwrap();
-    fs::write(root.path().join("usr/bin/bash.exe"), "").unwrap();
-
-    let profiles = msys2_profiles(root.path());
-
-    assert_eq!(profiles.len(), 1);
-    assert_eq!(profiles[0].name, "MSYS2");
-}
-
-#[test]
-fn creates_cygwin_profiles_for_installed_shells_with_direct_commands() {
-    let root = tempfile::tempdir().unwrap();
-    fs::create_dir_all(root.path().join("bin")).unwrap();
-    fs::write(root.path().join("bin/cygwin1.dll"), "").unwrap();
-    for shell in ["bash", "zsh", "fish", "nu"] {
-        fs::write(root.path().join("bin").join(format!("{shell}.exe")), "").unwrap();
-    }
-
-    let profiles = cygwin_profiles(root.path());
-
-    assert_eq!(
-        profiles
-            .iter()
-            .map(|profile| profile.name.as_str())
-            .collect::<Vec<_>>(),
-        ["Cygwin", "Cygwin: Zsh", "Cygwin: Fish", "Cygwin: Nushell"]
-    );
-    for (profile, (shell, icon)) in profiles.iter().zip([
-        ("bash", ProfileIcon::Bash),
-        ("zsh", ProfileIcon::Zsh),
-        ("fish", ProfileIcon::Fish),
-        ("nu", ProfileIcon::Zetta),
-    ]) {
-        assert_eq!(profile.icon, icon);
-        assert!(matches!(
-            &profile.command,
-            Shell::WithArguments {
-                program,
-                args,
-                title_override,
-            } if program == &root.path().join("bin").join(format!("{shell}.exe")).display().to_string()
-                && args == &["-l"]
-                && title_override.as_deref() == Some(profile.name.as_str())
-        ));
-    }
-}
-
-#[test]
-fn omits_cygwin_profiles_for_missing_shell_executables() {
-    let root = tempfile::tempdir().unwrap();
-    fs::create_dir_all(root.path().join("bin")).unwrap();
-    fs::write(root.path().join("bin/cygwin1.dll"), "").unwrap();
-    fs::write(root.path().join("bin/bash.exe"), "").unwrap();
-    fs::write(root.path().join("bin/nu.exe"), "").unwrap();
-
-    let profiles = cygwin_profiles(root.path());
-
-    assert_eq!(
-        profiles
-            .iter()
-            .map(|profile| profile.name.as_str())
-            .collect::<Vec<_>>(),
-        ["Cygwin", "Cygwin: Nushell"]
-    );
-}
-
-#[test]
-fn skips_incomplete_cygwin_roots_when_a_later_root_has_shells() {
-    let incomplete = tempfile::tempdir().unwrap();
-    fs::create_dir_all(incomplete.path().join("bin")).unwrap();
-    fs::write(incomplete.path().join("bin/cygwin1.dll"), "").unwrap();
-
-    let complete = tempfile::tempdir().unwrap();
-    fs::create_dir_all(complete.path().join("bin")).unwrap();
-    fs::write(complete.path().join("bin/cygwin1.dll"), "").unwrap();
-    fs::write(complete.path().join("bin/bash.exe"), "").unwrap();
-
-    assert_eq!(
-        select_cygwin_installation_root([
-            incomplete.path().to_path_buf(),
-            complete.path().to_path_buf(),
-        ]),
-        Some(complete.path().to_path_buf())
-    );
-}
-
-#[test]
-fn normalizes_cygwin_registry_installation_paths() {
-    assert_eq!(
-        normalize_cygwin_registry_path(r"\??\C:\cygwin64"),
-        Some(PathBuf::from(r"C:\cygwin64"))
-    );
-    assert_eq!(
-        normalize_cygwin_registry_path(r"\\??\D:\Tools\cygwin"),
-        Some(PathBuf::from(r"D:\Tools\cygwin"))
-    );
-    assert_eq!(
-        normalize_cygwin_registry_path(r"\??\UNC\server\share\cygwin"),
-        Some(PathBuf::from(r"\\server\share\cygwin"))
-    );
-    assert_eq!(normalize_cygwin_registry_path("relative\npath"), None);
-}
-
-#[cfg(windows)]
-#[test]
-fn msys2_launcher_command_supports_custom_paths_with_spaces() {
-    use std::os::windows::process::CommandExt as _;
-
-    let temporary = tempfile::tempdir().unwrap();
-    let root = temporary.path().join("custom MSYS2 installation");
-    fs::create_dir_all(root.join("usr/bin")).unwrap();
-    fs::write(
-        root.join("msys2_shell.cmd"),
-        "@echo off\r\nif \"%7\"==\"zsh\" exit /b 0\r\nexit /b 1\r\n",
-    )
-    .unwrap();
-    fs::write(root.join("usr/bin/zsh.exe"), "").unwrap();
-    let profile = msys2_profiles(&root).pop().unwrap();
-    let Shell::WithArguments { program, args, .. } = profile.command else {
-        panic!("MSYS2 profile did not include launcher arguments");
-    };
-
-    let status = Command::new(program)
-        .raw_arg(args.join(" "))
-        .status()
-        .unwrap();
-
-    assert!(status.success());
-}
-
-#[cfg(windows)]
-#[test]
-fn reads_custom_msys2_root_from_an_installer_shortcut() {
-    use windows::{
-        Win32::{
-            System::Com::{
-                CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
-                CoUninitialize, IPersistFile,
-            },
-            UI::Shell::{IShellLinkW, ShellLink},
-        },
-        core::{HSTRING, Interface},
-    };
-
-    let temporary = tempfile::tempdir().unwrap();
-    let shortcut = temporary.path().join("MSYS2 MSYS.lnk");
-    let root = temporary.path().join("custom MSYS2 installation");
-    unsafe {
-        CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok().unwrap();
-        {
-            let link: IShellLinkW =
-                CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER).unwrap();
-            link.SetPath(&HSTRING::from(root.join("msys2.exe").as_os_str()))
-                .unwrap();
-            link.SetWorkingDirectory(&HSTRING::from(root.as_os_str()))
-                .unwrap();
-            let persist: IPersistFile = link.cast().unwrap();
-            persist
-                .Save(&HSTRING::from(shortcut.as_os_str()), true)
-                .unwrap();
-
-            assert_eq!(shortcut_working_directory(&shortcut), Some(root));
-        }
-        CoUninitialize();
-    }
 }
 
 #[test]
 fn validates_max_scroll_history_lines() {
+    assert_eq!(parse_max_scroll_history_lines(0).unwrap(), 0);
     assert_eq!(
-        parse_max_scroll_history_lines(&serde_json::json!(0)).unwrap(),
-        0
-    );
-    assert_eq!(
-        parse_max_scroll_history_lines(&serde_json::json!(2_147_483_647)).unwrap(),
+        parse_max_scroll_history_lines(2_147_483_647).unwrap(),
         2_147_483_647
     );
-    assert!(parse_max_scroll_history_lines(&serde_json::json!(-1)).is_err());
-    assert!(parse_max_scroll_history_lines(&serde_json::json!(2_147_483_648_u64)).is_err());
-    assert!(parse_max_scroll_history_lines(&serde_json::json!(1.5)).is_err());
+    assert!(parse_max_scroll_history_lines(2_147_483_648).is_err());
+    // A value that is not a non-negative integer is rejected by the field's
+    // type rather than by the range check above.
+    for value in ["-1", "1.5", "\"many\"", "null"] {
+        assert!(
+            Config::parse(
+                &format!(r#"{{"max_scroll_history_lines":{value}}}"#),
+                None,
+                None
+            )
+            .is_err(),
+            "accepted invalid scrollback history {value}"
+        );
+    }
 }
 
 #[test]
 fn validates_inactive_pane_opacity() {
     assert_eq!(DEFAULT_INACTIVE_PANE_OPACITY, 0.8);
-    assert_eq!(
-        parse_inactive_pane_opacity(&serde_json::json!(0.8)).unwrap(),
-        0.8
-    );
-    assert!(parse_inactive_pane_opacity(&serde_json::json!(-0.1)).is_err());
-    assert!(parse_inactive_pane_opacity(&serde_json::json!(1.1)).is_err());
-    assert!(parse_inactive_pane_opacity(&serde_json::json!("dim")).is_err());
+    assert_eq!(parse_inactive_pane_opacity(0.8).unwrap(), 0.8);
+    assert!(parse_inactive_pane_opacity(-0.1).is_err());
+    assert!(parse_inactive_pane_opacity(1.1).is_err());
+    for value in ["\"dim\"", "true", "null"] {
+        assert!(
+            Config::parse(
+                &format!(r#"{{"inactive_pane_opacity":{value}}}"#),
+                None,
+                None
+            )
+            .is_err(),
+            "accepted invalid inactive pane opacity {value}"
+        );
+    }
 }
 
 /// `src/mux_identity.rs` reads `sessions.persistence.identity` on its own so the
@@ -1558,4 +1269,17 @@ fn both_identity_readers_treat_an_unset_identity_the_same_way() {
         let read = crate::mux_identity::configured_identity_paths(Some(path));
         assert_eq!(read, parsed.into_iter().collect::<Vec<_>>(), "{document}");
     }
+}
+
+/// A key written twice used to be silently last-wins, because the file was
+/// walked as a `serde_json::Value` and a duplicate had already been collapsed
+/// by the time it was read. Deserializing into the file's own type reports it,
+/// which is the better answer: nothing about a repeated setting is intentional.
+#[test]
+fn a_setting_written_twice_is_reported_rather_than_silently_resolved() {
+    let error = format!(
+        "{:#}",
+        Config::parse(r#"{"theme":"A","theme":"B"}"#, None, None).unwrap_err()
+    );
+    assert!(error.contains("duplicate field `theme`"), "{error}");
 }

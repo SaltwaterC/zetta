@@ -187,7 +187,15 @@ is a sibling under `src/`.
 ### Configuration, profiles, and projects
 
 - `config.rs`: the typed `Config`/`Profile` model, its parsing, and the
-  overlay rules project configuration layers on top of it
+  overlay rules project configuration layers on top of it. The file's own shape
+  is the `ConfigFile`/`SessionsFile`/`ProfileFile` deserialization mirror, so
+  `#[serde(deny_unknown_fields)]` is what rejects a misspelled setting and a
+  setting's name is not restated in an allow-list. Fields are `Setting<T>`
+  rather than `Option<T>` because serde would read an explicit `null` as
+  "absent", and this format reports it as a type error. A module directory —
+  `config/discovery.rs` holds the per-platform shell detection (Homebrew
+  prefixes, the MSYS2 and Cygwin installation roots, WSL distributions, `PATH`
+  resolution) that produces the profile set `Config::defaults` starts from
 - `project.rs`: `ProjectConfig`, `ProjectRegistry`, and project field
   validation
 - `project_context.rs`: the active project for a window, project detection for
@@ -411,20 +419,59 @@ Run Clippy for broader Rust changes when practical:
 cargo clippy --all-targets
 ```
 
-For changes touching Linux platform selection, also check the relevant
-feature combination, for example:
+For changes touching Linux platform selection, or a CLI service
+(`cli_services.rs`/`tftp.rs` and their gating), check the feature combinations
+too — the second exercises every `cli_services`/`servers_enabled`/
+`tftp_enabled` gate, since it has no CLI service enabled:
 
 ```sh
-cargo check --no-default-features --features x11
+make check-features
 ```
 
-For changes touching a CLI service (`cli_services.rs`/`tftp.rs` and their
-gating), also check every CLI service disabled, since that combination
-exercises every `cli_services`/`servers_enabled`/`tftp_enabled` gate:
+### Checking every platform
+
+Zetta is developed from Linux, macOS and Windows, and a local `cargo test`
+compiles only the host's `cfg` arms. A change to `#[cfg(windows)]` or
+`#[cfg(target_os = "macos")]` code can therefore pass every check on one
+machine and still fail to build on another. One target per platform:
 
 ```sh
-cargo check --no-default-features --features wayland
+make check-linux      # native on Linux, else x86_64-unknown-linux-gnu
+make check-windows    # native on Windows, else x86_64-pc-windows-gnu
+make check-macos      # native on macOS, else x86_64-apple-darwin
+make check-platforms  # check-features plus each platform this machine can check
 ```
+
+Each checks natively when it *is* the host and cross-checks otherwise, so which
+of them is the cheap one depends on where you are sitting. All pass
+`--all-targets`, so the tests behind those `cfg`s are compiled as well — a
+plain `cargo check` skips them, which is how test code that does not build
+under a feature combination goes unnoticed.
+
+They check, they do not link or run. Running a platform's tests needs a machine
+of that platform, so a green `make check-windows` is not a green Windows test
+suite.
+
+A cross check needs more than the Rust target: `aws-lc-sys`, `ring`,
+`tree-sitter` and `wasmtime` all compile C or assembly against the target's own
+headers, so there has to be a C toolchain that can produce them. Each target
+probes for one and says what to install rather than failing several screens
+into a build script. `make check-platforms` skips a platform it has no
+toolchain for, but still fails one it can check.
+
+- **Windows** needs MinGW-w64 (`x86_64-w64-mingw32-gcc`): a distribution
+  `mingw-w64` package, or `brew install mingw-w64`.
+- **Linux** from macOS or Windows needs a `x86_64-linux-gnu-gcc`; on macOS,
+  `brew install messense/macos-cross-toolchains/x86_64-unknown-linux-gnu`. No
+  Wayland or X11 development package is required, because `wayland-backend`
+  is used with `dlopen` and `cargo check` does not link.
+- **macOS** needs osxcross with an Apple SDK. The Rust target alone is not
+  enough and cannot be made to work: a Linux `cc` rejects
+  `-arch`/`-mmacosx-version-min` outright, and a bare clang gets past that only
+  to fall back to `/usr/include` and fail on glibc headers.
+
+Set `CC_<target with underscores>` (for example `CC_x86_64_apple_darwin`) to
+point at a toolchain that is not on `PATH` under its usual name.
 
 Do not run `make install`, uninstall targets, or system-cache refresh targets
 as validation; they mutate the host system. `make build` produces the release

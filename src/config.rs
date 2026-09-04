@@ -1,16 +1,11 @@
 use std::{
     collections::{HashMap, HashSet},
-    env,
-    ffi::OsStr,
-    fs,
+    env, fs,
     path::{Path, PathBuf},
-    sync::OnceLock,
 };
 
-#[cfg(windows)]
-use std::{os::windows::process::CommandExt as _, process::Command};
-
 use anyhow::{Context as _, Result, anyhow};
+use serde::{Deserialize, Deserializer};
 use serde_json::Value;
 use task::Shell;
 use terminal::MAX_SCROLL_HISTORY_LINES;
@@ -18,6 +13,10 @@ use ui::IconName;
 
 use crate::pane::MAX_PANES_PER_TAB;
 use crate::profile_icon::ProfileIcon;
+
+mod discovery;
+
+use discovery::discovered_profiles;
 
 pub(crate) const DEFAULT_TERMINAL_FONT_FAMILY: &str = "MesloLGS NF";
 const DEFAULT_MAX_SCROLL_HISTORY_LINES: usize = MAX_SCROLL_HISTORY_LINES;
@@ -171,6 +170,14 @@ impl PaneControlsPosition {
             Self::Right => "Right",
         }
     }
+
+    fn parse(value: &str) -> Result<Self> {
+        match value {
+            "left" => Ok(Self::Left),
+            "right" => Ok(Self::Right),
+            _ => anyhow::bail!("pane_controls_position must be \"left\" or \"right\""),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -192,6 +199,14 @@ impl NewTabProfile {
         match self {
             Self::Default => "Default",
             Self::Inherit => "Inherit",
+        }
+    }
+
+    fn parse(value: &str) -> Result<Self> {
+        match value {
+            "default" => Ok(Self::Default),
+            "inherit" => Ok(Self::Inherit),
+            _ => anyhow::bail!("new_tab_profile must be \"default\" or \"inherit\""),
         }
     }
 }
@@ -218,6 +233,15 @@ impl WorkingDirectoryScope {
             Self::None => "None",
             Self::Pane => "Pane",
             Self::Tab => "Tab",
+        }
+    }
+
+    fn parse(value: &str) -> Result<Self> {
+        match value {
+            "none" => Ok(Self::None),
+            "pane" => Ok(Self::Pane),
+            "tab" => Ok(Self::Tab),
+            _ => anyhow::bail!("working_directory_scope must be \"none\", \"pane\", or \"tab\""),
         }
     }
 
@@ -448,6 +472,125 @@ struct ProfileConfig {
     hidden: Option<bool>,
 }
 
+/// A setting that is absent unless its key appears in the file.
+///
+/// Deliberately not `Option<T>`: serde reads an explicit `null` into an
+/// `Option<T>` field as `None`, which would silently accept `"theme": null`
+/// where this file format has always reported it as a type error. Here the
+/// key's presence and the value's type are separate questions, and only the
+/// value's type is serde's to decide.
+enum Setting<T> {
+    Unset,
+    Set(T),
+}
+
+/// Written out rather than derived: `#[derive(Default)]` on a generic enum
+/// bounds the impl on `T: Default`, which has nothing to do with whether a key
+/// was present.
+impl<T> Default for Setting<T> {
+    fn default() -> Self {
+        Self::Unset
+    }
+}
+
+impl<T> Setting<T> {
+    fn get(self) -> Option<T> {
+        match self {
+            Self::Unset => None,
+            Self::Set(value) => Some(value),
+        }
+    }
+}
+
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for Setting<T> {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+        T::deserialize(deserializer).map(Self::Set)
+    }
+}
+
+/// The configuration file's shape.
+///
+/// Every field is a [`Setting`] because a configuration file is an overlay:
+/// only the keys it actually names are applied over [`Config::defaults`], which
+/// is what lets a project's configuration layer over the user's. The container's
+/// `default` is what makes an omitted key [`Setting::Unset`].
+///
+/// `deny_unknown_fields` is the whole of the misspelled-setting check. It used
+/// to be a hand-maintained list of the same names, which could drift from the
+/// fields it was meant to describe without anything noticing.
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct ConfigFile {
+    default_profile: Setting<String>,
+    new_tab_profile: Setting<String>,
+    working_directory: Setting<String>,
+    working_directory_scope: Setting<String>,
+    theme: Setting<String>,
+    dark_theme: Setting<String>,
+    /// `null` clears the icon, so this one distinguishes three states: absent,
+    /// explicitly cleared, and named.
+    default_tab_icon: Setting<Option<String>>,
+    terminal_font_size: Setting<f64>,
+    terminal_font_family: Setting<String>,
+    max_scroll_history_lines: Setting<u64>,
+    inactive_pane_opacity: Setting<f64>,
+    compact_mode: Setting<bool>,
+    hide_pane_size: Setting<bool>,
+    hide_title_bar_labels: Setting<bool>,
+    hide_title_bar_buttons: Setting<bool>,
+    hide_title_bar_menus: Setting<bool>,
+    pane_controls_position: Setting<String>,
+    pane_controls_hidden_by_default: Setting<bool>,
+    http_server_port: Setting<u64>,
+    tftp_server_port: Setting<u64>,
+    sessions: Setting<SessionsFile>,
+    /// Template nodes are polymorphic — a pane object or a one-key split object
+    /// — which a derive cannot describe without losing the errors that say what
+    /// was wrong with a layout. They stay hand-parsed, from here.
+    pane_split_templates: Setting<serde_json::Map<String, Value>>,
+    profiles: Setting<Vec<ProfileFile>>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct SessionsFile {
+    retention: Setting<String>,
+    ring_bytes: Setting<u64>,
+    persistence: Setting<SessionPersistenceFile>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct SessionPersistenceFile {
+    recipients: Setting<Vec<String>>,
+    /// `null` and an empty string both mean "use the conventional identity",
+    /// which is why this is not simply a path.
+    identity: Setting<Option<String>>,
+    auto_protect: Setting<bool>,
+}
+
+/// A profile as the file spells it. `name` is the only required key, because a
+/// profile entry may exist only to re-theme or hide a detected shell.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProfileFile {
+    name: String,
+    #[serde(default)]
+    program: Setting<String>,
+    #[serde(default)]
+    args: Setting<Vec<String>>,
+    #[serde(default)]
+    theme: Setting<String>,
+    #[serde(default)]
+    dark_theme: Setting<String>,
+    /// Kept as a raw value: `"auto"`, `null` and a name are all accepted, and
+    /// [`ProfileIcon::parse`] is what tells them apart.
+    #[serde(default)]
+    icon: Setting<Value>,
+    #[serde(default)]
+    hidden: Setting<bool>,
+}
+
 #[derive(Clone, Debug)]
 pub struct Config {
     pub config_path: PathBuf,
@@ -552,296 +695,205 @@ impl Config {
         Self::parse_into(content, base)
     }
 
-    fn parse_into(content: &str, mut config: Self) -> Result<Self> {
-        let root: Value = serde_json::from_str(content)
+    fn parse_into(content: &str, config: Self) -> Result<Self> {
+        let file = parse_config_file(content)
             .with_context(|| format!("parsing {}", config.config_path.display()))?;
-        validate_config_fields(&root)?;
+        config.apply(file)
+    }
 
-        if let Some(directory) = root.get("working_directory") {
-            let directory = directory
-                .as_str()
-                .context("working_directory must be a string")?;
-            config.working_directory = Some(expand_home(directory));
+    /// Applies the keys a file actually named, leaving the rest at the value
+    /// they already had. The order matters at the end: pane templates name
+    /// profiles, and `default_profile` names one the file may have just added.
+    fn apply(mut self, file: ConfigFile) -> Result<Self> {
+        if let Some(directory) = file.working_directory.get() {
+            self.working_directory = Some(expand_home(&directory));
             // An explicit home alias is equivalent to omitting the setting.
             // This distinction matters for WSL: an actual override is a
             // Windows-side cwd, while the default must be passed as `--cd ~`
             // so WSL resolves the Linux user's home directory.
-            config.working_directory_configured = !matches!(directory, "~" | "~/");
+            self.working_directory_configured = !matches!(directory.as_str(), "~" | "~/");
         }
-        if let Some(scope) = root.get("working_directory_scope") {
-            config.working_directory_scope = match scope
-                .as_str()
-                .context("working_directory_scope must be \"none\", \"pane\", or \"tab\"")?
-            {
-                "none" => WorkingDirectoryScope::None,
-                "pane" => WorkingDirectoryScope::Pane,
-                "tab" => WorkingDirectoryScope::Tab,
-                _ => {
-                    anyhow::bail!("working_directory_scope must be \"none\", \"pane\", or \"tab\"")
-                }
-            };
+        if let Some(scope) = file.working_directory_scope.get() {
+            self.working_directory_scope = WorkingDirectoryScope::parse(&scope)?;
         }
-        if let Some(profile) = root.get("new_tab_profile") {
-            config.new_tab_profile = match profile
-                .as_str()
-                .context("new_tab_profile must be \"default\" or \"inherit\"")?
-            {
-                "default" => NewTabProfile::Default,
-                "inherit" => NewTabProfile::Inherit,
-                _ => anyhow::bail!("new_tab_profile must be \"default\" or \"inherit\""),
-            };
+        if let Some(profile) = file.new_tab_profile.get() {
+            self.new_tab_profile = NewTabProfile::parse(&profile)?;
         }
-        if let Some(theme) = root.get("theme") {
-            config.theme = Some(theme.as_str().context("theme must be a string")?.to_owned());
+        if let Some(theme) = file.theme.get() {
+            self.theme = Some(theme);
         }
-        if let Some(dark_theme) = root.get("dark_theme") {
-            config.dark_theme = Some(
-                dark_theme
-                    .as_str()
-                    .context("dark_theme must be a string")?
-                    .to_owned(),
-            );
+        if let Some(dark_theme) = file.dark_theme.get() {
+            self.dark_theme = Some(dark_theme);
         }
-        if let Some(icon) = root.get("default_tab_icon") {
-            config.default_tab_icon = if icon.is_null() {
-                None
-            } else {
-                let name = icon
-                    .as_str()
-                    .context("default_tab_icon must be an icon name or null")?;
-                Some(name.parse().map_err(|_| {
-                    anyhow!("default_tab_icon must be a built-in icon name, got {name:?}")
-                })?)
-            };
+        if let Some(icon) = file.default_tab_icon.get() {
+            self.default_tab_icon = icon
+                .map(|name| {
+                    name.parse().map_err(|_| {
+                        anyhow!("default_tab_icon must be a built-in icon name, got {name:?}")
+                    })
+                })
+                .transpose()?;
         }
-        if let Some(font_size) = root.get("terminal_font_size") {
-            let font_size = font_size
-                .as_f64()
-                .context("terminal_font_size must be a number")? as f32;
+        if let Some(font_size) = file.terminal_font_size.get() {
+            let font_size = font_size as f32;
             anyhow::ensure!(
                 (6.0..=100.0).contains(&font_size),
                 "terminal_font_size must be between 6 and 100"
             );
-            config.terminal_font_size = Some(font_size);
+            self.terminal_font_size = Some(font_size);
         }
-        if let Some(font_family) = root.get("terminal_font_family") {
-            config.terminal_font_family = font_family
-                .as_str()
-                .context("terminal_font_family must be a string")?
-                .to_owned();
+        if let Some(font_family) = file.terminal_font_family.get() {
             anyhow::ensure!(
-                !config.terminal_font_family.trim().is_empty(),
+                !font_family.trim().is_empty(),
                 "terminal_font_family must not be empty"
             );
+            self.terminal_font_family = font_family;
         }
-        if let Some(history_lines) = root.get("max_scroll_history_lines") {
-            config.max_scroll_history_lines = parse_max_scroll_history_lines(history_lines)?;
+        if let Some(history_lines) = file.max_scroll_history_lines.get() {
+            self.max_scroll_history_lines = parse_max_scroll_history_lines(history_lines)?;
         }
-        if let Some(opacity) = root.get("inactive_pane_opacity") {
-            config.inactive_pane_opacity = parse_inactive_pane_opacity(opacity)?;
+        if let Some(opacity) = file.inactive_pane_opacity.get() {
+            self.inactive_pane_opacity = parse_inactive_pane_opacity(opacity)?;
         }
-        if let Some(compact) = root.get("compact_mode") {
-            config.compact_mode = compact
-                .as_bool()
-                .context("compact_mode must be a boolean")?;
+        if let Some(compact) = file.compact_mode.get() {
+            self.compact_mode = compact;
         }
-        if let Some(hidden) = root.get("hide_pane_size") {
-            config.hide_pane_size = hidden
-                .as_bool()
-                .context("hide_pane_size must be a boolean")?;
+        if let Some(hidden) = file.hide_pane_size.get() {
+            self.hide_pane_size = hidden;
         }
-        if let Some(hidden) = root.get("hide_title_bar_labels") {
-            config.hide_title_bar_labels = hidden
-                .as_bool()
-                .context("hide_title_bar_labels must be a boolean")?;
+        if let Some(hidden) = file.hide_title_bar_labels.get() {
+            self.hide_title_bar_labels = hidden;
         }
-        if let Some(hidden) = root.get("hide_title_bar_buttons") {
-            config.hide_title_bar_buttons = hidden
-                .as_bool()
-                .context("hide_title_bar_buttons must be a boolean")?;
+        if let Some(hidden) = file.hide_title_bar_buttons.get() {
+            self.hide_title_bar_buttons = hidden;
         }
-        if let Some(hidden) = root.get("hide_title_bar_menus") {
-            config.hide_title_bar_menus = hidden
-                .as_bool()
-                .context("hide_title_bar_menus must be a boolean")?;
+        if let Some(hidden) = file.hide_title_bar_menus.get() {
+            self.hide_title_bar_menus = hidden;
         }
-        if let Some(position) = root.get("pane_controls_position") {
-            config.pane_controls_position = match position
-                .as_str()
-                .context("pane_controls_position must be \"left\" or \"right\"")?
-            {
-                "left" => PaneControlsPosition::Left,
-                "right" => PaneControlsPosition::Right,
-                _ => anyhow::bail!("pane_controls_position must be \"left\" or \"right\""),
-            };
+        if let Some(position) = file.pane_controls_position.get() {
+            self.pane_controls_position = PaneControlsPosition::parse(&position)?;
         }
-        if let Some(hidden) = root.get("pane_controls_hidden_by_default") {
-            config.pane_controls_hidden_by_default = hidden
-                .as_bool()
-                .context("pane_controls_hidden_by_default must be a boolean")?;
+        if let Some(hidden) = file.pane_controls_hidden_by_default.get() {
+            self.pane_controls_hidden_by_default = hidden;
         }
-        if let Some(port) = root.get("http_server_port") {
-            config.http_server_port = parse_server_port(port, "http_server_port")?;
+        if let Some(port) = file.http_server_port.get() {
+            self.http_server_port = parse_server_port(port, "http_server_port")?;
         }
-        if let Some(port) = root.get("tftp_server_port") {
-            config.tftp_server_port = parse_server_port(port, "tftp_server_port")?;
+        if let Some(port) = file.tftp_server_port.get() {
+            self.tftp_server_port = parse_server_port(port, "tftp_server_port")?;
         }
-        if let Some(sessions) = root.get("sessions") {
-            let sessions = sessions.as_object().context("sessions must be an object")?;
-            if let Some(field) = sessions
-                .keys()
-                .find(|field| !matches!(field.as_str(), "retention" | "ring_bytes" | "persistence"))
-            {
-                anyhow::bail!("unrecognized sessions configuration field {field:?}");
-            }
-            if let Some(retention) = sessions.get("retention") {
-                config.sessions.retention = SessionRetention::parse(
-                    retention
-                        .as_str()
-                        .context("sessions.retention must be a string")?,
-                )?;
-            }
-            if let Some(ring_bytes) = sessions.get("ring_bytes") {
-                let ring_bytes = ring_bytes
-                    .as_u64()
-                    .context("sessions.ring_bytes must be a positive integer")?;
-                config.sessions.ring_bytes = usize::try_from(ring_bytes)
-                    .ok()
-                    .filter(|bytes| (4 * 1024..=MAX_SESSION_RING_BYTES).contains(bytes))
-                    .with_context(|| {
-                        format!(
-                            "sessions.ring_bytes must be between 4096 and {MAX_SESSION_RING_BYTES} bytes"
-                        )
-                    })?;
-            }
-            if let Some(persistence) = sessions.get("persistence") {
-                let persistence = persistence
-                    .as_object()
-                    .context("sessions.persistence must be an object")?;
-                if let Some(field) = persistence.keys().find(|field| {
-                    !matches!(field.as_str(), "recipients" | "identity" | "auto_protect")
-                }) {
-                    anyhow::bail!("unrecognized sessions.persistence field {field:?}");
-                }
-                if let Some(recipients) = persistence.get("recipients") {
-                    config.sessions.persistence.recipients = recipients
-                        .as_array()
-                        .context("sessions.persistence.recipients must be an array")?
-                        .iter()
-                        .map(|recipient| {
-                            recipient
-                                .as_str()
-                                .map(str::trim)
-                                .filter(|recipient| !recipient.is_empty())
-                                .map(str::to_owned)
-                                .context("sessions.persistence.recipients must contain strings")
-                        })
-                        .collect::<Result<Vec<_>>>()?;
-                }
-                if let Some(identity) = persistence.get("identity") {
-                    config.sessions.persistence.identity = match identity {
-                        Value::Null => None,
-                        Value::String(path) if path.trim().is_empty() => None,
-                        Value::String(path) => Some(PathBuf::from(path)),
-                        _ => anyhow::bail!(
-                            "sessions.persistence.identity must be a path string or null"
-                        ),
-                    };
-                }
-                if let Some(auto_protect) = persistence.get("auto_protect") {
-                    config.sessions.persistence.auto_protect = auto_protect
-                        .as_bool()
-                        .context("sessions.persistence.auto_protect must be a boolean")?;
-                }
-            }
-            config.sessions.to_zmux_retention()?;
+        if let Some(sessions) = file.sessions.get() {
+            sessions.apply(&mut self.sessions)?;
+            // Only a file that named `sessions` is held to a retention this
+            // build can actually serve.
+            self.sessions.to_zmux_retention()?;
         }
 
-        if let Some(profiles) = root.get("profiles") {
-            let profiles = profiles.as_array().context("profiles must be an array")?;
+        if let Some(profiles) = file.profiles.get() {
             let parsed = profiles
-                .iter()
-                .map(parse_profile)
+                .into_iter()
+                .map(ProfileFile::into_config)
                 .collect::<Result<Vec<_>>>()?;
-            merge_profiles(&mut config.profiles, &parsed)?;
-            merge_profile_visibility(&mut config.hidden_profiles, &parsed);
+            merge_profiles(&mut self.profiles, &parsed)?;
+            merge_profile_visibility(&mut self.hidden_profiles, &parsed);
         }
 
-        if let Some(templates) = root.get("pane_split_templates") {
-            let templates = templates
-                .as_object()
-                .context("pane_split_templates must be an object")?;
-            for (name, value) in templates {
+        if let Some(templates) = file.pane_split_templates.get() {
+            for (name, value) in &templates {
                 anyhow::ensure!(
                     !name.trim().is_empty(),
                     "pane split template names must not be empty"
                 );
-                let template = parse_pane_split_template_config(value, &config.profiles)
+                let template = parse_pane_split_template_config(value, &self.profiles)
                     .with_context(|| format!("parsing pane split template {name:?}"))?;
                 anyhow::ensure!(
                     (2..=64).contains(&template.pane_count()),
                     "pane split template {name:?} must contain between 2 and 64 panes"
                 );
-                config.pane_split_templates.insert(name.clone(), template);
+                self.pane_split_templates.insert(name.clone(), template);
             }
         }
 
-        if let Some(default_profile) = root.get("default_profile") {
-            let default_name = default_profile
-                .as_str()
-                .context("default_profile must be a string")?;
-            config.default_profile = resolve_default_profile(&config.profiles, default_name)?;
+        if let Some(default_profile) = file.default_profile.get() {
+            self.default_profile = resolve_default_profile(&self.profiles, &default_profile)?;
         }
 
-        Ok(config)
+        Ok(self)
     }
 }
 
-fn validate_config_fields(root: &Value) -> Result<()> {
-    const FIELDS: &[&str] = &[
-        "default_profile",
-        "new_tab_profile",
-        "working_directory",
-        "working_directory_scope",
-        "theme",
-        "dark_theme",
-        "default_tab_icon",
-        "terminal_font_size",
-        "terminal_font_family",
-        "max_scroll_history_lines",
-        "inactive_pane_opacity",
-        "compact_mode",
-        "hide_pane_size",
-        "hide_title_bar_labels",
-        "hide_title_bar_buttons",
-        "hide_title_bar_menus",
-        "pane_controls_position",
-        "pane_controls_hidden_by_default",
-        "http_server_port",
-        "tftp_server_port",
-        "sessions",
-        "pane_split_templates",
-        "profiles",
-    ];
-    let object = root
-        .as_object()
-        .context("configuration root must be an object")?;
-    if let Some(field) = object
-        .keys()
-        .find(|field| !FIELDS.contains(&field.as_str()))
-    {
-        anyhow::bail!("unrecognized configuration field {field:?}");
+impl SessionsFile {
+    fn apply(self, sessions: &mut SessionsConfig) -> Result<()> {
+        if let Some(retention) = self.retention.get() {
+            sessions.retention = SessionRetention::parse(&retention)?;
+        }
+        if let Some(ring_bytes) = self.ring_bytes.get() {
+            sessions.ring_bytes = usize::try_from(ring_bytes)
+                .ok()
+                .filter(|bytes| (4 * 1024..=MAX_SESSION_RING_BYTES).contains(bytes))
+                .with_context(|| {
+                    format!(
+                        "sessions.ring_bytes must be between 4096 and {MAX_SESSION_RING_BYTES} bytes"
+                    )
+                })?;
+        }
+        if let Some(persistence) = self.persistence.get() {
+            persistence.apply(&mut sessions.persistence)?;
+        }
+        Ok(())
     }
-    Ok(())
 }
 
-fn parse_server_port(value: &Value, field: &str) -> Result<u16> {
-    let message = || format!("{field} must be an integer from 1 to 65535");
-    let port = value.as_u64().with_context(message)?;
+impl SessionPersistenceFile {
+    fn apply(self, persistence: &mut SessionPersistenceConfig) -> Result<()> {
+        if let Some(recipients) = self.recipients.get() {
+            persistence.recipients = recipients
+                .into_iter()
+                .map(|recipient| {
+                    let recipient = recipient.trim();
+                    (!recipient.is_empty())
+                        .then(|| recipient.to_owned())
+                        .context("sessions.persistence.recipients must contain strings")
+                })
+                .collect::<Result<Vec<_>>>()?;
+        }
+        if let Some(identity) = self.identity.get() {
+            persistence.identity = identity
+                .filter(|path| !path.trim().is_empty())
+                .map(PathBuf::from);
+        }
+        if let Some(auto_protect) = self.auto_protect.get() {
+            persistence.auto_protect = auto_protect;
+        }
+        Ok(())
+    }
+}
+
+/// Reads the file's shape, reporting which setting was wrong rather than only
+/// what was wrong with it.
+///
+/// Serde names the expected type and the offending line, but not the field; on
+/// a nested value — a profile's `hidden`, a template's `env` — that is most of
+/// the answer missing. `serde_path_to_error` supplies the rest, so a message
+/// reads `profiles[1].hidden: invalid type: string "yes", expected a boolean`.
+fn parse_config_file(content: &str) -> Result<ConfigFile> {
+    let mut deserializer = serde_json::Deserializer::from_str(content);
+    serde_path_to_error::deserialize(&mut deserializer).map_err(|error| {
+        let path = error.path().to_string();
+        let error = error.into_inner();
+        if path.is_empty() || path == "." {
+            anyhow!("{error}")
+        } else {
+            anyhow!("{path}: {error}")
+        }
+    })
+}
+
+fn parse_server_port(port: u64, field: &str) -> Result<u16> {
     u16::try_from(port)
         .ok()
         .filter(|port| *port != 0)
-        .with_context(message)
+        .with_context(|| format!("{field} must be an integer from 1 to 65535"))
 }
 
 pub(crate) fn built_in_pane_split_templates() -> HashMap<String, PaneSplitTemplateConfig> {
@@ -1369,10 +1421,7 @@ pub(crate) fn visible_profile_index(
         .map(|(index, _)| index)
 }
 
-fn parse_inactive_pane_opacity(value: &Value) -> Result<f32> {
-    let opacity = value
-        .as_f64()
-        .context("inactive_pane_opacity must be a number")?;
+fn parse_inactive_pane_opacity(opacity: f64) -> Result<f32> {
     anyhow::ensure!(
         (0.0..=1.0).contains(&opacity),
         "inactive_pane_opacity must be between 0 and 1"
@@ -1380,10 +1429,7 @@ fn parse_inactive_pane_opacity(value: &Value) -> Result<f32> {
     Ok(opacity as f32)
 }
 
-fn parse_max_scroll_history_lines(value: &Value) -> Result<usize> {
-    let history_lines = value
-        .as_u64()
-        .context("max_scroll_history_lines must be a non-negative integer")?;
+fn parse_max_scroll_history_lines(history_lines: u64) -> Result<usize> {
     anyhow::ensure!(
         history_lines <= MAX_SCROLL_HISTORY_LINES as u64,
         "max_scroll_history_lines must not exceed {MAX_SCROLL_HISTORY_LINES}"
@@ -1391,899 +1437,40 @@ fn parse_max_scroll_history_lines(value: &Value) -> Result<usize> {
     Ok(history_lines as usize)
 }
 
-fn parse_profile(value: &Value) -> Result<ProfileConfig> {
-    let object = value
-        .as_object()
-        .context("each profile must be an object")?;
-    const FIELDS: &[&str] = &[
-        "name",
-        "program",
-        "args",
-        "theme",
-        "dark_theme",
-        "icon",
-        "hidden",
-    ];
-    if let Some(field) = object
-        .keys()
-        .find(|field| !FIELDS.contains(&field.as_str()))
-    {
-        anyhow::bail!("unrecognized profile field {field:?}");
-    }
-    let name = object
-        .get("name")
-        .and_then(Value::as_str)
-        .context("profile.name must be a string")?
-        .to_owned();
-    let program = object
-        .get("program")
-        .map(|program| {
-            program
-                .as_str()
-                .context("profile.program must be a string")
-                .map(str::to_owned)
-        })
-        .transpose()?;
-    let args = object
-        .get("args")
-        .map(|args| {
-            args.as_array()
-                .context("profile.args must be an array")?
-                .iter()
-                .map(|arg| {
-                    arg.as_str()
-                        .map(str::to_owned)
-                        .context("profile args must be strings")
-                })
-                .collect::<Result<Vec<_>>>()
-        })
-        .transpose()?
-        .unwrap_or_default();
-    anyhow::ensure!(
-        program.is_some() || args.is_empty(),
-        "profile.args requires program"
-    );
-    let command = program.map(|program| {
-        if args.is_empty() {
-            Shell::Program(program)
-        } else {
-            Shell::WithArguments {
-                program,
-                args,
-                title_override: Some(name.clone()),
-            }
-        }
-    });
-    let theme = object
-        .get("theme")
-        .map(|theme| {
-            theme
-                .as_str()
-                .context("profile.theme must be a string")
-                .map(str::to_owned)
-        })
-        .transpose()?;
-    let dark_theme = object
-        .get("dark_theme")
-        .map(|dark_theme| {
-            dark_theme
-                .as_str()
-                .context("profile.dark_theme must be a string")
-                .map(str::to_owned)
-        })
-        .transpose()?;
-    let icon = object
-        .get("icon")
-        .map(ProfileIcon::parse)
-        .transpose()?
-        .flatten();
-    let hidden = object
-        .get("hidden")
-        .map(|hidden| hidden.as_bool().context("profile.hidden must be a boolean"))
-        .transpose()?;
-    Ok(ProfileConfig {
-        name,
-        command,
-        theme,
-        dark_theme,
-        icon,
-        hidden,
-    })
-}
-
-fn discovered_profiles() -> Vec<Profile> {
-    static DISCOVERED_PROFILES: OnceLock<Vec<Profile>> = OnceLock::new();
-    DISCOVERED_PROFILES.get_or_init(discover_profiles).clone()
-}
-
-fn discover_profiles() -> Vec<Profile> {
-    let mut profiles = vec![Profile {
-        name: "System".to_owned(),
-        command: Shell::System,
-        theme: None,
-        dark_theme: None,
-        icon: ProfileIcon::automatic_for_shell(&Shell::System),
-    }];
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
-    let homebrew_prefixes = homebrew_prefixes();
-    let candidates: &[(&str, &str)] = if cfg!(windows) {
-        &[
-            ("PowerShell", "powershell.exe"),
-            ("PowerShell 7", "pwsh.exe"),
-            ("Command Prompt", "cmd.exe"),
-        ]
-    } else {
-        &[
-            ("Zsh", "zsh"),
-            ("Bash", "bash"),
-            ("Fish", "fish"),
-            ("Nushell", "nu"),
-        ]
-    };
-    let mut seen = HashSet::new();
-    for (name, program) in candidates {
-        if let Some(path) = command_path(program)
-            && seen.insert(path.clone())
-        {
-            #[cfg(any(target_os = "macos", target_os = "linux"))]
-            let profile =
-                homebrew_profile_for_path(&path, &homebrew_prefixes).unwrap_or_else(|| Profile {
-                    name: (*name).to_owned(),
-                    command: Shell::Program((*program).to_owned()),
-                    theme: None,
-                    dark_theme: None,
-                    icon: ProfileIcon::automatic_for_program(program),
-                });
-            #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-            let profile = Profile {
-                name: (*name).to_owned(),
-                command: Shell::Program((*program).to_owned()),
-                theme: None,
-                dark_theme: None,
-                icon: ProfileIcon::automatic_for_program(program),
-            };
-            profiles.push(profile);
-        }
-    }
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
-    profiles.extend(
-        homebrew_shell_profiles(homebrew_prefixes)
-            .into_iter()
-            .filter(|profile| {
-                let Shell::Program(program) = &profile.command else {
-                    return true;
-                };
-                seen.insert(PathBuf::from(program))
-            }),
-    );
-    #[cfg(windows)]
-    if let Some(root) = msys2_installation_root() {
-        profiles.extend(msys2_profiles(&root));
-    }
-    #[cfg(windows)]
-    if let Some(root) = cygwin_installation_root() {
-        profiles.extend(cygwin_profiles(&root));
-    }
-    #[cfg(windows)]
-    if let Some(program) = wsl_program() {
-        profiles.extend(discovered_wsl_profiles(&program));
-    }
-    profiles
-}
-
-#[cfg(any(target_os = "macos", target_os = "linux"))]
-const POSIX_PROFILE_CANDIDATES: &[(&str, &str)] = &[
-    ("Zsh", "zsh"),
-    ("Bash", "bash"),
-    ("Fish", "fish"),
-    ("Nushell", "nu"),
-];
-
-#[cfg(any(target_os = "macos", target_os = "linux"))]
-fn homebrew_prefixes() -> Vec<PathBuf> {
-    let mut prefixes = env::var_os("HOMEBREW_PREFIX")
-        .into_iter()
-        .map(PathBuf::from)
-        .collect::<Vec<_>>();
-
-    #[cfg(target_os = "macos")]
-    prefixes.extend([PathBuf::from("/opt/homebrew"), PathBuf::from("/usr/local")]);
-    #[cfg(target_os = "linux")]
-    prefixes.push(PathBuf::from("/home/linuxbrew/.linuxbrew"));
-
-    prefixes.dedup();
-    prefixes
-        .into_iter()
-        .filter(|prefix| prefix.join("bin/brew").is_file())
-        .collect()
-}
-
-#[cfg(any(target_os = "macos", target_os = "linux"))]
-fn homebrew_profile_for_path(path: &Path, prefixes: &[PathBuf]) -> Option<Profile> {
-    POSIX_PROFILE_CANDIDATES.iter().find_map(|(name, program)| {
-        prefixes.iter().find_map(|prefix| {
-            let homebrew_path = prefix.join("bin").join(program);
-            (homebrew_path == path).then(|| homebrew_profile(name, homebrew_path))
-        })
-    })
-}
-
-#[cfg(any(target_os = "macos", target_os = "linux"))]
-fn homebrew_profile(name: &str, path: PathBuf) -> Profile {
-    let command = path.to_string_lossy().into_owned();
-    Profile {
-        name: format!("{name} (Homebrew)"),
-        command: Shell::Program(command.clone()),
-        theme: None,
-        dark_theme: None,
-        icon: ProfileIcon::automatic_for_program(&command),
-    }
-}
-
-#[cfg(any(target_os = "macos", target_os = "linux"))]
-fn homebrew_shell_profiles(prefixes: impl IntoIterator<Item = PathBuf>) -> Vec<Profile> {
-    prefixes
-        .into_iter()
-        .flat_map(|prefix| {
-            let bin = prefix.join("bin");
-            POSIX_PROFILE_CANDIDATES
-                .iter()
-                .filter_map(move |(name, program)| {
-                    let path = bin.join(program);
-                    path.is_file().then(|| homebrew_profile(name, path))
-                })
-        })
-        .collect()
-}
-
-#[cfg(windows)]
-fn msys2_installation_root() -> Option<PathBuf> {
-    msys2_start_menu_installation_roots()
-        .into_iter()
-        .chain(msys2_registered_installation_roots())
-        .chain([PathBuf::from(r"C:\msys64")])
-        .find(|root| root.join("msys2_shell.cmd").is_file())
-}
-
-#[cfg(windows)]
-fn msys2_start_menu_installation_roots() -> Vec<PathBuf> {
-    use windows::Win32::{
-        Foundation::RPC_E_CHANGED_MODE,
-        System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize},
-    };
-
-    let shortcuts = [
-        env::var_os("APPDATA").map(PathBuf::from),
-        env::var_os("ProgramData").map(PathBuf::from),
-    ]
-    .into_iter()
-    .flatten()
-    .map(|start_menu| {
-        start_menu
-            .join("Microsoft/Windows/Start Menu/Programs/MSYS2")
-            .join("MSYS2 MSYS.lnk")
-    })
-    .filter(|shortcut| shortcut.is_file())
-    .collect::<Vec<_>>();
-    if shortcuts.is_empty() {
-        return Vec::new();
-    }
-
-    // SAFETY: COM is initialized for this thread before creating Shell Link objects,
-    // and is uninitialized only when this call initialized it successfully.
-    unsafe {
-        let result = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
-        let initialized = if result.is_ok() {
-            true
-        } else if result == RPC_E_CHANGED_MODE {
-            false
-        } else {
-            return Vec::new();
-        };
-        let roots = shortcuts
-            .into_iter()
-            .filter_map(|shortcut| shortcut_working_directory(&shortcut))
-            .collect();
-        if initialized {
-            CoUninitialize();
-        }
-        roots
-    }
-}
-
-#[cfg(windows)]
-fn shortcut_working_directory(shortcut: &Path) -> Option<PathBuf> {
-    use windows::{
-        Win32::{
-            System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance, IPersistFile, STGM_READ},
-            UI::Shell::{IShellLinkW, ShellLink},
-        },
-        core::{HSTRING, Interface},
-    };
-
-    // SAFETY: The caller initializes COM before this helper is used. All output
-    // buffers remain alive for the duration of the corresponding COM calls.
-    unsafe {
-        let link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER).ok()?;
-        let persist: IPersistFile = link.cast().ok()?;
-        persist
-            .Load(&HSTRING::from(shortcut.as_os_str()), STGM_READ)
-            .ok()?;
-        let mut directory = vec![0_u16; 32_768];
-        link.GetWorkingDirectory(&mut directory).ok()?;
-        let len = directory.iter().position(|character| *character == 0)?;
-        (len > 0).then(|| PathBuf::from(String::from_utf16_lossy(&directory[..len])))
-    }
-}
-
-#[cfg(windows)]
-fn msys2_registered_installation_roots() -> Vec<PathBuf> {
-    use windows::{
-        Win32::{
-            Foundation::ERROR_SUCCESS,
-            System::Registry::{
-                HKEY, HKEY_CURRENT_USER, KEY_READ, RegCloseKey, RegEnumKeyW, RegOpenKeyExW,
-            },
-        },
-        core::w,
-    };
-
-    fn read_string(key: HKEY, name: windows::core::PCWSTR) -> Option<String> {
-        use windows::Win32::{
-            Foundation::ERROR_SUCCESS,
-            System::Registry::{REG_SZ, RegQueryValueExW},
-        };
-
-        let mut value_type = REG_SZ;
-        let mut byte_len = 0;
-        // SAFETY: The first query requests only the value size and writes to valid local
-        // variables. The second query uses a buffer sized from that result.
-        if unsafe {
-            RegQueryValueExW(
-                key,
-                name,
-                None,
-                Some(&mut value_type),
-                None,
-                Some(&mut byte_len),
-            )
-        } != ERROR_SUCCESS
-            || value_type != REG_SZ
-            || byte_len < 2
-        {
-            return None;
-        }
-        let mut value = vec![0_u16; byte_len as usize / 2];
-        if unsafe {
-            RegQueryValueExW(
-                key,
-                name,
-                None,
-                Some(&mut value_type),
-                Some(value.as_mut_ptr().cast()),
-                Some(&mut byte_len),
-            )
-        } != ERROR_SUCCESS
-        {
-            return None;
-        }
-        let len = value.iter().position(|character| *character == 0)?;
-        Some(String::from_utf16_lossy(&value[..len]))
-    }
-
-    let mut uninstall = HKEY::default();
-    // The official MSYS2 installer registers its per-user uninstall entry here.
-    // SAFETY: `uninstall` is a valid output pointer and is closed below.
-    if unsafe {
-        RegOpenKeyExW(
-            HKEY_CURRENT_USER,
-            w!(r"Software\Microsoft\Windows\CurrentVersion\Uninstall"),
-            None,
-            KEY_READ,
-            &mut uninstall,
-        )
-    } != ERROR_SUCCESS
-    {
-        return Vec::new();
-    }
-
-    let mut roots = Vec::new();
-    for index in 0.. {
-        let mut name = [0_u16; 256];
-        // RegEnumKeyW writes at most the supplied buffer length.
-        let result = unsafe { RegEnumKeyW(uninstall, index, Some(&mut name)) };
-        if result != ERROR_SUCCESS {
-            break;
-        }
-        if !name.contains(&0) {
-            continue;
-        }
-        let mut entry = HKEY::default();
-        // SAFETY: The enumerated name is terminated in the local buffer, and `entry`
-        // is a valid output pointer.
-        if unsafe {
-            RegOpenKeyExW(
-                uninstall,
-                windows::core::PCWSTR(name.as_ptr()),
-                None,
-                KEY_READ,
-                &mut entry,
-            )
-        } != ERROR_SUCCESS
-        {
-            continue;
-        }
-        let is_msys2 = read_string(entry, w!("DisplayName")).is_some_and(|display_name| {
-            display_name.eq_ignore_ascii_case("MSYS2")
-                || display_name.to_ascii_lowercase().starts_with("msys2 ")
-        });
-        if is_msys2 && let Some(location) = read_string(entry, w!("InstallLocation")) {
-            roots.push(PathBuf::from(location));
-        }
-        // SAFETY: `entry` was opened successfully in this iteration.
-        unsafe {
-            let _ = RegCloseKey(entry);
-        }
-    }
-    // SAFETY: `uninstall` was opened successfully above.
-    unsafe {
-        let _ = RegCloseKey(uninstall);
-    }
-    roots
-}
-
-#[cfg(any(windows, test))]
-fn msys2_profiles(root: &Path) -> Vec<Profile> {
-    let launcher = root.join("msys2_shell.cmd");
-    [("MSYS2", "bash"), ("MSYS2: Zsh", "zsh")]
-        .into_iter()
-        .filter(|(_, shell)| root.join("usr/bin").join(format!("{shell}.exe")).is_file())
-        .map(|(name, shell)| {
-            let command = format!(
-                "\"\"{}\" -defterm -here -no-start -msys -use-full-path -shell {shell}\"",
-                launcher.display()
-            );
-            Profile {
-                name: name.to_owned(),
-                command: Shell::WithArguments {
-                    program: "cmd.exe".to_owned(),
-                    args: vec!["/d".to_owned(), "/s".to_owned(), "/c".to_owned(), command],
-                    title_override: Some(name.to_owned()),
-                },
-                theme: None,
-                dark_theme: None,
-                icon: match shell {
-                    "bash" => ProfileIcon::Bash,
-                    "zsh" => ProfileIcon::Zsh,
-                    _ => ProfileIcon::Zetta,
-                },
-            }
-        })
-        .collect()
-}
-
-#[cfg(windows)]
-fn cygwin_installation_root() -> Option<PathBuf> {
-    select_cygwin_installation_root(cygwin_installation_roots())
-}
-
-#[cfg(any(windows, test))]
-fn select_cygwin_installation_root(roots: impl IntoIterator<Item = PathBuf>) -> Option<PathBuf> {
-    let mut first_valid_root = None;
-    for root in roots {
-        if !root.join("bin").join("cygwin1.dll").is_file() {
-            continue;
-        }
-        if first_valid_root.is_none() {
-            first_valid_root = Some(root.clone());
-        }
-        // A stale registry entry may retain cygwin1.dll after the supported
-        // shell executables have been removed. Prefer the next complete
-        // installation so that one such entry cannot hide a working root.
-        if !cygwin_profiles(&root).is_empty() {
-            return Some(root);
-        }
-    }
-    first_valid_root
-}
-
-#[cfg(windows)]
-fn cygwin_installation_roots() -> Vec<PathBuf> {
-    let mut roots = Vec::new();
-    let mut seen = HashSet::new();
-
-    let mut add_root = |root: PathBuf| {
-        let key = root
-            .to_string_lossy()
-            .replace('/', "\\")
-            .trim_end_matches('\\')
-            .to_ascii_lowercase();
-        if !key.is_empty() && seen.insert(key) {
-            roots.push(root);
-        }
-    };
-
-    for root in cygwin_registered_installation_roots() {
-        add_root(root);
-    }
-
-    if let Some(path) = env::var_os("PATH") {
-        for entry in env::split_paths(&path) {
-            if entry
-                .file_name()
-                .is_some_and(|name| name.eq_ignore_ascii_case(OsStr::new("bin")))
-            {
-                if let Some(root) = entry.parent() {
-                    add_root(root.to_path_buf());
-                }
-            } else if entry.join("bin").join("cygwin1.dll").is_file() {
-                add_root(entry);
-            }
-        }
-    }
-
-    add_root(PathBuf::from(r"C:\cygwin64"));
-    add_root(PathBuf::from(r"C:\cygwin"));
-    roots
-}
-
-#[cfg(windows)]
-fn cygwin_registered_installation_roots() -> Vec<PathBuf> {
-    use windows::{
-        Win32::{
-            Foundation::ERROR_SUCCESS,
-            System::Registry::{
-                HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WOW64_32KEY,
-                KEY_WOW64_64KEY, REG_EXPAND_SZ, REG_SZ, RegCloseKey, RegEnumKeyW, RegEnumValueW,
-                RegOpenKeyExW, RegQueryValueExW,
-            },
-        },
-        core::{PCWSTR, PWSTR},
-    };
-
-    fn registry_string(key: HKEY, name: PCWSTR) -> Option<String> {
-        let mut value_type = REG_SZ;
-        let mut byte_len = 0u32;
-        // SAFETY: The first query writes only the value type and size to local variables.
-        if unsafe {
-            RegQueryValueExW(
-                key,
-                name,
-                None,
-                Some(&mut value_type),
-                None,
-                Some(&mut byte_len),
-            )
-        } != ERROR_SUCCESS
-            || (value_type != REG_SZ && value_type != REG_EXPAND_SZ)
-            || byte_len < 2
-        {
-            return None;
-        }
-
-        let mut value = vec![0u8; byte_len as usize];
-        // SAFETY: `value` is sized from the preceding registry query.
-        if unsafe {
-            RegQueryValueExW(
-                key,
-                name,
-                None,
-                Some(&mut value_type),
-                Some(value.as_mut_ptr()),
-                Some(&mut byte_len),
-            )
-        } != ERROR_SUCCESS
-        {
-            return None;
-        }
-
-        let units = value[..byte_len as usize]
-            .chunks_exact(2)
-            .map(|bytes| u16::from_le_bytes([bytes[0], bytes[1]]))
-            .take_while(|unit| *unit != 0)
-            .collect::<Vec<_>>();
-        String::from_utf16(&units).ok()
-    }
-
-    fn add_value(roots: &mut Vec<PathBuf>, key: HKEY, name: PCWSTR) {
-        if let Some(value) = registry_string(key, name)
-            && let Some(root) = normalize_cygwin_registry_path(&value)
-        {
-            roots.push(root);
-        }
-    }
-
-    fn add_values(roots: &mut Vec<PathBuf>, key: HKEY) {
-        let mut index = 0u32;
-        loop {
-            let mut name = [0u16; 512];
-            let mut name_len = name.len() as u32;
-            // SAFETY: The buffers are valid for the duration of this call.
-            let status = unsafe {
-                RegEnumValueW(
-                    key,
-                    index,
-                    Some(PWSTR(name.as_mut_ptr())),
-                    &mut name_len,
-                    None,
-                    None,
-                    None,
-                    None,
-                )
-            };
-            if status != ERROR_SUCCESS {
-                break;
-            }
-            let name = name[..name_len as usize]
-                .iter()
-                .copied()
-                .chain([0])
-                .collect::<Vec<_>>();
-            add_value(roots, key, PCWSTR(name.as_ptr()));
-            index += 1;
-        }
-    }
-
-    fn add_legacy_mount_values(roots: &mut Vec<PathBuf>, key: HKEY) {
-        add_value(roots, key, PCWSTR::null());
-        let mut index = 0u32;
-        loop {
-            let mut name = [0u16; 512];
-            // SAFETY: `name` is a valid output buffer for the enumerated subkey.
-            let status = unsafe { RegEnumKeyW(key, index, Some(&mut name)) };
-            if status != ERROR_SUCCESS {
-                break;
-            }
-            let name = name
-                .iter()
-                .copied()
-                .take_while(|unit| *unit != 0)
-                .chain([0])
-                .collect::<Vec<_>>();
-            let mut child = HKEY::default();
-            // SAFETY: The name is NUL-terminated and `child` is a valid output pointer.
-            if unsafe { RegOpenKeyExW(key, PCWSTR(name.as_ptr()), None, KEY_READ, &mut child) }
-                == ERROR_SUCCESS
-            {
-                add_value(roots, child, windows::core::w!("native"));
-                // SAFETY: `child` was opened successfully above.
-                unsafe {
-                    let _ = RegCloseKey(child);
-                }
-            }
-            index += 1;
-        }
-    }
-
-    let key_paths = [
-        (r"SOFTWARE\Cygwin\Installations", 0u8),
-        (r"SOFTWARE\Cygwin\setup", 1u8),
-        (r"SOFTWARE\Cygnus Solutions\Cygwin\mounts v2", 2u8),
-        (r"SOFTWARE\WOW6432Node\Cygwin\Installations", 0u8),
-        (r"SOFTWARE\WOW6432Node\Cygwin\setup", 1u8),
-        (
-            r"SOFTWARE\WOW6432Node\Cygnus Solutions\Cygwin\mounts v2",
-            2u8,
-        ),
-    ];
-    let hives = [HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE];
-    let views = [KEY_WOW64_64KEY, KEY_WOW64_32KEY];
-    let mut roots = Vec::new();
-
-    for hive in hives {
-        for view in views {
-            for (path, kind) in key_paths {
-                let path = path.encode_utf16().chain([0]).collect::<Vec<_>>();
-                let mut key = HKEY::default();
-                // SAFETY: `path` is NUL-terminated and `key` is a valid output pointer.
-                if unsafe {
-                    RegOpenKeyExW(hive, PCWSTR(path.as_ptr()), None, KEY_READ | view, &mut key)
-                } != ERROR_SUCCESS
-                {
-                    continue;
-                }
-
-                match kind {
-                    0 => add_values(&mut roots, key),
-                    1 => {
-                        add_value(&mut roots, key, windows::core::w!("rootdir"));
-                        add_value(&mut roots, key, PCWSTR::null());
-                    }
-                    _ => add_legacy_mount_values(&mut roots, key),
-                }
-                // SAFETY: `key` was opened successfully above.
-                unsafe {
-                    let _ = RegCloseKey(key);
-                }
-            }
-        }
-    }
-
-    roots
-}
-
-#[cfg(any(windows, test))]
-fn normalize_cygwin_registry_path(value: &str) -> Option<PathBuf> {
-    let value = value.trim().trim_end_matches('\0');
-    if value.is_empty() || value.chars().any(char::is_control) {
-        return None;
-    }
-
-    let value = value.replace('/', "\\");
-    let value = ["\\\\??\\", "\\??\\", "\\\\?\\"]
-        .iter()
-        .find_map(|prefix| {
-            value
-                .get(..prefix.len())
-                .filter(|value| value.eq_ignore_ascii_case(prefix))
-                .map(|_| &value[prefix.len()..])
-        })
-        .unwrap_or(&value);
-    let value = if value
-        .get(..4)
-        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("UNC\\"))
-    {
-        format!("\\\\{}", &value[4..])
-    } else {
-        value.to_owned()
-    };
-    (!value.is_empty()).then(|| PathBuf::from(value))
-}
-
-#[cfg(any(windows, test))]
-fn cygwin_profiles(root: &Path) -> Vec<Profile> {
-    [
-        ("Cygwin", "bash", ProfileIcon::Bash),
-        ("Cygwin: Zsh", "zsh", ProfileIcon::Zsh),
-        ("Cygwin: Fish", "fish", ProfileIcon::Fish),
-        ("Cygwin: Nushell", "nu", ProfileIcon::Zetta),
-    ]
-    .into_iter()
-    .filter_map(|(name, shell, icon)| {
-        let program = root.join("bin").join(format!("{shell}.exe"));
-        program.is_file().then(|| Profile {
-            name: name.to_owned(),
-            command: Shell::WithArguments {
-                program: program.display().to_string(),
-                args: vec!["-l".to_owned()],
-                title_override: Some(name.to_owned()),
-            },
-            theme: None,
-            dark_theme: None,
-            icon,
-        })
-    })
-    .collect()
-}
-
-#[cfg(windows)]
-fn wsl_program() -> Option<String> {
-    let system_root = env::var_os("SystemRoot").or_else(|| env::var_os("WINDIR"));
-    let system_wsl = system_root.map(PathBuf::from).map(|root| {
-        root.join("System32")
-            .join("wsl.exe")
-            .to_string_lossy()
-            .into_owned()
-    });
-
-    system_wsl
-        .filter(|program| Path::new(program).is_file())
-        .or_else(|| command_exists("wsl.exe").then(|| "wsl.exe".to_owned()))
-}
-
-#[cfg(windows)]
-fn discovered_wsl_profiles(program: &str) -> Vec<Profile> {
-    const CREATE_NO_WINDOW: u32 = 0x08000000;
-
-    let output = Command::new(program)
-        .args(["--list", "--quiet"])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output();
-    let Ok(output) = output else {
-        return Vec::new();
-    };
-    if !output.status.success() {
-        return Vec::new();
-    }
-
-    wsl_profiles_from_output(program, &output.stdout)
-}
-
-#[cfg(any(windows, test))]
-fn wsl_profiles_from_output(program: &str, output: &[u8]) -> Vec<Profile> {
-    parse_wsl_distribution_names(output)
-        .into_iter()
-        .map(|distribution| {
-            let name = format!("WSL: {distribution}");
-            Profile {
-                name: name.clone(),
-                command: Shell::WithArguments {
-                    program: program.to_owned(),
-                    args: vec!["--distribution".to_owned(), distribution],
-                    title_override: Some(name),
-                },
-                theme: None,
-                dark_theme: None,
-                icon: ProfileIcon::Tux,
-            }
-        })
-        .collect()
-}
-
-#[cfg(any(windows, test))]
-fn parse_wsl_distribution_names(output: &[u8]) -> Vec<String> {
-    let decoded = if let Some(bytes) = output.strip_prefix(&[0xfe, 0xff]) {
-        let code_units = bytes
-            .chunks_exact(2)
-            .map(|pair| u16::from_be_bytes([pair[0], pair[1]]))
-            .collect::<Vec<_>>();
-        String::from_utf16_lossy(&code_units)
-    } else if output.starts_with(&[0xff, 0xfe]) || output.contains(&0) {
-        let bytes = output.strip_prefix(&[0xff, 0xfe]).unwrap_or(output);
-        let code_units = bytes
-            .chunks_exact(2)
-            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
-            .collect::<Vec<_>>();
-        String::from_utf16_lossy(&code_units)
-    } else {
-        String::from_utf8_lossy(output).into_owned()
-    };
-
-    let mut seen = HashSet::new();
-    decoded
-        .lines()
-        .map(|line| line.trim_matches(['\0', '\u{feff}', ' ', '\t', '\r']))
-        .filter(|name| !name.is_empty())
-        .filter(|name| is_user_wsl_distribution(name))
-        .filter(|name| seen.insert(name.to_lowercase()))
-        .map(str::to_owned)
-        .collect()
-}
-
-#[cfg(any(windows, test))]
-fn is_user_wsl_distribution(name: &str) -> bool {
-    ![
-        "docker-desktop",
-        "docker-desktop-data",
-        "rancher-desktop",
-        "rancher-desktop-data",
-    ]
-    .iter()
-    .any(|service| name.eq_ignore_ascii_case(service))
-}
-
-fn command_path(program: &str) -> Option<PathBuf> {
-    let program_path = Path::new(program);
-    if program_path.components().count() > 1 {
-        return program_path.is_file().then(|| program_path.to_path_buf());
-    }
-    env::var_os("PATH").and_then(|path| command_path_in(program, &path))
-}
-
-fn command_path_in(program: &str, path: &OsStr) -> Option<PathBuf> {
-    env::split_paths(path).find_map(|directory| {
-        if cfg!(windows) {
-            if directory.join(program).is_file() {
-                Some(directory.join(program))
-            } else if !program.to_ascii_lowercase().ends_with(".exe")
-                && directory.join(format!("{program}.exe")).is_file()
-            {
-                Some(directory.join(format!("{program}.exe")))
+impl ProfileFile {
+    fn into_config(self) -> Result<ProfileConfig> {
+        let args = self.args.get().unwrap_or_default();
+        let program = self.program.get();
+        anyhow::ensure!(
+            program.is_some() || args.is_empty(),
+            "profile.args requires program"
+        );
+        let name = self.name;
+        let command = program.map(|program| {
+            if args.is_empty() {
+                Shell::Program(program)
             } else {
-                None
+                Shell::WithArguments {
+                    program,
+                    args,
+                    title_override: Some(name.clone()),
+                }
             }
-        } else {
-            directory
-                .join(program)
-                .is_file()
-                .then(|| directory.join(program))
-        }
-    })
-}
-
-#[cfg(windows)]
-fn command_exists(program: &str) -> bool {
-    command_path(program).is_some()
+        });
+        Ok(ProfileConfig {
+            name,
+            command,
+            theme: self.theme.get(),
+            dark_theme: self.dark_theme.get(),
+            icon: self
+                .icon
+                .get()
+                .map(|icon| ProfileIcon::parse(&icon))
+                .transpose()?
+                .flatten(),
+            hidden: self.hidden.get(),
+        })
+    }
 }
 
 /// Resolved by `zmux`, which needs the same directory without depending on
