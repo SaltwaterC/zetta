@@ -420,6 +420,12 @@ fn scrollback_paths(directory: &Path, session_id: u64) -> Result<Vec<PathBuf>> {
 #[serde(deny_unknown_fields)]
 struct Manifest {
     version: u32,
+    /// A compatibility artifact. Nothing in this image reads it; it is kept
+    /// current so an older image that still compares it sees this boot. It
+    /// cannot be dropped: `deny_unknown_fields` plus the `unwrap_or_default`
+    /// read in [`PersistenceStore::open_with_recovery_state`] means an older
+    /// image reading a manifest without the field would silently reset the
+    /// manifest and orphan every encrypted record. See [`boot_stamp`].
     boot_stamp: String,
     records: Vec<RestorableRecord>,
 }
@@ -478,9 +484,10 @@ impl PersistenceStore {
     }
 
     /// As [`Self::open_with_recovery`], preserving records as live during an
-    /// in-process daemon upgrade. A normal daemon start is evidence that the
-    /// previous daemon was lost, even when the operating-system boot stamp is
-    /// unchanged.
+    /// in-process daemon upgrade. A record's restorability follows the daemon
+    /// that wrote it no longer answering, full stop: any start that is not an
+    /// in-process handoff is evidence the previous daemon was lost, so it
+    /// recovers every record.
     pub fn open_with_recovery_state(
         base: &Path,
         values: Option<&[String]>,
@@ -512,13 +519,15 @@ impl PersistenceStore {
         if manifest.version != MANIFEST_VERSION {
             manifest = Manifest::default();
         }
-        let current_boot = boot_stamp();
-        let recovered = !replacing_daemon || manifest.boot_stamp != current_boot;
+        // Kept current for an older image that still compares it; see
+        // `boot_stamp`. This one never branches on it, so the refresh is
+        // unconditional rather than part of the recovery below.
+        manifest.boot_stamp = boot_stamp();
+        let recovered = !replacing_daemon;
         if recovered {
             for record in &mut manifest.records {
                 record.restorable = true;
             }
-            manifest.boot_stamp = current_boot;
         }
         let mut store = Self {
             directory,
@@ -957,8 +966,7 @@ pub fn read_opaque_records(base: &Path) -> Result<Vec<RestorableRecord>> {
     let daemon_alive = crate::transport::Endpoint::read(&base.join("zmux.json"))
         .ok()
         .is_some_and(|endpoint| crate::transport::Stream::connect(&endpoint.socket_path).is_ok());
-    let boot_changed = manifest.boot_stamp != boot_stamp();
-    if !daemon_alive || boot_changed {
+    if !daemon_alive {
         for record in &mut manifest.records {
             record.restorable = true;
         }
@@ -1064,14 +1072,26 @@ fn unix_now() -> u64 {
         .as_secs()
 }
 
+/// The value written to [`Manifest::boot_stamp`], which this image records but
+/// never compares. It is retained, with its values byte-identical to what
+/// older images wrote, because rollback to an older build is supported
+/// (`--upgrade` crosses a version boundary) and such a build both reads the
+/// field and rejects a manifest that has lost it.
+///
+/// Do not finish the removal by deleting this. Do not "complete" it with a
+/// macOS or Windows source either: the comparison it fed could not change an
+/// outcome on any platform, because both former consumers already had a
+/// stronger signal beside it — a live daemon answering, and an in-process
+/// handoff that cannot span a reboot. Worse, in the handoff path a stamp that
+/// wrongly reported a reboot *causes* recovery, which prunes against an empty
+/// live set; an approximate stamp there would delete the records of sessions
+/// that are still running. This becomes a question worth asking again only if
+/// a recorded pid ever becomes load-bearing.
 fn boot_stamp() -> String {
     #[cfg(target_os = "linux")]
     if let Ok(stamp) = fs::read_to_string("/proc/sys/kernel/random/boot_id") {
         return stamp.trim().to_owned();
     }
-    // Other platforms do not expose one portable boot identifier through the
-    // standard library. A stable per-user store still gets cleanup and opaque
-    // listing; Linux additionally detects a reboot explicitly.
     format!("{}-stable", std::env::consts::OS)
 }
 

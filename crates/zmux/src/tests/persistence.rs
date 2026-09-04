@@ -316,6 +316,116 @@ fn reopening_an_existing_store_recovers_its_private_recipient_options() {
     assert_eq!(reopened.load_session(8, &identities).unwrap().id, 8);
 }
 
+/// A store holding one record the daemon still owns, so restorability has
+/// something to be wrong about.
+fn store_with_one_live_record(directory: &Path) -> PersistenceStore {
+    let recipient = age::x25519::Identity::generate().to_public().to_string();
+    let mut store = PersistenceStore::open(directory, &[recipient])
+        .unwrap()
+        .unwrap();
+    store
+        .save_session(&PersistedSession {
+            id: 3,
+            created_at: 1,
+            updated_at: 2,
+            summary: BackgroundSessionSummary {
+                id: 3,
+                title: "held by this daemon".to_owned(),
+                authentication_required: false,
+                active_pane: 1,
+                layout: BackgroundPaneLayout::Pane { pane_id: 1 },
+                panes: Vec::new(),
+                held: false,
+                scoped_to: None,
+                key_envelope: None,
+            },
+            state: serde_json::Value::Null,
+            verifier: None,
+            key_envelope: None,
+            failed_authentications: 0,
+            backoff_seconds: 0,
+            snapshots: Vec::new(),
+        })
+        .unwrap();
+    assert!(!store.records()[0].restorable);
+    store
+}
+
+fn manifest_path(directory: &Path) -> PathBuf {
+    directory.join("persistence").join("manifest.json")
+}
+
+fn read_manifest(directory: &Path) -> Manifest {
+    serde_json::from_slice(&fs::read(manifest_path(directory)).unwrap()).unwrap()
+}
+
+/// Backdates the recorded stamp to one no boot of this machine can produce.
+fn record_foreign_boot_stamp(directory: &Path) {
+    let mut manifest = read_manifest(directory);
+    manifest.boot_stamp = "00000000-0000-0000-0000-000000000000".to_owned();
+    fs::write(
+        manifest_path(directory),
+        serde_json::to_vec_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+}
+
+#[test]
+fn an_upgrade_handoff_keeps_records_live_whatever_stamp_was_recorded() {
+    let directory = tempfile::tempdir().unwrap();
+    drop(store_with_one_live_record(directory.path()));
+    record_foreign_boot_stamp(directory.path());
+
+    let reopened = PersistenceStore::open_with_recovery_state(directory.path(), None, true)
+        .unwrap()
+        .unwrap();
+    assert_eq!(reopened.records().len(), 1);
+    assert!(
+        !reopened.records()[0].restorable,
+        "a handoff must not hand the record to a client, whatever the stamp says"
+    );
+}
+
+#[test]
+fn a_fresh_daemon_start_recovers_records_whatever_stamp_was_recorded() {
+    // Once with a stamp from another boot, once with this boot's own, which is
+    // what the store just wrote.
+    let foreign = tempfile::tempdir().unwrap();
+    drop(store_with_one_live_record(foreign.path()));
+    record_foreign_boot_stamp(foreign.path());
+    let matching = tempfile::tempdir().unwrap();
+    drop(store_with_one_live_record(matching.path()));
+    assert_eq!(read_manifest(matching.path()).boot_stamp, boot_stamp());
+
+    for directory in [foreign.path(), matching.path()] {
+        let reopened = PersistenceStore::open_with_recovery_state(directory, None, false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(reopened.records().len(), 1);
+        assert!(
+            reopened.records()[0].restorable,
+            "a start that is not a handoff recovers, whatever the stamp says"
+        );
+    }
+}
+
+#[test]
+fn opening_refreshes_the_recorded_boot_stamp_even_when_nothing_was_recovered() {
+    let directory = tempfile::tempdir().unwrap();
+    drop(store_with_one_live_record(directory.path()));
+    record_foreign_boot_stamp(directory.path());
+
+    // `replacing_daemon` is the open that recovers nothing. A rolled-back
+    // image reading a stale stamp would decide a reboot happened during a
+    // handoff and prune the records of running sessions.
+    let reopened = PersistenceStore::open_with_recovery_state(directory.path(), None, true)
+        .unwrap()
+        .unwrap();
+    assert!(!reopened.records()[0].restorable);
+    drop(reopened);
+    assert_eq!(read_manifest(directory.path()).boot_stamp, boot_stamp());
+}
+
 #[test]
 fn cleanup_keeps_the_fixed_record_bound() {
     let directory = tempfile::tempdir().unwrap();

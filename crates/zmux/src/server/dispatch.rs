@@ -531,9 +531,10 @@ pub(super) fn configure_daemon(
         if matches!(retention, Retention::Disk) && !persistence_recipients.is_empty() {
             // Configure is the normal path used when a client brings an
             // already-running daemon onto disk persistence. It is not an
-            // in-process executable handoff: any records left by an earlier
-            // daemon must become restorable even when the boot stamp is the
-            // same. Live sessions are written below as non-restorable again.
+            // in-process executable handoff, so any records left by an earlier
+            // daemon must become restorable: their restorability follows that
+            // daemon no longer answering, full stop. Live sessions are written
+            // below as non-restorable again.
             PersistenceStore::open_with_recovery_state(
                 &session_catalog_dir(),
                 Some(&persistence_recipients),

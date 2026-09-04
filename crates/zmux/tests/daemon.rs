@@ -851,6 +851,114 @@ fn cli_kill_removes_an_orphaned_disk_record_without_a_daemon() {
     );
 }
 
+/// A record whose contents are all secrets, so an opaque listing that leaked
+/// any of them would say so.
+#[cfg(feature = "session-persistence")]
+fn secret_session(session_id: u64) -> PersistedSession {
+    let mut summary = summary(session_id, 1);
+    summary.title = "secret-title".to_owned();
+    summary.panes = vec![zmux::protocol::BackgroundPaneSummary {
+        id: 1,
+        label: "secret-label".to_owned(),
+        profile: "secret-profile".to_owned(),
+        configured_command: "secret-command".to_owned(),
+        application: "secret-application".to_owned(),
+        foreground_command: Some(vec!["secret-foreground".to_owned()]),
+        terminal_title: Some("secret-terminal-title".to_owned()),
+        working_directory: Some(PathBuf::from("/secret-directory")),
+        state: zmux::protocol::BackgroundPaneState::Running,
+        exit: None,
+    }];
+    PersistedSession {
+        id: session_id,
+        created_at: 1,
+        updated_at: 2,
+        summary,
+        state: serde_json::json!({"cwd": "/secret-directory"}),
+        verifier: None,
+        key_envelope: None,
+        failed_authentications: 0,
+        backoff_seconds: 0,
+        snapshots: Vec::new(),
+    }
+}
+
+#[cfg(feature = "session-persistence")]
+const SECRETS: &[&str] = &[
+    "secret-title",
+    "secret-label",
+    "secret-profile",
+    "secret-command",
+    "secret-application",
+    "secret-foreground",
+    "secret-terminal-title",
+    "secret-directory",
+];
+
+#[cfg(feature = "session-persistence")]
+#[test]
+fn an_opaque_listing_offers_a_record_whose_daemon_is_gone_and_reveals_nothing_of_it() {
+    let recipient = age::x25519::Identity::generate().to_public().to_string();
+    let directory = tempfile::tempdir().unwrap();
+    let sessions = daemon_sessions_dir(directory.path());
+    std::fs::create_dir_all(&sessions).unwrap();
+    let mut store = PersistenceStore::open(&sessions, &[recipient])
+        .unwrap()
+        .unwrap();
+    store.save_session(&secret_session(41)).unwrap();
+    drop(store);
+
+    // The record was written as the live daemon's own; restorability has to be
+    // the listing's decision, not something already true on disk.
+    let manifest = std::fs::read_to_string(sessions.join("persistence/manifest.json")).unwrap();
+    assert!(
+        manifest.contains(r#""restorable": false"#),
+        "manifest: {manifest}"
+    );
+
+    let records = zmux::persistence::read_opaque_records(&sessions).unwrap();
+    let record = records
+        .iter()
+        .find(|record| record.id == 41)
+        .expect("the record was not listed");
+    assert!(
+        record.restorable,
+        "no daemon is answering, so the record must be offered: {record:?}"
+    );
+    let listed = format!("{records:?}\n{manifest}");
+    for secret in SECRETS {
+        assert!(
+            !listed.contains(secret),
+            "the opaque listing revealed {secret}: {listed}"
+        );
+    }
+}
+
+#[cfg(feature = "session-persistence")]
+#[test]
+fn an_opaque_listing_leaves_a_record_alone_while_its_daemon_answers() {
+    let recipient = age::x25519::Identity::generate().to_public().to_string();
+    let daemon = TestDaemon::start();
+    // Proves the daemon is answering; without that this test passes for the
+    // wrong reason.
+    drop(daemon.client());
+    let mut store = PersistenceStore::open(&daemon.sessions_dir(), &[recipient])
+        .unwrap()
+        .unwrap();
+    store.save_session(&secret_session(42)).unwrap();
+    drop(store);
+
+    let records = zmux::persistence::read_opaque_records(&daemon.sessions_dir()).unwrap();
+    let record = records
+        .iter()
+        .find(|record| record.id == 42)
+        .expect("the record was not listed");
+    assert!(
+        !record.restorable,
+        "a record its daemon still holds must not be offered: {record:?}"
+    );
+}
+
 #[cfg(feature = "session-persistence")]
 #[test]
 fn reconfiguring_to_disk_keeps_an_existing_process_and_creates_encrypted_persistence() {
