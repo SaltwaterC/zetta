@@ -266,10 +266,10 @@ fn parse_application_args(arguments: Vec<OsString>) -> Result<StartupArgs> {
         }
         match argument.as_ref() {
             "--config" | "-c" => {
-                config = Some(args.next().context("--config requires a path")?.into())
+                config = Some(args.next().context("--config requires a path")?.into());
             }
             "--keymap" | "-k" => {
-                keymap = Some(args.next().context("--keymap requires a path")?.into())
+                keymap = Some(args.next().context("--keymap requires a path")?.into());
             }
             "--profile" | "-p" => {
                 profile = Some(
@@ -277,7 +277,7 @@ fn parse_application_args(arguments: Vec<OsString>) -> Result<StartupArgs> {
                         .context("--profile requires a name")?
                         .to_string_lossy()
                         .into_owned(),
-                )
+                );
             }
             "--split" | "-s" => {
                 let name = args
@@ -301,7 +301,7 @@ fn parse_application_args(arguments: Vec<OsString>) -> Result<StartupArgs> {
                         .context("--theme requires a theme name")?
                         .to_string_lossy()
                         .into_owned(),
-                )
+                );
             }
             "--no-mux" | "-n" => {
                 anyhow::ensure!(!no_mux, "--no-mux may only be specified once");

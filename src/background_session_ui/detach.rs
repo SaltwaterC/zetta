@@ -44,11 +44,11 @@ impl Zetta {
         }
         match self.existing_protection(tab_id) {
             Some(authentication) => {
-                self.apply_protected_session_action(tab_id, action, authentication, window, cx)
+                self.apply_protected_session_action(tab_id, action, authentication, window, cx);
             }
             #[cfg(feature = "session-persistence")]
             None if self.auto_protect.is_some() => {
-                self.protect_automatically_and_then(tab_id, action, window, cx)
+                self.protect_automatically_and_then(tab_id, action, window, cx);
             }
             None => self.prompt_for_session_secret(tab_id, action, window, cx),
         }
@@ -281,7 +281,7 @@ impl Zetta {
     ) {
         match action {
             ProtectedSessionAction::Detach => {
-                self.detach_tab_by_id(tab_id, authentication, window, cx)
+                self.detach_tab_by_id(tab_id, authentication, window, cx);
             }
             ProtectedSessionAction::KeepRunning => {
                 let sharing_authentication = authentication.clone();

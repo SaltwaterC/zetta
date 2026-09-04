@@ -1,5 +1,47 @@
 use super::*;
 
+/// The picker's list for `scope`: the reset entry pinned first, then every
+/// installed theme once, in name order.
+///
+/// Takes the names rather than reading the registry so the list's own rules —
+/// the pin, the sort, the dedup, and landing the selection on whatever theme is
+/// currently showing — are decided somewhere a test can reach.
+fn theme_picker_palette(
+    scope: ThemeScope,
+    mut theme_names: Vec<String>,
+    current: Option<&str>,
+) -> CommandPalette {
+    theme_names.sort();
+    theme_names.dedup();
+    let reset_command = PaletteCommand {
+        name: match scope {
+            ThemeScope::Pane => "Reset to tab default",
+            ThemeScope::Tab => "Reset to configured theme",
+        }
+        .to_owned(),
+        shortcut: None,
+        action: Box::new(ResetTheme { scope }),
+    };
+    let theme_commands = theme_names
+        .into_iter()
+        .map(|name| PaletteCommand {
+            name: name.clone(),
+            shortcut: None,
+            action: Box::new(ApplyTheme { name, scope }),
+        })
+        .collect();
+    let mut picker = CommandPalette::with_pinned_first(reset_command, theme_commands);
+    if let Some(index) = current.and_then(|current| {
+        picker
+            .commands
+            .iter()
+            .position(|command| command.name == current)
+    }) {
+        picker.selected = index;
+    }
+    picker
+}
+
 impl Zetta {
     pub(crate) fn change_pane_theme(
         &mut self,
@@ -39,39 +81,12 @@ impl Zetta {
             })
             .or_else(|| Some(self.window_theme(cx)))
             .map(|theme| theme.name.to_string());
-        let mut theme_names = ThemeRegistry::global(cx)
+        let theme_names = ThemeRegistry::global(cx)
             .list()
             .into_iter()
             .map(|theme| theme.name.to_string())
             .collect::<Vec<_>>();
-        theme_names.sort();
-        theme_names.dedup();
-        let reset_command = PaletteCommand {
-            name: match scope {
-                ThemeScope::Pane => "Reset to tab default",
-                ThemeScope::Tab => "Reset to configured theme",
-            }
-            .to_owned(),
-            shortcut: None,
-            action: Box::new(ResetTheme { scope }),
-        };
-        let theme_commands = theme_names
-            .into_iter()
-            .map(|name| PaletteCommand {
-                name: name.clone(),
-                shortcut: None,
-                action: Box::new(ApplyTheme { name, scope }),
-            })
-            .collect();
-        let mut picker = CommandPalette::with_pinned_first(reset_command, theme_commands);
-        if let Some(index) = current_theme_name.as_deref().and_then(|current| {
-            picker
-                .commands
-                .iter()
-                .position(|command| command.name == current)
-        }) {
-            picker.selected = index;
-        }
+        let picker = theme_picker_palette(scope, theme_names, current_theme_name.as_deref());
         picker.scroll_to_selected();
         self.theme_picker_scope = scope;
         self.theme_picker_current = current_theme_name;
@@ -136,38 +151,16 @@ impl Zetta {
                 return;
             }
         }
-        match event.keystroke.key.as_str() {
-            "escape" => self.dismiss_pane_theme_picker(window, cx),
-            "up" => {
-                picker.selected = picker.selected.saturating_sub(1);
-                picker.scroll_to_selected();
-                cx.notify();
+        if event.keystroke.key == "escape" {
+            self.dismiss_pane_theme_picker(window, cx);
+            return;
+        }
+        match picker.apply_key(&event.keystroke) {
+            PaletteKey::Ignored => {}
+            PaletteKey::Redraw => cx.notify(),
+            PaletteKey::Accept(command) => {
+                self.run_pane_theme_picker_command(command, window, cx);
             }
-            "down" => {
-                picker.selected =
-                    (picker.selected + 1).min(picker.matches().len().saturating_sub(1));
-                picker.scroll_to_selected();
-                cx.notify();
-            }
-            "enter" => {
-                let command = picker.matches().get(picker.selected).copied();
-                if let Some(command) = command {
-                    self.run_pane_theme_picker_command(command, window, cx);
-                }
-            }
-            _ => match apply_text_field_key(&mut picker.query, &event.keystroke) {
-                TextFieldEdit::Ignored => {}
-                TextFieldEdit::CursorMoved => cx.notify(),
-                TextFieldEdit::Edited => {
-                    // The query filters the theme list, so the list is rebuilt
-                    // and the selection returns to the first match rather than
-                    // pointing into the old one.
-                    picker.refresh_matches();
-                    picker.selected = 0;
-                    picker.scroll_to_selected();
-                    cx.notify();
-                }
-            },
         }
     }
 
@@ -366,7 +359,7 @@ impl Zetta {
                                             command_index,
                                             window,
                                             cx,
-                                        )
+                                        );
                                     })
                                     .ok();
                             })
@@ -477,3 +470,7 @@ impl Zetta {
         )
     }
 }
+
+#[cfg(test)]
+#[path = "tests/pane_theme_picker.rs"]
+mod tests;

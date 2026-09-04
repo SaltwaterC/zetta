@@ -258,8 +258,7 @@ impl Zetta {
             search_match.pane_id,
             search_match
                 .stack_id
-                .map(PaneStackSelection::Stacked)
-                .unwrap_or(PaneStackSelection::Base),
+                .map_or(PaneStackSelection::Base, PaneStackSelection::Stacked),
         );
         let terminal = tab.active_terminal();
         if let Some(terminal) = terminal {
@@ -343,17 +342,16 @@ impl Zetta {
         let status = if search.limit_reached {
             let position = search
                 .active_match
-                .map(|index| (index + 1).to_string())
-                .unwrap_or_else(|| "0".to_owned());
+                .map_or_else(|| "0".to_owned(), |index| (index + 1).to_string());
             format!(
                 "{position} / {retained_match_count} shown · {} matches",
                 search.total_count
             )
         } else {
-            search
-                .active_match
-                .map(|index| format!("{} / {}", index + 1, search.total_count))
-                .unwrap_or_else(|| format!("0 / {}", search.total_count))
+            search.active_match.map_or_else(
+                || format!("0 / {}", search.total_count),
+                |index| format!("{} / {}", index + 1, search.total_count),
+            )
         };
 
         Some(

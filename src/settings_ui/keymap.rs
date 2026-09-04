@@ -375,7 +375,7 @@ pub(crate) fn render_keymap_sticky_candidate(
                                 context,
                                 SettingsInput::Keymap(KeymapTextField::Context(section_index)),
                                 editor.focused_input,
-                                colors.clone(),
+                                &colors,
                                 handle.clone(),
                             )),
                     )

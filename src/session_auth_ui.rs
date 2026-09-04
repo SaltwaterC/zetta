@@ -541,7 +541,7 @@ impl Zetta {
         self.session_authentication = None;
         match mode {
             SessionAuthenticationPromptMode::Protect { tab_id, action } => {
-                self.apply_protected_session_action(tab_id, action, None, window, cx)
+                self.apply_protected_session_action(tab_id, action, None, window, cx);
             }
             SessionAuthenticationPromptMode::Reconnect { .. }
             | SessionAuthenticationPromptMode::RemoteAttach { .. }
@@ -584,6 +584,12 @@ impl Zetta {
         cx.notify();
     }
 
+    /// Submits whatever the prompt is asking for.
+    ///
+    /// The order is load-bearing and each step says why: the modes that never
+    /// reach the local verifier are settled first, then the fields are
+    /// validated, and only then is the secret taken out of the prompt and
+    /// zeroized. A refused attempt therefore never reads the secret at all.
     pub(crate) fn submit_session_authentication(
         &mut self,
         window: &mut Window,
@@ -597,7 +603,6 @@ impl Zetta {
         else {
             return;
         };
-        // Checked before the prompt is borrowed mutably, and before the secret
         // is read, so a refused attempt never reaches the verifier.
         if let SessionAuthenticationPromptMode::Reconnect {
             runner_id,
@@ -625,145 +630,23 @@ impl Zetta {
             self.submit_remote_sealed_session_passphrase(session_id, window, cx);
             return;
         }
-        let Some(prompt) = self.session_authentication.as_mut() else {
+        if !self.validate_session_authentication(mode, window, cx) {
             return;
-        };
-        let secret = Zeroizing::new(prompt.secret.text.clone());
-        match mode {
-            SessionAuthenticationPromptMode::Protect { .. } => {
-                match session_authentication_choice(&secret, &prompt.confirmation.text) {
-                    SessionAuthenticationChoice::Unprotected => {
-                        self.continue_without_session_authentication(window, cx);
-                        return;
-                    }
-                    SessionAuthenticationChoice::Protected => {}
-                    SessionAuthenticationChoice::Incomplete => {
-                        prompt.error = Some("Enter the same secret in both fields.".into());
-                        cx.notify();
-                        return;
-                    }
-                }
-            }
-            SessionAuthenticationPromptMode::Reconnect { .. }
-            | SessionAuthenticationPromptMode::RemoteAttach { .. }
-                if secret.is_empty() =>
-            {
-                prompt.error = Some("Enter the session secret.".into());
-                cx.notify();
-                return;
-            }
-            SessionAuthenticationPromptMode::ResumeDisk { .. } => {
-                if prompt.disk_protected && secret.is_empty() {
-                    prompt.error = Some("Enter the session secret.".into());
-                    cx.notify();
-                    return;
-                }
-                if prompt.disk_identity_index.is_some()
-                    && (if prompt.disk_protected {
-                        prompt.confirmation.text.is_empty()
-                    } else {
-                        secret.is_empty()
-                    })
-                {
-                    prompt.error = Some("Enter the identity passphrase.".into());
-                    cx.notify();
-                    return;
-                }
-            }
-            SessionAuthenticationPromptMode::Reconnect { .. } => {}
-            SessionAuthenticationPromptMode::RemoteAttach { .. } => {
-                unreachable!("remote attach is handled before the local verifier")
-            }
-            #[cfg(feature = "session-persistence")]
-            SessionAuthenticationPromptMode::UnlockSealedSession { .. } => {
-                unreachable!("the identity passphrase is handled before the verifier")
-            }
-            #[cfg(feature = "session-persistence")]
-            SessionAuthenticationPromptMode::UnlockRemoteSealedSession { .. } => {
-                unreachable!("the remote identity passphrase is handled before the verifier")
-            }
         }
         #[cfg(feature = "session-persistence")]
         if let SessionAuthenticationPromptMode::ResumeDisk { session_id } = mode {
             self.submit_disk_resume_authentication(session_id, window, cx);
             return;
         }
+        let Some(prompt) = self.session_authentication.as_mut() else {
+            return;
+        };
+        let secret = Zeroizing::new(prompt.secret.text.clone());
         prompt.secret.text.zeroize();
         prompt.confirmation.text.zeroize();
         prompt.working = true;
         prompt.error = None;
-        // A session the multiplexer is holding keeps its verifier in the
-        // multiplexer, not in any Zetta process, so there is nothing to check
-        // here: the secret is handed to the daemon as part of the attach, and
-        // the daemon evaluates it. Without this branch the local verifier
-        // lookup returns nothing and a correct secret is reported as "no
-        // longer available".
-        if let SessionAuthenticationPromptMode::Reconnect { session_id, .. } = mode
-            && self.multiplexer_holds_session(session_id)
-        {
-            match self.attach_multiplexer_session(
-                session_id,
-                Some(SessionSecret::from_zeroizing(secret)),
-                window,
-                cx,
-            ) {
-                Ok(AttachOutcomeSummary::Attached) => {
-                    self.session_authentication = None;
-                    cx.notify();
-                }
-                Ok(AttachOutcomeSummary::AuthenticationFailed)
-                | Ok(AttachOutcomeSummary::AuthenticationRequired) => {
-                    if let Some(prompt) = self.session_authentication.as_mut() {
-                        prompt.working = false;
-                        prompt.secret = TextField::default();
-                        prompt.error = Some("Authentication failed.".into());
-                    }
-                    cx.notify();
-                }
-                Err(error) => {
-                    if let Some(prompt) = self.session_authentication.as_mut() {
-                        prompt.working = false;
-                        prompt.error = Some(format!("{error:#}"));
-                    }
-                    cx.notify();
-                }
-            }
-            return;
-        }
-        if let SessionAuthenticationPromptMode::RemoteAttach { session_id } = mode {
-            let Some(target) = self.remote_session_target.clone() else {
-                if let Some(prompt) = self.session_authentication.as_mut() {
-                    prompt.working = false;
-                    prompt.error = Some("The remote SSH target is no longer available.".into());
-                }
-                cx.notify();
-                return;
-            };
-            let result = match self.attach_remote_multiplexer_session(
-                target,
-                session_id,
-                Some(SessionSecret::from_zeroizing(secret)),
-                window,
-                cx,
-            ) {
-                Ok(AttachOutcomeSummary::Attached) => {
-                    self.session_authentication = None;
-                    self.remote_session_target = None;
-                    cx.notify();
-                    return;
-                }
-                Ok(AttachOutcomeSummary::AuthenticationRequired)
-                | Ok(AttachOutcomeSummary::AuthenticationFailed) => {
-                    "Authentication failed.".to_owned()
-                }
-                Err(error) => format!("{error:#}"),
-            };
-            if let Some(prompt) = self.session_authentication.as_mut() {
-                prompt.working = false;
-                prompt.secret = TextField::default();
-                prompt.error = Some(result);
-            }
-            cx.notify();
+        if self.submit_multiplexed_authentication(mode, &secret, window, cx) {
             return;
         }
         let generation = self.session_authentication_generation;
@@ -788,98 +671,253 @@ impl Zetta {
         };
         cx.spawn_in(window, async move |this, cx| {
             let result = cx
-                .background_spawn(async move {
-                    match mode {
-                        SessionAuthenticationPromptMode::Protect { .. } => {
-                            SessionAuthentication::create(&secret).map(Outcome::Created)
-                        }
-                        SessionAuthenticationPromptMode::Reconnect { .. } => verifier
-                            .context("the protected session is no longer available")
-                            .map(|verifier| Outcome::Verified(verifier.verify(&secret))),
-                        SessionAuthenticationPromptMode::RemoteAttach { .. } => {
-                            unreachable!("remote attach is handled before the local verifier")
-                        }
-                        SessionAuthenticationPromptMode::ResumeDisk { .. } => {
-                            unreachable!("disk resume is handled before the background verifier")
-                        }
-                        #[cfg(feature = "session-persistence")]
-                        SessionAuthenticationPromptMode::UnlockSealedSession { .. } => {
-                            unreachable!("the identity passphrase is handled before the verifier")
-                        }
-                        #[cfg(feature = "session-persistence")]
-                        SessionAuthenticationPromptMode::UnlockRemoteSealedSession { .. } => {
-                            unreachable!(
-                                "the remote identity passphrase is handled before the verifier"
-                            )
-                        }
-                    }
-                })
+                .background_spawn(async move { verify_session_secret(mode, &secret, verifier) })
                 .await;
             this.update_in(cx, |this, window, cx| {
+                // A newer prompt has replaced this one, so its answer is stale.
                 if this.session_authentication_generation != generation {
                     return;
                 }
-                match (mode, result) {
-                    (
-                        SessionAuthenticationPromptMode::Protect { tab_id, action },
-                        Ok(Outcome::Created(authentication)),
-                    ) => {
-                        this.session_authentication = None;
-                        this.apply_protected_session_action(
-                            tab_id,
-                            action,
-                            Some(authentication),
-                            window,
-                            cx,
-                        );
-                    }
-                    (
-                        SessionAuthenticationPromptMode::Reconnect {
-                            runner_id,
-                            session_id,
-                        },
-                        Ok(Outcome::Verified(Some(authorization))),
-                    ) => {
-                        this.session_authentication = None;
-                        this.process_clear_failed_authentications(runner_id, session_id, cx);
-                        this.complete_authenticated_reconnect(
-                            runner_id,
-                            session_id,
-                            &authorization,
-                            window,
-                            cx,
-                        );
-                    }
-                    (
-                        SessionAuthenticationPromptMode::Reconnect {
-                            runner_id,
-                            session_id,
-                        },
-                        Ok(Outcome::Verified(None)),
-                    ) => {
-                        this.process_record_failed_authentication(runner_id, session_id, cx);
-                        if let Some(prompt) = this.session_authentication.as_mut() {
-                            prompt.working = false;
-                            prompt.secret = TextField::default();
-                            prompt.error = Some("Authentication failed.".into());
-                        }
-                        cx.notify();
-                    }
-                    (SessionAuthenticationPromptMode::ResumeDisk { .. }, _) => {}
-                    (_, Err(error)) => {
-                        if let Some(prompt) = this.session_authentication.as_mut() {
-                            prompt.working = false;
-                            prompt.error = Some(format!("{error:#}"));
-                        }
-                        cx.notify();
-                    }
-                    _ => {}
-                }
+                this.apply_session_authentication_outcome(mode, result, window, cx);
             })
             .ok();
         })
         .detach();
         cx.notify();
+    }
+
+    /// Checks the prompt's fields against what `mode` needs, reporting the first
+    /// problem on the prompt itself.
+    ///
+    /// Returns `false` once it has reported one, or once a `Protect` prompt was
+    /// left blank — which means "do not protect this session" rather than an
+    /// error, and is acted on here.
+    fn validate_session_authentication(
+        &mut self,
+        mode: SessionAuthenticationPromptMode,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(prompt) = self.session_authentication.as_mut() else {
+            return false;
+        };
+        let secret = Zeroizing::new(prompt.secret.text.clone());
+        match mode {
+            SessionAuthenticationPromptMode::Protect { .. } => {
+                match session_authentication_choice(&secret, &prompt.confirmation.text) {
+                    SessionAuthenticationChoice::Unprotected => {
+                        self.continue_without_session_authentication(window, cx);
+                        return false;
+                    }
+                    SessionAuthenticationChoice::Protected => {}
+                    SessionAuthenticationChoice::Incomplete => {
+                        prompt.error = Some("Enter the same secret in both fields.".into());
+                        cx.notify();
+                        return false;
+                    }
+                }
+            }
+            SessionAuthenticationPromptMode::Reconnect { .. }
+            | SessionAuthenticationPromptMode::RemoteAttach { .. }
+                if secret.is_empty() =>
+            {
+                prompt.error = Some("Enter the session secret.".into());
+                cx.notify();
+                return false;
+            }
+            SessionAuthenticationPromptMode::ResumeDisk { .. } => {
+                if prompt.disk_protected && secret.is_empty() {
+                    prompt.error = Some("Enter the session secret.".into());
+                    cx.notify();
+                    return false;
+                }
+                if prompt.disk_identity_index.is_some()
+                    && (if prompt.disk_protected {
+                        prompt.confirmation.text.is_empty()
+                    } else {
+                        secret.is_empty()
+                    })
+                {
+                    prompt.error = Some("Enter the identity passphrase.".into());
+                    cx.notify();
+                    return false;
+                }
+            }
+            SessionAuthenticationPromptMode::Reconnect { .. } => {}
+            SessionAuthenticationPromptMode::RemoteAttach { .. } => {
+                unreachable!("remote attach is handled before the local verifier")
+            }
+            #[cfg(feature = "session-persistence")]
+            SessionAuthenticationPromptMode::UnlockSealedSession { .. } => {
+                unreachable!("the identity passphrase is handled before the verifier")
+            }
+            #[cfg(feature = "session-persistence")]
+            SessionAuthenticationPromptMode::UnlockRemoteSealedSession { .. } => {
+                unreachable!("the remote identity passphrase is handled before the verifier")
+            }
+        }
+        true
+    }
+
+    /// The two modes whose secret the multiplexer evaluates rather than a
+    /// verifier in this process.
+    ///
+    /// A session the multiplexer is holding keeps its verifier in the
+    /// multiplexer, not in any Zetta process, so there is nothing to check
+    /// locally: the secret is handed to the daemon as part of the attach and the
+    /// daemon evaluates it. Without this the local verifier lookup returns
+    /// nothing and a correct secret is reported as "no longer available".
+    ///
+    /// Returns `true` once it has handled the submission.
+    fn submit_multiplexed_authentication(
+        &mut self,
+        mode: SessionAuthenticationPromptMode,
+        secret: &Zeroizing<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        // A session the multiplexer is holding keeps its verifier in the
+        // multiplexer, not in any Zetta process, so there is nothing to check
+        // here: the secret is handed to the daemon as part of the attach, and
+        // the daemon evaluates it. Without this branch the local verifier
+        // lookup returns nothing and a correct secret is reported as "no
+        // longer available".
+        if let SessionAuthenticationPromptMode::Reconnect { session_id, .. } = mode
+            && self.multiplexer_holds_session(session_id)
+        {
+            match self.attach_multiplexer_session(
+                session_id,
+                Some(SessionSecret::from_zeroizing(secret.clone())),
+                window,
+                cx,
+            ) {
+                Ok(AttachOutcomeSummary::Attached) => {
+                    self.session_authentication = None;
+                    cx.notify();
+                }
+                Ok(AttachOutcomeSummary::AuthenticationFailed)
+                | Ok(AttachOutcomeSummary::AuthenticationRequired) => {
+                    if let Some(prompt) = self.session_authentication.as_mut() {
+                        prompt.working = false;
+                        prompt.secret = TextField::default();
+                        prompt.error = Some("Authentication failed.".into());
+                    }
+                    cx.notify();
+                }
+                Err(error) => {
+                    if let Some(prompt) = self.session_authentication.as_mut() {
+                        prompt.working = false;
+                        prompt.error = Some(format!("{error:#}"));
+                    }
+                    cx.notify();
+                }
+            }
+            return true;
+        }
+        if let SessionAuthenticationPromptMode::RemoteAttach { session_id } = mode {
+            let Some(target) = self.remote_session_target.clone() else {
+                if let Some(prompt) = self.session_authentication.as_mut() {
+                    prompt.working = false;
+                    prompt.error = Some("The remote SSH target is no longer available.".into());
+                }
+                cx.notify();
+                return true;
+            };
+            let result = match self.attach_remote_multiplexer_session(
+                target,
+                session_id,
+                Some(SessionSecret::from_zeroizing(secret.clone())),
+                window,
+                cx,
+            ) {
+                Ok(AttachOutcomeSummary::Attached) => {
+                    self.session_authentication = None;
+                    self.remote_session_target = None;
+                    cx.notify();
+                    return true;
+                }
+                Ok(AttachOutcomeSummary::AuthenticationRequired)
+                | Ok(AttachOutcomeSummary::AuthenticationFailed) => {
+                    "Authentication failed.".to_owned()
+                }
+                Err(error) => format!("{error:#}"),
+            };
+            if let Some(prompt) = self.session_authentication.as_mut() {
+                prompt.working = false;
+                prompt.secret = TextField::default();
+                prompt.error = Some(result);
+            }
+            cx.notify();
+            return true;
+        }
+        false
+    }
+
+    /// What the verified secret does to the prompt and the session behind it.
+    fn apply_session_authentication_outcome(
+        &mut self,
+        mode: SessionAuthenticationPromptMode,
+        result: anyhow::Result<Outcome>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let this = self;
+        match (mode, result) {
+            (
+                SessionAuthenticationPromptMode::Protect { tab_id, action },
+                Ok(Outcome::Created(authentication)),
+            ) => {
+                this.session_authentication = None;
+                this.apply_protected_session_action(
+                    tab_id,
+                    action,
+                    Some(authentication),
+                    window,
+                    cx,
+                );
+            }
+            (
+                SessionAuthenticationPromptMode::Reconnect {
+                    runner_id,
+                    session_id,
+                },
+                Ok(Outcome::Verified(Some(authorization))),
+            ) => {
+                this.session_authentication = None;
+                this.process_clear_failed_authentications(runner_id, session_id, cx);
+                this.complete_authenticated_reconnect(
+                    runner_id,
+                    session_id,
+                    &authorization,
+                    window,
+                    cx,
+                );
+            }
+            (
+                SessionAuthenticationPromptMode::Reconnect {
+                    runner_id,
+                    session_id,
+                },
+                Ok(Outcome::Verified(None)),
+            ) => {
+                this.process_record_failed_authentication(runner_id, session_id, cx);
+                if let Some(prompt) = this.session_authentication.as_mut() {
+                    prompt.working = false;
+                    prompt.secret = TextField::default();
+                    prompt.error = Some("Authentication failed.".into());
+                }
+                cx.notify();
+            }
+            (SessionAuthenticationPromptMode::ResumeDisk { .. }, _) => {}
+            (_, Err(error)) => {
+                if let Some(prompt) = this.session_authentication.as_mut() {
+                    prompt.working = false;
+                    prompt.error = Some(format!("{error:#}"));
+                }
+                cx.notify();
+            }
+            _ => {}
+        }
     }
 
     #[cfg(feature = "session-persistence")]
@@ -1031,6 +1069,11 @@ impl Zetta {
         true
     }
 
+    /// The session passphrase prompt.
+    ///
+    /// Split into the builders below — heading, description, fields, buttons —
+    /// because what each shows depends on the prompt's mode, and the mode
+    /// predicates they share travel in [`SessionPromptView`].
     pub(crate) fn render_session_authentication_overlay(
         &self,
         cx: &mut Context<Self>,
@@ -1038,46 +1081,6 @@ impl Zetta {
         let prompt = self.session_authentication.as_ref()?;
         let colors = self.window_theme(cx).colors().clone();
         let handle = cx.entity().downgrade();
-        let field = |id: &'static str,
-                     value: &TextField,
-                     selected: SessionAuthenticationField|
-         -> gpui::AnyElement {
-            let focused = prompt.field == selected;
-            let (before, after) = value.split_at_cursor();
-            let click_handle = handle.clone();
-            // A masked field, so the run is bullets rather than the text and
-            // `text_edit_ui`'s shared run does not apply — only its frame does.
-            field_box(id, focused, &colors)
-                .w_full()
-                .cursor_text()
-                .when(value.select_all && focused, |input| {
-                    input.bg(colors.element_selection_background)
-                })
-                .child(
-                    div()
-                        .whitespace_nowrap()
-                        .child("•".repeat(before.chars().count())),
-                )
-                .when(focused && !value.select_all, |input| {
-                    input.child(caret(&colors))
-                })
-                .child(
-                    div()
-                        .whitespace_nowrap()
-                        .child("•".repeat(after.chars().count())),
-                )
-                .on_click(move |_, _, cx| {
-                    click_handle
-                        .update(cx, |this, cx| {
-                            if let Some(prompt) = this.session_authentication.as_mut() {
-                                prompt.field = selected;
-                                cx.notify();
-                            }
-                        })
-                        .ok();
-                })
-                .into_any_element()
-        };
         let action = match prompt.mode {
             SessionAuthenticationPromptMode::Protect { action, .. } => Some(action),
             SessionAuthenticationPromptMode::Reconnect { .. }
@@ -1108,9 +1111,18 @@ impl Zetta {
         #[cfg(not(feature = "session-persistence"))]
         let disk_protected = false;
         let disk_has_secondary_field = disk_identity_required && disk_protected;
-        let submit_handle = handle.clone();
-        let without_authentication_handle = handle.clone();
-        let cancel_handle = handle.clone();
+        let view = SessionPromptView {
+            prompt,
+            colors: &colors,
+            handle: &handle,
+            no_mux: self.no_mux,
+            error_color: self.window_theme(cx).status().error,
+            action,
+            unlocking_sealed_session,
+            disk_identity_required,
+            disk_protected,
+            disk_has_secondary_field,
+        };
         Some(
             div()
                 .id("session-authentication-overlay")
@@ -1137,170 +1149,11 @@ impl Zetta {
                         .text_color(colors.text)
                         .shadow_lg()
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .child(
-                            Label::new(match action {
-                                Some(action) => action.title(self.no_mux),
-                                None if unlocking_sealed_session => "Unlock your age identity",
-                                None if matches!(
-                                    prompt.mode,
-                                    SessionAuthenticationPromptMode::ResumeDisk { .. }
-                                ) =>
-                                {
-                                    "Restore encrypted disk session"
-                                }
-                                None => "Authenticate protected session",
-                            })
-                            .size(LabelSize::Large)
-                            .color(Color::Custom(colors.text)),
-                        )
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(colors.text_muted)
-                                .child(match action {
-                                    Some(action) => action.description(self.no_mux),
-                                    None if unlocking_sealed_session => {
-                                        "This session is protected by your age key. Enter the \
-                                         passphrase for your identity file to open it; the \
-                                         session's own key was generated and is never typed."
-                                    }
-                                    None if matches!(
-                                        prompt.mode,
-                                        SessionAuthenticationPromptMode::ResumeDisk { .. }
-                                    ) =>
-                                    {
-                                        if disk_has_secondary_field {
-                                            "Enter the session secret and the identity passphrase."
-                                        } else if disk_identity_required {
-                                            "Enter the passphrase for the encrypted identity file."
-                                        } else {
-                                            "Enter the session secret after decrypting the disk record."
-                                        }
-                                    }
-                                    None if matches!(
-                                        prompt.mode,
-                                        SessionAuthenticationPromptMode::RemoteAttach { .. }
-                                    ) => {
-                                        "Enter the secret chosen when this remote session was shared."
-                                    }
-                                    None => "Enter the secret chosen when this session was detached.",
-                                }),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap_1()
-                                .child(
-                                    Label::new(
-                                        if unlocking_sealed_session
-                                            || (disk_identity_required && !disk_protected)
-                                        {
-                                            "Identity passphrase"
-                                        } else {
-                                            "Session secret"
-                                        },
-                                    )
-                                    .size(LabelSize::Small)
-                                    .color(Color::Custom(colors.text)),
-                                )
-                                .child(field(
-                                    "session-authentication-secret",
-                                    &prompt.secret,
-                                    SessionAuthenticationField::Secret,
-                                )),
-                        )
-                        .when(action.is_some() || disk_has_secondary_field, |panel| {
-                            panel.child(
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .gap_1()
-                                    .child(Label::new(if disk_has_secondary_field {
-                                        "Identity passphrase"
-                                    } else {
-                                        "Confirm secret"
-                                    })
-                                    .size(LabelSize::Small)
-                                    .color(Color::Custom(colors.text)))
-                                    .child(field(
-                                        "session-authentication-confirmation",
-                                        &prompt.confirmation,
-                                        SessionAuthenticationField::Confirmation,
-                                    )),
-                            )
-                        })
-                        .when_some(prompt.error.as_ref(), |panel, error| {
-                            panel.child(
-                                div()
-                                    .text_sm()
-                                    .text_color(self.window_theme(cx).status().error)
-                                    .child(error.clone()),
-                            )
-                        })
-                        .child(
-                            div()
-                                .flex()
-                                .justify_end()
-                                .gap_2()
-                                .child(
-                                    Button::new("cancel-session-authentication", "Cancel")
-                                        .style(ButtonStyle::Outlined)
-                                        .color(Color::Custom(colors.text))
-                                        .on_click(move |_, window, cx| {
-                                            cancel_handle
-                                                .update(cx, |this, cx| {
-                                                    this.dismiss_session_authentication(window, cx)
-                                                })
-                                                .ok();
-                                        }),
-                                )
-                                .when(action.is_some(), |buttons| {
-                                    buttons.child(
-                                        Button::new(
-                                            "continue-without-session-authentication",
-                                            "No authentication",
-                                        )
-                                        .style(ButtonStyle::Outlined)
-                                        .color(Color::Custom(colors.text))
-                                        .disabled(prompt.working)
-                                        .on_click(
-                                            move |_, window, cx| {
-                                                without_authentication_handle
-                                                .update(cx, |this, cx| {
-                                                    this.continue_without_session_authentication(
-                                                        window, cx,
-                                                    )
-                                                })
-                                                .ok();
-                                            },
-                                        ),
-                                    )
-                                })
-                                .child(
-                                    Button::new(
-                                        "submit-session-authentication",
-                                        match action {
-                                            Some(action) => action.submit_label(self.no_mux),
-                                            None if unlocking_sealed_session => "Unlock",
-                                            None => "Authenticate",
-                                        },
-                                    )
-                                    .style(ButtonStyle::Filled)
-                                    .color(Color::Custom(colors.text))
-                                    .loading(prompt.working)
-                                    .disabled(prompt.working)
-                                    .on_click(
-                                        move |_, window, cx| {
-                                            submit_handle
-                                                .update(cx, |this, cx| {
-                                                    this.submit_session_authentication(window, cx)
-                                                })
-                                                .ok();
-                                        },
-                                    ),
-                                ),
-                        ),
+                        .child(session_prompt_heading(view))
+                        .child(session_prompt_description(view))
+                        .child(session_prompt_secret_field(view))
+                        .child(session_prompt_secondary_fields(view))
+                        .child(session_prompt_buttons(view)),
                 )
                 .into_any_element(),
         )
@@ -1310,3 +1163,324 @@ impl Zetta {
 #[cfg(test)]
 #[path = "tests/session_auth_ui.rs"]
 mod tests;
+
+/// What every part of the session prompt reads: the prompt itself, the theme and
+/// handle its controls are built from, and the mode predicates the builders
+/// below share.
+#[derive(Clone, Copy)]
+struct SessionPromptView<'a> {
+    prompt: &'a SessionAuthenticationPrompt,
+    colors: &'a ThemeColors,
+    handle: &'a WeakEntity<Zetta>,
+    no_mux: bool,
+    /// Taken from the theme's status colours rather than `colors`, which is why
+    /// it travels separately.
+    error_color: gpui::Hsla,
+    action: Option<ProtectedSessionAction>,
+    unlocking_sealed_session: bool,
+    disk_identity_required: bool,
+    disk_protected: bool,
+    /// A disk resume can need both a session secret and an identity passphrase.
+    disk_has_secondary_field: bool,
+}
+
+impl SessionPromptView<'_> {
+    /// One masked field. The run is bullets rather than the text, so
+    /// `text_edit_ui`'s shared run does not apply — only its frame does.
+    fn field(
+        &self,
+        id: &'static str,
+        value: &TextField,
+        selected: SessionAuthenticationField,
+    ) -> gpui::AnyElement {
+        let prompt = self.prompt;
+        let colors = self.colors;
+        let handle = self.handle;
+        let focused = prompt.field == selected;
+        let (before, after) = value.split_at_cursor();
+        let click_handle = handle.clone();
+        // A masked field, so the run is bullets rather than the text and
+        // `text_edit_ui`'s shared run does not apply — only its frame does.
+        field_box(id, focused, colors)
+            .w_full()
+            .cursor_text()
+            .when(value.select_all && focused, |input| {
+                input.bg(colors.element_selection_background)
+            })
+            .child(
+                div()
+                    .whitespace_nowrap()
+                    .child("•".repeat(before.chars().count())),
+            )
+            .when(focused && !value.select_all, |input| {
+                input.child(caret(colors))
+            })
+            .child(
+                div()
+                    .whitespace_nowrap()
+                    .child("•".repeat(after.chars().count())),
+            )
+            .on_click(move |_, _, cx| {
+                click_handle
+                    .update(cx, |this, cx| {
+                        if let Some(prompt) = this.session_authentication.as_mut() {
+                            prompt.field = selected;
+                            cx.notify();
+                        }
+                    })
+                    .ok();
+            })
+            .into_any_element()
+    }
+}
+
+/// The prompt's title, which names what the secret is for.
+fn session_prompt_heading(view: SessionPromptView<'_>) -> impl IntoElement {
+    let SessionPromptView {
+        prompt,
+        colors,
+        no_mux,
+        action,
+        unlocking_sealed_session,
+        ..
+    } = view;
+    Label::new(match action {
+        Some(action) => action.title(no_mux),
+        None if unlocking_sealed_session => "Unlock your age identity",
+        None if matches!(
+            prompt.mode,
+            SessionAuthenticationPromptMode::ResumeDisk { .. }
+        ) =>
+        {
+            "Restore encrypted disk session"
+        }
+        None => "Authenticate protected session",
+    })
+    .size(LabelSize::Large)
+    .color(Color::Custom(colors.text))
+}
+
+/// The line under the title explaining what submitting will do.
+fn session_prompt_description(view: SessionPromptView<'_>) -> impl IntoElement {
+    let SessionPromptView {
+        prompt,
+        colors,
+        no_mux,
+        action,
+        unlocking_sealed_session,
+        disk_identity_required,
+        disk_has_secondary_field,
+        ..
+    } = view;
+    div()
+        .text_sm()
+        .text_color(colors.text_muted)
+        .child(match action {
+            Some(action) => action.description(no_mux),
+            None if unlocking_sealed_session => {
+                "This session is protected by your age key. Enter the \
+                 passphrase for your identity file to open it; the \
+                 session's own key was generated and is never typed."
+            }
+            None if matches!(
+                prompt.mode,
+                SessionAuthenticationPromptMode::ResumeDisk { .. }
+            ) =>
+            {
+                if disk_has_secondary_field {
+                    "Enter the session secret and the identity passphrase."
+                } else if disk_identity_required {
+                    "Enter the passphrase for the encrypted identity file."
+                } else {
+                    "Enter the session secret after decrypting the disk record."
+                }
+            }
+            None if matches!(
+                prompt.mode,
+                SessionAuthenticationPromptMode::RemoteAttach { .. }
+            ) =>
+            {
+                "Enter the secret chosen when this remote session was shared."
+            }
+            None => "Enter the secret chosen when this session was detached.",
+        })
+}
+
+/// The secret field and its label.
+fn session_prompt_secret_field(view: SessionPromptView<'_>) -> impl IntoElement {
+    let SessionPromptView {
+        prompt,
+        colors,
+        unlocking_sealed_session,
+        disk_identity_required,
+        disk_protected,
+        ..
+    } = view;
+    let field = |id, value, selected| view.field(id, value, selected);
+    div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .child(
+            Label::new(
+                if unlocking_sealed_session || (disk_identity_required && !disk_protected) {
+                    "Identity passphrase"
+                } else {
+                    "Session secret"
+                },
+            )
+            .size(LabelSize::Small)
+            .color(Color::Custom(colors.text)),
+        )
+        .child(field(
+            "session-authentication-secret",
+            &prompt.secret,
+            SessionAuthenticationField::Secret,
+        ))
+}
+
+/// The identity passphrase or confirmation field, where the mode needs a second
+/// one, and the error the last attempt reported.
+fn session_prompt_secondary_fields(view: SessionPromptView<'_>) -> impl IntoElement {
+    let SessionPromptView {
+        prompt,
+        colors,
+        error_color,
+        action,
+        disk_has_secondary_field,
+        ..
+    } = view;
+    let field = |id, value, selected| view.field(id, value, selected);
+    div()
+        .when(action.is_some() || disk_has_secondary_field, |panel| {
+            panel.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        Label::new(if disk_has_secondary_field {
+                            "Identity passphrase"
+                        } else {
+                            "Confirm secret"
+                        })
+                        .size(LabelSize::Small)
+                        .color(Color::Custom(colors.text)),
+                    )
+                    .child(field(
+                        "session-authentication-confirmation",
+                        &prompt.confirmation,
+                        SessionAuthenticationField::Confirmation,
+                    )),
+            )
+        })
+        .when_some(prompt.error.as_ref(), |panel, error| {
+            panel.child(div().text_sm().text_color(error_color).child(error.clone()))
+        })
+}
+
+/// Cancel, Submit, and — for a `Protect` prompt — the option to keep the
+/// session unprotected.
+fn session_prompt_buttons(view: SessionPromptView<'_>) -> impl IntoElement {
+    let SessionPromptView {
+        prompt,
+        colors,
+        handle,
+        no_mux,
+        action,
+        unlocking_sealed_session,
+        ..
+    } = view;
+    let submit_handle = handle.clone();
+    let without_authentication_handle = handle.clone();
+    let cancel_handle = handle.clone();
+    div()
+        .flex()
+        .justify_end()
+        .gap_2()
+        .child(
+            Button::new("cancel-session-authentication", "Cancel")
+                .style(ButtonStyle::Outlined)
+                .color(Color::Custom(colors.text))
+                .on_click(move |_, window, cx| {
+                    cancel_handle
+                        .update(cx, |this, cx| {
+                            this.dismiss_session_authentication(window, cx);
+                        })
+                        .ok();
+                }),
+        )
+        .when(action.is_some(), |buttons| {
+            buttons.child(
+                Button::new(
+                    "continue-without-session-authentication",
+                    "No authentication",
+                )
+                .style(ButtonStyle::Outlined)
+                .color(Color::Custom(colors.text))
+                .disabled(prompt.working)
+                .on_click(move |_, window, cx| {
+                    without_authentication_handle
+                        .update(cx, |this, cx| {
+                            this.continue_without_session_authentication(window, cx);
+                        })
+                        .ok();
+                }),
+            )
+        })
+        .child(
+            Button::new(
+                "submit-session-authentication",
+                match action {
+                    Some(action) => action.submit_label(no_mux),
+                    None if unlocking_sealed_session => "Unlock",
+                    None => "Authenticate",
+                },
+            )
+            .style(ButtonStyle::Filled)
+            .color(Color::Custom(colors.text))
+            .loading(prompt.working)
+            .disabled(prompt.working)
+            .on_click(move |_, window, cx| {
+                submit_handle
+                    .update(cx, |this, cx| {
+                        this.submit_session_authentication(window, cx);
+                    })
+                    .ok();
+            }),
+        )
+}
+
+/// Creates or checks the session secret. Runs on a background thread, because
+/// the key derivation behind it is deliberately slow.
+///
+/// Only `Protect` and `Reconnect` reach here: every other mode is settled before
+/// the local verifier is consulted, which is what the arms say.
+fn verify_session_secret(
+    mode: SessionAuthenticationPromptMode,
+    secret: &Zeroizing<String>,
+    verifier: Option<SessionAuthentication>,
+) -> anyhow::Result<Outcome> {
+    match mode {
+        SessionAuthenticationPromptMode::Protect { .. } => {
+            SessionAuthentication::create(secret).map(Outcome::Created)
+        }
+        SessionAuthenticationPromptMode::Reconnect { .. } => verifier
+            .context("the protected session is no longer available")
+            .map(|verifier| Outcome::Verified(verifier.verify(secret))),
+        SessionAuthenticationPromptMode::RemoteAttach { .. } => {
+            unreachable!("remote attach is handled before the local verifier")
+        }
+        SessionAuthenticationPromptMode::ResumeDisk { .. } => {
+            unreachable!("disk resume is handled before the background verifier")
+        }
+        #[cfg(feature = "session-persistence")]
+        SessionAuthenticationPromptMode::UnlockSealedSession { .. } => {
+            unreachable!("the identity passphrase is handled before the verifier")
+        }
+        #[cfg(feature = "session-persistence")]
+        SessionAuthenticationPromptMode::UnlockRemoteSealedSession { .. } => {
+            unreachable!("the remote identity passphrase is handled before the verifier")
+        }
+    }
+}

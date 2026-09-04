@@ -50,22 +50,22 @@ pub(crate) fn open_zetta_window(
             prepare_background_tabs_before_window_close(&zetta, window, cx);
             if let Some(name) = launch_split {
                 zetta.update(cx, |zetta, cx| {
-                    zetta.apply_pane_split_template(&ApplyPaneSplitTemplate { name }, window, cx)
+                    zetta.apply_pane_split_template(&ApplyPaneSplitTemplate { name }, window, cx);
                 });
             }
             if profile_pane_stress {
                 zetta.update(cx, |zetta, cx| {
-                    zetta.configure_pane_profile_stress(window, cx)
+                    zetta.configure_pane_profile_stress(window, cx);
                 });
             }
             if enable_performance_overlay {
                 zetta.update(cx, |zetta, cx| {
-                    zetta.toggle_performance_overlay(&TogglePerformanceOverlay, window, cx)
+                    zetta.toggle_performance_overlay(&TogglePerformanceOverlay, window, cx);
                 });
             }
             if let Some((options, status)) = performance_report {
                 zetta.update(cx, |zetta, cx| {
-                    zetta.start_performance_report(options, status, cx)
+                    zetta.start_performance_report(options, status, cx);
                 });
             }
             zetta
@@ -73,7 +73,7 @@ pub(crate) fn open_zetta_window(
         .context("opening Zetta window")?;
     if let Some(activation_token) = activation_token {
         window_handle.update(cx, |_, window, _| {
-            gpui_platform::activate_window_with_token(window, &activation_token)
+            gpui_platform::activate_window_with_token(window, &activation_token);
         })?;
     }
     if let Ok(surface) = std::env::var("ZETTA_SCREENSHOT_SURFACE") {
@@ -178,7 +178,7 @@ fn prepare_background_tabs_before_window_close(
     window.on_window_should_close(cx, move |_, cx| {
         zetta
             .update(cx, |zetta, cx| {
-                zetta.prepare_for_background_window_close(cx)
+                zetta.prepare_for_background_window_close(cx);
             })
             .ok();
         true
@@ -365,7 +365,7 @@ pub(crate) fn open_dormant_or_new_window(cx: &mut App) -> Result<()> {
     };
     if let WindowOpenTarget::Existing(window_id) = target {
         gpui::WindowHandle::<Zetta>::new(window_id).update(cx, |zetta, window, cx| {
-            zetta.resume_hidden_window(window, cx)
+            zetta.resume_hidden_window(window, cx);
         })?;
         cx.activate(true);
         return Ok(());
@@ -490,7 +490,7 @@ pub(super) fn handle_zetta_window_closed(cx: &mut App, window_id: WindowId) {
         .remove(&window_id);
     if let Some(entity) = entity {
         entity.update(cx, |zetta, cx| {
-            zetta.prepare_for_background_window_close(cx)
+            zetta.prepare_for_background_window_close(cx);
         });
         let (has_background_sessions, runner_id) = {
             let entity_state = entity.read(cx);

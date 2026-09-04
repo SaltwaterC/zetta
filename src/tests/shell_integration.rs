@@ -17,6 +17,57 @@ fn bash_command() -> std::process::Command {
     clean_shell_command("bash")
 }
 
+/// Whether this machine has a `bash` that runs.
+///
+/// Every test that drives the generated Bash script checks this and returns
+/// early: on Windows `bash.exe` is commonly the WSL launcher, which need not be
+/// installed, and on a minimal Linux image there may be no Bash at all.
+fn bash_available() -> bool {
+    bash_command()
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+}
+
+/// Runs `driver` under `command` with the shell integration script prepended,
+/// and returns its stdout once the script has been asserted to run cleanly.
+///
+/// `command` is a parameter rather than built here because three of these tests
+/// need extra environment and one needs a working directory; the rest pass
+/// [`bash_completion_command`].
+fn run_bash_driver(mut command: std::process::Command, driver: &str) -> String {
+    use std::io::Write as _;
+    use std::process::Stdio;
+
+    let mut child = command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(driver.as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "Bash completion script failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+/// A Bash that reads neither profile nor rc, so only the script under test is
+/// in scope.
+fn bash_completion_command() -> std::process::Command {
+    let mut command = bash_command();
+    command.args(["--noprofile", "--norc"]);
+    command
+}
+
 fn clean_shell_command(program: &str) -> std::process::Command {
     let mut command = std::process::Command::new(program);
     // Do not let a user's shell startup environment change the exit status or
@@ -98,11 +149,7 @@ fn bash_pane_wait_completion_fetches_origin_pane_labels_and_preserves_commas() {
     use std::process::Stdio;
 
     let _bash_test_lock = lock_bash_tests();
-    if !bash_command()
-        .arg("--version")
-        .output()
-        .is_ok_and(|output| output.status.success())
-    {
+    if !bash_available() {
         return;
     }
 
@@ -150,11 +197,7 @@ fn bash_project_command_completion_is_dynamic_and_stops_at_delimiter() {
     use std::process::Stdio;
 
     let _bash_test_lock = lock_bash_tests();
-    if !bash_command()
-        .arg("--version")
-        .output()
-        .is_ok_and(|output| output.status.success())
-    {
+    if !bash_available() {
         return;
     }
 
@@ -490,15 +533,8 @@ fn vi_integration_is_conditional_and_has_cli_completion() {
 
 #[test]
 fn bash_does_not_repeat_options_and_completes_vi_files() {
-    use std::io::Write as _;
-    use std::process::Stdio;
-
     let _bash_test_lock = lock_bash_tests();
-    if !bash_command()
-        .arg("--version")
-        .output()
-        .is_ok_and(|output| output.status.success())
-    {
+    if !bash_available() {
         return;
     }
 
@@ -506,26 +542,7 @@ fn bash_does_not_repeat_options_and_completes_vi_files() {
     let driver = format!(
         "{script}\nCOMP_WORDS=(zetta vi --)\nCOMP_CWORD=2\n_zetta_complete\nprintf 'option:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zetta vi --help '')\nCOMP_CWORD=3\n_zetta_complete\nprintf 'file:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zetta vi Carg)\nCOMP_CWORD=2\n_zetta_complete\nprintf 'file:%s\\n' \"${{COMPREPLY[@]}}\"\n"
     );
-    let mut child = bash_command()
-        .args(["--noprofile", "--norc"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(driver.as_bytes())
-        .unwrap();
-    let output = child.wait_with_output().unwrap();
-    assert!(
-        output.status.success(),
-        "Bash completion script failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let completions = String::from_utf8_lossy(&output.stdout);
+    let completions = run_bash_driver(bash_completion_command(), &driver);
     assert!(completions.lines().any(|line| line == "option:--help"));
     assert!(!completions.lines().any(|line| line == "file:--help"));
     assert!(completions.lines().any(|line| line == "file:Cargo.toml"));
@@ -533,15 +550,8 @@ fn bash_does_not_repeat_options_and_completes_vi_files() {
 
 #[test]
 fn bash_color_completion_offers_named_presets_for_long_and_short_flags() {
-    use std::io::Write as _;
-    use std::process::Stdio;
-
     let _bash_test_lock = lock_bash_tests();
-    if !bash_command()
-        .arg("--version")
-        .output()
-        .is_ok_and(|output| output.status.success())
-    {
+    if !bash_available() {
         return;
     }
 
@@ -549,26 +559,7 @@ fn bash_color_completion_offers_named_presets_for_long_and_short_flags() {
     let driver = format!(
         "{script}\nCOMP_WORDS=(zetta overlay --color '')\nCOMP_CWORD=3\n_zetta_complete\nprintf 'long:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zetta overlay -c '')\nCOMP_CWORD=3\n_zetta_complete\nprintf 'short:%s\\n' \"${{COMPREPLY[@]}}\"\n"
     );
-    let mut child = bash_command()
-        .args(["--noprofile", "--norc"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(driver.as_bytes())
-        .unwrap();
-    let output = child.wait_with_output().unwrap();
-    assert!(
-        output.status.success(),
-        "Bash completion script failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let completions = String::from_utf8_lossy(&output.stdout);
+    let completions = run_bash_driver(bash_completion_command(), &driver);
     for prefix in ["long:", "short:"] {
         for preset in OVERLAY_COLOR_PRESETS {
             assert!(
@@ -585,15 +576,8 @@ fn bash_color_completion_offers_named_presets_for_long_and_short_flags() {
 #[cfg(feature = "worktree")]
 #[test]
 fn bash_worktree_completion_offers_operations_and_long_worktree_options() {
-    use std::io::Write as _;
-    use std::process::Stdio;
-
     let _bash_test_lock = lock_bash_tests();
-    if !bash_command()
-        .arg("--version")
-        .output()
-        .is_ok_and(|output| output.status.success())
-    {
+    if !bash_available() {
         return;
     }
 
@@ -601,26 +585,7 @@ fn bash_worktree_completion_offers_operations_and_long_worktree_options() {
     let driver = format!(
         "{script}\ngit() {{ case \"$1 $2\" in branch\\ --show-current) printf '%s\\n' wt/feature ;; config\\ --local) printf '%s\\n' main ;; merge-base*) printf '%s\\n' split ;; rev-list*) printf '%s\\n' commit-one commit-two ;; esac; }}\nCOMP_WORDS=(zetta wt '')\nCOMP_CWORD=2\n_zetta_complete\nprintf 'operation:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zetta wt new --)\nCOMP_CWORD=3\n_zetta_complete\nprintf 'option:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zetta wt new --copy Carg)\nCOMP_CWORD=4\n_zetta_complete\nprintf 'copy-path:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zetta wt new -c Carg)\nCOMP_CWORD=4\n_zetta_complete\nprintf 'short-copy-path:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zetta wt sync '')\nCOMP_CWORD=3\n_zetta_complete\nprintf 'sync-commit:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zwt '')\nCOMP_CWORD=1\n_zetta_complete_zwt\nprintf 'wrapper:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zwt sync '')\nCOMP_CWORD=2\n_zetta_complete_zwt\nprintf 'wrapper-sync-commit:%s\\n' \"${{COMPREPLY[@]}}\"\n"
     );
-    let mut child = bash_command()
-        .args(["--noprofile", "--norc"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(driver.as_bytes())
-        .unwrap();
-    let output = child.wait_with_output().unwrap();
-    assert!(
-        output.status.success(),
-        "Bash completion script failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let completions = String::from_utf8_lossy(&output.stdout);
+    let completions = run_bash_driver(bash_completion_command(), &driver);
     for prefix in ["operation:", "wrapper:"] {
         for operation in ["new", "done", "abort", "status", "sync", "config"] {
             assert!(
@@ -663,11 +628,7 @@ fn bash_zmux_completes_the_same_as_zetta_mux() {
     use std::process::Stdio;
 
     let _bash_test_lock = lock_bash_tests();
-    if !bash_command()
-        .arg("--version")
-        .output()
-        .is_ok_and(|output| output.status.success())
-    {
+    if !bash_available() {
         return;
     }
 
@@ -1346,15 +1307,8 @@ fn notify_timeout_completion_does_not_leak_into_other_short_t_flags() {
 // subcommand's (empty) completions once any root flag has been typed.
 #[test]
 fn profile_and_theme_root_flags_keep_completing_each_other_in_bash() {
-    use std::io::Write as _;
-    use std::process::Stdio;
-
     let _bash_test_lock = lock_bash_tests();
-    if !bash_command()
-        .arg("--version")
-        .output()
-        .is_ok_and(|output| output.status.success())
-    {
+    if !bash_available() {
         return;
     }
 
@@ -1362,26 +1316,7 @@ fn profile_and_theme_root_flags_keep_completing_each_other_in_bash() {
     let driver = format!(
         "{script}\nCOMP_WORDS=(zetta --profile System '')\nCOMP_CWORD=3\n_zetta_complete\nprintf 'after-profile:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zetta --theme Dracula '')\nCOMP_CWORD=3\n_zetta_complete\nprintf 'after-theme:%s\\n' \"${{COMPREPLY[@]}}\"\n"
     );
-    let mut child = bash_command()
-        .args(["--noprofile", "--norc"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(driver.as_bytes())
-        .unwrap();
-    let output = child.wait_with_output().unwrap();
-    assert!(
-        output.status.success(),
-        "Bash completion script failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let completions = String::from_utf8_lossy(&output.stdout);
+    let completions = run_bash_driver(bash_completion_command(), &driver);
     // printf recycles its format string per remaining argument, so each
     // COMPREPLY entry lands on its own "after-profile:"/"after-theme:" line
     // rather than one space-joined line.
@@ -1417,15 +1352,8 @@ fn profile_and_theme_root_flags_keep_completing_each_other_in_bash() {
 
 #[test]
 fn bash_root_split_completion_handles_long_short_and_combined_launch_options() {
-    use std::io::Write as _;
-    use std::process::Stdio;
-
     let _bash_test_lock = lock_bash_tests();
-    if !bash_command()
-        .arg("--version")
-        .output()
-        .is_ok_and(|output| output.status.success())
-    {
+    if !bash_available() {
         return;
     }
 
@@ -1433,27 +1361,9 @@ fn bash_root_split_completion_handles_long_short_and_combined_launch_options() {
     let driver = format!(
         "zetta() {{\n    if [[ $1 == splits ]]; then\n        printf '%s\\n' custom-layout quarters four-vertical three-left three-right\n    elif [[ $1 == profile && $2 == list ]]; then\n        if [[ $3 == --config && $4 == profiles.json ]]; then\n            printf '%s\\n' 'Configured Shell'\n        else\n            printf '%s\\n' 'System' 'WSL: Ubuntu'\n        fi\n    fi\n}}\n{script}\nCOMP_WORDS=(zetta --split '')\nCOMP_CWORD=2\n_zetta_complete\nprintf 'long:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zetta -s '')\nCOMP_CWORD=2\n_zetta_complete\nprintf 'short:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zetta --profile System '')\nCOMP_CWORD=3\n_zetta_complete\nprintf 'profile:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zetta --split quarters --profile '')\nCOMP_CWORD=4\n_zetta_complete\nprintf 'combined:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zetta -c profiles.json profile disable '')\nCOMP_CWORD=5\n_zetta_complete\nprintf 'profile-config:%s\\n' \"${{COMPREPLY[@]}}\"\n"
     );
-    let mut child = bash_command()
-        .args(["--noprofile", "--norc"])
-        .env_remove("ZETTA_HOST_EXECUTABLE")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(driver.as_bytes())
-        .unwrap();
-    let output = child.wait_with_output().unwrap();
-    assert!(
-        output.status.success(),
-        "Bash completion script failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let completions = String::from_utf8_lossy(&output.stdout);
+    let mut command = bash_completion_command();
+    command.env_remove("ZETTA_HOST_EXECUTABLE");
+    let completions = run_bash_driver(command, &driver);
     for prefix in ["long:", "short:"] {
         for name in [
             "custom-layout",
@@ -1485,11 +1395,7 @@ fn bash_pane_completion_offers_directions_and_live_labels() {
     use std::process::Stdio;
 
     let _bash_test_lock = lock_bash_tests();
-    if !bash_command()
-        .arg("--version")
-        .output()
-        .is_ok_and(|output| output.status.success())
-    {
+    if !bash_available() {
         return;
     }
 

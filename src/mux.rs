@@ -11,6 +11,16 @@
 //! event subscription and are routed to the terminal that is showing the pane.
 //! And a tab is a session: panes spawned into the same tab have to join the
 //! same session, which is what [`MuxSession`] tracks.
+//!
+//! Every mutex here is taken with
+//! `unwrap_or_else(|poisoned| poisoned.into_inner())` rather than `unwrap`,
+//! which is the convention across the crate. Each of them guards a plain slot —
+//! the retention state, a session id, the pane the multiplexer opened — that is
+//! replaced whole on every write, so a thread that panicked while holding one
+//! leaves the value usable. Poisoning here would mean an unrelated window's
+//! panic wedging this one, which is worse than reading a value that is by
+//! construction intact. A future mutex that does guard an invariant a panic can
+//! break should use `unwrap` instead, and say so at the lock.
 
 use std::{
     collections::HashMap,
@@ -155,7 +165,10 @@ impl MuxRuntime {
     }
 
     pub(crate) fn retention(&self) -> Retention {
-        self.retention_state.lock().unwrap().effective
+        self.retention_state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .effective
     }
 
     /// Connects to a remote daemon through its SSH stream-local forward.
@@ -201,12 +214,19 @@ impl MuxRuntime {
 
     #[cfg(feature = "session-persistence")]
     pub(crate) fn requested_retention(&self) -> Retention {
-        self.retention_state.lock().unwrap().requested
+        self.retention_state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .requested
     }
 
     #[cfg(feature = "session-persistence")]
     pub(crate) fn degraded_reason(&self) -> Option<String> {
-        self.retention_state.lock().unwrap().degraded_reason.clone()
+        self.retention_state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .degraded_reason
+            .clone()
     }
 
     #[cfg(feature = "session-persistence")]
@@ -225,7 +245,10 @@ impl MuxRuntime {
         // handover, and only let the local view of retention follow a confirmed
         // daemon response.
         self.client.configure(retention, Vec::new())?;
-        *self.retention_state.lock().unwrap() = MuxRetentionState::exact(retention);
+        *self
+            .retention_state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = MuxRetentionState::exact(retention);
         Ok(())
     }
 
@@ -246,7 +269,10 @@ impl MuxRuntime {
                 persistence,
                 fallback_retention,
             )?;
-        *self.retention_state.lock().unwrap() = MuxRetentionState {
+        *self
+            .retention_state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = MuxRetentionState {
             requested: configuration.requested_retention,
             effective: configuration.effective_retention,
             degraded_reason: configuration.degraded_reason,
@@ -263,7 +289,10 @@ impl MuxRuntime {
         &mut self,
         configuration: zmux::client::RetentionConfiguration,
     ) {
-        *self.retention_state.lock().unwrap() = MuxRetentionState {
+        *self
+            .retention_state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = MuxRetentionState {
             requested: configuration.requested_retention,
             effective: configuration.effective_retention,
             degraded_reason: configuration.degraded_reason,
@@ -312,11 +341,17 @@ pub(crate) struct MuxSession(Arc<Mutex<Option<u64>>>);
 
 impl MuxSession {
     pub(crate) fn id(&self) -> Option<u64> {
-        *self.0.lock().unwrap()
+        *self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     pub(crate) fn set_id(&self, session_id: u64) {
-        *self.0.lock().unwrap() = Some(session_id);
+        *self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(session_id);
     }
 
     pub(crate) fn from_id(session_id: u64) -> Self {
@@ -344,7 +379,10 @@ pub(crate) struct OpenedPane {
 impl MuxPtyProvider {
     /// What the multiplexer created, once [`PtyProvider::open`] has returned.
     pub(crate) fn opened(&self) -> Option<OpenedPane> {
-        *self.opened.lock().unwrap()
+        *self
+            .opened
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     pub(crate) fn runtime(&self) -> &MuxRuntime {
@@ -376,12 +414,20 @@ impl PtyProvider for MuxPtyProvider {
             console_palette: request.console_palette,
         })?;
         self.session.set_id(pane.session_id);
-        *self.opened.lock().unwrap() = Some(OpenedPane {
+        *self
+            .opened
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(OpenedPane {
             session_id: pane.session_id,
             pane_id: pane.pane_id,
         });
         let mut handover = attached_pane_handover(pane, self.runtime.client().clone());
-        if let Some(replay) = self.restore_replay.lock().unwrap().take() {
+        if let Some(replay) = self
+            .restore_replay
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+        {
             handover.replay = replay;
         }
         Ok(handover)

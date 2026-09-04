@@ -421,22 +421,24 @@ impl Tab {
         let index = self
             .selected_minimized_pane
             .and_then(|pane_id| self.minimized_panes.iter().position(|id| *id == pane_id))
-            .map(|index| {
-                if forward {
-                    (index + 1) % self.minimized_panes.len()
-                } else {
-                    index
-                        .checked_sub(1)
-                        .unwrap_or(self.minimized_panes.len() - 1)
-                }
-            })
-            .unwrap_or_else(|| {
-                if forward {
-                    0
-                } else {
-                    self.minimized_panes.len() - 1
-                }
-            });
+            .map_or_else(
+                || {
+                    if forward {
+                        0
+                    } else {
+                        self.minimized_panes.len() - 1
+                    }
+                },
+                |index| {
+                    if forward {
+                        (index + 1) % self.minimized_panes.len()
+                    } else {
+                        index
+                            .checked_sub(1)
+                            .unwrap_or(self.minimized_panes.len() - 1)
+                    }
+                },
+            );
         self.selected_minimized_pane = Some(self.minimized_panes[index]);
         true
     }

@@ -150,10 +150,10 @@ pub(crate) fn parse_attention_args(args: &[OsString]) -> Result<StartupArgs> {
         anyhow::bail!("desktop notifications are disabled in this build")
     }
 
-    let summary = positional
-        .first()
-        .map(|value| value.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "Attention required".to_owned());
+    let summary = positional.first().map_or_else(
+        || "Attention required".to_owned(),
+        |value| value.to_string_lossy().into_owned(),
+    );
     anyhow::ensure!(!summary.is_empty(), "SUMMARY must not be empty");
     let body = positional
         .get(1)
@@ -249,94 +249,9 @@ pub(crate) fn parse_pane_args(args: &[OsString]) -> Result<PaneCommand> {
                 anyhow::ensure!(!value.is_empty(), "--pane requires a non-empty pane label");
                 pane = Some(value);
             }
-            "--overlay" | "-o" => {
-                let overlay = overlay.get_or_insert(PaneOverlayRequest {
-                    text: None,
-                    font_size: None,
-                    opacity: None,
-                    color: None,
-                });
-                anyhow::ensure!(
-                    overlay.text.is_none(),
-                    "--overlay may only be specified once"
-                );
-                overlay.text = Some(
-                    arguments
-                        .next()
-                        .context("--overlay requires overlay text")?
-                        .to_string_lossy()
-                        .into_owned(),
-                );
-            }
-            "--overlay-size" | "-S" => {
-                let overlay = overlay.get_or_insert(PaneOverlayRequest {
-                    text: None,
-                    font_size: None,
-                    opacity: None,
-                    color: None,
-                });
-                anyhow::ensure!(
-                    overlay.font_size.is_none(),
-                    "--overlay-size may only be specified once"
-                );
-                let value = arguments
-                    .next()
-                    .context("--overlay-size requires sm, base, lg, xl, 2xl, or 3xl")?
-                    .to_string_lossy()
-                    .into_owned();
-                overlay.font_size = Some(OverlayFontSize::parse(&value).with_context(|| {
-                    format!(
-                        "unknown overlay size {value:?}; expected one of {}",
-                        OverlayFontSize::CLI_NAMES.join(", ")
-                    )
-                })?);
-            }
-            "--overlay-opacity" | "-O" => {
-                let overlay = overlay.get_or_insert(PaneOverlayRequest {
-                    text: None,
-                    font_size: None,
-                    opacity: None,
-                    color: None,
-                });
-                anyhow::ensure!(
-                    overlay.opacity.is_none(),
-                    "--overlay-opacity may only be specified once"
-                );
-                let value = arguments
-                    .next()
-                    .context("--overlay-opacity requires a percentage from 0 to 100")?
-                    .to_string_lossy()
-                    .into_owned();
-                let percent = value.parse::<u8>().with_context(|| {
-                    format!("--overlay-opacity {value:?} must be a whole number")
-                })?;
-                anyhow::ensure!(
-                    percent <= 100,
-                    "--overlay-opacity must be between 0 and 100"
-                );
-                overlay.opacity = Some(percent);
-            }
-            "--overlay-color" | "-c" => {
-                let overlay = overlay.get_or_insert(PaneOverlayRequest {
-                    text: None,
-                    font_size: None,
-                    opacity: None,
-                    color: None,
-                });
-                anyhow::ensure!(
-                    overlay.color.is_none(),
-                    "--overlay-color may only be specified once"
-                );
-                let value = arguments
-                    .next()
-                    .context("--overlay-color requires a color name or hex color")?
-                    .to_string_lossy()
-                    .into_owned();
-                anyhow::ensure!(
-                    overlay_color_from_value(&value).is_some(),
-                    "invalid overlay color {value:?}"
-                );
-                overlay.color = Some(value);
+            "--overlay" | "-o" | "--overlay-size" | "-S" | "--overlay-opacity" | "-O"
+            | "--overlay-color" | "-c" => {
+                parse_pane_overlay_arg(&value, &mut overlay, &mut arguments)?;
             }
             "--stack" | "-s" => {
                 anyhow::ensure!(!stack, "--stack may only be specified once");
@@ -752,3 +667,91 @@ pub(super) fn parse_paste_subcommand(arguments: &[OsString]) -> Result<StartupAr
 #[cfg(test)]
 #[path = "../../tests/startup/arg_parsing/subcommands.rs"]
 mod tests;
+
+/// The four `--overlay*` options, which all fill in one
+/// [`PaneOverlayRequest`].
+///
+/// Together rather than as four arms of the caller's match: each of them starts
+/// by materialising the same empty request, and each has to refuse a second
+/// spelling of itself.
+fn parse_pane_overlay_arg(
+    option: &str,
+    overlay: &mut Option<PaneOverlayRequest>,
+    arguments: &mut std::slice::Iter<'_, OsString>,
+) -> Result<()> {
+    let overlay = overlay.get_or_insert(PaneOverlayRequest {
+        text: None,
+        font_size: None,
+        opacity: None,
+        color: None,
+    });
+    match option {
+        "--overlay" | "-o" => {
+            anyhow::ensure!(
+                overlay.text.is_none(),
+                "--overlay may only be specified once"
+            );
+            overlay.text = Some(
+                arguments
+                    .next()
+                    .context("--overlay requires overlay text")?
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+        }
+        "--overlay-size" | "-S" => {
+            anyhow::ensure!(
+                overlay.font_size.is_none(),
+                "--overlay-size may only be specified once"
+            );
+            let value = arguments
+                .next()
+                .context("--overlay-size requires sm, base, lg, xl, 2xl, or 3xl")?
+                .to_string_lossy()
+                .into_owned();
+            overlay.font_size = Some(OverlayFontSize::parse(&value).with_context(|| {
+                format!(
+                    "unknown overlay size {value:?}; expected one of {}",
+                    OverlayFontSize::CLI_NAMES.join(", ")
+                )
+            })?);
+        }
+        "--overlay-opacity" | "-O" => {
+            anyhow::ensure!(
+                overlay.opacity.is_none(),
+                "--overlay-opacity may only be specified once"
+            );
+            let value = arguments
+                .next()
+                .context("--overlay-opacity requires a percentage from 0 to 100")?
+                .to_string_lossy()
+                .into_owned();
+            let percent = value
+                .parse::<u8>()
+                .with_context(|| format!("--overlay-opacity {value:?} must be a whole number"))?;
+            anyhow::ensure!(
+                percent <= 100,
+                "--overlay-opacity must be between 0 and 100"
+            );
+            overlay.opacity = Some(percent);
+        }
+        "--overlay-color" | "-c" => {
+            anyhow::ensure!(
+                overlay.color.is_none(),
+                "--overlay-color may only be specified once"
+            );
+            let value = arguments
+                .next()
+                .context("--overlay-color requires a color name or hex color")?
+                .to_string_lossy()
+                .into_owned();
+            anyhow::ensure!(
+                overlay_color_from_value(&value).is_some(),
+                "invalid overlay color {value:?}"
+            );
+            overlay.color = Some(value);
+        }
+        _ => unreachable!("parse_pane_args routes only overlay options here"),
+    }
+    Ok(())
+}

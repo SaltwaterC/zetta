@@ -128,11 +128,11 @@ impl Zetta {
                     ByteStreamInputPolicy::CloseOnInterrupt
                         if ctrl_c_interrupts_byte_stream(input) =>
                     {
-                        this.close_pane(tab_id, pane_id, window, cx)
+                        this.close_pane(tab_id, pane_id, window, cx);
                     }
                     ByteStreamInputPolicy::CloseOnInterrupt => {}
                     ByteStreamInputPolicy::Broadcast => {
-                        this.broadcast_input(tab_id, pane_id, input, cx)
+                        this.broadcast_input(tab_id, pane_id, input, cx);
                     }
                 },
                 TerminalViewEvent::OpenEditor(request) => {

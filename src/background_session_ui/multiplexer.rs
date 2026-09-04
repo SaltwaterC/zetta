@@ -275,8 +275,7 @@ impl Zetta {
             .panes
             .iter()
             .find(|candidate| candidate.mux_pane_id == Some(pane.pane_id()))
-            .map(|candidate| candidate.id)
-            .unwrap_or(state.panes[0].id);
+            .map_or(state.panes[0].id, |candidate| candidate.id);
         let mut attached = vec![(first_pane, pane)];
         for pane_state in state.panes.iter().filter(|pane| pane.id != first_pane) {
             let Some(mux_pane_id) = pane_state.mux_pane_id else {
@@ -288,10 +287,10 @@ impl Zetta {
                 secret.as_ref(),
             )? {
                 zmux::client::AttachOutcome::Attached { pane, .. } => {
-                    attached.push((pane_state.id, AttachedPaneKind::Exclusive(pane)))
+                    attached.push((pane_state.id, AttachedPaneKind::Exclusive(pane)));
                 }
                 zmux::client::AttachOutcome::SharedAttached { pane, .. } => {
-                    attached.push((pane_state.id, AttachedPaneKind::Shared(pane)))
+                    attached.push((pane_state.id, AttachedPaneKind::Shared(pane)));
                 }
                 // The session authenticated a moment ago, so this can only mean
                 // it was taken in between. Show what was attached rather than

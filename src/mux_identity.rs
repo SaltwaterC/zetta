@@ -51,8 +51,7 @@ pub(crate) fn configured_identity_paths_with_fallback(
         .filter(|identity| !identity.is_empty());
     identity
         .map(expand_home)
-        .map(|identity| vec![identity])
-        .unwrap_or_else(fallback)
+        .map_or_else(fallback, |identity| vec![identity])
 }
 
 /// Expands a leading `~/`, which is how an identity is conventionally written in
@@ -62,8 +61,7 @@ fn expand_home(path: &str) -> PathBuf {
         return PathBuf::from(path);
     };
     let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
+        .map_or_else(|| PathBuf::from("."), PathBuf::from);
     home.join(relative)
 }
 

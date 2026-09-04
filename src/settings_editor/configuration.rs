@@ -180,14 +180,16 @@ impl ConfigurationForm {
             .and_then(Value::as_object)
             .and_then(|persistence| persistence.get("recipients"))
             .and_then(Value::as_array)
-            .map(|recipients| {
-                recipients
-                    .iter()
-                    .filter_map(Value::as_str)
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            })
-            .unwrap_or_else(|| config.sessions.persistence.recipients.join(", "));
+            .map_or_else(
+                || config.sessions.persistence.recipients.join(", "),
+                |recipients| {
+                    recipients
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                },
+            );
         let session_persistence_identity = root
             .get("sessions")
             .and_then(Value::as_object)

@@ -197,9 +197,8 @@ fn terminal_size_summary(terminal_size: Option<TerminalSize>) -> String {
 }
 
 fn terminal_size_json(terminal_size: Option<TerminalSize>) -> String {
-    let (columns, rows) = terminal_size
-        .map(|size| (Some(size.columns), Some(size.rows)))
-        .unwrap_or((None, None));
+    let (columns, rows) =
+        terminal_size.map_or((None, None), |size| (Some(size.columns), Some(size.rows)));
     serde_json::json!({ "columns": columns, "rows": rows }).to_string()
 }
 

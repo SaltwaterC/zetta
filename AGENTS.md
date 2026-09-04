@@ -133,7 +133,11 @@ is a sibling under `src/`.
   `Zetta` methods that drive it
 - `pane_theme_picker.rs`: per-pane theme picker model and overlay
 - `pane_overlay.rs`: per-pane overlay text and style picker
-- `command_palette.rs`: palette model and matching
+- `command_palette.rs`: palette model and matching, including
+  `CommandPalette::apply_key` — the list half of a picker's key handling
+  (arrows, `enter`, and re-filtering as the query changes), shared by the
+  command palette and the theme picker so the two do not drift. `escape` and
+  what `enter` runs stay with each surface, because those are what differ
 - `command_palette_ui.rs`: palette interaction, rendering, and its overlay
 - `multi_command.rs`: the multi-command prompt's model, its completion
   catalog, and completion-context parsing
@@ -310,7 +314,58 @@ lines rather than letting it keep growing. Never let a single `render`
 function or method own an entire screen or top-level function own an entire
 CLI/state surface — extract per-section methods or functions (passing in
 already-computed values instead of recomputing them) once that function is
-hard to scan in one pass.
+hard to scan in one pass. Splitting a long function is only done when the
+pieces get smaller: moving nine tenths of a body into one new function leaves
+the same function under a new name.
+
+**No function in `src/` is over 200 lines**, and that is the ceiling to keep,
+not a target to aim at — most are far below it. The shapes that get a function
+there, and what each wants instead:
+
+- **A render tree.** One builder per section, taking a `Copy` context bundle;
+  see `pane_overlay.rs`'s `OverlayPickerContext` or `settings_view.rs`'s
+  `SessionPromptView`. A section that differs from its neighbour only in a
+  label or a target is a table, not a copy — `SETTINGS_PAGE_TABS`.
+- **A `match` dispatch.** Keep the match exhaustive and make every arm one
+  line, either by extracting the fat arms into named methods
+  (`activate_settings_control`) or by grouping the arms into per-family
+  functions the dispatcher routes to (`process_control/decode.rs` and
+  `process_control/server.rs`, which use the same five groups so a new command
+  is added to the same-named function in both).
+- **A phased state transition.** One method per phase, in the order they run,
+  with the ordering constraints stated: `submit_session_authentication`,
+  `apply_pane_split_template_with_profile`.
+- **A closure awaited off the render path.** Bundle what has to cross into it
+  and give the callback a name; see `SpawnedTerminal` in `terminal_spawn.rs`.
+
+Where a phase returns "nothing happened" as distinct from "succeeded", say so
+in the type rather than with an early `return` the caller cannot see —
+`apply_pane_template_control` returns `Result<Option<()>>` for exactly that,
+and `a_control_this_page_does_not_own_leaves_the_form_untouched` pins it.
+
+Where a section needs more than about seven values, give it a borrowed `Copy`
+bundle rather than a longer parameter list or an
+`#[allow(clippy::too_many_arguments)]` — `PaneLayoutContext`, `PageWidgets`,
+`PaneNodeContext` and `KeymapBindingRow` are the existing ones.
+
+## Lints
+
+`Cargo.toml`'s `[lints.clippy]` denies four pedantic lints the tree is clean
+of, so they cannot come back one call site at a time. The section records which
+pedantic lints were considered and deliberately *not* adopted, with the reason
+for each; read it before adding another, and add the reason there rather than
+sprinkling `#[allow]`s.
+
+`#[allow(dead_code)]` is a last resort. If only tests reach an item, say
+`#[cfg(test)]`; if only one platform constructs it, say
+`#[cfg_attr(not(windows), allow(dead_code))]` and why. A bare allow on
+something nothing reaches at all means the item should be deleted.
+
+Take a `Mutex` with `unwrap_or_else(|poisoned| poisoned.into_inner())` rather
+than `unwrap`. Every mutex in the crate guards a slot that is replaced whole on
+each write, so a panic elsewhere leaves the value usable and poisoning would
+only spread one window's failure to another. A mutex that does guard an
+invariant a panic can break should use `unwrap` and say so at the lock.
 
 ## Tests
 
@@ -645,8 +700,12 @@ dynamically enumerate these values via CLI and offer these via auto complete.
 ### CLI help formatting
 
 CLI help tables must use the shared `format_help_table` helper from
-`startup/cli_help.rs`; the standalone `zmux` CLI uses its equivalent
-crate-local helper. Store option or command labels and descriptions separately
+`startup/cli_help.rs`. The standalone `zmux` and `zwt` CLIs each use their own
+crate-local copy of it, in `crates/zmux/src/lib.rs` and `crates/zwt/src/lib.rs`:
+the crates under `crates/` are separate Cargo workspaces, so sharing one
+implementation would mean publishing a crate to hold twelve lines of string
+padding. The three copies are deliberate and must stay identical in behaviour —
+each carries the same test. Store option or command labels and descriptions separately
 instead of embedding manual padding. The formatter computes the longest label
 per table, uses a two-space separator, aligns multiline continuation text, and
 emits no trailing whitespace.

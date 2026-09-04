@@ -139,8 +139,7 @@ pub(crate) fn config_path_identity(path: &Path) -> String {
         path.to_path_buf()
     } else {
         std::env::current_dir()
-            .map(|directory| directory.join(path))
-            .unwrap_or_else(|_| path.to_path_buf())
+            .map_or_else(|_| path.to_path_buf(), |directory| directory.join(path))
     };
     let absolute = fs::canonicalize(&absolute).unwrap_or(absolute);
     let mut normalized = PathBuf::new();

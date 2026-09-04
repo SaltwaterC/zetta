@@ -532,7 +532,7 @@ impl Zetta {
                     this.settings_loading = false;
                     match loaded {
                         Ok((configuration, keymap)) => {
-                            this.finish_opening_settings(configuration, keymap, window, cx)
+                            this.finish_opening_settings(configuration, keymap, window, cx);
                         }
                         Err(error) => {
                             this.settings_pending_page = None;
@@ -591,11 +591,10 @@ impl Zetta {
         themes.dedup();
         let installed_theme_extensions = Vec::new();
         // Use cached font enumeration from Zetta.font_cache if available, otherwise compute inline
-        let mut fonts = self
-            .font_cache
-            .get()
-            .map(|cache| cache.fonts.to_vec())
-            .unwrap_or_else(|| cx.text_system().all_font_names());
+        let mut fonts = self.font_cache.get().map_or_else(
+            || cx.text_system().all_font_names(),
+            |cache| cache.fonts.to_vec(),
+        );
         if !fonts.contains(&configuration.terminal_font_family) {
             fonts.push(configuration.terminal_font_family.clone());
         }
@@ -973,7 +972,25 @@ impl Zetta {
             cx.stop_propagation();
             return;
         }
-        let command = event.keystroke.modifiers.control || event.keystroke.modifiers.platform;
+        if self.settings_capture_key_down(event, window, cx) {
+            return;
+        }
+        if self.settings_dropdown_key_down(event, window, cx) {
+            return;
+        }
+        self.settings_page_key_down(event, window, cx);
+    }
+
+    /// A key pressed while the keymap editor is recording a chord.
+    ///
+    /// Returns `true` once it has consumed the key: while recording, nearly
+    /// every key is the binding being recorded rather than a dialog shortcut.
+    fn settings_capture_key_down(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
         if let Some(capture) = self
             .settings_editor
             .as_ref()
@@ -983,10 +1000,10 @@ impl Zetta {
             let modifiers = event.keystroke.modifiers;
             match event.keystroke.key.as_str() {
                 "escape" if is_unmodified_capture_control("escape", &modifiers) => {
-                    self.cancel_keymap_capture(capture.target, window, cx)
+                    self.cancel_keymap_capture(capture.target, window, cx);
                 }
                 "enter" if is_unmodified_capture_control("enter", &modifiers) => {
-                    self.commit_keymap_capture(capture.target, window, cx)
+                    self.commit_keymap_capture(capture.target, window, cx);
                 }
                 key if !is_modifier_key(key) => {
                     if let Some(editor) = self.settings_editor.as_mut()
@@ -1002,8 +1019,20 @@ impl Zetta {
                 _ => {}
             }
             cx.stop_propagation();
-            return;
+            return true;
         }
+        false
+    }
+
+    /// A key pressed while a dropdown's option list is open, which owns the
+    /// arrows and Enter for as long as it is showing.
+    fn settings_dropdown_key_down(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let command = event.keystroke.modifiers.control || event.keystroke.modifiers.platform;
         if self
             .settings_editor
             .as_ref()
@@ -1053,12 +1082,24 @@ impl Zetta {
                 }
                 _ => {
                     cx.stop_propagation();
-                    return;
+                    return true;
                 }
             }
             cx.stop_propagation();
-            return;
+            return true;
         }
+        false
+    }
+
+    /// The dialog's own keys: navigation between controls, and the shortcuts
+    /// that act on the visible page.
+    fn settings_page_key_down(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let command = event.keystroke.modifiers.control || event.keystroke.modifiers.platform;
         match event.keystroke.key.as_str() {
             "escape" => {
                 if self.settings_editor.as_ref().is_some_and(|editor| {
@@ -1090,7 +1131,7 @@ impl Zetta {
             "4" if command => self.select_settings_page(SettingsPage::PaneTemplates, window, cx),
             "5" if command => self.select_settings_page(SettingsPage::Projects, window, cx),
             "tab" => {
-                self.focus_adjacent_settings_control(event.keystroke.modifiers.shift, window, cx)
+                self.focus_adjacent_settings_control(event.keystroke.modifiers.shift, window, cx);
             }
             "up" | "down" => {
                 let direction = if event.keystroke.key == "up" { -1 } else { 1 };
@@ -1104,7 +1145,7 @@ impl Zetta {
                         self.move_open_settings_dropdown(direction, cx);
                     }
                     Some(SettingsControl::Numeric(setting)) => {
-                        self.adjust_numeric_setting(setting, direction, cx)
+                        self.adjust_numeric_setting(setting, direction, cx);
                     }
                     Some(SettingsControl::Opacity) => {
                         self.adjust_settings_opacity(OpacityTarget::Configuration, direction, cx);
@@ -1198,6 +1239,7 @@ impl Zetta {
                 self.edit_settings_input(event, cx);
             }
         }
+
         cx.stop_propagation();
     }
 }

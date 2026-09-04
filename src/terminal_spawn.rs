@@ -60,6 +60,43 @@ pub(crate) struct RestoredTerminalOptions {
     replay: Option<Vec<u8>>,
     prefill: Option<String>,
 }
+/// What wiring a stacked command's terminal needs once its builder resolves.
+///
+/// The stacked equivalent of [`SpawnedTerminal`]: a stacked entry belongs to a
+/// pane's stack rather than to the pane itself, so it carries the entry it is
+/// becoming. The task state that reports the command's exit is consumed by the
+/// builder and does not travel with it.
+struct SpawnedStackedTerminal {
+    tab_id: u64,
+    pane_id: u64,
+    entry_id: u64,
+    attention_id: u64,
+    pane_routing_id: u64,
+    terminal_theme: Option<Arc<Theme>>,
+    mux_provider: Option<Arc<crate::mux::MuxPtyProvider>>,
+}
+
+/// What the spawn callback still needs once the terminal builder resolves.
+///
+/// The builder is awaited off the render path, so everything the wiring after
+/// it depends on has to cross into that callback. These are those values, as
+/// one bundle rather than eleven captured locals — which is also what lets the
+/// success and failure paths be named functions rather than two arms of a
+/// closure.
+struct SpawnedTerminal {
+    tab_id: u64,
+    pane_id: u64,
+    /// Reported to shell integration so `zetta attention` can address the pane.
+    attention_id: u64,
+    pane_routing_id: u64,
+    terminal_theme: Option<Arc<Theme>>,
+    restore_options: Option<RestoredTerminalOptions>,
+    /// Only set while restoring: the directory the stored session was in.
+    restored_working_directory: Option<PathBuf>,
+    mux_provider: Option<Arc<crate::mux::MuxPtyProvider>>,
+    shell_integration_startup_command: Option<Vec<u8>>,
+    tracked_multi_command_launch: bool,
+}
 
 /// Everything one interactive-terminal spawn needs. The tab, the pane and the
 /// profile are always known; every other input has a default, so a caller
@@ -238,14 +275,13 @@ impl Zetta {
             .tabs
             .iter()
             .find(|tab| tab.id == tab_id)
-            .map(|tab| {
+            .map_or((None, None), |tab| {
                 (
                     tab.pane(pane_id)
                         .and_then(|pane| pane.theme_override.as_deref()),
                     tab.theme_override.as_deref(),
                 )
-            })
-            .unwrap_or((None, None));
+            });
         match resolve_terminal_theme(
             pane_theme_override,
             tab_theme_override,
@@ -601,37 +637,16 @@ impl Zetta {
             tracked_multi_command_launch,
             restore: restore_options,
         } = request;
-        let shell = match shell {
-            Some(shell) => shell,
-            None if is_wsl_shell(&profile.command) => wsl_shell_with_tracking(
-                profile.command.clone(),
-                wsl_directory.as_deref(),
-                wsl_cwd_file.as_deref(),
-            ),
-            None if cfg!(windows) && cygwin_profile(&profile.command).is_some() => {
-                #[cfg(windows)]
-                {
-                    match cygwin_shell_with_tracking(
-                        profile.command.clone(),
-                        pane_id,
-                        &env::temp_dir(),
-                    ) {
-                        Ok(shell) => shell,
-                        Err(error) => {
-                            self.report_pane_spawn_error(
-                                tab_id,
-                                pane_id,
-                                format!("Could not configure Cygwin CWD tracking: {error:#}"),
-                                cx,
-                            );
-                            return;
-                        }
-                    }
-                }
-                #[cfg(not(windows))]
-                unreachable!()
-            }
-            None => profile.command.clone(),
+        let Some(shell) = self.resolve_spawn_shell(
+            &profile,
+            shell,
+            tab_id,
+            pane_id,
+            wsl_directory.as_deref(),
+            wsl_cwd_file.as_deref(),
+            cx,
+        ) else {
+            return;
         };
         let mut combined_environment = self.project_environment_for_tab(tab_id);
         combined_environment.extend(environment_overrides);
@@ -705,205 +720,289 @@ impl Zetta {
             .is_some()
             .then(|| working_directory.clone())
             .flatten();
-        let builder = if restore_options.is_some() {
-            TerminalBuilder::new_with_console_palette_for_restore(
-                working_directory,
-                None,
-                shell,
-                environment,
-                settings.cursor_shape,
-                settings.alternate_scroll,
-                settings.max_scroll_history_lines,
-                path_hyperlink_regexes,
-                settings.path_hyperlink_timeout_ms,
-                false,
-                cx.entity_id().as_u64(),
-                None,
-                cx,
-                Vec::new(),
-                PathStyle::local(),
-                mux_provider
-                    .clone()
-                    .map(|provider| provider as Arc<dyn terminal::PtyProvider>),
-                initial_console_palette,
-            )
+        // The restoring and ordinary constructors take the same arguments and
+        // differ only in whether the shell starts fresh, so the choice is a
+        // function pointer rather than two spellings of the same 20 arguments.
+        // The environment's hasher is `collections::FxBuildHasher`, which this
+        // crate cannot name, so this stays inline where it is inferred.
+        let construct = if restore_options.is_some() {
+            TerminalBuilder::new_with_console_palette_for_restore
         } else {
-            TerminalBuilder::new_with_console_palette(
-                working_directory,
-                None,
-                shell,
-                environment,
-                settings.cursor_shape,
-                settings.alternate_scroll,
-                settings.max_scroll_history_lines,
-                path_hyperlink_regexes,
-                settings.path_hyperlink_timeout_ms,
-                false,
-                cx.entity_id().as_u64(),
-                None,
-                cx,
-                Vec::new(),
-                PathStyle::local(),
-                mux_provider
-                    .clone()
-                    .map(|provider| provider as Arc<dyn terminal::PtyProvider>),
-                initial_console_palette,
-            )
+            TerminalBuilder::new_with_console_palette
         };
-
+        let builder = construct(
+            working_directory,
+            None,
+            shell,
+            environment,
+            settings.cursor_shape,
+            settings.alternate_scroll,
+            settings.max_scroll_history_lines,
+            path_hyperlink_regexes,
+            settings.path_hyperlink_timeout_ms,
+            false,
+            cx.entity_id().as_u64(),
+            None,
+            cx,
+            Vec::new(),
+            PathStyle::local(),
+            mux_provider
+                .clone()
+                .map(|provider| provider as Arc<dyn terminal::PtyProvider>),
+            initial_console_palette,
+        );
         let this = cx.entity().downgrade();
+        let spawned = SpawnedTerminal {
+            tab_id,
+            pane_id,
+            attention_id,
+            pane_routing_id,
+            terminal_theme,
+            restore_options,
+            restored_working_directory,
+            mux_provider,
+            shell_integration_startup_command,
+            tracked_multi_command_launch,
+        };
         window
             .spawn(cx, async move |cx| match builder.await {
                 Ok(mut builder) => {
-                    if let Some(options) = restore_options.as_ref() {
+                    if let Some(options) = spawned.restore_options.as_ref() {
                         builder = builder
                             .with_fresh_shell_restore()
                             .with_restore_prefill(options.prefill.clone())
-                            .with_working_directory(restored_working_directory);
+                            .with_working_directory(spawned.restored_working_directory.clone());
                     }
                     this.update_in(cx, |this, window, cx| {
-                        this.adopt_mux_pane(
-                            tab_id,
-                            pane_id,
-                            mux_provider.as_deref(),
-                            &mut builder,
-                            window,
-                            cx,
-                        );
-                        let terminal = cx.new(|cx| builder.subscribe(cx));
-                        let view = cx.new(|cx| {
-                            TerminalView::new_with_theme(
-                                terminal.clone(),
-                                terminal_theme,
-                                window,
-                                cx,
-                            )
-                        });
-                        this.configure_terminal_view_silent_mode(tab_id, &view, cx);
-                        this.subscribe_spawned_terminal(
-                            tab_id,
-                            pane_id,
-                            Some(crate::run_command::RunPaneIdentity::new(
-                                attention_id,
-                                pane_routing_id,
-                            )),
-                            &terminal,
-                            window,
-                            cx,
-                        );
-                        this.subscribe_spawned_terminal_view(tab_id, pane_id, &view, window, cx);
-                        let should_focus = this
-                            .configure_spawned_terminal_focus(tab_id, pane_id, &view, window, cx);
-                        let tab_index = this.tabs.iter().position(|tab| tab.id == tab_id);
-                        if let Some(pane) = tab_index
-                            .and_then(|index| this.tabs.get_mut(index))
-                            .and_then(|tab| tab.pane_mut(pane_id))
-                        {
-                            pane.terminal = Some(terminal.clone());
-                            pane.view = Some(view.clone());
-                            pane.base_exited = false;
-                            pane.error = None;
-                            pane.exit = None;
-                            if restore_options.is_none()
-                                && let Some(command) = pane.pending_command.take()
-                            {
-                                view.update(cx, |view, cx| {
-                                    view.apply_input(
-                                        &TerminalInput::Text(format!("{command}\r")),
-                                        cx,
-                                    )
-                                });
-                            }
-                        } else {
-                            let stored_in_background = {
-                                let pane = this
-                                    .background_sessions
-                                    .iter_mut()
-                                    .find(|tab| tab.id == tab_id)
-                                    .and_then(|tab| tab.pane_mut(pane_id));
-                                if let Some(pane) = pane {
-                                    pane.terminal = Some(terminal.clone());
-                                    true
-                                } else {
-                                    false
-                                }
-                            };
-                            if stored_in_background {
-                                this.observe_background_terminal(
-                                    tab_id,
-                                    pane_id,
-                                    terminal.clone(),
-                                    cx,
-                                );
-                                this.publish_background_session_catalog(cx);
-                            }
-                        }
-                        this.schedule_worktree_detection_for_pane(tab_id, pane_id, cx);
-                        this.schedule_project_detection_for_pane(tab_id, pane_id, window, cx);
-                        if should_focus {
-                            view.focus_handle(cx).focus(window, cx);
-                        }
-                        this.sync_visible_terminals(cx);
-                        this.schedule_terminal_spawn_notify(cx);
-                        if tracked_multi_command_launch {
-                            this.finish_multi_command_launch(window, cx);
-                        }
-                        if restore_options.is_some() {
-                            let terminal_for_restore = terminal.clone();
-                            if let Some(command) = shell_integration_startup_command.as_ref() {
-                                let startup_handshake = terminal.update(cx, |terminal, _| {
-                                    terminal.start_init_command_startup_handshake()
-                                });
-                                let command = command.clone();
-                                cx.spawn(async move |_this, cx| {
-                                    startup_handshake.await;
-                                    terminal_for_restore.update(cx, |terminal, cx| {
-                                        terminal.write_init_command_after_startup(command, cx);
-                                        terminal.finish_fresh_shell_restore(cx);
-                                    });
-                                })
-                                .detach();
-                            } else {
-                                terminal_for_restore.update(cx, |terminal, cx| {
-                                    terminal.finish_fresh_shell_restore(cx);
-                                });
-                            }
-                        } else if let Some(command) = shell_integration_startup_command.as_ref() {
-                            let startup_handshake = terminal.update(cx, |terminal, _| {
-                                terminal.start_init_command_startup_handshake()
-                            });
-                            let command = command.clone();
-                            let terminal_for_startup = terminal.clone();
-                            cx.spawn(async move |_this, cx| {
-                                startup_handshake.await;
-                                terminal_for_startup.update(cx, |terminal, cx| {
-                                    terminal.write_init_command_after_startup(command, cx);
-                                });
-                            })
-                            .detach();
-                        }
+                        this.finish_terminal_spawn(builder, spawned, window, cx);
                     })
                     .ok();
                 }
                 Err(error) => {
                     this.update_in(cx, |this, window, cx| {
-                        if let Some(pane) = this
-                            .tabs
-                            .iter_mut()
-                            .find(|tab| tab.id == tab_id)
-                            .and_then(|tab| tab.pane_mut(pane_id))
-                        {
-                            pane.error = Some(format!("{error:#}"));
-                        }
-                        this.schedule_terminal_spawn_notify(cx);
-                        if tracked_multi_command_launch {
-                            this.finish_multi_command_launch(window, cx);
-                        }
+                        this.report_terminal_spawn_failure(&spawned, &error, window, cx);
                     })
                     .ok();
                 }
             })
             .detach();
+    }
+
+    /// The shell a spawn runs, deriving it from the profile when the request did
+    /// not name one.
+    ///
+    /// Returns `None` once it has already reported the failure on the pane —
+    /// only the Cygwin CWD-tracking path can fail, and it does so with a message
+    /// naming what could not be configured.
+    #[allow(clippy::too_many_arguments)]
+    fn resolve_spawn_shell(
+        &mut self,
+        profile: &Profile,
+        shell: Option<Shell>,
+        tab_id: u64,
+        pane_id: u64,
+        wsl_directory: Option<&str>,
+        wsl_cwd_file: Option<&Path>,
+        cx: &mut Context<Self>,
+    ) -> Option<Shell> {
+        // Only the Cygwin arm below reads these, and it is Windows-only.
+        #[cfg(not(windows))]
+        let (_, _, _) = (tab_id, pane_id, &cx);
+        Some(match shell {
+            Some(shell) => shell,
+            None if is_wsl_shell(&profile.command) => {
+                wsl_shell_with_tracking(profile.command.clone(), wsl_directory, wsl_cwd_file)
+            }
+            None if cfg!(windows) && cygwin_profile(&profile.command).is_some() => {
+                #[cfg(windows)]
+                {
+                    match cygwin_shell_with_tracking(
+                        profile.command.clone(),
+                        pane_id,
+                        &env::temp_dir(),
+                    ) {
+                        Ok(shell) => shell,
+                        Err(error) => {
+                            self.report_pane_spawn_error(
+                                tab_id,
+                                pane_id,
+                                format!("Could not configure Cygwin CWD tracking: {error:#}"),
+                                cx,
+                            );
+                            return None;
+                        }
+                    }
+                }
+                #[cfg(not(windows))]
+                unreachable!()
+            }
+            None => profile.command.clone(),
+        })
+    }
+
+    /// Wires a terminal whose builder has resolved into the pane that asked for
+    /// it, and runs whatever has to happen once it exists.
+    ///
+    /// The pane may have been closed or detached while the builder was in
+    /// flight, which is why the install below falls back to the background
+    /// session that now owns it.
+    fn finish_terminal_spawn(
+        &mut self,
+        mut builder: TerminalBuilder,
+        spawned: SpawnedTerminal,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let SpawnedTerminal {
+            tab_id,
+            pane_id,
+            attention_id,
+            pane_routing_id,
+            terminal_theme,
+            restore_options,
+            shell_integration_startup_command,
+            tracked_multi_command_launch,
+            mux_provider,
+            ..
+        } = spawned;
+        let this = self;
+        this.adopt_mux_pane(
+            tab_id,
+            pane_id,
+            mux_provider.as_deref(),
+            &mut builder,
+            window,
+            cx,
+        );
+        let terminal = cx.new(|cx| builder.subscribe(cx));
+        let view =
+            cx.new(|cx| TerminalView::new_with_theme(terminal.clone(), terminal_theme, window, cx));
+        this.configure_terminal_view_silent_mode(tab_id, &view, cx);
+        this.subscribe_spawned_terminal(
+            tab_id,
+            pane_id,
+            Some(crate::run_command::RunPaneIdentity::new(
+                attention_id,
+                pane_routing_id,
+            )),
+            &terminal,
+            window,
+            cx,
+        );
+        this.subscribe_spawned_terminal_view(tab_id, pane_id, &view, window, cx);
+        let should_focus =
+            this.configure_spawned_terminal_focus(tab_id, pane_id, &view, window, cx);
+        let tab_index = this.tabs.iter().position(|tab| tab.id == tab_id);
+        if let Some(pane) = tab_index
+            .and_then(|index| this.tabs.get_mut(index))
+            .and_then(|tab| tab.pane_mut(pane_id))
+        {
+            pane.terminal = Some(terminal.clone());
+            pane.view = Some(view.clone());
+            pane.base_exited = false;
+            pane.error = None;
+            pane.exit = None;
+            if restore_options.is_none()
+                && let Some(command) = pane.pending_command.take()
+            {
+                view.update(cx, |view, cx| {
+                    view.apply_input(&TerminalInput::Text(format!("{command}\r")), cx);
+                });
+            }
+        } else {
+            let stored_in_background = {
+                let pane = this
+                    .background_sessions
+                    .iter_mut()
+                    .find(|tab| tab.id == tab_id)
+                    .and_then(|tab| tab.pane_mut(pane_id));
+                if let Some(pane) = pane {
+                    pane.terminal = Some(terminal.clone());
+                    true
+                } else {
+                    false
+                }
+            };
+            if stored_in_background {
+                this.observe_background_terminal(tab_id, pane_id, terminal.clone(), cx);
+                this.publish_background_session_catalog(cx);
+            }
+        }
+        this.schedule_worktree_detection_for_pane(tab_id, pane_id, cx);
+        this.schedule_project_detection_for_pane(tab_id, pane_id, window, cx);
+        if should_focus {
+            view.focus_handle(cx).focus(window, cx);
+        }
+        this.sync_visible_terminals(cx);
+        this.schedule_terminal_spawn_notify(cx);
+        if tracked_multi_command_launch {
+            this.finish_multi_command_launch(window, cx);
+        }
+        if restore_options.is_some() {
+            let terminal_for_restore = terminal.clone();
+            if let Some(command) = shell_integration_startup_command.as_ref() {
+                let startup_handshake = terminal.update(cx, |terminal, _| {
+                    terminal.start_init_command_startup_handshake()
+                });
+                let command = command.clone();
+                cx.spawn(async move |_this, cx| {
+                    startup_handshake.await;
+                    terminal_for_restore.update(cx, |terminal, cx| {
+                        terminal.write_init_command_after_startup(command, cx);
+                        terminal.finish_fresh_shell_restore(cx);
+                    });
+                })
+                .detach();
+            } else {
+                terminal_for_restore.update(cx, |terminal, cx| {
+                    terminal.finish_fresh_shell_restore(cx);
+                });
+            }
+        } else if let Some(command) = shell_integration_startup_command.as_ref() {
+            let startup_handshake = terminal.update(cx, |terminal, _| {
+                terminal.start_init_command_startup_handshake()
+            });
+            let command = command.clone();
+            let terminal_for_startup = terminal.clone();
+            cx.spawn(async move |_this, cx| {
+                startup_handshake.await;
+                terminal_for_startup.update(cx, |terminal, cx| {
+                    terminal.write_init_command_after_startup(command, cx);
+                });
+            })
+            .detach();
+        }
+    }
+
+    /// A spawn that never produced a terminal: the pane shows the error, and a
+    /// multi-command batch waiting on this launch is released so the rest of it
+    /// is not left pending.
+    fn report_terminal_spawn_failure(
+        &mut self,
+        spawned: &SpawnedTerminal,
+        error: &anyhow::Error,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let SpawnedTerminal {
+            tab_id,
+            pane_id,
+            tracked_multi_command_launch,
+            ..
+        } = *spawned;
+        let this = self;
+        if let Some(pane) = this
+            .tabs
+            .iter_mut()
+            .find(|tab| tab.id == tab_id)
+            .and_then(|tab| tab.pane_mut(pane_id))
+        {
+            pane.error = Some(format!("{error:#}"));
+        }
+        this.schedule_terminal_spawn_notify(cx);
+        if tracked_multi_command_launch {
+            this.finish_multi_command_launch(window, cx);
+        }
     }
 
     pub(crate) fn schedule_terminal_spawn_notify(&mut self, cx: &mut Context<Self>) {
@@ -1181,170 +1280,29 @@ impl Zetta {
         );
 
         let this = cx.entity().downgrade();
+        let spawned = SpawnedStackedTerminal {
+            tab_id,
+            pane_id,
+            entry_id,
+            attention_id,
+            pane_routing_id,
+            terminal_theme,
+            mux_provider,
+        };
         window
             .spawn(cx, async move |cx| match builder.await {
-                Ok(mut builder) => {
+                Ok(builder) => {
                     this.update_in(cx, |this, window, cx| {
-                        this.adopt_mux_pane(
-                            tab_id,
-                            entry_id,
-                            mux_provider.as_deref(),
-                            &mut builder,
-                            window,
-                            cx,
-                        );
-                        let terminal = cx.new(|cx| builder.subscribe(cx));
-                        let view = cx.new(|cx| {
-                            TerminalView::new_with_theme(
-                                terminal.clone(),
-                                terminal_theme,
-                                window,
-                                cx,
-                            )
-                        });
-                        this.configure_terminal_view_silent_mode(tab_id, &view, cx);
-                        let run_registry = crate::run_command::process_run_registry();
-                        let run_identity =
-                            crate::run_command::RunPaneIdentity::new(attention_id, pane_routing_id);
-                        run_registry.pane_reopened(run_identity);
-                        cx.subscribe_in(
-                            &terminal,
-                            window,
-                            move |this, terminal, event: &TerminalEvent, _window, cx| match event {
-                                TerminalEvent::TrackingReady => {
-                                    run_registry.tracking_ready(run_identity)
-                                }
-                                TerminalEvent::CommandStarted { command } => {
-                                    run_registry.command_started(run_identity, command.clone())
-                                }
-                                TerminalEvent::CommandFinished { exit_code } => {
-                                    run_registry.command_finished(run_identity, *exit_code)
-                                }
-                                TerminalEvent::TerminalExited(_) => {
-                                    run_registry.terminal_lost(run_identity)
-                                }
-                                TerminalEvent::TaskFinished { exit_code } => {
-                                    this.stacked_task_finished(
-                                        tab_id, pane_id, entry_id, *exit_code, cx,
-                                    );
-                                }
-                                TerminalEvent::ResizeRequested { .. } => {
-                                    terminal.update(cx, |terminal, _| {
-                                        terminal.truncate_on_next_resize()
-                                    });
-                                }
-                                _ => {}
-                            },
-                        )
-                        .detach();
-                        cx.subscribe_in(
-                            &view,
-                            window,
-                            move |this, _, event, window, cx| match event {
-                                TerminalViewEvent::Close => {
-                                    this.stacked_terminal_closed(
-                                        tab_id, pane_id, entry_id, window, cx,
-                                    );
-                                }
-                                TerminalViewEvent::TitleChanged => cx.notify(),
-                                TerminalViewEvent::Input(_) => {}
-                                TerminalViewEvent::OpenEditor(request) => {
-                                    this.open_editor_in_new_pane(
-                                        tab_id,
-                                        pane_id,
-                                        request.clone(),
-                                        window,
-                                        cx,
-                                    );
-                                }
-                            },
-                        )
-                        .detach();
-                        let input_enabled = this.terminal_input_enabled();
-                        view.update(cx, |view, cx| {
-                            view.set_emit_input_events(false);
-                            view.set_input_enabled(input_enabled, cx);
-                        });
-                        let focus_handle = view.focus_handle(cx);
-                        cx.on_focus_in(&focus_handle, window, move |this, window, cx| {
-                            if let Some(tab) = this.tabs.iter_mut().find(|tab| tab.id == tab_id) {
-                                tab.activate_stack_entry(
-                                    pane_id,
-                                    PaneStackSelection::Stacked(entry_id),
-                                );
-                                cx.notify();
-                            }
-                            this.activate_current_project(window, cx);
-                            this.clear_active_tab_attention_if_focused(window, cx);
-                        })
-                        .detach();
-                        let tab_index = this.tabs.iter().position(|tab| tab.id == tab_id);
-                        let should_focus = tab_index.is_some_and(|index| {
-                            index == this.active_tab
-                                && this.tabs[index].active_pane == pane_id
-                                && this.tabs[index].pane(pane_id).is_some_and(|pane| {
-                                    pane.stack.selected == PaneStackSelection::Stacked(entry_id)
-                                })
-                        });
-                        let inserted = tab_index
-                            .and_then(|index| this.tabs.get_mut(index))
-                            .and_then(|tab| tab.pane_mut(pane_id))
-                            .and_then(|pane| {
-                                let entry = pane
-                                    .stack
-                                    .entries
-                                    .iter_mut()
-                                    .find(|entry| entry.id == entry_id)?;
-                                entry.terminal = Some(terminal.clone());
-                                entry.view = Some(view.clone());
-                                entry.state = StackedPaneState::Running;
-                                Some(())
-                            })
-                            .is_some();
-                        if !inserted {
-                            let stored_in_background = this
-                                .background_sessions
-                                .iter_mut()
-                                .find(|tab| tab.id == tab_id)
-                                .and_then(|tab| tab.pane_mut(pane_id))
-                                .and_then(|pane| {
-                                    let entry = pane
-                                        .stack
-                                        .entries
-                                        .iter_mut()
-                                        .find(|entry| entry.id == entry_id)?;
-                                    entry.terminal = Some(terminal.clone());
-                                    entry.state = StackedPaneState::Running;
-                                    Some(())
-                                })
-                                .is_some();
-                            if stored_in_background {
-                                terminal.update(cx, |terminal, cx| {
-                                    terminal.set_ui_visible(false, cx);
-                                });
-                                this.observe_background_stacked_terminal(
-                                    pane_id,
-                                    entry_id,
-                                    terminal.clone(),
-                                    cx,
-                                );
-                                this.publish_background_session_catalog(cx);
-                            }
-                        }
-                        if should_focus {
-                            view.focus_handle(cx).focus(window, cx);
-                        }
-                        this.sync_visible_terminals(cx);
-                        this.schedule_terminal_spawn_notify(cx);
+                        this.finish_stacked_terminal_spawn(builder, spawned, window, cx);
                     })
                     .ok();
                 }
                 Err(error) => {
                     this.update_in(cx, |this, _window, cx| {
                         this.stacked_terminal_failed(
-                            tab_id,
-                            pane_id,
-                            entry_id,
+                            spawned.tab_id,
+                            spawned.pane_id,
+                            spawned.entry_id,
                             format!("{error:#}"),
                             cx,
                         );
@@ -1354,6 +1312,156 @@ impl Zetta {
                 }
             })
             .detach();
+    }
+
+    /// Wires a stacked command's terminal into the pane stack that asked for it.
+    ///
+    /// Unlike an interactive pane, a stacked entry routes its exit and its focus
+    /// through the stack's selection, which is why this does not reuse
+    /// `finish_terminal_spawn`.
+    fn finish_stacked_terminal_spawn(
+        &mut self,
+        mut builder: TerminalBuilder,
+        spawned: SpawnedStackedTerminal,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let SpawnedStackedTerminal {
+            tab_id,
+            pane_id,
+            entry_id,
+            attention_id,
+            pane_routing_id,
+            terminal_theme,
+            mux_provider,
+        } = spawned;
+        let this = self;
+        this.adopt_mux_pane(
+            tab_id,
+            entry_id,
+            mux_provider.as_deref(),
+            &mut builder,
+            window,
+            cx,
+        );
+        let terminal = cx.new(|cx| builder.subscribe(cx));
+        let view =
+            cx.new(|cx| TerminalView::new_with_theme(terminal.clone(), terminal_theme, window, cx));
+        this.configure_terminal_view_silent_mode(tab_id, &view, cx);
+        let run_registry = crate::run_command::process_run_registry();
+        let run_identity = crate::run_command::RunPaneIdentity::new(attention_id, pane_routing_id);
+        run_registry.pane_reopened(run_identity);
+        cx.subscribe_in(
+            &terminal,
+            window,
+            move |this, terminal, event: &TerminalEvent, _window, cx| match event {
+                TerminalEvent::TrackingReady => {
+                    run_registry.tracking_ready(run_identity);
+                }
+                TerminalEvent::CommandStarted { command } => {
+                    run_registry.command_started(run_identity, command.clone());
+                }
+                TerminalEvent::CommandFinished { exit_code } => {
+                    run_registry.command_finished(run_identity, *exit_code);
+                }
+                TerminalEvent::TerminalExited(_) => {
+                    run_registry.terminal_lost(run_identity);
+                }
+                TerminalEvent::TaskFinished { exit_code } => {
+                    this.stacked_task_finished(tab_id, pane_id, entry_id, *exit_code, cx);
+                }
+                TerminalEvent::ResizeRequested { .. } => {
+                    terminal.update(cx, |terminal, _| {
+                        terminal.truncate_on_next_resize();
+                    });
+                }
+                _ => {}
+            },
+        )
+        .detach();
+        cx.subscribe_in(
+            &view,
+            window,
+            move |this, _, event, window, cx| match event {
+                TerminalViewEvent::Close => {
+                    this.stacked_terminal_closed(tab_id, pane_id, entry_id, window, cx);
+                }
+                TerminalViewEvent::TitleChanged => cx.notify(),
+                TerminalViewEvent::Input(_) => {}
+                TerminalViewEvent::OpenEditor(request) => {
+                    this.open_editor_in_new_pane(tab_id, pane_id, request.clone(), window, cx);
+                }
+            },
+        )
+        .detach();
+        let input_enabled = this.terminal_input_enabled();
+        view.update(cx, |view, cx| {
+            view.set_emit_input_events(false);
+            view.set_input_enabled(input_enabled, cx);
+        });
+        let focus_handle = view.focus_handle(cx);
+        cx.on_focus_in(&focus_handle, window, move |this, window, cx| {
+            if let Some(tab) = this.tabs.iter_mut().find(|tab| tab.id == tab_id) {
+                tab.activate_stack_entry(pane_id, PaneStackSelection::Stacked(entry_id));
+                cx.notify();
+            }
+            this.activate_current_project(window, cx);
+            this.clear_active_tab_attention_if_focused(window, cx);
+        })
+        .detach();
+        let tab_index = this.tabs.iter().position(|tab| tab.id == tab_id);
+        let should_focus = tab_index.is_some_and(|index| {
+            index == this.active_tab
+                && this.tabs[index].active_pane == pane_id
+                && this.tabs[index].pane(pane_id).is_some_and(|pane| {
+                    pane.stack.selected == PaneStackSelection::Stacked(entry_id)
+                })
+        });
+        let inserted = tab_index
+            .and_then(|index| this.tabs.get_mut(index))
+            .and_then(|tab| tab.pane_mut(pane_id))
+            .and_then(|pane| {
+                let entry = pane
+                    .stack
+                    .entries
+                    .iter_mut()
+                    .find(|entry| entry.id == entry_id)?;
+                entry.terminal = Some(terminal.clone());
+                entry.view = Some(view.clone());
+                entry.state = StackedPaneState::Running;
+                Some(())
+            })
+            .is_some();
+        if !inserted {
+            let stored_in_background = this
+                .background_sessions
+                .iter_mut()
+                .find(|tab| tab.id == tab_id)
+                .and_then(|tab| tab.pane_mut(pane_id))
+                .and_then(|pane| {
+                    let entry = pane
+                        .stack
+                        .entries
+                        .iter_mut()
+                        .find(|entry| entry.id == entry_id)?;
+                    entry.terminal = Some(terminal.clone());
+                    entry.state = StackedPaneState::Running;
+                    Some(())
+                })
+                .is_some();
+            if stored_in_background {
+                terminal.update(cx, |terminal, cx| {
+                    terminal.set_ui_visible(false, cx);
+                });
+                this.observe_background_stacked_terminal(pane_id, entry_id, terminal.clone(), cx);
+                this.publish_background_session_catalog(cx);
+            }
+        }
+        if should_focus {
+            view.focus_handle(cx).focus(window, cx);
+        }
+        this.sync_visible_terminals(cx);
+        this.schedule_terminal_spawn_notify(cx);
     }
 
     pub(crate) fn stacked_terminal_failed(

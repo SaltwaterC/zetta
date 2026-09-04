@@ -24,10 +24,10 @@ impl Zetta {
                 match event {
                     TerminalEvent::TrackingReady => run_registry.tracking_ready(identity),
                     TerminalEvent::CommandStarted { command } => {
-                        run_registry.command_started(identity, command.clone())
+                        run_registry.command_started(identity, command.clone());
                     }
                     TerminalEvent::CommandFinished { exit_code } => {
-                        run_registry.command_finished(identity, *exit_code)
+                        run_registry.command_finished(identity, *exit_code);
                     }
                     TerminalEvent::TerminalExited(_) => run_registry.terminal_lost(identity),
                     _ => {}
@@ -40,7 +40,7 @@ impl Zetta {
                     crate::session_state::valid_restore_command(command),
                 ),
                 TerminalEvent::CommandFinished { .. } | TerminalEvent::TerminalExited(_) => {
-                    this.update_active_command(tab_id, pane_id, None)
+                    this.update_active_command(tab_id, pane_id, None);
                 }
                 _ => {}
             }
@@ -146,10 +146,10 @@ impl Zetta {
                 match event {
                     TerminalEvent::TrackingReady => run_registry.tracking_ready(identity),
                     TerminalEvent::CommandStarted { command } => {
-                        run_registry.command_started(identity, command.clone())
+                        run_registry.command_started(identity, command.clone());
                     }
                     TerminalEvent::CommandFinished { exit_code } => {
-                        run_registry.command_finished(identity, *exit_code)
+                        run_registry.command_finished(identity, *exit_code);
                     }
                     TerminalEvent::TerminalExited(_) => run_registry.terminal_lost(identity),
                     _ => {}
@@ -330,8 +330,10 @@ impl Zetta {
                                     None
                                 }
                             })
-                            .map(str::to_owned)
-                            .unwrap_or_else(|| pane.profile.command.program_and_args().0)
+                            .map_or_else(
+                                || pane.profile.command.program_and_args().0,
+                                str::to_owned,
+                            )
                     });
                 BackgroundPaneSummary {
                     id: pane.id,
@@ -366,9 +368,10 @@ impl Zetta {
 
     fn background_session_title(&self, tab: &Tab, cx: &App) -> String {
         resolve_tab_title(tab, || {
-            tab.active_terminal()
-                .map(|terminal| terminal.read(cx).title(false).into())
-                .unwrap_or_else(|| format!("Tab {}", tab.id).into())
+            tab.active_terminal().map_or_else(
+                || format!("Tab {}", tab.id).into(),
+                |terminal| terminal.read(cx).title(false).into(),
+            )
         })
         .to_string()
     }
@@ -423,10 +426,10 @@ impl Zetta {
                 match event {
                     TerminalEvent::TrackingReady => run_registry.tracking_ready(identity),
                     TerminalEvent::CommandStarted { command } => {
-                        run_registry.command_started(identity, command.clone())
+                        run_registry.command_started(identity, command.clone());
                     }
                     TerminalEvent::CommandFinished { exit_code } => {
-                        run_registry.command_finished(identity, *exit_code)
+                        run_registry.command_finished(identity, *exit_code);
                     }
                     TerminalEvent::TerminalExited(_) => run_registry.terminal_lost(identity),
                     _ => {}
@@ -541,10 +544,10 @@ impl Zetta {
                     match event {
                         TerminalEvent::TrackingReady => run_registry.tracking_ready(identity),
                         TerminalEvent::CommandStarted { command } => {
-                            run_registry.command_started(identity, command.clone())
+                            run_registry.command_started(identity, command.clone());
                         }
                         TerminalEvent::CommandFinished { exit_code } => {
-                            run_registry.command_finished(identity, *exit_code)
+                            run_registry.command_finished(identity, *exit_code);
                         }
                         TerminalEvent::TerminalExited(_) => run_registry.terminal_lost(identity),
                         _ => {}

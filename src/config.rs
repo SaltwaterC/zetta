@@ -626,9 +626,8 @@ pub struct Config {
 impl Config {
     pub fn defaults(config_path: Option<&Path>, keymap_path: Option<PathBuf>) -> Self {
         let config_dir = platform_config_dir();
-        let config_path = config_path
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| config_dir.join("config.json"));
+        let config_path =
+            config_path.map_or_else(|| config_dir.join("config.json"), Path::to_path_buf);
         Self {
             config_path: config_path.clone(),
             keymap_override: keymap_path.clone(),
@@ -1495,8 +1494,7 @@ fn expand_home(path: &str) -> PathBuf {
 
 fn home_dir() -> PathBuf {
     env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."))
+        .map_or_else(|| PathBuf::from("."), PathBuf::from)
 }
 
 /// The conventional local SSH identity used as the age fallback when no

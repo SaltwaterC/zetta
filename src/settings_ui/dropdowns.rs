@@ -96,8 +96,7 @@ impl Zetta {
                 (
                     profile
                         .and_then(|profile| profile.icon.as_ref())
-                        .map(ProfileIcon::label)
-                        .unwrap_or("Automatic")
+                        .map_or("Automatic", ProfileIcon::label)
                         .to_owned(),
                     Arc::from(["Automatic", "Zetta", "Bash", "Zsh", "Fish"].map(str::to_owned)),
                 )
@@ -138,8 +137,7 @@ impl Zetta {
                     .profile_draft
                     .as_ref()
                     .and_then(|profile| profile.icon.as_ref())
-                    .map(ProfileIcon::label)
-                    .unwrap_or("Automatic")
+                    .map_or("Automatic", ProfileIcon::label)
                     .to_owned();
                 (
                     icon,
@@ -367,165 +365,7 @@ impl Zetta {
             return;
         }
         editor.clear_dropdown();
-        match dropdown {
-            SettingsDropdown::DefaultProfile => {
-                editor.configuration.default_profile = value;
-            }
-            SettingsDropdown::NewTabProfile => {
-                editor.configuration.new_tab_profile = if value == "Inherit" {
-                    NewTabProfile::Inherit
-                } else {
-                    NewTabProfile::Default
-                };
-            }
-            SettingsDropdown::Theme => editor.configuration.theme = value,
-            SettingsDropdown::DarkTheme => editor.configuration.dark_theme = value,
-            SettingsDropdown::WorkingDirectoryScope => {
-                editor.configuration.working_directory_scope = match value.as_str() {
-                    "None" => WorkingDirectoryScope::None,
-                    "Pane" => WorkingDirectoryScope::Pane,
-                    _ => WorkingDirectoryScope::Tab,
-                };
-            }
-            SettingsDropdown::PaneControlsPosition => {
-                editor.configuration.pane_controls_position = if value == "Left" {
-                    PaneControlsPosition::Left
-                } else {
-                    PaneControlsPosition::Right
-                };
-            }
-            SettingsDropdown::PaneControlsDefaultVisibility => {
-                editor.configuration.pane_controls_hidden_by_default = value == "Hidden";
-            }
-            SettingsDropdown::SessionRetention => {
-                editor.configuration.session_retention = match value.as_str() {
-                    "None" => crate::config::SessionRetention::None,
-                    "Disk" => crate::config::SessionRetention::Disk,
-                    _ => crate::config::SessionRetention::Memory,
-                };
-            }
-            SettingsDropdown::ProfileTheme(index) => {
-                if let Some(profile) = editor.configuration.profiles.get_mut(index) {
-                    profile.theme = (value != "Use application theme").then_some(value);
-                }
-            }
-            SettingsDropdown::ProfileDarkTheme(index) => {
-                if let Some(profile) = editor.configuration.profiles.get_mut(index) {
-                    profile.dark_theme = (value != "Use application theme").then_some(value);
-                }
-            }
-            SettingsDropdown::ProfileIcon(index) => {
-                if let Some(profile) = editor.configuration.profiles.get_mut(index) {
-                    profile.icon = if value == "Automatic" {
-                        None
-                    } else {
-                        ProfileIcon::parse_name(&value.to_ascii_lowercase())
-                            .ok()
-                            .flatten()
-                    };
-                }
-            }
-            SettingsDropdown::ProfileDraftTheme => {
-                if let Some(profile) = editor.profile_draft.as_mut() {
-                    profile.theme = (value != "Use application theme").then_some(value);
-                }
-            }
-            SettingsDropdown::ProfileDraftDarkTheme => {
-                if let Some(profile) = editor.profile_draft.as_mut() {
-                    profile.dark_theme = (value != "Use application theme").then_some(value);
-                }
-            }
-            SettingsDropdown::ProfileDraftIcon => {
-                if let Some(profile) = editor.profile_draft.as_mut() {
-                    profile.icon = if value == "Automatic" {
-                        None
-                    } else {
-                        ProfileIcon::parse_name(&value.to_ascii_lowercase())
-                            .ok()
-                            .flatten()
-                    };
-                }
-            }
-            SettingsDropdown::BindingAction(section, binding) => {
-                if let Some(binding) = editor
-                    .keymap
-                    .sections
-                    .get_mut(section)
-                    .and_then(|section| section.bindings.get_mut(binding))
-                {
-                    binding.action = if value == ApplyPaneSplitTemplate::name_for_type() {
-                        serde_json::json!([
-                            value,
-                            {
-                                "name": editor
-                                    .pane_template_names
-                                    .first()
-                                    .cloned()
-                                    .unwrap_or_default()
-                            }
-                        ])
-                    } else if value == OpenProfile::name_for_type() {
-                        serde_json::json!([value, { "slot": 1 }])
-                    } else {
-                        serde_json::Value::String(value)
-                    };
-                }
-            }
-            SettingsDropdown::BindingTemplate(section, binding) => {
-                if let Some(arguments) = editor
-                    .keymap
-                    .sections
-                    .get_mut(section)
-                    .and_then(|section| section.bindings.get_mut(binding))
-                    .and_then(|binding| binding.action.as_array_mut())
-                    .and_then(|action| action.get_mut(1))
-                    .and_then(serde_json::Value::as_object_mut)
-                {
-                    arguments.insert("name".to_owned(), serde_json::Value::String(value));
-                }
-            }
-            SettingsDropdown::BindingProfile(section, binding) => {
-                let Some(slot) = editor
-                    .profile_names
-                    .iter()
-                    .position(|profile| profile == &value)
-                    .map(|index| index + 1)
-                else {
-                    return;
-                };
-                if let Some(arguments) = editor
-                    .keymap
-                    .sections
-                    .get_mut(section)
-                    .and_then(|section| section.bindings.get_mut(binding))
-                    .and_then(|binding| binding.action.as_array_mut())
-                    .and_then(|action| action.get_mut(1))
-                    .and_then(serde_json::Value::as_object_mut)
-                {
-                    arguments.insert("slot".to_owned(), serde_json::json!(slot));
-                }
-            }
-            SettingsDropdown::PaneTemplateAxis(_)
-            | SettingsDropdown::PaneTemplateSource(_)
-            | SettingsDropdown::PaneTemplateTheme(_)
-            | SettingsDropdown::PaneTemplateDarkTheme(_)
-            | SettingsDropdown::PaneTemplateOverlaySize(_) => {
-                if !pane_templates::set_pane_template_dropdown(editor, dropdown, &value) {
-                    return;
-                }
-            }
-            SettingsDropdown::ProjectTheme
-            | SettingsDropdown::ProjectDarkTheme
-            | SettingsDropdown::ProjectDefaultProfile
-            | SettingsDropdown::ProjectInitialSplit
-            | SettingsDropdown::ProjectProfileTheme(_)
-            | SettingsDropdown::ProjectProfileDarkTheme(_)
-            | SettingsDropdown::ProjectProfileIcon(_) => {
-                if !projects::set_project_dropdown(editor, dropdown, &value) {
-                    return;
-                }
-            }
-        }
+        apply_settings_dropdown_value(editor, dropdown, value);
         match dropdown {
             SettingsDropdown::BindingAction(_, _) | SettingsDropdown::BindingTemplate(_, _) => {
                 editor.keymap_dirty = true;
@@ -549,6 +389,173 @@ impl Zetta {
             pane_templates::schedule_pane_template_validation(self, cx);
         } else {
             cx.notify();
+        }
+    }
+}
+
+/// Writes a dropdown's chosen option into the form behind it.
+///
+/// Separate from [`Zetta::set_settings_dropdown`] because that also has to
+/// close the popup, refresh caches and notify; this is only the assignment, and
+/// it is one arm per dropdown.
+fn apply_settings_dropdown_value(
+    editor: &mut SettingsEditor,
+    dropdown: SettingsDropdown,
+    value: String,
+) {
+    match dropdown {
+        SettingsDropdown::DefaultProfile => {
+            editor.configuration.default_profile = value;
+        }
+        SettingsDropdown::NewTabProfile => {
+            editor.configuration.new_tab_profile = if value == "Inherit" {
+                NewTabProfile::Inherit
+            } else {
+                NewTabProfile::Default
+            };
+        }
+        SettingsDropdown::Theme => editor.configuration.theme = value,
+        SettingsDropdown::DarkTheme => editor.configuration.dark_theme = value,
+        SettingsDropdown::WorkingDirectoryScope => {
+            editor.configuration.working_directory_scope = match value.as_str() {
+                "None" => WorkingDirectoryScope::None,
+                "Pane" => WorkingDirectoryScope::Pane,
+                _ => WorkingDirectoryScope::Tab,
+            };
+        }
+        SettingsDropdown::PaneControlsPosition => {
+            editor.configuration.pane_controls_position = if value == "Left" {
+                PaneControlsPosition::Left
+            } else {
+                PaneControlsPosition::Right
+            };
+        }
+        SettingsDropdown::PaneControlsDefaultVisibility => {
+            editor.configuration.pane_controls_hidden_by_default = value == "Hidden";
+        }
+        SettingsDropdown::SessionRetention => {
+            editor.configuration.session_retention = match value.as_str() {
+                "None" => crate::config::SessionRetention::None,
+                "Disk" => crate::config::SessionRetention::Disk,
+                _ => crate::config::SessionRetention::Memory,
+            };
+        }
+        SettingsDropdown::ProfileTheme(index) => {
+            if let Some(profile) = editor.configuration.profiles.get_mut(index) {
+                profile.theme = (value != "Use application theme").then_some(value);
+            }
+        }
+        SettingsDropdown::ProfileDarkTheme(index) => {
+            if let Some(profile) = editor.configuration.profiles.get_mut(index) {
+                profile.dark_theme = (value != "Use application theme").then_some(value);
+            }
+        }
+        SettingsDropdown::ProfileIcon(index) => {
+            if let Some(profile) = editor.configuration.profiles.get_mut(index) {
+                profile.icon = if value == "Automatic" {
+                    None
+                } else {
+                    ProfileIcon::parse_name(&value.to_ascii_lowercase())
+                        .ok()
+                        .flatten()
+                };
+            }
+        }
+        SettingsDropdown::ProfileDraftTheme => {
+            if let Some(profile) = editor.profile_draft.as_mut() {
+                profile.theme = (value != "Use application theme").then_some(value);
+            }
+        }
+        SettingsDropdown::ProfileDraftDarkTheme => {
+            if let Some(profile) = editor.profile_draft.as_mut() {
+                profile.dark_theme = (value != "Use application theme").then_some(value);
+            }
+        }
+        SettingsDropdown::ProfileDraftIcon => {
+            if let Some(profile) = editor.profile_draft.as_mut() {
+                profile.icon = if value == "Automatic" {
+                    None
+                } else {
+                    ProfileIcon::parse_name(&value.to_ascii_lowercase())
+                        .ok()
+                        .flatten()
+                };
+            }
+        }
+        SettingsDropdown::BindingAction(section, binding) => {
+            if let Some(binding) = editor
+                .keymap
+                .sections
+                .get_mut(section)
+                .and_then(|section| section.bindings.get_mut(binding))
+            {
+                binding.action = if value == ApplyPaneSplitTemplate::name_for_type() {
+                    serde_json::json!([
+                        value,
+                        {
+                            "name": editor
+                                .pane_template_names
+                                .first()
+                                .cloned()
+                                .unwrap_or_default()
+                        }
+                    ])
+                } else if value == OpenProfile::name_for_type() {
+                    serde_json::json!([value, { "slot": 1 }])
+                } else {
+                    serde_json::Value::String(value)
+                };
+            }
+        }
+        SettingsDropdown::BindingTemplate(section, binding) => {
+            if let Some(arguments) = editor
+                .keymap
+                .sections
+                .get_mut(section)
+                .and_then(|section| section.bindings.get_mut(binding))
+                .and_then(|binding| binding.action.as_array_mut())
+                .and_then(|action| action.get_mut(1))
+                .and_then(serde_json::Value::as_object_mut)
+            {
+                arguments.insert("name".to_owned(), serde_json::Value::String(value));
+            }
+        }
+        SettingsDropdown::BindingProfile(section, binding) => {
+            let Some(slot) = editor
+                .profile_names
+                .iter()
+                .position(|profile| profile == &value)
+                .map(|index| index + 1)
+            else {
+                return;
+            };
+            if let Some(arguments) = editor
+                .keymap
+                .sections
+                .get_mut(section)
+                .and_then(|section| section.bindings.get_mut(binding))
+                .and_then(|binding| binding.action.as_array_mut())
+                .and_then(|action| action.get_mut(1))
+                .and_then(serde_json::Value::as_object_mut)
+            {
+                arguments.insert("slot".to_owned(), serde_json::json!(slot));
+            }
+        }
+        SettingsDropdown::PaneTemplateAxis(_)
+        | SettingsDropdown::PaneTemplateSource(_)
+        | SettingsDropdown::PaneTemplateTheme(_)
+        | SettingsDropdown::PaneTemplateDarkTheme(_)
+        | SettingsDropdown::PaneTemplateOverlaySize(_) => {
+            if !pane_templates::set_pane_template_dropdown(editor, dropdown, &value) {}
+        }
+        SettingsDropdown::ProjectTheme
+        | SettingsDropdown::ProjectDarkTheme
+        | SettingsDropdown::ProjectDefaultProfile
+        | SettingsDropdown::ProjectInitialSplit
+        | SettingsDropdown::ProjectProfileTheme(_)
+        | SettingsDropdown::ProjectProfileDarkTheme(_)
+        | SettingsDropdown::ProjectProfileIcon(_) => {
+            if !projects::set_project_dropdown(editor, dropdown, &value) {}
         }
     }
 }

@@ -608,15 +608,8 @@ fn evaluate_run(state: &RegistryState, id: u64, stack: &mut Vec<u64>) -> Option<
                     .runs
                     .get(&dependency_id)
                     .is_some_and(|node| node.terminal.is_some());
-                evaluate_run(state, dependency_id, stack)
-                    .map(|evaluation| match evaluation {
-                        // A managed dependency is not satisfied merely because
-                        // its own prerequisites are ready. Its wrapper still
-                        // has to run its child and report the child's result.
-                        Evaluation::Ready if !dependency_was_terminal => Evaluation::Pending,
-                        evaluation => evaluation,
-                    })
-                    .unwrap_or_else(|| {
+                evaluate_run(state, dependency_id, stack).map_or_else(
+                    || {
                         // A terminal managed node is normally replaced in every
                         // dependent before it is retired. Keep this fallback for
                         // an already-snapshotted dependent whose link was
@@ -626,8 +619,7 @@ fn evaluate_run(state: &RegistryState, id: u64, stack: &mut Vec<u64>) -> Option<
                         match state
                             .panes
                             .get(&dependency.pane)
-                            .map(recorded_result)
-                            .unwrap_or(DependencyObservation::Missing)
+                            .map_or(DependencyObservation::Missing, recorded_result)
                         {
                             DependencyObservation::Last(result) => evaluate_last_result(result),
                             _ => Evaluation::Failed {
@@ -635,7 +627,15 @@ fn evaluate_run(state: &RegistryState, id: u64, stack: &mut Vec<u64>) -> Option<
                                 structural: true,
                             },
                         }
-                    })
+                    },
+                    |evaluation| match evaluation {
+                        // A managed dependency is not satisfied merely because
+                        // its own prerequisites are ready. Its wrapper still
+                        // has to run its child and report the child's result.
+                        Evaluation::Ready if !dependency_was_terminal => Evaluation::Pending,
+                        evaluation => evaluation,
+                    },
+                )
             }
             DependencyObservation::Last(result) => evaluate_last_result(result),
             DependencyObservation::Unknown => Evaluation::Failed {
@@ -694,8 +694,7 @@ fn recorded_result(pane_state: &PaneState) -> DependencyObservation {
     if pane_state.tracking_ready {
         pane_state
             .last_result
-            .map(DependencyObservation::Last)
-            .unwrap_or(DependencyObservation::Unknown)
+            .map_or(DependencyObservation::Unknown, DependencyObservation::Last)
     } else {
         DependencyObservation::Unknown
     }

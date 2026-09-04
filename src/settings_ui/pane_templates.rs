@@ -231,13 +231,13 @@ pub(crate) fn pane_template_dropdown_options(
     editor: &SettingsEditor,
     dropdown: SettingsDropdown,
 ) -> (String, Arc<[String]>) {
-    let path = match dropdown {
-        SettingsDropdown::PaneTemplateAxis(path)
-        | SettingsDropdown::PaneTemplateSource(path)
-        | SettingsDropdown::PaneTemplateTheme(path)
-        | SettingsDropdown::PaneTemplateDarkTheme(path)
-        | SettingsDropdown::PaneTemplateOverlaySize(path) => path,
-        _ => return (String::new(), Arc::from([])),
+    let (SettingsDropdown::PaneTemplateAxis(path)
+    | SettingsDropdown::PaneTemplateSource(path)
+    | SettingsDropdown::PaneTemplateTheme(path)
+    | SettingsDropdown::PaneTemplateDarkTheme(path)
+    | SettingsDropdown::PaneTemplateOverlaySize(path)) = dropdown
+    else {
+        return (String::new(), Arc::from([]));
     };
     match dropdown {
         SettingsDropdown::PaneTemplateAxis(_) => {
@@ -285,8 +285,7 @@ pub(crate) fn pane_template_dropdown_options(
             let selected = selected_pane(editor, path)
                 .and_then(|pane| pane.overlay.as_ref())
                 .and_then(|overlay| overlay.size)
-                .map(overlay_size_label)
-                .unwrap_or_else(|| "Default".to_owned());
+                .map_or_else(|| "Default".to_owned(), overlay_size_label);
             (selected, overlay_size_options())
         }
         _ => unreachable!(),
@@ -298,13 +297,13 @@ pub(crate) fn set_pane_template_dropdown(
     dropdown: SettingsDropdown,
     value: &str,
 ) -> bool {
-    let path = match dropdown {
-        SettingsDropdown::PaneTemplateAxis(path)
-        | SettingsDropdown::PaneTemplateSource(path)
-        | SettingsDropdown::PaneTemplateTheme(path)
-        | SettingsDropdown::PaneTemplateDarkTheme(path)
-        | SettingsDropdown::PaneTemplateOverlaySize(path) => path,
-        _ => return false,
+    let (SettingsDropdown::PaneTemplateAxis(path)
+    | SettingsDropdown::PaneTemplateSource(path)
+    | SettingsDropdown::PaneTemplateTheme(path)
+    | SettingsDropdown::PaneTemplateDarkTheme(path)
+    | SettingsDropdown::PaneTemplateOverlaySize(path)) = dropdown
+    else {
+        return false;
     };
     if !templates(editor).selected_is_editable() {
         return false;
@@ -705,7 +704,52 @@ pub(crate) fn activate_pane_template_control(
     let Some(editor) = zetta.settings_editor.as_mut() else {
         return Ok(());
     };
-    let result = match control {
+    let result = match apply_pane_template_control(editor, control.clone()) {
+        // Nothing changed, so none of the tail below applies.
+        Ok(None) => return Ok(()),
+        Ok(Some(())) => Ok(()),
+        Err(error) => Err(error),
+    };
+    let mut schedule_validation = false;
+    match result {
+        Ok(()) => {
+            if !matches!(
+                control,
+                SettingsControl::SelectPaneTemplate(_) | SettingsControl::SelectPaneTemplateNode(_)
+            ) {
+                mark_templates_dirty(editor);
+                refresh_template_names(editor);
+                schedule_validation = true;
+            }
+            invalidate_controls_cache(editor);
+        }
+        Err(error) => {
+            editor.message = Some((true, format!("Not changed: {error:#}")));
+        }
+    }
+    if schedule_validation {
+        schedule_pane_template_validation(zetta, cx);
+    } else {
+        cx.notify();
+    }
+    Ok(())
+}
+
+/// Applies one pane-template control to the form, reporting what went wrong
+/// rather than showing it.
+///
+/// `Ok(None)` means nothing changed — the control is not one of this page's, or
+/// the node it names has since gone. That is not the same as succeeding: the
+/// caller must then skip the dirty-marking and validation that follow a real
+/// change, which is what the early returns in the arms below rely on.
+///
+/// Split from [`activate_pane_template_control`] so the arms are not
+/// interleaved with that shared tail.
+fn apply_pane_template_control(
+    editor: &mut SettingsEditor,
+    control: SettingsControl,
+) -> Result<Option<()>> {
+    match control {
         SettingsControl::SelectPaneTemplate(index) => {
             templates_mut(editor).select_template(index);
             editor.focused_control = Some(SettingsControl::SelectPaneTemplate(index));
@@ -749,20 +793,20 @@ pub(crate) fn activate_pane_template_control(
         }
         SettingsControl::AddPaneTemplateArgument(path) => {
             let Some(pane) = selected_pane_mut(editor, path) else {
-                return Ok(());
+                return Ok(None);
             };
             let PaneTemplateSourceForm::Command(command) = &mut pane.source else {
-                return Ok(());
+                return Ok(None);
             };
             command.args.push(TextField::default());
             Ok(())
         }
         SettingsControl::RemovePaneTemplateArgument(path, argument) => {
             let Some(pane) = selected_pane_mut(editor, path) else {
-                return Ok(());
+                return Ok(None);
             };
             let PaneTemplateSourceForm::Command(command) = &mut pane.source else {
-                return Ok(());
+                return Ok(None);
             };
             anyhow::ensure!(
                 argument < command.args.len(),
@@ -773,7 +817,7 @@ pub(crate) fn activate_pane_template_control(
         }
         SettingsControl::AddPaneTemplateStackEntry(path) => {
             let Some(pane) = selected_pane_mut(editor, path) else {
-                return Ok(());
+                return Ok(None);
             };
             anyhow::ensure!(
                 pane.stack.len() < MAX_PANES_PER_TAB - 1,
@@ -788,7 +832,7 @@ pub(crate) fn activate_pane_template_control(
         }
         SettingsControl::RemovePaneTemplateStackEntry(path, entry) => {
             let Some(pane) = selected_pane_mut(editor, path) else {
-                return Ok(());
+                return Ok(None);
             };
             anyhow::ensure!(entry < pane.stack.len(), "stacked command no longer exists");
             pane.stack.remove(entry);
@@ -796,20 +840,20 @@ pub(crate) fn activate_pane_template_control(
         }
         SettingsControl::AddPaneTemplateStackArgument(path, entry) => {
             let Some(pane) = selected_pane_mut(editor, path) else {
-                return Ok(());
+                return Ok(None);
             };
             let Some(command) = pane.stack.get_mut(entry) else {
-                return Ok(());
+                return Ok(None);
             };
             command.args.push(TextField::default());
             Ok(())
         }
         SettingsControl::RemovePaneTemplateStackArgument(path, entry, argument) => {
             let Some(pane) = selected_pane_mut(editor, path) else {
-                return Ok(());
+                return Ok(None);
             };
             let Some(command) = pane.stack.get_mut(entry) else {
-                return Ok(());
+                return Ok(None);
             };
             anyhow::ensure!(
                 argument < command.args.len(),
@@ -823,7 +867,7 @@ pub(crate) fn activate_pane_template_control(
                 .selected_mut()
                 .filter(|template| template.editable())
             else {
-                return Ok(());
+                return Ok(None);
             };
             template.environment.push(PaneTemplateEnvironmentForm {
                 name: TextField::default(),
@@ -836,7 +880,7 @@ pub(crate) fn activate_pane_template_control(
                 .selected_mut()
                 .filter(|template| template.editable())
             else {
-                return Ok(());
+                return Ok(None);
             };
             anyhow::ensure!(
                 environment < template.environment.len(),
@@ -854,7 +898,7 @@ pub(crate) fn activate_pane_template_control(
         }
         SettingsControl::RemovePaneTemplateEnvironment(path, environment) => {
             let Some(pane) = selected_pane_mut(editor, path) else {
-                return Ok(());
+                return Ok(None);
             };
             anyhow::ensure!(
                 environment < pane.environment.len(),
@@ -865,7 +909,7 @@ pub(crate) fn activate_pane_template_control(
         }
         SettingsControl::TogglePaneTemplateOverlay(path) => {
             let Some(pane) = selected_pane_mut(editor, path) else {
-                return Ok(());
+                return Ok(None);
             };
             pane.overlay = if pane.overlay.is_some() {
                 None
@@ -879,31 +923,9 @@ pub(crate) fn activate_pane_template_control(
             };
             Ok(())
         }
-        _ => return Ok(()),
-    };
-    let mut schedule_validation = false;
-    match result {
-        Ok(()) => {
-            if !matches!(
-                control,
-                SettingsControl::SelectPaneTemplate(_) | SettingsControl::SelectPaneTemplateNode(_)
-            ) {
-                mark_templates_dirty(editor);
-                refresh_template_names(editor);
-                schedule_validation = true;
-            }
-            invalidate_controls_cache(editor);
-        }
-        Err(error) => {
-            editor.message = Some((true, format!("Not changed: {error:#}")));
-        }
+        _ => return Ok(None),
     }
-    if schedule_validation {
-        schedule_pane_template_validation(zetta, cx);
-    } else {
-        cx.notify();
-    }
-    Ok(())
+    .map(Some)
 }
 
 #[cfg(test)]

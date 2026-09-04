@@ -604,9 +604,7 @@ fn duration_millis(duration: Duration) -> u64 {
 }
 
 fn logical_cpu_count() -> usize {
-    std::thread::available_parallelism()
-        .map(usize::from)
-        .unwrap_or(1)
+    std::thread::available_parallelism().map_or(1, usize::from)
 }
 
 #[cfg(test)]

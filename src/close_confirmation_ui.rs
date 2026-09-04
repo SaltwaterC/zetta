@@ -96,9 +96,10 @@ impl Zetta {
         let confirmation = self.close_tab_confirmation.as_ref()?;
         let colors = self.window_theme(cx).colors().clone();
         let tab = self.tabs.iter().find(|tab| tab.id == confirmation.tab_id);
-        let title = tab
-            .map(|tab| tab_overflow_entry_label(tab, cx))
-            .unwrap_or_else(|| "this tab".into());
+        let title = tab.map_or_else(
+            || "this tab".into(),
+            |tab| tab_overflow_entry_label(tab, cx),
+        );
         let backgrounded = tab.is_some_and(|tab| {
             tab.shared || tab.close_policy.background_authentication().is_some()
         });
@@ -149,7 +150,7 @@ impl Zetta {
                             .on_click(move |_, window, cx| {
                                 cancel_handle
                                     .update(cx, |this, cx| {
-                                        this.dismiss_tab_close_confirmation(window, cx)
+                                        this.dismiss_tab_close_confirmation(window, cx);
                                     })
                                     .ok();
                             }),

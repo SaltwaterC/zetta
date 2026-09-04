@@ -287,10 +287,9 @@ impl Zetta {
         if !tab.pane_is_visible(tab.active_pane) {
             return None;
         }
-        Some(
-            tab.active_view()
-                .map(|view| view.focus_handle(cx))
-                .unwrap_or_else(|| self.terminal_placeholder_focus.clone()),
-        )
+        Some(tab.active_view().map_or_else(
+            || self.terminal_placeholder_focus.clone(),
+            |view| view.focus_handle(cx),
+        ))
     }
 }

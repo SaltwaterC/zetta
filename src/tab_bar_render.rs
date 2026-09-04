@@ -4,6 +4,7 @@ use crate::rename::resolve_tab_title;
 
 /// The per-frame inputs the tab bar needs, gathered once by `Render for Zetta`
 /// so the measured tab row does not read them back out of the entity.
+#[derive(Clone)]
 pub(crate) struct TabBarChrome {
     pub(crate) handle: WeakEntity<Zetta>,
     pub(crate) compact_mode: bool,
@@ -109,7 +110,7 @@ impl Zetta {
             .on_click(|event, window, cx| {
                 cx.stop_propagation();
                 if event.click_count() == 2 {
-                    window.dispatch_action(Box::new(NewTab), cx)
+                    window.dispatch_action(Box::new(NewTab), cx);
                 }
             })
             .when(tab_move_mode_active, |tab_bar| {
@@ -154,242 +155,9 @@ fn render_tab_move_mode_indicator(
 /// the width this row is actually given, so the whole row is built inside a
 /// `container_query` rather than during the enclosing render pass.
 fn render_tabs_row(chrome: TabBarChrome) -> impl IntoElement {
-    let TabBarChrome {
-        handle,
-        compact_mode,
-        title_bar_height,
-        is_macos_fullscreen,
-        rounded_top_right: _,
-        compact_tab_top_left,
-        compact_tab_top_right,
-        compact_tab_bottom_left,
-        compact_tab_bottom_right,
-        corner_radius,
-        tab_bar_background,
-        compact_leading_background,
-        tab_close_button_on_left,
-        is_renaming_tab,
-        tab_count,
-        pinned_tab_count,
-        is_renaming_pinned,
-        selected_tab_index,
-        tab_move_mode_active,
-        no_mux,
-        overflow_selection,
-        border_color,
-        left_menu_handle,
-        right_menu_handle,
-    } = chrome;
-
-    container_query(move |size, _window, cx| {
-        // The new-tab button now renders inside this same measured row (right
-        // after the tabs/right overflow trigger) so it stays snug against them
-        // instead of sitting at the edge of the bar. Reserve its footprint here,
-        // on top of whatever an overflow trigger itself needs, so it can never
-        // get pushed out of the measured width and clipped. In compact mode also
-        // reserve the drag strip's guaranteed minimum, except in macOS
-        // fullscreen where the artificial strip is omitted.
-        let show_compact_drag_area = compact_drag_area_visible(compact_mode, is_macos_fullscreen);
-        let reserved_chrome_width =
-            TAB_OVERFLOW_TRIGGER_WIDTH + compact_drag_area_reserve_width(show_compact_drag_area);
-        let pinned_count = pinned_tab_count;
-        let unpinned_count = tab_count.saturating_sub(pinned_count);
-        let selected_unpinned_index = selected_tab_index
-            .saturating_sub(pinned_count)
-            .min(unpinned_count.saturating_sub(1));
-        let pinned_width = PINNED_TAB_WIDTH * pinned_count
-            + if is_renaming_pinned {
-                TAB_MAX_WIDTH - PINNED_TAB_WIDTH
-            } else {
-                px(0.)
-            };
-        let available_for_tabs = (size.width - reserved_chrome_width - pinned_width).max(px(0.));
-        let unpinned_is_renaming = is_renaming_tab && !is_renaming_pinned;
-        let is_shrinking =
-            tab_bar_tabs_are_shrinking(available_for_tabs, unpinned_is_renaming, unpinned_count);
-        let visible_range = tab_bar_visible_tab_range_with_pinned_tabs(
-            available_for_tabs,
-            unpinned_count,
-            selected_unpinned_index,
-            unpinned_is_renaming,
-            overflow_selection,
-            pinned_count > 0,
-        );
-
-        let (tabs, left_overflow, right_overflow, first_visible_selected) = handle
-            .read_with(cx, |this, cx| {
-                let overflow_entries = |range: std::ops::Range<usize>| {
-                    range
-                        .filter_map(|index| {
-                            let absolute_index = pinned_count + index;
-                            let tab = this.tabs.get(absolute_index)?;
-                            Some((absolute_index, tab_overflow_entry_label(tab, cx)))
-                        })
-                        .collect::<Vec<_>>()
-                };
-                let left_overflow = overflow_entries(0..visible_range.start);
-                let right_overflow = overflow_entries(visible_range.end..unpinned_count);
-
-                let visible_tabs: Vec<_> = this
-                    .tabs
-                    .iter()
-                    .enumerate()
-                    .filter(|(index, _)| {
-                        *index < pinned_count
-                            || visible_range.contains(&index.saturating_sub(pinned_count))
-                    })
-                    .map(|(index, tab)| {
-                        let selected = index == this.active_tab;
-                        // Resolved once per visible tab and carried through: the
-                        // selected tab's neighbour lookups below want the same
-                        // themes, and each `theme_for_tab` is a registry lock read
-                        // plus an `Arc` clone.
-                        let theme = this.theme_for_tab(tab, cx);
-                        (index, tab, selected, theme)
-                    })
-                    .collect();
-                let first_visible_selected = visible_tabs
-                    .first()
-                    .map(|(_, _, sel, _)| *sel)
-                    .unwrap_or(false);
-                let visible_tabs_for_neighbors = visible_tabs.clone();
-                let tabs = visible_tabs
-                    .into_iter()
-                    .enumerate()
-                    .map(|(visible_index, (index, tab, selected, tab_theme))| {
-                        let next_selected = visible_tabs_for_neighbors
-                            .get(visible_index + 1)
-                            .map(|(_, _, next_sel, _)| *next_sel)
-                            .unwrap_or(false);
-                        let (left_transition_background, right_transition_background) = if selected
-                        {
-                            let left_background = visible_index
-                                .checked_sub(1)
-                                .and_then(|index| visible_tabs_for_neighbors.get(index))
-                                .map(|(_, _, _, theme)| theme.colors().tab_inactive_background);
-                            let right_background = visible_tabs_for_neighbors
-                                .get(visible_index + 1)
-                                .map(|(_, _, _, theme)| theme.colors().tab_inactive_background);
-                            // With no pinned tab or overflow trigger before it,
-                            // the first visible tab sits directly beside the
-                            // title-bar controls. Its rounded corner must reveal
-                            // that background, not the tab bar's, or differing
-                            // theme colors leave a square seam at the boundary.
-                            let left_edge_background = active_tab_left_edge_background(
-                                visible_index,
-                                pinned_count,
-                                visible_range.start,
-                                compact_leading_background,
-                            );
-                            active_tab_transition_backgrounds(
-                                left_background,
-                                right_background,
-                                left_edge_background,
-                                tab_bar_background,
-                            )
-                        } else {
-                            (tab_bar_background, tab_bar_background)
-                        };
-                        render_tab(
-                            TabChrome {
-                                index,
-                                selected_tab_index: this.active_tab,
-                                selected,
-                                next_selected,
-                                tab_count,
-                                pinned: index < pinned_count,
-                                tab_move_mode_active,
-                                no_mux,
-                                is_shrinking,
-                                is_renaming_tab,
-                                compact_mode,
-                                title_bar_height,
-                                tab_close_button_on_left,
-                                compact_tab_top_left,
-                                compact_tab_top_right,
-                                compact_tab_bottom_left,
-                                compact_tab_bottom_right,
-                                corner_radius,
-                                left_transition_background,
-                                right_transition_background,
-                                handle: &handle,
-                            },
-                            tab,
-                            tab_theme,
-                            cx,
-                        )
-                    })
-                    .collect::<Vec<_>>();
-                (tabs, left_overflow, right_overflow, first_visible_selected)
-            })
-            .unwrap_or_default();
-        let mut tab_iter = tabs.into_iter();
-        let pinned_tabs = tab_iter.by_ref().take(pinned_count);
-
-        div()
-            .id("tabs-scroll")
-            .when(compact_mode, |tabs| tabs.h(title_bar_height))
-            .when(!compact_mode, |tabs| tabs.h_full())
-            .w_full()
-            .min_w_0()
-            .flex()
-            .items_center()
-            // The selected compact tab deliberately paints its lower corner
-            // transitions into the neighboring controls. The visible-range
-            // calculation already constrains the row's layout; clipping is
-            // only needed for the standalone tab bar.
-            .when(!compact_mode, |tabs| tabs.overflow_hidden())
-            // Buttons form one contiguous area with no dividers between them, so
-            // this separator (matching the tab bar's own former left border) only
-            // belongs here when a tab, not the left overflow trigger, sits first.
-            // Also omit when the first visible tab is the active tab in compact mode.
-            .when(
-                compact_mode && left_overflow.is_empty() && !first_visible_selected,
-                |tabs| tabs.border_l_1().border_color(border_color.opacity(0.25)),
-            )
-            // Keep the pinned prefix ahead of the unpinned overflow control;
-            // the overflow menu only represents tabs from the unpinned range.
-            .children(pinned_tabs)
-            .when(!left_overflow.is_empty(), |bar| {
-                let overflow_border = if compact_mode {
-                    border_color.opacity(0.5)
-                } else {
-                    border_color
-                };
-                bar.child(render_tab_overflow_trigger(
-                    false,
-                    left_overflow,
-                    compact_mode,
-                    title_bar_height,
-                    overflow_border,
-                    left_menu_handle.clone(),
-                    handle.clone(),
-                ))
-            })
-            .children(tab_iter)
-            .when(!right_overflow.is_empty(), |bar| {
-                let overflow_border = if compact_mode {
-                    border_color.opacity(0.5)
-                } else {
-                    border_color
-                };
-                bar.child(render_tab_overflow_trigger(
-                    true,
-                    right_overflow,
-                    compact_mode,
-                    title_bar_height,
-                    overflow_border,
-                    right_menu_handle.clone(),
-                    handle.clone(),
-                ))
-            })
-            .child(render_new_tab_button(compact_mode, title_bar_height))
-            .when(show_compact_drag_area, |bar| {
-                bar.child(render_compact_drag_area(title_bar_height, handle.clone()))
-            })
-    })
-    .min_w_0()
-    .flex_shrink_1()
+    container_query(move |size, _window, cx| tab_bar_row_contents(size, chrome.clone(), cx))
+        .min_w_0()
+        .flex_shrink_1()
 }
 
 /// Everything a single tab needs that the enclosing measured row already knows.
@@ -615,7 +383,6 @@ fn render_tab(chrome: TabChrome<'_>, tab: &Tab, tab_theme: Arc<Theme>, cx: &App)
         index,
         selected_tab_index,
         selected,
-        next_selected,
         tab_count,
         pinned,
         tab_move_mode_active,
@@ -624,15 +391,9 @@ fn render_tab(chrome: TabChrome<'_>, tab: &Tab, tab_theme: Arc<Theme>, cx: &App)
         is_renaming_tab,
         compact_mode,
         title_bar_height,
-        tab_close_button_on_left,
-        compact_tab_top_left,
-        compact_tab_top_right,
         compact_tab_bottom_left,
-        compact_tab_bottom_right,
-        corner_radius,
-        left_transition_background,
-        right_transition_background,
         handle,
+        ..
     } = chrome;
     let tab_colors = tab_theme.colors();
     let tab_background = if selected {
@@ -667,8 +428,7 @@ fn render_tab(chrome: TabChrome<'_>, tab: &Tab, tab_theme: Arc<Theme>, cx: &App)
                 view.read(cx).tab_content_text(0, cx)
             } else {
                 tab.active_pane()
-                    .map(|pane| pane.profile.name.clone())
-                    .unwrap_or_else(|| "Terminal".to_string())
+                    .map_or_else(|| "Terminal".to_string(), |pane| pane.profile.name.clone())
                     .into()
             }
         })
@@ -697,7 +457,7 @@ fn render_tab(chrome: TabChrome<'_>, tab: &Tab, tab_theme: Arc<Theme>, cx: &App)
         tab_colors,
         tab_text,
         tab_icon,
-        title,
+        title.clone(),
         lifecycle_icon,
         silent_mode_icon,
         custom_icon,
@@ -705,96 +465,20 @@ fn render_tab(chrome: TabChrome<'_>, tab: &Tab, tab_theme: Arc<Theme>, cx: &App)
         pinned,
         is_renaming_this_tab,
     );
-    let tab_element = tab_bar_row_height(compact_mode, title_bar_height)
-        .id(("tab", tab.id as usize))
-        .w_full()
-        .min_w_0()
-        .px_2()
-        .flex()
-        .when(tab_close_button_on_left, |tab| tab.flex_row_reverse())
-        .items_center()
-        .gap_1()
-        .when(!(compact_mode && (selected || next_selected)), |tab| {
-            tab.border_r_1().border_color(if compact_mode {
-                tab_colors.border.opacity(0.5)
-            } else {
-                tab_colors.border
-            })
-        })
-        .when(tab_move_mode_active && selected, |tab| {
-            tab.border_b_2().border_color(tab_colors.text_accent)
-        })
-        .when(!show_active_tab_shape, |tab| tab.bg(tab_background))
-        .when(show_active_tab_shape, |tab| {
-            tab.relative().child(render_active_tab_shape(
-                compact_tab_top_left,
-                compact_tab_top_right,
-                compact_tab_bottom_left,
-                compact_tab_bottom_right,
-                tab_background,
-                left_transition_background,
-                right_transition_background,
-                corner_radius,
-            ))
-        })
-        .aria_label(accessible_title)
-        .tooltip(Tooltip::text(full_title.clone()))
-        .cursor(if tab_move_mode_active {
-            CursorStyle::ResizeLeftRight
-        } else {
-            CursorStyle::OpenHand
-        })
-        .on_drag(
-            TabDrag {
-                tab_id: tab.id,
-                pinned: tab.pinned,
-            },
-            |_, _, _, cx| cx.new(|_| gpui::Empty),
-        )
-        .on_click(move |event, window, cx| {
-            cx.stop_propagation();
-            select_handle
-                .update(cx, |this, cx| {
-                    this.active_tab = index;
-                    this.tab_overflow_selection_side = None;
-                    if event.click_count() == 2
-                        && let Some(view) = rename_view.as_ref()
-                    {
-                        this.begin_rename(view.clone(), window, cx);
-                    } else {
-                        this.focus_active(window, cx);
-                    }
-                })
-                .ok();
-        })
-        .child(div().min_w_0().flex_1().overflow_hidden().child(content))
-        .when(!pinned, |tab_element| {
-            tab_element.child(
-                div()
-                    .id(("close-tab", tab.id as usize))
-                    .size(px(24.))
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .cursor_pointer()
-                    .hover(|style| style.bg(tab_colors.element_hover))
-                    .aria_label("Close tab")
-                    .tooltip(move |_window, cx| Tooltip::for_action("Close tab", &CloseTab, cx))
-                    .child(
-                        svg()
-                            .path(IconName::Close.path())
-                            .size(px(12.))
-                            .text_color(tab_icon),
-                    )
-                    .on_click(move |_, window, cx| {
-                        cx.stop_propagation();
-                        close_handle
-                            .update(cx, |this, cx| this.close_tab_at(index, window, cx))
-                            .ok();
-                    }),
-            )
-        });
+    let tab_element = tab_shape(TabShape {
+        chrome,
+        tab,
+        tab_colors,
+        content,
+        full_title,
+        accessible_title,
+        tab_icon,
+        rename_view,
+        close_handle,
+        tab_background,
+        show_active_tab_shape,
+        select_handle,
+    });
     let tab_element = with_tab_context_menu(
         tab_element,
         tab,
@@ -860,6 +544,152 @@ fn render_tab(chrome: TabChrome<'_>, tab: &Tab, tab_theme: Arc<Theme>, cx: &App)
     tab_element.into_any_element()
 }
 
+/// What building a tab's clickable shape needs, once its content has been laid
+/// out.
+struct TabShape<'a> {
+    chrome: TabChrome<'a>,
+    tab: &'a Tab,
+    tab_colors: &'a ThemeColors,
+    content: AnyElement,
+    full_title: SharedString,
+    accessible_title: SharedString,
+    tab_icon: gpui::Hsla,
+    rename_view: Option<Entity<TerminalView>>,
+    close_handle: WeakEntity<Zetta>,
+    tab_background: gpui::Hsla,
+    show_active_tab_shape: bool,
+    select_handle: WeakEntity<Zetta>,
+}
+
+/// The tab itself: its background, its hover and click behaviour, and the drag
+/// surface that reorders it.
+fn tab_shape(shape: TabShape<'_>) -> gpui::Stateful<gpui::Div> {
+    let TabShape {
+        chrome,
+        tab,
+        tab_colors,
+        content,
+        full_title,
+        accessible_title,
+        tab_icon,
+        rename_view,
+        close_handle,
+        tab_background,
+        show_active_tab_shape,
+        select_handle,
+        ..
+    } = shape;
+    let TabChrome {
+        index,
+        selected,
+        next_selected,
+        pinned,
+        tab_move_mode_active,
+        compact_mode,
+        title_bar_height,
+        tab_close_button_on_left,
+        compact_tab_top_left,
+        compact_tab_top_right,
+        compact_tab_bottom_left,
+        compact_tab_bottom_right,
+        corner_radius,
+        left_transition_background,
+        right_transition_background,
+        ..
+    } = chrome;
+
+    tab_bar_row_height(compact_mode, title_bar_height)
+        .id(("tab", tab.id as usize))
+        .w_full()
+        .min_w_0()
+        .px_2()
+        .flex()
+        .when(tab_close_button_on_left, |tab| tab.flex_row_reverse())
+        .items_center()
+        .gap_1()
+        .when(!(compact_mode && (selected || next_selected)), |tab| {
+            tab.border_r_1().border_color(if compact_mode {
+                tab_colors.border.opacity(0.5)
+            } else {
+                tab_colors.border
+            })
+        })
+        .when(tab_move_mode_active && selected, |tab| {
+            tab.border_b_2().border_color(tab_colors.text_accent)
+        })
+        .when(!show_active_tab_shape, |tab| tab.bg(tab_background))
+        .when(show_active_tab_shape, |tab| {
+            tab.relative().child(render_active_tab_shape(
+                compact_tab_top_left,
+                compact_tab_top_right,
+                compact_tab_bottom_left,
+                compact_tab_bottom_right,
+                tab_background,
+                left_transition_background,
+                right_transition_background,
+                corner_radius,
+            ))
+        })
+        .aria_label(accessible_title)
+        .tooltip(Tooltip::text(full_title))
+        .cursor(if tab_move_mode_active {
+            CursorStyle::ResizeLeftRight
+        } else {
+            CursorStyle::OpenHand
+        })
+        .on_drag(
+            TabDrag {
+                tab_id: tab.id,
+                pinned: tab.pinned,
+            },
+            |_, _, _, cx| cx.new(|_| gpui::Empty),
+        )
+        .on_click(move |event, window, cx| {
+            cx.stop_propagation();
+            select_handle
+                .update(cx, |this, cx| {
+                    this.active_tab = index;
+                    this.tab_overflow_selection_side = None;
+                    if event.click_count() == 2
+                        && let Some(view) = rename_view.as_ref()
+                    {
+                        this.begin_rename(view.clone(), window, cx);
+                    } else {
+                        this.focus_active(window, cx);
+                    }
+                })
+                .ok();
+        })
+        .child(div().min_w_0().flex_1().overflow_hidden().child(content))
+        .when(!pinned, |tab_element| {
+            tab_element.child(
+                div()
+                    .id(("close-tab", tab.id as usize))
+                    .size(px(24.))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .cursor_pointer()
+                    .hover(|style| style.bg(tab_colors.element_hover))
+                    .aria_label("Close tab")
+                    .tooltip(move |_window, cx| Tooltip::for_action("Close tab", &CloseTab, cx))
+                    .child(
+                        svg()
+                            .path(IconName::Close.path())
+                            .size(px(12.))
+                            .text_color(tab_icon),
+                    )
+                    .on_click(move |_, window, cx| {
+                        cx.stop_propagation();
+                        close_handle
+                            .update(cx, |this, cx| this.close_tab_at(index, window, cx))
+                            .ok();
+                    }),
+            )
+        })
+}
+
 fn tab_drop_surface_paint_layer(
     surface: gpui::Stateful<gpui::Div>,
     defer_paint: bool,
@@ -920,7 +750,7 @@ fn render_tab_drop_surface(
         .on_drop(move |dragged: &TabDrag, _, cx| {
             drop_handle
                 .update(cx, |this, cx| {
-                    this.reorder_tab(dragged.tab_id, position, cx)
+                    this.reorder_tab(dragged.tab_id, position, cx);
                 })
                 .ok();
         })
@@ -1091,4 +921,303 @@ fn with_tab_context_menu(
         })
         .trigger(move |_, _, _| tab_element)
         .into_any_element()
+}
+
+/// The measured row's contents: the pinned tabs, the tabs that fit, the two
+/// overflow triggers, the new-tab button, and — in compact mode — the drag
+/// strip.
+///
+/// Rebuilt on every measure, which is why it takes `chrome` by reference: the
+/// `container_query` closure is called again whenever the row's width changes.
+fn tab_bar_row_contents(
+    size: gpui::Size<Pixels>,
+    chrome: TabBarChrome,
+    cx: &mut App,
+) -> AnyElement {
+    let TabBarChrome {
+        handle,
+        compact_mode,
+        title_bar_height,
+        is_macos_fullscreen,
+        is_renaming_tab,
+        tab_count,
+        pinned_tab_count,
+        is_renaming_pinned,
+        selected_tab_index,
+        overflow_selection,
+        border_color,
+        left_menu_handle,
+        right_menu_handle,
+        ..
+    } = chrome.clone();
+    // The new-tab button now renders inside this same measured row (right
+    // after the tabs/right overflow trigger) so it stays snug against them
+    // instead of sitting at the edge of the bar. Reserve its footprint here,
+    // on top of whatever an overflow trigger itself needs, so it can never
+    // get pushed out of the measured width and clipped. In compact mode also
+    // reserve the drag strip's guaranteed minimum, except in macOS
+    // fullscreen where the artificial strip is omitted.
+    let show_compact_drag_area = compact_drag_area_visible(compact_mode, is_macos_fullscreen);
+    let reserved_chrome_width =
+        TAB_OVERFLOW_TRIGGER_WIDTH + compact_drag_area_reserve_width(show_compact_drag_area);
+    let pinned_count = pinned_tab_count;
+    let unpinned_count = tab_count.saturating_sub(pinned_count);
+    let selected_unpinned_index = selected_tab_index
+        .saturating_sub(pinned_count)
+        .min(unpinned_count.saturating_sub(1));
+    let pinned_width = PINNED_TAB_WIDTH * pinned_count
+        + if is_renaming_pinned {
+            TAB_MAX_WIDTH - PINNED_TAB_WIDTH
+        } else {
+            px(0.)
+        };
+    let available_for_tabs = (size.width - reserved_chrome_width - pinned_width).max(px(0.));
+    let unpinned_is_renaming = is_renaming_tab && !is_renaming_pinned;
+    let is_shrinking =
+        tab_bar_tabs_are_shrinking(available_for_tabs, unpinned_is_renaming, unpinned_count);
+    let visible_range = tab_bar_visible_tab_range_with_pinned_tabs(
+        available_for_tabs,
+        unpinned_count,
+        selected_unpinned_index,
+        unpinned_is_renaming,
+        overflow_selection,
+        pinned_count > 0,
+    );
+
+    let TabBarTabs {
+        tabs,
+        left_overflow,
+        right_overflow,
+        first_visible_selected,
+    } = tab_bar_tab_elements(
+        &chrome,
+        visible_range.clone(),
+        pinned_count,
+        unpinned_count,
+        is_shrinking,
+        cx,
+    );
+    let mut tab_iter = tabs.into_iter();
+    let pinned_tabs = tab_iter.by_ref().take(pinned_count);
+
+    div()
+        .id("tabs-scroll")
+        .when(compact_mode, |tabs| tabs.h(title_bar_height))
+        .when(!compact_mode, |tabs| tabs.h_full())
+        .w_full()
+        .min_w_0()
+        .flex()
+        .items_center()
+        // The selected compact tab deliberately paints its lower corner
+        // transitions into the neighboring controls. The visible-range
+        // calculation already constrains the row's layout; clipping is
+        // only needed for the standalone tab bar.
+        .when(!compact_mode, |tabs| tabs.overflow_hidden())
+        // Buttons form one contiguous area with no dividers between them, so
+        // this separator (matching the tab bar's own former left border) only
+        // belongs here when a tab, not the left overflow trigger, sits first.
+        // Also omit when the first visible tab is the active tab in compact mode.
+        .when(
+            compact_mode && left_overflow.is_empty() && !first_visible_selected,
+            |tabs| tabs.border_l_1().border_color(border_color.opacity(0.25)),
+        )
+        // Keep the pinned prefix ahead of the unpinned overflow control;
+        // the overflow menu only represents tabs from the unpinned range.
+        .children(pinned_tabs)
+        .when(!left_overflow.is_empty(), |bar| {
+            let overflow_border = if compact_mode {
+                border_color.opacity(0.5)
+            } else {
+                border_color
+            };
+            bar.child(render_tab_overflow_trigger(
+                false,
+                left_overflow,
+                compact_mode,
+                title_bar_height,
+                overflow_border,
+                left_menu_handle.clone(),
+                handle.clone(),
+            ))
+        })
+        .children(tab_iter)
+        .when(!right_overflow.is_empty(), |bar| {
+            let overflow_border = if compact_mode {
+                border_color.opacity(0.5)
+            } else {
+                border_color
+            };
+            bar.child(render_tab_overflow_trigger(
+                true,
+                right_overflow,
+                compact_mode,
+                title_bar_height,
+                overflow_border,
+                right_menu_handle.clone(),
+                handle.clone(),
+            ))
+        })
+        .child(render_new_tab_button(compact_mode, title_bar_height))
+        .when(show_compact_drag_area, |bar| {
+            bar.child(render_compact_drag_area(title_bar_height, handle.clone()))
+        })
+        .into_any_element()
+}
+
+/// What the measured row learned from one read of the window.
+struct TabBarTabs {
+    tabs: Vec<AnyElement>,
+    /// The tabs that did not fit to the left and to the right, as the labels
+    /// their overflow menus offer.
+    left_overflow: Vec<(usize, SharedString)>,
+    right_overflow: Vec<(usize, SharedString)>,
+    /// Whether the first tab still on screen is the selected one, which decides
+    /// where the active-tab shape's left transition is drawn.
+    first_visible_selected: bool,
+}
+
+/// The visible tabs, the labels the two overflow menus offer, and whether the
+/// first visible tab is the selected one.
+///
+/// Reads the window once for all of them, because building a tab needs the tab
+/// itself and its resolved theme.
+#[allow(clippy::too_many_arguments)]
+fn tab_bar_tab_elements(
+    chrome: &TabBarChrome,
+    visible_range: std::ops::Range<usize>,
+    pinned_count: usize,
+    unpinned_count: usize,
+    is_shrinking: bool,
+    cx: &mut App,
+) -> TabBarTabs {
+    let TabBarChrome {
+        handle,
+        compact_mode,
+        title_bar_height,
+        compact_tab_top_left,
+        compact_tab_top_right,
+        compact_tab_bottom_left,
+        compact_tab_bottom_right,
+        corner_radius,
+        tab_close_button_on_left,
+        is_renaming_tab,
+        tab_count,
+        tab_move_mode_active,
+        no_mux,
+        compact_leading_background,
+        tab_bar_background,
+        ..
+    } = chrome.clone();
+    handle
+        .read_with(cx, |this, cx| {
+            let overflow_entries = |range: std::ops::Range<usize>| {
+                range
+                    .filter_map(|index| {
+                        let absolute_index = pinned_count + index;
+                        let tab = this.tabs.get(absolute_index)?;
+                        Some((absolute_index, tab_overflow_entry_label(tab, cx)))
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let left_overflow = overflow_entries(0..visible_range.start);
+            let right_overflow = overflow_entries(visible_range.end..unpinned_count);
+
+            let visible_tabs: Vec<_> = this
+                .tabs
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| {
+                    *index < pinned_count
+                        || visible_range.contains(&index.saturating_sub(pinned_count))
+                })
+                .map(|(index, tab)| {
+                    let selected = index == this.active_tab;
+                    // Resolved once per visible tab and carried through: the
+                    // selected tab's neighbour lookups below want the same
+                    // themes, and each `theme_for_tab` is a registry lock read
+                    // plus an `Arc` clone.
+                    let theme = this.theme_for_tab(tab, cx);
+                    (index, tab, selected, theme)
+                })
+                .collect();
+            let first_visible_selected = visible_tabs.first().is_some_and(|(_, _, sel, _)| *sel);
+            let visible_tabs_for_neighbors = visible_tabs.clone();
+            let tabs = visible_tabs
+                .into_iter()
+                .enumerate()
+                .map(|(visible_index, (index, tab, selected, tab_theme))| {
+                    let next_selected = visible_tabs_for_neighbors
+                        .get(visible_index + 1)
+                        .is_some_and(|(_, _, next_sel, _)| *next_sel);
+                    let (left_transition_background, right_transition_background) = if selected {
+                        let left_background = visible_index
+                            .checked_sub(1)
+                            .and_then(|index| visible_tabs_for_neighbors.get(index))
+                            .map(|(_, _, _, theme)| theme.colors().tab_inactive_background);
+                        let right_background = visible_tabs_for_neighbors
+                            .get(visible_index + 1)
+                            .map(|(_, _, _, theme)| theme.colors().tab_inactive_background);
+                        // With no pinned tab or overflow trigger before it,
+                        // the first visible tab sits directly beside the
+                        // title-bar controls. Its rounded corner must reveal
+                        // that background, not the tab bar's, or differing
+                        // theme colors leave a square seam at the boundary.
+                        let left_edge_background = active_tab_left_edge_background(
+                            visible_index,
+                            pinned_count,
+                            visible_range.start,
+                            compact_leading_background,
+                        );
+                        active_tab_transition_backgrounds(
+                            left_background,
+                            right_background,
+                            left_edge_background,
+                            tab_bar_background,
+                        )
+                    } else {
+                        (tab_bar_background, tab_bar_background)
+                    };
+                    render_tab(
+                        TabChrome {
+                            index,
+                            selected_tab_index: this.active_tab,
+                            selected,
+                            next_selected,
+                            tab_count,
+                            pinned: index < pinned_count,
+                            tab_move_mode_active,
+                            no_mux,
+                            is_shrinking,
+                            is_renaming_tab,
+                            compact_mode,
+                            title_bar_height,
+                            tab_close_button_on_left,
+                            compact_tab_top_left,
+                            compact_tab_top_right,
+                            compact_tab_bottom_left,
+                            compact_tab_bottom_right,
+                            corner_radius,
+                            left_transition_background,
+                            right_transition_background,
+                            handle: &handle,
+                        },
+                        tab,
+                        tab_theme,
+                        cx,
+                    )
+                })
+                .collect::<Vec<_>>();
+            TabBarTabs {
+                tabs,
+                left_overflow,
+                right_overflow,
+                first_visible_selected,
+            }
+        })
+        .unwrap_or_else(|_| TabBarTabs {
+            tabs: Vec::new(),
+            left_overflow: Vec::new(),
+            right_overflow: Vec::new(),
+            first_visible_selected: false,
+        })
 }

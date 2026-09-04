@@ -300,10 +300,7 @@ pub(super) fn list_themes() -> Result<()> {
 pub(super) fn list_pane_splits() -> Result<()> {
     let (base, _) = load_startup_config(None, None);
     let project = crate::project_cli::current_project_config(&base)?;
-    let config = project
-        .as_ref()
-        .map(|project| &project.effective)
-        .unwrap_or(&base);
+    let config = project.as_ref().map_or(&base, |project| &project.effective);
     for name in configured_split_names(config) {
         println!("{name}");
     }

@@ -315,8 +315,7 @@ pub(crate) fn tab_overflow_entry_label(tab: &Tab, cx: &App) -> SharedString {
             view.read(cx).tab_content_text(1, cx)
         } else {
             tab.active_pane()
-                .map(|pane| pane.profile.name.clone())
-                .unwrap_or_else(|| "Terminal".to_string())
+                .map_or_else(|| "Terminal".to_string(), |pane| pane.profile.name.clone())
                 .into()
         }
     })
@@ -361,7 +360,7 @@ pub(crate) fn render_tab_overflow_trigger(
                         .size(ButtonSize::Large)
                         .icon_size(IconSize::Small)
                         .aria_label(tooltip_label.clone()),
-                    Tooltip::text(tooltip_label.clone()),
+                    Tooltip::text(tooltip_label),
                 )
                 .anchor(if is_right {
                     Anchor::TopRight
@@ -438,7 +437,7 @@ pub(crate) fn render_new_tab_button(compact_mode: bool, compact_height: Pixels) 
                 .tooltip(move |_window, cx| Tooltip::for_action("New tab", &NewTab, cx))
                 .on_click(|_, window, cx| {
                     cx.stop_propagation();
-                    window.dispatch_action(Box::new(NewTab), cx)
+                    window.dispatch_action(Box::new(NewTab), cx);
                 }),
         )
         .into_any_element()
@@ -677,7 +676,6 @@ impl Zetta {
             })
             .unwrap_or_default();
         let background_sessions = self.process_background_session_picker_entries(cx);
-        let background_session_count = background_sessions.len();
         let active_pane_size =
             title_bar_pane_size_visible(compact_mode, self.launch_config.hide_pane_size)
                 .then(|| {
@@ -749,6 +747,88 @@ impl Zetta {
             (None, Some(tab_bar))
         };
 
+        let TitleBarSessionControls {
+            show_title_bar_control_labels,
+            show_title_bar_buttons,
+            reconnect_control,
+            right_title_bar_controls,
+        } = self.title_bar_session_controls(TitleBarSessionInputs {
+            window,
+            compact_mode,
+            background_sessions: background_sessions.clone(),
+            right_window_controls,
+            handle,
+        });
+        let title_bar = self.render_title_bar(
+            TitleBarLayout {
+                title_bar_height,
+                title_bar_background,
+                rounded_top_left: frame.rounded_top_left,
+                rounded_top_right: frame.rounded_top_right,
+                corner_radius: frame.corner_radius,
+                compact_mode,
+                is_macos_fullscreen,
+                compact_tab_bar,
+                left_window_controls,
+                right_title_bar_controls,
+                show_title_bar_menus: title_bar_menus_visible(
+                    self.launch_config.hide_title_bar_menus,
+                ),
+                application_menu: self.render_application_menu(
+                    show_title_bar_control_labels,
+                    handle,
+                    active_terminal_focus.clone(),
+                ),
+                profile_menu: self.render_profile_menu(
+                    show_title_bar_control_labels,
+                    handle,
+                    active_terminal_focus,
+                    cx,
+                ),
+                show_title_bar_buttons,
+                show_title_bar_control_labels,
+                no_mux: self.no_mux,
+                auto_background_tab,
+                auto_background_protected,
+                reconnect_control,
+                show_broadcast_control: title_bar_broadcast_visible(
+                    self.launch_config.hide_title_bar_buttons,
+                ),
+                broadcast_input,
+                show_silent_control: title_bar_silent_visible(
+                    self.launch_config.hide_title_bar_buttons,
+                ),
+                silent_mode: silent_mode_state.effective(),
+                system_silent: silent_mode_state.system_active(),
+                focus_status_access,
+                active_pane_size,
+            },
+            cx,
+        );
+
+        TitleBarChrome {
+            title_bar,
+            tab_bar: regular_tab_bar,
+        }
+    }
+
+    /// The session-related half of the title bar's controls.
+    ///
+    /// Separate because these four values are decided together from the
+    /// window's width and how many background sessions there are, and the
+    /// reconnect control's placement depends on both.
+    fn title_bar_session_controls(
+        &self,
+        inputs: TitleBarSessionInputs<'_>,
+    ) -> TitleBarSessionControls {
+        let TitleBarSessionInputs {
+            window,
+            compact_mode,
+            background_sessions,
+            right_window_controls,
+            handle,
+        } = inputs;
+        let background_session_count = background_sessions.len();
         let show_title_bar_control_labels = title_bar_shows_control_labels(
             window.viewport_size().width,
             background_session_count > 0,
@@ -803,56 +883,11 @@ impl Zetta {
             .child(right_window_controls)
             .into_any_element();
 
-        let title_bar = self.render_title_bar(
-            TitleBarLayout {
-                title_bar_height,
-                title_bar_background,
-                rounded_top_left: frame.rounded_top_left,
-                rounded_top_right: frame.rounded_top_right,
-                corner_radius: frame.corner_radius,
-                compact_mode,
-                is_macos_fullscreen,
-                compact_tab_bar,
-                left_window_controls,
-                right_title_bar_controls,
-                show_title_bar_menus: title_bar_menus_visible(
-                    self.launch_config.hide_title_bar_menus,
-                ),
-                application_menu: self.render_application_menu(
-                    show_title_bar_control_labels,
-                    handle,
-                    active_terminal_focus.clone(),
-                ),
-                profile_menu: self.render_profile_menu(
-                    show_title_bar_control_labels,
-                    handle,
-                    active_terminal_focus,
-                    cx,
-                ),
-                show_title_bar_buttons,
-                show_title_bar_control_labels,
-                no_mux: self.no_mux,
-                auto_background_tab,
-                auto_background_protected,
-                reconnect_control,
-                show_broadcast_control: title_bar_broadcast_visible(
-                    self.launch_config.hide_title_bar_buttons,
-                ),
-                broadcast_input,
-                show_silent_control: title_bar_silent_visible(
-                    self.launch_config.hide_title_bar_buttons,
-                ),
-                silent_mode: silent_mode_state.effective(),
-                system_silent: silent_mode_state.system_active(),
-                focus_status_access,
-                active_pane_size,
-            },
-            cx,
-        );
-
-        TitleBarChrome {
-            title_bar,
-            tab_bar: regular_tab_bar,
+        TitleBarSessionControls {
+            show_title_bar_control_labels,
+            show_title_bar_buttons,
+            reconnect_control,
+            right_title_bar_controls,
         }
     }
 
@@ -1087,7 +1122,7 @@ impl Zetta {
                                     .update(cx, |this, cx| {
                                         this.reconnect_background_session(
                                             runner_id, session_id, window, cx,
-                                        )
+                                        );
                                     })
                                     .ok();
                             },
@@ -1099,129 +1134,24 @@ impl Zetta {
             .into_any_element()
     }
 
+    /// The title bar. Its controls row and the two toggles that need their own
+    /// tooltips are built below, so this is the frame and the drag behaviour.
     pub(crate) fn render_title_bar(
         &self,
-        layout: TitleBarLayout,
+        mut layout: TitleBarLayout,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let TitleBarLayout {
-            title_bar_height,
-            title_bar_background,
-            rounded_top_left,
-            rounded_top_right,
-            corner_radius,
-            compact_mode,
-            is_macos_fullscreen,
-            compact_tab_bar,
-            left_window_controls,
-            right_title_bar_controls,
-            show_title_bar_menus,
-            application_menu,
-            profile_menu,
-            show_title_bar_buttons,
-            show_title_bar_control_labels,
-            no_mux,
-            auto_background_tab,
-            auto_background_protected,
-            reconnect_control,
-            show_broadcast_control,
-            broadcast_input,
-            show_silent_control,
-            silent_mode,
-            system_silent,
-            focus_status_access,
-            active_pane_size,
-        } = layout;
-        let reserve_macos_title_bar_space =
-            macos_title_bar_reservations_enabled(is_macos_fullscreen);
-        let reserve_compact_leading_controls =
-            compact_leading_controls_reservation_enabled(compact_mode, is_macos_fullscreen);
-        let profile_menu = if compact_mode {
-            render_compact_tab_neighbor_control(profile_menu, title_bar_background)
-        } else {
-            profile_menu
-        };
-        let broadcast_control = show_broadcast_control.then(|| {
-            let button = Button::new(
-                "toggle-broadcast-input",
-                if show_title_bar_control_labels {
-                    "Broadcast"
-                } else {
-                    ""
-                },
-            )
-            .start_icon(Icon::new(IconName::Keyboard).size(IconSize::Small).color(
-                if broadcast_input {
-                    Color::Selected
-                } else {
-                    Color::Default
-                },
-            ))
-            .style(ButtonStyle::Subtle)
-            .size(ButtonSize::Large)
-            .toggle_state(broadcast_input)
-            .aria_label("Broadcast input to all panes")
-            .tooltip(Tooltip::for_action_title(
-                if broadcast_input {
-                    "Broadcast input is on"
-                } else {
-                    "Broadcast input to all panes"
-                },
-                &ToggleBroadcastInput,
-            ))
-            .on_click(|_, window, cx| window.dispatch_action(Box::new(ToggleBroadcastInput), cx));
-
-            if compact_mode {
-                render_compact_tab_neighbor_control(button, title_bar_background)
-            } else {
-                button.into_any_element()
-            }
-        });
-        let silent_control = show_silent_control.then(|| {
-            let silent_tooltip_title = if system_silent {
-                "Silent mode is controlled by Do Not Disturb"
-            } else if cfg!(target_os = "macos") {
-                focus_status_access.tooltip()
-            } else {
-                "Silence terminal bells and notification sounds"
-            };
-            let silent_tooltip = Tooltip::for_action_title(silent_tooltip_title, &ToggleSilentMode);
-            let button = Button::new(
-                "toggle-silent-mode",
-                if show_title_bar_control_labels {
-                    "Silent"
-                } else {
-                    ""
-                },
-            )
-            .start_icon(
-                Icon::new(title_bar_silent_icon(silent_mode))
-                    .size(IconSize::Small)
-                    .color(if silent_mode {
-                        Color::Selected
-                    } else {
-                        Color::Default
-                    }),
-            )
-            .style(ButtonStyle::Subtle)
-            .size(ButtonSize::Large)
-            .toggle_state(silent_mode)
-            .disabled(system_silent)
-            .aria_label(if silent_mode {
-                "Silent mode is on"
-            } else {
-                "Silent mode is off"
-            })
-            .tooltip(silent_tooltip)
-            .on_click(|_, window, cx| window.dispatch_action(Box::new(ToggleSilentMode), cx));
-
-            if compact_mode {
-                render_compact_tab_neighbor_control(button, title_bar_background)
-            } else {
-                button.into_any_element()
-            }
-        });
-
+        let compact_tab_bar = layout.compact_tab_bar.take();
+        let left_window_controls =
+            std::mem::replace(&mut layout.left_window_controls, div().into_any_element());
+        let active_pane_size = layout.active_pane_size.take();
+        let title_bar_height = layout.title_bar_height;
+        let title_bar_background = layout.title_bar_background;
+        let rounded_top_left = layout.rounded_top_left;
+        let rounded_top_right = layout.rounded_top_right;
+        let corner_radius = layout.corner_radius;
+        let compact_mode = layout.compact_mode;
+        let controls = self.render_title_bar_controls(layout);
         div()
             .id("zetta-title-bar")
             .window_control_area(WindowControlArea::Drag)
@@ -1269,107 +1199,7 @@ impl Zetta {
                 }
             })
             .child(left_window_controls)
-            .child(
-                h_flex()
-                    .id("title-bar-controls")
-                    // Keep application controls out of the draggable native title-bar region.
-                    .occlude()
-                    .min_w_0()
-                    // Drop trailing controls before they can overlap the client corner.
-                    .flex_shrink_1()
-                    .overflow_hidden()
-                    .gap_1()
-                    // When the reserve below makes this wider than its content, fill it from
-                    // the tab-bar side inward, so any blank space lands next to the traffic
-                    // lights instead of between the controls and the tabs.
-                    .justify_end()
-                    // The traffic lights are native controls even with a client title bar.
-                    .when(reserve_macos_title_bar_space, |controls| {
-                        controls.ml(px(72.))
-                    })
-                    // Reserve a minimal, constant gap next to the traffic lights sized for
-                    // two Large buttons (e.g. the application and profile menu triggers) —
-                    // enough that tabs don't crowd the traffic lights when nothing else is
-                    // there, but a `min_w` rather than extra margin so that any menus or the
-                    // broadcast button which do render here expand into that reserve instead
-                    // of pushing further out.
-                    .when(reserve_compact_leading_controls, |controls| {
-                        controls.min_w(COMPACT_LEADING_CONTROLS_RESERVE)
-                    })
-                    .when(show_title_bar_menus, |controls| {
-                        controls.child(application_menu).child(profile_menu)
-                    })
-                    .when(
-                        title_bar_keep_running_visible(no_mux, show_title_bar_buttons),
-                        |controls| {
-                            controls.child(
-                                Button::new(
-                                    "auto-background-tab",
-                                    if show_title_bar_control_labels {
-                                        "Keep running"
-                                    } else {
-                                        ""
-                                    },
-                                )
-                                .start_icon(Icon::new(IconName::Pin).size(IconSize::Small))
-                                .style(ButtonStyle::Subtle)
-                                .size(ButtonSize::Large)
-                                .toggle_state(auto_background_tab)
-                                .aria_label("Keep this tab running after close")
-                                .tooltip(Tooltip::for_action_title(
-                                    if auto_background_tab {
-                                        if auto_background_protected {
-                                            "Keep running after close is on · authentication required"
-                                        } else {
-                                            "Keep running after close is on · no authentication"
-                                        }
-                                    } else {
-                                        "Keep this tab running after the tab or window is closed"
-                                    },
-                                    &ToggleAutoBackgroundTab,
-                                ))
-                                .on_click(|_, window, cx| {
-                                    window.dispatch_action(
-                                        Box::new(ToggleAutoBackgroundTab),
-                                        cx,
-                                    )
-                                }),
-                            )
-                        },
-                    )
-                    .when(show_title_bar_buttons, |controls| {
-                        controls.child(
-                            Button::new(
-                                "detach-tab",
-                                if show_title_bar_control_labels {
-                                    "Detach"
-                                } else {
-                                    ""
-                                },
-                            )
-                            .start_icon(Icon::new(IconName::Archive).size(IconSize::Small))
-                            .style(ButtonStyle::Subtle)
-                            .size(ButtonSize::Large)
-                            .aria_label("Detach tab")
-                            .tooltip(Tooltip::for_action_title(
-                                "Detach tab to background",
-                                &DetachTab,
-                            ))
-                            .on_click(|_, window, cx| {
-                                window.dispatch_action(Box::new(DetachTab), cx)
-                            }),
-                        )
-                    })
-                    .when_some(reconnect_control, |controls, reconnect_control| {
-                        controls.child(reconnect_control)
-                    })
-                    .when_some(broadcast_control, |controls, broadcast_control| {
-                        controls.child(broadcast_control)
-                    })
-                    .when_some(silent_control, |controls, silent_control| {
-                        controls.child(silent_control)
-                    }),
-            )
+            .child(controls)
             .when_some(compact_tab_bar, |title_bar, tab_bar| {
                 title_bar.child(tab_bar)
             })
@@ -1385,11 +1215,292 @@ impl Zetta {
                     ),
                 )
             })
+            .into_any_element()
+    }
+
+    /// Everything in the title bar that is not the window's own controls: the
+    /// menus, the session buttons, and the broadcast and silent toggles.
+    fn render_title_bar_controls(&self, layout: TitleBarLayout) -> AnyElement {
+        let TitleBarLayout {
+            title_bar_background,
+            compact_mode,
+            is_macos_fullscreen,
+            right_title_bar_controls,
+            show_title_bar_menus,
+            application_menu,
+            profile_menu,
+            show_title_bar_buttons,
+            show_title_bar_control_labels,
+            no_mux,
+            auto_background_tab,
+            auto_background_protected,
+            reconnect_control,
+            show_broadcast_control,
+            broadcast_input,
+            show_silent_control,
+            silent_mode,
+            system_silent,
+            focus_status_access,
+            ..
+        } = layout;
+        let reserve_macos_title_bar_space =
+            macos_title_bar_reservations_enabled(is_macos_fullscreen);
+        let reserve_compact_leading_controls =
+            compact_leading_controls_reservation_enabled(compact_mode, is_macos_fullscreen);
+        let profile_menu = if compact_mode {
+            render_compact_tab_neighbor_control(profile_menu, title_bar_background)
+        } else {
+            profile_menu
+        };
+        let broadcast_control = show_broadcast_control.then(|| {
+            broadcast_input_control(
+                broadcast_input,
+                show_title_bar_control_labels,
+                compact_mode,
+                title_bar_background,
+            )
+        });
+        let silent_control = show_silent_control.then(|| {
+            silent_mode_control(SilentControl {
+                silent_mode,
+                system_silent,
+                focus_status_access,
+                show_title_bar_control_labels,
+                compact_mode,
+                title_bar_background,
+            })
+        });
+        h_flex()
+            .id("title-bar-controls")
+            // Keep application controls out of the draggable native title-bar region.
+            .occlude()
+            .min_w_0()
+            // Drop trailing controls before they can overlap the client corner.
+            .flex_shrink_1()
+            .overflow_hidden()
+            .gap_1()
+            // When the reserve below makes this wider than its content, fill it from
+            // the tab-bar side inward, so any blank space lands next to the traffic
+            // lights instead of between the controls and the tabs.
+            .justify_end()
+            // The traffic lights are native controls even with a client title bar.
+            .when(reserve_macos_title_bar_space, |controls| {
+                controls.ml(px(72.))
+            })
+            // Reserve a minimal, constant gap next to the traffic lights sized for
+            // two Large buttons (e.g. the application and profile menu triggers) —
+            // enough that tabs don't crowd the traffic lights when nothing else is
+            // there, but a `min_w` rather than extra margin so that any menus or the
+            // broadcast button which do render here expand into that reserve instead
+            // of pushing further out.
+            .when(reserve_compact_leading_controls, |controls| {
+                controls.min_w(COMPACT_LEADING_CONTROLS_RESERVE)
+            })
+            .when(show_title_bar_menus, |controls| {
+                controls.child(application_menu).child(profile_menu)
+            })
+            .when(
+                title_bar_keep_running_visible(no_mux, show_title_bar_buttons),
+                |controls| {
+                    controls.child(
+                        Button::new(
+                            "auto-background-tab",
+                            if show_title_bar_control_labels {
+                                "Keep running"
+                            } else {
+                                ""
+                            },
+                        )
+                        .start_icon(Icon::new(IconName::Pin).size(IconSize::Small))
+                        .style(ButtonStyle::Subtle)
+                        .size(ButtonSize::Large)
+                        .toggle_state(auto_background_tab)
+                        .aria_label("Keep this tab running after close")
+                        .tooltip(Tooltip::for_action_title(
+                            if auto_background_tab {
+                                if auto_background_protected {
+                                    "Keep running after close is on · authentication required"
+                                } else {
+                                    "Keep running after close is on · no authentication"
+                                }
+                            } else {
+                                "Keep this tab running after the tab or window is closed"
+                            },
+                            &ToggleAutoBackgroundTab,
+                        ))
+                        .on_click(|_, window, cx| {
+                            window.dispatch_action(Box::new(ToggleAutoBackgroundTab), cx);
+                        }),
+                    )
+                },
+            )
+            .when(show_title_bar_buttons, |controls| {
+                controls.child(
+                    Button::new(
+                        "detach-tab",
+                        if show_title_bar_control_labels {
+                            "Detach"
+                        } else {
+                            ""
+                        },
+                    )
+                    .start_icon(Icon::new(IconName::Archive).size(IconSize::Small))
+                    .style(ButtonStyle::Subtle)
+                    .size(ButtonSize::Large)
+                    .aria_label("Detach tab")
+                    .tooltip(Tooltip::for_action_title(
+                        "Detach tab to background",
+                        &DetachTab,
+                    ))
+                    .on_click(|_, window, cx| {
+                        window.dispatch_action(Box::new(DetachTab), cx);
+                    }),
+                )
+            })
+            .when_some(reconnect_control, |controls, reconnect_control| {
+                controls.child(reconnect_control)
+            })
+            .when_some(broadcast_control, |controls, broadcast_control| {
+                controls.child(broadcast_control)
+            })
+            .when_some(silent_control, |controls, silent_control| {
+                controls.child(silent_control)
+            })
             .child(right_title_bar_controls)
             .into_any_element()
     }
 }
 
+/// What deciding the title bar's session controls depends on.
+struct TitleBarSessionInputs<'a> {
+    window: &'a Window,
+    compact_mode: bool,
+    background_sessions: Arc<[(u64, u64, String, String)]>,
+    right_window_controls: AnyElement,
+    handle: &'a WeakEntity<Zetta>,
+}
+
+/// The session-related half of the title bar: whether its controls carry labels
+/// at this width, and the reconnect control's two possible placements.
+struct TitleBarSessionControls {
+    show_title_bar_control_labels: bool,
+    show_title_bar_buttons: bool,
+    reconnect_control: Option<AnyElement>,
+    right_title_bar_controls: AnyElement,
+}
+
 #[cfg(test)]
 #[path = "tests/title_bar_render.rs"]
 mod tests;
+
+/// The Broadcast toggle, whose tooltip explains what typing into a broadcast
+/// pane does to the others.
+fn broadcast_input_control(
+    broadcast_input: bool,
+    show_title_bar_control_labels: bool,
+    compact_mode: bool,
+    title_bar_background: gpui::Hsla,
+) -> AnyElement {
+    let button = Button::new(
+        "toggle-broadcast-input",
+        if show_title_bar_control_labels {
+            "Broadcast"
+        } else {
+            ""
+        },
+    )
+    .start_icon(
+        Icon::new(IconName::Keyboard)
+            .size(IconSize::Small)
+            .color(if broadcast_input {
+                Color::Selected
+            } else {
+                Color::Default
+            }),
+    )
+    .style(ButtonStyle::Subtle)
+    .size(ButtonSize::Large)
+    .toggle_state(broadcast_input)
+    .aria_label("Broadcast input to all panes")
+    .tooltip(Tooltip::for_action_title(
+        if broadcast_input {
+            "Broadcast input is on"
+        } else {
+            "Broadcast input to all panes"
+        },
+        &ToggleBroadcastInput,
+    ))
+    .on_click(|_, window, cx| window.dispatch_action(Box::new(ToggleBroadcastInput), cx));
+
+    if compact_mode {
+        render_compact_tab_neighbor_control(button, title_bar_background)
+    } else {
+        button.into_any_element()
+    }
+}
+
+/// What the Silent toggle needs: its own state, the system's do-not-disturb, and
+/// whether Zetta is allowed to read the latter.
+struct SilentControl {
+    silent_mode: bool,
+    system_silent: bool,
+    focus_status_access: FocusStatusAccess,
+    show_title_bar_control_labels: bool,
+    compact_mode: bool,
+    title_bar_background: gpui::Hsla,
+}
+
+/// The Silent toggle. Its tooltip is the only place that says whether the state
+/// came from Zetta or from the system.
+fn silent_mode_control(control: SilentControl) -> AnyElement {
+    let SilentControl {
+        silent_mode,
+        system_silent,
+        focus_status_access,
+        show_title_bar_control_labels,
+        compact_mode,
+        title_bar_background,
+    } = control;
+    let silent_tooltip_title = if system_silent {
+        "Silent mode is controlled by Do Not Disturb"
+    } else if cfg!(target_os = "macos") {
+        focus_status_access.tooltip()
+    } else {
+        "Silence terminal bells and notification sounds"
+    };
+    let silent_tooltip = Tooltip::for_action_title(silent_tooltip_title, &ToggleSilentMode);
+    let button = Button::new(
+        "toggle-silent-mode",
+        if show_title_bar_control_labels {
+            "Silent"
+        } else {
+            ""
+        },
+    )
+    .start_icon(
+        Icon::new(title_bar_silent_icon(silent_mode))
+            .size(IconSize::Small)
+            .color(if silent_mode {
+                Color::Selected
+            } else {
+                Color::Default
+            }),
+    )
+    .style(ButtonStyle::Subtle)
+    .size(ButtonSize::Large)
+    .toggle_state(silent_mode)
+    .disabled(system_silent)
+    .aria_label(if silent_mode {
+        "Silent mode is on"
+    } else {
+        "Silent mode is off"
+    })
+    .tooltip(silent_tooltip)
+    .on_click(|_, window, cx| window.dispatch_action(Box::new(ToggleSilentMode), cx));
+
+    if compact_mode {
+        render_compact_tab_neighbor_control(button, title_bar_background)
+    } else {
+        button.into_any_element()
+    }
+}

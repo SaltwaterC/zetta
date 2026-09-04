@@ -494,10 +494,12 @@ fn path_identity(path: &Path) -> String {
     let value = if cfg!(windows) {
         match value.strip_prefix(r"\\?\UNC\") {
             Some(rest) => format!(r"\\{rest}"),
-            None => value
-                .strip_prefix(r"\\?\")
-                .map(str::to_owned)
-                .unwrap_or_else(|| value.into_owned()),
+            // Not `map_or_else`: the fallback moves `value`, which the
+            // `strip_prefix` borrow is still holding while the call is made.
+            None => match value.strip_prefix(r"\\?\") {
+                Some(rest) => rest.to_owned(),
+                None => value.into_owned(),
+            },
         }
     } else {
         value.into_owned()

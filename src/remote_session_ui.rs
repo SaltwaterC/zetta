@@ -370,8 +370,6 @@ impl Zetta {
         let picker_scroll = picker.scroll.clone();
         let rows = remote_session_rows(handle, colors, &picker_scroll, sessions, selected);
 
-        let target_handle = handle.clone();
-        let port_handle = handle.clone();
         let cancel_handle = handle.clone();
         let load_handle = handle.clone();
         let attach_handle = handle.clone();
@@ -409,58 +407,17 @@ impl Zetta {
                             value: TextField,
                             selected_field: RemoteSessionField,
                             placeholder: &'static str,
-                            click_handle: WeakEntity<Self>|
-         -> AnyElement {
-            let focused = field == selected_field;
-            let (before, after) = value.split_at_cursor();
-            field_box(id, focused, colors)
-                .flex_1()
-                .min_w_0()
-                .cursor_text()
-                .when(value.select_all && focused, |input| {
-                    input.bg(colors.element_selection_background)
-                })
-                .when(focused && !value.select_all, |input| {
-                    input
-                        .child(div().whitespace_nowrap().child(before.to_owned()))
-                        .child(caret(colors))
-                        .child(div().whitespace_nowrap().child(after.to_owned()))
-                })
-                .when(focused && value.select_all, |input| {
-                    input.child(div().whitespace_nowrap().child(value.text.clone()))
-                })
-                .when(!focused, |input| {
-                    input.child(
-                        div()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_ellipsis()
-                            .text_color(if value.text.is_empty() {
-                                colors.text_placeholder
-                            } else {
-                                colors.text
-                            })
-                            .child(if value.text.is_empty() {
-                                placeholder.to_owned()
-                            } else {
-                                value.text.clone()
-                            }),
-                    )
-                })
-                .on_click(move |_, _, cx| {
-                    click_handle
-                        .update(cx, |this, cx| {
-                            if let Some(picker) = this.remote_session_picker.as_mut() {
-                                picker.field = selected_field;
-                                cx.notify();
-                            }
-                        })
-                        .ok();
-                })
-                .into_any_element()
+                            click_handle: WeakEntity<Self>| {
+            remote_session_field(
+                id,
+                value,
+                selected_field,
+                placeholder,
+                field,
+                colors,
+                click_handle,
+            )
         };
-
         Some(
             div()
                 .id("remote-session-backdrop")
@@ -496,30 +453,12 @@ impl Zetta {
                                 .text_color(colors.text_muted)
                                 .child("Connect through your normal OpenSSH configuration. Remote sessions must be shared.")
                         )
-                        .child(
-                            h_flex()
-                                .w_full()
-                                .gap_2()
-                                .child(field_widget(
-                                    "remote-session-target",
-                                    target,
-                                    RemoteSessionField::Target,
-                                    "SSH target or alias",
-                                    target_handle,
-                                ))
-                                .child(
-                                    div()
-                                        .flex_none()
-                                        .w(px(120.))
-                                        .child(field_widget(
-                                            "remote-session-port",
-                                            port,
-                                            RemoteSessionField::Port,
-                                            "Port",
-                                            port_handle,
-                                        )),
-                                ),
-                        )
+                        .child(remote_session_fields(
+                            &field_widget,
+                            target,
+                            port,
+                            handle,
+                        ))
                         .when(
                             field == RemoteSessionField::Target && has_suggestions,
                             |panel| {
@@ -548,61 +487,15 @@ impl Zetta {
                         )
                         .child(session_list)
                         .child(
-                            div()
-                                .flex()
-                                .justify_between()
-                                .items_center()
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(colors.text_muted)
-                                        .child("Tab next · ↑↓ choose · Enter load/attach · Esc cancel"),
-                                )
-                                .child(
-                                    h_flex()
-                                        .gap_2()
-                                        .child(
-                                            Button::new("cancel-remote-session", "Cancel")
-                                                .style(ButtonStyle::Outlined)
-                                                .color(Color::Custom(colors.text))
-                                                .on_click(move |_, window, cx| {
-                                                    cancel_handle
-                                                        .update(cx, |this, cx| {
-                                                            this.dismiss_remote_session_picker(window, cx)
-                                                        })
-                                                        .ok();
-                                                }),
-                                        )
-                                        .child(
-                                            Button::new(
-                                                "load-remote-sessions",
-                                                if loading { "Loading…" } else { "Load" },
-                                            )
-                                            .style(ButtonStyle::Outlined)
-                                            .color(Color::Custom(colors.text))
-                                            .disabled(loading)
-                                            .on_click(move |_, _, cx| {
-                                                load_handle
-                                                    .update(cx, |this, cx| {
-                                                        this.load_remote_sessions(cx)
-                                                    })
-                                                    .ok();
-                                            }),
-                                        )
-                                        .child(
-                                            Button::new("attach-remote-session", "Attach")
-                                                .style(ButtonStyle::Filled)
-                                                .color(Color::Custom(colors.text))
-                                                .disabled(loading || session_count == 0)
-                                                .on_click(move |_, window, cx| {
-                                                    attach_handle
-                                                        .update(cx, |this, cx| {
-                                                            this.select_remote_session(selected, window, cx)
-                                                        })
-                                                        .ok();
-                                                }),
-                                        ),
-                                ),
+                            remote_session_actions(RemoteSessionActions {
+                                loading,
+                                session_count,
+                                selected,
+                                colors,
+                                cancel_handle,
+                                load_handle,
+                                attach_handle,
+                            }),
                         ),
                 )
                 .into_any_element(),
@@ -670,7 +563,7 @@ fn remote_session_rows(
                         .on_click(move |_, window, cx| {
                             row_handle
                                 .update(cx, |this, cx| {
-                                    this.select_remote_session(index, window, cx)
+                                    this.select_remote_session(index, window, cx);
                                 })
                                 .ok();
                         })
@@ -731,4 +624,182 @@ fn remote_session_suggestion_rows(
                 .child(suggestion_label)
         })
         .collect()
+}
+
+/// One of the picker's two text fields — the SSH target and the port.
+///
+/// A shared builder rather than two spellings: they differ only in what they
+/// hold and which field selecting them focuses.
+#[allow(clippy::too_many_arguments)]
+fn remote_session_field(
+    id: &'static str,
+    value: TextField,
+    selected_field: RemoteSessionField,
+    placeholder: &'static str,
+    field: RemoteSessionField,
+    colors: &ThemeColors,
+    click_handle: WeakEntity<Zetta>,
+) -> AnyElement {
+    let focused = field == selected_field;
+    let (before, after) = value.split_at_cursor();
+    field_box(id, focused, colors)
+        .flex_1()
+        .min_w_0()
+        .cursor_text()
+        .when(value.select_all && focused, |input| {
+            input.bg(colors.element_selection_background)
+        })
+        .when(focused && !value.select_all, |input| {
+            input
+                .child(div().whitespace_nowrap().child(before.to_owned()))
+                .child(caret(colors))
+                .child(div().whitespace_nowrap().child(after.to_owned()))
+        })
+        .when(focused && value.select_all, |input| {
+            input.child(div().whitespace_nowrap().child(value.text.clone()))
+        })
+        .when(!focused, |input| {
+            input.child(
+                div()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .text_color(if value.text.is_empty() {
+                        colors.text_placeholder
+                    } else {
+                        colors.text
+                    })
+                    .child(if value.text.is_empty() {
+                        placeholder.to_owned()
+                    } else {
+                        value.text.clone()
+                    }),
+            )
+        })
+        .on_click(move |_, _, cx| {
+            click_handle
+                .update(cx, |this, cx| {
+                    if let Some(picker) = this.remote_session_picker.as_mut() {
+                        picker.field = selected_field;
+                        cx.notify();
+                    }
+                })
+                .ok();
+        })
+        .into_any_element()
+}
+
+/// The SSH target and port fields, side by side.
+fn remote_session_fields(
+    field_widget: &impl Fn(
+        &'static str,
+        TextField,
+        RemoteSessionField,
+        &'static str,
+        WeakEntity<Zetta>,
+    ) -> AnyElement,
+    target: TextField,
+    port: TextField,
+    handle: &WeakEntity<Zetta>,
+) -> impl IntoElement {
+    let target_handle = handle.clone();
+    let port_handle = handle.clone();
+    h_flex()
+        .w_full()
+        .gap_2()
+        .child(field_widget(
+            "remote-session-target",
+            target,
+            RemoteSessionField::Target,
+            "SSH target or alias",
+            target_handle,
+        ))
+        .child(div().flex_none().w(px(120.)).child(field_widget(
+            "remote-session-port",
+            port,
+            RemoteSessionField::Port,
+            "Port",
+            port_handle,
+        )))
+}
+
+/// What the picker's action row needs to decide which buttons are live.
+struct RemoteSessionActions<'a> {
+    loading: bool,
+    session_count: usize,
+    selected: usize,
+    colors: &'a ThemeColors,
+    cancel_handle: WeakEntity<Zetta>,
+    load_handle: WeakEntity<Zetta>,
+    attach_handle: WeakEntity<Zetta>,
+}
+
+/// Cancel, Refresh and Attach, with Attach live only once a session is
+/// selected.
+fn remote_session_actions(actions: RemoteSessionActions<'_>) -> impl IntoElement {
+    let RemoteSessionActions {
+        loading,
+        session_count,
+        selected,
+        colors,
+        cancel_handle,
+        load_handle,
+        attach_handle,
+    } = actions;
+    div()
+        .flex()
+        .justify_between()
+        .items_center()
+        .child(
+            div()
+                .text_xs()
+                .text_color(colors.text_muted)
+                .child("Tab next · ↑↓ choose · Enter load/attach · Esc cancel"),
+        )
+        .child(
+            h_flex()
+                .gap_2()
+                .child(
+                    Button::new("cancel-remote-session", "Cancel")
+                        .style(ButtonStyle::Outlined)
+                        .color(Color::Custom(colors.text))
+                        .on_click(move |_, window, cx| {
+                            cancel_handle
+                                .update(cx, |this, cx| {
+                                    this.dismiss_remote_session_picker(window, cx);
+                                })
+                                .ok();
+                        }),
+                )
+                .child(
+                    Button::new(
+                        "load-remote-sessions",
+                        if loading { "Loading…" } else { "Load" },
+                    )
+                    .style(ButtonStyle::Outlined)
+                    .color(Color::Custom(colors.text))
+                    .disabled(loading)
+                    .on_click(move |_, _, cx| {
+                        load_handle
+                            .update(cx, |this, cx| {
+                                this.load_remote_sessions(cx);
+                            })
+                            .ok();
+                    }),
+                )
+                .child(
+                    Button::new("attach-remote-session", "Attach")
+                        .style(ButtonStyle::Filled)
+                        .color(Color::Custom(colors.text))
+                        .disabled(loading || session_count == 0)
+                        .on_click(move |_, window, cx| {
+                            attach_handle
+                                .update(cx, |this, cx| {
+                                    this.select_remote_session(selected, window, cx);
+                                })
+                                .ok();
+                        }),
+                ),
+        )
 }

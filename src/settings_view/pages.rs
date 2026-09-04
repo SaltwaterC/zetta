@@ -81,6 +81,112 @@ pub(crate) fn render_settings_pages(
     }
 }
 
+/// A settings row that opens a picker rather than editing in place: the value it
+/// currently holds, a chevron, and the focus ring the form's other controls
+/// have.
+///
+/// The default-tab-icon and font-family rows are the two of these; they differ
+/// only in what they show and what clicking them opens, so the frame is built
+/// once here.
+fn picker_trigger_row(
+    id: &'static str,
+    focused: bool,
+    colors: &ThemeColors,
+    value: impl IntoElement,
+    open: impl Fn(&mut Window, &mut App) + 'static,
+) -> AnyElement {
+    h_flex()
+        .id(id)
+        .h_9()
+        .w_full()
+        .min_w(px(180.))
+        .px_3()
+        .justify_between()
+        .rounded(px(4.))
+        .border_1()
+        .border_color(if focused {
+            colors.border_focused
+        } else {
+            colors.border
+        })
+        .bg(colors.editor_background)
+        .cursor_pointer()
+        .hover(|style| style.bg(colors.element_hover))
+        .child(value)
+        .child(
+            svg()
+                .path(IconName::ChevronDown.path())
+                .size(px(14.))
+                .text_color(colors.icon_muted),
+        )
+        .on_click(move |_, window, cx| open(window, cx))
+        .into_any_element()
+}
+
+/// The row that opens the tab-icon picker, showing the icon new tabs get.
+fn default_tab_icon_field(
+    editor: &SettingsEditor,
+    colors: &ThemeColors,
+    handle: &WeakEntity<Zetta>,
+) -> AnyElement {
+    let current = editor.configuration.default_tab_icon;
+    let picker_handle = handle.clone();
+    picker_trigger_row(
+        "default-tab-icon-picker-trigger",
+        editor.focused_control == Some(SettingsControl::DefaultTabIconPicker),
+        colors,
+        h_flex()
+            .gap_2()
+            .child(Icon::new(current.unwrap_or(IconName::Dash)))
+            .child(current.map_or_else(|| "None".to_owned(), tab_icon_label)),
+        move |window, cx| {
+            picker_handle
+                .update(cx, |this, cx| {
+                    this.open_default_tab_icon_picker(window, cx);
+                })
+                .ok();
+        },
+    )
+}
+
+/// The row that opens the font picker, showing the current family in itself.
+fn font_family_field(
+    editor: &SettingsEditor,
+    colors: &ThemeColors,
+    handle: &WeakEntity<Zetta>,
+) -> AnyElement {
+    let current_font = editor.configuration.terminal_font_family.clone();
+    let picker_handle = handle.clone();
+    picker_trigger_row(
+        "terminal-font-family-picker-trigger",
+        editor.focused_control == Some(SettingsControl::FontPicker),
+        colors,
+        div()
+            .min_w_0()
+            .overflow_hidden()
+            .whitespace_nowrap()
+            .text_ellipsis()
+            .font_family(current_font.clone())
+            .child(current_font),
+        move |window, cx| {
+            picker_handle
+                .update(cx, |this, cx| {
+                    if let Some(editor) = this.settings_editor.as_mut() {
+                        editor.font_query = Some(TextField::default());
+                        editor.scroll_geometry_initialized = false;
+                    }
+                    this.focus_settings_input(SettingsInput::FontSearch, window, cx);
+                })
+                .ok();
+        },
+    )
+}
+
+/// The Configuration page: a flat list of setting rows, in sections.
+///
+/// Each section is its own builder below, because the rows are a data table
+/// rather than logic and reading one section should not mean scrolling past the
+/// others.
 fn render_configuration_page(
     editor: &SettingsEditor,
     colors: &ThemeColors,
@@ -88,15 +194,38 @@ fn render_configuration_page(
     focus_status_access: FocusStatusAccess,
     widgets: &PageWidgets<'_>,
 ) -> AnyElement {
-    #[cfg(not(target_os = "macos"))]
-    let _ = focus_status_access;
+    let mut rows = configuration_appearance_rows(editor, colors, handle, widgets);
+    rows.extend(configuration_session_rows(editor, colors, widgets));
+    rows.extend(configuration_window_rows(
+        editor,
+        colors,
+        focus_status_access,
+        widgets,
+    ));
+    #[cfg(servers_enabled)]
+    rows.extend(configuration_network_rows(
+        &editor.configuration,
+        colors,
+        widgets.setting_row,
+        widgets.numeric,
+    ));
+    rows.extend(configuration_profile_rows(editor, colors, handle, widgets));
+    div().children(rows).into_any_element()
+}
+
+/// Profile, theme, tab icon, font, working directory and scrollback: what a
+/// new tab looks like and starts in.
+fn configuration_appearance_rows(
+    editor: &SettingsEditor,
+    colors: &ThemeColors,
+    handle: &WeakEntity<Zetta>,
+    widgets: &PageWidgets<'_>,
+) -> Vec<AnyElement> {
     let &PageWidgets {
         text_input,
         dropdown,
         setting_row,
-        setting_toggle,
         numeric,
-        opacity_slider,
         ..
     } = widgets;
     let configuration = &editor.configuration;
@@ -120,126 +249,14 @@ fn render_configuration_page(
         configuration.dark_theme.clone(),
         SettingsDropdown::DarkTheme,
     );
-    let current_default_tab_icon = configuration.default_tab_icon;
-    let default_tab_icon_handle = handle.clone();
-    let default_tab_icon = h_flex()
-        .id("default-tab-icon-picker-trigger")
-        .h_9()
-        .w_full()
-        .min_w(px(180.))
-        .px_3()
-        .justify_between()
-        .rounded(px(4.))
-        .border_1()
-        .border_color(
-            if editor.focused_control == Some(SettingsControl::DefaultTabIconPicker) {
-                colors.border_focused
-            } else {
-                colors.border
-            },
-        )
-        .bg(colors.editor_background)
-        .cursor_pointer()
-        .hover(|style| style.bg(colors.element_hover))
-        .child(
-            h_flex()
-                .gap_2()
-                .child(Icon::new(
-                    current_default_tab_icon.unwrap_or(IconName::Dash),
-                ))
-                .child(
-                    current_default_tab_icon
-                        .map(tab_icon_label)
-                        .unwrap_or_else(|| "None".to_owned()),
-                ),
-        )
-        .child(
-            svg()
-                .path(IconName::ChevronDown.path())
-                .size(px(14.))
-                .text_color(colors.icon_muted),
-        )
-        .on_click(move |_, window, cx| {
-            default_tab_icon_handle
-                .update(cx, |this, cx| {
-                    this.open_default_tab_icon_picker(window, cx);
-                })
-                .ok();
-        })
-        .into_any_element();
+    let default_tab_icon = default_tab_icon_field(editor, colors, handle);
+    let font_family = font_family_field(editor, colors, handle);
     let working_directory_scope = dropdown(
         "settings-working-directory-scope".to_owned(),
         configuration.working_directory_scope.label().to_owned(),
         SettingsDropdown::WorkingDirectoryScope,
     );
-    let pane_controls_position = dropdown(
-        "settings-pane-controls-position".to_owned(),
-        configuration.pane_controls_position.label().to_owned(),
-        SettingsDropdown::PaneControlsPosition,
-    );
-    let pane_controls_default_visibility = dropdown(
-        "settings-pane-controls-default-visibility".to_owned(),
-        if configuration.pane_controls_hidden_by_default {
-            "Hidden".to_owned()
-        } else {
-            "Visible".to_owned()
-        },
-        SettingsDropdown::PaneControlsDefaultVisibility,
-    );
-    let session_retention = dropdown(
-        "settings-session-retention".to_owned(),
-        configuration.session_retention.label().to_owned(),
-        SettingsDropdown::SessionRetention,
-    );
-    let current_font = configuration.terminal_font_family.clone();
-    let picker_handle = handle.clone();
-    let font_family = h_flex()
-        .id("terminal-font-family-picker-trigger")
-        .h_9()
-        .w_full()
-        .min_w(px(180.))
-        .px_3()
-        .justify_between()
-        .rounded(px(4.))
-        .border_1()
-        .border_color(
-            if editor.focused_control == Some(SettingsControl::FontPicker) {
-                colors.border_focused
-            } else {
-                colors.border
-            },
-        )
-        .bg(colors.editor_background)
-        .cursor_pointer()
-        .hover(|style| style.bg(colors.element_hover))
-        .child(
-            div()
-                .min_w_0()
-                .overflow_hidden()
-                .whitespace_nowrap()
-                .text_ellipsis()
-                .font_family(current_font.clone())
-                .child(current_font),
-        )
-        .child(
-            svg()
-                .path(IconName::ChevronDown.path())
-                .size(px(14.))
-                .text_color(colors.icon_muted),
-        )
-        .on_click(move |_, window, cx| {
-            picker_handle
-                .update(cx, |this, cx| {
-                    if let Some(editor) = this.settings_editor.as_mut() {
-                        editor.font_query = Some(TextField::default());
-                        editor.scroll_geometry_initialized = false;
-                    }
-                    this.focus_settings_input(SettingsInput::FontSearch, window, cx);
-                })
-                .ok();
-        })
-        .into_any_element();
-    let mut rows = vec![
+    vec![
         setting_row(
             "Default profile",
             "Profile selected when Zetta starts",
@@ -316,6 +333,36 @@ fn render_configuration_page(
                 ConfigTextField::ScrollHistory,
             ),
         ),
+    ]
+}
+
+/// The background-session section: what a detached or shared session keeps, and
+/// how it is encrypted at rest.
+fn configuration_session_rows(
+    editor: &SettingsEditor,
+    colors: &ThemeColors,
+    widgets: &PageWidgets<'_>,
+) -> Vec<AnyElement> {
+    let &PageWidgets {
+        text_input,
+        dropdown,
+        setting_row,
+        setting_toggle,
+        numeric,
+        ..
+    } = widgets;
+    // Both are read only by the encrypted-retention rows below.
+    #[cfg(not(feature = "session-persistence"))]
+    let (_, _) = (text_input, setting_toggle);
+    let configuration = &editor.configuration;
+    let session_retention = dropdown(
+        "settings-session-retention".to_owned(),
+        configuration.session_retention.label().to_owned(),
+        SettingsDropdown::SessionRetention,
+    );
+    // `mut` only where the auto-protect row below can be pushed.
+    #[cfg_attr(not(feature = "session-persistence"), allow(unused_mut))]
+    let mut rows = vec![
         div()
             .pt_4()
             .pb_2()
@@ -393,7 +440,43 @@ fn render_configuration_page(
             ),
         ));
     }
-    rows.extend([
+    rows
+}
+
+/// The window-chrome section: pane dimming, compact mode, and what the title
+/// bar shows.
+fn configuration_window_rows(
+    editor: &SettingsEditor,
+    colors: &ThemeColors,
+    focus_status_access: FocusStatusAccess,
+    widgets: &PageWidgets<'_>,
+) -> Vec<AnyElement> {
+    // Both are read only by the macOS Focus status row below.
+    #[cfg(not(target_os = "macos"))]
+    let (_, _) = (focus_status_access, colors);
+    let &PageWidgets {
+        dropdown,
+        setting_row,
+        setting_toggle,
+        opacity_slider,
+        ..
+    } = widgets;
+    let configuration = &editor.configuration;
+    let pane_controls_position = dropdown(
+        "settings-pane-controls-position".to_owned(),
+        configuration.pane_controls_position.label().to_owned(),
+        SettingsDropdown::PaneControlsPosition,
+    );
+    let pane_controls_default_visibility = dropdown(
+        "settings-pane-controls-default-visibility".to_owned(),
+        if configuration.pane_controls_hidden_by_default {
+            "Hidden".to_owned()
+        } else {
+            "Visible".to_owned()
+        },
+        SettingsDropdown::PaneControlsDefaultVisibility,
+    );
+    vec![
         setting_row(
             "Inactive pane opacity",
             "Dimming level as a percentage",
@@ -496,16 +579,7 @@ fn render_configuration_page(
             SettingsControl::Dropdown(SettingsDropdown::PaneControlsDefaultVisibility),
             pane_controls_default_visibility,
         ),
-    ]);
-    #[cfg(servers_enabled)]
-    rows.extend(configuration_network_rows(
-        configuration,
-        colors,
-        setting_row,
-        numeric,
-    ));
-    rows.extend(configuration_profile_rows(editor, colors, handle, widgets));
-    div().children(rows).into_any_element()
+    ]
 }
 
 /// The optional local servers' ports.
@@ -572,11 +646,6 @@ fn configuration_profile_rows(
     handle: &WeakEntity<Zetta>,
     widgets: &PageWidgets<'_>,
 ) -> Vec<AnyElement> {
-    let &PageWidgets {
-        text_input,
-        dropdown,
-        ..
-    } = widgets;
     let configuration = &editor.configuration;
     let mut rows = Vec::new();
     rows.push(
@@ -589,228 +658,11 @@ fn configuration_profile_rows(
             .into_any_element(),
     );
     for (index, profile) in configuration.profiles.iter().enumerate() {
-        let profile_controls = profile_controls(index, profile.detected);
-        let profile_focused = profile_controls
-            .iter()
-            .any(|control| editor.focused_control.as_ref() == Some(control));
-        let profile_theme = profile
-            .theme
-            .clone()
-            .unwrap_or_else(|| "Use application theme".to_owned());
-        let profile_theme = dropdown(
-            format!("settings-profile-{index}-theme"),
-            profile_theme,
-            SettingsDropdown::ProfileTheme(index),
-        );
-        let profile_dark_theme = profile
-            .dark_theme
-            .clone()
-            .unwrap_or_else(|| "Use application theme".to_owned());
-        let profile_dark_theme = dropdown(
-            format!("settings-profile-{index}-dark-theme"),
-            profile_dark_theme,
-            SettingsDropdown::ProfileDarkTheme(index),
-        );
-        let profile_icon_value = profile.icon.as_ref().unwrap_or(&profile.automatic_icon);
-        let profile_icon = h_flex()
-            .w_full()
-            .gap_2()
-            .child(profile_icon_value.render(IconSize::Small))
-            .child(div().min_w_0().flex_1().child(dropdown(
-                format!("settings-profile-{index}-icon"),
-                ProfileIcon::selector_label(profile.icon.as_ref()).to_owned(),
-                SettingsDropdown::ProfileIcon(index),
-            )));
-        let visibility_handle = handle.clone();
-        let profile_visibility = switch(
-            format!("settings-profile-{index}-visibility"),
-            (!profile.hidden).into(),
-        )
-        .label(if profile.hidden { "Hidden" } else { "Visible" })
-        .full_width(true)
-        .aria_label("Show profile in Profiles menu")
-        .on_click(move |state, window, cx| {
-            visibility_handle
-                .update(cx, |this, cx| {
-                    this.set_settings_toggle(
-                        SettingsToggle::ProfileVisibility(index),
-                        state.selected(),
-                        window,
-                        cx,
-                    );
-                })
-                .ok();
-        });
-        let card = if profile.detected {
-            div()
-                .p_3()
-                .mb_2()
-                .rounded(px(6.))
-                .border_1()
-                .border_color(if profile_focused {
-                    colors.border_focused
-                } else {
-                    colors.border
-                })
-                .bg(if profile_focused {
-                    colors.element_selected
-                } else {
-                    colors.editor_background
-                })
-                .child(
-                    h_flex()
-                        .min_w_0()
-                        .flex_1()
-                        .gap_2()
-                        .child(profile_icon_value.render(IconSize::Medium))
-                        .child(
-                            div()
-                                .min_w_0()
-                                .flex_1()
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .text_color(colors.text)
-                                        .child(profile.name.text.clone()),
-                                )
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(colors.text_muted)
-                                        .child("Detected profile"),
-                                ),
-                        ),
-                )
-                .child(profile_fields_grid([
-                    profile_field("Shown in Profiles menu", profile_visibility, colors),
-                    profile_field("Icon", profile_icon, colors),
-                    profile_field("Light theme", profile_theme, colors),
-                    profile_field("Dark theme", profile_dark_theme, colors),
-                ]))
-                .into_any_element()
-        } else {
-            let remove_handle = handle.clone();
-            div()
-                .p_3()
-                .mb_2()
-                .rounded(px(6.))
-                .border_1()
-                .border_color(if profile_focused {
-                    colors.border_focused
-                } else {
-                    colors.border
-                })
-                .bg(if profile_focused {
-                    colors.element_selected
-                } else {
-                    colors.editor_background
-                })
-                .child(
-                    h_flex()
-                        .items_end()
-                        .gap_2()
-                        .child(
-                            div()
-                                .min_w_0()
-                                .flex_1()
-                                .child(
-                                    div()
-                                        .mb_1()
-                                        .text_xs()
-                                        .text_color(colors.text_muted)
-                                        .child("Profile name"),
-                                )
-                                .child(text_input(
-                                    format!("settings-profile-{index}-name"),
-                                    profile.name.clone(),
-                                    SettingsInput::Configuration(ConfigTextField::ProfileName(
-                                        index,
-                                    )),
-                                )),
-                        )
-                        .child(
-                            IconButton::new(("remove-settings-profile", index), IconName::Trash)
-                                .icon_size(IconSize::Small)
-                                .icon_color(Color::Custom(colors.icon))
-                                .selected_icon_color(Color::Custom(colors.icon))
-                                .toggle_state(
-                                    editor.focused_control
-                                        == Some(SettingsControl::RemoveProfile(index)),
-                                )
-                                .selected_style(ButtonStyle::OutlinedCustom(colors.border_focused))
-                                .tooltip(Tooltip::text("Remove profile"))
-                                .on_click(move |_, _, cx| {
-                                    remove_handle
-                                        .update(cx, |this, cx| {
-                                            if let Some(editor) = this.settings_editor.as_mut() {
-                                                editor.configuration.profiles.remove(index);
-                                                editor.configuration_dirty = true;
-                                                invalidate_controls_cache(editor);
-                                                cx.notify();
-                                            }
-                                        })
-                                        .ok();
-                                }),
-                        ),
-                )
-                .child(
-                    div()
-                        .mt_2()
-                        .grid()
-                        .grid_cols(2)
-                        .gap_2()
-                        .child(
-                            div()
-                                .min_w_0()
-                                .flex_1()
-                                .child(
-                                    div()
-                                        .mb_1()
-                                        .text_xs()
-                                        .text_color(colors.text_muted)
-                                        .child("Program"),
-                                )
-                                .child(text_input(
-                                    format!("settings-profile-{index}-program"),
-                                    profile.program.clone(),
-                                    SettingsInput::Configuration(ConfigTextField::ProfileProgram(
-                                        index,
-                                    )),
-                                )),
-                        )
-                        .child(
-                            div()
-                                .min_w_0()
-                                .flex_1()
-                                .child(
-                                    div()
-                                        .mb_1()
-                                        .text_xs()
-                                        .text_color(colors.text_muted)
-                                        .child("Arguments (comma separated)"),
-                                )
-                                .child(text_input(
-                                    format!("settings-profile-{index}-arguments"),
-                                    profile.arguments.clone(),
-                                    SettingsInput::Configuration(
-                                        ConfigTextField::ProfileArguments(index),
-                                    ),
-                                )),
-                        ),
-                )
-                .child(profile_fields_grid([
-                    profile_field("Shown in Profiles menu", profile_visibility, colors),
-                    profile_field("Icon", profile_icon, colors),
-                    profile_field("Light theme", profile_theme, colors),
-                    profile_field("Dark theme", profile_dark_theme, colors),
-                ]))
-                .into_any_element()
-        };
-        rows.push(
-            track_focus_scroll(div().w_full().child(card), editor, &profile_controls)
-                .into_any_element(),
-        );
+        rows.push(profile_card(
+            index, profile, editor, colors, handle, widgets,
+        ));
     }
+
     let add_handle = handle.clone();
     let add_focused = editor.focused_control == Some(SettingsControl::AddProfile);
     rows.push(
@@ -859,12 +711,28 @@ fn configuration_profile_rows(
     rows
 }
 
+/// The Themes page: the extension search, what is installed, and what the last
+/// search found.
 fn render_themes_page(
     editor: &SettingsEditor,
     colors: &ThemeColors,
     handle: &WeakEntity<Zetta>,
     widgets: &PageWidgets<'_>,
 ) -> AnyElement {
+    let mut rows = theme_search_rows(editor, colors, handle, widgets);
+    rows.extend(installed_theme_extension_rows(editor, colors, handle));
+    rows.extend(available_theme_extension_rows(editor, colors, handle));
+    div().children(rows).into_any_element()
+}
+
+/// The page's heading, the note about what is installed from an extension, and
+/// the search field with its button.
+fn theme_search_rows(
+    editor: &SettingsEditor,
+    colors: &ThemeColors,
+    handle: &WeakEntity<Zetta>,
+    widgets: &PageWidgets<'_>,
+) -> Vec<AnyElement> {
     let text_input = widgets.text_input;
     let search = text_input(
         "settings-theme-extension-search".to_owned(),
@@ -872,7 +740,8 @@ fn render_themes_page(
         SettingsInput::ThemeSearch,
     );
     let search_handle = handle.clone();
-    let mut rows = vec![
+    vec![
+
             div()
                 .mb_3()
                 .child(
@@ -932,7 +801,7 @@ fn render_themes_page(
                                 .on_click(move |_, window, cx| {
                                     search_handle
                                         .update(cx, |this, cx| {
-                                            this.fetch_theme_extensions(window, cx)
+                                            this.fetch_theme_extensions(window, cx);
                                         })
                                         .ok();
                                 })
@@ -944,7 +813,18 @@ fn render_themes_page(
                         ),
                 )
                 .into_any_element(),
-        ];
+    ]
+}
+
+/// The theme extensions already installed, each with the button that removes
+/// it. Nothing is emitted when none are.
+fn installed_theme_extension_rows(
+    editor: &SettingsEditor,
+    colors: &ThemeColors,
+    handle: &WeakEntity<Zetta>,
+) -> Vec<AnyElement> {
+    let mut rows = Vec::new();
+
     if !editor.installed_theme_extensions.is_empty() {
         rows.push(
             div()
@@ -1037,7 +917,7 @@ fn render_themes_page(
                                                             id.clone(),
                                                             window,
                                                             cx,
-                                                        )
+                                                        );
                                                     })
                                                     .ok();
                                             })
@@ -1049,6 +929,17 @@ fn render_themes_page(
             );
         }
     }
+    rows
+}
+
+/// What the last search found, or the line explaining why the list is empty.
+fn available_theme_extension_rows(
+    editor: &SettingsEditor,
+    colors: &ThemeColors,
+    handle: &WeakEntity<Zetta>,
+) -> Vec<AnyElement> {
+    let mut rows = Vec::new();
+
     if editor.theme_extensions.is_empty() && !editor.theme_extensions_loading {
         rows.push(
             div()
@@ -1159,7 +1050,7 @@ fn render_themes_page(
                                                         id.clone(),
                                                         window,
                                                         cx,
-                                                    )
+                                                    );
                                                 })
                                                 .ok();
                                         })
@@ -1176,7 +1067,7 @@ fn render_themes_page(
                 .into_any_element(),
         );
     }
-    div().children(rows).into_any_element()
+    rows
 }
 
 fn render_keymap_page(
@@ -1274,3 +1165,312 @@ fn render_keymap_page(
 #[cfg(test)]
 #[path = "../tests/settings_view/pages.rs"]
 mod tests;
+
+/// One profile's card, tracked for keyboard scrolling as a whole so focusing
+/// any control inside it brings the card into view.
+///
+/// A detected profile and a user-defined one are different cards, not one card
+/// with fields disabled: a detected profile's program and arguments come from
+/// what is installed and cannot be edited, so it shows them as text and offers
+/// only the four overrides.
+#[allow(clippy::too_many_arguments)]
+fn profile_card(
+    index: usize,
+    profile: &crate::settings_editor::ProfileForm,
+    editor: &SettingsEditor,
+    colors: &ThemeColors,
+    handle: &WeakEntity<Zetta>,
+    widgets: &PageWidgets<'_>,
+) -> AnyElement {
+    let &PageWidgets {
+        text_input,
+        dropdown,
+        ..
+    } = widgets;
+
+    let profile_controls = profile_controls(index, profile.detected);
+    let profile_focused = profile_controls
+        .iter()
+        .any(|control| editor.focused_control.as_ref() == Some(control));
+    let profile_theme = profile
+        .theme
+        .clone()
+        .unwrap_or_else(|| "Use application theme".to_owned());
+    let profile_theme = dropdown(
+        format!("settings-profile-{index}-theme"),
+        profile_theme,
+        SettingsDropdown::ProfileTheme(index),
+    );
+    let profile_dark_theme = profile
+        .dark_theme
+        .clone()
+        .unwrap_or_else(|| "Use application theme".to_owned());
+    let profile_dark_theme = dropdown(
+        format!("settings-profile-{index}-dark-theme"),
+        profile_dark_theme,
+        SettingsDropdown::ProfileDarkTheme(index),
+    );
+    let profile_icon_value = profile.icon.as_ref().unwrap_or(&profile.automatic_icon);
+    let profile_icon = h_flex()
+        .w_full()
+        .gap_2()
+        .child(profile_icon_value.render(IconSize::Small))
+        .child(div().min_w_0().flex_1().child(dropdown(
+            format!("settings-profile-{index}-icon"),
+            ProfileIcon::selector_label(profile.icon.as_ref()).to_owned(),
+            SettingsDropdown::ProfileIcon(index),
+        )));
+    let visibility_handle = handle.clone();
+    let profile_visibility = switch(
+        format!("settings-profile-{index}-visibility"),
+        (!profile.hidden).into(),
+    )
+    .label(if profile.hidden { "Hidden" } else { "Visible" })
+    .full_width(true)
+    .aria_label("Show profile in Profiles menu")
+    .on_click(move |state, window, cx| {
+        visibility_handle
+            .update(cx, |this, cx| {
+                this.set_settings_toggle(
+                    SettingsToggle::ProfileVisibility(index),
+                    state.selected(),
+                    window,
+                    cx,
+                );
+            })
+            .ok();
+    });
+    let card = if profile.detected {
+        detected_profile_card(
+            ProfileCardParts {
+                index,
+                profile,
+                profile_focused,
+                profile_icon_value,
+                profile_visibility,
+                profile_icon,
+                profile_theme,
+                profile_dark_theme,
+            },
+            colors,
+        )
+    } else {
+        user_profile_card(
+            ProfileCardParts {
+                index,
+                profile,
+                profile_focused,
+                profile_icon_value,
+                profile_visibility,
+                profile_icon,
+                profile_theme,
+                profile_dark_theme,
+            },
+            editor,
+            colors,
+            handle,
+            text_input,
+        )
+    };
+    track_focus_scroll(div().w_full().child(card), editor, &profile_controls).into_any_element()
+}
+
+/// The parts both kinds of profile card are built from: which profile it is,
+/// whether anything inside it holds the keyboard, its icon, and the four
+/// override controls the two cards lay out identically.
+struct ProfileCardParts<'a> {
+    index: usize,
+    profile: &'a crate::settings_editor::ProfileForm,
+    profile_focused: bool,
+    profile_icon_value: &'a ProfileIcon,
+    profile_visibility: ui::Switch,
+    profile_icon: Div,
+    profile_theme: AnyElement,
+    profile_dark_theme: AnyElement,
+}
+
+/// The card frame both kinds share: padding, rounding, and the border and fill
+/// that report focus.
+fn profile_card_frame(focused: bool, colors: &ThemeColors) -> Div {
+    div()
+        .p_3()
+        .mb_2()
+        .rounded(px(6.))
+        .border_1()
+        .border_color(if focused {
+            colors.border_focused
+        } else {
+            colors.border
+        })
+        .bg(if focused {
+            colors.element_selected
+        } else {
+            colors.editor_background
+        })
+}
+
+/// A profile discovered on this machine. Its program and arguments come from
+/// what is installed, so they are shown rather than edited, and only the four
+/// overrides are controls.
+fn detected_profile_card(parts: ProfileCardParts<'_>, colors: &ThemeColors) -> AnyElement {
+    let ProfileCardParts {
+        index,
+        profile,
+        profile_focused,
+        profile_icon_value,
+        profile_visibility,
+        profile_icon,
+        profile_theme,
+        profile_dark_theme,
+    } = parts;
+    let _ = index;
+    profile_card_frame(profile_focused, colors)
+        .child(
+            h_flex()
+                .min_w_0()
+                .flex_1()
+                .gap_2()
+                .child(profile_icon_value.render(IconSize::Medium))
+                .child(
+                    div()
+                        .min_w_0()
+                        .flex_1()
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(colors.text)
+                                .child(profile.name.text.clone()),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(colors.text_muted)
+                                .child("Detected profile"),
+                        ),
+                ),
+        )
+        .child(profile_fields_grid([
+            profile_field("Shown in Profiles menu", profile_visibility, colors),
+            profile_field("Icon", profile_icon, colors),
+            profile_field("Light theme", profile_theme, colors),
+            profile_field("Dark theme", profile_dark_theme, colors),
+        ]))
+        .into_any_element()
+}
+
+/// A user-defined profile: its name, program and arguments are editable, and it
+/// can be removed.
+fn user_profile_card(
+    parts: ProfileCardParts<'_>,
+    editor: &SettingsEditor,
+    colors: &ThemeColors,
+    handle: &WeakEntity<Zetta>,
+    text_input: &dyn Fn(String, TextField, SettingsInput) -> AnyElement,
+) -> AnyElement {
+    let ProfileCardParts {
+        index,
+        profile,
+        profile_focused,
+        profile_icon_value,
+        profile_visibility,
+        profile_icon,
+        profile_theme,
+        profile_dark_theme,
+    } = parts;
+    let _ = profile_icon_value;
+    let remove_handle = handle.clone();
+    profile_card_frame(profile_focused, colors)
+        .child(
+            h_flex()
+                .items_end()
+                .gap_2()
+                .child(
+                    div()
+                        .min_w_0()
+                        .flex_1()
+                        .child(
+                            div()
+                                .mb_1()
+                                .text_xs()
+                                .text_color(colors.text_muted)
+                                .child("Profile name"),
+                        )
+                        .child(text_input(
+                            format!("settings-profile-{index}-name"),
+                            profile.name.clone(),
+                            SettingsInput::Configuration(ConfigTextField::ProfileName(index)),
+                        )),
+                )
+                .child(
+                    IconButton::new(("remove-settings-profile", index), IconName::Trash)
+                        .icon_size(IconSize::Small)
+                        .icon_color(Color::Custom(colors.icon))
+                        .selected_icon_color(Color::Custom(colors.icon))
+                        .toggle_state(
+                            editor.focused_control == Some(SettingsControl::RemoveProfile(index)),
+                        )
+                        .selected_style(ButtonStyle::OutlinedCustom(colors.border_focused))
+                        .tooltip(Tooltip::text("Remove profile"))
+                        .on_click(move |_, _, cx| {
+                            remove_handle
+                                .update(cx, |this, cx| {
+                                    if let Some(editor) = this.settings_editor.as_mut() {
+                                        editor.configuration.profiles.remove(index);
+                                        editor.configuration_dirty = true;
+                                        invalidate_controls_cache(editor);
+                                        cx.notify();
+                                    }
+                                })
+                                .ok();
+                        }),
+                ),
+        )
+        .child(
+            div()
+                .mt_2()
+                .grid()
+                .grid_cols(2)
+                .gap_2()
+                .child(
+                    div()
+                        .min_w_0()
+                        .flex_1()
+                        .child(
+                            div()
+                                .mb_1()
+                                .text_xs()
+                                .text_color(colors.text_muted)
+                                .child("Program"),
+                        )
+                        .child(text_input(
+                            format!("settings-profile-{index}-program"),
+                            profile.program.clone(),
+                            SettingsInput::Configuration(ConfigTextField::ProfileProgram(index)),
+                        )),
+                )
+                .child(
+                    div()
+                        .min_w_0()
+                        .flex_1()
+                        .child(
+                            div()
+                                .mb_1()
+                                .text_xs()
+                                .text_color(colors.text_muted)
+                                .child("Arguments (comma separated)"),
+                        )
+                        .child(text_input(
+                            format!("settings-profile-{index}-arguments"),
+                            profile.arguments.clone(),
+                            SettingsInput::Configuration(ConfigTextField::ProfileArguments(index)),
+                        )),
+                ),
+        )
+        .child(profile_fields_grid([
+            profile_field("Shown in Profiles menu", profile_visibility, colors),
+            profile_field("Icon", profile_icon, colors),
+            profile_field("Light theme", profile_theme, colors),
+            profile_field("Dark theme", profile_dark_theme, colors),
+        ]))
+        .into_any_element()
+}

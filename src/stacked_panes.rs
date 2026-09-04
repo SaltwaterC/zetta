@@ -78,12 +78,11 @@ impl Zetta {
         cx: &mut Context<Self>,
     ) {
         let Some((tab_id, pane_id, entry_id)) = self.tabs.get(self.active_tab).and_then(|tab| {
-            let entry_id = match tab
+            let Some(PaneStackSelection::Stacked(entry_id)) = tab
                 .active_pane()
                 .map(|pane| pane.focused_stack_selection(window, cx))
-            {
-                Some(PaneStackSelection::Stacked(id)) => id,
-                _ => return None,
+            else {
+                return None;
             };
             Some((tab.id, tab.active_pane, entry_id))
         }) else {

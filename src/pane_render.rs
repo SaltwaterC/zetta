@@ -22,14 +22,74 @@ fn with_inactive_pane_opacity(pane: gpui::Div, active: bool, inactive_opacity: f
     pane.when(!active, |pane| pane.opacity(inactive_opacity))
 }
 
+/// The badge a pane shows in its bottom-right corner while resize or move mode
+/// is on. Both modes draw the same chip and differ only in what they write in
+/// it, so the two callers pass a finished label.
+fn pane_status_badge(label: String, colors: &ThemeColors) -> gpui::Div {
+    div()
+        .absolute()
+        .right(px(6.))
+        .bottom(px(6.))
+        .px_2()
+        .py_1()
+        .rounded_sm()
+        .bg(colors.status_bar_background)
+        .text_sm()
+        .text_color(colors.text)
+        .child(label)
+}
+
+/// A pane's overlay text, positioned against the pane's top-right corner.
+///
+/// The vertical offset is per font size on purpose: the line box sits on the
+/// glyph's internal leading (measured: 6px at `sm`, 14px at `3xl`), so each size
+/// offsets by `overlay_pane_inset() - leading(size)` to keep the visible gap to
+/// the pane edge constant.
+fn pane_overlay_element(
+    pane_id: u64,
+    overlay: String,
+    pane: &TerminalPane,
+    editing: bool,
+    colors: &ThemeColors,
+) -> gpui::Stateful<gpui::Div> {
+    let font_size = pane.overlay_font_size.unwrap_or(OverlayFontSize::DEFAULT);
+    let base_opacity = pane.overlay_opacity.unwrap_or(DEFAULT_OVERLAY_OPACITY);
+    let color = pane.overlay_color.unwrap_or(colors.text);
+    let top = match font_size {
+        OverlayFontSize::Small => px(8.),
+        OverlayFontSize::Base => px(7.),
+        OverlayFontSize::Large => px(6.),
+        OverlayFontSize::ExtraLarge => px(5.),
+        OverlayFontSize::ExtraExtraLarge => px(3.),
+        OverlayFontSize::ExtraExtraExtraLarge => px(0.),
+    };
+    div()
+        .id(("terminal-pane-overlay", pane_id as usize))
+        .absolute()
+        .right(px(14.))
+        .top(top)
+        .max_w(px(320.))
+        .map(|element| match font_size {
+            OverlayFontSize::Small => element.text_sm(),
+            OverlayFontSize::Base => element.text_base(),
+            OverlayFontSize::Large => element.text_lg(),
+            OverlayFontSize::ExtraLarge => element.text_xl(),
+            OverlayFontSize::ExtraExtraLarge => element.text_2xl(),
+            OverlayFontSize::ExtraExtraExtraLarge => element.text_3xl(),
+        })
+        .text_color(color)
+        .opacity(if editing { 1. } else { base_opacity })
+        .overflow_hidden()
+        .child(overlay)
+}
+
 fn stacked_entry_status(entry: &StackedPane) -> String {
     match entry.state {
         StackedPaneState::Starting => "starting".to_owned(),
         StackedPaneState::Running => "running".to_owned(),
         StackedPaneState::Completed => entry
             .exit_code
-            .map(|code| format!("exit {code}"))
-            .unwrap_or_else(|| "completed".to_owned()),
+            .map_or_else(|| "completed".to_owned(), |code| format!("exit {code}")),
         StackedPaneState::Failed => "failed".to_owned(),
     }
 }
@@ -320,20 +380,124 @@ impl Zetta {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
+        let PaneLayoutContext { tab, colors, .. } = context;
+        let Some(pane) = tab.pane(pane_id) else {
+            return div().size_full().into_any_element();
+        };
+        let pane_label = tab
+            .displayed_pane_label(pane_id)
+            .unwrap_or_else(|| pane.label());
+        let pane_size = pane.selected_terminal().map(|terminal| {
+            let bounds = terminal.read(cx).last_content().terminal_bounds;
+            terminal_size_label(bounds.num_columns(), bounds.num_lines())
+        });
+        let content = self.render_pane_body(context, pane, edges, window, cx);
+        div()
+            .id(("terminal-pane", pane_id as usize))
+            .relative()
+            .when(
+                tab.panes.len() > 1 && tab.maximized_pane.is_none(),
+                |pane| {
+                    pane.on_mouse_move(cx.listener(move |this, _, window, cx| {
+                        this.show_pane_controls(pane_id, window, cx);
+                    }))
+                },
+            )
+            .size_full()
+            .min_w_0()
+            .min_h_0()
+            .flex_grow_1()
+            .flex_basis(gpui::relative(0.))
+            .overflow_hidden()
+            .child(content)
+            .when_some(
+                self.pane_resize_mode.then_some(pane_size.clone()).flatten(),
+                |element, pane_size| {
+                    element.child(pane_status_badge(
+                        format!("{pane_label} {pane_size}"),
+                        colors,
+                    ))
+                },
+            )
+            .when(self.pane_move_mode, |element| {
+                let overlay_label = if tab.active_pane == pane_id {
+                    format!("{pane_label} Move mode")
+                } else {
+                    pane_label.clone()
+                };
+                element.child(pane_status_badge(overlay_label, colors))
+            })
+            .when_some(tab.displayed_pane_overlay(pane_id), |element, overlay| {
+                element.child(pane_overlay_element(
+                    pane_id,
+                    overlay,
+                    pane,
+                    tab.editing_overlay_pane == Some(pane_id),
+                    colors,
+                ))
+            })
+            .when(
+                tab.maximized_pane.is_none()
+                    && pane.stack.is_empty()
+                    && (tab.renaming_pane == Some(pane_id)
+                        || (tab.panes.len() > 1
+                            && self.pane_controls_visible_for == Some(pane_id))),
+                |element| {
+                    element.child(
+                        self.render_pane_controls(context, pane_id, pane_label, pane_size, cx),
+                    )
+                },
+            )
+            .when(
+                self.pane_move_mode && tab.panes.len() > 1 && tab.maximized_pane.is_none(),
+                |pane| {
+                    let pane_move_drag = PaneMoveDrag {
+                        tab_id: tab.id,
+                        pane_id,
+                    };
+                    // A dedicated top-most overlay, rather than handlers on the
+                    // pane itself, so `occlude` can block every mouse
+                    // interaction with the terminal underneath (selection,
+                    // clicks, scroll) while move mode is active: the pane must
+                    // act as a plain drag handle, not a terminal.
+                    pane.child(
+                        div()
+                            .id(("pane-move-drag-surface", pane_id as usize))
+                            .absolute()
+                            .inset_0()
+                            .cursor(CursorStyle::OpenHand)
+                            .occlude()
+                            .on_drag(pane_move_drag, |_, _, _, cx| cx.new(|_| gpui::Empty))
+                            .on_drop(cx.listener(
+                                move |this, dragged: &PaneMoveDrag, _window, cx| {
+                                    this.move_pane_via_drag(*dragged, pane_move_drag, cx);
+                                },
+                            )),
+                    )
+                },
+            )
+            .into_any_element()
+    }
+
+    /// What fills a pane: the terminal view it is showing, or the message that
+    /// stands in for one, under any stacked-command rows and the inactive-pane
+    /// dimming.
+    fn render_pane_body(
+        &self,
+        context: PaneLayoutContext<'_>,
+        pane: &TerminalPane,
+        edges: PaneWindowEdges,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
         let PaneLayoutContext {
             tab,
             colors,
             error_color,
             corner_radius,
         } = context;
-        let Some(pane) = tab.pane(pane_id) else {
-            return div().size_full().into_any_element();
-        };
+        let pane_id = pane.id;
         let corner_radii = edges.client_corner_radii(window, corner_radius);
-        let pane_label = tab
-            .displayed_pane_label(pane_id)
-            .unwrap_or_else(|| pane.label());
-        let pane_overlay = tab.displayed_pane_overlay(pane_id);
         let selected_view = pane.selected_view();
         let (editor_background, terminal_background) = selected_view
             .as_ref()
@@ -344,28 +508,6 @@ impl Zetta {
                 })
             })
             .unwrap_or((colors.editor_background, colors.terminal_background));
-        let pane_terminal = pane.selected_terminal();
-        let pane_size = pane_terminal.map(|terminal| {
-            let bounds = terminal.read(cx).last_content().terminal_bounds;
-            terminal_size_label(bounds.num_columns(), bounds.num_lines())
-        });
-        let pane_label_selected = tab.pane_rename_selected(pane_id);
-        let pane_overlay_editing = tab.editing_overlay_pane == Some(pane_id);
-        let pane_overlay_font_size = pane.overlay_font_size.unwrap_or(OverlayFontSize::DEFAULT);
-        let pane_overlay_base_opacity = pane.overlay_opacity.unwrap_or(DEFAULT_OVERLAY_OPACITY);
-        let pane_overlay_color = pane.overlay_color.unwrap_or(colors.text);
-        let pane_overlay_top = match pane_overlay_font_size {
-            // The line box sits on the glyph's internal leading
-            // (measured: 6px at `sm`, 14px at `3xl`), so each size
-            // offsets by `overlay_pane_inset() - leading(size)` to keep
-            // the visible gap to the pane edge constant.
-            OverlayFontSize::Small => px(8.),
-            OverlayFontSize::Base => px(7.),
-            OverlayFontSize::Large => px(6.),
-            OverlayFontSize::ExtraLarge => px(5.),
-            OverlayFontSize::ExtraExtraLarge => px(3.),
-            OverlayFontSize::ExtraExtraExtraLarge => px(0.),
-        };
         let active = selected_view.as_ref().is_some_and(|view| {
             view.focus_handle(cx).is_focused(window)
                 || view.read(cx).has_open_context_menu()
@@ -388,11 +530,10 @@ impl Zetta {
         };
         let selected_profile_name = match pane.stack.selected {
             PaneStackSelection::Base => pane.profile.name.clone(),
-            PaneStackSelection::Stacked(_) => pane
-                .stack
-                .selected_entry()
-                .map(|entry| entry.profile.name.clone())
-                .unwrap_or_else(|| pane.profile.name.clone()),
+            PaneStackSelection::Stacked(_) => pane.stack.selected_entry().map_or_else(
+                || pane.profile.name.clone(),
+                |entry| entry.profile.name.clone(),
+            ),
         };
         let content = match (&selected_view, selected_error) {
             (Some(view), _) => {
@@ -423,8 +564,7 @@ impl Zetta {
                 } else {
                     pane.exit
                         .as_ref()
-                        .map(|exit| exit.heading())
-                        .unwrap_or("Unable to start command")
+                        .map_or("Unable to start command", |exit| exit.heading())
                 };
                 div()
                     .size_full()
@@ -486,306 +626,174 @@ impl Zetta {
                 )
                 .into_any_element()
         };
-        let content = with_inactive_pane_opacity(
+        with_inactive_pane_opacity(
             div().size_full().child(content),
             active,
             self.projects
                 .config_for_pane(tab.active_pane)
-                .map(|project| project.effective.inactive_pane_opacity)
-                .unwrap_or(self.launch_config.inactive_pane_opacity),
+                .map_or(self.launch_config.inactive_pane_opacity, |project| {
+                    project.effective.inactive_pane_opacity
+                }),
         )
-        .into_any_element();
+        .into_any_element()
+    }
+
+    /// The controls a pane shows while it is hovered or being renamed: its
+    /// label, and — when the tab has more than one pane — its grid size and the
+    /// minimize/maximize/close buttons.
+    ///
+    /// A single pane being renamed reaches this too, which is why the buttons
+    /// keep their own `panes.len() > 1` test rather than inheriting the
+    /// caller's.
+    fn render_pane_controls(
+        &self,
+        context: PaneLayoutContext<'_>,
+        pane_id: u64,
+        pane_label: String,
+        pane_size: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let PaneLayoutContext { tab, colors, .. } = context;
+        let pane_label_selected = tab.pane_rename_selected(pane_id);
+        let maximize_handle = cx.entity().downgrade();
+        let minimize_handle = cx.entity().downgrade();
+        let close_handle = cx.entity().downgrade();
+        let rename_handle = cx.entity().downgrade();
+        let tab_id = tab.id;
+        let maximize_pane_id = pane_id;
+        let minimize_pane_id = pane_id;
+        let close_pane_id = pane_id;
+        let rename_pane_id = pane_id;
+        let pane_label_tooltip = format!("{pane_label}\nDouble-click to label this pane");
         div()
-            .id(("terminal-pane", pane_id as usize))
-            .relative()
+            .absolute()
+            .top(px(4.))
             .when(
-                tab.panes.len() > 1 && tab.maximized_pane.is_none(),
-                |pane| {
-                    pane.on_mouse_move(cx.listener(move |this, _, window, cx| {
-                        this.show_pane_controls(pane_id, window, cx);
-                    }))
-                },
+                self.launch_config.pane_controls_position == PaneControlsPosition::Left,
+                |controls| controls.left(px(4.)),
             )
-            .size_full()
-            .min_w_0()
-            .min_h_0()
-            .flex_grow_1()
-            .flex_basis(gpui::relative(0.))
-            .overflow_hidden()
-            .child(content)
-            .when_some(
-                self.pane_resize_mode.then_some(pane_size.clone()).flatten(),
-                |pane, pane_size| {
-                    pane.child(
-                        div()
-                            .absolute()
-                            .right(px(6.))
-                            .bottom(px(6.))
-                            .px_2()
-                            .py_1()
-                            .rounded_sm()
-                            .bg(colors.status_bar_background)
-                            .text_sm()
-                            .text_color(colors.text)
-                            .child(format!("{pane_label} {pane_size}")),
-                    )
-                },
-            )
-            .when(self.pane_move_mode, |pane| {
-                let overlay_label = if tab.active_pane == pane_id {
-                    format!("{pane_label} Move mode")
-                } else {
-                    pane_label.clone()
-                };
-                pane.child(
-                    div()
-                        .absolute()
-                        .right(px(6.))
-                        .bottom(px(6.))
-                        .px_2()
-                        .py_1()
-                        .rounded_sm()
-                        .bg(colors.status_bar_background)
-                        .text_sm()
-                        .text_color(colors.text)
-                        .child(overlay_label),
-                )
-            })
-            .when_some(pane_overlay, |pane, overlay| {
-                pane.child(
-                    div()
-                        .id(("terminal-pane-overlay", pane_id as usize))
-                        .absolute()
-                        .right(px(14.))
-                        .top(pane_overlay_top)
-                        .max_w(px(320.))
-                        .map(|element| match pane_overlay_font_size {
-                            OverlayFontSize::Small => element.text_sm(),
-                            OverlayFontSize::Base => element.text_base(),
-                            OverlayFontSize::Large => element.text_lg(),
-                            OverlayFontSize::ExtraLarge => element.text_xl(),
-                            OverlayFontSize::ExtraExtraLarge => element.text_2xl(),
-                            OverlayFontSize::ExtraExtraExtraLarge => element.text_3xl(),
-                        })
-                        .text_color(pane_overlay_color)
-                        .opacity(if pane_overlay_editing {
-                            1.
-                        } else {
-                            pane_overlay_base_opacity
-                        })
-                        .overflow_hidden()
-                        .child(overlay),
-                )
-            })
             .when(
-                tab.maximized_pane.is_none()
-                    && pane.stack.is_empty()
-                    && (tab.renaming_pane == Some(pane_id)
-                        || (tab.panes.len() > 1
-                            && self.pane_controls_visible_for == Some(pane_id))),
-                |pane| {
-                    let maximize_handle = cx.entity().downgrade();
-                    let minimize_handle = cx.entity().downgrade();
-                    let close_handle = cx.entity().downgrade();
-                    let rename_handle = cx.entity().downgrade();
-                    let tab_id = tab.id;
-                    let maximize_pane_id = pane_id;
-                    let minimize_pane_id = pane_id;
-                    let close_pane_id = pane_id;
-                    let rename_pane_id = pane_id;
-                    let pane_label_tooltip =
-                        format!("{pane_label}\nDouble-click to label this pane");
-                    pane.child(
+                self.launch_config.pane_controls_position == PaneControlsPosition::Right,
+                |controls| controls.right(px(4.)),
+            )
+            .flex()
+            .when(
+                self.launch_config.pane_controls_position == PaneControlsPosition::Left,
+                |controls| controls.flex_row_reverse(),
+            )
+            .items_center()
+            .gap_1()
+            .child(
+                div()
+                    .id(("terminal-pane-label", pane_id as usize))
+                    .h_6()
+                    .max_w(px(240.))
+                    .flex()
+                    .items_center()
+                    .px_2()
+                    .rounded_sm()
+                    .border_1()
+                    .border_color(colors.border)
+                    .bg(colors.status_bar_background)
+                    .when(pane_label_selected, |label| {
+                        label.bg(colors.element_selected)
+                    })
+                    .cursor_text()
+                    .overflow_hidden()
+                    .tooltip(Tooltip::for_action_title(pane_label_tooltip, &RenamePane))
+                    .on_click(move |event, window, cx| {
+                        if event.click_count() == 2 {
+                            cx.stop_propagation();
+                            rename_handle
+                                .update(cx, |this, cx| {
+                                    this.begin_pane_rename(rename_pane_id, window, cx);
+                                })
+                                .ok();
+                        }
+                    })
+                    .child(
+                        Label::new(pane_label)
+                            .size(LabelSize::Small)
+                            .color(Color::Custom(colors.text_muted)),
+                    ),
+            )
+            .when(tab.panes.len() > 1, |controls| {
+                controls
+                    .when_some(pane_size, |controls, pane_size| {
+                        controls.child(
+                            Label::new(pane_size)
+                                .size(LabelSize::Small)
+                                .color(Color::Custom(colors.text_muted)),
+                        )
+                    })
+                    .child(
                         div()
-                            .absolute()
-                            .top(px(4.))
-                            .when(
-                                self.launch_config.pane_controls_position
-                                    == PaneControlsPosition::Left,
-                                |controls| controls.left(px(4.)),
-                            )
-                            .when(
-                                self.launch_config.pane_controls_position
-                                    == PaneControlsPosition::Right,
-                                |controls| controls.right(px(4.)),
-                            )
                             .flex()
-                            .when(
-                                self.launch_config.pane_controls_position
-                                    == PaneControlsPosition::Left,
-                                |controls| controls.flex_row_reverse(),
-                            )
                             .items_center()
                             .gap_1()
                             .child(
-                                div()
-                                    .id(("terminal-pane-label", pane_id as usize))
-                                    .h_6()
-                                    .max_w(px(240.))
-                                    .flex()
-                                    .items_center()
-                                    .px_2()
-                                    .rounded_sm()
-                                    .border_1()
-                                    .border_color(colors.border)
-                                    .bg(colors.status_bar_background)
-                                    .when(pane_label_selected, |label| {
-                                        label.bg(colors.element_selected)
-                                    })
-                                    .cursor_text()
-                                    .overflow_hidden()
-                                    .tooltip(Tooltip::for_action_title(
-                                        pane_label_tooltip,
-                                        &RenamePane,
-                                    ))
-                                    .on_click(move |event, window, cx| {
-                                        if event.click_count() == 2 {
-                                            cx.stop_propagation();
-                                            rename_handle
-                                                .update(cx, |this, cx| {
-                                                    this.begin_pane_rename(
-                                                        rename_pane_id,
-                                                        window,
-                                                        cx,
-                                                    );
-                                                })
-                                                .ok();
-                                        }
-                                    })
-                                    .child(
-                                        Label::new(pane_label)
-                                            .size(LabelSize::Small)
-                                            .color(Color::Custom(colors.text_muted)),
-                                    ),
+                                IconButton::new(
+                                    ("minimize-terminal-pane", pane_id as usize),
+                                    IconName::Dash,
+                                )
+                                .style(ButtonStyle::Transparent)
+                                .size(ButtonSize::Compact)
+                                .icon_size(IconSize::XSmall)
+                                .icon_color(Color::Custom(colors.icon))
+                                .aria_label("Minimize pane")
+                                .tooltip(Tooltip::for_action_title("Minimize pane", &MinimizePane))
+                                .on_click(move |_, window, cx| {
+                                    minimize_handle
+                                        .update(cx, |this, cx| {
+                                            this.minimize_pane_by_id(minimize_pane_id, window, cx);
+                                        })
+                                        .ok();
+                                }),
                             )
-                            .when(tab.panes.len() > 1, |controls| {
-                                controls
-                                    .when_some(pane_size.clone(), |controls, pane_size| {
-                                        controls.child(
-                                            Label::new(pane_size)
-                                                .size(LabelSize::Small)
-                                                .color(Color::Custom(colors.text_muted)),
-                                        )
+                            .child(
+                                IconButton::new(
+                                    ("maximize-terminal-pane", pane_id as usize),
+                                    IconName::Maximize,
+                                )
+                                .style(ButtonStyle::Transparent)
+                                .size(ButtonSize::Compact)
+                                .icon_size(IconSize::XSmall)
+                                .icon_color(Color::Custom(colors.icon))
+                                .aria_label("Maximize pane")
+                                .tooltip(Tooltip::for_action_title(
+                                    "Maximize pane",
+                                    &ToggleMaximizePane,
+                                ))
+                                .on_click(move |_, window, cx| {
+                                    maximize_handle
+                                        .update(cx, |this, cx| {
+                                            this.toggle_maximize_pane_by_id(
+                                                maximize_pane_id,
+                                                window,
+                                                cx,
+                                            );
+                                        })
+                                        .ok();
+                                }),
+                            ),
+                    )
+                    .child(
+                        IconButton::new(("close-terminal-pane", pane_id as usize), IconName::Close)
+                            .style(ButtonStyle::Transparent)
+                            .size(ButtonSize::Compact)
+                            .icon_size(IconSize::XSmall)
+                            .icon_color(Color::Custom(colors.icon))
+                            .aria_label("Close pane")
+                            .tooltip(Tooltip::for_action_title("Close pane", &ClosePane))
+                            .on_click(move |_, window, cx| {
+                                close_handle
+                                    .update(cx, |this, cx| {
+                                        this.close_pane(tab_id, close_pane_id, window, cx);
                                     })
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .items_center()
-                                            .gap_1()
-                                            .child(
-                                                IconButton::new(
-                                                    ("minimize-terminal-pane", pane_id as usize),
-                                                    IconName::Dash,
-                                                )
-                                                .style(ButtonStyle::Transparent)
-                                                .size(ButtonSize::Compact)
-                                                .icon_size(IconSize::XSmall)
-                                                .icon_color(Color::Custom(colors.icon))
-                                                .aria_label("Minimize pane")
-                                                .tooltip(Tooltip::for_action_title(
-                                                    "Minimize pane",
-                                                    &MinimizePane,
-                                                ))
-                                                .on_click(move |_, window, cx| {
-                                                    minimize_handle
-                                                        .update(cx, |this, cx| {
-                                                            this.minimize_pane_by_id(
-                                                                minimize_pane_id,
-                                                                window,
-                                                                cx,
-                                                            );
-                                                        })
-                                                        .ok();
-                                                }),
-                                            )
-                                            .child(
-                                                IconButton::new(
-                                                    ("maximize-terminal-pane", pane_id as usize),
-                                                    IconName::Maximize,
-                                                )
-                                                .style(ButtonStyle::Transparent)
-                                                .size(ButtonSize::Compact)
-                                                .icon_size(IconSize::XSmall)
-                                                .icon_color(Color::Custom(colors.icon))
-                                                .aria_label("Maximize pane")
-                                                .tooltip(Tooltip::for_action_title(
-                                                    "Maximize pane",
-                                                    &ToggleMaximizePane,
-                                                ))
-                                                .on_click(move |_, window, cx| {
-                                                    maximize_handle
-                                                        .update(cx, |this, cx| {
-                                                            this.toggle_maximize_pane_by_id(
-                                                                maximize_pane_id,
-                                                                window,
-                                                                cx,
-                                                            );
-                                                        })
-                                                        .ok();
-                                                }),
-                                            ),
-                                    )
-                                    .child(
-                                        IconButton::new(
-                                            ("close-terminal-pane", pane_id as usize),
-                                            IconName::Close,
-                                        )
-                                        .style(ButtonStyle::Transparent)
-                                        .size(ButtonSize::Compact)
-                                        .icon_size(IconSize::XSmall)
-                                        .icon_color(Color::Custom(colors.icon))
-                                        .aria_label("Close pane")
-                                        .tooltip(Tooltip::for_action_title(
-                                            "Close pane",
-                                            &ClosePane,
-                                        ))
-                                        .on_click(
-                                            move |_, window, cx| {
-                                                close_handle
-                                                    .update(cx, |this, cx| {
-                                                        this.close_pane(
-                                                            tab_id,
-                                                            close_pane_id,
-                                                            window,
-                                                            cx,
-                                                        );
-                                                    })
-                                                    .ok();
-                                            },
-                                        ),
-                                    )
+                                    .ok();
                             }),
                     )
-                },
-            )
-            .when(
-                self.pane_move_mode && tab.panes.len() > 1 && tab.maximized_pane.is_none(),
-                |pane| {
-                    let pane_move_drag = PaneMoveDrag {
-                        tab_id: tab.id,
-                        pane_id,
-                    };
-                    // A dedicated top-most overlay, rather than handlers on the
-                    // pane itself, so `occlude` can block every mouse
-                    // interaction with the terminal underneath (selection,
-                    // clicks, scroll) while move mode is active: the pane must
-                    // act as a plain drag handle, not a terminal.
-                    pane.child(
-                        div()
-                            .id(("pane-move-drag-surface", pane_id as usize))
-                            .absolute()
-                            .inset_0()
-                            .cursor(CursorStyle::OpenHand)
-                            .occlude()
-                            .on_drag(pane_move_drag, |_, _, _, cx| cx.new(|_| gpui::Empty))
-                            .on_drop(cx.listener(
-                                move |this, dragged: &PaneMoveDrag, _window, cx| {
-                                    this.move_pane_via_drag(*dragged, pane_move_drag, cx);
-                                },
-                            )),
-                    )
-                },
-            )
+            })
             .into_any_element()
     }
 

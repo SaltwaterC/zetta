@@ -41,13 +41,11 @@ pub(crate) fn update_profile_actions(
     if !metadata.file_type().is_file() || !is_writable(&metadata) {
         return Ok(false);
     }
-    let contents = match fs::read_to_string(&path) {
-        Ok(contents) => contents,
-        Err(_) => return Ok(false),
+    let Ok(contents) = fs::read_to_string(&path) else {
+        return Ok(false);
     };
-    let executable = match env::current_exe() {
-        Ok(executable) => executable,
-        Err(_) => return Ok(false),
+    let Ok(executable) = env::current_exe() else {
+        return Ok(false);
     };
     let Some(updated) =
         render_managed_desktop_entry(&contents, &executable, profiles, hidden_profiles)

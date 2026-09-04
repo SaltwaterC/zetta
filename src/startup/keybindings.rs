@@ -49,28 +49,6 @@ pub(crate) const PROFILE_SHORTCUT_SYMBOLS: [&str; 10] =
 pub(crate) const PROFILE_SHORTCUT_KEYS: [&str; 10] =
     ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"];
 
-/// Converts GPUI's normalized number-row key names to the user-facing
-/// physical-key aliases used by menus and the keymap editor.
-#[allow(dead_code)]
-pub(crate) fn keymap_keystroke_alias(keystroke: &str) -> Option<String> {
-    let keystroke = keystroke.trim().to_ascii_lowercase();
-    let key_index = keystroke
-        .strip_prefix("ctrl-shift-")
-        .and_then(|key| {
-            PROFILE_SHORTCUT_KEYS
-                .iter()
-                .position(|candidate| *candidate == key)
-        })
-        .or_else(|| {
-            keystroke.strip_prefix("ctrl-").and_then(|symbol| {
-                PROFILE_SHORTCUT_SYMBOLS
-                    .iter()
-                    .position(|candidate| *candidate == symbol)
-            })
-        })?;
-    Some(format!("Ctrl+Shift+{}", PROFILE_SHORTCUT_KEYS[key_index]))
-}
-
 /// Converts a user-facing number-row alias back to GPUI's normalized keymap
 /// spelling for storage and keymap loading.
 pub(crate) fn keymap_keystroke_storage(keystroke: &str) -> String {

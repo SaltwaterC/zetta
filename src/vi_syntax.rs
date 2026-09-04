@@ -1205,8 +1205,10 @@ fn active_syntax_theme_for(configured_theme: Option<&str>) -> Arc<SyntaxTheme> {
     // a syntax theme has nothing to do with.
     registry
         .get(selected_theme_name(configured_theme))
-        .map(|theme: Arc<Theme>| theme.syntax().clone())
-        .unwrap_or_else(|_| Arc::new(SyntaxTheme::new([])))
+        .map_or_else(
+            |_| Arc::new(SyntaxTheme::new([])),
+            |theme: Arc<Theme>| theme.syntax().clone(),
+        )
 }
 
 fn to_terminal_style(style: &ZedHighlightStyle) -> HighlightStyle {

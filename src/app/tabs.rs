@@ -13,8 +13,7 @@ impl Zetta {
         let project = self.active_project_config().cloned();
         let effective = project
             .as_ref()
-            .map(|project| &project.effective)
-            .unwrap_or(&self.launch_config);
+            .map_or(&self.launch_config, |project| &project.effective);
         let Some(profile) = new_tab_profile(
             active_profile,
             &self.profiles,
@@ -93,8 +92,7 @@ impl Zetta {
         let project = self.active_project_config().cloned();
         let effective = project
             .as_ref()
-            .map(|project| &project.effective)
-            .unwrap_or(&self.launch_config);
+            .map_or(&self.launch_config, |project| &project.effective);
         let active_profile = self.tabs.get(self.active_tab).and_then(Tab::active_profile);
         let profile = new_tab_profile(
             active_profile,
@@ -188,8 +186,7 @@ impl Zetta {
         let active_pane = self.tabs.get(self.active_tab).and_then(Tab::active_pane);
         let effective = project
             .as_ref()
-            .map(|project| &project.effective)
-            .unwrap_or(&self.launch_config);
+            .map_or(&self.launch_config, |project| &project.effective);
         let inherit_working_directory =
             origin.inherits_working_directory(effective.working_directory_scope);
         let inherited_working_directory = active_pane

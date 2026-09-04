@@ -69,12 +69,12 @@ pub(crate) use arg_parsing::{
 #[cfg(not(feature = "tftp-client"))]
 pub(crate) use cli_help::{TftpCommand, parse_tftp_args, tftp_help};
 pub(crate) use cli_help::{command_help, format_help_table};
+#[cfg(test)]
+pub(crate) use keybindings::RENAME_TAB_KEYBINDING;
 pub(crate) use keybindings::{
     PROFILE_SHORTCUT_KEYS, keymap_keystroke_display, keymap_keystroke_storage, load_keybindings,
     profile_keybindings, profile_shortcut_label,
 };
-#[cfg(test)]
-pub(crate) use keybindings::{RENAME_TAB_KEYBINDING, keymap_keystroke_alias};
 #[cfg(target_os = "macos")]
 pub(crate) use keybindings::{
     install_native_macos_menus, update_native_macos_dock_menu, update_native_macos_menus,
@@ -484,8 +484,7 @@ fn resolve_application_launch(
     }
     let effective_launch_config = initial_project
         .as_ref()
-        .map(|project| &project.effective)
-        .unwrap_or(&config);
+        .map_or(&config, |project| &project.effective);
     validate_launch_split(effective_launch_config, args.split.as_deref())?;
     let initial_profile = select_launch_profile(effective_launch_config, args.profile.as_deref())?;
     // Keyed by profile name (case-insensitive) rather than baked into

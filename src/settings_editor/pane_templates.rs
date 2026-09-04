@@ -22,11 +22,6 @@ pub struct PaneTemplateNodePath {
 impl PaneTemplateNodePath {
     pub const ROOT: Self = Self { bits: 0, length: 0 };
 
-    #[allow(dead_code)]
-    pub fn root() -> Self {
-        Self::ROOT
-    }
-
     pub fn depth(self) -> usize {
         self.length as usize
     }
@@ -1080,13 +1075,6 @@ impl PaneTemplatesForm {
             templates.insert(template.name.text.clone(), Value::Object(value));
         }
         Ok(Value::Object(templates))
-    }
-
-    #[allow(dead_code)]
-    pub fn has_custom_values(&self) -> bool {
-        self.templates
-            .iter()
-            .any(|template| !template.is_pristine_inherited())
     }
 }
 

@@ -116,14 +116,14 @@ fn parse_benchmark_args(arguments: &[OsString]) -> Result<StartupArgs> {
             "--terminal-checkerboard-workload" => mode = StartupMode::TerminalCheckerboardWorkload,
             "--terminal-sparse-update-workload" => mode = StartupMode::TerminalSparseUpdateWorkload,
             "--terminal-alt-screen-scroll-workload" => {
-                mode = StartupMode::TerminalAltScreenScrollWorkload
+                mode = StartupMode::TerminalAltScreenScrollWorkload;
             }
             "--profile-report" | "-r" => {
                 profile_report = Some(
                     args.next()
                         .context("--profile-report requires a path")?
                         .into(),
-                )
+                );
             }
             "--profile-duration" | "-d" => {
                 let seconds = args

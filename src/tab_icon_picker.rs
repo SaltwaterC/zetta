@@ -21,6 +21,13 @@ pub(crate) struct IconEntry {
 
 pub(crate) const TAB_ICON_COLUMNS: usize = 7;
 
+/// The icon grid's cell geometry. Shared by the picker, which sizes its
+/// viewport from it, and by the grid itself.
+const ICON_CELL_WIDTH: Pixels = px(84.);
+const ICON_CELL_HEIGHT: Pixels = px(68.);
+const ICON_CELL_PADDING: Pixels = px(1.);
+const ICON_GAP: Pixels = px(1.);
+
 pub(crate) const fn tab_icon_row(index: usize) -> usize {
     index / TAB_ICON_COLUMNS
 }
@@ -201,8 +208,7 @@ impl Zetta {
     pub(crate) fn tab_icon_entries(&self) -> Arc<[IconEntry]> {
         self.icon_cache
             .get()
-            .map(|cache| cache.entries.clone())
-            .unwrap_or_else(fallback_icon_entries)
+            .map_or_else(fallback_icon_entries, |cache| cache.entries.clone())
     }
 
     pub(crate) fn open_tab_icon_picker(
@@ -491,13 +497,6 @@ impl Zetta {
         let picker = self.tab_icon_picker.as_ref()?;
         let query = picker.query.clone();
 
-        // Grid constants
-        const ICON_CELL_WIDTH: Pixels = px(84.);
-        const ICON_CELL_HEIGHT: Pixels = px(68.);
-        const ICON_CELL_PADDING: Pixels = px(1.);
-        const ICON_GAP: Pixels = px(1.);
-        let row_height = ICON_CELL_HEIGHT + ICON_CELL_PADDING * 2. + ICON_GAP;
-
         let row_count = options.len().div_ceil(TAB_ICON_COLUMNS);
 
         // Build search bar
@@ -542,114 +541,16 @@ impl Zetta {
             .child("Close");
 
         // Virtualized icon grid using uniform_list
-        let row_colors = colors.clone();
-        let row_entries = entries.clone();
-        let row_handle = handle.clone();
-        let row_selected_icon = selected_icon;
-        let row_selected_index = selected_index;
-        let options_for_rows = options.clone();
-
-        let icon_rows = uniform_list(
-            "tab-icon-grid",
+        let icon_rows = tab_icon_grid(TabIconGrid {
+            options: options.clone(),
+            entries,
+            selected_icon,
+            selected_index,
             row_count,
-            move |range: std::ops::Range<usize>, _, _| {
-                let entries = row_entries.clone();
-                let options = &options_for_rows;
-                let row_handle = row_handle.clone();
-                let row_colors = row_colors.clone();
-                let row_selected_icon = row_selected_icon;
-                let row_selected_index = row_selected_index;
-
-                range
-                    .map(|row_index| {
-                        let row_start = row_index * TAB_ICON_COLUMNS;
-                        let row_end = (row_start + TAB_ICON_COLUMNS).min(options.len());
-                        let row_options = &options[row_start..row_end];
-
-                        let cells: Vec<AnyElement> = row_options
-                            .iter()
-                            .enumerate()
-                            .map(|(col_index, option)| {
-                                // Copy the option value since IconName is Copy
-                                let option = *option;
-                                let index = row_start + col_index;
-                                let icon = option
-                                    .and_then(|index| entries.get(index).map(|entry| entry.icon));
-                                let label = option
-                                    .and_then(|index| {
-                                        entries.get(index).map(|entry| entry.label.clone())
-                                    })
-                                    .unwrap_or_else(|| SharedString::new_static("None"));
-                                let keyboard_selected = index == row_selected_index;
-                                let icon_for_click = icon;
-                                let icon_handle = row_handle.clone();
-
-                                div()
-                                    .id(("tab-icon-option", index))
-                                    .w(ICON_CELL_WIDTH)
-                                    .h(ICON_CELL_HEIGHT)
-                                    .p_1()
-                                    .flex()
-                                    .flex_col()
-                                    .items_center()
-                                    .justify_center()
-                                    .gap_1()
-                                    .rounded(px(4.))
-                                    .cursor_pointer()
-                                    .when(icon == row_selected_icon, |cell| {
-                                        cell.bg(row_colors.element_selected)
-                                    })
-                                    .when(keyboard_selected, |cell| {
-                                        cell.border_1().border_color(row_colors.border_focused)
-                                    })
-                                    .hover(|cell| cell.bg(row_colors.element_hover))
-                                    .when_some(icon, |cell, icon| {
-                                        cell.child(
-                                            Icon::new(icon)
-                                                .size(IconSize::Medium)
-                                                .color(Color::Custom(row_colors.icon)),
-                                        )
-                                    })
-                                    .when(icon.is_none(), |cell| {
-                                        cell.child(
-                                            Icon::new(IconName::Dash)
-                                                .size(IconSize::Medium)
-                                                .color(Color::Custom(row_colors.icon)),
-                                        )
-                                    })
-                                    .child(
-                                        Label::new(label.clone())
-                                            .size(LabelSize::XSmall)
-                                            .color(Color::Custom(row_colors.text))
-                                            .truncate(),
-                                    )
-                                    .tooltip(Tooltip::text(label))
-                                    .on_click(move |_, window, cx| {
-                                        icon_handle
-                                            .update(cx, |this, cx| {
-                                                this.set_tab_icon(icon_for_click, window, cx);
-                                            })
-                                            .ok();
-                                    })
-                                    .into_any_element()
-                            })
-                            .collect();
-
-                        div()
-                            .h(row_height)
-                            .flex()
-                            .gap_1()
-                            .children(cells)
-                            .into_any_element()
-                    })
-                    .collect()
-            },
-        )
-        .with_sizing_behavior(ListSizingBehavior::Infer)
-        .w_full()
-        .h_full()
-        .track_scroll(&scroll_handle)
-        .on_scroll_wheel(|_, _, cx| cx.stop_propagation());
+            colors: colors.clone(),
+            handle: handle.clone(),
+            scroll_handle: scroll_handle.clone(),
+        });
 
         let has_options = !options.is_empty();
 
@@ -712,4 +613,144 @@ impl Zetta {
                 .into_any_element(),
         )
     }
+}
+
+/// What the virtualized icon grid needs. Owned rather than borrowed because the
+/// `uniform_list` batch closure outlives this frame's borrows.
+struct TabIconGrid {
+    options: Arc<[Option<usize>]>,
+    entries: Arc<[IconEntry]>,
+    selected_icon: Option<IconName>,
+    selected_index: usize,
+    row_count: usize,
+    colors: ThemeColors,
+    handle: WeakEntity<Zetta>,
+    scroll_handle: gpui::UniformListScrollHandle,
+}
+
+/// The icon grid: `TAB_ICON_COLUMNS` cells per row, virtualized so only the
+/// visible rows are built however many icons there are.
+fn tab_icon_grid(grid: TabIconGrid) -> gpui::UniformList {
+    let TabIconGrid {
+        options,
+        entries,
+        selected_icon,
+        selected_index,
+        row_count,
+        colors,
+        handle,
+        scroll_handle,
+    } = grid;
+    let row_height = ICON_CELL_HEIGHT + ICON_CELL_PADDING * 2. + ICON_GAP;
+    let row_colors = colors;
+    let row_entries = entries.clone();
+    let row_handle = handle.clone();
+    let row_selected_icon = selected_icon;
+    let row_selected_index = selected_index;
+    let options_for_rows = options.clone();
+
+    uniform_list(
+        "tab-icon-grid",
+        row_count,
+        move |range: std::ops::Range<usize>, _, _| {
+            let entries = row_entries.clone();
+            let options = &options_for_rows;
+            let row_handle = row_handle.clone();
+            // Borrowed, not cloned: the cells only read `Hsla` fields out of
+            // it, and this runs once per batch of visible rows per scroll
+            // frame — `ThemeColors` is 143 fields.
+            let row_colors = &row_colors;
+            let row_selected_icon = row_selected_icon;
+            let row_selected_index = row_selected_index;
+
+            range
+                .map(|row_index| {
+                    let row_start = row_index * TAB_ICON_COLUMNS;
+                    let row_end = (row_start + TAB_ICON_COLUMNS).min(options.len());
+                    let row_options = &options[row_start..row_end];
+
+                    let cells: Vec<AnyElement> = row_options
+                        .iter()
+                        .enumerate()
+                        .map(|(col_index, option)| {
+                            // Copy the option value since IconName is Copy
+                            let option = *option;
+                            let index = row_start + col_index;
+                            let icon =
+                                option.and_then(|index| entries.get(index).map(|entry| entry.icon));
+                            let label = option
+                                .and_then(|index| {
+                                    entries.get(index).map(|entry| entry.label.clone())
+                                })
+                                .unwrap_or_else(|| SharedString::new_static("None"));
+                            let keyboard_selected = index == row_selected_index;
+                            let icon_for_click = icon;
+                            let icon_handle = row_handle.clone();
+
+                            div()
+                                .id(("tab-icon-option", index))
+                                .w(ICON_CELL_WIDTH)
+                                .h(ICON_CELL_HEIGHT)
+                                .p_1()
+                                .flex()
+                                .flex_col()
+                                .items_center()
+                                .justify_center()
+                                .gap_1()
+                                .rounded(px(4.))
+                                .cursor_pointer()
+                                .when(icon == row_selected_icon, |cell| {
+                                    cell.bg(row_colors.element_selected)
+                                })
+                                .when(keyboard_selected, |cell| {
+                                    cell.border_1().border_color(row_colors.border_focused)
+                                })
+                                .hover(|cell| cell.bg(row_colors.element_hover))
+                                .when_some(icon, |cell, icon| {
+                                    cell.child(
+                                        Icon::new(icon)
+                                            .size(IconSize::Medium)
+                                            .color(Color::Custom(row_colors.icon)),
+                                    )
+                                })
+                                .when(icon.is_none(), |cell| {
+                                    cell.child(
+                                        Icon::new(IconName::Dash)
+                                            .size(IconSize::Medium)
+                                            .color(Color::Custom(row_colors.icon)),
+                                    )
+                                })
+                                .child(
+                                    Label::new(label.clone())
+                                        .size(LabelSize::XSmall)
+                                        .color(Color::Custom(row_colors.text))
+                                        .truncate(),
+                                )
+                                .tooltip(Tooltip::text(label))
+                                .on_click(move |_, window, cx| {
+                                    icon_handle
+                                        .update(cx, |this, cx| {
+                                            this.set_tab_icon(icon_for_click, window, cx);
+                                        })
+                                        .ok();
+                                })
+                                .into_any_element()
+                        })
+                        .collect();
+
+                    div()
+                        .h(row_height)
+                        .flex()
+                        .gap_1()
+                        .children(cells)
+                        .into_any_element()
+                })
+                .collect()
+        },
+    )
+    .with_sizing_behavior(ListSizingBehavior::Infer)
+    .w_full()
+    .h_full()
+    .track_scroll(&scroll_handle)
+    .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
 }

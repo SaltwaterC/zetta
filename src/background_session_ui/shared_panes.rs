@@ -207,10 +207,9 @@ impl Zetta {
         cx: &mut Context<Self>,
     ) {
         let entry = self.shared_panes.remove(&pane_id);
-        let (mux_pane_id, runtime) = entry
-            .as_ref()
-            .map(|entry| (Some(entry.mux_pane_id), Some(entry.runtime.clone())))
-            .unwrap_or((None, None));
+        let (mux_pane_id, runtime) = entry.as_ref().map_or((None, None), |entry| {
+            (Some(entry.mux_pane_id), Some(entry.runtime.clone()))
+        });
         if let Some(runtime) = runtime.as_ref()
             && let Some(mux_pane_id) = mux_pane_id
         {
@@ -232,7 +231,7 @@ impl Zetta {
         }
         terminal.update(cx, |terminal, cx| match report.raw_status {
             Some(raw_status) => {
-                terminal.report_child_exit(exit_status_from_raw(raw_status), report.input_sent, cx)
+                terminal.report_child_exit(exit_status_from_raw(raw_status), report.input_sent, cx);
             }
             // The multiplexer saw the process end but could not say how — or the
             // pane was already gone when this client asked what it had missed.

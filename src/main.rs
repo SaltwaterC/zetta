@@ -65,7 +65,7 @@ use background_sessions::{
     VerifiedSession, application_from_command_line, background_pane_exit_from_terminal,
 };
 use command_palette::{
-    CommandPalette, PaletteCommand, humanize_action_name, project_palette_commands,
+    CommandPalette, PaletteCommand, PaletteKey, humanize_action_name, project_palette_commands,
 };
 use config::{
     Config, NewTabProfile, PaneControlsPosition, PaneSplitAxis, PaneSplitOverlaySize,

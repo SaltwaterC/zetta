@@ -309,8 +309,7 @@ impl Zetta {
         let (effective_profiles, effective_working_directory) = {
             let effective = self
                 .active_project_config()
-                .map(|project| &project.effective)
-                .unwrap_or(&self.launch_config);
+                .map_or(&self.launch_config, |project| &project.effective);
             (
                 effective.profiles.clone(),
                 effective.working_directory.clone(),

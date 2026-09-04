@@ -271,7 +271,7 @@ fn apply_silent_mode_to_process(enabled: bool, cx: &mut App) {
     let entities = process_zetta_entities(cx);
     for entity in entities {
         entity.update(cx, |zetta, cx| {
-            zetta.apply_silent_mode_to_views(enabled, cx)
+            zetta.apply_silent_mode_to_views(enabled, cx);
         });
     }
 }

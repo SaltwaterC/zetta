@@ -130,12 +130,14 @@ pub(crate) fn parse_tftp_args(args: impl IntoIterator<Item = OsString>) -> Resul
             let host = utf8_argument(&positional[0], "HOST")?;
             let remote = utf8_argument(&positional[1], "REMOTE")?;
             anyhow::ensure!(!remote.contains('\0'), "REMOTE must not contain a NUL byte");
-            let local = positional.get(2).map(PathBuf::from).unwrap_or_else(|| {
-                Path::new(&remote)
-                    .file_name()
-                    .map(PathBuf::from)
-                    .unwrap_or_else(|| PathBuf::from(&remote))
-            });
+            let local = positional.get(2).map_or_else(
+                || {
+                    Path::new(&remote)
+                        .file_name()
+                        .map_or_else(|| PathBuf::from(&remote), PathBuf::from)
+                },
+                PathBuf::from,
+            );
             anyhow::ensure!(!local.as_os_str().is_empty(), "LOCAL must not be empty");
             Ok(TftpCommand::Get {
                 host,

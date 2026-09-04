@@ -308,7 +308,7 @@ impl Zetta {
                                 .on_click(move |_, window, cx| {
                                     add_handle
                                         .update(cx, |this, cx| {
-                                            this.accept_project_offer(window, cx)
+                                            this.accept_project_offer(window, cx);
                                         })
                                         .ok();
                                 }),
@@ -332,7 +332,7 @@ impl Zetta {
                             .aria_label("Reload configuration")
                             .tooltip(Tooltip::text("Reload configuration"))
                             .on_click(|_, window, cx| {
-                                window.dispatch_action(Box::new(ReloadConfiguration), cx)
+                                window.dispatch_action(Box::new(ReloadConfiguration), cx);
                             }),
                     ),
                 ))

@@ -136,3 +136,54 @@ fn global_environment_rows_are_keyboard_reachable() {
         ]
     );
 }
+
+/// A control this page does not own must leave the form alone: it is not a
+/// change, so it must not mark the configuration dirty or clear the message the
+/// last real change left. The distinction lives in
+/// `apply_pane_template_control`'s `Ok(None)`, and nothing else pins it.
+#[test]
+fn a_control_this_page_does_not_own_leaves_the_form_untouched() {
+    let config = Config::parse("{}", None, None).unwrap();
+    let mut editor = crate::settings_ui::controls::tests::configuration_editor(&config);
+    editor.configuration_dirty = false;
+    editor.message = Some((false, "Saved".to_owned()));
+
+    let outcome = apply_pane_template_control(&mut editor, SettingsControl::Save);
+
+    assert!(
+        matches!(outcome, Ok(None)),
+        "a control from another page is neither applied nor an error"
+    );
+    assert!(
+        !editor.configuration_dirty,
+        "an unowned control must not mark the configuration dirty"
+    );
+    assert_eq!(
+        editor.message,
+        Some((false, "Saved".to_owned())),
+        "an unowned control must not clear the last message"
+    );
+}
+
+/// The same for a control this page *does* own whose node has since gone: the
+/// early returns in those arms mean "nothing changed", not "changed
+/// successfully".
+#[test]
+fn a_template_control_for_a_missing_node_reports_no_change() {
+    let config = Config::parse("{}", None, None).unwrap();
+    let mut editor = crate::settings_ui::controls::tests::configuration_editor(&config);
+    editor.configuration_dirty = false;
+    let missing = PaneTemplateNodePath::ROOT
+        .child(false)
+        .unwrap()
+        .child(false)
+        .unwrap();
+
+    let outcome = apply_pane_template_control(
+        &mut editor,
+        SettingsControl::AddPaneTemplateArgument(missing),
+    );
+
+    assert!(matches!(outcome, Ok(None)));
+    assert!(!editor.configuration_dirty);
+}

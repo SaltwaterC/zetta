@@ -198,8 +198,7 @@ pub(crate) fn project_dropdown_options(
             form.profiles
                 .get(index)
                 .and_then(|profile| profile.icon.as_ref())
-                .map(ProfileIcon::label)
-                .unwrap_or("Automatic")
+                .map_or("Automatic", ProfileIcon::label)
                 .to_owned(),
             Arc::from(["Automatic", "Zetta", "Bash", "Zsh", "Fish"].map(str::to_owned)),
         ),

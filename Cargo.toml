@@ -192,6 +192,26 @@ embed-resource = "3"
 age = { version = "0.11.1", default-features = false, features = ["armor", "ssh"] }
 gpui = { path = "zed/crates/gpui", features = ["test-support"] }
 
+# Pedantic lints the tree is already clean of, denied so they cannot creep back
+# in one call site at a time. Deliberately not adopted, with the reason:
+#
+# - `needless_pass_by_value`: GPUI closures own what they capture, so most of
+#   its ~80 sites would trade a move for a borrow plus a clone.
+# - `redundant_closure_for_method_calls`: turns readable closures into path
+#   expressions (`|poisoned| poisoned.into_inner()` becomes
+#   `std::sync::PoisonError::into_inner`).
+# - `unnecessary_wraps`: `startup/cli_modes.rs` and the CLI services return
+#   `Result<()>` because their dispatch table does, not because they can fail.
+# - `match_same_arms`: merging arms that happen to agree today hides which
+#   variant is which, and this tree leans on exhaustive matches to route.
+# - `redundant_clone`: mostly builder chains where the clone is what keeps the
+#   value alive for a later call in the same expression.
+[lints.clippy]
+manual_let_else = "deny"
+map_unwrap_or = "deny"
+redundant_closure = "deny"
+semicolon_if_nothing_returned = "deny"
+
 [patch.crates-io]
 tree-sitter-language = { git = "https://github.com/tree-sitter/tree-sitter", rev = "43623ec9bf0eaaf7113285c46e8a09018f181b18" }
 async-process = { git = "https://github.com/zed-industries/async-process.git", rev = "0b6d6713570af61806e1e5cb40e0f757cb93fd9d" }

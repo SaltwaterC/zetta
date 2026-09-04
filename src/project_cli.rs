@@ -175,17 +175,6 @@ fn resolve_open_target_in_registry(
     })
 }
 
-#[allow(dead_code)]
-pub(crate) fn resolve_open_root(path: Option<&Path>) -> Result<PathBuf> {
-    Ok(resolve_open_target(path)?.root)
-}
-
-#[allow(dead_code)]
-pub(crate) fn current_registered_project() -> Result<Option<PathBuf>> {
-    let current = absolute_path(None)?;
-    Ok(resolve_registered_project(&current, &ProjectRegistry::load()?).root)
-}
-
 pub(crate) fn current_project_target() -> Result<Option<ProjectOpenTarget>> {
     let current = absolute_path(None)?;
     let registry = ProjectRegistry::load()?;
@@ -222,9 +211,7 @@ fn absolute_path(path: Option<&Path>) -> Result<PathBuf> {
 }
 
 fn absolute_path_without_requiring_existence(path: Option<&Path>) -> Result<PathBuf> {
-    let path = path
-        .map(Path::to_path_buf)
-        .unwrap_or(std::env::current_dir()?);
+    let path = path.map_or(std::env::current_dir()?, Path::to_path_buf);
     if path.is_absolute() {
         Ok(path)
     } else {

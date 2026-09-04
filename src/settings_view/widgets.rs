@@ -46,6 +46,20 @@ pub(crate) struct KeymapRowRenderContext {
     pub(crate) focused_input: Option<SettingsInput>,
 }
 
+/// [`KeymapRowData::Binding`]'s fields, borrowed, so the row builder takes one
+/// parameter rather than six adjacent indices, strings and flags.
+///
+/// `action_name` stays a separate parameter: it is the only one of them the
+/// dropdown needs owned.
+struct KeymapBindingRow<'a> {
+    section_index: usize,
+    binding_index: usize,
+    keystroke: &'a TextField,
+    template_name: Option<&'a str>,
+    profile_name: Option<&'a str>,
+    is_default: bool,
+}
+
 /// How much of the form stays visible past a control the keyboard just moved to,
 /// so it never sits flush against the edge of the scroll region.
 const FOCUS_SCROLL_MARGIN: Pixels = px(10.);
@@ -226,7 +240,7 @@ pub(crate) fn text_field(
         field,
         input,
         editor.focused_input,
-        colors.clone(),
+        colors,
         handle.clone(),
     )
 }
@@ -244,7 +258,7 @@ pub(crate) fn dropdown_field(
         label,
         selection,
         editor.focused_control == Some(SettingsControl::Dropdown(selection)),
-        colors.clone(),
+        colors,
         handle.clone(),
     )
 }
@@ -258,7 +272,7 @@ impl Zetta {
         label: String,
         selection: SettingsDropdown,
         focused: bool,
-        colors: ThemeColors,
+        colors: &ThemeColors,
         handle: WeakEntity<Self>,
     ) -> gpui::AnyElement {
         let menu_handle = handle.clone();
@@ -466,7 +480,7 @@ impl Zetta {
         field: TextField,
         input: SettingsInput,
         focused_input: Option<SettingsInput>,
-        colors: ThemeColors,
+        colors: &ThemeColors,
         handle: WeakEntity<Self>,
     ) -> gpui::AnyElement {
         let focused = focused_input == Some(input);
@@ -485,7 +499,7 @@ impl Zetta {
         .then_some(GLOBAL_CONTEXT_LABEL);
         let (before, after) = field.split_at_cursor();
         let input_handle = handle.clone();
-        field_box(id, focused, &colors)
+        field_box(id, focused, colors)
             .w_full()
             .min_w(px(180.))
             .when(centered, |input| input.justify_center().text_center())
@@ -515,7 +529,7 @@ impl Zetta {
             .when(focused, |input| {
                 input
                     .child(div().whitespace_nowrap().child(before.to_owned()))
-                    .when(!field.select_all, |input| input.child(caret(&colors)))
+                    .when(!field.select_all, |input| input.child(caret(colors)))
                     .child(div().whitespace_nowrap().child(after.to_owned()))
             })
             .on_click(move |_, window, cx| {
@@ -526,7 +540,8 @@ impl Zetta {
             .into_any_element()
     }
 
-    #[allow(clippy::too_many_arguments)]
+    /// One row of the Keymap page. Each kind of row is its own builder below;
+    /// this only decides which.
     pub(crate) fn render_keymap_row(
         row: &KeymapRowData,
         ctx: &KeymapRowRenderContext,
@@ -535,37 +550,7 @@ impl Zetta {
             KeymapRowData::SectionHeader {
                 section_index,
                 context,
-            } => {
-                let section_index = *section_index;
-                let colors = ctx.colors.clone();
-                let focused = ctx.focused_control
-                    == Some(SettingsControl::Input(SettingsInput::Keymap(
-                        KeymapTextField::Context(section_index),
-                    )));
-                h_flex()
-                    .w_full()
-                    .h(px(KEYMAP_ROW_HEIGHT))
-                    .gap_2()
-                    .px_2()
-                    .border_t_1()
-                    .border_b_1()
-                    .border_color(colors.border)
-                    .bg(if focused {
-                        colors.element_selected
-                    } else {
-                        colors.editor_background
-                    })
-                    .child(div().flex_none().text_sm().child("Context"))
-                    .child(div().min_w_0().flex_1().child(Self::text_input_widget(
-                        format!("settings-keymap-section-{section_index}-context"),
-                        context.clone(),
-                        SettingsInput::Keymap(KeymapTextField::Context(section_index)),
-                        ctx.focused_input,
-                        colors.clone(),
-                        ctx.handle.clone(),
-                    )))
-                    .into_any_element()
-            }
+            } => Self::render_keymap_section_header(*section_index, context, ctx),
             KeymapRowData::Binding {
                 section_index,
                 binding_index,
@@ -574,360 +559,429 @@ impl Zetta {
                 template_name,
                 profile_name,
                 is_default,
-            } => {
-                let section_index = *section_index;
-                let binding_index = *binding_index;
-                let colors = ctx.colors.clone();
-                let binding_focused = ctx.focused_control
-                    == Some(SettingsControl::Input(SettingsInput::Keymap(
-                        KeymapTextField::Keystroke(section_index, binding_index),
-                    )))
-                    || ctx.focused_control
-                        == Some(SettingsControl::RemoveBinding(section_index, binding_index))
-                    || ctx.focused_control
-                        == Some(SettingsControl::CaptureKeymap(KeymapTextField::Keystroke(
-                            section_index,
-                            binding_index,
-                        )));
-                let action_focused = ctx.focused_control
-                    == Some(SettingsControl::Dropdown(SettingsDropdown::BindingAction(
-                        section_index,
-                        binding_index,
-                    )));
-                let action = Self::dropdown_trigger_widget(
-                    format!("settings-binding-{section_index}-{binding_index}-action"),
-                    action_name.clone(),
-                    SettingsDropdown::BindingAction(section_index, binding_index),
-                    action_focused,
-                    colors.clone(),
-                    ctx.handle.clone(),
-                );
-                let template = template_name.as_ref().map(|name| {
-                    let focused = ctx.focused_control
-                        == Some(SettingsControl::Dropdown(
-                            SettingsDropdown::BindingTemplate(section_index, binding_index),
-                        ));
-                    Self::dropdown_trigger_widget(
-                        format!("settings-binding-{section_index}-{binding_index}-template"),
-                        name.clone(),
-                        SettingsDropdown::BindingTemplate(section_index, binding_index),
-                        focused,
-                        colors.clone(),
-                        ctx.handle.clone(),
-                    )
-                });
-                let profile = profile_name.as_ref().map(|name| {
-                    let focused = ctx.focused_control
-                        == Some(SettingsControl::Dropdown(SettingsDropdown::BindingProfile(
-                            section_index,
-                            binding_index,
-                        )));
-                    Self::dropdown_trigger_widget(
-                        format!("settings-binding-{section_index}-{binding_index}-profile"),
-                        name.clone(),
-                        SettingsDropdown::BindingProfile(section_index, binding_index),
-                        focused,
-                        colors.clone(),
-                        ctx.handle.clone(),
-                    )
-                });
-                let capture_handle = ctx.handle.clone();
-                h_flex()
-                    .w_full()
-                    .h(px(KEYMAP_ROW_HEIGHT))
-                    .pl_6()
-                    .pr_2()
-                    .gap_2()
-                    .border_b_1()
-                    .border_color(colors.border_variant)
-                    .when(binding_focused, |row| row.bg(colors.element_selected))
-                    .child(
-                        h_flex()
-                            .w(px(330.))
-                            .gap_1()
-                            .flex_none()
-                            .child(Self::text_input_widget(
-                                format!("settings-binding-{section_index}-{binding_index}-key"),
-                                keystroke.clone(),
-                                SettingsInput::Keymap(KeymapTextField::Keystroke(
-                                    section_index,
-                                    binding_index,
-                                )),
-                                ctx.focused_input,
-                                colors.clone(),
-                                ctx.handle.clone(),
-                            ))
-                            .child(
-                                Button::new(
-                                    format!(
-                                        "record-settings-binding-{section_index}-{binding_index}"
-                                    ),
-                                    "Record",
-                                )
-                                .style(ButtonStyle::Outlined)
-                                .size(ButtonSize::Compact)
-                                .color(Color::Custom(colors.text))
-                                .on_click(move |_, window, cx| {
-                                    capture_handle
-                                        .update(cx, |this, cx| {
-                                            this.start_keymap_capture(
-                                                KeymapTextField::Keystroke(
-                                                    section_index,
-                                                    binding_index,
-                                                ),
-                                                window,
-                                                cx,
-                                            )
-                                        })
-                                        .ok();
-                                }),
-                            ),
-                    )
-                    .child(div().min_w_0().flex_1().child(action))
-                    .when_some(template, |row, template| {
-                        row.child(div().w(px(180.)).flex_none().child(template))
-                    })
-                    .when_some(profile, |row, profile| {
-                        row.child(div().w(px(180.)).flex_none().child(profile))
-                    })
-                    .child({
-                        let is_default = *is_default;
-                        let (icon, tooltip_text, control_variant) = if is_default {
-                            (
-                                IconName::Slash,
-                                "Unbind (disable built-in binding)",
-                                SettingsControl::UnbindBinding(section_index, binding_index),
-                            )
-                        } else {
-                            (
-                                IconName::Trash,
-                                "Remove binding",
-                                SettingsControl::RemoveBinding(section_index, binding_index),
-                            )
-                        };
-                        let remove_handle = ctx.handle.clone();
-                        IconButton::new(
-                            format!("unbind-settings-binding-{section_index}-{binding_index}"),
-                            icon,
-                        )
-                        .icon_size(IconSize::Small)
-                        .icon_color(Color::Custom(colors.icon))
-                        .selected_icon_color(Color::Custom(colors.icon))
-                        .toggle_state(ctx.focused_control == Some(control_variant))
-                        .selected_style(ButtonStyle::OutlinedCustom(colors.border_focused))
-                        .tooltip(Tooltip::text(tooltip_text))
-                        .on_click(move |_, _, cx| {
-                            remove_handle
-                                .update(cx, |this, cx| {
-                                    if let Some(editor) = this.settings_editor.as_mut()
-                                        && let Some(section) =
-                                            editor.keymap.sections.get_mut(section_index)
-                                        && binding_index < section.bindings.len()
-                                    {
-                                        let binding = section.bindings.remove(binding_index);
-                                        if is_default {
-                                            // Add to unbind map
-                                            let storage_key =
-                                                keymap_keystroke_storage(&binding.keystroke.text);
-                                            section
-                                                .unbind
-                                                .insert(storage_key.clone(), binding.action_name());
-                                            // Add to unbound_defaults for immediate UI feedback
-                                            section.unbound_defaults.push(BindingForm {
-                                                keystroke: binding.keystroke,
-                                                action: binding.action,
-                                            });
-                                        }
-                                        editor.keymap_dirty = true;
-                                        refresh_keymap_cache(editor);
-                                        invalidate_controls_cache(editor);
-                                        cx.notify();
-                                    }
-                                })
-                                .ok();
-                        })
-                    })
-                    .into_any_element()
-            }
+            } => Self::render_keymap_binding_row(
+                KeymapBindingRow {
+                    section_index: *section_index,
+                    binding_index: *binding_index,
+                    keystroke,
+                    template_name: template_name.as_deref(),
+                    profile_name: profile_name.as_deref(),
+                    is_default: *is_default,
+                },
+                action_name,
+                ctx,
+            ),
             KeymapRowData::UnboundDefault {
                 section_index,
                 binding_index,
                 keystroke,
                 action_name,
-            } => {
-                let section_index = *section_index;
-                let binding_index = *binding_index;
-                let colors = ctx.colors.clone();
-                let restore_handle = ctx.handle.clone();
-                h_flex()
-                    .w_full()
-                    .h(px(KEYMAP_ROW_HEIGHT))
-                    .pl_6()
-                    .pr_2()
-                    .gap_2()
-                    .border_b_1()
-                    .border_color(colors.border_variant)
-                    .child(
-                        h_flex()
-                            .w(px(330.))
-                            .gap_1()
-                            .flex_none()
-                            .child(Self::text_input_widget(
-                                format!("settings-unbound-{section_index}-{binding_index}-key"),
-                                keystroke.clone(),
-                                SettingsInput::Keymap(KeymapTextField::Keystroke(
-                                    section_index,
-                                    binding_index,
-                                )),
-                                ctx.focused_input,
-                                colors.clone(),
-                                ctx.handle.clone(),
-                            ))
-                            .child(
-                                Button::new(
-                                    format!("record-unbound-{section_index}-{binding_index}"),
-                                    "Record",
-                                )
-                                .style(ButtonStyle::Outlined)
-                                .size(ButtonSize::Compact)
-                                .color(Color::Custom(colors.text))
-                                .disabled(true)
-                                .on_click(move |_, _, _| {}),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .min_w_0()
-                            .flex_1()
-                            .opacity(0.5)
-                            .child(action_name.clone()),
-                    )
-                    .child(
-                        IconButton::new(
-                            format!("restore-unbound-{section_index}-{binding_index}"),
-                            IconName::RotateCw,
-                        )
-                        .icon_size(IconSize::Small)
-                        .icon_color(Color::Custom(colors.icon))
-                        .tooltip(Tooltip::text("Restore binding"))
-                        .on_click(move |_, _, cx| {
-                            restore_handle
-                                .update(cx, |this, cx| {
-                                    if let Some(editor) = this.settings_editor.as_mut()
-                                        && let Some(section) =
-                                            editor.keymap.sections.get_mut(section_index)
-                                        && binding_index < section.unbound_defaults.len()
-                                    {
-                                        let binding =
-                                            section.unbound_defaults.remove(binding_index);
-                                        // Remove from unbind map
-                                        section.unbind.shift_remove(&keymap_keystroke_storage(
-                                            &binding.keystroke.text,
-                                        ));
-                                        // Add back to bindings
-                                        section.bindings.push(BindingForm {
-                                            keystroke: binding.keystroke,
-                                            action: binding.action,
-                                        });
-                                        editor.keymap_dirty = true;
-                                        refresh_keymap_cache(editor);
-                                        invalidate_controls_cache(editor);
-                                        cx.notify();
-                                    }
-                                })
-                                .ok();
-                        }),
-                    )
-                    .into_any_element()
-            }
+            } => Self::render_keymap_unbound_row(
+                *section_index,
+                *binding_index,
+                keystroke,
+                action_name,
+                ctx,
+            ),
             KeymapRowData::AddBinding {
                 section_index,
                 context,
-            } => {
-                let section_index = *section_index;
-                let colors = ctx.colors.clone();
-                let add_handle = ctx.handle.clone();
-                let focused =
-                    ctx.focused_control == Some(SettingsControl::AddBinding(section_index));
+            } => Self::render_keymap_add_binding_row(*section_index, context, ctx),
+            KeymapRowData::AddSection => Self::render_keymap_add_section_row(ctx),
+        }
+    }
+
+    /// A keymap context heading, which is itself the editable context string.
+    fn render_keymap_section_header(
+        section_index: usize,
+        context: &TextField,
+        ctx: &KeymapRowRenderContext,
+    ) -> gpui::AnyElement {
+        let colors = &ctx.colors;
+        let focused = ctx.focused_control
+            == Some(SettingsControl::Input(SettingsInput::Keymap(
+                KeymapTextField::Context(section_index),
+            )));
+        h_flex()
+            .w_full()
+            .h(px(KEYMAP_ROW_HEIGHT))
+            .gap_2()
+            .px_2()
+            .border_t_1()
+            .border_b_1()
+            .border_color(colors.border)
+            .bg(if focused {
+                colors.element_selected
+            } else {
+                colors.editor_background
+            })
+            .child(div().flex_none().text_sm().child("Context"))
+            .child(div().min_w_0().flex_1().child(Self::text_input_widget(
+                format!("settings-keymap-section-{section_index}-context"),
+                context.clone(),
+                SettingsInput::Keymap(KeymapTextField::Context(section_index)),
+                ctx.focused_input,
+                colors,
+                ctx.handle.clone(),
+            )))
+            .into_any_element()
+    }
+
+    /// One binding: its keystroke, the action it runs, the optional template and
+    /// profile that scope it, and the button that unbinds or removes it.
+    fn render_keymap_binding_row(
+        row: KeymapBindingRow<'_>,
+        action_name: &str,
+        ctx: &KeymapRowRenderContext,
+    ) -> gpui::AnyElement {
+        let KeymapBindingRow {
+            section_index,
+            binding_index,
+            keystroke,
+            template_name,
+            profile_name,
+            is_default,
+        } = row;
+        let colors = &ctx.colors;
+        let binding_focused = ctx.focused_control
+            == Some(SettingsControl::Input(SettingsInput::Keymap(
+                KeymapTextField::Keystroke(section_index, binding_index),
+            )))
+            || ctx.focused_control
+                == Some(SettingsControl::RemoveBinding(section_index, binding_index))
+            || ctx.focused_control
+                == Some(SettingsControl::CaptureKeymap(KeymapTextField::Keystroke(
+                    section_index,
+                    binding_index,
+                )));
+        let action_focused = ctx.focused_control
+            == Some(SettingsControl::Dropdown(SettingsDropdown::BindingAction(
+                section_index,
+                binding_index,
+            )));
+        let action = Self::dropdown_trigger_widget(
+            format!("settings-binding-{section_index}-{binding_index}-action"),
+            action_name.to_owned(),
+            SettingsDropdown::BindingAction(section_index, binding_index),
+            action_focused,
+            colors,
+            ctx.handle.clone(),
+        );
+        let template = template_name.map(|name| {
+            let focused = ctx.focused_control
+                == Some(SettingsControl::Dropdown(
+                    SettingsDropdown::BindingTemplate(section_index, binding_index),
+                ));
+            Self::dropdown_trigger_widget(
+                format!("settings-binding-{section_index}-{binding_index}-template"),
+                name.to_owned(),
+                SettingsDropdown::BindingTemplate(section_index, binding_index),
+                focused,
+                colors,
+                ctx.handle.clone(),
+            )
+        });
+        let profile = profile_name.map(|name| {
+            let focused = ctx.focused_control
+                == Some(SettingsControl::Dropdown(SettingsDropdown::BindingProfile(
+                    section_index,
+                    binding_index,
+                )));
+            Self::dropdown_trigger_widget(
+                format!("settings-binding-{section_index}-{binding_index}-profile"),
+                name.to_owned(),
+                SettingsDropdown::BindingProfile(section_index, binding_index),
+                focused,
+                colors,
+                ctx.handle.clone(),
+            )
+        });
+        let capture_handle = ctx.handle.clone();
+        h_flex()
+            .w_full()
+            .h(px(KEYMAP_ROW_HEIGHT))
+            .pl_6()
+            .pr_2()
+            .gap_2()
+            .border_b_1()
+            .border_color(colors.border_variant)
+            .when(binding_focused, |row| row.bg(colors.element_selected))
+            .child(
                 h_flex()
-                    .w_full()
-                    .h(px(KEYMAP_ROW_HEIGHT))
-                    .pl_6()
-                    .pr_2()
-                    .border_b_1()
-                    .border_color(colors.border_variant)
+                    .w(px(330.))
+                    .gap_1()
+                    .flex_none()
+                    .child(Self::text_input_widget(
+                        format!("settings-binding-{section_index}-{binding_index}-key"),
+                        keystroke.clone(),
+                        SettingsInput::Keymap(KeymapTextField::Keystroke(
+                            section_index,
+                            binding_index,
+                        )),
+                        ctx.focused_input,
+                        colors,
+                        ctx.handle.clone(),
+                    ))
                     .child(
                         Button::new(
-                            format!("add-settings-binding-{section_index}"),
-                            format!("Add binding for {context}"),
+                            format!("record-settings-binding-{section_index}-{binding_index}"),
+                            "Record",
                         )
                         .style(ButtonStyle::Outlined)
+                        .size(ButtonSize::Compact)
                         .color(Color::Custom(colors.text))
-                        .selected_label_color(Color::Custom(colors.text))
-                        .toggle_state(focused)
-                        .selected_style(ButtonStyle::OutlinedCustom(colors.border_focused))
-                        .on_click(move |_, _, cx| {
-                            add_handle
+                        .on_click(move |_, window, cx| {
+                            capture_handle
                                 .update(cx, |this, cx| {
-                                    if let Some(editor) = this.settings_editor.as_mut()
-                                        && let Some(section) =
-                                            editor.keymap.sections.get_mut(section_index)
-                                    {
-                                        section.bindings.push(BindingForm {
-                                            keystroke: TextField::new("ctrl-shift-x"),
-                                            action: serde_json::Value::String(
-                                                "zetta::NewTab".to_owned(),
-                                            ),
-                                        });
-                                        editor.keymap_dirty = true;
-                                        refresh_keymap_cache(editor);
-                                        invalidate_controls_cache(editor);
-                                        cx.notify();
-                                    }
+                                    this.start_keymap_capture(
+                                        KeymapTextField::Keystroke(section_index, binding_index),
+                                        window,
+                                        cx,
+                                    );
                                 })
                                 .ok();
                         }),
+                    ),
+            )
+            .child(div().min_w_0().flex_1().child(action))
+            .when_some(template, |row, template| {
+                row.child(div().w(px(180.)).flex_none().child(template))
+            })
+            .when_some(profile, |row, profile| {
+                row.child(div().w(px(180.)).flex_none().child(profile))
+            })
+            .child({
+                let (icon, tooltip_text, control_variant) = if is_default {
+                    (
+                        IconName::Slash,
+                        "Unbind (disable built-in binding)",
+                        SettingsControl::UnbindBinding(section_index, binding_index),
                     )
-                    .into_any_element()
-            }
-            KeymapRowData::AddSection => {
-                let colors = ctx.colors.clone();
-                let add_handle = ctx.handle.clone();
-                let focused = ctx.focused_control == Some(SettingsControl::AddKeymapSection);
+                } else {
+                    (
+                        IconName::Trash,
+                        "Remove binding",
+                        SettingsControl::RemoveBinding(section_index, binding_index),
+                    )
+                };
+                let remove_handle = ctx.handle.clone();
+                IconButton::new(
+                    format!("unbind-settings-binding-{section_index}-{binding_index}"),
+                    icon,
+                )
+                .icon_size(IconSize::Small)
+                .icon_color(Color::Custom(colors.icon))
+                .selected_icon_color(Color::Custom(colors.icon))
+                .toggle_state(ctx.focused_control == Some(control_variant))
+                .selected_style(ButtonStyle::OutlinedCustom(colors.border_focused))
+                .tooltip(Tooltip::text(tooltip_text))
+                .on_click(move |_, _, cx| {
+                    remove_handle
+                        .update(cx, |this, cx| {
+                            if let Some(editor) = this.settings_editor.as_mut()
+                                && let Some(section) = editor.keymap.sections.get_mut(section_index)
+                                && binding_index < section.bindings.len()
+                            {
+                                let binding = section.bindings.remove(binding_index);
+                                if is_default {
+                                    // Add to unbind map
+                                    let storage_key =
+                                        keymap_keystroke_storage(&binding.keystroke.text);
+                                    section.unbind.insert(storage_key, binding.action_name());
+                                    // Add to unbound_defaults for immediate UI feedback
+                                    section.unbound_defaults.push(BindingForm {
+                                        keystroke: binding.keystroke,
+                                        action: binding.action,
+                                    });
+                                }
+                                editor.keymap_dirty = true;
+                                refresh_keymap_cache(editor);
+                                invalidate_controls_cache(editor);
+                                cx.notify();
+                            }
+                        })
+                        .ok();
+                })
+            })
+            .into_any_element()
+    }
+
+    /// A built-in binding the user has disabled: shown greyed out, with the
+    /// button that puts it back.
+    fn render_keymap_unbound_row(
+        section_index: usize,
+        binding_index: usize,
+        keystroke: &TextField,
+        action_name: &str,
+        ctx: &KeymapRowRenderContext,
+    ) -> gpui::AnyElement {
+        let colors = &ctx.colors;
+        let restore_handle = ctx.handle.clone();
+        h_flex()
+            .w_full()
+            .h(px(KEYMAP_ROW_HEIGHT))
+            .pl_6()
+            .pr_2()
+            .gap_2()
+            .border_b_1()
+            .border_color(colors.border_variant)
+            .child(
                 h_flex()
-                    .w_full()
-                    .h(px(KEYMAP_ROW_HEIGHT))
-                    .pl_6()
-                    .pr_2()
-                    .border_b_1()
-                    .border_color(colors.border_variant)
+                    .w(px(330.))
+                    .gap_1()
+                    .flex_none()
+                    .child(Self::text_input_widget(
+                        format!("settings-unbound-{section_index}-{binding_index}-key"),
+                        keystroke.clone(),
+                        SettingsInput::Keymap(KeymapTextField::Keystroke(
+                            section_index,
+                            binding_index,
+                        )),
+                        ctx.focused_input,
+                        colors,
+                        ctx.handle.clone(),
+                    ))
                     .child(
-                        Button::new("add-keymap-section", "Add keymap context")
-                            .style(ButtonStyle::Outlined)
-                            .color(Color::Custom(colors.text))
-                            .selected_label_color(Color::Custom(colors.text))
-                            .toggle_state(focused)
-                            .selected_style(ButtonStyle::OutlinedCustom(colors.border_focused))
-                            .on_click(move |_, _, cx| {
-                                add_handle
-                                    .update(cx, |this, cx| {
-                                        if let Some(editor) = this.settings_editor.as_mut() {
-                                            editor
-                                                .keymap
-                                                .sections
-                                                .push(KeymapSectionForm::new("Zetta > Terminal"));
-                                            editor.keymap_dirty = true;
-                                            refresh_keymap_cache(editor);
-                                            invalidate_controls_cache(editor);
-                                            cx.notify();
-                                        }
-                                    })
-                                    .ok();
-                            }),
-                    )
-                    .into_any_element()
-            }
-        }
+                        Button::new(
+                            format!("record-unbound-{section_index}-{binding_index}"),
+                            "Record",
+                        )
+                        .style(ButtonStyle::Outlined)
+                        .size(ButtonSize::Compact)
+                        .color(Color::Custom(colors.text))
+                        .disabled(true)
+                        .on_click(move |_, _, _| {}),
+                    ),
+            )
+            .child(
+                div()
+                    .min_w_0()
+                    .flex_1()
+                    .opacity(0.5)
+                    .child(action_name.to_owned()),
+            )
+            .child(
+                IconButton::new(
+                    format!("restore-unbound-{section_index}-{binding_index}"),
+                    IconName::RotateCw,
+                )
+                .icon_size(IconSize::Small)
+                .icon_color(Color::Custom(colors.icon))
+                .tooltip(Tooltip::text("Restore binding"))
+                .on_click(move |_, _, cx| {
+                    restore_handle
+                        .update(cx, |this, cx| {
+                            if let Some(editor) = this.settings_editor.as_mut()
+                                && let Some(section) = editor.keymap.sections.get_mut(section_index)
+                                && binding_index < section.unbound_defaults.len()
+                            {
+                                let binding = section.unbound_defaults.remove(binding_index);
+                                // Remove from unbind map
+                                section.unbind.shift_remove(&keymap_keystroke_storage(
+                                    &binding.keystroke.text,
+                                ));
+                                // Add back to bindings
+                                section.bindings.push(BindingForm {
+                                    keystroke: binding.keystroke,
+                                    action: binding.action,
+                                });
+                                editor.keymap_dirty = true;
+                                refresh_keymap_cache(editor);
+                                invalidate_controls_cache(editor);
+                                cx.notify();
+                            }
+                        })
+                        .ok();
+                }),
+            )
+            .into_any_element()
+    }
+
+    /// The button that appends a binding to a keymap context.
+    fn render_keymap_add_binding_row(
+        section_index: usize,
+        context: &str,
+        ctx: &KeymapRowRenderContext,
+    ) -> gpui::AnyElement {
+        let colors = &ctx.colors;
+        let add_handle = ctx.handle.clone();
+        let focused = ctx.focused_control == Some(SettingsControl::AddBinding(section_index));
+        h_flex()
+            .w_full()
+            .h(px(KEYMAP_ROW_HEIGHT))
+            .pl_6()
+            .pr_2()
+            .border_b_1()
+            .border_color(colors.border_variant)
+            .child(
+                Button::new(
+                    format!("add-settings-binding-{section_index}"),
+                    format!("Add binding for {context}"),
+                )
+                .style(ButtonStyle::Outlined)
+                .color(Color::Custom(colors.text))
+                .selected_label_color(Color::Custom(colors.text))
+                .toggle_state(focused)
+                .selected_style(ButtonStyle::OutlinedCustom(colors.border_focused))
+                .on_click(move |_, _, cx| {
+                    add_handle
+                        .update(cx, |this, cx| {
+                            if let Some(editor) = this.settings_editor.as_mut()
+                                && let Some(section) = editor.keymap.sections.get_mut(section_index)
+                            {
+                                section.bindings.push(BindingForm {
+                                    keystroke: TextField::new("ctrl-shift-x"),
+                                    action: serde_json::Value::String("zetta::NewTab".to_owned()),
+                                });
+                                editor.keymap_dirty = true;
+                                refresh_keymap_cache(editor);
+                                invalidate_controls_cache(editor);
+                                cx.notify();
+                            }
+                        })
+                        .ok();
+                }),
+            )
+            .into_any_element()
+    }
+
+    /// The button that appends a whole keymap context.
+    fn render_keymap_add_section_row(ctx: &KeymapRowRenderContext) -> gpui::AnyElement {
+        let colors = &ctx.colors;
+        let add_handle = ctx.handle.clone();
+        let focused = ctx.focused_control == Some(SettingsControl::AddKeymapSection);
+        h_flex()
+            .w_full()
+            .h(px(KEYMAP_ROW_HEIGHT))
+            .pl_6()
+            .pr_2()
+            .border_b_1()
+            .border_color(colors.border_variant)
+            .child(
+                Button::new("add-keymap-section", "Add keymap context")
+                    .style(ButtonStyle::Outlined)
+                    .color(Color::Custom(colors.text))
+                    .selected_label_color(Color::Custom(colors.text))
+                    .toggle_state(focused)
+                    .selected_style(ButtonStyle::OutlinedCustom(colors.border_focused))
+                    .on_click(move |_, _, cx| {
+                        add_handle
+                            .update(cx, |this, cx| {
+                                if let Some(editor) = this.settings_editor.as_mut() {
+                                    editor
+                                        .keymap
+                                        .sections
+                                        .push(KeymapSectionForm::new("Zetta > Terminal"));
+                                    editor.keymap_dirty = true;
+                                    refresh_keymap_cache(editor);
+                                    invalidate_controls_cache(editor);
+                                    cx.notify();
+                                }
+                            })
+                            .ok();
+                    }),
+            )
+            .into_any_element()
     }
 }
 

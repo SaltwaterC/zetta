@@ -106,3 +106,7 @@ pub(crate) fn field_box(
         })
         .bg(colors.editor_background)
 }
+
+#[cfg(test)]
+#[path = "tests/text_edit_ui.rs"]
+mod tests;

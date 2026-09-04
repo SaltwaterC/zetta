@@ -38,11 +38,6 @@ fn request_existing_process_window_with_command(
     Ok(false)
 }
 
-#[allow(dead_code)]
-pub(crate) fn request_existing_process_project(root: &Path) -> Result<bool> {
-    request_existing_process_project_with_working_directory(root, None)
-}
-
 pub(crate) fn request_existing_process_project_with_working_directory(
     root: &Path,
     working_directory: Option<&Path>,
@@ -320,10 +315,10 @@ pub(crate) fn request_process_run_wait(
             command,
         }),
         "failed" | "rejected" => {
-            let message = response
-                .error
-                .map(|error| error.message)
-                .unwrap_or_else(|| "run dependencies were not satisfied".to_owned());
+            let message = response.error.map_or_else(
+                || "run dependencies were not satisfied".to_owned(),
+                |error| error.message,
+            );
             anyhow::bail!("{message}");
         }
         status => anyhow::bail!("unexpected response to run_wait: {status}"),
@@ -368,7 +363,6 @@ pub(crate) fn request_process_silent_mode(
 }
 
 #[cfg(feature = "notifications")]
-#[allow(dead_code)]
 pub(crate) fn request_process_focus_tab(process_id: u32, attention_id: u64) -> Result<bool> {
     anyhow::ensure!(process_id != 0, "process ID must be positive");
     anyhow::ensure!(attention_id != 0, "attention ID must be positive");
@@ -376,9 +370,10 @@ pub(crate) fn request_process_focus_tab(process_id: u32, attention_id: u64) -> R
     send_focus_tab_request(&endpoint, attention_id)
 }
 
-// Kept for process-control callers for protocol compatibility. The request is
-// honored outside a worktree and is masked by the active worktree title.
-#[allow(dead_code)]
+// Only the sidecar reaches this: no Zetta subcommand sets a tab name over the
+// socket today. `decode_control_request` is what keeps `set_tab_name` available
+// to other process-control clients, and this is what pins the client half of it.
+#[cfg(test)]
 pub(crate) fn request_process_tab_name(process_id: u32, request: TabNameRequest) -> Result<bool> {
     let endpoint = read_control_endpoint(process_id)?;
     send_set_tab_name_request(&endpoint, &request)
@@ -423,11 +418,6 @@ fn send_open_window_request_with_command(
             ..Default::default()
         },
     )
-}
-
-#[allow(dead_code)]
-fn send_open_project_request(endpoint: &ControlEndpoint, root: &Path) -> Result<bool> {
-    send_open_project_request_with_working_directory(endpoint, root, None)
 }
 
 fn send_open_project_request_with_working_directory(
@@ -486,7 +476,7 @@ fn send_set_tab_attention_request(
     )
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 fn send_set_tab_name_request(endpoint: &ControlEndpoint, request: &TabNameRequest) -> Result<bool> {
     send_control_command(
         endpoint,
@@ -516,7 +506,6 @@ fn send_set_worktree_name_request(
 }
 
 #[cfg(feature = "notifications")]
-#[allow(dead_code)]
 fn send_focus_tab_request(endpoint: &ControlEndpoint, attention_id: u64) -> Result<bool> {
     send_control_command(
         endpoint,

@@ -113,7 +113,7 @@ impl SettingsFormWidgets {
             field,
             input,
             self.focused_input,
-            self.colors.clone(),
+            &self.colors,
             self.handle.clone(),
         )
     }
@@ -130,7 +130,7 @@ impl SettingsFormWidgets {
             label,
             selection,
             focused,
-            self.colors.clone(),
+            &self.colors,
             self.handle.clone(),
         )
     }

@@ -226,7 +226,7 @@ fn reloading_a_clean_configuration_editor_shows_new_configured_profiles() {
 /// A Configuration-page editor with no files behind it: the form falls back to
 /// its bundled defaults when the path does not exist, which is all the tab order
 /// depends on.
-fn configuration_editor(config: &Config) -> SettingsEditor {
+pub(crate) fn configuration_editor(config: &Config) -> SettingsEditor {
     let missing = Path::new("zetta-settings-ui-controls-tests-nonexistent.json");
     SettingsEditor {
         page: SettingsPage::Configuration,
@@ -395,4 +395,26 @@ fn the_automatic_protection_toggle_joins_the_tab_order_only_when_it_is_drawn() {
         )),
     );
     assert_eq!(position_of(&controls, &toggle), identity + 1);
+}
+
+/// The tab row and this tab order are built from separate lists — one in
+/// `settings_view`, one in `build_settings_controls` — so a page added to the
+/// row without a control here is reachable by mouse and not by keyboard, and a
+/// control without a row focuses a tab that is never drawn.
+#[test]
+fn the_keyboard_tab_order_matches_the_tab_row_the_dialog_draws() {
+    let config = Config::parse("{}", None, None).unwrap();
+    let mut editor = configuration_editor(&config);
+    let focusable: Vec<SettingsPage> = Zetta::settings_controls(&mut editor)
+        .into_iter()
+        .filter_map(|control| match control {
+            SettingsControl::Tab(page) => Some(page),
+            _ => None,
+        })
+        .collect();
+    let drawn: Vec<SettingsPage> = crate::settings_view::SETTINGS_PAGE_TABS
+        .iter()
+        .map(|(page, ..)| *page)
+        .collect();
+    assert_eq!(drawn, focusable);
 }

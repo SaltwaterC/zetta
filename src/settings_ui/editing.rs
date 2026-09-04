@@ -23,66 +23,14 @@ impl Zetta {
         }
         match control {
             SettingsControl::Tab(page) => self.select_settings_page(page, window, cx),
-            SettingsControl::Close => {
-                if self
-                    .settings_editor
-                    .as_ref()
-                    .is_some_and(|editor| editor.profile_draft.is_some())
-                {
-                    if let Some(editor) = self.settings_editor.as_mut() {
-                        editor.dismiss_profile_draft();
-                        editor.focused_input = None;
-                        editor.focused_control = None;
-                        editor.focus_scroll_request = None;
-                        editor.message = None;
-                        invalidate_controls_cache(editor);
-                        cx.notify();
-                    }
-                } else {
-                    self.dismiss_settings(window, cx);
-                }
-            }
+            SettingsControl::Close => self.activate_settings_close(window, cx),
             SettingsControl::Save => self.save_settings(window, cx),
             SettingsControl::Input(input) => self.focus_settings_input(input, window, cx),
             SettingsControl::CaptureKeymap(target) => self.start_keymap_capture(target, window, cx),
             SettingsControl::Dropdown(dropdown) => {
-                self.open_settings_dropdown(dropdown, window.mouse_position(), cx)
+                self.open_settings_dropdown(dropdown, window.mouse_position(), cx);
             }
-            SettingsControl::Toggle(toggle) => {
-                let value = self.settings_editor.as_ref().map(|editor| match toggle {
-                    SettingsToggle::CompactMode => editor.configuration.compact_mode,
-                    SettingsToggle::PaneSize => editor.configuration.hide_pane_size,
-                    SettingsToggle::TitleBarLabels => editor.configuration.hide_title_bar_labels,
-                    SettingsToggle::TitleBarButtons => editor.configuration.hide_title_bar_buttons,
-                    #[cfg(feature = "session-persistence")]
-                    SettingsToggle::SessionAutoProtect => {
-                        editor.configuration.session_persistence_auto_protect
-                    }
-                    SettingsToggle::ProfileVisibility(index) => editor
-                        .configuration
-                        .profiles
-                        .get(index)
-                        .is_some_and(|profile| !profile.hidden),
-                    SettingsToggle::ProfileDraftVisibility => editor
-                        .profile_draft
-                        .as_ref()
-                        .is_some_and(|profile| !profile.hidden),
-                    #[cfg(target_os = "macos")]
-                    SettingsToggle::TitleBarMenus => editor.configuration.hide_title_bar_menus,
-                    SettingsToggle::ProjectOpacityOverride => editor
-                        .project
-                        .as_ref()
-                        .is_some_and(|project| project.form.inactive_pane_opacity.is_some()),
-                    SettingsToggle::ProjectProfileVisibility(index) => editor
-                        .project
-                        .as_ref()
-                        .and_then(|project| project.form.profiles.get(index))
-                        .is_some_and(|profile| !profile.hidden),
-                });
-                if let Some(value) = value {
-                    self.set_settings_toggle(toggle, !value, window, cx);
-                }
-            }
+            SettingsControl::Toggle(toggle) => self.activate_settings_toggle(toggle, window, cx),
             #[cfg(target_os = "macos")]
             SettingsControl::RequestFocusStatusAccess => {
                 window.dispatch_action(Box::new(RequestFocusStatusAccess), cx);
@@ -99,138 +47,25 @@ impl Zetta {
                 self.open_default_tab_icon_picker(window, cx);
             }
             SettingsControl::Numeric(_) | SettingsControl::Opacity => {}
-            SettingsControl::AddProfile => {
-                if let Some(editor) = self.settings_editor.as_mut() {
-                    editor.profile_draft_scroll = ScrollHandle::new();
-                    editor.profile_draft = Some(settings_editor::ProfileForm {
-                        name: TextField::default(),
-                        program: TextField::default(),
-                        arguments: TextField::default(),
-                        theme: None,
-                        dark_theme: None,
-                        icon: None,
-                        automatic_icon: ProfileIcon::Zetta,
-                        hidden: false,
-                        detected: false,
-                    });
-                    editor.message = None;
-                    invalidate_controls_cache(editor);
-                }
-                self.focus_settings_input(
-                    SettingsInput::ProfileDraft(ProfileDraftField::Name),
-                    window,
-                    cx,
-                );
-            }
+            SettingsControl::AddProfile => self.begin_profile_draft(window, cx),
             SettingsControl::RemoveProfile(index) => {
-                if let Some(editor) = self.settings_editor.as_mut()
-                    && index < editor.configuration.profiles.len()
-                {
-                    editor.configuration.profiles.remove(index);
-                    editor.configuration_dirty = true;
-                    editor.focused_control = None;
-                    invalidate_controls_cache(editor);
-                    cx.notify();
-                }
+                self.remove_settings_profile(index, window, cx);
             }
             SettingsControl::SearchThemes => self.fetch_theme_extensions(window, cx),
             SettingsControl::InstallTheme(id) => self.download_theme_extension(id, window, cx),
             SettingsControl::RemoveTheme(id) => self.remove_theme_extension(id, window, cx),
             SettingsControl::RemoveBinding(section, binding) => {
-                if let Some(editor) = self.settings_editor.as_mut()
-                    && let Some(section) = editor.keymap.sections.get_mut(section)
-                    && binding < section.bindings.len()
-                {
-                    section.bindings.remove(binding);
-                    editor.keymap_dirty = true;
-                    editor.focused_control = None;
-                    cx.notify();
-                }
+                self.remove_settings_binding(section, binding, window, cx);
             }
             SettingsControl::UnbindBinding(section, binding) => {
-                if let Some(editor) = self.settings_editor.as_mut()
-                    && let Some(section) = editor.keymap.sections.get_mut(section)
-                    && binding < section.bindings.len()
-                {
-                    let binding = section.bindings.remove(binding);
-                    // Add to unbind map
-                    section.unbind.insert(
-                        keymap_keystroke_storage(&binding.keystroke.text),
-                        binding.action_name(),
-                    );
-                    editor.keymap_dirty = true;
-                    editor.focused_control = None;
-                    cx.notify();
-                }
+                self.unbind_settings_binding(section, binding, window, cx);
             }
             SettingsControl::AddBinding(section_index) => {
-                if let Some(editor) = self.settings_editor.as_mut()
-                    && let Some(section) = editor.keymap.sections.get_mut(section_index)
-                {
-                    section.bindings.push(BindingForm {
-                        keystroke: TextField::new("ctrl-shift-x"),
-                        action: serde_json::Value::String("zetta::NewTab".to_owned()),
-                    });
-                    editor.keymap_dirty = true;
-                    cx.notify();
-                }
+                self.add_settings_binding(section_index, window, cx);
             }
-            SettingsControl::AddKeymapSection => {
-                if let Some(editor) = self.settings_editor.as_mut() {
-                    editor
-                        .keymap
-                        .sections
-                        .push(KeymapSectionForm::new("Zetta > Terminal"));
-                    editor.keymap_dirty = true;
-                    cx.notify();
-                }
-            }
-            SettingsControl::Font(index) => {
-                if let Some(editor) = self.settings_editor.as_mut()
-                    && let Some(font) = editor.fonts.get(index)
-                {
-                    editor.configuration.terminal_font_family = font.clone();
-                    editor.configuration_dirty = true;
-                    editor.clear_dropdown();
-                    editor.font_query = None;
-                    editor.focused_input = None;
-                    editor.focused_control = None;
-                    editor.message = None;
-                    invalidate_controls_cache(editor);
-                    cx.notify();
-                }
-            }
-            SettingsControl::CreateProfile => {
-                let valid = self.settings_editor.as_ref().is_some_and(|editor| {
-                    editor.profile_draft.as_ref().is_some_and(|draft| {
-                        Self::profile_draft_has_required_fields(
-                            &draft.name.text,
-                            &draft.program.text,
-                        )
-                    })
-                });
-                if !valid {
-                    if let Some(editor) = self.settings_editor.as_mut() {
-                        editor.message =
-                            Some((true, "Profile name and program are required.".to_owned()));
-                    }
-                    cx.notify();
-                    return;
-                }
-                if let Some(editor) = self.settings_editor.as_mut() {
-                    let mut draft = editor.profile_draft.take().unwrap();
-                    draft.automatic_icon = ProfileIcon::automatic_for_program(&draft.program.text);
-                    editor.configuration.profiles.push(draft);
-                    editor.configuration_dirty = true;
-                    editor.clear_dropdown();
-                    editor.focused_input = None;
-                    editor.focused_control = None;
-                    editor.focus_scroll_request = None;
-                    editor.message = None;
-                    invalidate_controls_cache(editor);
-                    cx.notify();
-                }
-            }
+            SettingsControl::AddKeymapSection => self.add_settings_keymap_section(window, cx),
+            SettingsControl::Font(index) => self.select_settings_font(index, window, cx),
+            SettingsControl::CreateProfile => self.create_settings_profile(window, cx),
             SettingsControl::SelectPaneTemplate(_)
             | SettingsControl::SelectPaneTemplateNode(_)
             | SettingsControl::NewPaneTemplate
@@ -250,7 +85,7 @@ impl Zetta {
             | SettingsControl::AddPaneTemplateEnvironment(_)
             | SettingsControl::RemovePaneTemplateEnvironment(_, _)
             | SettingsControl::TogglePaneTemplateOverlay(_) => {
-                let _ = pane_templates::activate_pane_template_control(self, control, window, cx);
+                self.activate_settings_pane_template_control(control, window, cx);
             }
             SettingsControl::CloseProjectConfig
             | SettingsControl::SaveProjectConfig
@@ -265,20 +100,266 @@ impl Zetta {
             | SettingsControl::RemoveProjectCommandEnvironment(_, _)
             | SettingsControl::AddProjectProfile
             | SettingsControl::RemoveProjectProfile(_) => {
-                self.activate_project_config_control(control, window, cx)
+                self.activate_settings_project_control(control, window, cx);
             }
             SettingsControl::ProjectOpacity => {}
             SettingsControl::AddProject => self.add_project_from_settings(window, cx),
             SettingsControl::OpenProject(index) => {
-                self.open_project_from_settings(index, window, cx)
+                self.open_project_from_settings(index, window, cx);
             }
             SettingsControl::EditProject(index) => {
-                self.edit_project_from_settings(index, window, cx)
+                self.edit_project_from_settings(index, window, cx);
             }
             SettingsControl::RemoveProject(index) => {
-                self.remove_project_from_settings(index, window, cx)
+                self.remove_project_from_settings(index, window, cx);
             }
         }
+    }
+
+    /// Closing the dialog, which asks first when a profile draft would be lost.
+    fn activate_settings_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self
+            .settings_editor
+            .as_ref()
+            .is_some_and(|editor| editor.profile_draft.is_some())
+        {
+            if let Some(editor) = self.settings_editor.as_mut() {
+                editor.dismiss_profile_draft();
+                editor.focused_input = None;
+                editor.focused_control = None;
+                editor.focus_scroll_request = None;
+                editor.message = None;
+                invalidate_controls_cache(editor);
+                cx.notify();
+            }
+        } else {
+            self.dismiss_settings(window, cx);
+        }
+    }
+
+    /// Flipping one of the Configuration page's switches.
+    fn activate_settings_toggle(
+        &mut self,
+        toggle: SettingsToggle,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let value = self.settings_editor.as_ref().map(|editor| match toggle {
+            SettingsToggle::CompactMode => editor.configuration.compact_mode,
+            SettingsToggle::PaneSize => editor.configuration.hide_pane_size,
+            SettingsToggle::TitleBarLabels => editor.configuration.hide_title_bar_labels,
+            SettingsToggle::TitleBarButtons => editor.configuration.hide_title_bar_buttons,
+            #[cfg(feature = "session-persistence")]
+            SettingsToggle::SessionAutoProtect => {
+                editor.configuration.session_persistence_auto_protect
+            }
+            SettingsToggle::ProfileVisibility(index) => editor
+                .configuration
+                .profiles
+                .get(index)
+                .is_some_and(|profile| !profile.hidden),
+            SettingsToggle::ProfileDraftVisibility => editor
+                .profile_draft
+                .as_ref()
+                .is_some_and(|profile| !profile.hidden),
+            #[cfg(target_os = "macos")]
+            SettingsToggle::TitleBarMenus => editor.configuration.hide_title_bar_menus,
+            SettingsToggle::ProjectOpacityOverride => editor
+                .project
+                .as_ref()
+                .is_some_and(|project| project.form.inactive_pane_opacity.is_some()),
+            SettingsToggle::ProjectProfileVisibility(index) => editor
+                .project
+                .as_ref()
+                .and_then(|project| project.form.profiles.get(index))
+                .is_some_and(|profile| !profile.hidden),
+        });
+        if let Some(value) = value {
+            self.set_settings_toggle(toggle, !value, window, cx);
+        }
+    }
+
+    /// Opening the Add profile modal on a blank draft.
+    fn begin_profile_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(editor) = self.settings_editor.as_mut() {
+            editor.profile_draft_scroll = ScrollHandle::new();
+            editor.profile_draft = Some(settings_editor::ProfileForm {
+                name: TextField::default(),
+                program: TextField::default(),
+                arguments: TextField::default(),
+                theme: None,
+                dark_theme: None,
+                icon: None,
+                automatic_icon: ProfileIcon::Zetta,
+                hidden: false,
+                detected: false,
+            });
+            editor.message = None;
+            invalidate_controls_cache(editor);
+        }
+        self.focus_settings_input(
+            SettingsInput::ProfileDraft(ProfileDraftField::Name),
+            window,
+            cx,
+        );
+    }
+
+    /// Removing a user-defined profile.
+    fn remove_settings_profile(
+        &mut self,
+        index: usize,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(editor) = self.settings_editor.as_mut()
+            && index < editor.configuration.profiles.len()
+        {
+            editor.configuration.profiles.remove(index);
+            editor.configuration_dirty = true;
+            editor.focused_control = None;
+            invalidate_controls_cache(editor);
+            cx.notify();
+        }
+    }
+
+    /// Removing a keymap binding.
+    fn remove_settings_binding(
+        &mut self,
+        section: usize,
+        binding: usize,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(editor) = self.settings_editor.as_mut()
+            && let Some(section) = editor.keymap.sections.get_mut(section)
+            && binding < section.bindings.len()
+        {
+            section.bindings.remove(binding);
+            editor.keymap_dirty = true;
+            editor.focused_control = None;
+            cx.notify();
+        }
+    }
+
+    /// Disabling a built-in binding, which is recorded rather than deleted.
+    fn unbind_settings_binding(
+        &mut self,
+        section: usize,
+        binding: usize,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(editor) = self.settings_editor.as_mut()
+            && let Some(section) = editor.keymap.sections.get_mut(section)
+            && binding < section.bindings.len()
+        {
+            let binding = section.bindings.remove(binding);
+            // Add to unbind map
+            section.unbind.insert(
+                keymap_keystroke_storage(&binding.keystroke.text),
+                binding.action_name(),
+            );
+            editor.keymap_dirty = true;
+            editor.focused_control = None;
+            cx.notify();
+        }
+    }
+
+    /// Appending a binding to a keymap context.
+    fn add_settings_binding(
+        &mut self,
+        section_index: usize,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(editor) = self.settings_editor.as_mut()
+            && let Some(section) = editor.keymap.sections.get_mut(section_index)
+        {
+            section.bindings.push(BindingForm {
+                keystroke: TextField::new("ctrl-shift-x"),
+                action: serde_json::Value::String("zetta::NewTab".to_owned()),
+            });
+            editor.keymap_dirty = true;
+            cx.notify();
+        }
+    }
+
+    /// Appending a keymap context.
+    fn add_settings_keymap_section(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(editor) = self.settings_editor.as_mut() {
+            editor
+                .keymap
+                .sections
+                .push(KeymapSectionForm::new("Zetta > Terminal"));
+            editor.keymap_dirty = true;
+            cx.notify();
+        }
+    }
+
+    /// Choosing a font family from the picker.
+    fn select_settings_font(&mut self, index: usize, _window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(editor) = self.settings_editor.as_mut()
+            && let Some(font) = editor.fonts.get(index)
+        {
+            editor.configuration.terminal_font_family = font.clone();
+            editor.configuration_dirty = true;
+            editor.clear_dropdown();
+            editor.font_query = None;
+            editor.focused_input = None;
+            editor.focused_control = None;
+            editor.message = None;
+            invalidate_controls_cache(editor);
+            cx.notify();
+        }
+    }
+
+    /// Committing the Add profile modal's draft.
+    fn create_settings_profile(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let valid = self.settings_editor.as_ref().is_some_and(|editor| {
+            editor.profile_draft.as_ref().is_some_and(|draft| {
+                Self::profile_draft_has_required_fields(&draft.name.text, &draft.program.text)
+            })
+        });
+        if !valid {
+            if let Some(editor) = self.settings_editor.as_mut() {
+                editor.message = Some((true, "Profile name and program are required.".to_owned()));
+            }
+            cx.notify();
+            return;
+        }
+        if let Some(editor) = self.settings_editor.as_mut() {
+            let mut draft = editor.profile_draft.take().unwrap();
+            draft.automatic_icon = ProfileIcon::automatic_for_program(&draft.program.text);
+            editor.configuration.profiles.push(draft);
+            editor.configuration_dirty = true;
+            editor.clear_dropdown();
+            editor.focused_input = None;
+            editor.focused_control = None;
+            editor.focus_scroll_request = None;
+            editor.message = None;
+            invalidate_controls_cache(editor);
+            cx.notify();
+        }
+    }
+
+    /// The pane-template page's controls, which the template editor owns.
+    fn activate_settings_pane_template_control(
+        &mut self,
+        control: SettingsControl,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let _ = pane_templates::activate_pane_template_control(self, control, window, cx);
+    }
+
+    /// The project configuration builder's controls.
+    fn activate_settings_project_control(
+        &mut self,
+        control: SettingsControl,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.activate_project_config_control(control, window, cx);
     }
 
     pub(crate) fn edit_settings_input(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
@@ -401,7 +482,7 @@ impl Zetta {
             SettingsToggle::TitleBarButtons => editor.configuration.hide_title_bar_buttons = value,
             #[cfg(feature = "session-persistence")]
             SettingsToggle::SessionAutoProtect => {
-                editor.configuration.session_persistence_auto_protect = value
+                editor.configuration.session_persistence_auto_protect = value;
             }
             SettingsToggle::ProfileVisibility(index) => {
                 if let Some(profile) = editor.configuration.profiles.get_mut(index) {

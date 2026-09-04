@@ -142,8 +142,9 @@ impl Zetta {
                 let profiles = metadata
                     .project_root(*routing_id)
                     .and_then(|root| self.projects.configs.get(root))
-                    .map(|project| &project.effective.profiles)
-                    .unwrap_or(&self.launch_config.profiles);
+                    .map_or(&self.launch_config.profiles, |project| {
+                        &project.effective.profiles
+                    });
                 let mut profile = profiles
                     .iter()
                     .find(|profile| profile.name.eq_ignore_ascii_case(name))

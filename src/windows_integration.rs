@@ -102,6 +102,12 @@ struct TerminalStartupInfo {
     wShowWindow: u16,
 }
 
+/// The startup metadata the Windows Terminal handoff ABI hands over.
+///
+/// Everything but `title` is decoded because the ABI sends it and a partial
+/// decode would desynchronize the rest, not because Zetta applies it yet —
+/// hence the per-field allows rather than one on the struct, so a field added
+/// later still has to say why it is unread.
 #[derive(Clone, Debug)]
 pub(crate) struct HandoffStartupMetadata {
     pub(crate) title: Option<String>,
@@ -174,6 +180,10 @@ pub(crate) fn monitor_handoff_child(
         .ok();
 }
 
+/// Only `signal` is ever read; the other three handles are held so the console
+/// they belong to stays open for as long as the handover does. Dropping them
+/// early closes the client's end of the protocol, so these fields are the hold
+/// itself rather than stored state.
 struct WindowsHandoffControl {
     signal: OwnedHandle,
     #[allow(dead_code)]

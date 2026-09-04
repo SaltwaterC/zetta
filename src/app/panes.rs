@@ -88,8 +88,7 @@ impl Zetta {
         }
         let profile_name = profile_name
             .as_deref()
-            .map(Self::sanitize_exit_context)
-            .unwrap_or_else(|| "<unknown>".to_owned());
+            .map_or_else(|| "<unknown>".to_owned(), Self::sanitize_exit_context);
         log::warn!(
             "unexpected terminal exit: profile={:?} pane_id={} session_id={} child_pid={:?} source={:?} exit_code={:?} input_sent={} foreground_command={:?}",
             profile_name,

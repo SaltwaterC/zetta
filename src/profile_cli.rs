@@ -264,7 +264,7 @@ fn parse_add_command(arguments: &[String]) -> Result<ProfileCommand> {
                 );
             }
             "--arg" | "-a" => {
-                args.push(arguments.next().context("--arg requires a value")?.clone())
+                args.push(arguments.next().context("--arg requires a value")?.clone());
             }
             "--theme" | "-t" => {
                 anyhow::ensure!(theme.is_none(), "--theme may only be specified once");

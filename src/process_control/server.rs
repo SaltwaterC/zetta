@@ -145,6 +145,32 @@ fn serve_control_connection(
     let _ = write_message(&mut stream, &response);
 }
 
+/// The sender and the shutdown flag every arm of [`apply_control_request`]
+/// dispatches through, bound once so an arm names only the command it builds.
+struct ControlDispatch<'a> {
+    commands: &'a UnboundedSender<ProcessControlCommand>,
+    stopping: &'a AtomicBool,
+}
+
+impl ControlDispatch<'_> {
+    /// Sends a command and waits for the window to acknowledge it.
+    fn send(&self, build: impl FnOnce(Sender<bool>) -> ProcessControlCommand) -> &'static str {
+        dispatch_control_command(self.commands, self.stopping, build)
+    }
+
+    /// The same, for a command that answers with a value written into
+    /// `response`, or the reason it refused.
+    fn send_for<T>(
+        &self,
+        response: &mut ControlResponse,
+        code: &str,
+        build: impl FnOnce(Sender<std::result::Result<T, String>>) -> ProcessControlCommand,
+        apply: impl FnOnce(T, &mut ControlResponse),
+    ) -> &'static str {
+        dispatch_control_result(self.commands, self.stopping, response, code, build, apply)
+    }
+}
+
 /// Applies one decoded request, filling in whatever the response carries
 /// beyond its status, and returns that status.
 ///
@@ -164,72 +190,129 @@ fn apply_control_request(
         // waiting on a socket that closed.
         return Some("rejected");
     };
-    Some(match command {
+    // `run_wait` takes the connection over rather than answering with a status
+    // — the client blocks on it until the command it is waiting for finishes —
+    // so it is handled here rather than in a group.
+    if let ControlRequestCommand::RunWait { request } = command {
+        serve_run_wait_connection(stream, commands, stopping, token, request);
+        return None;
+    }
+    let dispatch = ControlDispatch { commands, stopping };
+    // Exhaustive, so a new command has to be given a group rather than falling
+    // through. The groups mirror `decode.rs`'s, so a command is added to the
+    // same-named function in both files; each group re-matches only its own
+    // variants, which is why they end in an `unreachable!` this match rules out.
+    Some(match &command {
+        ControlRequestCommand::ReloadConfiguration { .. }
+        | ControlRequestCommand::OpenWindow
+        | ControlRequestCommand::OpenNewWindow { .. }
+        | ControlRequestCommand::OpenProject { .. }
+        | ControlRequestCommand::ReloadProjects => apply_window_command(command, &dispatch),
+        ControlRequestCommand::ReplacePane { .. }
+        | ControlRequestCommand::OpenCommand { .. }
+        | ControlRequestCommand::RunPane { .. }
+        | ControlRequestCommand::RunShellCommand { .. }
+        | ControlRequestCommand::RunComplete { .. }
+        | ControlRequestCommand::ListPaneLabels { .. } => {
+            apply_pane_command(command, &dispatch, response)
+        }
+        ControlRequestCommand::ReconnectSession { .. }
+        | ControlRequestCommand::OpenRemoteSession { .. }
+        | ControlRequestCommand::ResumeDiskSession { .. } => {
+            apply_session_command(command, &dispatch)
+        }
+        ControlRequestCommand::SetTabIcon { .. }
+        | ControlRequestCommand::SetTheme { .. }
+        | ControlRequestCommand::ListThemes
+        | ControlRequestCommand::GetPaneTheme { .. }
+        | ControlRequestCommand::SetPaneOverlay { .. } => {
+            apply_appearance_command(command, &dispatch, response)
+        }
+        // Already returned above; named so this match stays exhaustive and a new
+        // command still has to be given a group.
+        ControlRequestCommand::RunWait { .. } => return None,
+        ControlRequestCommand::SetTabAttention { .. }
+        | ControlRequestCommand::FocusTab { .. }
+        | ControlRequestCommand::SetTabName { .. }
+        | ControlRequestCommand::SetWorktreeName { .. }
+        | ControlRequestCommand::GetSilentMode { .. } => {
+            apply_tab_command(command, &dispatch, response)
+        }
+    })
+}
+
+/// Configuration, window and project commands.
+///
+/// Only reachable for the variants [`apply_control_request`] routes here, which
+/// is what the final arm relies on.
+fn apply_window_command(
+    command: ControlRequestCommand,
+    dispatch: &ControlDispatch<'_>,
+) -> &'static str {
+    match command {
         ControlRequestCommand::ReloadConfiguration { config_path } => {
-            dispatch_control_command(commands, stopping, |completion| {
-                ProcessControlCommand::ReloadConfiguration {
-                    config_path,
-                    completion,
-                }
+            dispatch.send(|completion| ProcessControlCommand::ReloadConfiguration {
+                config_path,
+                completion,
             })
         }
         ControlRequestCommand::OpenWindow => {
-            dispatch_control_command(commands, stopping, |completion| {
-                ProcessControlCommand::OpenWindow { completion }
-            })
+            dispatch.send(|completion| ProcessControlCommand::OpenWindow { completion })
         }
         ControlRequestCommand::OpenNewWindow {
             profile,
             activation_token,
-        } => dispatch_control_command(commands, stopping, |completion| {
-            ProcessControlCommand::OpenNewWindow {
-                profile,
-                activation_token,
-                completion,
-            }
+        } => dispatch.send(|completion| ProcessControlCommand::OpenNewWindow {
+            profile,
+            activation_token,
+            completion,
         }),
         ControlRequestCommand::OpenProject {
             root,
             working_directory,
-        } => dispatch_control_command(commands, stopping, |completion| {
-            ProcessControlCommand::OpenProject {
-                root,
-                working_directory,
-                completion,
-            }
+        } => dispatch.send(|completion| ProcessControlCommand::OpenProject {
+            root,
+            working_directory,
+            completion,
         }),
         ControlRequestCommand::ReloadProjects => {
-            dispatch_control_command(commands, stopping, |completion| {
-                ProcessControlCommand::ReloadProjects { completion }
-            })
+            dispatch.send(|completion| ProcessControlCommand::ReloadProjects { completion })
         }
+        _ => unreachable!("apply_control_request routes only window dispatch.commands here"),
+    }
+}
+
+/// Commands about a pane: what runs in it, and what it reports back.
+///
+/// Only reachable for the variants [`apply_control_request`] routes here, which
+/// is what the final arm relies on.
+fn apply_pane_command(
+    command: ControlRequestCommand,
+    dispatch: &ControlDispatch<'_>,
+    response: &mut ControlResponse,
+) -> &'static str {
+    match command {
         ControlRequestCommand::ReplacePane {
             split,
             profile,
             theme,
-        } => dispatch_control_command(commands, stopping, |completion| {
-            ProcessControlCommand::ReplacePane {
-                request: ReplacePaneRequest {
-                    split,
-                    profile,
-                    theme,
-                },
-                completion,
-            }
+        } => dispatch.send(|completion| ProcessControlCommand::ReplacePane {
+            request: ReplacePaneRequest {
+                split,
+                profile,
+                theme,
+            },
+            completion,
         }),
         ControlRequestCommand::OpenCommand {
             request,
             working_directory,
-        } => dispatch_control_command(commands, stopping, |completion| {
-            ProcessControlCommand::OpenCommand {
-                request,
-                working_directory,
-                completion,
-            }
+        } => dispatch.send(|completion| ProcessControlCommand::OpenCommand {
+            request,
+            working_directory,
+            completion,
         }),
-        ControlRequestCommand::RunPane { request } => dispatch_control_result(
-            commands,
-            stopping,
+        ControlRequestCommand::RunPane { request } => dispatch.send_for(
             response,
             "pane_rejected",
             |completion| ProcessControlCommand::RunPane {
@@ -238,9 +321,7 @@ fn apply_control_request(
             },
             |(), _| {},
         ),
-        ControlRequestCommand::RunShellCommand { request } => dispatch_control_result(
-            commands,
-            stopping,
+        ControlRequestCommand::RunShellCommand { request } => dispatch.send_for(
             response,
             "shell_command_rejected",
             |completion| ProcessControlCommand::RunShellCommand {
@@ -249,14 +330,8 @@ fn apply_control_request(
             },
             |(), _| {},
         ),
-        ControlRequestCommand::RunWait { request } => {
-            serve_run_wait_connection(stream, commands, stopping, token, request);
-            return None;
-        }
         ControlRequestCommand::RunComplete { .. } => "rejected",
-        ControlRequestCommand::ListPaneLabels { attention_id } => dispatch_control_result(
-            commands,
-            stopping,
+        ControlRequestCommand::ListPaneLabels { attention_id } => dispatch.send_for(
             response,
             "pane_list_rejected",
             |completion| ProcessControlCommand::ListPaneLabels {
@@ -265,12 +340,25 @@ fn apply_control_request(
             },
             |labels, response| response.pane_labels = labels,
         ),
+        _ => unreachable!("apply_control_request routes only pane dispatch.commands here"),
+    }
+}
+
+/// Commands that attach a session to this window.
+///
+/// Only reachable for the variants [`apply_control_request`] routes here, which
+/// is what the final arm relies on.
+fn apply_session_command(
+    command: ControlRequestCommand,
+    dispatch: &ControlDispatch<'_>,
+) -> &'static str {
+    match command {
         ControlRequestCommand::ReconnectSession {
             runner_id,
             session_id,
             attention_id,
             secret,
-        } => dispatch_reconnect_command(commands, stopping, |completion| {
+        } => dispatch_reconnect_command(dispatch.commands, dispatch.stopping, |completion| {
             ProcessControlCommand::ReconnectSession {
                 runner_id,
                 session_id,
@@ -284,7 +372,7 @@ fn apply_control_request(
             port,
             session_id,
             secret,
-        } => dispatch_reconnect_command(commands, stopping, |completion| {
+        } => dispatch_reconnect_command(dispatch.commands, dispatch.stopping, |completion| {
             ProcessControlCommand::OpenRemoteSession {
                 target,
                 port,
@@ -298,7 +386,7 @@ fn apply_control_request(
             identity_paths,
             identity_passphrases,
             secret,
-        } => dispatch_reconnect_command(commands, stopping, |completion| {
+        } => dispatch_reconnect_command(dispatch.commands, dispatch.stopping, |completion| {
             ProcessControlCommand::ResumeDiskSession {
                 session_id,
                 identity_paths,
@@ -307,27 +395,38 @@ fn apply_control_request(
                 completion,
             }
         }),
+        _ => unreachable!("apply_control_request routes only session dispatch.commands here"),
+    }
+}
+
+/// Commands that change how a tab or pane looks.
+///
+/// Only reachable for the variants [`apply_control_request`] routes here, which
+/// is what the final arm relies on.
+fn apply_appearance_command(
+    command: ControlRequestCommand,
+    dispatch: &ControlDispatch<'_>,
+    response: &mut ControlResponse,
+) -> &'static str {
+    match command {
         ControlRequestCommand::SetTabIcon { icon } => {
-            dispatch_control_command(commands, stopping, |completion| {
-                ProcessControlCommand::SetTabIcon { icon, completion }
-            })
+            dispatch.send(|completion| ProcessControlCommand::SetTabIcon { icon, completion })
         }
         ControlRequestCommand::SetTheme { scope, theme } => {
-            dispatch_control_command(commands, stopping, |completion| {
-                ProcessControlCommand::SetTheme {
-                    scope,
-                    theme,
-                    completion,
-                }
+            dispatch.send(|completion| ProcessControlCommand::SetTheme {
+                scope,
+                theme,
+                completion,
             })
         }
         ControlRequestCommand::ListThemes => {
             let (completion, completed) = channel();
-            let accepted = commands
+            let accepted = dispatch
+                .commands
                 .unbounded_send(ProcessControlCommand::ListThemes { completion })
                 .is_ok();
             match accepted
-                .then(|| wait_for_theme_list_completion(&completed, stopping))
+                .then(|| wait_for_theme_list_completion(&completed, dispatch.stopping))
                 .flatten()
             {
                 Some(themes) => {
@@ -340,9 +439,7 @@ fn apply_control_request(
         ControlRequestCommand::GetPaneTheme {
             attention_id,
             pane_id,
-        } => dispatch_control_result(
-            commands,
-            stopping,
+        } => dispatch.send_for(
             response,
             "pane_theme_unavailable",
             |completion| ProcessControlCommand::GetPaneTheme {
@@ -359,57 +456,62 @@ fn apply_control_request(
             color,
         } => {
             let color = color.and_then(|value| overlay_color_from_value(&value));
-            dispatch_control_command(commands, stopping, |completion| {
-                ProcessControlCommand::SetPaneOverlay {
-                    text,
-                    font_size,
-                    opacity,
-                    color,
-                    completion,
-                }
+            dispatch.send(|completion| ProcessControlCommand::SetPaneOverlay {
+                text,
+                font_size,
+                opacity,
+                color,
+                completion,
             })
         }
+        _ => unreachable!("apply_control_request routes only appearance dispatch.commands here"),
+    }
+}
+
+/// Commands that address a tab by name or attention id.
+///
+/// Only reachable for the variants [`apply_control_request`] routes here, which
+/// is what the final arm relies on.
+fn apply_tab_command(
+    command: ControlRequestCommand,
+    dispatch: &ControlDispatch<'_>,
+    response: &mut ControlResponse,
+) -> &'static str {
+    match command {
         ControlRequestCommand::SetTabAttention {
             attention_id,
             summary,
             body,
-        } => dispatch_control_command(commands, stopping, |completion| {
-            ProcessControlCommand::SetTabAttention {
-                request: TabAttentionRequest {
-                    attention_id,
-                    summary,
-                    body,
-                },
-                completion,
-            }
+        } => dispatch.send(|completion| ProcessControlCommand::SetTabAttention {
+            request: TabAttentionRequest {
+                attention_id,
+                summary,
+                body,
+            },
+            completion,
         }),
         ControlRequestCommand::FocusTab { attention_id } => {
-            dispatch_control_command(commands, stopping, |completion| {
-                ProcessControlCommand::FocusTab {
-                    attention_id,
-                    completion,
-                }
+            dispatch.send(|completion| ProcessControlCommand::FocusTab {
+                attention_id,
+                completion,
             })
         }
         ControlRequestCommand::SetTabName { attention_id, name } => {
-            dispatch_control_command(commands, stopping, |completion| {
-                ProcessControlCommand::SetTabName {
-                    request: TabNameRequest { attention_id, name },
-                    completion,
-                }
+            dispatch.send(|completion| ProcessControlCommand::SetTabName {
+                request: TabNameRequest { attention_id, name },
+                completion,
             })
         }
         ControlRequestCommand::SetWorktreeName { attention_id, name } => {
-            dispatch_control_command(commands, stopping, |completion| {
-                ProcessControlCommand::SetWorktreeName {
-                    request: WorktreeNameRequest { attention_id, name },
-                    completion,
-                }
+            dispatch.send(|completion| ProcessControlCommand::SetWorktreeName {
+                request: WorktreeNameRequest { attention_id, name },
+                completion,
             })
         }
         ControlRequestCommand::GetSilentMode { attention_id } => {
             let (completion, completed) = channel();
-            if commands
+            if dispatch
+                .commands
                 .unbounded_send(ProcessControlCommand::GetSilentMode {
                     attention_id,
                     completion,
@@ -417,7 +519,8 @@ fn apply_control_request(
                 .is_err()
             {
                 "rejected"
-            } else if let Some(silent_mode) = wait_for_silent_mode_completion(&completed, stopping)
+            } else if let Some(silent_mode) =
+                wait_for_silent_mode_completion(&completed, dispatch.stopping)
             {
                 response.silent_mode = silent_mode;
                 "ok"
@@ -425,7 +528,8 @@ fn apply_control_request(
                 "rejected"
             }
         }
-    })
+        _ => unreachable!("apply_control_request routes only tab dispatch.commands here"),
+    }
 }
 
 /// Sends a command built around a fresh completion channel and waits for the
@@ -622,11 +726,32 @@ fn serve_run_wait_connection(
     };
     let id = registration.id;
     let _ = stream.set_read_timeout(None);
+    let Some(resolution) =
+        await_run_resolution(stream, stopping, &registration, &client_requests, id)
+    else {
+        return;
+    };
+    write_run_resolution(stream, stopping, &client_requests, id, resolution);
+}
+
+/// Waits for the run to resolve, giving up if the process is shutting down or
+/// the client hangs up first.
+///
+/// Returns `None` once it has already deregistered the run and closed the
+/// connection, which is what every abandonment here has to do: a run left
+/// registered would keep a `zetta pane wait` waiting on a client that is gone.
+fn await_run_resolution(
+    stream: &mut UnixStream,
+    stopping: &AtomicBool,
+    registration: &crate::run_command::RunRegistration,
+    client_requests: &Receiver<Option<ControlRequestCommand>>,
+    id: u64,
+) -> Option<crate::run_command::RunResolutionMessage> {
     let resolution = loop {
         if stopping.load(Ordering::Acquire) {
             process_run_registry().connection_lost(id);
             shutdown_run_connection(stream);
-            return;
+            return None;
         }
         match registration.recv_timeout(CONTROL_COMPLETION_POLL_INTERVAL) {
             Ok(resolution) => break resolution,
@@ -634,17 +759,28 @@ fn serve_run_wait_connection(
                 Ok(_) | Err(TryRecvError::Disconnected) => {
                     process_run_registry().connection_lost(id);
                     shutdown_run_connection(stream);
-                    return;
+                    return None;
                 }
                 Err(TryRecvError::Empty) => {}
             },
             Err(RecvTimeoutError::Disconnected) => {
                 process_run_registry().connection_lost(id);
                 shutdown_run_connection(stream);
-                return;
+                return None;
             }
         }
     };
+    Some(resolution)
+}
+
+/// Answers the waiting client with what the run did.
+fn write_run_resolution(
+    stream: &mut UnixStream,
+    stopping: &AtomicBool,
+    client_requests: &Receiver<Option<ControlRequestCommand>>,
+    id: u64,
+    resolution: crate::run_command::RunResolutionMessage,
+) {
     match resolution.resolution {
         RunResolution::Failed => {
             let _ = write_message(

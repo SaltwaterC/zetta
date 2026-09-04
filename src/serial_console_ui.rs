@@ -1,5 +1,39 @@
 use super::*;
 
+/// The connection the prompt describes, or the message to show in its place.
+///
+/// Separate from `submit_serial_console` because these are the prompt's own
+/// rules — a device has to be picked, and a baud rate is a positive whole
+/// number — rather than anything about opening the port.
+fn serial_settings_from_prompt(
+    prompt: &SerialConsolePrompt,
+) -> Result<SerialConnectionSettings, String> {
+    let Some(device) = prompt.devices.get(prompt.selected_device) else {
+        return Err("No serial device is selected".to_owned());
+    };
+    let baud_rate = match prompt.baud_rate.text.parse::<u32>() {
+        Ok(baud_rate) if baud_rate > 0 => baud_rate,
+        _ => return Err("Baud rate must be a positive whole number".to_owned()),
+    };
+    Ok(SerialConnectionSettings {
+        port_name: device.port_name.clone(),
+        baud_rate,
+        data_bits: prompt.data_bits,
+        parity: prompt.parity,
+        stop_bits: prompt.stop_bits,
+        flow_control: prompt.flow_control,
+    })
+}
+
+/// Whether `key` is text the baud-rate field takes.
+///
+/// Digits only: the field is a number, and letting anything else in produces a
+/// baud rate [`serial_settings_from_prompt`] rejects later, with nothing to
+/// say which keystroke caused it.
+fn baud_rate_accepts(key: &str) -> bool {
+    key.len() == 1 && key.as_bytes()[0].is_ascii_digit()
+}
+
 impl Zetta {
     pub(crate) fn render_serial_console_overlay(
         &self,
@@ -65,14 +99,13 @@ impl Zetta {
         let device_value = if prompt.loading {
             "Scanning…".to_owned()
         } else {
-            prompt
-                .devices
-                .get(prompt.selected_device)
-                .map(|device| match &device.description {
+            prompt.devices.get(prompt.selected_device).map_or_else(
+                || "No devices found".to_owned(),
+                |device| match &device.description {
                     Some(description) => format!("{} — {description}", device.port_name),
                     None => device.port_name.clone(),
-                })
-                .unwrap_or_else(|| "No devices found".to_owned())
+                },
+            )
         };
         let baud_value = if prompt.field == SerialField::BaudRate {
             prompt.baud_rate.caret_marker_display()
@@ -262,26 +295,13 @@ impl Zetta {
         if prompt.connecting {
             return;
         }
-        let Some(device) = prompt.devices.get(prompt.selected_device) else {
-            prompt.error = Some("No serial device is selected".to_owned());
-            cx.notify();
-            return;
-        };
-        let baud_rate = match prompt.baud_rate.text.parse::<u32>() {
-            Ok(baud_rate) if baud_rate > 0 => baud_rate,
-            _ => {
-                prompt.error = Some("Baud rate must be a positive whole number".to_owned());
+        let settings = match serial_settings_from_prompt(prompt) {
+            Ok(settings) => settings,
+            Err(message) => {
+                prompt.error = Some(message);
                 cx.notify();
                 return;
             }
-        };
-        let settings = SerialConnectionSettings {
-            port_name: device.port_name.clone(),
-            baud_rate,
-            data_bits: prompt.data_bits,
-            parity: prompt.parity,
-            stop_bits: prompt.stop_bits,
-            flow_control: prompt.flow_control,
         };
         prompt.connecting = true;
         prompt.error = None;
@@ -395,16 +415,13 @@ impl Zetta {
                 cx.notify();
             }
             "r" if event.keystroke.modifiers.control || event.keystroke.modifiers.platform => {
-                self.refresh_serial_devices(cx)
+                self.refresh_serial_devices(cx);
             }
             "backspace" if prompt.field == SerialField::BaudRate => {
                 prompt.baud_rate.backspace();
                 cx.notify();
             }
-            key if prompt.field == SerialField::BaudRate
-                && key.len() == 1
-                && key.as_bytes()[0].is_ascii_digit() =>
-            {
+            key if prompt.field == SerialField::BaudRate && baud_rate_accepts(key) => {
                 prompt.baud_rate.insert(key);
                 cx.notify();
             }
@@ -413,3 +430,7 @@ impl Zetta {
         true
     }
 }
+
+#[cfg(test)]
+#[path = "tests/serial_console_ui.rs"]
+mod tests;

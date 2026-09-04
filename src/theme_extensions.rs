@@ -196,8 +196,7 @@ async fn install_archive(archive: &[u8], extension_id: &str, themes_dir: &Path) 
         let file_name = relative
             .file_stem()
             .and_then(|name| name.to_str())
-            .map(safe_file_component)
-            .unwrap_or_else(|| "theme".to_owned());
+            .map_or_else(|| "theme".to_owned(), safe_file_component);
         let destination = themes_dir.join(format!("{safe_id}--{index}--{file_name}.json"));
         let temporary = themes_dir.join(format!(".{safe_id}--{index}.tmp"));
         fs::write(&temporary, bytes).with_context(|| format!("writing {}", temporary.display()))?;

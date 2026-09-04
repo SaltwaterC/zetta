@@ -1,5 +1,20 @@
 use super::*;
 
+/// Whether a tab that already has `existing` panes can hold the `expansions`
+/// panes a tiled multi-command would open, or the message to show instead.
+///
+/// The command replaces the active pane and tiles the rest beside it, so it
+/// needs `expansions - 1` more panes rather than `expansions`.
+fn multi_command_pane_budget(existing: usize, expansions: usize) -> Result<(), String> {
+    let additional = expansions.saturating_sub(1);
+    if can_add_panes(existing, additional) {
+        return Ok(());
+    }
+    Err(format!(
+        "This tab has {existing} panes; the command would exceed the {MAX_PANES_PER_TAB}-pane limit"
+    ))
+}
+
 impl Zetta {
     pub(crate) fn load_multi_command_catalog(&mut self, cx: &mut Context<Self>) {
         let path = env::var_os("PATH");
@@ -105,15 +120,10 @@ impl Zetta {
         let Some(tab) = self.tabs.get(self.active_tab) else {
             return;
         };
+        // The command replaces the active pane and tiles the rest beside it.
         let additional = expansions.len() - 1;
-        if !can_add_panes(tab.panes.len(), additional) {
-            self.set_multi_command_error(
-                format!(
-                    "This tab has {} panes; the command would exceed the {MAX_PANES_PER_TAB}-pane limit",
-                    tab.panes.len()
-                ),
-                cx,
-            );
+        if let Err(message) = multi_command_pane_budget(tab.panes.len(), expansions.len()) {
+            self.set_multi_command_error(message, cx);
             return;
         }
 
@@ -210,7 +220,7 @@ impl Zetta {
                 view.apply_input(
                     &TerminalInput::Text(format!("{}\r", expansions[0].command)),
                     cx,
-                )
+                );
             });
         }
 
@@ -239,7 +249,7 @@ impl Zetta {
             pane.pending_command = Some(command);
         } else if let Some(view) = active_view {
             view.update(cx, |view, cx| {
-                view.apply_input(&TerminalInput::Text(format!("{command}\r")), cx)
+                view.apply_input(&TerminalInput::Text(format!("{command}\r")), cx);
             });
         }
 
@@ -503,7 +513,7 @@ impl Zetta {
                     .on_click(move |_, window, cx| {
                         completion_handle
                             .update(cx, |this, cx| {
-                                this.select_multi_command_completion(completion_index, window, cx)
+                                this.select_multi_command_completion(completion_index, window, cx);
                             })
                             .ok();
                     })
@@ -606,3 +616,7 @@ impl Zetta {
         )
     }
 }
+
+#[cfg(test)]
+#[path = "tests/multi_command_ui.rs"]
+mod tests;

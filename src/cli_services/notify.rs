@@ -213,9 +213,8 @@ fn try_show_portal_notification(command: &NotifyCommand) -> Result<bool> {
     }
 
     let icon = notification_icon_path(command)?;
-    let icon_uri = match url::Url::from_file_path(&icon) {
-        Ok(icon_uri) => icon_uri,
-        Err(()) => return Ok(false),
+    let Ok(icon_uri) = url::Url::from_file_path(&icon) else {
+        return Ok(false);
     };
     let portal_notification = ashpd::desktop::notification::Notification::new(&command.summary)
         .body(command.body.as_deref())
@@ -903,15 +902,16 @@ pub(crate) fn run_notification(
 
 impl NotificationRequest {
     pub(super) fn run(&self, target: Option<NotificationTarget>) -> Result<()> {
-        let silent = target
-            .map(|target| {
+        let silent = target.map_or_else(
+            crate::silent_mode::system_silence_active_non_prompting,
+            |target| {
                 crate::process_control::request_process_silent_mode(
                     target.process_id,
                     Some(target.attention_id),
                 )
                 .unwrap_or(false)
-            })
-            .unwrap_or_else(crate::silent_mode::system_silence_active_non_prompting);
+            },
+        );
         #[cfg(target_os = "macos")]
         {
             self.run_macos(target, silent)
@@ -999,7 +999,7 @@ impl NotificationRequest {
             let mut response = None;
             notification_handle
                 .wait_for_response(|received: &notify_rust::NotificationResponse| {
-                    response = Some(received.clone())
+                    response = Some(received.clone());
                 })
                 .map_err(|error| anyhow::anyhow!("{error}"))
                 .context("waiting for the desktop notification response")?;

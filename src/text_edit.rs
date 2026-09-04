@@ -176,8 +176,7 @@ pub(crate) fn previous_char_boundary(text: &str, cursor: usize) -> usize {
     text[..cursor]
         .char_indices()
         .next_back()
-        .map(|(index, _)| index)
-        .unwrap_or(0)
+        .map_or(0, |(index, _)| index)
 }
 
 /// The byte offset just past the `char` at `cursor`, or the end of the text.
@@ -185,8 +184,7 @@ pub(crate) fn next_char_boundary(text: &str, cursor: usize) -> usize {
     text[cursor..]
         .chars()
         .next()
-        .map(|character| cursor + character.len_utf8())
-        .unwrap_or(text.len())
+        .map_or(text.len(), |character| cursor + character.len_utf8())
 }
 
 /// What a clipboard shortcut did, so the surface knows whether to re-run

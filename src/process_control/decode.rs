@@ -229,7 +229,26 @@ fn decode_authenticated_request(
 
 /// Turns a request whose fields are already known to be legal for its command
 /// into that command, checking the values the table cannot describe.
+/// Decodes `request` into the command it names, or `None` if it does not
+/// describe one.
+///
+/// The arms are grouped into the five functions below rather than being one
+/// 25-arm match: each group matches the commands it knows and returns `None`
+/// for the rest, taking nothing out of the request until an arm matches, so the
+/// chain can try them in turn.
 fn decode_control_command(request: &mut ControlRequest) -> Option<ControlRequestCommand> {
+    decode_window_command(request)
+        .or_else(|| decode_pane_command(request))
+        .or_else(|| decode_session_command(request))
+        .or_else(|| decode_appearance_command(request))
+        .or_else(|| decode_tab_command(request))
+}
+
+/// Configuration, window and project commands.
+///
+/// `reload_configuration`, `open_window`, `new_window`, `open_project` and
+/// `reload_projects`.
+fn decode_window_command(request: &mut ControlRequest) -> Option<ControlRequestCommand> {
     match request.command.as_str() {
         "reload_configuration" => request
             .config_path
@@ -271,6 +290,16 @@ fn decode_control_command(request: &mut ControlRequest) -> Option<ControlRequest
                 }
             }),
         "reload_projects" => Some(ControlRequestCommand::ReloadProjects),
+        _ => None,
+    }
+}
+
+/// Commands about a pane: what runs in it, and what it reports back.
+///
+/// `get_silent_mode`, `replace_pane`, the three `run_*` commands,
+/// `open_command` and `list_panes`.
+fn decode_pane_command(request: &mut ControlRequest) -> Option<ControlRequestCommand> {
+    match request.command.as_str() {
         "get_silent_mode" => {
             let attention_id = request.attention_id.take();
             if attention_id == Some(0) {
@@ -372,6 +401,15 @@ fn decode_control_command(request: &mut ControlRequest) -> Option<ControlRequest
             }
             Some(ControlRequestCommand::ListPaneLabels { attention_id })
         }
+        _ => None,
+    }
+}
+
+/// Commands that attach a session to this window.
+///
+/// `open_remote_session`, `reconnect_session` and `resume_disk_session`.
+fn decode_session_command(request: &mut ControlRequest) -> Option<ControlRequestCommand> {
+    match request.command.as_str() {
         "open_remote_session" => {
             let target = request.ssh_target.take().filter(|target| {
                 !target.is_empty() && !target.starts_with('-') && target.len() <= 4096
@@ -444,6 +482,16 @@ fn decode_control_command(request: &mut ControlRequest) -> Option<ControlRequest
                 secret: request.secret.take().map(SessionSecret::new),
             })
         }
+        _ => None,
+    }
+}
+
+/// Commands that change how a tab or pane looks.
+///
+/// `set_tab_icon`, `set_theme`, `list_themes`, `get_pane_theme` and
+/// `set_overlay`.
+fn decode_appearance_command(request: &mut ControlRequest) -> Option<ControlRequestCommand> {
+    match request.command.as_str() {
         "set_tab_icon" => {
             let icon = match request.icon.take() {
                 Some(icon) => Some(icon.parse().ok()?),
@@ -492,6 +540,15 @@ fn decode_control_command(request: &mut ControlRequest) -> Option<ControlRequest
                 color: request.pane_overlay_color.take(),
             })
         }
+        _ => None,
+    }
+}
+
+/// Commands that address a tab by name or attention id.
+///
+/// `set_tab_attention`, `focus_tab`, `set_tab_name` and `set_worktree_name`.
+fn decode_tab_command(request: &mut ControlRequest) -> Option<ControlRequestCommand> {
+    match request.command.as_str() {
         "set_tab_attention" => {
             let attention_id = request.attention_id.take().filter(|id| *id != 0)?;
             let summary = request
@@ -523,7 +580,6 @@ fn decode_control_command(request: &mut ControlRequest) -> Option<ControlRequest
             }
             Some(ControlRequestCommand::SetWorktreeName { attention_id, name })
         }
-        // `allowed_control_fields` has already rejected anything else.
         _ => None,
     }
 }

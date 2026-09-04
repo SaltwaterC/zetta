@@ -21,8 +21,9 @@ pub(crate) enum TabDropPosition {
     Before(u64),
     After(u64),
     /// No tab surface was hit. The tab bar does not construct this during a
-    /// normal drag, but it keeps the outside-drop no-op explicit.
-    #[allow(dead_code)]
+    /// normal drag, but it keeps the outside-drop no-op explicit — which is
+    /// why only the sidecar builds one, to pin that the drop is a no-op.
+    #[cfg_attr(not(test), allow(dead_code))]
     Outside,
 }
 
@@ -715,7 +716,103 @@ impl Zetta {
             ))
             .then(|| resolve_auto_protect(&config, &mut configuration_error))
             .flatten();
-        let mut this = Self {
+        let mut this = Self::with_launch_state(
+            config,
+            configuration_error,
+            projects,
+            button_layout,
+            no_mux,
+            launch_theme_override,
+            #[cfg(feature = "session-persistence")]
+            auto_protect,
+            window,
+            cx,
+        );
+        this.warm_font_and_icon_caches(cx);
+        // Only does anything when resolving needed the network, which is why it
+        // was skipped above; the cheap case is already resolved.
+        #[cfg(feature = "session-persistence")]
+        if this.auto_protect.is_none() {
+            this.refresh_auto_protect(cx);
+        }
+        let mut initial_launch = Some(initial_launch.unwrap_or(TerminalLaunch::Spawn));
+        if let Some(project) = initial_project {
+            let project = this.projects.insert_config(project);
+            let profile = initial_profile.or_else(|| {
+                project
+                    .effective
+                    .profiles
+                    .get(project.effective.default_profile)
+                    .cloned()
+            });
+            if let Some(profile) = profile {
+                this.open_tab_with_profile_context(
+                    profile,
+                    Some(project),
+                    NewTabOrigin::ProjectEntry,
+                    initial_command.clone(),
+                    initial_working_directory.clone(),
+                    initial_launch.take().unwrap_or(TerminalLaunch::Spawn),
+                    window,
+                    cx,
+                );
+            } else {
+                this.open_tab(window, cx);
+            }
+        } else if let Some(profile) = initial_profile {
+            this.open_tab_with_profile_context(
+                profile,
+                None,
+                NewTabOrigin::CurrentSession,
+                initial_command.clone(),
+                initial_working_directory.clone(),
+                initial_launch.take().unwrap_or(TerminalLaunch::Spawn),
+                window,
+                cx,
+            );
+        } else {
+            let profile = new_tab_profile(
+                None,
+                &this.profiles,
+                this.launch_config.default_profile,
+                this.launch_config.new_tab_profile,
+            );
+            if let Some(profile) = profile {
+                this.open_tab_with_profile_context(
+                    profile,
+                    None,
+                    NewTabOrigin::CurrentSession,
+                    initial_command,
+                    initial_working_directory,
+                    initial_launch.take().unwrap_or(TerminalLaunch::Spawn),
+                    window,
+                    cx,
+                );
+            }
+        }
+        this
+    }
+
+    /// The window's state before anything has been opened in it.
+    ///
+    /// Separate from [`Self::new`] so the 60-field literal is not interleaved
+    /// with the work that follows it — the cache warm-up, and opening whatever
+    /// the launch asked for.
+    #[allow(clippy::too_many_arguments)]
+    fn with_launch_state(
+        config: Config,
+        configuration_error: Option<String>,
+        projects: ProjectState,
+        button_layout: WindowButtonLayout,
+        no_mux: bool,
+        launch_theme_override: Option<(String, String)>,
+        #[cfg(feature = "session-persistence")] auto_protect: Option<
+            Arc<crate::session_auto_protect::SessionAutoProtect>,
+        >,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self {
             launch_config: config.clone(),
             #[cfg(feature = "session-persistence")]
             auto_protect,
@@ -843,7 +940,13 @@ impl Zetta {
                     this.handle_window_appearance_change(window, cx);
                 }),
             ],
-        };
+        }
+    }
+
+    /// Builds the font and icon caches off the main thread, so the first frame
+    /// does not wait on the system font enumeration.
+    fn warm_font_and_icon_caches(&mut self, cx: &mut Context<Self>) {
+        let this = self;
         // Initialize font and icon caches in background
         let text_system = cx.text_system().clone();
         let font_cache = this.font_cache.clone();
@@ -868,68 +971,6 @@ impl Zetta {
             .detach();
 
         this.load_multi_command_catalog(cx);
-        // Only does anything when resolving needed the network, which is why it
-        // was skipped above; the cheap case is already resolved.
-        #[cfg(feature = "session-persistence")]
-        if this.auto_protect.is_none() {
-            this.refresh_auto_protect(cx);
-        }
-        let mut initial_launch = Some(initial_launch.unwrap_or(TerminalLaunch::Spawn));
-        if let Some(project) = initial_project {
-            let project = this.projects.insert_config(project);
-            let profile = initial_profile.or_else(|| {
-                project
-                    .effective
-                    .profiles
-                    .get(project.effective.default_profile)
-                    .cloned()
-            });
-            if let Some(profile) = profile {
-                this.open_tab_with_profile_context(
-                    profile,
-                    Some(project),
-                    NewTabOrigin::ProjectEntry,
-                    initial_command.clone(),
-                    initial_working_directory.clone(),
-                    initial_launch.take().unwrap_or(TerminalLaunch::Spawn),
-                    window,
-                    cx,
-                );
-            } else {
-                this.open_tab(window, cx);
-            }
-        } else if let Some(profile) = initial_profile {
-            this.open_tab_with_profile_context(
-                profile,
-                None,
-                NewTabOrigin::CurrentSession,
-                initial_command.clone(),
-                initial_working_directory.clone(),
-                initial_launch.take().unwrap_or(TerminalLaunch::Spawn),
-                window,
-                cx,
-            );
-        } else {
-            let profile = new_tab_profile(
-                None,
-                &this.profiles,
-                this.launch_config.default_profile,
-                this.launch_config.new_tab_profile,
-            );
-            if let Some(profile) = profile {
-                this.open_tab_with_profile_context(
-                    profile,
-                    None,
-                    NewTabOrigin::CurrentSession,
-                    initial_command,
-                    initial_working_directory,
-                    initial_launch.take().unwrap_or(TerminalLaunch::Spawn),
-                    window,
-                    cx,
-                );
-            }
-        }
-        this
     }
 }
 

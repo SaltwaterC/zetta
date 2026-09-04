@@ -16,6 +16,63 @@ pub(crate) use widgets::{
     dropdown_field, text_field, track_focus_scroll, track_focus_scroll_from,
 };
 
+#[cfg(test)]
+#[path = "tests/settings_view.rs"]
+mod tests;
+
+/// The dialog's page tabs, in the order they are shown.
+///
+/// `pub(crate)` so `settings_ui::controls`' sidecar can check it against the
+/// keyboard tab order, which is built from a separate list.
+pub(crate) const SETTINGS_PAGE_TABS: [(SettingsPage, &str, &str); 5] = [
+    (
+        SettingsPage::Configuration,
+        "settings-configuration-tab",
+        "Configuration",
+    ),
+    (SettingsPage::Themes, "settings-themes-tab", "Themes"),
+    (SettingsPage::Keymap, "settings-keymap-tab", "Keymap"),
+    (
+        SettingsPage::PaneTemplates,
+        "settings-pane-templates-tab",
+        "Templates",
+    ),
+    (SettingsPage::Projects, "settings-projects-tab", "Projects"),
+];
+
+/// One page tab. The five differ only in the page they select, their element id
+/// and their label, so they are built from [`SETTINGS_PAGE_TABS`] rather than
+/// spelled out five times.
+///
+/// A tab highlights both while its page is open and while it holds keyboard
+/// focus, so the tab row shows focus the way the form rows do.
+fn settings_page_tab(
+    page: SettingsPage,
+    id: &'static str,
+    label: &'static str,
+    editor: &SettingsEditor,
+    colors: &ThemeColors,
+    handle: &WeakEntity<Zetta>,
+) -> gpui::Stateful<gpui::Div> {
+    let handle = handle.clone();
+    div()
+        .id(id)
+        .px_3()
+        .py_1()
+        .rounded(px(4.))
+        .cursor_pointer()
+        .when(
+            editor.page == page || editor.focused_control == Some(SettingsControl::Tab(page)),
+            |tab| tab.bg(colors.element_selected),
+        )
+        .on_click(move |_, window, cx| {
+            handle
+                .update(cx, |this, cx| this.select_settings_page(page, window, cx))
+                .ok();
+        })
+        .child(label)
+}
+
 impl Zetta {
     /// The settings page and the scroll region it lives in.
     ///
@@ -120,6 +177,87 @@ impl Zetta {
         Some(region)
     }
 
+    /// The dialog header's Close and Save buttons.
+    ///
+    /// `save_in_progress` disables Save rather than hiding it, so the header
+    /// keeps its width while a write is in flight; `unsaved_changes` is what
+    /// puts the asterisk on it.
+    fn render_settings_header_actions(
+        &self,
+        editor: &SettingsEditor,
+        colors: &ThemeColors,
+        handle: &WeakEntity<Self>,
+        save_in_progress: bool,
+        unsaved_changes: bool,
+    ) -> gpui::Div {
+        let close_handle = handle.clone();
+        let save_handle = handle.clone();
+        h_flex()
+            .gap_2()
+            .child(
+                div()
+                    .id("close-settings")
+                    .px_3()
+                    .py_1()
+                    .rounded(px(4.))
+                    .border_1()
+                    .border_color(if editor.focused_control == Some(SettingsControl::Close) {
+                        colors.border_focused
+                    } else {
+                        colors.element_selected
+                    })
+                    .cursor_pointer()
+                    .bg(colors.element_selected)
+                    .text_color(colors.text)
+                    .hover(|style| style.bg(colors.element_hover))
+                    .tooltip(Tooltip::text("Close settings (Esc)"))
+                    .on_click(move |_, window, cx| {
+                        close_handle
+                            .update(cx, |this, cx| this.dismiss_settings(window, cx))
+                            .ok();
+                    })
+                    .child("Close"),
+            )
+            .child(
+                div()
+                    .id("save-settings")
+                    .px_3()
+                    .py_1()
+                    .rounded(px(4.))
+                    .border_1()
+                    .border_color(if editor.focused_control == Some(SettingsControl::Save) {
+                        colors.border_focused
+                    } else {
+                        colors.element_selected
+                    })
+                    .bg(colors.element_selected)
+                    .text_color(colors.text)
+                    .when(!save_in_progress, |button| {
+                        button
+                            .cursor_pointer()
+                            .hover(|style| style.bg(colors.element_hover))
+                            .tooltip(Tooltip::for_action_title_in(
+                                "Save settings",
+                                &SaveSettings,
+                                &self.settings_focus,
+                            ))
+                            .on_click(move |_, window, cx| {
+                                save_handle
+                                    .update(cx, |this, cx| this.save_settings(window, cx))
+                                    .ok();
+                            })
+                    })
+                    .when(save_in_progress, |button| button.opacity(0.65))
+                    .child(if save_in_progress {
+                        "Saving…"
+                    } else if unsaved_changes {
+                        "Save *"
+                    } else {
+                        "Save"
+                    }),
+            )
+    }
+
     pub(crate) fn render_settings_overlay(
         &mut self,
         window: &mut Window,
@@ -198,13 +336,6 @@ impl Zetta {
             Self::dropdown_popup_widget(selection, colors.clone(), handle.clone(), dropdown_state)
         });
 
-        let config_handle = handle.clone();
-        let themes_handle = handle.clone();
-        let keymap_handle = handle.clone();
-        let templates_handle = handle.clone();
-        let projects_handle = handle.clone();
-        let close_handle = handle.clone();
-        let save_handle = handle.clone();
         // The header Save button is scoped to whatever the visible page edits,
         // which is the open project's file rather than the user configuration
         // while the projects builder is up.
@@ -269,232 +400,21 @@ impl Zetta {
                                 .justify_between()
                                 .border_b_1()
                                 .border_color(colors.border)
-                                .child(
-                                    h_flex()
-                                        .gap_1()
-                                        .child(
-                                            div()
-                                                .id("settings-configuration-tab")
-                                                .px_3()
-                                                .py_1()
-                                                .rounded(px(4.))
-                                                .cursor_pointer()
-                                                .when(
-                                                    editor.page == SettingsPage::Configuration
-                                                        || editor.focused_control
-                                                            == Some(SettingsControl::Tab(
-                                                                SettingsPage::Configuration,
-                                                            )),
-                                                    |tab| tab.bg(colors.element_selected),
-                                                )
-                                                .on_click(move |_, window, cx| {
-                                                    config_handle
-                                                        .update(cx, |this, cx| {
-                                                            this.select_settings_page(
-                                                                SettingsPage::Configuration,
-                                                                window,
-                                                                cx,
-                                                            )
-                                                        })
-                                                        .ok();
-                                                })
-                                                .child("Configuration"),
-                                        )
-                                        .child(
-                                            div()
-                                                .id("settings-themes-tab")
-                                                .px_3()
-                                                .py_1()
-                                                .rounded(px(4.))
-                                                .cursor_pointer()
-                                                .when(
-                                                    editor.page == SettingsPage::Themes
-                                                        || editor.focused_control
-                                                            == Some(SettingsControl::Tab(
-                                                                SettingsPage::Themes,
-                                                            )),
-                                                    |tab| tab.bg(colors.element_selected),
-                                                )
-                                                .on_click(move |_, window, cx| {
-                                                    themes_handle
-                                                        .update(cx, |this, cx| {
-                                                            this.select_settings_page(
-                                                                SettingsPage::Themes,
-                                                                window,
-                                                                cx,
-                                                            )
-                                                        })
-                                                        .ok();
-                                                })
-                                                .child("Themes"),
-                                        )
-                                        .child(
-                                            div()
-                                                .id("settings-keymap-tab")
-                                                .px_3()
-                                                .py_1()
-                                                .rounded(px(4.))
-                                                .cursor_pointer()
-                                                .when(
-                                                    editor.page == SettingsPage::Keymap
-                                                        || editor.focused_control
-                                                            == Some(SettingsControl::Tab(
-                                                                SettingsPage::Keymap,
-                                                            )),
-                                                    |tab| tab.bg(colors.element_selected),
-                                                )
-                                                .on_click(move |_, window, cx| {
-                                                    keymap_handle
-                                                        .update(cx, |this, cx| {
-                                                            this.select_settings_page(
-                                                                SettingsPage::Keymap,
-                                                                window,
-                                                                cx,
-                                                            )
-                                                        })
-                                                        .ok();
-                                                })
-                                                .child("Keymap"),
-                                        )
-                                        .child(
-                                            div()
-                                                .id("settings-pane-templates-tab")
-                                                .px_3()
-                                                .py_1()
-                                                .rounded(px(4.))
-                                                .cursor_pointer()
-                                                .when(
-                                                    editor.page == SettingsPage::PaneTemplates
-                                                        || editor.focused_control
-                                                            == Some(SettingsControl::Tab(
-                                                                SettingsPage::PaneTemplates,
-                                                            )),
-                                                    |tab| tab.bg(colors.element_selected),
-                                                )
-                                                .on_click(move |_, window, cx| {
-                                                    templates_handle
-                                                        .update(cx, |this, cx| {
-                                                            this.select_settings_page(
-                                                                SettingsPage::PaneTemplates,
-                                                                window,
-                                                                cx,
-                                                            )
-                                                        })
-                                                        .ok();
-                                                })
-                                                .child("Templates"),
-                                        )
-                                        .child(
-                                            div()
-                                                .id("settings-projects-tab")
-                                                .px_3()
-                                                .py_1()
-                                                .rounded(px(4.))
-                                                .cursor_pointer()
-                                                .when(
-                                                    editor.page == SettingsPage::Projects
-                                                        || editor.focused_control
-                                                            == Some(SettingsControl::Tab(
-                                                                SettingsPage::Projects,
-                                                            )),
-                                                    |tab| tab.bg(colors.element_selected),
-                                                )
-                                                .on_click(move |_, window, cx| {
-                                                    projects_handle
-                                                        .update(cx, |this, cx| {
-                                                            this.select_settings_page(
-                                                                SettingsPage::Projects,
-                                                                window,
-                                                                cx,
-                                                            )
-                                                        })
-                                                        .ok();
-                                                })
-                                                .child("Projects"),
-                                        ),
-                                )
-                                .child(
-                                    h_flex()
-                                        .gap_2()
-                                        .child(
-                                            div()
-                                                .id("close-settings")
-                                                .px_3()
-                                                .py_1()
-                                                .rounded(px(4.))
-                                                .border_1()
-                                                .border_color(
-                                                    if editor.focused_control
-                                                        == Some(SettingsControl::Close)
-                                                    {
-                                                        colors.border_focused
-                                                    } else {
-                                                        colors.element_selected
-                                                    },
-                                                )
-                                                .cursor_pointer()
-                                                .bg(colors.element_selected)
-                                                .text_color(colors.text)
-                                                .hover(|style| style.bg(colors.element_hover))
-                                                .tooltip(Tooltip::text("Close settings (Esc)"))
-                                                .on_click(move |_, window, cx| {
-                                                    close_handle
-                                                        .update(cx, |this, cx| {
-                                                            this.dismiss_settings(window, cx)
-                                                        })
-                                                        .ok();
-                                                })
-                                                .child("Close"),
-                                        )
-                                        .child(
-                                            div()
-                                                .id("save-settings")
-                                                .px_3()
-                                                .py_1()
-                                                .rounded(px(4.))
-                                                .border_1()
-                                                .border_color(
-                                                    if editor.focused_control
-                                                        == Some(SettingsControl::Save)
-                                                    {
-                                                        colors.border_focused
-                                                    } else {
-                                                        colors.element_selected
-                                                    },
-                                                )
-                                                .bg(colors.element_selected)
-                                                .text_color(colors.text)
-                                                .when(!settings_save_in_progress, |button| {
-                                                    button
-                                                        .cursor_pointer()
-                                                        .hover(|style| {
-                                                            style.bg(colors.element_hover)
-                                                        })
-                                                        .tooltip(Tooltip::for_action_title_in(
-                                                            "Save settings",
-                                                            &SaveSettings,
-                                                            &self.settings_focus,
-                                                        ))
-                                                        .on_click(move |_, window, cx| {
-                                                            save_handle
-                                                                .update(cx, |this, cx| {
-                                                                    this.save_settings(window, cx)
-                                                                })
-                                                                .ok();
-                                                        })
-                                                })
-                                                .when(settings_save_in_progress, |button| {
-                                                    button.opacity(0.65)
-                                                })
-                                                .child(if settings_save_in_progress {
-                                                    "Saving…"
-                                                } else if unsaved_changes {
-                                                    "Save *"
-                                                } else {
-                                                    "Save"
-                                                }),
-                                        ),
-                                ),
+                                .child(SETTINGS_PAGE_TABS.iter().fold(
+                                    h_flex().gap_1(),
+                                    |row, (page, id, label)| {
+                                        row.child(settings_page_tab(
+                                            *page, id, label, editor, &colors, &handle,
+                                        ))
+                                    },
+                                ))
+                                .child(self.render_settings_header_actions(
+                                    editor,
+                                    &colors,
+                                    &handle,
+                                    settings_save_in_progress,
+                                    unsaved_changes,
+                                )),
                         )
                         .child(
                             h_flex()

@@ -229,9 +229,10 @@ impl Zetta {
             self.mux = Some(runtime.clone());
             runtime
         };
-        let (identity_paths, identity_passphrases) = identities
-            .map(|identities| (identities.paths, identities.passphrases))
-            .unwrap_or_else(|| (self.disk_resume_identity_paths(), Vec::new()));
+        let (identity_paths, identity_passphrases) = identities.map_or_else(
+            || (self.disk_resume_identity_paths(), Vec::new()),
+            |identities| (identities.paths, identities.passphrases),
+        );
         let persisted = match runtime
             .client()
             .resume_with_secret_and_identity_passphrases(
@@ -253,6 +254,24 @@ impl Zetta {
         // fails. The daemon now holds an authenticated restore lease; the
         // consumed disk record is represented by that lease until handoff.
         cx.defer(refresh_process_background_sessions);
+        self.rebuild_resumed_disk_tab(session_id, persisted, window, cx)
+    }
+
+    /// Rebuilds the tab a resumed disk session becomes, and starts a terminal in
+    /// every pane it had.
+    ///
+    /// Split from [`Self::resume_disk_session`] so the authentication and lease
+    /// handling above is not interleaved with reconstructing the tab; by the
+    /// time this runs the daemon already holds the restore lease, so a failure
+    /// here reports rather than retries.
+    #[cfg(feature = "session-persistence")]
+    fn rebuild_resumed_disk_tab(
+        &mut self,
+        session_id: u64,
+        persisted: zmux::persistence::PersistedSession,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> ReconnectSessionResult {
         let summary_title = persisted.summary.title.clone();
         let persisted_summary = persisted.summary;
         let snapshots = persisted.snapshots;
@@ -676,7 +695,7 @@ impl Zetta {
         }
         if let Some(source) = zetta_for_runner(runner_id, cx) {
             source.update(cx, |source, _| {
-                source.record_failed_authentication(session_id)
+                source.record_failed_authentication(session_id);
             });
         }
     }
@@ -693,7 +712,7 @@ impl Zetta {
         }
         if let Some(source) = zetta_for_runner(runner_id, cx) {
             source.update(cx, |source, _| {
-                source.clear_failed_authentications(session_id)
+                source.clear_failed_authentications(session_id);
             });
         }
     }

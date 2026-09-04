@@ -126,10 +126,6 @@ fn captured_shifted_number_row_uses_gpui_keymap_normalization() {
 
     assert_eq!(keymap_keystroke_display("ctrl-)"), "ctrl-shift-0");
     assert_eq!(keymap_keystroke_display("ctrl-shift-0"), "ctrl-shift-0");
-    assert_eq!(
-        keymap_keystroke_alias("ctrl-shift-0"),
-        Some("Ctrl+Shift+0".to_owned())
-    );
     assert_eq!(keymap_keystroke_display("ctrl-shift-10"), "ctrl-shift-10");
 }
 

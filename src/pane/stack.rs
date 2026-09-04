@@ -47,8 +47,9 @@ impl PaneStack {
             self.selected = self
                 .entries
                 .first()
-                .map(|entry| PaneStackSelection::Stacked(entry.id))
-                .unwrap_or(PaneStackSelection::Base);
+                .map_or(PaneStackSelection::Base, |entry| {
+                    PaneStackSelection::Stacked(entry.id)
+                });
         }
     }
 
@@ -100,8 +101,7 @@ impl PaneStack {
                 .entries
                 .iter()
                 .position(|entry| entry.id == id)
-                .map(|index| index + 1)
-                .unwrap_or(0),
+                .map_or(0, |index| index + 1),
         };
         let count = self.entries.len() + 1;
         let next = if forward {
@@ -175,8 +175,9 @@ impl PaneStack {
             self.selected = self
                 .entries
                 .last()
-                .map(|entry| PaneStackSelection::Stacked(entry.id))
-                .unwrap_or(PaneStackSelection::Base);
+                .map_or(PaneStackSelection::Base, |entry| {
+                    PaneStackSelection::Stacked(entry.id)
+                });
         }
     }
 }

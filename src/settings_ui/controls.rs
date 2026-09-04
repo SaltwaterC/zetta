@@ -81,7 +81,7 @@ pub(crate) fn invalidate_controls_cache(editor: &mut SettingsEditor) {
 }
 
 impl Zetta {
-    fn settings_controls(editor: &mut SettingsEditor) -> Vec<SettingsControl> {
+    pub(crate) fn settings_controls(editor: &mut SettingsEditor) -> Vec<SettingsControl> {
         // Check cache first
         if let Some(ref cache) = editor.controls_cache {
             return cache.clone();
@@ -467,4 +467,4 @@ pub(crate) fn profile_draft_controls() -> [SettingsControl; 9] {
 
 #[cfg(test)]
 #[path = "../tests/settings_ui/controls.rs"]
-mod tests;
+pub(crate) mod tests;

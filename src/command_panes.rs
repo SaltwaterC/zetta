@@ -737,7 +737,7 @@ impl Zetta {
         }
         if let Some(view) = view {
             view.update(cx, |view, cx| {
-                view.apply_input(&TerminalInput::Text(format!("{command}\r")), cx)
+                view.apply_input(&TerminalInput::Text(format!("{command}\r")), cx);
             });
         }
         self.focus_active(window, cx);
@@ -779,7 +779,7 @@ impl Zetta {
         }
         if let Some(view) = view {
             view.update(cx, |view, cx| {
-                view.apply_input(&TerminalInput::Text(format!("{command}\r")), cx)
+                view.apply_input(&TerminalInput::Text(format!("{command}\r")), cx);
             });
         }
         self.focus_active(window, cx);

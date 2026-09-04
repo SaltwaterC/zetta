@@ -274,8 +274,7 @@ impl Zetta {
 
     pub(crate) fn effective_config(&self) -> &Config {
         self.active_project_config()
-            .map(|project| &project.effective)
-            .unwrap_or(&self.launch_config)
+            .map_or(&self.launch_config, |project| &project.effective)
     }
 
     /// Re-binds the built-in `ctrl-shift-{number}` profile shortcuts, and on
@@ -556,8 +555,7 @@ impl Zetta {
         self.projects.active_context = Some(context_key);
         let config = project
             .as_ref()
-            .map(|project| &project.effective)
-            .unwrap_or(&self.launch_config);
+            .map_or(&self.launch_config, |project| &project.effective);
         self.profiles = config.profiles.clone();
         self.working_directory = config.working_directory.clone();
         // The project may add, hide, or unhide profiles, which changes which
@@ -628,9 +626,9 @@ impl Zetta {
         let tab = &mut self.tabs[tab_index];
         for pane in &mut tab.panes {
             let project = projects.get(&pane.id);
-            let configured_profiles = project
-                .map(|project| &project.effective.profiles)
-                .unwrap_or(&self.launch_config.profiles);
+            let configured_profiles = project.map_or(&self.launch_config.profiles, |project| {
+                &project.effective.profiles
+            });
             let configured_profile = configured_profiles
                 .iter()
                 .find(|profile| profile.name.eq_ignore_ascii_case(&pane.profile.name));
@@ -659,9 +657,9 @@ impl Zetta {
             }
             for entry in &mut pane.stack.entries {
                 let project = projects.get(&entry.id);
-                let configured_profiles = project
-                    .map(|project| &project.effective.profiles)
-                    .unwrap_or(&self.launch_config.profiles);
+                let configured_profiles = project.map_or(&self.launch_config.profiles, |project| {
+                    &project.effective.profiles
+                });
                 let configured_profile = configured_profiles
                     .iter()
                     .find(|profile| profile.name.eq_ignore_ascii_case(&entry.profile.name));

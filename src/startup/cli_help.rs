@@ -474,9 +474,10 @@ pub(crate) fn theme_help(scope: Option<ThemeScope>) -> String {
         ),
         None => "Usage: zetta theme pane [OPTIONS] THEME\n       zetta theme tab [OPTIONS] THEME\n       zetta theme pane --reset\n       zetta theme tab --reset\n       zetta theme pane --list\n       zetta theme tab --list".to_owned(),
     };
-    let target = scope
-        .map(|scope| format!("active {}", scope.name()))
-        .unwrap_or_else(|| "active pane or tab".to_owned());
+    let target = scope.map_or_else(
+        || "active pane or tab".to_owned(),
+        |scope| format!("active {}", scope.name()),
+    );
     let options = format_help_table([
         (
             "-t, --theme NAME",

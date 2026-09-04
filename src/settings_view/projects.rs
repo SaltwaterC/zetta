@@ -140,84 +140,9 @@ fn render_project_config(
     opacity_slider: &impl Fn(f32, OpacityTarget) -> AnyElement,
 ) -> AnyElement {
     let form = &project.form;
-    let saving = project.save_in_progress;
-    let actions = h_flex()
-        .gap_2()
-        .child(action_button(
-            editor,
-            "project-config-close".to_owned(),
-            "Back to projects".to_owned(),
-            SettingsControl::CloseProjectConfig,
-            !saving,
-            colors,
-            handle,
-        ))
-        .child(action_button(
-            editor,
-            "project-config-save".to_owned(),
-            if saving {
-                "Saving…".to_owned()
-            } else if project.dirty {
-                "Save project *".to_owned()
-            } else {
-                "Save project".to_owned()
-            },
-            SettingsControl::SaveProjectConfig,
-            !saving,
-            colors,
-            handle,
-        ))
-        .child(action_button(
-            editor,
-            "project-config-open-file".to_owned(),
-            "Open in editor".to_owned(),
-            SettingsControl::OpenProjectConfigFile,
-            !saving,
-            colors,
-            handle,
-        ));
-
-    let icon_handle = handle.clone();
     let current_icon = form.default_tab_icon;
-    let tab_icon_trigger = h_flex()
-        .id("project-tab-icon-picker-trigger")
-        .h_9()
-        .min_w_0()
-        .flex_1()
-        .px_3()
-        .justify_between()
-        .rounded(px(4.))
-        .border_1()
-        .border_color(
-            if editor.focused_control == Some(SettingsControl::ProjectTabIconPicker) {
-                colors.border_focused
-            } else {
-                colors.border
-            },
-        )
-        .bg(colors.editor_background)
-        .cursor_pointer()
-        .hover(|style| style.bg(colors.element_hover))
-        .child(
-            h_flex()
-                .gap_2()
-                .child(Icon::new(current_icon.icon().unwrap_or(IconName::Dash)))
-                .child(current_icon.label()),
-        )
-        .child(
-            svg()
-                .path(IconName::ChevronDown.path())
-                .size(px(14.))
-                .text_color(colors.icon_muted),
-        )
-        .on_click(move |_, window, cx| {
-            icon_handle
-                .update(cx, |this, cx| {
-                    this.open_project_tab_icon_picker(window, cx);
-                })
-                .ok();
-        });
-
+    let actions = project_config_actions(editor, project, colors, handle);
+    let tab_icon_trigger = project_tab_icon_trigger(editor, project, colors, handle);
     let mut content: Vec<AnyElement> = vec![
         actions.into_any_element(),
         div()
@@ -367,6 +292,103 @@ fn render_project_config(
     push_project_profile_rows(&mut content, editor, form, colors, handle);
     push_project_template_rows(&mut content, editor, form, colors, handle);
     v_flex().children(content).into_any_element()
+}
+
+/// The builder's Close, Save and Open-file buttons.
+fn project_config_actions(
+    editor: &SettingsEditor,
+    project: &ProjectEditor,
+    colors: &ThemeColors,
+    handle: &WeakEntity<Zetta>,
+) -> AnyElement {
+    let saving = project.save_in_progress;
+    h_flex()
+        .gap_2()
+        .child(action_button(
+            editor,
+            "project-config-close".to_owned(),
+            "Back to projects".to_owned(),
+            SettingsControl::CloseProjectConfig,
+            !saving,
+            colors,
+            handle,
+        ))
+        .child(action_button(
+            editor,
+            "project-config-save".to_owned(),
+            if saving {
+                "Saving…".to_owned()
+            } else if project.dirty {
+                "Save project *".to_owned()
+            } else {
+                "Save project".to_owned()
+            },
+            SettingsControl::SaveProjectConfig,
+            !saving,
+            colors,
+            handle,
+        ))
+        .child(action_button(
+            editor,
+            "project-config-open-file".to_owned(),
+            "Open in editor".to_owned(),
+            SettingsControl::OpenProjectConfigFile,
+            !saving,
+            colors,
+            handle,
+        ))
+        .into_any_element()
+}
+
+/// The row that opens the tab-icon picker for the project's default icon.
+fn project_tab_icon_trigger(
+    editor: &SettingsEditor,
+    project: &ProjectEditor,
+    colors: &ThemeColors,
+    handle: &WeakEntity<Zetta>,
+) -> AnyElement {
+    let form = &project.form;
+    let icon_handle = handle.clone();
+    let current_icon = form.default_tab_icon;
+    h_flex()
+        .id("project-tab-icon-picker-trigger")
+        .h_9()
+        .min_w_0()
+        .flex_1()
+        .px_3()
+        .justify_between()
+        .rounded(px(4.))
+        .border_1()
+        .border_color(
+            if editor.focused_control == Some(SettingsControl::ProjectTabIconPicker) {
+                colors.border_focused
+            } else {
+                colors.border
+            },
+        )
+        .bg(colors.editor_background)
+        .cursor_pointer()
+        .hover(|style| style.bg(colors.element_hover))
+        .child(
+            h_flex()
+                .gap_2()
+                .child(Icon::new(current_icon.icon().unwrap_or(IconName::Dash)))
+                .child(current_icon.label()),
+        )
+        .child(
+            svg()
+                .path(IconName::ChevronDown.path())
+                .size(px(14.))
+                .text_color(colors.icon_muted),
+        )
+        .on_click(move |_, window, cx| {
+            icon_handle
+                .update(cx, |this, cx| {
+                    this.open_project_tab_icon_picker(window, cx);
+                })
+                .ok();
+        })
+        .into_any_element()
 }
 
 /// The environment rows: the variables every terminal started inside the
@@ -735,8 +757,7 @@ fn push_project_profile_rows(
                 profile
                     .icon
                     .as_ref()
-                    .map(ProfileIcon::label)
-                    .unwrap_or("Automatic")
+                    .map_or("Automatic", ProfileIcon::label)
                     .to_owned(),
                 SettingsDropdown::ProjectProfileIcon(index),
                 editor,

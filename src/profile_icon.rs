@@ -33,7 +33,9 @@ pub(crate) enum ProfileIcon {
     /// This variant is kept platform-neutral so configuration and Jump List
     /// tests can exercise the model on every host. It is only produced by
     /// automatic discovery on Windows.
-    #[allow(dead_code)]
+    /// Only ever constructed by `automatic_for_program` under
+    /// `#[cfg(windows)]`, where an executable can carry its own icon.
+    #[cfg_attr(not(windows), allow(dead_code))]
     Executable(PathBuf),
 }
 
@@ -84,7 +86,7 @@ impl ProfileIcon {
     }
 
     pub(crate) fn selector_label(icon: Option<&Self>) -> &'static str {
-        icon.map(Self::label).unwrap_or("Automatic")
+        icon.map_or("Automatic", Self::label)
     }
 
     pub(crate) fn automatic_for_shell(shell: &Shell) -> Self {
@@ -181,7 +183,6 @@ pub(crate) fn automatic_for_program(program: &str) -> ProfileIcon {
     ProfileIcon::automatic_for_program_name(program)
 }
 
-#[allow(dead_code)]
 fn executable_basename(program: &str) -> Option<String> {
     let basename = program.rsplit(['/', '\\']).find(|part| !part.is_empty())?;
     let basename = basename

@@ -19,6 +19,20 @@ pub(crate) fn action_available_in_launch_mode(action_name: &str, no_mux: bool) -
     action_name != unavailable_action
 }
 
+/// What [`CommandPalette::apply_key`] did with a key, and what is left for the
+/// surface that owns the list.
+#[derive(Debug, PartialEq, Eq)]
+pub enum PaletteKey {
+    /// Not a key the list answers to. The caller carries on with its own
+    /// handling — `escape`, and whatever else that surface binds.
+    Ignored,
+    /// The selection or the query changed. Nothing else to do but redraw.
+    Redraw,
+    /// `enter` on this command index. The caller runs it, because what running
+    /// one means differs per surface.
+    Accept(usize),
+}
+
 pub struct PaletteCommand {
     pub name: String,
     pub shortcut: Option<String>,
@@ -72,6 +86,49 @@ impl CommandPalette {
 
     pub fn matches(&self) -> &[usize] {
         &self.matches
+    }
+
+    /// Applies one key to the list and its query, and reports what the caller
+    /// still has to do.
+    ///
+    /// The command palette and the theme picker are both a [`CommandPalette`]
+    /// behind a filtered list, and their key handlers were the same code with
+    /// the receiver renamed. What differs is only what `escape` dismisses and
+    /// what `enter` runs, so both stay at the call site: `escape` is not a key
+    /// this answers to, and `enter` comes back as [`PaletteKey::Accept`]
+    /// carrying the command rather than running it.
+    pub fn apply_key(&mut self, keystroke: &gpui::Keystroke) -> PaletteKey {
+        match keystroke.key.as_str() {
+            "up" => {
+                self.selected = self.selected.saturating_sub(1);
+                self.scroll_to_selected();
+                PaletteKey::Redraw
+            }
+            "down" => {
+                self.selected = (self.selected + 1).min(self.matches.len().saturating_sub(1));
+                self.scroll_to_selected();
+                PaletteKey::Redraw
+            }
+            "enter" => match self.matches.get(self.selected).copied() {
+                Some(command) => PaletteKey::Accept(command),
+                // An empty list has nothing to run, and the overlay stays open
+                // rather than dismissing on a keystroke that did nothing.
+                None => PaletteKey::Redraw,
+            },
+            _ => match crate::text_edit::apply_text_field_key(&mut self.query, keystroke) {
+                crate::text_edit::TextFieldEdit::Ignored => PaletteKey::Ignored,
+                crate::text_edit::TextFieldEdit::CursorMoved => PaletteKey::Redraw,
+                crate::text_edit::TextFieldEdit::Edited => {
+                    // The query is the filter, so the match list is rebuilt and
+                    // the selection returns to the first match rather than
+                    // pointing into the old one.
+                    self.refresh_matches();
+                    self.selected = 0;
+                    self.scroll_to_selected();
+                    PaletteKey::Redraw
+                }
+            },
+        }
     }
 
     pub fn scroll_to_selected(&self) {

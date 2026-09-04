@@ -609,8 +609,7 @@ impl Zetta {
                     pane.selected_view()
                         .is_some_and(|view| view.focus_handle(cx).contains_focused(window, cx))
                 })
-                .map(|pane| pane.id)
-                .unwrap_or(tab.active_pane);
+                .map_or(tab.active_pane, |pane| pane.id);
             tab.activate_pane(pane_id);
             let Some(bounds) = tab
                 .pane(pane_id)

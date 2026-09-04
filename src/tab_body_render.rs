@@ -84,9 +84,9 @@ impl Zetta {
                 let panes_own_window_bottom = maximized_pane.is_none() && minimized_shelf.is_none();
                 let maximized_bar_owns_window_bottom =
                     maximized_pane.is_some() && minimized_shelf.is_none();
-                let content = layout
-                    .as_ref()
-                    .map(|layout| {
+                let content = layout.as_ref().map_or_else(
+                    || div().size_full().into_any_element(),
+                    |layout| {
                         self.render_pane_layout(
                             tab,
                             layout,
@@ -97,8 +97,8 @@ impl Zetta {
                             corner_radius,
                             cx,
                         )
-                    })
-                    .unwrap_or_else(|| div().size_full().into_any_element());
+                    },
+                );
                 div()
                     .size_full()
                     .min_h_0()
@@ -162,7 +162,6 @@ impl Zetta {
         let restore_handle = handle.clone();
         let close_handle = handle;
         let maximized_bar_owns_window_bottom = owns_window_bottom;
-        let tab_colors = tab_colors.clone();
         div()
             .h_7()
             .flex_none()
@@ -276,7 +275,9 @@ impl Zetta {
         let close_handle = handle.clone();
         let tab_index = self.active_tab;
         let entries_handle = handle;
-        let entry_colors = tab_colors.clone();
+        // Owned because the `container_query` below is a `move` closure that
+        // rebuilds the shelf on resize. One clone, not the two this used to
+        // make: the entry rows read the same colours the shelf does.
         let tab_colors = tab_colors.clone();
         div()
             .id("minimized-panes-shelf")
@@ -336,111 +337,14 @@ impl Zetta {
                         }),
                 )
             })
-            .child(
-                container_query(move |size, _, cx| {
-                    let capacity = minimized_pane_capacity(size.width, count);
-                    let visible_entries = entries_handle
-                        .read_with(cx, |this, _| {
-                            let Some(tab) = this
-                                .tabs
-                                .get(tab_index)
-                                .filter(|candidate| candidate.id == tab_id)
-                            else {
-                                return Vec::new();
-                            };
-                            resolve_visible_minimized_panes(
-                                tab.minimized_panes.len(),
-                                index,
-                                capacity,
-                                |entry_index| {
-                                    let entry_pane_id = *tab.minimized_panes.get(entry_index)?;
-                                    let pane = tab.pane(entry_pane_id)?;
-                                    let pane_label = tab
-                                        .displayed_pane_label(entry_pane_id)
-                                        .unwrap_or_else(|| pane.label());
-                                    Some((
-                                        entry_index,
-                                        entry_pane_id,
-                                        format!("{pane_label} · {}", pane.profile.name),
-                                    ))
-                                },
-                            )
-                        })
-                        .unwrap_or_default();
-                    div()
-                        .size_full()
-                        .min_w_0()
-                        .flex()
-                        .items_center()
-                        .gap_1()
-                        .overflow_hidden()
-                        .children(visible_entries.into_iter().map(
-                            |(entry_index, entry_pane_id, shelf_label)| {
-                                let is_selected = entry_index == index;
-                                let restore_handle = entries_handle.clone();
-                                div()
-                                    .id(("restore-minimized-pane", entry_pane_id as usize))
-                                    .h_6()
-                                    .min_w_0()
-                                    .flex_1()
-                                    .flex()
-                                    .items_center()
-                                    .gap_1()
-                                    .px_2()
-                                    .rounded_sm()
-                                    .border_1()
-                                    .border_color(if is_selected {
-                                        entry_colors.border_focused
-                                    } else {
-                                        entry_colors.border
-                                    })
-                                    .bg(if is_selected {
-                                        entry_colors.element_selected
-                                    } else {
-                                        entry_colors.element_background
-                                    })
-                                    .cursor_pointer()
-                                    .overflow_hidden()
-                                    .tooltip(Tooltip::for_action_title(
-                                        if is_selected {
-                                            format!(
-                                                "{shelf_label}\nSelected minimized pane; restore"
-                                            )
-                                        } else {
-                                            format!("{shelf_label}\nRestore minimized pane")
-                                        },
-                                        &RestoreMinimizedPane,
-                                    ))
-                                    .on_click(move |_, window, cx| {
-                                        restore_handle
-                                            .update(cx, |this, cx| {
-                                                this.restore_minimized_pane_by_id(
-                                                    entry_pane_id,
-                                                    window,
-                                                    cx,
-                                                );
-                                            })
-                                            .ok();
-                                    })
-                                    .child(
-                                        Icon::new(IconName::Dash)
-                                            .size(IconSize::XSmall)
-                                            .color(Color::Custom(entry_colors.text_accent)),
-                                    )
-                                    .child(
-                                        Label::new(shelf_label)
-                                            .flex_1()
-                                            .size(LabelSize::Small)
-                                            .color(Color::Custom(entry_colors.text))
-                                            .line_clamp(1),
-                                    )
-                            },
-                        ))
-                })
-                .h_6()
-                .min_w_0()
-                .flex_1(),
-            )
+            .child(minimized_pane_strip(MinimizedPaneStrip {
+                count,
+                index,
+                tab_index,
+                tab_id,
+                tab_colors: tab_colors.clone(),
+                entries_handle,
+            }))
             .when(count > 1, |shelf| {
                 shelf.child(
                     IconButton::new("next-minimized-pane", IconName::ChevronRight)
@@ -492,3 +396,124 @@ impl Zetta {
 #[cfg(test)]
 #[path = "tests/tab_body_render.rs"]
 mod tests;
+
+/// What the minimized-pane strip needs. Owned because it is rebuilt inside a
+/// `container_query`, which reruns on resize and so cannot borrow this frame.
+struct MinimizedPaneStrip {
+    count: usize,
+    index: usize,
+    tab_index: usize,
+    tab_id: u64,
+    tab_colors: ThemeColors,
+    entries_handle: WeakEntity<Zetta>,
+}
+
+/// The strip of minimized panes, measured so only as many chips as fit are
+/// drawn and the rest fall into the overflow count.
+fn minimized_pane_strip(strip: MinimizedPaneStrip) -> impl IntoElement {
+    let MinimizedPaneStrip {
+        count,
+        index,
+        tab_index,
+        tab_id,
+        tab_colors,
+        entries_handle,
+    } = strip;
+    container_query(move |size, _, cx| {
+        let capacity = minimized_pane_capacity(size.width, count);
+        let visible_entries = entries_handle
+            .read_with(cx, |this, _| {
+                let Some(tab) = this
+                    .tabs
+                    .get(tab_index)
+                    .filter(|candidate| candidate.id == tab_id)
+                else {
+                    return Vec::new();
+                };
+                resolve_visible_minimized_panes(
+                    tab.minimized_panes.len(),
+                    index,
+                    capacity,
+                    |entry_index| {
+                        let entry_pane_id = *tab.minimized_panes.get(entry_index)?;
+                        let pane = tab.pane(entry_pane_id)?;
+                        let pane_label = tab
+                            .displayed_pane_label(entry_pane_id)
+                            .unwrap_or_else(|| pane.label());
+                        Some((
+                            entry_index,
+                            entry_pane_id,
+                            format!("{pane_label} · {}", pane.profile.name),
+                        ))
+                    },
+                )
+            })
+            .unwrap_or_default();
+        div()
+            .size_full()
+            .min_w_0()
+            .flex()
+            .items_center()
+            .gap_1()
+            .overflow_hidden()
+            .children(visible_entries.into_iter().map(
+                |(entry_index, entry_pane_id, shelf_label)| {
+                    let is_selected = entry_index == index;
+                    let restore_handle = entries_handle.clone();
+                    div()
+                        .id(("restore-minimized-pane", entry_pane_id as usize))
+                        .h_6()
+                        .min_w_0()
+                        .flex_1()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .px_2()
+                        .rounded_sm()
+                        .border_1()
+                        .border_color(if is_selected {
+                            tab_colors.border_focused
+                        } else {
+                            tab_colors.border
+                        })
+                        .bg(if is_selected {
+                            tab_colors.element_selected
+                        } else {
+                            tab_colors.element_background
+                        })
+                        .cursor_pointer()
+                        .overflow_hidden()
+                        .tooltip(Tooltip::for_action_title(
+                            if is_selected {
+                                format!("{shelf_label}\nSelected minimized pane; restore")
+                            } else {
+                                format!("{shelf_label}\nRestore minimized pane")
+                            },
+                            &RestoreMinimizedPane,
+                        ))
+                        .on_click(move |_, window, cx| {
+                            restore_handle
+                                .update(cx, |this, cx| {
+                                    this.restore_minimized_pane_by_id(entry_pane_id, window, cx);
+                                })
+                                .ok();
+                        })
+                        .child(
+                            Icon::new(IconName::Dash)
+                                .size(IconSize::XSmall)
+                                .color(Color::Custom(tab_colors.text_accent)),
+                        )
+                        .child(
+                            Label::new(shelf_label)
+                                .flex_1()
+                                .size(LabelSize::Small)
+                                .color(Color::Custom(tab_colors.text))
+                                .line_clamp(1),
+                        )
+                },
+            ))
+    })
+    .h_6()
+    .min_w_0()
+    .flex_1()
+}

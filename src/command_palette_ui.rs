@@ -306,38 +306,14 @@ impl Zetta {
                 return;
             }
         }
-        match event.keystroke.key.as_str() {
-            "escape" => self.dismiss_command_palette(window, cx),
-            "up" => {
-                palette.selected = palette.selected.saturating_sub(1);
-                palette.scroll_to_selected();
-                cx.notify();
-            }
-            "down" => {
-                palette.selected =
-                    (palette.selected + 1).min(palette.matches().len().saturating_sub(1));
-                palette.scroll_to_selected();
-                cx.notify();
-            }
-            "enter" => {
-                let command = palette.matches().get(palette.selected).copied();
-                if let Some(command) = command {
-                    self.run_palette_command(command, window, cx);
-                }
-            }
-            _ => match apply_text_field_key(&mut palette.query, &event.keystroke) {
-                TextFieldEdit::Ignored => {}
-                TextFieldEdit::CursorMoved => cx.notify(),
-                TextFieldEdit::Edited => {
-                    // The query is the filter, so the match list is rebuilt and
-                    // the selection returns to the first match rather than
-                    // pointing into the old one.
-                    palette.refresh_matches();
-                    palette.selected = 0;
-                    palette.scroll_to_selected();
-                    cx.notify();
-                }
-            },
+        if event.keystroke.key == "escape" {
+            self.dismiss_command_palette(window, cx);
+            return;
+        }
+        match palette.apply_key(&event.keystroke) {
+            PaletteKey::Ignored => {}
+            PaletteKey::Redraw => cx.notify(),
+            PaletteKey::Accept(command) => self.run_palette_command(command, window, cx),
         }
     }
 
@@ -472,10 +448,10 @@ impl Zetta {
                 },
                 OverlayPickerSection::Color => match event.keystroke.key.as_str() {
                     "left" if event.keystroke.modifiers.shift => {
-                        self.adjust_overlay_hue(-1. / 36., cx)
+                        self.adjust_overlay_hue(-1. / 36., cx);
                     }
                     "right" if event.keystroke.modifiers.shift => {
-                        self.adjust_overlay_hue(1. / 36., cx)
+                        self.adjust_overlay_hue(1. / 36., cx);
                     }
                     "left" => self.adjust_overlay_saturation(-0.05, cx),
                     "right" => self.adjust_overlay_saturation(0.05, cx),
@@ -562,7 +538,7 @@ impl Zetta {
                             .on_click(move |_, window, cx| {
                                 row_handle
                                     .update(cx, |this, cx| {
-                                        this.run_palette_command(command_index, window, cx)
+                                        this.run_palette_command(command_index, window, cx);
                                     })
                                     .ok();
                             })
@@ -672,3 +648,7 @@ impl Zetta {
         )
     }
 }
+
+#[cfg(test)]
+#[path = "tests/command_palette_ui.rs"]
+mod tests;
