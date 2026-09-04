@@ -57,7 +57,7 @@ pub(super) fn serve(daemon: &Arc<Daemon>, stream: Stream, token: &str) -> Result
     #[cfg(windows)]
     let peer_process_id = match peer_process_id {
         attested @ Some(_) => attested,
-        None if attestation_needed(daemon, &envelope.request) => {
+        None if attestation_needed(daemon, &envelope.request, envelope.stream_only) => {
             match attest_peer(&mut connection, envelope.client_process_id) {
                 Ok(attested) => attested,
                 Err(error) => {
@@ -152,6 +152,29 @@ pub(super) fn serve(daemon: &Arc<Daemon>, stream: Stream, token: &str) -> Result
                 peer_process_id,
                 &mut connection,
             )
+        }
+        Request::StoreImage {
+            session_id,
+            pane_id,
+            length,
+        } => {
+            match store_image(
+                daemon,
+                session_id,
+                pane_id,
+                length,
+                envelope.client_process_id,
+                peer_process_id,
+                client_id,
+                stream_only,
+                session_secret.as_deref(),
+                &mut connection,
+            ) {
+                Ok(()) => Ok(()),
+                Err(error) => connection.send(&Response::Error {
+                    message: format!("{error:#}"),
+                }),
+            }
         }
         Request::Input { .. } => connection.send(&Response::Error {
             message: "input belongs on a shared connection".to_owned(),

@@ -10,10 +10,10 @@ pub use scrollback_temp::{
 use std::{cmp, ops::Range as StdRange, path::PathBuf, sync::Arc, time::Duration};
 
 use gpui::{
-    Action, AnyElement, App, AppContext as _, ClipboardItem, Context, Corners, DismissEvent,
-    Entity, EventEmitter, FocusHandle, Focusable, KeyContext, KeyDownEvent, Keystroke, MouseButton,
-    MouseDownEvent, Pixels, Point, Render, ScrollWheelEvent, Subscription, Task, Window, actions,
-    anchored, deferred, div, px,
+    Action, AnyElement, App, AppContext as _, ClipboardEntry, ClipboardItem, Context, Corners,
+    DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, KeyContext, KeyDownEvent,
+    Keystroke, MouseButton, MouseDownEvent, Pixels, Point, Render, ScrollWheelEvent, Subscription,
+    Task, Window, actions, anchored, deferred, div, px,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -71,6 +71,7 @@ actions!(zetta, [ChangePaneTheme, SavePaneOutput, SetPaneOverlay]);
 pub enum TerminalViewEvent {
     Close,
     TitleChanged,
+    PasteError(String),
     Input(TerminalInput),
     OpenEditor(EditorRequest),
 }
@@ -86,6 +87,13 @@ fn enabled_input_event(
     build: impl FnOnce() -> TerminalViewEvent,
 ) -> Option<TerminalViewEvent> {
     enabled.then(build)
+}
+
+fn first_clipboard_image(clipboard: &ClipboardItem) -> Option<Arc<gpui::Image>> {
+    clipboard.entries().iter().find_map(|entry| match entry {
+        ClipboardEntry::Image(image) if !image.bytes.is_empty() => Some(Arc::new(image.clone())),
+        _ => None,
+    })
 }
 
 fn search_request_is_current(
@@ -107,11 +115,11 @@ enum RightClickAction {
 fn right_click_action(
     terminal_mouse_mode: bool,
     shift: bool,
-    clipboard_has_text: bool,
+    clipboard_has_content: bool,
 ) -> RightClickAction {
     if terminal_mouse_mode && !shift {
         RightClickAction::Forward
-    } else if shift || !clipboard_has_text {
+    } else if shift || !clipboard_has_content {
         RightClickAction::ContextMenu
     } else {
         RightClickAction::Paste
@@ -130,6 +138,7 @@ pub enum TerminalInput {
     Keystroke(Keystroke),
     Text(String),
     Paste(String),
+    PasteImage(Arc<gpui::Image>),
 }
 
 #[derive(Clone)]
@@ -381,6 +390,7 @@ impl TerminalView {
                 | Event::CommandStarted { .. }
                 | Event::CommandFinished { .. } => {}
                 Event::TitleChanged => cx.emit(TerminalViewEvent::TitleChanged),
+                Event::PasteError(error) => cx.emit(TerminalViewEvent::PasteError(error.clone())),
                 Event::CloseTerminal => cx.emit(TerminalViewEvent::Close),
                 Event::NewNavigationTarget(target) => {
                     view.hover = match target
@@ -700,6 +710,12 @@ impl TerminalView {
             }
             TerminalInput::Paste(text) => {
                 self.terminal.update(cx, |terminal, _| terminal.paste(text));
+            }
+            TerminalInput::PasteImage(image) => {
+                let option_as_meta = TerminalSettings::get_global(cx).option_as_meta;
+                self.terminal.update(cx, |terminal, _| {
+                    terminal.paste_image(image.clone(), option_as_meta)
+                });
             }
         }
     }
@@ -1082,23 +1098,31 @@ impl TerminalView {
         let Some(clipboard) = cx.read_from_clipboard() else {
             return;
         };
+        if self.search_query.is_some() {
+            if let Some(text) = clipboard.text() {
+                self.insert_search_text(&text, cx);
+            }
+        } else if let Some(image) = first_clipboard_image(&clipboard) {
+            self.paste_image(image, cx);
+        } else if let Some(text) = clipboard.text() {
+            self.paste_text_value(&text, cx);
+        }
+    }
+
+    fn paste_text(&mut self, _: &PasteText, _: &mut Window, cx: &mut Context<Self>) {
+        if !self.input_enabled {
+            return;
+        }
+        let Some(clipboard) = cx.read_from_clipboard() else {
+            return;
+        };
         if let Some(text) = clipboard.text() {
             if self.search_query.is_some() {
                 self.insert_search_text(&text, cx);
             } else {
-                self.terminal
-                    .update(cx, |terminal, _| terminal.paste(&text));
-                if let Some(event) = enabled_input_event(self.emit_input_events, || {
-                    TerminalViewEvent::Input(TerminalInput::Paste(text))
-                }) {
-                    cx.emit(event);
-                }
+                self.paste_text_value(&text, cx);
             }
         }
-    }
-
-    fn paste_text(&mut self, _: &PasteText, window: &mut Window, cx: &mut Context<Self>) {
-        self.paste(&Paste, window, cx);
     }
 
     fn paste_trimmed(&mut self, _: &PasteTrimmed, _: &mut Window, cx: &mut Context<Self>) {
@@ -1113,13 +1137,29 @@ impl TerminalView {
             if self.search_query.is_some() {
                 self.insert_search_text(text, cx);
             } else {
-                self.terminal.update(cx, |terminal, _| terminal.paste(text));
-                if let Some(event) = enabled_input_event(self.emit_input_events, || {
-                    TerminalViewEvent::Input(TerminalInput::Paste(text.to_owned()))
-                }) {
-                    cx.emit(event);
-                }
+                self.paste_text_value(text, cx);
             }
+        }
+    }
+
+    fn paste_text_value(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.terminal.update(cx, |terminal, _| terminal.paste(text));
+        if let Some(event) = enabled_input_event(self.emit_input_events, || {
+            TerminalViewEvent::Input(TerminalInput::Paste(text.to_owned()))
+        }) {
+            cx.emit(event);
+        }
+    }
+
+    fn paste_image(&mut self, image: Arc<gpui::Image>, cx: &mut Context<Self>) {
+        let option_as_meta = TerminalSettings::get_global(cx).option_as_meta;
+        self.terminal.update(cx, |terminal, _| {
+            terminal.paste_image(image.clone(), option_as_meta)
+        });
+        if let Some(event) = enabled_input_event(self.emit_input_events, || {
+            TerminalViewEvent::Input(TerminalInput::PasteImage(image))
+        }) {
+            cx.emit(event);
         }
     }
 
@@ -1142,8 +1182,9 @@ impl TerminalView {
     }
 
     fn clipboard_has_content(cx: &App) -> bool {
-        cx.read_from_clipboard()
-            .is_some_and(|clipboard| clipboard.text().is_some())
+        cx.read_from_clipboard().is_some_and(|clipboard| {
+            clipboard.text().is_some() || first_clipboard_image(&clipboard).is_some()
+        })
     }
 
     fn deploy_context_menu(
@@ -1460,13 +1501,13 @@ impl Render for TerminalView {
                         .last_content
                         .mode
                         .contains(Modes::MOUSE_MODE);
-                    let clipboard_has_text = !terminal_mouse_mode
+                    let clipboard_has_content = !terminal_mouse_mode
                         && !event.modifiers.shift
                         && Self::clipboard_has_content(cx);
                     let action = right_click_action(
                         terminal_mouse_mode,
                         event.modifiers.shift,
-                        clipboard_has_text,
+                        clipboard_has_content,
                     );
                     match action {
                         RightClickAction::ContextMenu => {

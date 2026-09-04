@@ -458,6 +458,7 @@ impl Zetta {
                     this.schedule_project_detection_for_pane(tab_id, pane_id, window, cx);
                     cx.notify();
                 }
+                TerminalViewEvent::PasteError(error) => this.show_notice(error.clone(), cx),
                 TerminalViewEvent::Input(input)
                     if server_input_stops_server(input, is_http_server, is_tftp_server) =>
                 {
@@ -573,6 +574,7 @@ impl Zetta {
                     this.stacked_terminal_closed(tab_id, pane_id, entry_id, window, cx);
                 }
                 TerminalViewEvent::TitleChanged => cx.notify(),
+                TerminalViewEvent::PasteError(error) => this.show_notice(error.clone(), cx),
                 TerminalViewEvent::Input(_) => {}
                 TerminalViewEvent::OpenEditor(request) => {
                     this.open_editor_in_new_pane(tab_id, pane_id, request.clone(), window, cx);

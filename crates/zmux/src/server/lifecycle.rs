@@ -866,7 +866,11 @@ pub(super) fn session_control_authorized(
 /// their message, so there is nowhere to interject a challenge. Those ask to be
 /// identified first, with [`Request::Attest`].
 #[cfg(windows)]
-pub(super) fn attestation_needed(daemon: &Arc<Daemon>, request: &Request) -> bool {
+pub(super) fn attestation_needed(
+    daemon: &Arc<Daemon>,
+    request: &Request,
+    stream_only: bool,
+) -> bool {
     #[cfg(feature = "session-persistence")]
     if let Request::Spawn(SpawnRequest {
         session_id: Some(session_id),
@@ -882,6 +886,7 @@ pub(super) fn attestation_needed(daemon: &Arc<Daemon>, request: &Request) -> boo
     let session_id = match request {
         Request::Share(request) => Some(request.session_id),
         Request::Snapshot { session_id, .. } => Some(*session_id),
+        Request::StoreImage { session_id, .. } if !stream_only => Some(*session_id),
         Request::Resize { session_id, .. }
         | Request::SetConsolePalette { session_id, .. }
         | Request::ClosePane { session_id, .. }
@@ -1084,6 +1089,7 @@ pub(super) fn kill(
                     .as_mut()
                     .expect("the persistence store was checked above")
                     .forget(session_id)?;
+                remove_image_session(daemon, session_id);
                 return Ok(());
             }
         }
@@ -1106,6 +1112,7 @@ pub(super) fn kill(
     if let Some(persistence) = daemon.persistence.lock().unwrap().as_mut() {
         persistence.forget(session_id)?;
     }
+    remove_image_session(daemon, session_id);
     #[cfg(windows)]
     for console_id in consoles {
         close_host_console(daemon, console_id);
@@ -1137,6 +1144,7 @@ pub(super) fn forget(
         if let Some(persistence) = daemon.persistence.lock().unwrap().as_mut() {
             persistence.forget(session_id)?;
         }
+        remove_image_session(daemon, session_id);
         #[cfg(windows)]
         for console_id in consoles {
             close_host_console(daemon, console_id);
@@ -1162,6 +1170,7 @@ pub(super) fn forget(
             if let Some(persistence) = daemon.persistence.lock().unwrap().as_mut() {
                 persistence.forget(session_id)?;
             }
+            remove_image_session(daemon, session_id);
             return Ok(());
         }
         let mut restored = daemon.restored.lock().unwrap();
@@ -1170,6 +1179,7 @@ pub(super) fn forget(
             .any(|session| session.request.record_id == session_id)
         {
             restored.retain(|session| session.request.record_id != session_id);
+            remove_image_session(daemon, session_id);
             return Ok(());
         }
     }
@@ -1273,8 +1283,11 @@ pub(super) fn close_pane(
         // pane here would evict the other viewers too.
         _ => anyhow::bail!("client {client_process_id} does not hold pane {pane_id}"),
     }
-    let (released, _consoles) = end_abandoned_sessions(&mut sessions);
+    let (released, _consoles, ended_sessions) = end_abandoned_sessions(&mut sessions);
     drop(sessions);
+    for session_id in ended_sessions {
+        remove_image_session(daemon, session_id);
+    }
     #[cfg(windows)]
     for console_id in _consoles {
         close_host_console(daemon, console_id);

@@ -124,6 +124,7 @@ impl Zetta {
             move |this, _, event, window, cx| match event {
                 TerminalViewEvent::Close => this.close_pane(tab_id, pane_id, window, cx),
                 TerminalViewEvent::TitleChanged => cx.notify(),
+                TerminalViewEvent::PasteError(error) => this.show_notice(error.clone(), cx),
                 TerminalViewEvent::Input(input) => match input_policy {
                     ByteStreamInputPolicy::CloseOnInterrupt
                         if ctrl_c_interrupts_byte_stream(input) =>

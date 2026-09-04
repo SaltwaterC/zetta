@@ -14,7 +14,10 @@ use crate::protocol::{BackgroundSessionSummary, RestorableSessionRecord};
 
 /// The wire format, and what a client and a multiplexer compare before they
 /// trust each other to understand one another.
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
+
+/// Maximum encoded image size accepted by the image-paste request.
+pub const MAX_IMAGE_BYTES: usize = 64 * 1024 * 1024;
 
 /// Every request carries the endpoint token, which authenticates the *channel*
 /// only. It says nothing about whether a protected session may be attached —
@@ -122,6 +125,15 @@ pub enum Request {
         length: usize,
         columns: u16,
         lines: u16,
+    },
+    /// Stores a normalized clipboard image for a shared pane and returns the
+    /// absolute path the attached TUI can consume. The raw PNG bytes follow
+    /// the request on the connection.
+    StoreImage {
+        session_id: u64,
+        pane_id: u64,
+        /// Length of the raw PNG bytes that follow the message.
+        length: usize,
     },
     /// Input from a shared client, on the shared connection [`Request::Attach`]
     /// left open after it was answered with [`Response::SharedAttached`].
@@ -455,6 +467,11 @@ pub enum Response {
     /// Answers [`Request::PaneStates`], in the order asked.
     PaneStates {
         panes: Vec<PaneStateReport>,
+    },
+    /// Answers [`Request::StoreImage`] with the path visible to the session's
+    /// child process.
+    ImageStored {
+        path: String,
     },
     Ok,
     /// Asks the client to prove it is the process its envelope named, before a

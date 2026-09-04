@@ -6,6 +6,7 @@
 
 use super::*;
 
+use super::image_paste::RemoteImagePasteHandler;
 use super::shared_panes::SharedPaneWriter;
 
 impl Zetta {
@@ -494,6 +495,15 @@ impl Zetta {
                         mux_pane_id,
                         runtime.session_secret(),
                     ));
+                    let built = if runtime.is_remote() {
+                        built.with_image_paste_handler(Arc::new(RemoteImagePasteHandler::new(
+                            runtime,
+                            session_id,
+                            mux_pane_id,
+                        )))
+                    } else {
+                        built
+                    };
                     (mux_pane_id, Some(built), None, Some(pane))
                 }
             };

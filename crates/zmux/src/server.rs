@@ -246,9 +246,11 @@ impl Session {
 ///
 /// Returns whether anything was pruned, so the caller republishes only then.
 fn prune_exited_panes(daemon: &Arc<Daemon>) -> bool {
-    let mut sessions = daemon.sessions.lock().unwrap();
+    let mut sessions = daemon
+        .sessions
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let mut changed = false;
-    #[cfg(feature = "session-persistence")]
     let mut removed_session_ids = Vec::new();
     #[cfg(windows)]
     let mut closed_consoles = Vec::new();
@@ -263,7 +265,6 @@ fn prune_exited_panes(daemon: &Arc<Daemon>) -> bool {
             !remove
         });
         changed |= session.panes.len() != before;
-        #[cfg(feature = "session-persistence")]
         if session.panes.is_empty() {
             removed_session_ids.push(session.id);
         }
@@ -272,6 +273,9 @@ fn prune_exited_panes(daemon: &Arc<Daemon>) -> bool {
     sessions.retain(|session| !session.panes.is_empty());
     changed |= sessions.len() != before;
     drop(sessions);
+    for session_id in &removed_session_ids {
+        remove_image_session(daemon, *session_id);
+    }
     #[cfg(feature = "session-persistence")]
     {
         let mut persistence = daemon.persistence.lock().unwrap();
@@ -378,6 +382,8 @@ pub struct Daemon {
     catalog: Mutex<SessionCatalogPublisher>,
     retention: Mutex<Retention>,
     running: AtomicBool,
+    /// Private per-session storage for normalized clipboard images.
+    image_directory: PathBuf,
     #[cfg(feature = "session-persistence")]
     /// The private directory this daemon serves.  Keeping it here lets a
     /// memory-fallback daemon recover or discard records left by an earlier
@@ -417,6 +423,7 @@ impl Daemon {
     fn new(
         directory: &Path,
         retention: Retention,
+        image_directory: PathBuf,
         #[cfg(feature = "session-persistence")] persistence: Option<PersistenceStore>,
         next_session_id: u64,
         generation: u64,
@@ -436,6 +443,7 @@ impl Daemon {
             )),
             retention: Mutex::new(retention),
             running: AtomicBool::new(true),
+            image_directory,
             #[cfg(feature = "session-persistence")]
             directory: directory.to_owned(),
             executable: resolve_own_executable(),
@@ -625,6 +633,7 @@ pub fn run(
     let daemon = Arc::new(Daemon::new(
         &directory,
         retention,
+        directory.join("clipboard"),
         #[cfg(feature = "session-persistence")]
         persistence,
         next_session_id,
@@ -665,6 +674,7 @@ pub fn run(
             );
         }
     }
+    sweep_image_staging(&daemon)?;
     start_reaper(daemon.clone())?;
     start_drain(daemon.clone())?;
 
@@ -1017,6 +1027,7 @@ fn spawn_worker(name: &str, make_worker: impl Fn() -> Box<dyn FnOnce() + Send>) 
 
 mod attachment;
 mod dispatch;
+mod image_store;
 mod lifecycle;
 mod sizing;
 mod upgrade;
@@ -1028,6 +1039,7 @@ mod workers;
 // globs keep that one namespace rather than spelling out a hundred imports.
 use attachment::*;
 use dispatch::*;
+use image_store::*;
 use lifecycle::*;
 use sizing::*;
 use upgrade::*;

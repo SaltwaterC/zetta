@@ -27,6 +27,39 @@ fn ping_requests_are_tagged_by_name_on_the_wire() {
 }
 
 #[test]
+fn image_store_messages_round_trip_with_the_raw_payload_length() {
+    let request = Request::StoreImage {
+        session_id: 7,
+        pane_id: 8,
+        length: 1234,
+    };
+    let wire = serde_json::to_value(&request).unwrap();
+    assert_eq!(wire["request"], "store_image");
+    assert_eq!(wire["session_id"], 7);
+    assert_eq!(wire["pane_id"], 8);
+    assert_eq!(wire["length"], 1234);
+
+    let parsed: Request = serde_json::from_value(wire).unwrap();
+    assert!(matches!(
+        parsed,
+        Request::StoreImage {
+            session_id: 7,
+            pane_id: 8,
+            length: 1234,
+        }
+    ));
+
+    let response = Response::ImageStored {
+        path: "/tmp/zetta-image.png".to_owned(),
+    };
+    let parsed: Response = serde_json::from_value(serde_json::to_value(response).unwrap()).unwrap();
+    assert!(matches!(
+        parsed,
+        Response::ImageStored { path } if path == "/tmp/zetta-image.png"
+    ));
+}
+
+#[test]
 fn spawn_requests_round_trip_shell_arguments_environment_and_working_directory() {
     let mut environment = HashMap::new();
     environment.insert("PROMPT".to_owned(), "zetta-prompt".to_owned());

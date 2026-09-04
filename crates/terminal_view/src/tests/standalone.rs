@@ -81,10 +81,30 @@ fn shifted_right_click_opens_the_context_menu() {
 }
 
 #[test]
-fn plain_right_click_pastes_when_clipboard_has_text() {
+fn plain_right_click_pastes_when_clipboard_has_content() {
     assert_eq!(
         right_click_action(false, false, true),
         RightClickAction::Paste
+    );
+}
+
+#[test]
+fn the_first_nonempty_clipboard_image_is_selected_for_paste() {
+    let image = gpui::Image::from_bytes(gpui::ImageFormat::Png, vec![1, 2, 3]);
+    let clipboard = gpui::ClipboardItem {
+        entries: vec![
+            gpui::ClipboardEntry::Image(gpui::Image::empty()),
+            gpui::ClipboardEntry::String("text alongside image".to_owned().into()),
+            gpui::ClipboardEntry::Image(image.clone()),
+        ],
+    };
+
+    assert_eq!(first_clipboard_image(&clipboard).as_deref(), Some(&image));
+    assert!(
+        first_clipboard_image(&gpui::ClipboardItem {
+            entries: vec![gpui::ClipboardEntry::Image(gpui::Image::empty())],
+        })
+        .is_none()
     );
 }
 

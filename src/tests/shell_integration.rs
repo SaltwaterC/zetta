@@ -79,7 +79,8 @@ fn clean_shell_command(program: &str) -> std::process::Command {
         .env_remove("ZETTA_PROCESS_ID")
         .env_remove("ZETTA_ATTENTION_ID")
         .env_remove("ZETTA_PANE_ID")
-        .env_remove("ZETTA_PANE_ROUTING_ID");
+        .env_remove("ZETTA_PANE_ROUTING_ID")
+        .env_remove("ZETTA_NO_MUX");
     command
 }
 

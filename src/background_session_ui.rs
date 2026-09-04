@@ -351,6 +351,7 @@ pub(crate) enum SealedKeyAuthorization {
 const SNAPSHOT_LINES: usize = 2_000;
 
 mod detach;
+mod image_paste;
 mod multiplexer;
 mod observers;
 mod reconnect;

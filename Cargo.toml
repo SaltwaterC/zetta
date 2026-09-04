@@ -83,6 +83,16 @@ futures = "0.3"
 getrandom = "0.3"
 gpui = { path = "zed/crates/gpui", features = ["profiler"] }
 gpui_platform = { path = "crates/gpui_platform", features = ["font-kit"] }
+image = { version = "0.25", default-features = false, features = [
+    "bmp",
+    "gif",
+    "ico",
+    "jpeg",
+    "png",
+    "pnm",
+    "tiff",
+    "webp",
+] }
 menu = { path = "zed/crates/menu" }
 notify-rust = { version = "4", features = ["preview-macos-un"], optional = true }
 release_channel = { path = "zed/crates/release_channel" }
@@ -139,7 +149,6 @@ zmux = { path = "crates/zmux", default-features = false, features = ["scrollback
 zwt = { path = "crates/zwt", optional = true }
 
 [target.'cfg(windows)'.dependencies]
-image = { version = "0.25", default-features = false, features = ["png"] }
 uds_windows = "1.2"
 windows-registry = "0.5"
 windows = { version = "0.61", features = [

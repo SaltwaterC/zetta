@@ -726,6 +726,9 @@ pub enum Event {
     CloseTerminal,
     Bell,
     Wakeup,
+    /// Reports a failure to prepare or transfer an image requested by Paste.
+    /// No fallback input is sent when this event is emitted.
+    PasteError(String),
     /// The shell integration has installed the lifecycle hooks used by
     /// `zetta pane wait`.
     TrackingReady,
@@ -1229,6 +1232,15 @@ type ClipboardFormatter = Arc<dyn Fn(&str) -> String + Sync + Send + 'static>;
 type ColorFormatter = Arc<dyn Fn(Rgb) -> String + Sync + Send + 'static>;
 type TextAreaSizeFormatter = Arc<dyn Fn(TerminalBounds) -> String + Sync + Send + 'static>;
 
+/// Resolves an image clipboard entry to text suitable for a terminal paste.
+///
+/// Local terminals do not need a handler: they receive the native image-paste
+/// shortcut. A shared remote terminal installs one so the image can be stored
+/// on the machine that owns the session before its path is sent to the child.
+pub trait ImagePasteHandler: Send + Sync {
+    fn paste_image(&self, image: &gpui::Image) -> Result<String>;
+}
+
 #[derive(Clone)]
 pub(crate) enum TerminalBackendEvent {
     MouseCursorDirty,
@@ -1242,6 +1254,7 @@ pub(crate) enum TerminalBackendEvent {
     ResizeRequest { rows: usize, columns: usize },
     CursorBlinkingChange,
     Wakeup,
+    PasteError(String),
     Bell,
     Exit,
     ChildExit(ExitStatus),
@@ -1442,6 +1455,7 @@ impl fmt::Debug for TerminalBackendEvent {
             }
             Self::CursorBlinkingChange => f.write_str("CursorBlinkingChange"),
             Self::Wakeup => f.write_str("Wakeup"),
+            Self::PasteError(error) => write!(f, "PasteError({error})"),
             Self::Bell => f.write_str("Bell"),
             Self::Exit => f.write_str("Exit"),
             Self::ChildExit(status) => write!(f, "ChildExit({status})"),
@@ -2031,6 +2045,7 @@ impl TerminalBuilder {
             terminal_type: TerminalType::DisplayOnly,
             subprocess: None,
             byte_stream: None,
+            image_paste_handler: None,
             pty_control: None,
             pty_control_is_local: false,
             console_palette_enabled: false,
@@ -2100,7 +2115,7 @@ impl TerminalBuilder {
             init_command_startup_tx: None,
             init_command_startup_echo_disabled: false,
             init_command_startup_uses_nul: false,
-            init_command_startup_pending_input: Vec::new(),
+            init_command_startup_pending_input: VecDeque::new(),
             event_loop_task: Task::ready(Ok(())),
             background_executor: background_executor.clone(),
             path_style,
@@ -2269,6 +2284,14 @@ impl TerminalBuilder {
     /// for a shared pane replays through this instead.
     pub fn with_replay(mut self, bytes: Vec<u8>) -> Self {
         self.terminal.pending_replay = (!bytes.is_empty()).then_some(bytes);
+        self
+    }
+
+    /// Installs the resolver used when this byte stream receives an image
+    /// paste. The handler is captured by each queued image command, so it is
+    /// safe to add after [`Self::new_byte_stream`] has started its writer.
+    pub fn with_image_paste_handler(mut self, handler: Arc<dyn ImagePasteHandler>) -> Self {
+        self.terminal.image_paste_handler = Some(handler);
         self
     }
 
@@ -2771,6 +2794,7 @@ impl TerminalBuilder {
                 terminal_type,
                 subprocess,
                 byte_stream: None,
+                image_paste_handler: None,
                 pty_control,
                 pty_control_is_local,
                 console_palette_enabled,
@@ -2842,7 +2866,7 @@ impl TerminalBuilder {
                 init_command_startup_tx: None,
                 init_command_startup_echo_disabled: false,
                 init_command_startup_uses_nul: false,
-                init_command_startup_pending_input: Vec::new(),
+                init_command_startup_pending_input: VecDeque::new(),
                 event_loop_task: Task::ready(Ok(())),
                 background_executor,
                 path_style,
@@ -3031,6 +3055,8 @@ pub struct Terminal {
     subprocess: Option<SubprocessHandle>,
     /// Set for terminals connected to a blocking bidirectional byte stream.
     byte_stream: Option<ByteStreamHandle>,
+    /// Resolves image paste commands queued on a remote byte stream.
+    image_paste_handler: Option<Arc<dyn ImagePasteHandler>>,
     /// True when `pty_control` is this terminal's own pty sender rather than a
     /// control the multiplexer provided. Only the former is released along with
     /// the rest of the pty's resources.
@@ -3134,7 +3160,7 @@ pub struct Terminal {
     /// User input that arrived while the hidden startup wrapper was still
     /// active. It must wait until the wrapper has restored echo, otherwise it
     /// can be consumed as the wrapper's payload or be echoed out of order.
-    init_command_startup_pending_input: Vec<u8>,
+    init_command_startup_pending_input: VecDeque<InputCommand>,
     event_loop_task: Task<Result<(), anyhow::Error>>,
     background_executor: BackgroundExecutor,
     path_style: PathStyle,
@@ -3309,8 +3335,8 @@ impl Terminal {
                     self.release_init_command_startup_render();
                     let pending_input =
                         std::mem::take(&mut self.init_command_startup_pending_input);
-                    if !pending_input.is_empty() {
-                        self.write_input(pending_input);
+                    for input in pending_input {
+                        self.write_input_command(input);
                     }
                     return;
                 }
@@ -3415,6 +3441,7 @@ impl Terminal {
                     info.emit_title_changed_if_changed(cx);
                 }
             }
+            TerminalBackendEvent::PasteError(error) => cx.emit(Event::PasteError(error)),
             TerminalBackendEvent::ColorRequest(index, format) => {
                 // It's important that the color request is processed here to retain relative order
                 // with other PTY writes. Otherwise applications might witness out-of-order
@@ -4022,7 +4049,7 @@ impl Terminal {
         // silently mute, which showed up as only the client that joined *last*
         // being able to type.
         if let Some(byte_stream) = &self.byte_stream {
-            byte_stream.write(input.into_owned());
+            byte_stream.write(InputCommand::Bytes(input.into_owned()));
         } else if let TerminalType::Pty {
             pty_tx: Some(pty_tx),
             ..
@@ -4041,6 +4068,10 @@ impl Terminal {
 
     pub fn input(&mut self, input: impl Into<Cow<'static, [u8]>>) {
         let input: Cow<'static, [u8]> = input.into();
+        self.queue_input(InputCommand::Bytes(input.into_owned()));
+    }
+
+    fn queue_input(&mut self, input: InputCommand) {
         self.keyboard_input_sent = true;
         // A user who types while a restored screen is waiting for shell
         // startup has taken ownership of the fresh prompt. Do not later append
@@ -4050,15 +4081,34 @@ impl Terminal {
             self.restore_prompt_boundary_sent = true;
         }
         if self.init_command_startup_done_title.is_some() {
-            self.init_command_startup_pending_input
-                .extend_from_slice(input.as_ref());
+            self.init_command_startup_pending_input.push_back(input);
             self.complete_init_command_startup_handshake();
             self.cancel_init_command_startup();
             return;
         }
         self.complete_init_command_startup_handshake();
         self.cancel_init_command_startup();
-        self.write_input(input);
+        self.write_input_command(input);
+    }
+
+    fn write_input_command(&mut self, input: InputCommand) {
+        match input {
+            InputCommand::Bytes(input) => self.write_input(input),
+            InputCommand::Image {
+                image,
+                bracketed_paste,
+                handler,
+            } => {
+                self.prepare_input(&[]);
+                if let Some(byte_stream) = &self.byte_stream {
+                    byte_stream.write(InputCommand::Image {
+                        image,
+                        bracketed_paste,
+                        handler,
+                    });
+                }
+            }
+        }
     }
 
     /// Runs Zetta's editor dispatcher through the active shell so it inherits
@@ -4345,8 +4395,7 @@ impl Terminal {
         cx.emit(Event::Wakeup);
     }
 
-    fn write_input(&mut self, input: impl Into<Cow<'static, [u8]>>) {
-        let input: Cow<'static, [u8]> = input.into();
+    fn prepare_input(&mut self, input: &[u8]) {
         // A submitted command is the boundary a directory change belongs to.
         if !self.is_remote_terminal && input.contains(&b'\r') {
             let term = self.term.lock_unfair();
@@ -4358,6 +4407,11 @@ impl Terminal {
 
         self.events.push_back(InternalEvent::Scroll(Scroll::Bottom));
         self.events.push_back(InternalEvent::SetSelection(None));
+    }
+
+    fn write_input(&mut self, input: impl Into<Cow<'static, [u8]>>) {
+        let input: Cow<'static, [u8]> = input.into();
+        self.prepare_input(input.as_ref());
 
         #[cfg(any(test, feature = "test-support"))]
         self.input_log.push(input.to_vec());
@@ -4522,13 +4576,35 @@ impl Terminal {
 
     ///Paste text into the terminal
     pub fn paste(&mut self, text: &str) {
-        let paste_text = if self.last_content.mode.contains(Modes::BRACKETED_PASTE) {
-            format!("{}{}{}", "\x1b[200~", text.replace('\x1b', ""), "\x1b[201~")
-        } else {
-            text.replace("\r\n", "\r").replace('\n', "\r")
-        };
+        self.input(paste_bytes(
+            text,
+            self.last_content.mode.contains(Modes::BRACKETED_PASTE),
+        ));
+    }
 
-        self.input(paste_text.into_bytes());
+    /// Pastes an image into a terminal application.
+    ///
+    /// A local terminal receives the native image-paste shortcut so TUIs can
+    /// read the desktop clipboard themselves. A remote shared pane queues the
+    /// image for its handler, which stores it on the session host and sends the
+    /// resulting path as a bracketed paste.
+    pub fn paste_image(&mut self, image: Arc<gpui::Image>, option_as_meta: bool) {
+        if self.byte_stream.is_some()
+            && let Some(handler) = self.image_paste_handler.clone()
+        {
+            self.queue_input(InputCommand::Image {
+                image,
+                bracketed_paste: self.last_content.mode.contains(Modes::BRACKETED_PASTE),
+                handler,
+            });
+            return;
+        }
+
+        let key = if cfg!(windows) { "alt-v" } else { "ctrl-v" };
+        let keystroke = Keystroke::parse(key).expect("native image paste key is valid");
+        if let Some(input) = to_esc_str(&keystroke, self.last_content.mode, option_as_meta) {
+            self.input(input.into_owned().into_bytes());
+        }
     }
 
     pub fn sync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -5896,8 +5972,25 @@ struct SubprocessHandle {
 }
 
 /// Owns the workers used by a blocking bidirectional byte stream.
+enum InputCommand {
+    Bytes(Vec<u8>),
+    Image {
+        image: Arc<gpui::Image>,
+        bracketed_paste: bool,
+        handler: Arc<dyn ImagePasteHandler>,
+    },
+}
+
+fn paste_bytes(text: &str, bracketed_paste: bool) -> Vec<u8> {
+    if bracketed_paste {
+        format!("\x1b[200~{}\x1b[201~", text.replace('\x1b', "")).into_bytes()
+    } else {
+        text.replace("\r\n", "\r").replace('\n', "\r").into_bytes()
+    }
+}
+
 struct ByteStreamHandle {
-    input_tx: Option<mpsc::Sender<Vec<u8>>>,
+    input_tx: Option<mpsc::Sender<InputCommand>>,
     stopped: Arc<std::sync::atomic::AtomicBool>,
     /// Signalled by the reader thread as it returns, so a caller can tell
     /// "everything the stream held is in the grid" from "the thread is still
@@ -5908,9 +6001,9 @@ struct ByteStreamHandle {
 }
 
 impl ByteStreamHandle {
-    fn write(&self, bytes: Vec<u8>) {
+    fn write(&self, command: InputCommand) {
         if let Some(input_tx) = &self.input_tx {
-            input_tx.send(bytes).ok();
+            input_tx.send(command).ok();
         }
     }
 
@@ -6001,14 +6094,38 @@ fn spawn_byte_stream(
         })
         .expect("spawning a terminal byte-stream reader");
 
-    let (input_tx, input_rx) = mpsc::channel::<Vec<u8>>();
+    let (input_tx, input_rx) = mpsc::channel::<InputCommand>();
     let writer_stopped = stopped.clone();
+    let writer_events = events_tx;
     let writer_thread = thread::Builder::new()
         .name("terminal-byte-stream-writer".to_owned())
         .spawn(move || {
             while !writer_stopped.load(Ordering::Acquire) {
-                let Ok(bytes) = input_rx.recv() else { break };
-                if let Err(error) = writer.write_all(&bytes).and_then(|()| writer.flush()) {
+                let Ok(command) = input_rx.recv() else { break };
+                let result = match command {
+                    InputCommand::Bytes(bytes) => {
+                        writer.write_all(&bytes).and_then(|()| writer.flush())
+                    }
+                    InputCommand::Image {
+                        image,
+                        bracketed_paste,
+                        handler,
+                    } => match handler.paste_image(&image) {
+                        Ok(path) => {
+                            let bytes = paste_bytes(&path, bracketed_paste);
+                            writer.write_all(&bytes).and_then(|()| writer.flush())
+                        }
+                        Err(error) => {
+                            writer_events
+                                .unbounded_send(PtyEvent::Event(TerminalBackendEvent::PasteError(
+                                    format!("could not paste image: {error:#}"),
+                                )))
+                                .ok();
+                            Ok(())
+                        }
+                    },
+                };
+                if let Err(error) = result {
                     log::warn!("byte stream write failed: {error}");
                     break;
                 }
@@ -7197,6 +7314,16 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    struct TestImagePasteHandler;
+
+    #[cfg(unix)]
+    impl ImagePasteHandler for TestImagePasteHandler {
+        fn paste_image(&self, _: &gpui::Image) -> anyhow::Result<String> {
+            Ok("/tmp/remote-image.png".to_owned())
+        }
+    }
+
     /// A pane revoked into shared mode keeps typing into the multiplexer.
     ///
     /// The conversion leaves `TerminalType::Pty` in place and only shuts the
@@ -7281,6 +7408,60 @@ mod tests {
         );
 
         unsafe { libc::kill(-(child_pid as libc::pid_t), libc::SIGKILL) };
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
+    async fn an_image_on_a_byte_stream_is_resolved_before_its_path_is_written(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+        cx.executor().allow_parking();
+
+        let written = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let terminal = cx.new(|cx| {
+            TerminalBuilder::new_byte_stream(
+                Box::new(CannedReader { bytes: Vec::new() }),
+                Box::new(RecordingWriter(written.clone())),
+                String::new(),
+                SettingsCursorShape::default(),
+                AlternateScroll::On,
+                None,
+                0,
+                cx.background_executor(),
+                PathStyle::local(),
+            )
+            .with_image_paste_handler(Arc::new(TestImagePasteHandler))
+            .subscribe(cx)
+        });
+
+        terminal.update(cx, |terminal, _| {
+            terminal.paste_image(
+                Arc::new(gpui::Image::from_bytes(
+                    gpui::ImageFormat::Png,
+                    vec![1, 2, 3],
+                )),
+                false,
+            );
+        });
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while written
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_empty()
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(
+            written
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .as_slice(),
+            b"/tmp/remote-image.png",
+            "the byte stream must receive the resolved path, not image bytes"
+        );
     }
 
     /// A restored screen is written once, and not until the pane has a real size.
@@ -9286,6 +9467,15 @@ mod tests {
                 vec![b"middle-click paste".to_vec()]
             );
         });
+    }
+
+    #[test]
+    fn paste_bytes_preserves_bracketed_text_and_strips_escape_bytes() {
+        assert_eq!(
+            paste_bytes("first\r\nsecond\n\x1bthird", true),
+            b"\x1b[200~first\r\nsecond\nthird\x1b[201~"
+        );
+        assert_eq!(paste_bytes("first\r\nsecond\n", false), b"first\rsecond\r");
     }
 
     /// With mouse tracking active (e.g. htop), Shift is the escape hatch to

@@ -31,8 +31,8 @@ type Descriptors = Vec<()>;
 
 use crate::{
     messages::{
-        DetachRequest, Envelope, Event, PROTOCOL_VERSION, PaneSnapshot, PaneStateReport, Request,
-        Response, SpawnRequest,
+        DetachRequest, Envelope, Event, MAX_IMAGE_BYTES, PROTOCOL_VERSION, PaneSnapshot,
+        PaneStateReport, Request, Response, SpawnRequest,
     },
     paths::session_catalog_dir,
     protocol::{BackgroundSessionSummary, RestorableSessionRecord},
@@ -955,6 +955,19 @@ impl Client {
     /// effect — elsewhere the kernel identifies the peer from the socket and the
     /// exchange is a single round trip that changes nothing.
     fn open_attested(&self, request: Request, client_process_id: u32) -> Result<Connection> {
+        self.open_attested_with_secret(request, client_process_id, None)
+    }
+
+    /// Opens a streamed request after establishing the peer identity, while
+    /// carrying the session secret in the real request envelope. The
+    /// attestation handshake must happen first because streamed payload bytes
+    /// leave no place for the daemon to challenge the peer.
+    fn open_attested_with_secret(
+        &self,
+        request: Request,
+        client_process_id: u32,
+        secret: Option<&SessionSecret>,
+    ) -> Result<Connection> {
         #[cfg(windows)]
         {
             let mut connection = self.open_as(Request::Attest, client_process_id)?;
@@ -964,11 +977,16 @@ impl Client {
                 other => anyhow::bail!("unexpected response to attestation: {other:?}"),
             }
             let endpoint = self.endpoint_snapshot();
-            connection.send(&self.envelope(endpoint.token, client_process_id, request, None))?;
+            connection.send(&self.envelope(endpoint.token, client_process_id, request, secret))?;
             Ok(connection)
         }
         #[cfg(unix)]
-        self.open_as(request, client_process_id)
+        self.open_as_with_endpoint_and_secret(
+            request,
+            client_process_id,
+            &self.endpoint_snapshot(),
+            secret,
+        )
     }
 
     /// Receives a response, answering an attestation challenge first if the
@@ -1226,6 +1244,39 @@ impl Client {
             Response::Ok => Ok(()),
             Response::Error { message } => anyhow::bail!("{message}"),
             other => anyhow::bail!("unexpected response to snapshot: {other:?}"),
+        }
+    }
+
+    /// Stores a normalized clipboard image for a shared pane and returns the
+    /// absolute path written by the daemon. The upload uses its own
+    /// authenticated request connection so it cannot interfere with the
+    /// pane's one-way output/input relay.
+    pub fn store_image(&self, session_id: u64, pane_id: u64, bytes: Vec<u8>) -> Result<String> {
+        anyhow::ensure!(
+            !bytes.is_empty() && bytes.len() <= MAX_IMAGE_BYTES,
+            "image payload must be between 1 byte and {MAX_IMAGE_BYTES} bytes"
+        );
+        let secret = self.session_secret();
+        let mut connection = self.open_attested_with_secret(
+            Request::StoreImage {
+                session_id,
+                pane_id,
+                length: bytes.len(),
+            },
+            std::process::id(),
+            secret.as_ref(),
+        )?;
+        connection.write_all(&bytes)?;
+        match Self::receive(&mut connection)?.0 {
+            Response::ImageStored { path } => Ok(path),
+            Response::AuthenticationRequired => {
+                anyhow::bail!("the remote session requires authentication for image paste")
+            }
+            Response::AuthenticationFailed => {
+                anyhow::bail!("the remote session rejected its authentication secret")
+            }
+            Response::Error { message } => anyhow::bail!("{message}"),
+            other => anyhow::bail!("unexpected response to image paste: {other:?}"),
         }
     }
 
