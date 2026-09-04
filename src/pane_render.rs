@@ -154,7 +154,11 @@ impl Zetta {
             .into_any_element()
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the stack entry's own six values plus the GPUI context; \
+                  bundling them would only rename the argument list"
+    )]
     fn render_stacked_row(
         &self,
         tab: &Tab,
@@ -244,20 +248,16 @@ impl Zetta {
             .into_any_element()
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn render_pane_layout(
         &self,
-        tab: &Tab,
+        context: PaneLayoutContext<'_>,
         layout: &PaneLayout,
-        colors: &ThemeColors,
-        error_color: gpui::Hsla,
         window: &Window,
         owns_window_bottom: bool,
-        corner_radius: Pixels,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let edges = PaneWindowEdges::all().with_bottom(owns_window_bottom);
-        let corner_radii = edges.client_corner_radii(window, corner_radius);
+        let corner_radii = edges.client_corner_radii(window, context.corner_radius);
         div()
             .when(self.pane_resize_mode, |layout| {
                 layout.key_context("PaneResize")
@@ -278,19 +278,8 @@ impl Zetta {
             .when(corner_radii.bottom_right > Pixels::ZERO, |layout| {
                 layout.rounded_br(corner_radii.bottom_right)
             })
-            .bg(colors.border)
-            .child(self.render_pane_layout_with_edges(
-                PaneLayoutContext {
-                    tab,
-                    colors,
-                    error_color,
-                    corner_radius,
-                },
-                layout,
-                edges,
-                window,
-                cx,
-            ))
+            .bg(context.colors.border)
+            .child(self.render_pane_layout_with_edges(context, layout, edges, window, cx))
             .into_any_element()
     }
 
@@ -799,7 +788,11 @@ impl Zetta {
 
     /// One split: the two subtrees at their ratio, and the gutter that resizes
     /// them while pane-resize mode is on.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "already takes both of this file's bundles; the remainder is the \
+                  split node destructured, which the recursion needs by part"
+    )]
     fn render_pane_split(
         &self,
         context: PaneLayoutContext<'_>,
@@ -891,11 +884,11 @@ impl Zetta {
 /// the rest travels as one `Copy` bundle rather than as five parameters
 /// threaded through each recursion.
 #[derive(Clone, Copy)]
-struct PaneLayoutContext<'a> {
-    tab: &'a Tab,
-    colors: &'a ThemeColors,
-    error_color: gpui::Hsla,
-    corner_radius: Pixels,
+pub(crate) struct PaneLayoutContext<'a> {
+    pub(crate) tab: &'a Tab,
+    pub(crate) colors: &'a ThemeColors,
+    pub(crate) error_color: gpui::Hsla,
+    pub(crate) corner_radius: Pixels,
 }
 
 #[derive(Clone, Copy, Default)]

@@ -140,7 +140,10 @@ pub struct PaneTemplatePaneForm {
 // Pane leaves are the common case and are kept inline to avoid one heap
 // allocation per leaf in the bounded editor tree. Split children are already
 // boxed, and the tree is capped at 64 panes.
-#[allow(clippy::large_enum_variant)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "the inline pane leaf is deliberate; see the comment above"
+)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PaneTemplateNodeForm {
     Pane(PaneTemplatePaneForm),

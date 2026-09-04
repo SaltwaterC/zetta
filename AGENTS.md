@@ -356,10 +356,39 @@ pedantic lints were considered and deliberately *not* adopted, with the reason
 for each; read it before adding another, and add the reason there rather than
 sprinkling `#[allow]`s.
 
+Suppress a lint with `#[expect(<lint>, reason = "...")]`, not `#[allow(..)]`.
+An `expect` is reported by `unfulfilled_lint_expectations` once the lint stops
+firing, so a suppression cannot outlive what it was for; an `allow` that has
+become unnecessary is invisible and accumulates. Three
+`#[allow(clippy::too_many_arguments)]` in this tree were found suppressing
+nothing at all. Use `allow` only where the lint genuinely fires sometimes and
+not others across the platform or feature matrix, and say which in the reason.
+`cfg_attr`-gated suppressions stay `allow`, because whether they fire is exactly
+what the `cfg` decides.
+
+`clippy::too_many_arguments` is not a suppression of first resort. Reach for the
+borrowed `Copy` bundle described under "Application architecture" first, and
+check whether the bundle already exists — `PaneLayoutContext`, `PageWidgets`,
+`MuxPaneIds`, `TabBodyCorners` and `TabCorners` all had call sites still passing
+their contents one at a time. Suppress only once the remaining arguments are
+genuinely independent, and note in the reason why they cannot be bundled. The
+threshold counts `self`, `&mut Window` and `&mut Context<Self>`, so a GPUI
+method with five real parameters trips it; that is a legitimate reason, and
+naming it is the point.
+
 `#[allow(dead_code)]` is a last resort. If only tests reach an item, say
 `#[cfg(test)]`; if only one platform constructs it, say
 `#[cfg_attr(not(windows), allow(dead_code))]` and why. A bare allow on
 something nothing reaches at all means the item should be deleted.
+
+`make lint` lints only the host's `cfg` arms and the host's feature set, so the
+denied lints above are *not* verified anywhere else by it — twelve violations of
+them sat in `#[cfg(windows)]` arms because no local run ever compiled those
+arms. `make clippy-linux`, `clippy-windows`, `clippy-macos`, `clippy-features`
+and `clippy-platforms` run the matching `check-*` target's exact command with
+`clippy -- -D warnings` instead, which also fails an `#[expect(..)]` that has
+stopped firing on that platform. Run the one covering what you changed;
+`make clippy-platforms` covers every platform this machine has a toolchain for.
 
 Take a `Mutex` with `unwrap_or_else(|poisoned| poisoned.into_inner())` rather
 than `unwrap`. Every mutex in the crate guards a slot that is replaced whole on

@@ -46,38 +46,24 @@ pub(crate) struct PageWidgets<'a> {
     pub(crate) opacity_slider: &'a dyn Fn(f32, OpacityTarget) -> AnyElement,
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn render_settings_pages(
     editor: &SettingsEditor,
     colors: &ThemeColors,
     handle: &WeakEntity<Zetta>,
     zetta_entity: &gpui::Entity<Zetta>,
     focus_status_access: FocusStatusAccess,
-    scroll_indicator: &impl Fn(String, &ScrollHandle) -> AnyElement,
-    text_input: &impl Fn(String, TextField, SettingsInput) -> AnyElement,
-    dropdown: &impl Fn(String, String, SettingsDropdown) -> AnyElement,
-    setting_row: &impl Fn(&'static str, &'static str, SettingsControl, AnyElement) -> AnyElement,
-    setting_toggle: &impl Fn(&'static str, bool, SettingsToggle) -> AnyElement,
-    numeric: &impl Fn(&'static str, TextField, NumericSetting, ConfigTextField) -> AnyElement,
-    opacity_slider: &impl Fn(f32, OpacityTarget) -> AnyElement,
+    widgets: &PageWidgets<'_>,
 ) -> AnyElement {
-    let widgets = PageWidgets {
-        scroll_indicator,
-        text_input,
-        dropdown,
-        setting_row,
-        setting_toggle,
-        numeric,
-        opacity_slider,
-    };
     match editor.page {
         SettingsPage::Configuration => {
-            render_configuration_page(editor, colors, handle, focus_status_access, &widgets)
+            render_configuration_page(editor, colors, handle, focus_status_access, widgets)
         }
-        SettingsPage::Themes => render_themes_page(editor, colors, handle, &widgets),
-        SettingsPage::Keymap => render_keymap_page(editor, colors, handle, zetta_entity, &widgets),
+        SettingsPage::Themes => render_themes_page(editor, colors, handle, widgets),
+        SettingsPage::Keymap => render_keymap_page(editor, colors, handle, zetta_entity, widgets),
         SettingsPage::PaneTemplates => render_pane_templates_page(editor, colors, handle),
-        SettingsPage::Projects => render_projects_page(editor, colors, handle, opacity_slider),
+        SettingsPage::Projects => {
+            render_projects_page(editor, colors, handle, widgets.opacity_slider)
+        }
     }
 }
 
@@ -1173,7 +1159,6 @@ mod tests;
 /// with fields disabled: a detected profile's program and arguments come from
 /// what is installed and cannot be edited, so it shows them as text and offers
 /// only the four overrides.
-#[allow(clippy::too_many_arguments)]
 fn profile_card(
     index: usize,
     profile: &crate::settings_editor::ProfileForm,

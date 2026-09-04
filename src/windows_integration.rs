@@ -1,7 +1,14 @@
 #![allow(non_snake_case)]
 // Windows Terminal's handoff ABI fixes several parameter lists that exceed
-// Clippy's general-purpose argument-count threshold.
-#![allow(clippy::too_many_arguments)]
+// Clippy's general-purpose argument-count threshold: the two `EstablishPtyHandoff`
+// vtable entries, the `establish_*` implementations behind them, and the two
+// `duplicate_*_handoff_request` helpers that mirror their signatures. Module-wide
+// rather than ten identical attributes, and an `expect` so it is reported if the
+// ABI ever stops needing it.
+#![expect(
+    clippy::too_many_arguments,
+    reason = "the Windows Terminal handoff ABI fixes these parameter lists"
+)]
 
 use std::{
     collections::HashSet,
@@ -299,11 +306,10 @@ impl TerminalHandoff {
         if child_pid == 0 {
             return E_INVALIDARG;
         }
-        let request = match duplicate_legacy_handoff_request(
+        let Ok(request) = duplicate_legacy_handoff_request(
             input, output, signal, reference, server, client, child_pid, startup,
-        ) {
-            Ok(request) => request,
-            Err(_) => return E_FAIL,
+        ) else {
+            return E_FAIL;
         };
         if self.submit(request) { S_OK } else { E_FAIL }
     }
@@ -322,19 +328,16 @@ impl TerminalHandoff {
         if child_pid == 0 {
             return E_INVALIDARG;
         }
-        let (server_pipe, client_pipe) = match create_handoff_pipe() {
-            Ok(pipes) => pipes,
-            Err(_) => return E_FAIL,
+        let Ok((server_pipe, client_pipe)) = create_handoff_pipe() else {
+            return E_FAIL;
         };
-        let conin = match duplicate_handle(HANDLE(server_pipe.as_raw_handle())) {
-            Ok(handle) => handle,
-            Err(_) => return E_FAIL,
+        let Ok(conin) = duplicate_handle(HANDLE(server_pipe.as_raw_handle())) else {
+            return E_FAIL;
         };
-        let returned_output = match duplicate_handle(HANDLE(client_pipe.as_raw_handle())) {
-            Ok(handle) => handle,
-            Err(_) => return E_FAIL,
+        let Ok(returned_output) = duplicate_handle(HANDLE(client_pipe.as_raw_handle())) else {
+            return E_FAIL;
         };
-        let request = match duplicate_handoff_request(
+        let Ok(request) = duplicate_handoff_request(
             server_pipe,
             conin,
             signal,
@@ -343,9 +346,8 @@ impl TerminalHandoff {
             client,
             child_pid,
             Some(startup),
-        ) {
-            Ok(request) => request,
-            Err(_) => return E_FAIL,
+        ) else {
+            return E_FAIL;
         };
         if !self.submit(request) {
             return E_FAIL;

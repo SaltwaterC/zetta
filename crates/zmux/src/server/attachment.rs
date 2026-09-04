@@ -395,7 +395,11 @@ pub(super) fn finish_handover_waiter(pane: &mut Pane, collapse_empty_shared: boo
 /// Takes the sessions guard by value: the publish that announces the attach
 /// must not run while the lock is still held — the caller's guard would dead
 /// lock against itself.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the attach request's decoded fields, plus the daemon, the sessions \
+              guard this must take by value, and the connection to answer on"
+)]
 pub(super) fn attach_exclusive(
     daemon: &Arc<Daemon>,
     mut sessions: MutexGuard<'_, Vec<Session>>,
@@ -464,7 +468,11 @@ pub(super) fn attach_exclusive(
 /// dropped, because this function then serves the client's connection for its
 /// whole lifetime, and that serve loop re-locks the sessions mutex on every
 /// input and resize.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the attach request's decoded fields, plus the daemon, the sessions \
+              guard this must take by value, and the connection to answer on"
+)]
 pub(super) fn attach_shared(
     daemon: &Arc<Daemon>,
     mut sessions: MutexGuard<'_, Vec<Session>>,
@@ -1042,7 +1050,11 @@ pub(super) fn remove_shared_client(
 /// attach waiting on the handover is woken to join. During a live share, the
 /// exclusive attachment remains in place; the following share request then
 /// persists the checkpoint while the original client keeps reading the PTY.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the snapshot request's seven decoded fields, plus the daemon and \
+              the connection to answer on"
+)]
 pub(super) fn snapshot(
     daemon: &Arc<Daemon>,
     session_id: u64,

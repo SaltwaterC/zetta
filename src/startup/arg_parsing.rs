@@ -322,7 +322,7 @@ fn parse_application_args(arguments: Vec<OsString>) -> Result<StartupArgs> {
                     args.next()
                         .context("--register-windows-shell requires a shortcut path")?
                         .into(),
-                )
+                );
             }
             #[cfg(windows)]
             "--unregister-windows-shell" => {

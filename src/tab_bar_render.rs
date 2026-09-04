@@ -270,14 +270,30 @@ fn render_active_tab_top_transition_background(
         .bg(surrounding_background)
 }
 
-fn render_active_tab_shape_base_fill(
+/// Which of an active compact tab's four corners are rounded.
+///
+/// Four positional `bool`s say nothing at a call site about which corner is
+/// which, and the shape is built in two passes that each need all four, so they
+/// travel as one `Copy` bundle.
+#[derive(Clone, Copy)]
+struct TabCorners {
     top_left: bool,
     top_right: bool,
     bottom_left: bool,
     bottom_right: bool,
+}
+
+fn render_active_tab_shape_base_fill(
+    corners: TabCorners,
     corner_radius: Pixels,
     active_background: Hsla,
 ) -> gpui::Div {
+    let TabCorners {
+        top_left,
+        top_right,
+        bottom_left,
+        bottom_right,
+    } = corners;
     div()
         .absolute()
         .top_0()
@@ -291,17 +307,19 @@ fn render_active_tab_shape_base_fill(
         .bg(active_background)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn render_active_tab_shape(
-    top_left: bool,
-    top_right: bool,
-    bottom_left: bool,
-    bottom_right: bool,
+    corners: TabCorners,
     active_background: Hsla,
     left_transition_background: Hsla,
     right_transition_background: Hsla,
     corner_radius: Pixels,
 ) -> gpui::Div {
+    let TabCorners {
+        top_left,
+        top_right,
+        bottom_left,
+        bottom_right,
+    } = corners;
     div()
         .absolute()
         .top_0()
@@ -328,10 +346,7 @@ fn render_active_tab_shape(
             ))
         })
         .child(render_active_tab_shape_base_fill(
-            top_left,
-            top_right,
-            bottom_left,
-            bottom_right,
+            corners,
             corner_radius,
             active_background,
         ))
@@ -457,13 +472,15 @@ fn render_tab(chrome: TabChrome<'_>, tab: &Tab, tab_theme: Arc<Theme>, cx: &App)
         tab_colors,
         tab_text,
         tab_icon,
-        title.clone(),
-        lifecycle_icon,
-        silent_mode_icon,
-        custom_icon,
-        attention_tooltip,
-        pinned,
-        is_renaming_this_tab,
+        TabContent {
+            title: title.clone(),
+            lifecycle_icon,
+            silent_mode_icon,
+            custom_icon,
+            attention_tooltip,
+            pinned,
+            is_renaming_this_tab,
+        },
     );
     let tab_element = tab_shape(TabShape {
         chrome,
@@ -484,11 +501,13 @@ fn render_tab(chrome: TabChrome<'_>, tab: &Tab, tab_theme: Arc<Theme>, cx: &App)
         tab,
         index,
         handle,
-        no_mux,
-        pinned,
-        tab_auto_background,
-        tab_count,
-        tab_move_mode_active,
+        TabMenuContext {
+            no_mux,
+            pinned,
+            tab_auto_background,
+            tab_count,
+            tab_move_mode_active,
+        },
         cx,
     );
     let tab_element = if pinned {
@@ -620,10 +639,12 @@ fn tab_shape(shape: TabShape<'_>) -> gpui::Stateful<gpui::Div> {
         .when(!show_active_tab_shape, |tab| tab.bg(tab_background))
         .when(show_active_tab_shape, |tab| {
             tab.relative().child(render_active_tab_shape(
-                compact_tab_top_left,
-                compact_tab_top_right,
-                compact_tab_bottom_left,
-                compact_tab_bottom_right,
+                TabCorners {
+                    top_left: compact_tab_top_left,
+                    top_right: compact_tab_top_right,
+                    bottom_left: compact_tab_bottom_left,
+                    bottom_right: compact_tab_bottom_right,
+                },
                 tab_background,
                 left_transition_background,
                 right_transition_background,
@@ -766,12 +787,9 @@ mod tests;
 /// A pinned tab shows only its icons, so the title is drawn only when the tab
 /// is unpinned or is being renamed — a rename has to show the buffer it is
 /// editing whatever the tab's width.
-#[allow(clippy::too_many_arguments)]
-fn render_tab_content(
-    tab: &Tab,
-    tab_colors: &ThemeColors,
-    tab_text: Hsla,
-    tab_icon: Hsla,
+/// What a tab's row shows, once the enclosing measured row has resolved it from
+/// the tab, its theme, and how far the bar is shrinking.
+struct TabContent {
     title: SharedString,
     lifecycle_icon: Option<IconName>,
     silent_mode_icon: Option<IconName>,
@@ -779,7 +797,24 @@ fn render_tab_content(
     attention_tooltip: Option<String>,
     pinned: bool,
     is_renaming_this_tab: bool,
+}
+
+fn render_tab_content(
+    tab: &Tab,
+    tab_colors: &ThemeColors,
+    tab_text: Hsla,
+    tab_icon: Hsla,
+    content: TabContent,
 ) -> AnyElement {
+    let TabContent {
+        title,
+        lifecycle_icon,
+        silent_mode_icon,
+        custom_icon,
+        attention_tooltip,
+        pinned,
+        is_renaming_this_tab,
+    } = content;
     h_flex()
         .min_w_0()
         .gap_1()
@@ -851,19 +886,32 @@ fn render_tab_content(
 /// The menu activates the tab it was opened on before it is built, and takes
 /// that tab's focus as its action context, so an action chosen from an
 /// inactive tab's menu still applies to the tab the user clicked.
-#[allow(clippy::too_many_arguments)]
-fn with_tab_context_menu(
-    tab_element: impl IntoElement + 'static,
-    tab: &Tab,
-    index: usize,
-    handle: &WeakEntity<Zetta>,
+/// What a tab's context menu may offer, which the bar around the tab decides
+/// rather than the tab itself.
+#[derive(Clone, Copy)]
+struct TabMenuContext {
     no_mux: bool,
     pinned: bool,
     tab_auto_background: bool,
     tab_count: usize,
     tab_move_mode_active: bool,
+}
+
+fn with_tab_context_menu(
+    tab_element: impl IntoElement + 'static,
+    tab: &Tab,
+    index: usize,
+    handle: &WeakEntity<Zetta>,
+    menu: TabMenuContext,
     cx: &App,
 ) -> AnyElement {
+    let TabMenuContext {
+        no_mux,
+        pinned,
+        tab_auto_background,
+        tab_count,
+        tab_move_mode_active,
+    } = menu;
     let menu_handle = handle.clone();
     let tab_silent_mode = tab.silent_mode;
     let tab_shared = tab.shared;
@@ -1081,7 +1129,6 @@ struct TabBarTabs {
 ///
 /// Reads the window once for all of them, because building a tab needs the tab
 /// itself and its resolved theme.
-#[allow(clippy::too_many_arguments)]
 fn tab_bar_tab_elements(
     chrome: &TabBarChrome,
     visible_range: std::ops::Range<usize>,

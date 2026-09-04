@@ -574,6 +574,7 @@ pub(crate) struct Zetta {
     pub(crate) _subscriptions: Vec<Subscription>,
 }
 
+#[derive(Default)]
 pub(crate) struct ZettaLaunchOptions {
     pub(crate) initial_profile: Option<Profile>,
     pub(crate) initial_project: Option<ProjectConfig>,
@@ -582,6 +583,25 @@ pub(crate) struct ZettaLaunchOptions {
     pub(crate) initial_command: Option<Vec<String>>,
     pub(crate) initial_working_directory: Option<PathBuf>,
     pub(crate) initial_launch: Option<TerminalLaunch>,
+}
+
+/// The window's starting state, as [`Zetta::new`] has resolved it: the
+/// configuration it launched with, whatever went wrong reading it, the project
+/// registry, and what the platform says about window buttons.
+///
+/// Distinct from [`ZettaLaunchOptions`], which is what the launch *asked* for;
+/// this is what was made of it. Passed to [`Zetta::with_launch_state`] as one
+/// value so the resolution above it and the 60-field literal below it stay
+/// separable.
+struct LaunchState {
+    config: Config,
+    configuration_error: Option<String>,
+    projects: ProjectState,
+    button_layout: WindowButtonLayout,
+    no_mux: bool,
+    launch_theme_override: Option<(String, String)>,
+    #[cfg(feature = "session-persistence")]
+    auto_protect: Option<Arc<crate::session_auto_protect::SessionAutoProtect>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -717,14 +737,16 @@ impl Zetta {
             .then(|| resolve_auto_protect(&config, &mut configuration_error))
             .flatten();
         let mut this = Self::with_launch_state(
-            config,
-            configuration_error,
-            projects,
-            button_layout,
-            no_mux,
-            launch_theme_override,
-            #[cfg(feature = "session-persistence")]
-            auto_protect,
+            LaunchState {
+                config,
+                configuration_error,
+                projects,
+                button_layout,
+                no_mux,
+                launch_theme_override,
+                #[cfg(feature = "session-persistence")]
+                auto_protect,
+            },
             window,
             cx,
         );
@@ -798,20 +820,17 @@ impl Zetta {
     /// Separate from [`Self::new`] so the 60-field literal is not interleaved
     /// with the work that follows it — the cache warm-up, and opening whatever
     /// the launch asked for.
-    #[allow(clippy::too_many_arguments)]
-    fn with_launch_state(
-        config: Config,
-        configuration_error: Option<String>,
-        projects: ProjectState,
-        button_layout: WindowButtonLayout,
-        no_mux: bool,
-        launch_theme_override: Option<(String, String)>,
-        #[cfg(feature = "session-persistence")] auto_protect: Option<
-            Arc<crate::session_auto_protect::SessionAutoProtect>,
-        >,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
+    fn with_launch_state(state: LaunchState, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let LaunchState {
+            config,
+            configuration_error,
+            projects,
+            button_layout,
+            no_mux,
+            launch_theme_override,
+            #[cfg(feature = "session-persistence")]
+            auto_protect,
+        } = state;
         Self {
             launch_config: config.clone(),
             #[cfg(feature = "session-persistence")]

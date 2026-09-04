@@ -736,15 +736,16 @@ fn cygwin_path_environment_value(root: &Path, inherited_path: Option<&str>) -> S
                 != cygwin_bin_key
         }));
     }
-    env::join_paths(paths)
-        .map(|path| path.to_string_lossy().into_owned())
-        .unwrap_or_else(|_| {
-            let separator = if cfg!(windows) { ";" } else { ":" };
-            let root = cygwin_bin.to_string_lossy().into_owned();
-            inherited_text
-                .map(|path| format!("{root}{separator}{path}"))
-                .unwrap_or(root)
-        })
+    if let Ok(joined) = env::join_paths(paths) {
+        return joined.to_string_lossy().into_owned();
+    }
+    // Joining only fails when a component contains the separator, which leaves
+    // no vector to join; build the string directly instead.
+    let separator = if cfg!(windows) { ";" } else { ":" };
+    let root = cygwin_bin.to_string_lossy().into_owned();
+    inherited_text
+        .map(|path| format!("{root}{separator}{path}"))
+        .unwrap_or(root)
 }
 
 #[cfg(windows)]

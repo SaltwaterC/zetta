@@ -630,7 +630,6 @@ fn remote_session_suggestion_rows(
 ///
 /// A shared builder rather than two spellings: they differ only in what they
 /// hold and which field selecting them focuses.
-#[allow(clippy::too_many_arguments)]
 fn remote_session_field(
     id: &'static str,
     value: TextField,

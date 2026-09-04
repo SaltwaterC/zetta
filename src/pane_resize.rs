@@ -693,7 +693,11 @@ impl Zetta {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "six independent measurements the resize is computed from, plus \
+                  the GPUI context"
+    )]
     fn resize_pane_axis(
         &mut self,
         tab_index: usize,

@@ -14,7 +14,7 @@
 //! - `shared_panes.rs` — panes several windows watch at once.
 
 use super::*;
-use crate::mux::SharedPaneEntry;
+use crate::mux::{MuxPaneIds, SharedPaneEntry};
 use crate::project::resolve_registered_project_config_root;
 use crate::rename::resolve_tab_title;
 use crate::worktree_detection::terminal_event_requires_worktree_detection;

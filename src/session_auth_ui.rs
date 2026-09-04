@@ -233,7 +233,11 @@ impl Zetta {
     }
 
     #[cfg(feature = "session-persistence")]
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "five owned values the unlock consumes, plus the GPUI window \
+                  and context"
+    )]
     fn unlock_remote_sealed_session(
         &mut self,
         target: zmux::remote::RemoteTarget,

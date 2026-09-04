@@ -301,7 +301,11 @@ impl Zetta {
         );
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "five values describing the split, plus the GPUI window and \
+                  context, which cannot go in a borrowed bundle"
+    )]
     fn split_pane_with_pending_command(
         &mut self,
         tab_id: u64,

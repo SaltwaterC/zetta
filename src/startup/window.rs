@@ -7,45 +7,41 @@
 
 use super::*;
 
-#[allow(clippy::too_many_arguments)]
+/// What a launch does to the window once the `Zetta` view exists: apply a split
+/// template, switch the performance instrumentation on, and hand the window's
+/// activation token to the platform.
+///
+/// Separate from [`ZettaLaunchOptions`], which is what the view itself is built
+/// from. Both derive `Default`, because most callers open a plain window and
+/// set one or two of these.
+#[derive(Default)]
+pub(crate) struct WindowLaunchOptions {
+    pub(crate) launch_split: Option<String>,
+    pub(crate) enable_performance_overlay: bool,
+    pub(crate) performance_report: Option<(PerformanceReportOptions, PerformanceReportStatus)>,
+    pub(crate) profile_pane_stress: bool,
+    pub(crate) activation_token: Option<String>,
+}
+
 pub(crate) fn open_zetta_window(
     config: Config,
     configuration_error: Option<String>,
-    initial_profile: Option<Profile>,
-    initial_project: Option<ProjectConfig>,
-    launch_theme_override: Option<(String, String)>,
-    launch_split: Option<String>,
-    enable_performance_overlay: bool,
-    performance_report: Option<(PerformanceReportOptions, PerformanceReportStatus)>,
-    profile_pane_stress: bool,
-    no_mux: bool,
-    initial_command: Option<Vec<String>>,
-    initial_working_directory: Option<PathBuf>,
-    initial_launch: Option<crate::app::TerminalLaunch>,
-    activation_token: Option<String>,
+    launch: ZettaLaunchOptions,
+    window_launch: WindowLaunchOptions,
     cx: &mut App,
 ) -> Result<()> {
+    let WindowLaunchOptions {
+        launch_split,
+        enable_performance_overlay,
+        performance_report,
+        profile_pane_stress,
+        activation_token,
+    } = window_launch;
     let options = zetta_window_options(cx);
     let window_handle = cx
         .open_window(options, move |window, cx| {
             window.set_window_title("Zetta");
-            let zetta = cx.new(|cx| {
-                Zetta::new(
-                    config,
-                    configuration_error,
-                    ZettaLaunchOptions {
-                        initial_profile,
-                        initial_project,
-                        launch_theme_override,
-                        no_mux,
-                        initial_command,
-                        initial_working_directory,
-                        initial_launch,
-                    },
-                    window,
-                    cx,
-                )
-            });
+            let zetta = cx.new(|cx| Zetta::new(config, configuration_error, launch, window, cx));
             track_zetta_window(&zetta, window, cx);
             prepare_background_tabs_before_window_close(&zetta, window, cx);
             if let Some(name) = launch_split {
@@ -394,18 +390,11 @@ pub(crate) fn open_dormant_or_new_window(cx: &mut App) -> Result<()> {
         open_zetta_window(
             config,
             configuration_error,
-            None,
-            None,
-            None,
-            None,
-            false,
-            None,
-            false,
-            no_mux,
-            None,
-            None,
-            None,
-            None,
+            ZettaLaunchOptions {
+                no_mux,
+                ..Default::default()
+            },
+            WindowLaunchOptions::default(),
             cx,
         )
     }
@@ -435,18 +424,15 @@ pub(super) fn open_fresh_zetta_window_with_profile_and_activation_token(
     open_zetta_window(
         config,
         configuration_error,
-        initial_profile,
-        None,
-        None,
-        None,
-        false,
-        None,
-        false,
-        no_mux,
-        None,
-        None,
-        None,
-        activation_token,
+        ZettaLaunchOptions {
+            initial_profile,
+            no_mux,
+            ..Default::default()
+        },
+        WindowLaunchOptions {
+            activation_token,
+            ..Default::default()
+        },
         cx,
     )
 }
@@ -467,18 +453,12 @@ pub(super) fn open_windows_handoff_window(
     open_zetta_window(
         config,
         configuration_error,
-        None,
-        None,
-        None,
-        None,
-        false,
-        None,
-        false,
-        no_mux,
-        None,
-        None,
-        Some(crate::app::TerminalLaunch::Handoff(request)),
-        None,
+        ZettaLaunchOptions {
+            no_mux,
+            initial_launch: Some(crate::app::TerminalLaunch::Handoff(request)),
+            ..Default::default()
+        },
+        WindowLaunchOptions::default(),
         cx,
     )
 }

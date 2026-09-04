@@ -582,15 +582,16 @@ fn parse_ssh_config_hosts(contents: &str) -> Vec<String> {
 
 fn executable_names(path: Option<&std::ffi::OsStr>) -> Vec<String> {
     #[cfg(windows)]
-    let executable_extensions = env::var_os("PATHEXT")
-        .map(|extensions| {
+    let executable_extensions = env::var_os("PATHEXT").map_or_else(
+        || vec![".exe".to_owned(), ".cmd".to_owned(), ".bat".to_owned()],
+        |extensions| {
             extensions
                 .to_string_lossy()
                 .split(';')
                 .map(|extension| extension.to_ascii_lowercase())
                 .collect::<Vec<_>>()
-        })
-        .unwrap_or_else(|| vec![".exe".to_owned(), ".cmd".to_owned(), ".bat".to_owned()]);
+        },
+    );
     let names = path
         .into_iter()
         .flat_map(env::split_paths)

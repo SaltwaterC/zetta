@@ -288,9 +288,10 @@ fn active_shell_path() -> Option<PathBuf> {
 
 #[cfg(windows)]
 fn cygwin_tool_from_active_shell(tool: &str) -> PathBuf {
-    active_shell_path()
-        .map(|path| cygwin_tool_for_path(&path, tool))
-        .unwrap_or_else(|| PathBuf::from(tool))
+    active_shell_path().map_or_else(
+        || PathBuf::from(tool),
+        |path| cygwin_tool_for_path(&path, tool),
+    )
 }
 
 #[cfg(windows)]

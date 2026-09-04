@@ -189,17 +189,15 @@ fn active_tab_top_corner_underlays_use_the_surrounding_backgrounds() {
 #[test]
 fn active_tab_shape_body_resolves_to_the_full_measured_tab_width() {
     let radius = px(8.);
-    let mut shape = render_active_tab_shape(
-        true,
-        true,
-        true,
-        true,
-        gpui::white(),
-        gpui::black(),
-        gpui::black(),
-        radius,
-    );
-    let mut body = render_active_tab_shape_base_fill(true, true, true, true, radius, gpui::white());
+    let corners = TabCorners {
+        top_left: true,
+        top_right: true,
+        bottom_left: true,
+        bottom_right: true,
+    };
+    let mut shape =
+        render_active_tab_shape(corners, gpui::white(), gpui::black(), gpui::black(), radius);
+    let mut body = render_active_tab_shape_base_fill(corners, radius, gpui::white());
     let negative_radius = gpui::Length::Definite((-radius).into());
     let positive_radius = gpui::Length::Definite(radius.into());
 

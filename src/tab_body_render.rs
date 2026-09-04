@@ -3,6 +3,44 @@ use super::*;
 const MINIMIZED_PANE_ENTRY_MIN_WIDTH: Pixels = px(180.);
 const MINIMIZED_PANE_ENTRY_GAP: Pixels = px(4.);
 
+/// The window's bottom edge, as the tab body's lowest element has to round
+/// itself to it.
+///
+/// Which element that is depends on what the tab is showing — the pane layout,
+/// the maximized-pane bar, or the minimized shelf — so the geometry travels as
+/// one `Copy` bundle instead of the same four parameters on each of them.
+/// `owns_window_bottom` is the part that differs between them, so it is set
+/// with [`Self::with_bottom`] the way [`PaneWindowEdges`] does it.
+#[derive(Clone, Copy)]
+struct TabBodyCorners {
+    owns_window_bottom: bool,
+    rounded_bottom_left: bool,
+    rounded_bottom_right: bool,
+    corner_radius: Pixels,
+}
+
+impl TabBodyCorners {
+    const fn with_bottom(mut self, owns_window_bottom: bool) -> Self {
+        self.owns_window_bottom = owns_window_bottom;
+        self
+    }
+}
+
+/// The maximized pane, as the bar above it shows it.
+struct MaximizedPane {
+    pane_id: u64,
+    label: String,
+    label_selected: bool,
+}
+
+/// The minimized pane the shelf has selected, and where it sits among them.
+#[derive(Clone, Copy)]
+struct MinimizedShelfSelection {
+    pane_id: u64,
+    index: usize,
+    count: usize,
+}
+
 fn minimized_pane_capacity(available_width: Pixels, pane_count: usize) -> usize {
     if pane_count == 0 {
         return 0;
@@ -58,13 +96,12 @@ impl Zetta {
                 let tab_error_color = tab_theme.status().error;
                 let layout = tab.visible_layout();
                 let maximized_pane = tab.maximized_pane.and_then(|pane_id| {
-                    tab.pane(pane_id).map(|pane| {
-                        (
-                            pane_id,
-                            tab.displayed_pane_label(pane_id)
-                                .unwrap_or_else(|| pane.label()),
-                            tab.pane_rename_selected(pane_id),
-                        )
+                    tab.pane(pane_id).map(|pane| MaximizedPane {
+                        pane_id,
+                        label: tab
+                            .displayed_pane_label(pane_id)
+                            .unwrap_or_else(|| pane.label()),
+                        label_selected: tab.pane_rename_selected(pane_id),
                     })
                 });
                 let minimized_count = tab.minimized_panes.len();
@@ -76,25 +113,37 @@ impl Zetta {
                             .position(|pane_id| *pane_id == selected)
                     })
                     .unwrap_or(0);
-                let minimized_shelf = tab
-                    .minimized_panes
-                    .get(minimized_index)
-                    .copied()
-                    .map(|pane_id| (pane_id, minimized_index, minimized_count));
+                let minimized_shelf =
+                    tab.minimized_panes
+                        .get(minimized_index)
+                        .copied()
+                        .map(|pane_id| MinimizedShelfSelection {
+                            pane_id,
+                            index: minimized_index,
+                            count: minimized_count,
+                        });
                 let panes_own_window_bottom = maximized_pane.is_none() && minimized_shelf.is_none();
                 let maximized_bar_owns_window_bottom =
                     maximized_pane.is_some() && minimized_shelf.is_none();
+                let corners = TabBodyCorners {
+                    owns_window_bottom: false,
+                    rounded_bottom_left,
+                    rounded_bottom_right,
+                    corner_radius,
+                };
                 let content = layout.as_ref().map_or_else(
                     || div().size_full().into_any_element(),
                     |layout| {
                         self.render_pane_layout(
-                            tab,
+                            crate::pane_render::PaneLayoutContext {
+                                tab,
+                                colors: &tab_colors,
+                                error_color: tab_error_color,
+                                corner_radius,
+                            },
                             layout,
-                            &tab_colors,
-                            tab_error_color,
                             window,
                             panes_own_window_bottom,
-                            corner_radius,
                             cx,
                         )
                     },
@@ -106,33 +155,21 @@ impl Zetta {
                     .flex_col()
                     .when(self.tab_move_mode, |body| body.key_context("TabMove"))
                     .child(div().min_h_0().flex_1().child(content))
-                    .when_some(
-                        maximized_pane,
-                        |body, (pane_id, pane_label, pane_label_selected)| {
-                            body.child(self.render_maximized_pane_bar(
-                                tab.id,
-                                pane_id,
-                                pane_label,
-                                pane_label_selected,
-                                &tab_colors,
-                                maximized_bar_owns_window_bottom,
-                                rounded_bottom_left,
-                                rounded_bottom_right,
-                                corner_radius,
-                                cx,
-                            ))
-                        },
-                    )
-                    .when_some(minimized_shelf, |body, (pane_id, index, count)| {
+                    .when_some(maximized_pane, |body, pane| {
+                        body.child(self.render_maximized_pane_bar(
+                            tab.id,
+                            pane,
+                            &tab_colors,
+                            corners.with_bottom(maximized_bar_owns_window_bottom),
+                            cx,
+                        ))
+                    })
+                    .when_some(minimized_shelf, |body, selection| {
                         body.child(self.render_minimized_pane_shelf(
                             tab.id,
-                            pane_id,
-                            index,
-                            count,
+                            selection,
                             &tab_colors,
-                            rounded_bottom_left,
-                            rounded_bottom_right,
-                            corner_radius,
+                            corners,
                             cx,
                         ))
                     })
@@ -144,24 +181,28 @@ impl Zetta {
 
     /// The bar under a maximized pane: which pane it is, and the buttons that
     /// restore or close it.
-    #[allow(clippy::too_many_arguments)]
     fn render_maximized_pane_bar(
         &self,
         tab_id: u64,
-        pane_id: u64,
-        pane_label: String,
-        pane_label_selected: bool,
+        pane: MaximizedPane,
         tab_colors: &ThemeColors,
-        owns_window_bottom: bool,
-        rounded_bottom_left: bool,
-        rounded_bottom_right: bool,
-        corner_radius: Pixels,
+        corners: TabBodyCorners,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let handle = cx.entity().downgrade();
         let restore_handle = handle.clone();
         let close_handle = handle;
-        let maximized_bar_owns_window_bottom = owns_window_bottom;
+        let MaximizedPane {
+            pane_id,
+            label: pane_label,
+            label_selected: pane_label_selected,
+        } = pane;
+        let TabBodyCorners {
+            owns_window_bottom: maximized_bar_owns_window_bottom,
+            rounded_bottom_left,
+            rounded_bottom_right,
+            corner_radius,
+        } = corners;
         div()
             .h_7()
             .flex_none()
@@ -256,19 +297,27 @@ impl Zetta {
     /// The shelf that shows a tab's minimized panes: the selected one's label,
     /// the arrows that step through them, and the buttons that restore or
     /// close the selection.
-    #[allow(clippy::too_many_arguments)]
     fn render_minimized_pane_shelf(
         &self,
         tab_id: u64,
-        pane_id: u64,
-        index: usize,
-        count: usize,
+        selection: MinimizedShelfSelection,
         tab_colors: &ThemeColors,
-        rounded_bottom_left: bool,
-        rounded_bottom_right: bool,
-        corner_radius: Pixels,
+        corners: TabBodyCorners,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let MinimizedShelfSelection {
+            pane_id,
+            index,
+            count,
+        } = selection;
+        // The shelf is the lowest element whenever a tab has one, so it always
+        // owns the window's bottom edge and ignores `owns_window_bottom`.
+        let TabBodyCorners {
+            owns_window_bottom: _,
+            rounded_bottom_left,
+            rounded_bottom_right,
+            corner_radius,
+        } = corners;
         let handle = cx.entity().downgrade();
         let previous_handle = handle.clone();
         let next_handle = handle.clone();

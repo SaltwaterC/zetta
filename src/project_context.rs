@@ -454,7 +454,10 @@ impl Zetta {
             .detach();
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the detection's five values plus the GPUI window and context"
+    )]
     fn apply_project_detection(
         &mut self,
         tab_id: u64,

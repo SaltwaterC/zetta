@@ -322,8 +322,7 @@ fn extract_executable_icon(executable: &Path) -> Result<PathBuf> {
     };
 
     let cache_dir = std::env::var_os("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
+        .map_or_else(std::env::temp_dir, PathBuf::from)
         .join("Zetta")
         .join("profile-icons");
     std::fs::create_dir_all(&cache_dir)

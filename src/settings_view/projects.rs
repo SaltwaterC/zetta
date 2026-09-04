@@ -16,7 +16,7 @@ pub(crate) fn render_projects_page(
     editor: &SettingsEditor,
     colors: &ThemeColors,
     handle: &WeakEntity<Zetta>,
-    opacity_slider: &impl Fn(f32, OpacityTarget) -> AnyElement,
+    opacity_slider: &dyn Fn(f32, OpacityTarget) -> AnyElement,
 ) -> AnyElement {
     match project_editor(editor) {
         Some(project) => render_project_config(editor, project, colors, handle, opacity_slider),
@@ -137,7 +137,7 @@ fn render_project_config(
     project: &ProjectEditor,
     colors: &ThemeColors,
     handle: &WeakEntity<Zetta>,
-    opacity_slider: &impl Fn(f32, OpacityTarget) -> AnyElement,
+    opacity_slider: &dyn Fn(f32, OpacityTarget) -> AnyElement,
 ) -> AnyElement {
     let form = &project.form;
     let current_icon = form.default_tab_icon;

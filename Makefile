@@ -180,6 +180,7 @@ WINDOWS_ZWT_ARGS := $(if $(call tool_enabled,$(WORKTREE)), -SourceZwtBinary "$(B
 
 .PHONY: all build fmt test lint check-platforms check-features \
 	check-linux check-windows check-macos \
+	clippy-platforms clippy-features clippy-linux clippy-windows clippy-macos \
 	can-check-linux can-check-windows can-check-macos \
 	install install-binary install-capabilities install-assets install-user-path uninstall \
 	uninstall-binary uninstall-assets uninstall-user-path refresh-desktop-caches clean
@@ -260,6 +261,17 @@ fmt:
 lint:
 	$(CARGO_RUN) clippy --locked --all-targets --no-default-features --features "$(BUILD_FEATURES)" -- -D warnings
 
+# The cargo subcommand the per-platform targets run, and anything passed after
+# `--`. `check` with no extra arguments by default; the `clippy-*` targets below
+# re-run the same targets with `clippy -- -D warnings`.
+#
+# Clippy lints only the `cfg` arms it compiles, so `make lint` says nothing
+# about the other platforms' code — which is how twelve violations of the
+# lints `Cargo.toml` *denies* sat in `#[cfg(windows)]` arms unnoticed. Checking
+# a platform and linting it are the same command apart from these two.
+PLATFORM_CARGO_CMD ?= check
+PLATFORM_CARGO_ARGS ?=
+
 # Per-platform checking.
 #
 # `make test` compiles only the host's `cfg` arms, so a change to
@@ -335,9 +347,9 @@ check-linux:
 		echo "  messense/macos-cross-toolchains/x86_64-unknown-linux-gnu."; \
 		echo "  Otherwise point CC_x86_64_unknown_linux_gnu at a cross gcc."; \
 		exit 1; }
-	$(CARGO_RUN) check --locked --all-targets \
+	$(CARGO_RUN) $(PLATFORM_CARGO_CMD) --locked --all-targets \
 		$(if $(filter linux,$(HOST_PLATFORM)),,--target $(CHECK_LINUX_TARGET)) \
-		--no-default-features --features "$(CHECK_LINUX_FEATURES)"
+		--no-default-features --features "$(CHECK_LINUX_FEATURES)" $(PLATFORM_CARGO_ARGS)
 
 check-windows:
 	@if [ "$(HOST_PLATFORM)" = "windows" ]; then exit 0; fi; \
@@ -351,9 +363,9 @@ check-windows:
 		echo "  is not enough. Install your platform's mingw-w64 package"; \
 		echo "  (apt/dnf mingw-w64, or brew install mingw-w64)."; \
 		exit 1; }
-	$(CARGO_RUN) check --locked --all-targets \
+	$(CARGO_RUN) $(PLATFORM_CARGO_CMD) --locked --all-targets \
 		$(if $(filter windows,$(HOST_PLATFORM)),,--target $(CHECK_WINDOWS_TARGET)) \
-		--no-default-features --features "$(CHECK_WINDOWS_FEATURES)"
+		--no-default-features --features "$(CHECK_WINDOWS_FEATURES)" $(PLATFORM_CARGO_ARGS)
 
 check-macos:
 	@if [ "$(HOST_PLATFORM)" = "macos" ]; then exit 0; fi; \
@@ -369,16 +381,16 @@ check-macos:
 		echo "  glibc headers. Install osxcross with an Apple SDK, then put"; \
 		echo "  o64-clang on PATH or set CC_x86_64_apple_darwin to it."; \
 		exit 1; }
-	$(CARGO_RUN) check --locked --all-targets \
+	$(CARGO_RUN) $(PLATFORM_CARGO_CMD) --locked --all-targets \
 		$(if $(filter macos,$(HOST_PLATFORM)),,--target $(CHECK_MACOS_TARGET)) \
-		--no-default-features --features "$(CHECK_MACOS_FEATURES)"
+		--no-default-features --features "$(CHECK_MACOS_FEATURES)" $(PLATFORM_CARGO_ARGS)
 
 # The two feature combinations AGENTS.md calls out: `x11` covers Linux
 # windowing-backend selection, and either one with no capability features
 # exercises every `cli_services`/`servers_enabled`/`tftp_enabled` gate.
 check-features:
-	$(CARGO_RUN) check --locked --all-targets --no-default-features --features x11
-	$(CARGO_RUN) check --locked --all-targets --no-default-features --features wayland
+	$(CARGO_RUN) $(PLATFORM_CARGO_CMD) --locked --all-targets --no-default-features --features x11 $(PLATFORM_CARGO_ARGS)
+	$(CARGO_RUN) $(PLATFORM_CARGO_CMD) --locked --all-targets --no-default-features --features wayland $(PLATFORM_CARGO_ARGS)
 
 # Every platform this machine can check. The host is always one of them; a
 # platform whose cross toolchain is missing is skipped rather than failing the
@@ -403,6 +415,18 @@ check-platforms: check-features
 		fi; \
 	done; \
 	exit $$failed
+
+# The same coverage as the `check-*` targets above, but linting rather than
+# checking.
+#
+# `make lint` only ever lints the host's `cfg` arms and the host's feature set,
+# so the lints `Cargo.toml` denies are unverified everywhere else. These run the
+# very same commands with `clippy -- -D warnings`, which also fails an
+# `#[expect(..)]` that has stopped firing on that platform. The assignment is on
+# the command line so it reaches the recursive `$(MAKE)` in `check-platforms`.
+clippy-linux clippy-windows clippy-macos clippy-features clippy-platforms:
+	@$(MAKE) --no-print-directory $(patsubst clippy-%,check-%,$@) \
+		PLATFORM_CARGO_CMD=clippy PLATFORM_CARGO_ARGS='-- -D warnings'
 
 ifeq ($(OS),Windows_NT)
 build:

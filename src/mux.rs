@@ -564,6 +564,20 @@ pub(crate) struct MuxPanes {
     runtimes: HashMap<u64, MuxRuntime>,
 }
 
+/// The four ids a multiplexed pane is addressed by: the tab and pane this
+/// window knows it as, and the session and pane the multiplexer knows it as.
+///
+/// All four travel together through every grant/revoke handover and every
+/// shared-pane registration, so they travel as one `Copy` bundle rather than
+/// as four positional `u64`s that nothing but their order distinguishes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct MuxPaneIds {
+    pub(crate) tab_id: u64,
+    pub(crate) pane_id: u64,
+    pub(crate) session_id: u64,
+    pub(crate) mux_pane_id: u64,
+}
+
 /// A pane this window is showing in shared mode.
 ///
 /// The pane's terminal reads what the multiplexer relays instead of the pty
@@ -944,10 +958,12 @@ impl crate::Zetta {
                 .register(opened.pane_id, events);
         }
         self.watch_for_revoke(
-            tab_id,
-            pane_id,
-            opened.session_id,
-            opened.pane_id,
+            MuxPaneIds {
+                tab_id,
+                pane_id,
+                session_id: opened.session_id,
+                mux_pane_id: opened.pane_id,
+            },
             provider.runtime(),
             window,
             cx,
@@ -1006,23 +1022,21 @@ impl crate::Zetta {
     /// down to one, because relaying to a single client is the daemon reading a
     /// terminal the client could read itself — at about a quarter more cost for
     /// sustained output, and with the daemon's own flow control in the way.
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn watch_for_grant(
         &mut self,
-        tab_id: u64,
-        pane_id: u64,
-        session_id: u64,
-        mux_pane_id: u64,
+        ids: MuxPaneIds,
         runtime: &MuxRuntime,
         window: &mut gpui::Window,
         cx: &mut gpui::Context<crate::Zetta>,
     ) {
         let (grant_tx, grant_rx) = async_channel::unbounded();
-        runtime.grant_reporters().register(mux_pane_id, grant_tx);
+        runtime
+            .grant_reporters()
+            .register(ids.mux_pane_id, grant_tx);
         cx.spawn_in(window, async move |this, cx| {
             let _ = grant_rx.recv().await;
             this.update_in(cx, |this, window, cx| {
-                this.handle_pane_grant(tab_id, pane_id, session_id, mux_pane_id, window, cx);
+                this.handle_pane_grant(ids, window, cx);
             })
         })
         .detach();
@@ -1040,26 +1054,24 @@ impl crate::Zetta {
     /// spawning one *and* reattaching one. A pane that holds the descriptor
     /// without watching for a revoke cannot answer one, so a third window's
     /// attach waits out the multiplexer's whole handover timeout and then fails.
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn watch_for_revoke(
         &mut self,
-        tab_id: u64,
-        pane_id: u64,
-        session_id: u64,
-        mux_pane_id: u64,
+        ids: MuxPaneIds,
         runtime: &MuxRuntime,
         window: &mut gpui::Window,
         cx: &mut gpui::Context<Self>,
     ) {
         let (revoke_tx, revoke_rx) = async_channel::unbounded();
-        runtime.revoke_reporters().register(mux_pane_id, revoke_tx);
+        runtime
+            .revoke_reporters()
+            .register(ids.mux_pane_id, revoke_tx);
         cx.spawn_in(window, async move |this, cx| {
             // The daemon waits only so long for the answer, so the handover
             // has to start promptly. Nothing is ever sent here; the channel
             // is just the arrival of the revoke.
             let _ = revoke_rx.recv().await;
             this.update_in(cx, |this, window, cx| {
-                this.handle_pane_revoke(tab_id, pane_id, session_id, mux_pane_id, window, cx);
+                this.handle_pane_revoke(ids, window, cx);
             })
         })
         .detach();

@@ -118,19 +118,22 @@ impl Zetta {
         } else {
             FocusStatusAccess::Unknown
         };
+        let page_widgets = pages::PageWidgets {
+            scroll_indicator: &scroll_indicator,
+            text_input: &text_input,
+            dropdown: &dropdown,
+            setting_row: &setting_row,
+            setting_toggle: &setting_toggle,
+            numeric: &numeric,
+            opacity_slider: &opacity_slider,
+        };
         let content = pages::render_settings_pages(
             editor,
             &colors,
             &handle,
             &cx.entity(),
             focus_status_access,
-            &scroll_indicator,
-            &text_input,
-            &dropdown,
-            &setting_row,
-            &setting_toggle,
-            &numeric,
-            &opacity_slider,
+            &page_widgets,
         );
 
         // The keymap list virtualizes its rows with `uniform_list`, which only clips to a

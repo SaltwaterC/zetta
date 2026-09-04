@@ -124,8 +124,7 @@ impl Zetta {
         let project = self.active_project_config().cloned();
         let effective = project
             .as_ref()
-            .map(|project| &project.effective)
-            .unwrap_or(&self.launch_config);
+            .map_or(&self.launch_config, |project| &project.effective);
         let active_profile = self.tabs.get(self.active_tab).and_then(Tab::active_profile);
         let Some(profile) = new_tab_profile(
             active_profile,
@@ -158,7 +157,11 @@ impl Zetta {
         true
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "six owned values a caller moves in, plus the GPUI window and \
+                  context; an owned bundle would only move the argument list"
+    )]
     pub(crate) fn open_tab_with_profile_context(
         &mut self,
         mut profile: Profile,
@@ -302,7 +305,7 @@ impl Zetta {
             ),
             #[cfg(windows)]
             TerminalLaunch::Handoff(request) => {
-                self.spawn_windows_handoff_terminal(tab_id, pane_id, profile, request, window, cx)
+                self.spawn_windows_handoff_terminal(tab_id, pane_id, profile, request, window, cx);
             }
         }
         if project.is_some() {
@@ -414,18 +417,12 @@ impl Zetta {
         open_zetta_window(
             self.launch_config.clone(),
             self.configuration_error.clone(),
-            None,
-            project,
-            None,
-            None,
-            false,
-            None,
-            false,
-            self.no_mux,
-            None,
-            None,
-            None,
-            None,
+            ZettaLaunchOptions {
+                initial_project: project,
+                no_mux: self.no_mux,
+                ..Default::default()
+            },
+            WindowLaunchOptions::default(),
             cx,
         )
         .log_err();

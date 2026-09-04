@@ -379,7 +379,11 @@ impl Zetta {
     /// Each becomes an ordinary terminal view: from here on the pane behaves
     /// exactly like one this process spawned, because it is reading the same
     /// kind of descriptor through the same event loop.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "takes the tab by mutable borrow, so the rest cannot join it in \
+                  a bundle without borrowing the same tab twice"
+    )]
     fn build_attached_panes(
         &mut self,
         tab: &mut Tab,
@@ -505,31 +509,20 @@ impl Zetta {
                 runtime.reporters().register(mux_pane_id, child_events);
             }
             self.mux_panes.record(pane_id, mux_pane_id);
+            let ids = MuxPaneIds {
+                tab_id: tab.id,
+                pane_id,
+                session_id,
+                mux_pane_id,
+            };
             if let Some(shared) = &shared {
-                self.register_shared_pane(
-                    tab.id,
-                    pane_id,
-                    session_id,
-                    mux_pane_id,
-                    shared,
-                    runtime,
-                    window,
-                    cx,
-                );
+                self.register_shared_pane(ids, shared, runtime, window, cx);
             } else {
                 // This window now holds the descriptor, so it is the one the
                 // multiplexer will ask to hand the pane over when a third
                 // window attaches. Without this the request went nowhere and
                 // that attach waited out the whole handover timeout.
-                self.watch_for_revoke(
-                    tab.id,
-                    pane_id,
-                    session_id,
-                    mux_pane_id,
-                    runtime,
-                    window,
-                    cx,
-                );
+                self.watch_for_revoke(ids, runtime, window, cx);
             }
 
             let terminal = cx.new(|cx| built.subscribe(cx));

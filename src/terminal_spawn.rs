@@ -794,7 +794,10 @@ impl Zetta {
     /// Returns `None` once it has already reported the failure on the pane —
     /// only the Cygwin CWD-tracking path can fail, and it does so with a message
     /// naming what could not be configured.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "six values the spawn is resolved from, plus the GPUI context"
+    )]
     fn resolve_spawn_shell(
         &mut self,
         profile: &Profile,

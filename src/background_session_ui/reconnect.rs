@@ -565,7 +565,10 @@ impl Zetta {
         .detach();
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the CLI request's five fields plus the GPUI window and context"
+    )]
     pub(crate) fn open_remote_session_from_cli(
         &mut self,
         target: String,

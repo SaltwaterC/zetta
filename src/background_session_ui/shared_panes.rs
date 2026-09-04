@@ -71,25 +71,23 @@ impl Zetta {
     /// Records a shared pane and starts the task that keeps it in step with
     /// the multiplexer: applying arbitrated sizes and routing the pane's
     /// exit report to its terminal.
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn register_shared_pane(
         &mut self,
-        tab_id: u64,
-        pane_id: u64,
-        session_id: u64,
-        mux_pane_id: u64,
+        ids: MuxPaneIds,
         pane: &Arc<zmux::client::SharedPane>,
         runtime: &MuxRuntime,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let (exit_tx, exit_rx) = async_channel::unbounded();
-        runtime.reporters().register_shared(mux_pane_id, exit_tx);
+        runtime
+            .reporters()
+            .register_shared(ids.mux_pane_id, exit_tx);
         self.shared_panes.insert(
-            pane_id,
+            ids.pane_id,
             SharedPaneEntry {
                 pane: pane.clone(),
-                mux_pane_id,
+                mux_pane_id: ids.mux_pane_id,
                 runtime: runtime.clone(),
             },
         );
@@ -97,17 +95,9 @@ impl Zetta {
             // Every local route into shared mode has to come through here, so
             // every shared pane can be offered back when it turns out to be the
             // last viewer. Remote panes are deliberately stream-only.
-            self.watch_for_grant(
-                tab_id,
-                pane_id,
-                session_id,
-                mux_pane_id,
-                runtime,
-                window,
-                cx,
-            );
+            self.watch_for_grant(ids, runtime, window, cx);
         }
-        self.spawn_shared_pane_task(tab_id, pane_id, pane.clone(), exit_rx, window, cx);
+        self.spawn_shared_pane_task(ids.tab_id, ids.pane_id, pane.clone(), exit_rx, window, cx);
     }
 
     fn spawn_shared_pane_task(
@@ -291,13 +281,16 @@ impl Zetta {
     /// multiplexer's relay to the terminal itself.
     pub(crate) fn handle_pane_grant(
         &mut self,
-        tab_id: u64,
-        pane_id: u64,
-        session_id: u64,
-        mux_pane_id: u64,
+        ids: MuxPaneIds,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let MuxPaneIds {
+            tab_id,
+            pane_id,
+            session_id,
+            mux_pane_id,
+        } = ids;
         let Some(runtime) = self
             .shared_panes
             .get(&pane_id)
@@ -360,16 +353,7 @@ impl Zetta {
             };
             this.update_in(cx, |this, window, cx| {
                 this.complete_grant_conversion(
-                    tab_id,
-                    pane_id,
-                    session_id,
-                    mux_pane_id,
-                    attached,
-                    terminal,
-                    options,
-                    &runtime,
-                    window,
-                    cx,
+                    ids, attached, terminal, options, &runtime, window, cx,
                 );
             })
             .ok();
@@ -378,13 +362,14 @@ impl Zetta {
     }
 
     /// Finishes taking a pane back: its terminal now reads the pty itself.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the pane's ids already travel as one bundle; the rest are the \
+                  handover's own four values plus the GPUI window and context"
+    )]
     fn complete_grant_conversion(
         &mut self,
-        tab_id: u64,
-        pane_id: u64,
-        session_id: u64,
-        mux_pane_id: u64,
+        ids: MuxPaneIds,
         attached: zmux::client::AttachedPane,
         terminal: Entity<Terminal>,
         options: terminal::AttachedOptions,
@@ -416,19 +401,11 @@ impl Zetta {
         // The shared bookkeeping goes, and with it the shared connection: this
         // window no longer reads a relay. Done after the conversion, so a failure
         // above leaves the pane as it was.
-        self.drop_shared_pane(pane_id);
+        self.drop_shared_pane(ids.pane_id);
         // Exits now arrive through the pty's own child-event channel again, and a
         // pane holding the descriptor has to be able to answer a future revoke.
-        runtime.reporters().register(mux_pane_id, child_events);
-        self.watch_for_revoke(
-            tab_id,
-            pane_id,
-            session_id,
-            mux_pane_id,
-            runtime,
-            window,
-            cx,
-        );
+        runtime.reporters().register(ids.mux_pane_id, child_events);
+        self.watch_for_revoke(ids, runtime, window, cx);
         cx.notify();
     }
 
@@ -441,13 +418,16 @@ impl Zetta {
     /// daemon's relay instead.
     pub(crate) fn handle_pane_revoke(
         &mut self,
-        tab_id: u64,
-        pane_id: u64,
-        session_id: u64,
-        mux_pane_id: u64,
+        ids: MuxPaneIds,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let MuxPaneIds {
+            tab_id,
+            pane_id,
+            session_id,
+            mux_pane_id,
+        } = ids;
         let Some(runtime) = self
             .mux_panes
             .runtime_for_tab(tab_id)
@@ -516,17 +496,7 @@ impl Zetta {
                 return;
             };
             this.update_in(cx, |this, window, cx| {
-                this.complete_revoke_conversion(
-                    tab_id,
-                    pane_id,
-                    session_id,
-                    mux_pane_id,
-                    pane,
-                    terminal_handle,
-                    &runtime,
-                    window,
-                    cx,
-                );
+                this.complete_revoke_conversion(ids, pane, terminal_handle, &runtime, window, cx);
             })
             .ok();
         })
@@ -535,13 +505,9 @@ impl Zetta {
 
     /// Finishes the revoke handover: the pane's terminal now reads the
     /// multiplexer's relay, and the pane is registered as shared.
-    #[allow(clippy::too_many_arguments)]
     fn complete_revoke_conversion(
         &mut self,
-        tab_id: u64,
-        pane_id: u64,
-        session_id: u64,
-        mux_pane_id: u64,
+        ids: MuxPaneIds,
         pane: zmux::client::SharedPane,
         terminal: Entity<Terminal>,
         runtime: &MuxRuntime,
@@ -566,23 +532,14 @@ impl Zetta {
         {
             return;
         }
-        runtime.revoke_reporters().forget(mux_pane_id);
-        self.register_shared_pane(
-            tab_id,
-            pane_id,
-            session_id,
-            mux_pane_id,
-            &pane,
-            runtime,
-            window,
-            cx,
-        );
+        runtime.revoke_reporters().forget(ids.mux_pane_id);
+        self.register_shared_pane(ids, &pane, runtime, window, cx);
         // This pane's view was wired up when it was spawned, long before it
         // became shared, so its size reports have to be subscribed here rather
         // than in `connect_terminal_view`. Without this the pane joins size
         // arbitration silently: the daemon only ever knows the size it was
         // handed over at, so every other viewer is sized against a stale figure.
-        self.subscribe_shared_pane_size(pane_id, &terminal, window, cx);
+        self.subscribe_shared_pane_size(ids.pane_id, &terminal, window, cx);
         cx.notify();
     }
 
