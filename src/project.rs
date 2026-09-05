@@ -479,11 +479,43 @@ pub(crate) fn path_is_within(path: &Path, root: &Path) -> bool {
 }
 
 pub(crate) fn paths_equal(left: &Path, right: &Path) -> bool {
-    if cfg!(windows) {
-        path_identity(left) == path_identity(right)
-    } else {
-        left == right
+    if !cfg!(windows) {
+        return left == right;
     }
+    let left = left.to_string_lossy();
+    let right = right.to_string_lossy();
+    windows_paths_equal(&left, &right)
+}
+
+/// The Windows half of [`paths_equal`], split out so it can be tested from any
+/// platform — the `cfg!(windows)` above is a runtime branch, so these rules are
+/// otherwise never exercised off Windows.
+///
+/// Compares the normalised character streams instead of building normalised
+/// `String`s: `config_for_pane` calls this once per registered project, several
+/// times per frame, and [`path_identity`] allocates two or three strings a call.
+fn windows_paths_equal(left: &str, right: &str) -> bool {
+    normalized_windows_chars(left).eq(normalized_windows_chars(right))
+}
+
+/// A Windows path as the characters that decide its identity: the verbatim
+/// prefix removed, separators unified, trailing separators dropped, lowercased.
+fn normalized_windows_chars(value: &str) -> impl Iterator<Item = char> + '_ {
+    // `fs::canonicalize` returns verbatim `\\?\`-prefixed paths, while
+    // tempdir-style paths and CLI arguments do not; both spell the same
+    // directory.
+    let (prefix, rest) = match value.strip_prefix(r"\\?\UNC\") {
+        Some(rest) => (r"\\", rest),
+        None => match value.strip_prefix(r"\\?\") {
+            Some(rest) => ("", rest),
+            None => ("", value),
+        },
+    };
+    prefix
+        .chars()
+        .chain(rest.trim_end_matches(['/', '\\']).chars())
+        .map(|character| if character == '\\' { '/' } else { character })
+        .flat_map(char::to_lowercase)
 }
 
 fn path_identity(path: &Path) -> String {

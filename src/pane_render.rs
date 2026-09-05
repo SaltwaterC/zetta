@@ -373,13 +373,28 @@ impl Zetta {
         let Some(pane) = tab.pane(pane_id) else {
             return div().size_full().into_any_element();
         };
-        let pane_label = tab
-            .displayed_pane_label(pane_id)
-            .unwrap_or_else(|| pane.label());
-        let pane_size = pane.selected_terminal().map(|terminal| {
-            let bounds = terminal.read(cx).last_content().terminal_bounds;
-            terminal_size_label(bounds.num_columns(), bounds.num_lines())
+        // Only the two mode badges and the pane controls show these, and all
+        // three are normally off, so building them unconditionally allocated two
+        // strings per pane per frame — and read the terminal entity for bounds —
+        // to throw them away. The controls predicate is hoisted rather than
+        // duplicated so it cannot drift from the `when` below that uses it.
+        let shows_pane_controls = tab.maximized_pane.is_none()
+            && pane.stack.is_empty()
+            && (tab.renaming_pane == Some(pane_id)
+                || (tab.panes.len() > 1 && self.pane_controls_visible_for == Some(pane_id)));
+        let needs_labels = self.pane_resize_mode || self.pane_move_mode || shows_pane_controls;
+        let pane_label = needs_labels.then(|| {
+            tab.displayed_pane_label(pane_id)
+                .unwrap_or_else(|| pane.label())
         });
+        let pane_size = needs_labels
+            .then(|| {
+                pane.selected_terminal().map(|terminal| {
+                    let bounds = terminal.read(cx).last_content().terminal_bounds;
+                    terminal_size_label(bounds.num_columns(), bounds.num_lines())
+                })
+            })
+            .flatten();
         let content = self.render_pane_body(context, pane, edges, window, cx);
         div()
             .id(("terminal-pane", pane_id as usize))
@@ -400,22 +415,27 @@ impl Zetta {
             .overflow_hidden()
             .child(content)
             .when_some(
-                self.pane_resize_mode.then_some(pane_size.clone()).flatten(),
-                |element, pane_size| {
+                self.pane_resize_mode
+                    .then(|| pane_label.clone().zip(pane_size.clone()))
+                    .flatten(),
+                |element, (pane_label, pane_size)| {
                     element.child(pane_status_badge(
                         format!("{pane_label} {pane_size}"),
                         colors,
                     ))
                 },
             )
-            .when(self.pane_move_mode, |element| {
-                let overlay_label = if tab.active_pane == pane_id {
-                    format!("{pane_label} Move mode")
-                } else {
-                    pane_label.clone()
-                };
-                element.child(pane_status_badge(overlay_label, colors))
-            })
+            .when_some(
+                self.pane_move_mode.then(|| pane_label.clone()).flatten(),
+                |element, pane_label| {
+                    let overlay_label = if tab.active_pane == pane_id {
+                        format!("{pane_label} Move mode")
+                    } else {
+                        pane_label
+                    };
+                    element.child(pane_status_badge(overlay_label, colors))
+                },
+            )
             .when_some(tab.displayed_pane_overlay(pane_id), |element, overlay| {
                 element.child(pane_overlay_element(
                     pane_id,
@@ -425,13 +445,9 @@ impl Zetta {
                     colors,
                 ))
             })
-            .when(
-                tab.maximized_pane.is_none()
-                    && pane.stack.is_empty()
-                    && (tab.renaming_pane == Some(pane_id)
-                        || (tab.panes.len() > 1
-                            && self.pane_controls_visible_for == Some(pane_id))),
-                |element| {
+            .when_some(
+                shows_pane_controls.then_some(pane_label).flatten(),
+                |element, pane_label| {
                     element.child(
                         self.render_pane_controls(context, pane_id, pane_label, pane_size, cx),
                     )

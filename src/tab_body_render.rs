@@ -92,7 +92,7 @@ impl Zetta {
         match self.tabs.get(self.active_tab) {
             Some(tab) => {
                 let tab_theme = self.theme_for_tab(tab, cx);
-                let tab_colors = tab_theme.colors().clone();
+                let tab_colors = tab_theme.colors();
                 let tab_error_color = tab_theme.status().error;
                 let layout = tab.visible_layout();
                 let maximized_pane = tab.maximized_pane.and_then(|pane_id| {
@@ -137,7 +137,7 @@ impl Zetta {
                         self.render_pane_layout(
                             crate::pane_render::PaneLayoutContext {
                                 tab,
-                                colors: &tab_colors,
+                                colors: tab_colors,
                                 error_color: tab_error_color,
                                 corner_radius,
                             },
@@ -159,18 +159,14 @@ impl Zetta {
                         body.child(self.render_maximized_pane_bar(
                             tab.id,
                             pane,
-                            &tab_colors,
+                            tab_colors,
                             corners.with_bottom(maximized_bar_owns_window_bottom),
                             cx,
                         ))
                     })
                     .when_some(minimized_shelf, |body, selection| {
                         body.child(self.render_minimized_pane_shelf(
-                            tab.id,
-                            selection,
-                            &tab_colors,
-                            corners,
-                            cx,
+                            tab.id, selection, tab_colors, corners, cx,
                         ))
                     })
                     .into_any_element()

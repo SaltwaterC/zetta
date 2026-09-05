@@ -243,3 +243,56 @@ fn project_profiles_extend_the_visible_profile_shortcut_slots() {
         base_slots - 1
     );
 }
+
+/// `paths_equal`'s Windows rules are behind a runtime `cfg!(windows)`, so they
+/// are never exercised by a Linux or macOS test run unless called directly.
+/// These pin the four ways Windows spells the same directory.
+#[test]
+fn windows_paths_equal_ignores_the_verbatim_prefix() {
+    assert!(windows_paths_equal(
+        r"\\?\C:\Users\stefan\project",
+        r"C:\Users\stefan\project"
+    ));
+    assert!(windows_paths_equal(
+        r"\\?\UNC\server\share\project",
+        r"\\server\share\project"
+    ));
+}
+
+#[test]
+fn windows_paths_equal_ignores_separator_case_and_trailing_slash() {
+    assert!(windows_paths_equal(r"C:\Users\Stefan", "c:/users/stefan"));
+    assert!(windows_paths_equal(r"C:\Users\Stefan\", r"C:\Users\Stefan"));
+    assert!(windows_paths_equal(
+        r"C:\Users\Stefan//",
+        r"C:\Users\Stefan"
+    ));
+}
+
+#[test]
+fn windows_paths_equal_still_separates_different_directories() {
+    assert!(!windows_paths_equal(
+        r"C:\Users\stefan",
+        r"C:\Users\stefanie"
+    ));
+    assert!(!windows_paths_equal(r"C:\a\b", r"C:\a\c"));
+    assert!(!windows_paths_equal(r"C:\a", r"D:\a"));
+}
+
+/// The streaming comparison has to agree with `path_identity`, which is what
+/// the project registry sorts and prefix-matches by.
+#[test]
+fn windows_paths_equal_agrees_with_the_normalized_string() {
+    for (left, right) in [
+        (r"\\?\C:\A\B", r"c:/a/b/"),
+        (r"C:\A\B", r"C:\A\B"),
+        (r"C:\A", r"C:\B"),
+    ] {
+        let normalized = |value: &str| -> String { normalized_windows_chars(value).collect() };
+        assert_eq!(
+            windows_paths_equal(left, right),
+            normalized(left) == normalized(right),
+            "{left} vs {right}"
+        );
+    }
+}

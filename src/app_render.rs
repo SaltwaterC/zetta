@@ -477,10 +477,13 @@ fn render_title_bar_chrome_boundary(
     window: &mut Window,
     cx: &mut Context<Zetta>,
 ) -> AnyElement {
-    let colors = zetta.window_theme(cx).colors().clone();
+    // Bound so `colors` can borrow it: `ThemeColors` is ~150 fields wide and
+    // this runs whenever the chrome re-renders.
+    let theme = zetta.window_theme(cx);
+    let colors = theme.colors();
     let handle = cx.entity().downgrade();
     let frame = WindowFrameGeometry::new(window, cx);
-    let chrome = zetta.render_title_bar_chrome(&frame, &colors, &handle, window, cx);
+    let chrome = zetta.render_title_bar_chrome(&frame, colors, &handle, window, cx);
     div()
         .size_full()
         .flex()
@@ -548,17 +551,17 @@ impl Render for Zetta {
         if !Arc::ptr_eq(GlobalTheme::theme(cx), &theme) {
             GlobalTheme::update_theme(cx, theme.clone());
         }
-        let colors = theme.colors().clone();
+        let colors = theme.colors();
         let error_color = theme.status().error;
         let handle = cx.entity().downgrade();
 
         // The column itself is composed here rather than behind a boundary of
         // its own: every frame reaches it anyway, and wrapping it in a cache
         // that always misses would suppress the caches inside it.
-        let column = self.render_window_column(&colors, window, cx);
-        let overlays = self.render_overlays(&colors, error_color, &handle, window, cx);
+        let column = self.render_window_column(colors, window, cx);
+        let overlays = self.render_overlays(colors, error_color, &handle, window, cx);
 
-        let content = self.compose_window_content(column, overlays, &colors, cx);
+        let content = self.compose_window_content(column, overlays, colors, cx);
         client_window_frame(content, window, colors.border)
     }
 }
