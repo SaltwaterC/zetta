@@ -62,6 +62,10 @@ mod server;
 pub(crate) use client::PaneThemeAnswer;
 #[cfg(feature = "syntax-highlighting")]
 pub(crate) use client::ProcessPaneThemeQuery;
+#[cfg(all(feature = "notifications", any(test, not(target_os = "macos"))))]
+pub(crate) use client::request_process_focus_tab;
+#[cfg(feature = "notifications")]
+pub(crate) use client::request_process_silent_mode;
 pub(crate) use client::{
     request_existing_process_command, request_existing_process_configuration_reload,
     request_existing_process_new_window, request_existing_process_pane,
@@ -72,8 +76,6 @@ pub(crate) use client::{
     request_existing_process_theme, request_existing_process_theme_list,
     request_existing_process_window, request_process_run_wait, request_process_tab_attention,
 };
-#[cfg(feature = "notifications")]
-pub(crate) use client::{request_process_focus_tab, request_process_silent_mode};
 pub(crate) use endpoint::config_path_identity;
 pub(crate) use server::ProcessControlServer;
 
