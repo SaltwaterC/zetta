@@ -19,6 +19,7 @@ is still upstream `master`, so that fork has no upstream to catch up with.
 | `crates/gpui_macos` | `zed/crates/gpui_macos@2890c340` | Input-source lifetime/context gating, keyboard-layout recovery, pasteboard lifetime safety, native menu/profile shortcuts, and related tests. The Metal renderer is no longer forked: it now comes from the submodule's `gpui_apple`. |
 | `crates/gpui_windows` | `zed/crates/gpui_windows@2890c340` | Correct maximize/restore toggle, DirectX scene annotations, one-shot attention flashing, inactive popup behavior, and input activation fixes. |
 | `crates/gpui` | `zed/crates/gpui@2890c340` | Unstable sort for the three sprite vectors in `Scene::finish`. |
+| `crates/theme_settings` | `zed/crates/theme_settings@2890c340` | `ThemeSettings` as a plain gpui global rather than a `SettingsStore` entry, with `IntoGpui` vendored and the unused settings-file writers removed. |
 
 ### Routing-only forks
 
@@ -39,32 +40,26 @@ own `gpui` dependency, delete the fork rather than keeping it in step.
 | --- | ---: | --- |
 | `crates/ui` | 28,586 | direct |
 | `crates/settings_content` | 11,803 | direct |
-| `crates/git` | 9,525 | direct |
-| `crates/migrator` | 9,010 | `settings_content` |
-| `crates/settings` | 8,561 | direct |
-| `crates/fs` | 6,908 | direct |
-| `crates/text` | 6,592 | direct |
 | `crates/theme` | 5,872 | direct |
 | `crates/gpui_wgpu` | 4,840 | direct |
 | `crates/gpui_web` | 4,474 | direct |
-| `crates/rope` | 4,132 | direct |
 | `crates/gpui_macros` | 3,317 | direct |
 | `crates/task` | 3,164 | direct |
-| `crates/theme_settings` | 2,320 | direct |
 | `crates/gpui_apple` | 2,013 | direct |
 | `crates/zed_actions` | 998 | direct |
-| `crates/askpass` | 748 | direct |
 | `crates/component` | 530 | direct |
 | `crates/syntax_theme` | 345 | direct |
 | `crates/release_channel` | 308 | direct |
 | `crates/assets` | 65 | direct |
 | `crates/menu` | 37 | direct |
 
-Twelve of these are reachable only through `settings` and `theme_settings`
-(`settings`, `settings_content`, `migrator`, `fs`, `git`, `askpass`, `rope`,
-`text`, and their dependents). Replacing Zed's settings layer with Zetta's own
-`Config` would let all of them be deleted; see
-`docs/performance-review-2026-09-04.md`.
+Seven more routing forks were deleted when Zetta stopped depending on Zed's
+settings layer: `settings`, `migrator`, `fs`, `git`, `askpass`, `rope` and
+`text` — 45,476 lines, including Zed's git layer and its SSH askpass helper.
+`settings_content` stays: it is a schema crate of plain value types with no
+filesystem or git dependency, and Zetta's `TerminalSettings` still reads its
+enums. `theme_settings` is no longer routing-only — it owns `ThemeSettings` as a
+plain gpui global and has its own `UPSTREAM.md` entry above.
 
 Per-fork synchronization notes live in each fork directory's `UPSTREAM.md`.
 `target/` directories and license-only differences are not fork patches.

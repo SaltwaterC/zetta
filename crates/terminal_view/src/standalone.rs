@@ -17,7 +17,7 @@ use gpui::{
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
-use settings::{Settings, SettingsStore, TerminalBell, TerminalBlink};
+use settings_content::{TerminalBell, TerminalBlink};
 use terminal::{
     Clear, Copy, Event, HoveredWord, MaybeNavigationTarget, Modes, Paste, PasteText, PasteTrimmed,
     ScrollLineDown, ScrollLineUp, ScrollPageDown, ScrollPageUp, ScrollToBottom, ScrollToTop,
@@ -353,7 +353,7 @@ impl TerminalView {
         });
         let blink_manager = cx.new(|_| BlinkManager::new());
         let blink_observer = cx.observe(&blink_manager, |_, _, cx| cx.notify());
-        let settings_observer = cx.observe_global::<SettingsStore>(Self::settings_changed);
+        let settings_observer = cx.observe_global::<TerminalSettings>(Self::settings_changed);
         let terminal_observer = cx.observe(&terminal, |_, _, cx| cx.notify());
         let terminal_events = cx.subscribe_in(
             &terminal,
@@ -1344,10 +1344,10 @@ impl ScrollbarVisibility for TerminalScrollbarSettings {
             .show
             .unwrap_or_default()
         {
-            settings::ShowScrollbar::Auto => scrollbars::ShowScrollbar::Auto,
-            settings::ShowScrollbar::System => scrollbars::ShowScrollbar::System,
-            settings::ShowScrollbar::Always => scrollbars::ShowScrollbar::Always,
-            settings::ShowScrollbar::Never => scrollbars::ShowScrollbar::Never,
+            settings_content::ShowScrollbar::Auto => scrollbars::ShowScrollbar::Auto,
+            settings_content::ShowScrollbar::System => scrollbars::ShowScrollbar::System,
+            settings_content::ShowScrollbar::Always => scrollbars::ShowScrollbar::Always,
+            settings_content::ShowScrollbar::Never => scrollbars::ShowScrollbar::Never,
         }
     }
 }

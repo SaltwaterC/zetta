@@ -7,6 +7,7 @@ mod config;
 mod default_terminal;
 #[cfg(feature = "http-server")]
 mod http_server;
+mod keymap_file;
 mod mux;
 #[cfg(feature = "session-persistence")]
 mod mux_identity;
@@ -87,6 +88,7 @@ use gpui::{
     WindowDecorations, WindowId, WindowOptions, actions, anchored, canvas, container_query,
     deferred, div, point, profiler, px, size, svg, transparent_black, uniform_list,
 };
+use keymap_file::{DEFAULT_KEYMAP_PATH, KeymapFile, KeymapFileLoadResult};
 use mux::{MuxPanes, MuxRuntime};
 use process_control::{
     ProcessControlCommand, ProcessControlServer, ReconnectSessionResult, TabAttentionRequest,
@@ -100,7 +102,6 @@ use project::{
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use session_auth_ui::SessionAuthenticationPrompt;
-use settings::{KeymapFile, KeymapFileLoadResult, Settings as _};
 use settings_editor::{
     BindingForm, ConfigTextField, ConfigurationForm, KeymapForm, KeymapSectionForm,
     KeymapTextField, PaneTemplateNodePath, PaneTemplateTextField, SettingsPage,

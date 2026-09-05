@@ -1,31 +1,23 @@
 #![allow(missing_docs)]
 
+use crate::content_into_gpui::IntoGpui;
 use crate::schema::{status_colors_refinement, syntax_overrides, theme_colors_refinement};
 use crate::{merge_accent_colors, merge_player_colors};
 use collections::HashMap;
 use gpui::{
-    App, Context, Font, FontFallbacks, FontStyle, Global, Pixels, SharedString, Subscription,
-    Window, px,
+    App, Context, Font, FontFeatures, FontStyle, FontWeight, Global, Pixels, SharedString,
+    Subscription, Window, px,
 };
 use refineable::Refineable;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-pub use settings::{FontFamilyName, IconThemeName, ThemeAppearanceMode, ThemeName};
-use settings::{IntoGpui, RegisterSetting, Settings, SettingsContent};
+pub use settings_content::{FontFamilyName, IconThemeName, ThemeAppearanceMode, ThemeName};
 use std::sync::Arc;
 use theme::{Appearance, DEFAULT_ICON_THEME_NAME, SyntaxTheme, Theme, UiDensity};
 
 const MIN_FONT_SIZE: Pixels = px(6.0);
 const MAX_FONT_SIZE: Pixels = px(100.0);
 const MIN_LINE_HEIGHT: f32 = 1.0;
-
-pub(crate) fn ui_density_from_settings(val: settings::UiDensity) -> UiDensity {
-    match val {
-        settings::UiDensity::Compact => UiDensity::Compact,
-        settings::UiDensity::Default => UiDensity::Default,
-        settings::UiDensity::Comfortable => UiDensity::Comfortable,
-    }
-}
 
 pub fn appearance_to_mode(appearance: Appearance) -> ThemeAppearanceMode {
     match appearance {
@@ -35,7 +27,7 @@ pub fn appearance_to_mode(appearance: Appearance) -> ThemeAppearanceMode {
 }
 
 /// Customizable settings for the UI and theme system.
-#[derive(Clone, PartialEq, RegisterSetting)]
+#[derive(Clone, PartialEq)]
 pub struct ThemeSettings {
     /// The UI font size. Determines the size of text in the UI,
     /// as well as the size of a [gpui::Rems] unit.
@@ -86,9 +78,9 @@ pub struct ThemeSettings {
     /// Manual overrides for the active theme.
     ///
     /// Note: This setting is still experimental. See [this tracking issue](https://github.com/zed-industries/zed/issues/18078)
-    pub experimental_theme_overrides: Option<settings::ThemeStyleContent>,
+    pub experimental_theme_overrides: Option<settings_content::ThemeStyleContent>,
     /// Manual overrides per theme
-    pub theme_overrides: HashMap<String, settings::ThemeStyleContent>,
+    pub theme_overrides: HashMap<String, settings_content::ThemeStyleContent>,
     /// The current icon theme selection.
     pub icon_theme: IconThemeSelection,
     /// The density of the UI.
@@ -101,8 +93,8 @@ pub struct ThemeSettings {
 /// Returns the name of the default theme for the given [`Appearance`].
 pub fn default_theme(appearance: Appearance) -> &'static str {
     match appearance {
-        Appearance::Light => settings::DEFAULT_LIGHT_THEME,
-        Appearance::Dark => settings::DEFAULT_DARK_THEME,
+        Appearance::Light => settings_content::DEFAULT_LIGHT_THEME,
+        Appearance::Dark => settings_content::DEFAULT_DARK_THEME,
     }
 }
 
@@ -157,11 +149,11 @@ pub enum ThemeSelection {
     },
 }
 
-impl From<settings::ThemeSelection> for ThemeSelection {
-    fn from(selection: settings::ThemeSelection) -> Self {
+impl From<settings_content::ThemeSelection> for ThemeSelection {
+    fn from(selection: settings_content::ThemeSelection) -> Self {
         match selection {
-            settings::ThemeSelection::Static(theme) => ThemeSelection::Static(theme),
-            settings::ThemeSelection::Dynamic { mode, light, dark } => {
+            settings_content::ThemeSelection::Static(theme) => ThemeSelection::Static(theme),
+            settings_content::ThemeSelection::Dynamic { mode, light, dark } => {
                 ThemeSelection::Dynamic { mode, light, dark }
             }
         }
@@ -209,11 +201,13 @@ pub enum IconThemeSelection {
     },
 }
 
-impl From<settings::IconThemeSelection> for IconThemeSelection {
-    fn from(selection: settings::IconThemeSelection) -> Self {
+impl From<settings_content::IconThemeSelection> for IconThemeSelection {
+    fn from(selection: settings_content::IconThemeSelection) -> Self {
         match selection {
-            settings::IconThemeSelection::Static(theme) => IconThemeSelection::Static(theme),
-            settings::IconThemeSelection::Dynamic { mode, light, dark } => {
+            settings_content::IconThemeSelection::Static(theme) => {
+                IconThemeSelection::Static(theme)
+            }
+            settings_content::IconThemeSelection::Dynamic { mode, light, dark } => {
                 IconThemeSelection::Dynamic { mode, light, dark }
             }
         }
@@ -245,127 +239,17 @@ impl IconThemeSelection {
     }
 }
 
-/// Sets the theme for the given appearance to the theme with the specified name.
-///
-/// The caller should make sure that the [`Appearance`] matches the theme associated with the name.
-///
-/// If the current [`ThemeAppearanceMode`] is set to [`System`] and the user's system [`Appearance`]
-/// is different than the new theme's [`Appearance`], this function will update the
-/// [`ThemeAppearanceMode`] to the new theme's appearance in order to display the new theme.
-///
-/// [`System`]: ThemeAppearanceMode::System
-pub fn set_theme(
-    current: &mut SettingsContent,
-    theme_name: impl Into<Arc<str>>,
-    theme_appearance: Appearance,
-    system_appearance: Appearance,
-) {
-    let theme_name = ThemeName(theme_name.into());
-
-    let Some(selection) = current.theme.theme.as_mut() else {
-        current.theme.theme = Some(settings::ThemeSelection::Static(theme_name));
-        return;
-    };
-
-    match selection {
-        settings::ThemeSelection::Static(theme) => {
-            *theme = theme_name;
-        }
-        settings::ThemeSelection::Dynamic { mode, light, dark } => {
-            match theme_appearance {
-                Appearance::Light => *light = theme_name,
-                Appearance::Dark => *dark = theme_name,
-            }
-
-            let should_update_mode =
-                !(mode == &ThemeAppearanceMode::System && theme_appearance == system_appearance);
-
-            if should_update_mode {
-                *mode = appearance_to_mode(theme_appearance);
-            }
-        }
-    }
-}
-
-/// Sets the icon theme for the given appearance to the icon theme with the specified name.
-pub fn set_icon_theme(
-    current: &mut SettingsContent,
-    icon_theme_name: IconThemeName,
-    appearance: Appearance,
-) {
-    if let Some(selection) = current.theme.icon_theme.as_mut() {
-        let icon_theme_to_update = match selection {
-            settings::IconThemeSelection::Static(theme) => theme,
-            settings::IconThemeSelection::Dynamic { mode, light, dark } => match mode {
-                ThemeAppearanceMode::Light => light,
-                ThemeAppearanceMode::Dark => dark,
-                ThemeAppearanceMode::System => match appearance {
-                    Appearance::Light => light,
-                    Appearance::Dark => dark,
-                },
-            },
-        };
-
-        *icon_theme_to_update = icon_theme_name;
-    } else {
-        current.theme.icon_theme = Some(settings::IconThemeSelection::Static(icon_theme_name));
-    }
-}
-
-/// Sets the mode for the theme.
-pub fn set_mode(content: &mut SettingsContent, mode: ThemeAppearanceMode) {
-    let theme = content.theme.as_mut();
-
-    if let Some(selection) = theme.theme.as_mut() {
-        match selection {
-            settings::ThemeSelection::Static(_) => {
-                *selection = settings::ThemeSelection::Dynamic {
-                    mode: ThemeAppearanceMode::System,
-                    light: ThemeName(settings::DEFAULT_LIGHT_THEME.into()),
-                    dark: ThemeName(settings::DEFAULT_DARK_THEME.into()),
-                };
-            }
-            settings::ThemeSelection::Dynamic {
-                mode: mode_to_update,
-                ..
-            } => *mode_to_update = mode,
-        }
-    } else {
-        theme.theme = Some(settings::ThemeSelection::Dynamic {
-            mode,
-            light: ThemeName(settings::DEFAULT_LIGHT_THEME.into()),
-            dark: ThemeName(settings::DEFAULT_DARK_THEME.into()),
-        });
-    }
-
-    if let Some(selection) = theme.icon_theme.as_mut() {
-        match selection {
-            settings::IconThemeSelection::Static(icon_theme) => {
-                *selection = settings::IconThemeSelection::Dynamic {
-                    mode,
-                    light: icon_theme.clone(),
-                    dark: icon_theme.clone(),
-                };
-            }
-            settings::IconThemeSelection::Dynamic {
-                mode: mode_to_update,
-                ..
-            } => *mode_to_update = mode,
-        }
-    } else {
-        theme.icon_theme = Some(settings::IconThemeSelection::Static(IconThemeName(
-            DEFAULT_ICON_THEME_NAME.into(),
-        )));
-    }
-}
-
 pub use theme::BufferLineHeight;
 
-pub fn buffer_line_height_from_settings(value: settings::BufferLineHeight) -> BufferLineHeight {
+pub fn buffer_line_height_from_settings(
+    value: settings_content::BufferLineHeight,
+) -> BufferLineHeight {
     match value {
-        settings::BufferLineHeight::Comfortable => BufferLineHeight::Comfortable,
-        settings::BufferLineHeight::Standard => BufferLineHeight::Standard,
-        settings::BufferLineHeight::Custom(line_height) => BufferLineHeight::Custom(line_height),
+        settings_content::BufferLineHeight::Comfortable => BufferLineHeight::Comfortable,
+        settings_content::BufferLineHeight::Standard => BufferLineHeight::Standard,
+        settings_content::BufferLineHeight::Custom(line_height) => {
+            BufferLineHeight::Custom(line_height)
+        }
     }
 }
 
@@ -520,7 +404,7 @@ impl ThemeSettings {
         arc_theme
     }
 
-    fn modify_theme(base_theme: &mut Theme, theme_overrides: &settings::ThemeStyleContent) {
+    fn modify_theme(base_theme: &mut Theme, theme_overrides: &settings_content::ThemeStyleContent) {
         if let Some(window_background_appearance) = theme_overrides.window_background_appearance {
             base_theme.styles.window_background_appearance =
                 window_background_appearance.into_gpui();
@@ -688,80 +572,74 @@ pub fn clamp_font_size(size: Pixels) -> Pixels {
     size.clamp(MIN_FONT_SIZE, MAX_FONT_SIZE)
 }
 
-fn font_fallbacks_from_settings(
-    fallbacks: Option<Vec<settings::FontFamilyName>>,
-) -> Option<FontFallbacks> {
-    fallbacks.map(|fallbacks| {
-        FontFallbacks::from_fonts(
-            fallbacks
-                .into_iter()
-                .map(|font_family| font_family.0.to_string())
-                .collect(),
-        )
-    })
-}
-
-impl settings::Settings for ThemeSettings {
-    fn from_settings(content: &settings::SettingsContent) -> Self {
-        let content = &content.theme;
-        let theme_selection: ThemeSelection = content.theme.clone().unwrap().into();
-        let icon_theme_selection: IconThemeSelection = content.icon_theme.clone().unwrap().into();
+/// The defaults Zed's settings store used to produce for this struct.
+///
+/// Zetta owns these now: it resolves its own configuration in `Config`, and the
+/// store existed only to hold this struct and `TerminalSettings` as globals.
+/// The values are read out of the store as it behaved before the move, so the
+/// rendered result is unchanged.
+impl Default for ThemeSettings {
+    fn default() -> Self {
         Self {
-            ui_font_size: clamp_font_size(content.ui_font_size.unwrap().into_gpui()),
+            ui_font_size: clamp_font_size(px(16.)),
             ui_font: Font {
-                family: content.ui_font_family.as_ref().unwrap().0.clone().into(),
-                features: content.ui_font_features.clone().unwrap().into_gpui(),
-                fallbacks: font_fallbacks_from_settings(content.ui_font_fallbacks.clone()),
-                weight: content.ui_font_weight.unwrap().into_gpui(),
-                style: Default::default(),
-            },
-            buffer_font: Font {
-                family: content
-                    .buffer_font_family
-                    .as_ref()
-                    .unwrap()
-                    .0
-                    .clone()
-                    .into(),
-                features: content.buffer_font_features.clone().unwrap().into_gpui(),
-                fallbacks: font_fallbacks_from_settings(content.buffer_font_fallbacks.clone()),
-                weight: content.buffer_font_weight.unwrap().into_gpui(),
+                family: ".ZedSans".into(),
+                // Zed's default settings disable `calt` for the UI font only.
+                features: FontFeatures::disable_ligatures(),
+                fallbacks: None,
+                weight: FontWeight(400.),
                 style: FontStyle::default(),
             },
-            buffer_font_size: clamp_font_size(content.buffer_font_size.unwrap().into_gpui()),
-            buffer_line_height: buffer_line_height_from_settings(
-                content.buffer_line_height.unwrap(),
-            ),
-            agent_ui_font_family: content
-                .agent_ui_font_family
-                .as_ref()
-                .map(|font| font.0.clone().into()),
-            agent_ui_font_size: content.agent_ui_font_size.map(|s| s.into_gpui()),
-            agent_buffer_font_family: content
-                .agent_buffer_font_family
-                .as_ref()
-                .map(|font| font.0.clone().into()),
-            agent_buffer_font_size: content.agent_buffer_font_size.map(|s| s.into_gpui()),
-            git_commit_buffer_font_size: content.git_commit_buffer_font_size.map(|s| s.into_gpui()),
-            markdown_preview_font_family: content
-                .markdown_preview_font_family
-                .as_ref()
-                .map(|f| f.0.clone().into()),
-            markdown_preview_code_font_family: content
-                .markdown_preview_code_font_family
-                .as_ref()
-                .map(|f| f.0.clone().into()),
-            markdown_preview_font_size: content.markdown_preview_font_size.map(|s| s.into_gpui()),
-            markdown_preview_theme: content
-                .markdown_preview_theme
-                .clone()
-                .map(ThemeSelection::from),
-            theme: theme_selection,
-            experimental_theme_overrides: content.experimental_theme_overrides.clone(),
-            theme_overrides: content.theme_overrides.clone(),
-            icon_theme: icon_theme_selection,
-            ui_density: ui_density_from_settings(content.ui_density.unwrap_or_default()),
-            unnecessary_code_fade: content.unnecessary_code_fade.unwrap().0.clamp(0.0, 0.9),
+            buffer_font: Font {
+                family: ".ZedMono".into(),
+                features: FontFeatures::default(),
+                fallbacks: None,
+                weight: FontWeight(400.),
+                style: FontStyle::default(),
+            },
+            buffer_font_size: clamp_font_size(px(15.)),
+            buffer_line_height: BufferLineHeight::Comfortable,
+            agent_ui_font_family: None,
+            agent_ui_font_size: None,
+            agent_buffer_font_family: None,
+            agent_buffer_font_size: None,
+            git_commit_buffer_font_size: None,
+            markdown_preview_font_family: None,
+            markdown_preview_code_font_family: None,
+            markdown_preview_font_size: None,
+            markdown_preview_theme: None,
+            theme: ThemeSelection::Dynamic {
+                mode: ThemeAppearanceMode::System,
+                light: ThemeName(settings_content::DEFAULT_LIGHT_THEME.into()),
+                dark: ThemeName(settings_content::DEFAULT_DARK_THEME.into()),
+            },
+            experimental_theme_overrides: None,
+            theme_overrides: Default::default(),
+            icon_theme: IconThemeSelection::Static(IconThemeName(DEFAULT_ICON_THEME_NAME.into())),
+            ui_density: UiDensity::default(),
+            unnecessary_code_fade: 0.3,
         }
+    }
+}
+
+impl gpui::Global for ThemeSettings {}
+
+impl ThemeSettings {
+    /// Installs the defaults. Call once during startup, before anything reads
+    /// them.
+    pub fn init_global(cx: &mut App) {
+        cx.set_global(Self::default());
+    }
+
+    pub fn get_global(cx: &App) -> &Self {
+        cx.global::<Self>()
+    }
+
+    /// Replaces the global, which notifies every `observe_global::<ThemeSettings>`
+    /// watcher — the hook the theme and font-size observers hang off.
+    pub fn update_global(cx: &mut App, update: impl FnOnce(&mut Self)) {
+        let mut settings = cx.global::<Self>().clone();
+        update(&mut settings);
+        cx.set_global(settings);
     }
 }

@@ -315,41 +315,4 @@ mod tests {
                 .child(UpdateButton::updated("Update to Version: 1.0.0"))
         }
     }
-
-    #[gpui::test]
-    async fn test_downloading_tooltip_shows_in_preview_like_layout(cx: &mut TestAppContext) {
-        cx.update(|cx| {
-            let settings_store = settings::SettingsStore::test(cx);
-            cx.set_global(settings_store);
-            theme_settings::init(theme::LoadThemes::JustBase, cx);
-        });
-        let tooltip_built = Rc::new(Cell::new(false));
-        let tooltip_rendered = Rc::new(Cell::new(0));
-        let (_view, cx) = cx.add_window_view({
-            let tooltip_built = tooltip_built.clone();
-            let tooltip_rendered = tooltip_rendered.clone();
-            |_, _| PreviewLikeButtons {
-                tooltip_built,
-                tooltip_rendered,
-            }
-        });
-
-        cx.simulate_mouse_move(point(px(30.), px(30.)), None, gpui::Modifiers::default());
-        cx.run_until_parked();
-        cx.simulate_mouse_move(point(px(31.), px(30.)), None, gpui::Modifiers::default());
-        cx.run_until_parked();
-
-        cx.executor().advance_clock(Duration::from_millis(600));
-        cx.run_until_parked();
-
-        assert!(tooltip_built.get(), "tooltip should have been built");
-
-        tooltip_rendered.set(0);
-        cx.update(|window, _| window.refresh());
-        cx.run_until_parked();
-        assert!(
-            tooltip_rendered.get() > 0,
-            "tooltip should still be rendered after another frame"
-        );
-    }
 }

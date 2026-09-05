@@ -3,15 +3,23 @@
 This crate is synchronized with `zed/crates/theme_settings` at Zed revision
 `2890c340e07a4c4c7e6778e99a49f5414115b250`.
 
-**No Zetta patches. Do not add any.** This fork exists only so that the `gpui`
-fork can be wired in: this crate sits between Zetta and `gpui`, and Cargo
-resolves a dependency edge from the manifest that declares it, so leaving this
-crate in the submodule would pull a second copy of `gpui` into the build. See
-`crates/gpui/UPSTREAM.md` for why that is not survivable, and
-`crates/UPSTREAM_AUDIT.md` for the full routing set.
+Retain these Zetta patches when synchronizing:
 
-Synchronizing is therefore a straight copy from upstream, followed by the
-mechanical adjustments the move requires:
+- `ThemeSettings` is a plain gpui global with its own `Default`, not an entry in
+  Zed's `SettingsStore`. Zetta resolves configuration itself in `Config`, and the
+  store's only remaining job was to hold this struct and `TerminalSettings`;
+  carrying it meant carrying `settings`, and behind it `fs`, `git`, `askpass`,
+  `rope`, `text` and `migrator`. The defaults were read out of the running store
+  before the move, so the rendered result is unchanged.
+- `IntoGpui` is vendored into `content_into_gpui.rs`; it was the only thing this
+  crate needed from `settings` itself, and it only touches `settings_content` and
+  gpui types.
+- The settings-file writers (`set_theme`, `set_icon_theme`, `set_mode`) are
+  removed. They wrote back into Zed's settings file, which Zetta does not have.
+- Value types come from `settings_content` rather than `settings`'s re-exports.
+
+Beyond those, synchronizing is a copy from upstream plus the mechanical
+adjustments the move out of Zed's workspace requires:
 
 - `Cargo.toml` spells out every dependency that was `workspace = true`, and the
   `[lints]` table, because neither can be inherited from outside

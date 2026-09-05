@@ -701,7 +701,7 @@ fn index_default_bindings(bindings: &[KeyBinding]) -> HashMap<DefaultBindingKey,
 
 pub(crate) fn load_keybindings(path: &PathBuf, profile_count: usize, no_mux: bool, cx: &mut App) {
     cx.clear_key_bindings();
-    match KeymapFile::load_asset_allow_partial_failure(settings::DEFAULT_KEYMAP_PATH, cx) {
+    match KeymapFile::load_asset_allow_partial_failure(DEFAULT_KEYMAP_PATH, cx) {
         Ok(bindings) => cx.bind_keys(bindings),
         Err(error) => eprintln!("Could not load the default terminal keymap: {error:#}"),
     }

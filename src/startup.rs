@@ -591,7 +591,7 @@ fn initialize_zetta_settings(launch: &ApplicationLaunch, cx: &mut App) {
     menu::init();
     zed_actions::init();
     release_channel::init(semver::Version::new(0, 1, 0), cx);
-    settings::init(cx);
+    TerminalSettings::init(cx);
     theme_settings::init(theme::LoadThemes::All(Box::new(ZettaAssets)), cx);
     load_user_themes(cx).log_err();
     ZettaAssets.load_fonts(cx).log_err();

@@ -1,27 +1,28 @@
 use collections::HashMap;
-use gpui::{FontFallbacks, FontFeatures, FontWeight, Pixels};
+use gpui::{App, FontFallbacks, FontFeatures, FontWeight, Global, Pixels};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-pub use settings::AlternateScroll;
-
-use settings::{
-    IntoGpui, PathHyperlinkRegex, RegisterSetting, ShowScrollbar, TerminalBell, TerminalBlink,
-    TerminalDockPosition, TerminalLineHeight, VenvSettings, WorkingDirectory,
-    merge_from::MergeFrom,
+// The value types stay in `settings_content`, which is a schema crate with no
+// filesystem or git dependencies. What Zetta dropped is `settings` — the store,
+// its keymap loader and the `fs`/`git`/`rope`/`text` tree behind them.
+pub use settings_content::{
+    AlternateScroll, ShowScrollbar, TerminalBell, TerminalBlink, TerminalLineHeight,
 };
+
 use task::Shell;
 use theme_settings::FontFamilyName;
 
-#[derive(Copy, Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-pub struct Toolbar {
-    pub breadcrumbs: bool,
-}
-
-#[derive(Clone, Debug, Deserialize, RegisterSetting)]
+/// The terminal settings this process runs with.
+///
+/// A plain gpui global rather than an entry in Zed's `SettingsStore`: Zetta
+/// resolves its configuration itself in `Config`, and the store's only remaining
+/// job was to hold this struct. `Default` carries the values the store used to
+/// produce, so behaviour is unchanged; `apply_config_settings` overwrites the
+/// fields Zetta's own configuration owns.
+#[derive(Clone, Debug)]
 pub struct TerminalSettings {
     pub shell: Shell,
-    pub working_directory: WorkingDirectory,
     pub font_size: Option<Pixels>, // todo(settings_refactor) can be non-optional...
     pub font_family: Option<FontFamilyName>,
     pub font_fallbacks: Option<FontFallbacks>,
@@ -36,20 +37,12 @@ pub struct TerminalSettings {
     pub copy_on_select: bool,
     pub keep_selection_on_copy: bool,
     pub open_links_in_mouse_mode: bool,
-    pub button: bool,
-    pub dock: TerminalDockPosition,
-    pub flexible: bool,
-    pub default_width: Pixels,
-    pub default_height: Pixels,
-    pub detect_venv: VenvSettings,
     pub max_scroll_history_lines: Option<usize>,
     pub scroll_multiplier: f32,
-    pub toolbar: Toolbar,
     pub scrollbar: ScrollbarSettings,
     pub minimum_contrast: f32,
     pub path_hyperlink_regexes: Vec<String>,
     pub path_hyperlink_timeout_ms: u64,
-    pub show_count_badge: bool,
     pub bell: TerminalBell,
 }
 
@@ -61,80 +54,87 @@ pub struct ScrollbarSettings {
     pub show: Option<ShowScrollbar>,
 }
 
-fn settings_shell_to_task_shell(shell: settings::Shell) -> Shell {
-    match shell {
-        settings::Shell::System => Shell::System,
-        settings::Shell::Program(program) => Shell::Program(program),
-        settings::Shell::WithArguments {
-            program,
-            args,
-            title_override,
-        } => Shell::WithArguments {
-            program,
-            args,
-            title_override,
-        },
+/// The path-like target patterns a terminal recognises out of the box.
+///
+/// Kept verbatim from the value Zed's default settings produced, because the
+/// second pattern is a carefully built multi-line regex and retyping it is how
+/// path hyperlinks quietly stop matching.
+fn default_path_hyperlink_regexes() -> Vec<String> {
+    vec![
+        r#"File "(?<path>[^"]+)", line (?<line>[0-9]+)"#.to_owned(),
+        r##"(?x)
+(?<path>
+    (
+        # multi-char path: first char (not opening delimiter, space, or box drawing char)
+        [^({\[<\"'`\ ─-╿]
+        # middle chars: non-space, and colon/paren only if not followed by digit/paren/space
+        ([^\ :(]|[:(][^0-9()\ ])*
+        # last char: not closing delimiter or colon
+        [^()}\]>\"'`.,;:\ ]
+    |
+        # single-char path: not delimiter, punctuation, space, or box drawing char
+        [^(){}\[\]<>\"'`.,;:\ ─-╿]
+    )
+    # optional line/column suffix (included in path for PathWithPosition::parse_str)
+    (:+[0-9]+(:[0-9]+)?|:?\([0-9]+([,:]?[0-9]+)?\))?
+)"##
+        .to_owned(),
+    ]
+}
+
+impl Default for TerminalSettings {
+    fn default() -> Self {
+        TerminalSettings {
+            shell: Shell::System,
+            font_size: None,
+            font_family: None,
+            font_fallbacks: None,
+            font_features: None,
+            font_weight: Some(FontWeight(400.0)),
+            line_height: TerminalLineHeight::Standard,
+            env: HashMap::default(),
+            cursor_shape: CursorShape::Block,
+            blinking: TerminalBlink::TerminalControlled,
+            alternate_scroll: AlternateScroll::On,
+            option_as_meta: false,
+            copy_on_select: false,
+            keep_selection_on_copy: true,
+            open_links_in_mouse_mode: true,
+            max_scroll_history_lines: Some(10_000),
+            scroll_multiplier: 1.0,
+            scrollbar: ScrollbarSettings { show: None },
+            minimum_contrast: 45.0,
+            path_hyperlink_regexes: default_path_hyperlink_regexes(),
+            path_hyperlink_timeout_ms: 1,
+            bell: TerminalBell::Off,
+        }
     }
 }
 
-impl settings::Settings for TerminalSettings {
-    fn from_settings(content: &settings::SettingsContent) -> Self {
-        let user_content = content.terminal.clone().unwrap();
-        // Note: we allow a subset of "terminal" settings in the project files.
-        let mut project_content = user_content.project.clone();
-        project_content.merge_from_option(content.project.terminal.as_ref());
-        TerminalSettings {
-            shell: settings_shell_to_task_shell(project_content.shell.unwrap()),
-            working_directory: project_content.working_directory.unwrap(),
-            font_size: user_content.font_size.map(|s| s.into_gpui()),
-            font_family: user_content.font_family,
-            font_fallbacks: user_content.font_fallbacks.map(|fallbacks| {
-                FontFallbacks::from_fonts(
-                    fallbacks
-                        .into_iter()
-                        .map(|family| family.0.to_string())
-                        .collect(),
-                )
-            }),
-            font_features: user_content.font_features.map(|f| f.into_gpui()),
-            font_weight: user_content.font_weight.map(|w| w.into_gpui()),
-            line_height: user_content.line_height.unwrap(),
-            env: project_content.env.unwrap(),
-            cursor_shape: user_content.cursor_shape.unwrap().into(),
-            blinking: user_content.blinking.unwrap(),
-            alternate_scroll: user_content.alternate_scroll.unwrap(),
-            option_as_meta: user_content.option_as_meta.unwrap(),
-            copy_on_select: user_content.copy_on_select.unwrap(),
-            keep_selection_on_copy: user_content.keep_selection_on_copy.unwrap(),
-            open_links_in_mouse_mode: user_content.open_links_in_mouse_mode.unwrap(),
-            button: user_content.button.unwrap(),
-            dock: user_content.dock.unwrap(),
-            default_width: user_content.default_width.unwrap().into_gpui(),
-            default_height: user_content.default_height.unwrap().into_gpui(),
-            flexible: user_content.flexible.unwrap(),
-            detect_venv: project_content.detect_venv.unwrap(),
-            scroll_multiplier: user_content.scroll_multiplier.unwrap(),
-            max_scroll_history_lines: user_content.max_scroll_history_lines,
-            toolbar: Toolbar {
-                breadcrumbs: user_content.toolbar.unwrap().breadcrumbs.unwrap(),
-            },
-            scrollbar: ScrollbarSettings {
-                show: user_content.scrollbar.unwrap().show,
-            },
-            minimum_contrast: user_content.minimum_contrast.unwrap(),
-            path_hyperlink_regexes: project_content
-                .path_hyperlink_regexes
-                .unwrap()
-                .into_iter()
-                .map(|regex| match regex {
-                    PathHyperlinkRegex::SingleLine(regex) => regex,
-                    PathHyperlinkRegex::MultiLine(regex) => regex.join("\n"),
-                })
-                .collect(),
-            path_hyperlink_timeout_ms: project_content.path_hyperlink_timeout_ms.unwrap(),
-            show_count_badge: user_content.show_count_badge.unwrap(),
-            bell: user_content.bell.unwrap(),
-        }
+impl Global for TerminalSettings {}
+
+impl TerminalSettings {
+    /// Installs the defaults. Call once during startup, before anything reads
+    /// them; `apply_config_settings` then applies the user's configuration.
+    pub fn init(cx: &mut App) {
+        cx.set_global(Self::default());
+    }
+
+    pub fn get_global(cx: &App) -> &Self {
+        cx.global::<Self>()
+    }
+
+    pub fn update_global(cx: &mut App, update: impl FnOnce(&mut Self)) {
+        let mut settings = cx.global::<Self>().clone();
+        update(&mut settings);
+        cx.set_global(settings);
+    }
+
+    /// Replaces the settings wholesale, which is what applying a reloaded
+    /// configuration does. Notifies every `observe_global::<TerminalSettings>`
+    /// watcher, so live panes pick the change up.
+    pub fn override_global(settings: Self, cx: &mut App) {
+        cx.set_global(settings);
     }
 }
 
@@ -150,15 +150,4 @@ pub enum CursorShape {
     Bar,
     /// Cursor is a hollow box like `▯`.
     Hollow,
-}
-
-impl From<settings::CursorShapeContent> for CursorShape {
-    fn from(value: settings::CursorShapeContent) -> Self {
-        match value {
-            settings::CursorShapeContent::Block => CursorShape::Block,
-            settings::CursorShapeContent::Underline => CursorShape::Underline,
-            settings::CursorShapeContent::Bar => CursorShape::Bar,
-            settings::CursorShapeContent::Hollow => CursorShape::Hollow,
-        }
-    }
 }

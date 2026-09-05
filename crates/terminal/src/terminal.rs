@@ -25,7 +25,6 @@ use collections::{HashMap, VecDeque};
 use futures::StreamExt;
 use pty_info::{ProcessIdGetter, PtyProcessInfo, TerminalProcessIds};
 use serde::{Deserialize, Serialize};
-use settings::Settings;
 use task::{HideStrategy, Shell, ShellKind, SpawnInTerminal};
 use terminal_settings::{AlternateScroll, CursorShape as SettingsCursorShape, TerminalSettings};
 use theme::{ActiveTheme, Theme};
@@ -8927,8 +8926,7 @@ mod tests {
 
     fn init_test(cx: &mut TestAppContext) {
         cx.update(|cx| {
-            let settings_store = settings::SettingsStore::test(cx);
-            cx.set_global(settings_store);
+            TerminalSettings::init(cx);
             theme_settings::init(theme::LoadThemes::JustBase, cx);
         });
     }
@@ -9197,8 +9195,7 @@ mod tests {
 
     fn init_ctrl_click_hyperlink_test(cx: &mut TestAppContext, output: &[u8]) -> Entity<Terminal> {
         cx.update(|cx| {
-            let settings_store = settings::SettingsStore::test(cx);
-            cx.set_global(settings_store);
+            TerminalSettings::init(cx);
         });
 
         let terminal = cx.new(|cx| {
@@ -9655,8 +9652,7 @@ mod tests {
     async fn windows_conpty_preserves_ctrl_j_in_win32_input_mode(cx: &mut TestAppContext) {
         cx.executor().allow_parking();
         cx.update(|cx| {
-            let settings_store = settings::SettingsStore::test(cx);
-            cx.set_global(settings_store);
+            TerminalSettings::init(cx);
             theme_settings::init(theme::LoadThemes::JustBase, cx);
         });
 
@@ -10750,8 +10746,7 @@ mod tests {
     #[gpui::test]
     async fn test_display_only_write_output_ignores_osc52(cx: &mut TestAppContext) {
         cx.update(|cx| {
-            let settings_store = settings::SettingsStore::test(cx);
-            cx.set_global(settings_store);
+            TerminalSettings::init(cx);
             cx.write_to_clipboard(ClipboardItem::new_string("original".to_string()));
         });
 
@@ -11046,12 +11041,9 @@ mod tests {
     async fn test_ctrl_click_in_mouse_mode_forwards_when_setting_disabled(cx: &mut TestAppContext) {
         let terminal = init_ctrl_click_hyperlink_test(cx, b"Visit https://zed.dev/ for more\r\n");
 
-        cx.update_global(|store: &mut settings::SettingsStore, cx| {
-            store.update_user_settings(cx, |settings| {
-                settings
-                    .terminal
-                    .get_or_insert_default()
-                    .open_links_in_mouse_mode = Some(false);
+        cx.update(|cx| {
+            TerminalSettings::update_global(cx, |settings| {
+                settings.open_links_in_mouse_mode = false;
             });
         });
 
@@ -11310,8 +11302,7 @@ mod tests {
             cx: &mut TestAppContext,
         ) -> (Entity<Terminal>, &mut VisualTestContext) {
             cx.update(|cx| {
-                let settings_store = settings::SettingsStore::test(cx);
-                cx.set_global(settings_store);
+                TerminalSettings::init(cx);
             });
 
             cx.executor().allow_parking();

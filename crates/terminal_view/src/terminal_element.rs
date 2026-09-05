@@ -9,7 +9,6 @@ use gpui::{
     relative, size, transparent_black,
 };
 use itertools::Itertools;
-use settings::Settings;
 use std::time::Instant;
 use terminal::{
     Cell, Color, Content, CursorShape, IndexedCell, Modes, NamedColor, Point, Range, Terminal,
@@ -23,7 +22,7 @@ use ui::{ParentElement, Tooltip};
 use util::ResultExt;
 
 use std::mem;
-use std::{fmt::Debug, rc::Rc, sync::Arc};
+use std::{cell::RefCell, fmt::Debug, rc::Rc, sync::Arc, sync::OnceLock};
 
 use crate::{BlockContext, BlockProperties, ContentMode, TerminalMode, TerminalView};
 
@@ -1408,8 +1407,11 @@ impl TerminalElement {
     }
 
     fn rem_size(&self, cx: &mut App) -> Option<Pixels> {
-        let settings = ThemeSettings::get_global(cx).clone();
-        let buffer_font_size = settings.buffer_font_size(cx);
+        // Borrowed, not cloned, matching the sibling read in `prepaint`: this
+        // runs for every pane on every frame and only one field is read, while
+        // `ThemeSettings` carries a dozen fonts and shared strings plus the
+        // theme-override maps.
+        let buffer_font_size = ThemeSettings::get_global(cx).buffer_font_size(cx);
         let rem_size_scale = {
             // Our default UI font size is 14px on a 16px base scale.
             // This means the default UI font size is 0.875rems.
@@ -1426,6 +1428,48 @@ impl TerminalElement {
 
         Some(buffer_font_size * rem_size_scale)
     }
+}
+
+/// The terminal's font features when the user has configured none.
+///
+/// Zed's default settings disable ligatures for the terminal, and Zetta never
+/// sets `terminal.font_features`, so this is what every pane resolves to. Built
+/// once: the value is an `Arc` internally, so callers clone a refcount rather
+/// than a `String`, a `Vec` and an `Arc` per prepaint.
+fn default_terminal_font_features() -> FontFeatures {
+    static DEFAULT: OnceLock<FontFeatures> = OnceLock::new();
+    DEFAULT.get_or_init(FontFeatures::disable_ligatures).clone()
+}
+
+/// The width of a terminal cell for a font, memoised across frames.
+///
+/// `resolve_font` hashes the whole `Font` — the family string, the features
+/// vector and the fallbacks vector — and the advance lookup is a second hash,
+/// both for every pane on every frame, to produce a pair that only changes when
+/// a font setting does.
+///
+/// This is a memo on the inputs rather than a cache with an invalidation
+/// contract: a changed font is simply a different key, so there is no event that
+/// has to remember to clear it. One entry, because panes overwhelmingly share a
+/// font and a miss costs what this replaced.
+fn resolve_cell_width(font: &Font, font_size: Pixels, cx: &App) -> Pixels {
+    thread_local! {
+        static MEMO: RefCell<Option<(Font, Pixels, Pixels)>> = const { RefCell::new(None) };
+    }
+    MEMO.with(|memo| {
+        let mut memo = memo.borrow_mut();
+        if let Some((cached_font, cached_size, cell_width)) = memo.as_ref()
+            && cached_size == &font_size
+            && cached_font == font
+        {
+            return *cell_width;
+        }
+        let text_system = cx.text_system();
+        let font_id = text_system.resolve_font(font);
+        let cell_width = text_system.advance(font_id, font_size, 'm').unwrap().width;
+        *memo = Some((font.clone(), font_size, cell_width));
+        cell_width
+    })
 }
 
 impl Element for TerminalElement {
@@ -1528,12 +1572,14 @@ impl Element for TerminalElement {
                     .or(buffer_font.fallbacks.as_ref())
                     .cloned();
 
-                // `unwrap_or` would build the fallback on every prepaint even
-                // when the setting is present, so keep it lazy.
+                // Zetta does not set `font_features`, so this fallback is the
+                // default path rather than the rare one, and building it means
+                // a `String`, a `Vec` and an `Arc` for every pane on every
+                // frame. Built once and cloned as an `Arc` bump instead.
                 let font_features = terminal_settings
                     .font_features
                     .clone()
-                    .unwrap_or_else(FontFeatures::disable_ligatures);
+                    .unwrap_or_else(default_terminal_font_features);
 
                 let font_weight = terminal_settings.font_weight.unwrap_or_default();
 
@@ -1583,7 +1629,6 @@ impl Element for TerminalElement {
                     ..Default::default()
                 };
 
-                let text_system = cx.text_system();
                 let player_color = theme.players().local();
                 let match_color = theme.colors().search_match_background;
                 let gutter;
@@ -1591,12 +1636,7 @@ impl Element for TerminalElement {
                     let rem_size = window.rem_size();
                     let font_pixels = text_style.font_size.to_pixels(rem_size);
                     let line_height = f32::from(font_pixels) * line_height;
-                    let font_id = cx.text_system().resolve_font(&text_style.font());
-
-                    let cell_width = text_system
-                        .advance(font_id, font_pixels, 'm')
-                        .unwrap()
-                        .width;
+                    let cell_width = resolve_cell_width(&text_style.font(), font_pixels, cx);
                     gutter = cell_width;
 
                     let mut size = bounds.size;

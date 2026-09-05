@@ -493,7 +493,6 @@ mod tests {
         vte::ansi::Handler,
     };
     use regex::Regex;
-    use settings::{self, Settings, SettingsContent};
     use std::{cell::RefCell, ops::RangeInclusive, path::PathBuf, rc::Rc};
     use url::Url;
     use util::paths::PathWithPosition;
@@ -1146,7 +1145,6 @@ mod tests {
                 index::{Column, Point as AlacPoint},
                 term::{Term, test::mock_term},
             };
-            use settings::{self, Settings, SettingsContent};
             use std::{cell::RefCell, rc::Rc};
             use util_macros::perf;
 
@@ -1327,11 +1325,7 @@ mod tests {
                 thread_local! {
                     static TEST_REGEX_SEARCHES: RefCell<RegexSearches> =
                         RefCell::new({
-                            let default_settings_content: Rc<SettingsContent> =
-                                settings::parse_json_with_comments(&settings::default_settings())
-                                    .unwrap();
-                            let default_terminal_settings =
-                                TerminalSettings::from_settings(&default_settings_content);
+                            let default_terminal_settings = TerminalSettings::default();
 
                             RegexSearches::new(
                                 &default_terminal_settings.path_hyperlink_regexes,
@@ -1922,9 +1916,7 @@ mod tests {
         thread_local! {
             static TEST_REGEX_SEARCHES: RefCell<RegexSearches> =
                 RefCell::new({
-                    let default_settings_content: Rc<SettingsContent> =
-                        settings::parse_json_with_comments(&settings::default_settings()).unwrap();
-                    let default_terminal_settings = TerminalSettings::from_settings(&default_settings_content);
+                    let default_terminal_settings = TerminalSettings::default();
 
                     RegexSearches::new([
                         RUST_DIAGNOSTIC_REGEX,

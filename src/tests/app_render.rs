@@ -411,7 +411,6 @@ impl Render for ProjectOfferBannerHarness {
 #[gpui::test]
 fn project_offer_actions_remain_visible_when_the_message_is_long(cx: &mut TestAppContext) {
     cx.update(|cx| {
-        settings::init(cx);
         theme_settings::init(theme::LoadThemes::All(Box::new(ZettaAssets)), cx);
         let registry = ThemeRegistry::global(cx);
         GlobalTheme::update_theme(cx, registry.get("One Light").unwrap());

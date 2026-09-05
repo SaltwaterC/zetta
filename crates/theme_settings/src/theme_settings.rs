@@ -5,12 +5,13 @@
 //! This crate provides theme settings integration for Zed,
 //! bridging the theme system with the settings infrastructure.
 
+mod content_into_gpui;
 mod schema;
 mod settings;
 
 use std::sync::Arc;
 
-use ::settings::{IntoGpui, Settings, SettingsStore};
+use crate::content_into_gpui::IntoGpui;
 use anyhow::{Context as _, Result};
 use gpui::{App, Font, HighlightStyle, Pixels, Refineable, px};
 use gpui_util::ResultExt;
@@ -36,7 +37,7 @@ pub use crate::settings::{
     buffer_line_height_from_settings, clamp_font_size, default_theme,
     observe_buffer_font_size_adjustment, reset_agent_buffer_font_size, reset_agent_ui_font_size,
     reset_buffer_font_size, reset_git_commit_buffer_font_size, reset_markdown_preview_font_size,
-    reset_ui_font_size, set_icon_theme, set_mode, set_theme, setup_ui_font,
+    reset_ui_font_size, setup_ui_font,
 };
 pub use theme::UiDensity;
 
@@ -69,6 +70,10 @@ impl ThemeSettingsProvider for ThemeSettingsProviderImpl {
 /// This is the full initialization for the application. It calls [`theme::init`]
 /// and then wires up settings observation for theme/font changes.
 pub fn init(themes_to_load: LoadThemes, cx: &mut App) {
+    // The settings store used to install this global when the setting was
+    // registered with it. Nothing else does now, and everything below reads it.
+    ThemeSettings::init_global(cx);
+
     let load_user_themes = matches!(&themes_to_load, LoadThemes::All(_));
 
     theme::init(themes_to_load, cx);
@@ -101,7 +106,7 @@ pub fn init(themes_to_load: LoadThemes, cx: &mut App) {
         settings.theme_overrides.clone(),
     );
 
-    cx.observe_global::<SettingsStore>(move |cx| {
+    cx.observe_global::<ThemeSettings>(move |cx| {
         let settings = ThemeSettings::get_global(cx);
 
         let buffer_font_size_settings = settings.buffer_font_size_settings();
@@ -374,7 +379,7 @@ pub fn refine_theme(theme: &ThemeContent) -> Theme {
 /// Merges player color overrides into the given [`PlayerColors`].
 pub fn merge_player_colors(
     player_colors: &mut PlayerColors,
-    user_player_colors: &[::settings::PlayerColorContent],
+    user_player_colors: &[settings_content::PlayerColorContent],
 ) {
     if user_player_colors.is_empty() {
         return;
@@ -413,7 +418,7 @@ pub fn merge_player_colors(
 /// Merges accent color overrides into the given [`AccentColors`].
 pub fn merge_accent_colors(
     accent_colors: &mut AccentColors,
-    user_accent_colors: &[::settings::AccentContent],
+    user_accent_colors: &[settings_content::AccentContent],
 ) {
     if user_accent_colors.is_empty() {
         return;

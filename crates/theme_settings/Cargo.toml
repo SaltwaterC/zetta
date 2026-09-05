@@ -26,7 +26,7 @@ nonminimal_bool = "allow"
 
 [features]
 default = []
-test-support = ["gpui/test-support", "settings/test-support", "theme/test-support"]
+test-support = ["gpui/test-support", "theme/test-support"]
 
 [lib]
 path = "src/theme_settings.rs"
@@ -44,10 +44,9 @@ schemars = { version = "1.0", features = ["indexmap2"] }
 serde = { version = "1.0.221", features = ["derive", "rc"] }
 serde_json = { version = "1.0.144", features = ["preserve_order", "raw_value"] }
 serde_json_lenient = { version = "0.2", features = ["preserve_order", "raw_value"] }
-settings = { path = "../settings" }
+settings_content = { path = "../settings_content" }
 theme = { path = "../theme" }
 uuid = { version = "1.1.2", features = ["v4", "v5", "v7", "serde"] }
 
 [dev-dependencies]
 gpui = { path = "../gpui", default-features = false, features = ["test-support"] }
-settings = { path = "../settings", features = ["test-support"] }

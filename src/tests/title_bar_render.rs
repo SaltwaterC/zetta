@@ -408,7 +408,6 @@ fn assert_title_bar_layout(compact_mode: bool, cx: &mut gpui::TestAppContext) {
 #[gpui::test]
 fn right_title_bar_controls_stay_at_the_window_edge_in_both_modes(cx: &mut gpui::TestAppContext) {
     cx.update(|cx| {
-        settings::init(cx);
         theme_settings::init(theme::LoadThemes::JustBase, cx);
     });
     for compact_mode in [false, true] {
