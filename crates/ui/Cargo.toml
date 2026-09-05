@@ -1,0 +1,61 @@
+[package]
+name = "ui"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "GPL-3.0-or-later"
+
+# Resolved from `zed/Cargo.toml`'s `[workspace.lints]`, which a fork outside
+# that workspace cannot inherit. Keep it in step when syncing.
+[lints.rust]
+unexpected_cfgs = { level = "allow" }
+
+[lints.clippy]
+dbg_macro = "deny"
+todo = "deny"
+declare_interior_mutable_const = "deny"
+redundant_clone = "deny"
+disallowed_methods = "deny"
+style = { level = "allow", priority = -1 }
+type_complexity = "allow"
+let_underscore_future = "allow"
+single_range_in_vec_init = "allow"
+too_many_arguments = "allow"
+large_enum_variant = "allow"
+nonminimal_bool = "allow"
+
+[lib]
+name = "ui"
+path = "src/ui.rs"
+
+[dependencies]
+chrono = { version = "0.4", features = ["serde"] }
+component = { path = "../component" }
+documented = "0.10"
+gpui = { path = "../gpui", default-features = false }
+gpui_macros = { path = "../gpui_macros" }
+icons = { path = "../../zed/crates/icons" }
+itertools = "0.14.0"
+log = { version = "0.4.16", features = ["kv_unstable_serde", "serde"] }
+menu = { path = "../menu" }
+num-format = "0.4.4"
+schemars = { version = "1.0", features = ["indexmap2"] }
+serde = { version = "1.0.221", features = ["derive", "rc"] }
+smallvec = { version = "1.6", features = ["union", "const_new"] }
+strum = { version = "0.28", features = ["derive"] }
+theme = { path = "../theme" }
+ui_macros = { path = "../../zed/crates/ui_macros" }
+web-time = "1.1.0"
+gpui_util = { path = "../../zed/crates/gpui_util" }
+
+[dev-dependencies]
+gpui = { path = "../gpui", default-features = false, features = ["test-support"] }
+settings = { path = "../settings", features = ["test-support"] }
+theme_settings = { path = "../theme_settings" }
+
+[package.metadata.cargo-shear]
+ignored = ["log"]
+
+[features]
+default = []
+derive_inspector_reflection = []

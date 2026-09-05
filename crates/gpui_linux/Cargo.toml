@@ -56,9 +56,9 @@ bytemuck = "1"
 collections = { path = "../../zed/crates/collections" }
 image = { version = "0.25.1", default-features = false, features = ["bmp", "dds", "exr", "ff", "gif", "hdr", "ico", "jpeg", "png", "pnm", "qoi", "rayon", "tga", "tiff", "webp"] }
 futures = "0.3.32"
-gpui = { path = "../../zed/crates/gpui", default-features = false }
+gpui = { path = "../gpui", default-features = false }
 gpui_util = { path = "../../zed/crates/gpui_util" }
-gpui_wgpu = { path = "../../zed/crates/gpui_wgpu", optional = true, features = ["font-kit"] }
+gpui_wgpu = { path = "../gpui_wgpu", optional = true, features = ["font-kit"] }
 http_client = { path = "../../zed/crates/http_client" }
 itertools = "0.14.0"
 libc = "0.2"

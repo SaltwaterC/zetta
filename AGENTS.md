@@ -27,6 +27,16 @@ git submodule update --init
   explicitly requires an upstream dependency change.
 - Code under `crates/` is maintained as part of Zetta and may be changed when
   the application needs corresponding terminal or platform behavior.
+- A change to a `zed/` crate is made by forking it under `crates/`, never by
+  editing the submodule. Cargo resolves a dependency edge from the manifest that
+  declares it, so forking a crate that other `zed/` crates depend on means
+  forking those too — `gpui` needed twenty-two of them. Those carry no patches
+  and exist only to route the edge; `crates/UPSTREAM_AUDIT.md` lists them under
+  "Routing-only forks" and each says so in its own `UPSTREAM.md`. Do not add
+  behavior to a routing-only fork, and do not try to avoid one with a
+  `.cargo/config.toml` path override: that was tried, it silently rerouted
+  `gpui_platform` to the upstream copy, and Cargo documents it as slated to
+  become a hard error.
 - Keep platform-specific behavior behind the existing `cfg` boundaries. Linux
   defaults to Wayland; the `x11` feature enables the X11 backend.
 - Preserve unrelated working-tree changes. Do not rewrite or clean files that

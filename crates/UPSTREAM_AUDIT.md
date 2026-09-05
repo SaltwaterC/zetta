@@ -18,6 +18,53 @@ is still upstream `master`, so that fork has no upstream to catch up with.
 | `crates/gpui_linux` | `zed/crates/gpui_linux@2890c340` | Executor cap, keyboard and serial fixes, Wayland diagnostics and resize safety, X11 exposure repainting, Zenity fallback, and Zetta-specific platform behavior. |
 | `crates/gpui_macos` | `zed/crates/gpui_macos@2890c340` | Input-source lifetime/context gating, keyboard-layout recovery, pasteboard lifetime safety, native menu/profile shortcuts, and related tests. The Metal renderer is no longer forked: it now comes from the submodule's `gpui_apple`. |
 | `crates/gpui_windows` | `zed/crates/gpui_windows@2890c340` | Correct maximize/restore toggle, DirectX scene annotations, one-shot attention flashing, inactive popup behavior, and input activation fixes. |
+| `crates/gpui` | `zed/crates/gpui@2890c340` | Unstable sort for the three sprite vectors in `Scene::finish`. |
+
+### Routing-only forks
+
+These carry **no** Zetta patches. They exist because `gpui` is not a leaf: each
+of them sits between Zetta and `gpui`, and Cargo resolves a dependency edge from
+the manifest that declares it, so leaving any of them in the submodule pulls a
+second, incompatible copy of `gpui` into the build. A path override in
+`.cargo/config.toml` was tried first and rejected — it rearranged the crate
+graph and Cargo documents it as slated to become a hard error.
+
+Synchronize them by straight copy from upstream, then reapply the mechanical
+adjustments recorded in each one's `UPSTREAM.md` (resolved `workspace = true`
+dependencies and `[lints]`, `publish = false`, and relocated `include_*!` and
+`rust_embed` paths). If Zetta ever stops depending on one, or upstream drops its
+own `gpui` dependency, delete the fork rather than keeping it in step.
+
+| Routing-only fork | Lines | Reaches `gpui` via |
+| --- | ---: | --- |
+| `crates/ui` | 28,586 | direct |
+| `crates/settings_content` | 11,803 | direct |
+| `crates/git` | 9,525 | direct |
+| `crates/migrator` | 9,010 | `settings_content` |
+| `crates/settings` | 8,561 | direct |
+| `crates/fs` | 6,908 | direct |
+| `crates/text` | 6,592 | direct |
+| `crates/theme` | 5,872 | direct |
+| `crates/gpui_wgpu` | 4,840 | direct |
+| `crates/gpui_web` | 4,474 | direct |
+| `crates/rope` | 4,132 | direct |
+| `crates/gpui_macros` | 3,317 | direct |
+| `crates/task` | 3,164 | direct |
+| `crates/theme_settings` | 2,320 | direct |
+| `crates/gpui_apple` | 2,013 | direct |
+| `crates/zed_actions` | 998 | direct |
+| `crates/askpass` | 748 | direct |
+| `crates/component` | 530 | direct |
+| `crates/syntax_theme` | 345 | direct |
+| `crates/release_channel` | 308 | direct |
+| `crates/assets` | 65 | direct |
+| `crates/menu` | 37 | direct |
+
+Twelve of these are reachable only through `settings` and `theme_settings`
+(`settings`, `settings_content`, `migrator`, `fs`, `git`, `askpass`, `rope`,
+`text`, and their dependents). Replacing Zed's settings layer with Zetta's own
+`Config` would let all of them be deleted; see
+`docs/performance-review-2026-09-04.md`.
 
 Per-fork synchronization notes live in each fork directory's `UPSTREAM.md`.
 `target/` directories and license-only differences are not fork patches.

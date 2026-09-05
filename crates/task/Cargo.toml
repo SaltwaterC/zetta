@@ -1,0 +1,57 @@
+[package]
+name = "task"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "GPL-3.0-or-later"
+
+[features]
+test-support = [
+    "gpui/test-support",
+    "util/test-support"
+]
+
+[lib]
+path = "src/task.rs"
+doctest = false
+
+# Resolved from `zed/Cargo.toml`'s `[workspace.lints]`, which a fork outside
+# that workspace cannot inherit. Keep it in step when syncing.
+[lints.rust]
+unexpected_cfgs = { level = "allow" }
+
+[lints.clippy]
+dbg_macro = "deny"
+todo = "deny"
+declare_interior_mutable_const = "deny"
+redundant_clone = "deny"
+disallowed_methods = "deny"
+style = { level = "allow", priority = -1 }
+type_complexity = "allow"
+let_underscore_future = "allow"
+single_range_in_vec_init = "allow"
+too_many_arguments = "allow"
+large_enum_variant = "allow"
+nonminimal_bool = "allow"
+
+[dependencies]
+anyhow = "1.0.86"
+collections = { version = "0.1.0", path = "../../zed/crates/collections" }
+futures = "0.3.32"
+gpui = { path = "../gpui", default-features = false }
+hex = "0.4.3"
+log = { version = "0.4.16", features = ["kv_unstable_serde", "serde"] }
+parking_lot = "0.12.1"
+proto = { path = "../../zed/crates/proto" }
+schemars = { version = "1.0", features = ["indexmap2"] }
+serde = { version = "1.0.221", features = ["derive", "rc"] }
+serde_json = { version = "1.0.144", features = ["preserve_order", "raw_value"] }
+serde_json_lenient = { version = "0.2", features = ["preserve_order", "raw_value"] }
+sha2 = "0.10"
+shellexpand = "3.1"
+util = { path = "../../zed/crates/util" }
+zed_actions = { path = "../zed_actions" }
+
+[dev-dependencies]
+gpui = { path = "../gpui", default-features = false, features = ["test-support"] }
+pretty_assertions = { version = "1.3.0", features = ["unstable"] }

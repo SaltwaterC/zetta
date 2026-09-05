@@ -157,13 +157,40 @@ impl LayoutPoint {
     }
 }
 
+/// How one cell is styled, as everything a run has to agree on.
+///
+/// Deliberately not a [`TextRun`]. A `TextRun` owns a [`Font`], so building one
+/// per cell clones the family `SharedString`, the `FontFeatures` `Arc` and the
+/// `FontFallbacks` `Arc`, and comparing two of them compares the family *by
+/// content* and both feature and fallback vectors *element-wise, including their
+/// `String`s* — for every cell of every pane on every frame, thousands of cells
+/// a frame. A configured `font_fallbacks` list turned that into one string
+/// comparison per fallback per cell, so the cost scaled with the user's
+/// configuration rather than staying fixed.
+///
+/// Every cell of a pane draws with the same base font, so the only parts of it a
+/// cell can vary are the weight and the style. Those travel here as two `Copy`
+/// fields, which makes the whole struct a fixed-size scalar comparison with no
+/// heap reads, and the `Font` is built once per run in
+/// [`BatchedTextRun::text_run`] instead.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CellStyle {
+    pub color: Hsla,
+    pub underline: Option<UnderlineStyle>,
+    pub strikethrough: Option<StrikethroughStyle>,
+    pub weight: FontWeight,
+    pub font_style: FontStyle,
+}
+
 /// A batched text run that combines multiple adjacent cells with the same style
 #[derive(Debug)]
 pub struct BatchedTextRun {
     pub start_point: LayoutPoint,
     pub text: String,
     pub cell_count: usize,
-    pub style: TextRun,
+    pub cell_style: CellStyle,
+    /// The run's length in bytes, which is what [`TextRun::len`] wants.
+    pub len: usize,
     pub font_size: AbsoluteLength,
 }
 
@@ -171,7 +198,7 @@ impl BatchedTextRun {
     fn new_from_char(
         start_point: LayoutPoint,
         c: char,
-        style: TextRun,
+        cell_style: CellStyle,
         font_size: AbsoluteLength,
     ) -> Self {
         let mut text = String::with_capacity(100); // Pre-allocate for typical line length
@@ -180,17 +207,14 @@ impl BatchedTextRun {
             start_point,
             text,
             cell_count: 1,
-            style,
+            cell_style,
+            len: c.len_utf8(),
             font_size,
         }
     }
 
-    fn can_append(&self, other_style: &TextRun) -> bool {
-        self.style.font == other_style.font
-            && self.style.color == other_style.color
-            && self.style.background_color == other_style.background_color
-            && self.style.underline == other_style.underline
-            && self.style.strikethrough == other_style.strikethrough
+    fn can_append(&self, other_style: &CellStyle) -> bool {
+        self.cell_style == *other_style
     }
 
     fn append_char(&mut self, c: char) {
@@ -208,11 +232,33 @@ impl BatchedTextRun {
         if counts_cell {
             self.cell_count += 1;
         }
-        self.style.len += c.len_utf8();
+        self.len += c.len_utf8();
+    }
+
+    /// The run's `TextRun`, built from the pane's base font.
+    ///
+    /// `base_font` is the pane's font at its configured weight and style; this
+    /// applies the cell's own weight and style over it. The caller builds it
+    /// once for the whole pane, so this is the only place a `Font` is cloned on
+    /// the cell path — once per run rather than once per cell.
+    fn text_run(&self, base_font: &Font) -> TextRun {
+        TextRun {
+            len: self.len,
+            color: self.cell_style.color,
+            background_color: None,
+            font: Font {
+                weight: self.cell_style.weight,
+                style: self.cell_style.font_style,
+                ..base_font.clone()
+            },
+            underline: self.cell_style.underline,
+            strikethrough: self.cell_style.strikethrough,
+        }
     }
 
     pub fn paint(
         &self,
+        base_font: &Font,
         origin: GpuiPoint<Pixels>,
         dimensions: &TerminalBounds,
         window: &mut Window,
@@ -231,7 +277,7 @@ impl BatchedTextRun {
                 // run of every pane on every frame.
                 SharedString::from(self.text.as_str()),
                 self.font_size.to_pixels(window.rem_size()),
-                std::slice::from_ref(&self.style),
+                std::slice::from_ref(&self.text_run(base_font)),
                 Some(dimensions.cell_width),
             )
             .paint(
@@ -1094,7 +1140,7 @@ impl TerminalElement {
         hyperlink: Option<(HighlightStyle, &Range)>,
         minimum_contrast: f32,
         contrast_cache: &mut ContrastCache,
-    ) -> TextRun {
+    ) -> CellStyle {
         let skip_contrast = Self::is_app_chosen_exact_color(&fg);
         let mut fg = convert_color(&fg, colors);
         let bg = convert_color(&bg, colors);
@@ -1126,23 +1172,18 @@ impl TerminalElement {
             text_style.font_weight
         };
 
-        let style = if cell.is_italic() {
+        let font_style = if cell.is_italic() {
             FontStyle::Italic
         } else {
             FontStyle::Normal
         };
 
-        let mut result = TextRun {
-            len: cell.character().len_utf8(),
+        let mut result = CellStyle {
             color: fg,
-            background_color: None,
-            font: Font {
-                weight,
-                style,
-                ..text_style.font()
-            },
             underline,
             strikethrough,
+            weight,
+            font_style,
         };
 
         if let Some((style, range)) = hyperlink
@@ -1994,8 +2035,11 @@ impl Element for TerminalElement {
 
                     // Paint batched text runs instead of individual cells
                     let text_paint_start = debug_logging.then(Instant::now);
+                    // Built once for the pane, not once per cell: each run
+                    // applies its own weight and style over it.
+                    let base_font = layout.base_text_style.font();
                     for batch in &layout.batched_text_runs {
-                        batch.paint(origin, &layout.dimensions, window, cx);
+                        batch.paint(&base_font, origin, &layout.dimensions, window, cx);
                     }
                     paint_grid_layer(
                         &layout.block_element_rects,
@@ -2233,9 +2277,10 @@ impl InputHandler for TerminalInputHandler {
 /// Whether the cell's only contribution to the frame is its background colour,
 /// which the background-region pass already paints.
 ///
-/// A run's `TextRun` never carries a background — `cell_style` leaves
-/// `background_color` unset — so a space that differs from its neighbours only
-/// by background paints nothing as text. Including it is far from free:
+/// A run's `TextRun` never carries a background — [`BatchedTextRun::text_run`]
+/// leaves `background_color` unset, and [`CellStyle`] has no such field — so a
+/// space that differs from its neighbours only by background paints nothing as
+/// text. Including it is far from free:
 /// minimum-contrast adjustment resolves each cell's foreground against its own
 /// background, so neighbouring cells with different backgrounds resolve to
 /// different foregrounds, which breaks run batching. A screen of alternating
@@ -2699,28 +2744,21 @@ mod tests {
         );
     }
 
+    fn test_cell_style(color: Hsla) -> CellStyle {
+        CellStyle {
+            color,
+            underline: None,
+            strikethrough: None,
+            weight: FontWeight::NORMAL,
+            font_style: FontStyle::Normal,
+        }
+    }
+
     #[test]
     fn test_batched_text_run_can_append() {
-        let style1 = TextRun {
-            len: 1,
-            font: font("Helvetica"),
-            color: Hsla::red(),
-            ..Default::default()
-        };
-
-        let style2 = TextRun {
-            len: 1,
-            font: font("Helvetica"),
-            color: Hsla::red(),
-            ..Default::default()
-        };
-
-        let style3 = TextRun {
-            len: 1,
-            font: font("Helvetica"),
-            color: Hsla::blue(), // Different color
-            ..Default::default()
-        };
+        let style1 = test_cell_style(Hsla::red());
+        let style2 = test_cell_style(Hsla::red());
+        let style3 = test_cell_style(Hsla::blue()); // Different color
 
         let font_size = AbsoluteLength::Pixels(px(12.0));
         let batch = BatchedTextRun::new_from_char(LayoutPoint::new(0, 0), 'a', style1, font_size);
@@ -2732,86 +2770,162 @@ mod tests {
         assert!(!batch.can_append(&style3));
     }
 
+    /// Weight and style are what a cell can vary about the pane's font, so they
+    /// are what the batching key has to carry now that the key is no longer a
+    /// whole `Font`. Without them a bold cell would batch into a regular run and
+    /// be painted at the wrong weight.
     #[test]
-    fn test_batched_text_run_append() {
-        let style = TextRun {
-            len: 1,
-            font: font("Helvetica"),
-            color: Hsla::red(),
-            ..Default::default()
+    fn a_run_does_not_batch_across_weight_or_style() {
+        let font_size = AbsoluteLength::Pixels(px(12.0));
+        let regular = test_cell_style(Hsla::red());
+        let batch = BatchedTextRun::new_from_char(LayoutPoint::new(0, 0), 'a', regular, font_size);
+
+        let bold = CellStyle {
+            weight: FontWeight::BOLD,
+            ..regular
+        };
+        let italic = CellStyle {
+            font_style: FontStyle::Italic,
+            ..regular
         };
 
+        assert!(!batch.can_append(&bold));
+        assert!(!batch.can_append(&italic));
+        assert!(batch.can_append(&regular));
+    }
+
+    /// The decoration fields still discriminate. `can_append` is one derived
+    /// comparison now, so this pins that the derive covers every field rather
+    /// than only the colour.
+    #[test]
+    fn a_run_does_not_batch_across_decorations() {
         let font_size = AbsoluteLength::Pixels(px(12.0));
+        let plain = test_cell_style(Hsla::red());
+        let batch = BatchedTextRun::new_from_char(LayoutPoint::new(0, 0), 'a', plain, font_size);
+
+        let underlined = CellStyle {
+            underline: Some(UnderlineStyle {
+                color: Some(Hsla::red()),
+                thickness: px(1.0),
+                wavy: false,
+            }),
+            ..plain
+        };
+        let struck = CellStyle {
+            strikethrough: Some(StrikethroughStyle {
+                color: Some(Hsla::red()),
+                thickness: px(1.0),
+            }),
+            ..plain
+        };
+
+        assert!(!batch.can_append(&underlined));
+        assert!(!batch.can_append(&struck));
+    }
+
+    /// The run's `TextRun` is built at paint time from the pane's base font, so
+    /// the base font's family, features and fallbacks have to survive while the
+    /// cell's own weight and style override the base's.
+    #[test]
+    fn a_runs_text_run_applies_the_cell_weight_over_the_base_font() {
+        let font_size = AbsoluteLength::Pixels(px(12.0));
+        let mut base = font("Helvetica");
+        base.weight = FontWeight::LIGHT;
+        base.features = gpui::FontFeatures::disable_ligatures();
+
+        let cell_style = CellStyle {
+            weight: FontWeight::BOLD,
+            font_style: FontStyle::Italic,
+            ..test_cell_style(Hsla::red())
+        };
         let mut batch =
-            BatchedTextRun::new_from_char(LayoutPoint::new(0, 0), 'a', style, font_size);
+            BatchedTextRun::new_from_char(LayoutPoint::new(0, 0), 'a', cell_style, font_size);
+        batch.append_char('b');
+
+        let text_run = batch.text_run(&base);
+
+        assert_eq!(text_run.font.weight, FontWeight::BOLD);
+        assert_eq!(text_run.font.style, FontStyle::Italic);
+        assert_eq!(text_run.font.family, base.family);
+        assert_eq!(text_run.font.features, base.features);
+        assert_eq!(text_run.color, Hsla::red());
+        // `len` is the run's byte length, which is what shaping consumes.
+        assert_eq!(text_run.len, 2);
+        // A run never carries a background; the background pass paints those.
+        assert_eq!(text_run.background_color, None);
+    }
+
+    #[test]
+    fn test_batched_text_run_append() {
+        let font_size = AbsoluteLength::Pixels(px(12.0));
+        let mut batch = BatchedTextRun::new_from_char(
+            LayoutPoint::new(0, 0),
+            'a',
+            test_cell_style(Hsla::red()),
+            font_size,
+        );
 
         assert_eq!(batch.text, "a");
         assert_eq!(batch.cell_count, 1);
-        assert_eq!(batch.style.len, 1);
+        assert_eq!(batch.len, 1);
 
         batch.append_char('b');
 
         assert_eq!(batch.text, "ab");
         assert_eq!(batch.cell_count, 2);
-        assert_eq!(batch.style.len, 2);
+        assert_eq!(batch.len, 2);
 
         batch.append_char('c');
 
         assert_eq!(batch.text, "abc");
         assert_eq!(batch.cell_count, 3);
-        assert_eq!(batch.style.len, 3);
+        assert_eq!(batch.len, 3);
     }
 
     #[test]
     fn test_batched_text_run_append_char() {
-        let style = TextRun {
-            len: 1,
-            font: font("Helvetica"),
-            color: Hsla::red(),
-            ..Default::default()
-        };
-
         let font_size = AbsoluteLength::Pixels(px(12.0));
-        let mut batch =
-            BatchedTextRun::new_from_char(LayoutPoint::new(0, 0), 'x', style, font_size);
+        let mut batch = BatchedTextRun::new_from_char(
+            LayoutPoint::new(0, 0),
+            'x',
+            test_cell_style(Hsla::red()),
+            font_size,
+        );
 
         assert_eq!(batch.text, "x");
         assert_eq!(batch.cell_count, 1);
-        assert_eq!(batch.style.len, 1);
+        assert_eq!(batch.len, 1);
 
         batch.append_char('y');
 
         assert_eq!(batch.text, "xy");
         assert_eq!(batch.cell_count, 2);
-        assert_eq!(batch.style.len, 2);
+        assert_eq!(batch.len, 2);
 
         // Test with multi-byte character
         batch.append_char('😀');
 
         assert_eq!(batch.text, "xy😀");
         assert_eq!(batch.cell_count, 3);
-        assert_eq!(batch.style.len, 6); // 1 + 1 + 4 bytes for emoji
+        assert_eq!(batch.len, 6); // 1 + 1 + 4 bytes for emoji
     }
 
     #[test]
     fn test_batched_text_run_append_zero_width_char() {
-        let style = TextRun {
-            len: 1,
-            font: font("Helvetica"),
-            color: Hsla::red(),
-            ..Default::default()
-        };
-
         let font_size = AbsoluteLength::Pixels(px(12.0));
-        let mut batch =
-            BatchedTextRun::new_from_char(LayoutPoint::new(0, 0), 'x', style, font_size);
+        let mut batch = BatchedTextRun::new_from_char(
+            LayoutPoint::new(0, 0),
+            'x',
+            test_cell_style(Hsla::red()),
+            font_size,
+        );
 
         let combining = '\u{0301}';
         batch.append_zero_width_chars(&[combining]);
 
         assert_eq!(batch.text, format!("x{}", combining));
         assert_eq!(batch.cell_count, 1);
-        assert_eq!(batch.style.len, 1 + combining.len_utf8());
+        assert_eq!(batch.len, 1 + combining.len_utf8());
     }
 
     /// `layout_grid` extends the trailing background region across horizontally

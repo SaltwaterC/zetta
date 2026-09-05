@@ -19,18 +19,18 @@ x11 = ["gpui_linux/x11"]
 
 [dependencies]
 futures = "0.3.32"
-gpui = { path = "../../zed/crates/gpui", default-features = false }
+gpui = { path = "../gpui", default-features = false }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 gpui_macos = { path = "../gpui_macos", default-features = false }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 gpui_windows = { path = "../gpui_windows", default-features = false }
-gpui = { path = "../../zed/crates/gpui", default-features = false, features = ["windows-manifest"] }
+gpui = { path = "../gpui", default-features = false, features = ["windows-manifest"] }
 
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
 gpui_linux = { path = "../gpui_linux", default-features = false }
 
 [target.'cfg(target_family = "wasm")'.dependencies]
-gpui_web = { path = "../../zed/crates/gpui_web" }
+gpui_web = { path = "../gpui_web" }
 console_error_panic_hook = "0.1.7"

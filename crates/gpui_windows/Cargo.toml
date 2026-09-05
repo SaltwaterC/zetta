@@ -14,7 +14,7 @@ test-support = ["gpui/test-support"]
 screen-capture = ["gpui/screen-capture", "scap"]
 
 [dependencies]
-gpui = { path = "../../zed/crates/gpui", default-features = false }
+gpui = { path = "../gpui", default-features = false }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 accesskit = { version = "0.24.0", features = ["enumn"] }

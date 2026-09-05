@@ -78,10 +78,10 @@ libc = "0.2"
 log = "0.4"
 async-compression = { version = "0.4", features = ["gzip", "futures-io"] }
 async-tar = "0.6"
-assets = { path = "zed/crates/assets" }
+assets = { path = "crates/assets" }
 futures = "0.3"
 getrandom = "0.3"
-gpui = { path = "zed/crates/gpui", features = ["profiler"] }
+gpui = { path = "crates/gpui", features = ["profiler"] }
 gpui_platform = { path = "crates/gpui_platform", features = ["font-kit"] }
 image = { version = "0.25", default-features = false, features = [
     "bmp",
@@ -93,9 +93,9 @@ image = { version = "0.25", default-features = false, features = [
     "tiff",
     "webp",
 ] }
-menu = { path = "zed/crates/menu" }
+menu = { path = "crates/menu" }
 notify-rust = { version = "4", features = ["preview-macos-un"], optional = true }
-release_channel = { path = "zed/crates/release_channel" }
+release_channel = { path = "crates/release_channel" }
 reqwest_client = { path = "zed/crates/reqwest_client" }
 rust-embed = "8"
 schemars = "1"
@@ -109,14 +109,14 @@ sysinfo = "0.37"
 regex = "1.11"
 strum = "0.28"
 serialport = { version = "4.9", default-features = false, optional = true }
-settings = { path = "zed/crates/settings" }
-task = { path = "zed/crates/task" }
+settings = { path = "crates/settings" }
+task = { path = "crates/task" }
 terminal = { path = "crates/terminal" }
 terminal_view = { path = "crates/terminal_view" }
 tempfile = "3"
 time = { version = "0.3", features = ["formatting", "macros"] }
-theme = { path = "zed/crates/theme" }
-theme_settings = { path = "zed/crates/theme_settings" }
+theme = { path = "crates/theme" }
+theme_settings = { path = "crates/theme_settings" }
 toml = "0.8"
 tree-sitter = { git = "https://github.com/tree-sitter/tree-sitter", rev = "43623ec9bf0eaaf7113285c46e8a09018f181b18", optional = true }
 tree-sitter-bash = { version = "0.25.1", optional = true }
@@ -141,10 +141,10 @@ tree-sitter-yaml = { git = "https://github.com/zed-industries/tree-sitter-yaml",
 tree-sitter-powershell = { version = "0.26", optional = true }
 tree-sitter-batch = { version = "0.11", optional = true }
 tree-sitter-highlight = { git = "https://github.com/tree-sitter/tree-sitter", rev = "43623ec9bf0eaaf7113285c46e8a09018f181b18", optional = true }
-ui = { path = "zed/crates/ui" }
+ui = { path = "crates/ui" }
 util = { path = "zed/crates/util" }
 zeroize = "1"
-zed_actions = { path = "zed/crates/zed_actions" }
+zed_actions = { path = "crates/zed_actions" }
 zmux = { path = "crates/zmux", default-features = false, features = ["scrollback-buffer"] }
 zwt = { path = "crates/zwt", optional = true }
 
@@ -199,7 +199,7 @@ embed-resource = "3"
 # Already in the graph through zmux; a dev-dependency here so tests can generate
 # a throwaway key pair to seal a session key to.
 age = { version = "0.11.1", default-features = false, features = ["armor", "ssh"] }
-gpui = { path = "zed/crates/gpui", features = ["test-support"] }
+gpui = { path = "crates/gpui", features = ["test-support"] }
 
 # Pedantic lints the tree is already clean of, denied so they cannot creep back
 # in one call site at a time. Deliberately not adopted, with the reason:
