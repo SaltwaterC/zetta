@@ -156,6 +156,7 @@ impl Zetta {
         config: Config,
         cx: &mut Context<Self>,
     ) -> Result<()> {
+        crate::process_control::bump_pane_theme_revision();
         self.apply_loaded_configuration(config, cx)?;
         self.configuration_error = None;
         Ok(())

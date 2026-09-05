@@ -161,12 +161,89 @@ pub(crate) struct PtyProcessInfo {
     task: Mutex<Option<Task<()>>>,
     refresh_pending: Mutex<bool>,
     last_refresh: Mutex<Option<Instant>>,
-    // ConPTY only exposes the PID of the process it spawned (the shell); unlike
-    // Unix's `tcgetpgrp`, there is no OS primitive to ask which process currently
-    // owns the terminal. This is a dedicated `System` for periodically walking the
-    // live process tree to approximate an answer (see `resolve_foreground_pid`).
-    #[cfg(windows)]
-    descendant_tree: RwLock<System>,
+}
+
+/// The newest childless descendant of `root`, as ConPTY's stand-in for a
+/// foreground process.
+///
+/// Pure and pid-typed rather than `sysinfo`-typed so it can be tested off
+/// Windows, where the caller above never runs. `children` maps a parent pid to
+/// its children and their start times.
+///
+/// The depth cap is what stops a parent/child cycle — which a recycled pid can
+/// produce between two snapshots — from spinning forever.
+#[cfg(any(windows, test))]
+fn newest_leaf_descendant(children: &collections::HashMap<u32, Vec<(u32, u64)>>, root: u32) -> u32 {
+    const MAX_DEPTH: usize = 32;
+    let mut current = root;
+    for _ in 0..MAX_DEPTH {
+        let Some(newest) = children.get(&current).and_then(|children| {
+            children
+                .iter()
+                .max_by_key(|(_, started)| *started)
+                .map(|(pid, _)| *pid)
+        }) else {
+            break;
+        };
+        current = newest;
+    }
+    current
+}
+
+/// One system-wide process snapshot shared by every terminal in the process.
+#[cfg(windows)]
+struct WindowsProcessTree {
+    system: System,
+    children: collections::HashMap<u32, Vec<(u32, u64)>>,
+    refreshed: Option<Instant>,
+}
+
+#[cfg(windows)]
+static WINDOWS_PROCESS_TREE: std::sync::LazyLock<Mutex<WindowsProcessTree>> =
+    std::sync::LazyLock::new(|| {
+        Mutex::new(WindowsProcessTree {
+            system: System::new(),
+            children: collections::HashMap::default(),
+            refreshed: None,
+        })
+    });
+
+#[cfg(windows)]
+impl WindowsProcessTree {
+    /// The parent-to-children index, re-enumerating the system only when the
+    /// snapshot has aged out.
+    ///
+    /// The index is built once per snapshot; the walk used to filter every
+    /// process in the system once per level, up to thirty-two times per call.
+    fn children_refreshed_at_most_every(
+        &mut self,
+        max_age: Duration,
+    ) -> &collections::HashMap<u32, Vec<(u32, u64)>> {
+        let fresh = self
+            .refreshed
+            .is_some_and(|refreshed| refreshed.elapsed() < max_age);
+        if fresh {
+            return &self.children;
+        }
+        // `remove_dead_processes` keeps this bounded to live processes rather
+        // than accumulating entries for every process that ever ran (#58651).
+        self.system.refresh_processes_specifics(
+            ProcessesToUpdate::All,
+            true,
+            ProcessRefreshKind::nothing(),
+        );
+        self.children.clear();
+        for process in self.system.processes().values() {
+            if let Some(parent) = process.parent() {
+                self.children
+                    .entry(parent.as_u32())
+                    .or_default()
+                    .push((process.pid().as_u32(), process.start_time()));
+            }
+        }
+        self.refreshed = Some(Instant::now());
+        &self.children
+    }
 }
 
 const PROCESS_INFO_REFRESH_INTERVAL: Duration = Duration::from_millis(500);
@@ -224,8 +301,6 @@ impl PtyProcessInfo {
             task: Mutex::new(None),
             refresh_pending: Mutex::new(false),
             last_refresh: Mutex::new(None),
-            #[cfg(windows)]
-            descendant_tree: RwLock::new(System::new()),
         }
     }
 
@@ -261,34 +336,21 @@ impl PtyProcessInfo {
 
     /// Best-effort stand-in for Unix's `tcgetpgrp`: walk the live process tree
     /// from the shell down to its most recently started childless descendant,
-    /// on the assumption that's the interactively running command. Refreshing
-    /// with `ProcessesToUpdate::All` and `remove_dead_processes = true` keeps
-    /// `descendant_tree` bounded to currently-alive processes rather than
-    /// accumulating stale entries (see the accumulation concern in `refresh`
-    /// below / #58651).
+    /// on the assumption that's the interactively running command.
+    ///
+    /// The snapshot is shared by every terminal in the process and reused for
+    /// [`PROCESS_INFO_REFRESH_INTERVAL`]. It used to be per-terminal, so ten
+    /// panes meant ten system-wide process enumerations every 500 ms for the
+    /// same answer.
     #[cfg(windows)]
     fn resolve_foreground_pid(&self) -> Option<Pid> {
-        const MAX_DEPTH: usize = 32;
         let shell_pid = self.pid_getter.pid()?;
-        let mut system = self.descendant_tree.write();
-        system.refresh_processes_specifics(
-            ProcessesToUpdate::All,
-            true,
-            ProcessRefreshKind::nothing(),
-        );
-        let mut current = shell_pid;
-        for _ in 0..MAX_DEPTH {
-            let Some(child) = system
-                .processes()
-                .values()
-                .filter(|process| process.parent() == Some(current))
-                .max_by_key(|process| process.start_time())
-            else {
-                break;
-            };
-            current = child.pid();
-        }
-        Some(current)
+        let mut tree = WINDOWS_PROCESS_TREE.lock();
+        let children = tree.children_refreshed_at_most_every(PROCESS_INFO_REFRESH_INTERVAL);
+        Some(Pid::from_u32(newest_leaf_descendant(
+            children,
+            shell_pid.as_u32(),
+        )))
     }
 
     /// Returns whether the process currently owning the terminal is the shell
@@ -547,6 +609,42 @@ impl PtyProcessInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ConPTY has no `tcgetpgrp`, so the foreground process is guessed by
+    /// walking to the newest childless descendant. The walk runs only on
+    /// Windows, so these exercise it directly.
+    #[test]
+    fn newest_leaf_descendant_follows_the_most_recently_started_child() {
+        let children = collections::HashMap::from_iter([
+            // The shell started two children; the newer one is the guess.
+            (10u32, vec![(20u32, 100u64), (21u32, 200u64)]),
+            (21, vec![(30, 300)]),
+        ]);
+        assert_eq!(newest_leaf_descendant(&children, 10), 30);
+    }
+
+    #[test]
+    fn newest_leaf_descendant_stops_at_a_childless_process() {
+        let children = collections::HashMap::default();
+        assert_eq!(
+            newest_leaf_descendant(&children, 7),
+            7,
+            "a shell with no children is its own foreground process"
+        );
+    }
+
+    /// A pid recycled between two snapshots can make the index describe a
+    /// cycle. The depth cap is what keeps that from spinning forever.
+    #[test]
+    fn newest_leaf_descendant_terminates_on_a_cycle() {
+        let children =
+            collections::HashMap::from_iter([(1u32, vec![(2u32, 10u64)]), (2, vec![(1, 20)])]);
+        let resolved = newest_leaf_descendant(&children, 1);
+        assert!(
+            resolved == 1 || resolved == 2,
+            "a cycle must terminate at one of its members, got {resolved}"
+        );
+    }
 
     #[cfg(unix)]
     #[test]

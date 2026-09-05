@@ -204,6 +204,9 @@ impl Zetta {
                             let registry = ThemeRegistry::global(cx);
                             registry.remove_user_themes(&theme_names);
                             theme_settings::load_bundled_themes(&registry);
+                            // Installing or removing an extension changes what
+                            // a theme name resolves to.
+                            crate::process_control::bump_pane_theme_revision();
                             this.reload_configuration(&ReloadConfiguration, window, cx);
 
                             let mut themes = ThemeRegistry::global(cx)

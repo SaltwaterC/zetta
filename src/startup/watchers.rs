@@ -8,6 +8,8 @@
 
 use super::*;
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 /// How often the configuration file is checked for changes made outside the
 /// settings UI. The check is metadata-only while the file is unchanged, so it
 /// does not add work to rendering or input handling.
@@ -106,7 +108,14 @@ pub(super) fn start_configuration_watcher(cx: &mut App) {
             cx.background_executor()
                 .timer(CONFIGURATION_FILE_POLL)
                 .await;
-            let changed = config_file_stamp(&config_path);
+            // `cx.spawn` resumes on the foreground thread, so taking these
+            // stamps inline put two or three `stat` calls per second on the
+            // thread that draws. Only a change needs the foreground.
+            let changed = {
+                let config_path = config_path.clone();
+                cx.background_spawn(async move { config_file_stamp(&config_path) })
+                    .await
+            };
             if changed != last_seen {
                 last_seen = changed;
                 if let Err(error) = cx.update(reload_process_configuration) {
@@ -126,7 +135,9 @@ pub(super) fn start_configuration_watcher(cx: &mut App) {
 
             #[cfg(target_os = "linux")]
             {
-                let current_stamp = linux_desktop::desktop_entry_stamp();
+                let current_stamp = cx
+                    .background_spawn(async { linux_desktop::desktop_entry_stamp() })
+                    .await;
                 if current_stamp != desktop_entry_stamp {
                     desktop_entry_stamp = current_stamp;
                     // An installer may atomically replace the entry with
@@ -212,7 +223,54 @@ pub(super) fn start_multiplexer_session_watcher(cx: &mut App) {
     .detach();
 }
 
+/// Whether a catalog read is already running, and whether another was asked for
+/// while it was.
+///
+/// A publish happens on every `TitleChanged` of every background pane, so
+/// several can land in one frame; without this each would start its own read of
+/// the same directory. The same shape as `PtyProcessInfo`'s refresh guard.
+static CATALOG_REFRESH_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+static CATALOG_REFRESH_PENDING: AtomicBool = AtomicBool::new(false);
+
+/// Rebuilds the process-wide reconnect list.
+///
+/// The multiplexer's half of that list costs a `read_dir`, a JSON parse per
+/// published catalog, a `stat` per catalog to tell a Zetta process from the
+/// daemon, and — with session persistence — a read of the encrypted disk
+/// records. That ran on the thread that draws, on every title change of every
+/// background pane. It now runs on the background executor and only the
+/// combining step returns to the foreground.
 pub(crate) fn refresh_process_background_sessions(cx: &mut App) {
+    if CATALOG_REFRESH_IN_FLIGHT.swap(true, Ordering::AcqRel) {
+        CATALOG_REFRESH_PENDING.store(true, Ordering::Release);
+        return;
+    }
+    let no_mux = cx.has_global::<ZettaProcessState>() && cx.global::<ZettaProcessState>().no_mux;
+    cx.spawn(async move |cx| {
+        let multiplexer_entries = if no_mux {
+            Vec::new()
+        } else {
+            cx.background_spawn(async { multiplexer_session_entries() })
+                .await
+        };
+        cx.update(|cx| apply_background_session_entries(multiplexer_entries, cx));
+        CATALOG_REFRESH_IN_FLIGHT.store(false, Ordering::Release);
+        // A publish that arrived while the read was in flight described state
+        // this result cannot include, so it gets its own read rather than being
+        // dropped.
+        if CATALOG_REFRESH_PENDING.swap(false, Ordering::AcqRel) {
+            cx.update(refresh_process_background_sessions);
+        }
+    })
+    .detach();
+}
+
+/// Combines the sessions this process holds with the ones the read found, and
+/// publishes the result. The foreground half, kept small on purpose.
+fn apply_background_session_entries(
+    multiplexer_entries: Vec<ProcessBackgroundSessionEntry>,
+    cx: &mut App,
+) {
     let entities = process_zetta_entities(cx);
     let mut entries = Vec::new();
     for zetta in &entities {
@@ -222,10 +280,7 @@ pub(crate) fn refresh_process_background_sessions(cx: &mut App) {
             |(session_id, title, details)| (runner_id, *session_id, title.clone(), details.clone()),
         ));
     }
-    let no_mux = cx.has_global::<ZettaProcessState>() && cx.global::<ZettaProcessState>().no_mux;
-    if !no_mux {
-        entries.extend(multiplexer_session_entries());
-    }
+    entries.extend(multiplexer_entries);
     if cx.has_global::<ZettaProcessState>() {
         cx.global_mut::<ZettaProcessState>()
             .background_session_entries = entries.into();

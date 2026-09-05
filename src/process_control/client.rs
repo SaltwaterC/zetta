@@ -346,8 +346,18 @@ impl ProcessPaneThemeQuery {
         })
     }
 
-    pub(crate) fn theme_name(&self) -> Result<Option<String>> {
-        send_get_pane_theme_request(&self.endpoint, self.attention_id, self.pane_id)
+    /// The pane's theme, if it has changed since `known_revision`.
+    ///
+    /// Pass `None` to force a full answer regardless of the revision; the
+    /// watcher does that periodically so a revision that was never bumped
+    /// cannot leave an editor showing stale colours indefinitely.
+    pub(crate) fn theme_name(&self, known_revision: Option<u64>) -> Result<PaneThemeAnswer> {
+        send_get_pane_theme_request(
+            &self.endpoint,
+            self.attention_id,
+            self.pane_id,
+            known_revision,
+        )
     }
 }
 
@@ -665,24 +675,46 @@ fn send_list_themes_request(endpoint: &ControlEndpoint) -> Result<Option<Vec<Str
     Ok((response.status == "ok").then_some(response.themes))
 }
 
+/// What a pane-theme query answered.
+#[cfg(feature = "syntax-highlighting")]
+pub(crate) enum PaneThemeAnswer {
+    /// The revision the client already had is still current, so the theme it is
+    /// using is still right. Answered by the connection thread alone.
+    Unchanged,
+    /// The theme as of `revision`. `name` is `None` when the pane has no theme
+    /// of its own.
+    Resolved {
+        name: Option<String>,
+        revision: Option<u64>,
+    },
+}
+
 #[cfg(feature = "syntax-highlighting")]
 fn send_get_pane_theme_request(
     endpoint: &ControlEndpoint,
     attention_id: u64,
     pane_id: Option<u64>,
-) -> Result<Option<String>> {
+    known_revision: Option<u64>,
+) -> Result<PaneThemeAnswer> {
     let response = send_control_request(
         endpoint,
         "get_pane_theme",
         ControlRequest {
             pane_id,
             attention_id: Some(attention_id),
+            pane_theme_revision: known_revision,
             ..Default::default()
         },
     )?;
-    Ok((response.status == "ok")
-        .then_some(response.pane_theme)
-        .flatten())
+    if response.status == "unchanged" {
+        return Ok(PaneThemeAnswer::Unchanged);
+    }
+    Ok(PaneThemeAnswer::Resolved {
+        name: (response.status == "ok")
+            .then_some(response.pane_theme)
+            .flatten(),
+        revision: response.pane_theme_revision,
+    })
 }
 
 fn send_set_overlay_request(

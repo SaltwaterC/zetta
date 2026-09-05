@@ -75,6 +75,17 @@ pub(crate) fn apply_zetta_theme_overrides(theme: &mut Theme) {
     colors.scrollbar_thumb_active_background = colors.text_accent.opacity(0.95);
 }
 
+/// Whether [`apply_zetta_theme_overrides`] would leave this theme unchanged.
+///
+/// Derived from the same expressions the override writes, so the two cannot
+/// disagree about what "already baked" means.
+fn zetta_theme_overrides_are_baked(theme: &Theme) -> bool {
+    let colors = &theme.styles.colors;
+    colors.scrollbar_thumb_background == colors.text_muted.opacity(0.7)
+        && colors.scrollbar_thumb_hover_background == colors.text.opacity(0.85)
+        && colors.scrollbar_thumb_active_background == colors.text_accent.opacity(0.95)
+}
+
 /// Rewrites every registered theme with [`apply_zetta_theme_overrides`] applied.
 ///
 /// The overrides used to be applied at each lookup instead, which cloned a whole
@@ -85,16 +96,25 @@ pub(crate) fn apply_zetta_theme_overrides(theme: &mut Theme) {
 /// Call this after anything that can add themes to the registry; `apply_config_settings`
 /// already does, and every reload path goes through it.
 pub(crate) fn bake_zetta_theme_overrides(registry: &ThemeRegistry) {
+    // Only themes that still need it are cloned. This runs at startup before
+    // the first frame and again on every configuration reload, over every
+    // bundled and installed theme, and a `Theme` clone carries its colours and
+    // its whole syntax map. After the first sweep essentially every theme is
+    // already baked, so the common case becomes three comparisons each.
     let overridden = registry
         .list_names()
         .into_iter()
         .filter_map(|name| registry.get(&name).ok())
+        .filter(|theme| !zetta_theme_overrides_are_baked(theme))
         .map(|theme| {
             let mut theme = theme.as_ref().clone();
             apply_zetta_theme_overrides(&mut theme);
             theme
         })
         .collect::<Vec<_>>();
+    if overridden.is_empty() {
+        return;
+    }
     registry.insert_themes(overridden);
 }
 

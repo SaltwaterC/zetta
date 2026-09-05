@@ -21,6 +21,7 @@ fn pane_control_responses_round_trip_labels_and_structured_errors() {
         run_id: None,
         themes: Vec::new(),
         pane_theme: None,
+        pane_theme_revision: None,
         silent_mode: false,
         pane_labels: vec!["Pane 1".to_owned(), "api".to_owned()],
         error: Some(ControlError {
@@ -42,6 +43,7 @@ fn silent_mode_response_round_trips_its_state() {
         run_id: None,
         themes: Vec::new(),
         pane_theme: None,
+        pane_theme_revision: None,
         silent_mode: true,
         pane_labels: Vec::new(),
         error: None,

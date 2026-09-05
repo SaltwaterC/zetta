@@ -377,8 +377,9 @@ fn control_server_delivers_the_originating_pane_theme() {
         serde_json::from_slice(&fs::read(endpoint_path).unwrap()).unwrap();
 
     let client_endpoint = endpoint.clone();
-    let client =
-        thread::spawn(move || send_get_pane_theme_request(&client_endpoint, 42, Some(9)).unwrap());
+    let client = thread::spawn(move || {
+        send_get_pane_theme_request(&client_endpoint, 42, Some(9), None).unwrap()
+    });
     let command = futures::executor::block_on(received.next()).unwrap();
     let ProcessControlCommand::GetPaneTheme {
         attention_id,
@@ -391,10 +392,13 @@ fn control_server_delivers_the_originating_pane_theme() {
     assert_eq!(attention_id, 42);
     assert_eq!(pane_id, Some(9));
     completion.send(Ok("One Dark".to_owned())).unwrap();
-    assert_eq!(client.join().unwrap().as_deref(), Some("One Dark"));
+    let PaneThemeAnswer::Resolved { name, .. } = client.join().unwrap() else {
+        panic!("a query with no known revision must be answered outright");
+    };
+    assert_eq!(name.as_deref(), Some("One Dark"));
 
     let legacy_client =
-        thread::spawn(move || send_get_pane_theme_request(&endpoint, 42, None).unwrap());
+        thread::spawn(move || send_get_pane_theme_request(&endpoint, 42, None, None).unwrap());
     let command = futures::executor::block_on(received.next()).unwrap();
     let ProcessControlCommand::GetPaneTheme {
         attention_id,
@@ -407,7 +411,10 @@ fn control_server_delivers_the_originating_pane_theme() {
     assert_eq!(attention_id, 42);
     assert_eq!(pane_id, None);
     completion.send(Ok("One Dark".to_owned())).unwrap();
-    assert_eq!(legacy_client.join().unwrap().as_deref(), Some("One Dark"));
+    let PaneThemeAnswer::Resolved { name, .. } = legacy_client.join().unwrap() else {
+        panic!("a query with no known revision must be answered outright");
+    };
+    assert_eq!(name.as_deref(), Some("One Dark"));
 }
 
 #[test]
@@ -654,4 +661,90 @@ fn control_server_delivers_authenticated_worktree_name_set_and_clear_requests() 
     assert_eq!(request, clear);
     completion.send(true).unwrap();
     assert!(client.join().unwrap());
+}
+
+/// The revision gate is what keeps an idle `zetta vi` from waking the thread
+/// that draws twice a second, so the property worth pinning is that an
+/// up-to-date client is answered *without any command reaching the main loop*.
+///
+/// The revision is process-wide and other tests run in parallel, so one of them
+/// can bump between reading it here and the server reading it. That shows up as
+/// a dispatched query rather than a wrong answer; the attempt is serviced and
+/// retried rather than being allowed to fail the run intermittently.
+#[test]
+fn a_current_revision_is_answered_without_reaching_the_main_loop() {
+    let (commands, mut received) = futures::channel::mpsc::unbounded();
+    let directory = tempfile::tempdir().unwrap();
+    let endpoint_path = directory.path().join("control.json");
+    let _server = ProcessControlServer::start_at(commands, endpoint_path.clone()).unwrap();
+    let endpoint: ControlEndpoint =
+        serde_json::from_slice(&fs::read(endpoint_path).unwrap()).unwrap();
+
+    for _ in 0..16 {
+        let current = crate::process_control::pane_theme_revision();
+        let (finished, answers) = std::sync::mpsc::channel();
+        let query_endpoint = endpoint.clone();
+        thread::spawn(move || {
+            let answer =
+                send_get_pane_theme_request(&query_endpoint, 42, Some(9), Some(current)).unwrap();
+            let _ = finished.send(answer);
+        });
+
+        // Either the connection thread answered on its own, or a concurrent
+        // bump made this query stale and it dispatched. Waiting on both avoids
+        // joining a client that is still blocked on a completion.
+        let answer = loop {
+            if let Ok(answer) = answers.try_recv() {
+                break answer;
+            }
+            if let Ok(ProcessControlCommand::GetPaneTheme { completion, .. }) = received.try_recv()
+            {
+                completion.send(Ok("One Dark".to_owned())).unwrap();
+            }
+            thread::sleep(std::time::Duration::from_millis(1));
+        };
+
+        if matches!(answer, PaneThemeAnswer::Unchanged) {
+            assert!(
+                received.try_recv().is_err(),
+                "an unchanged answer must not dispatch to the main loop"
+            );
+            return;
+        }
+    }
+    panic!("a query at the current revision was never answered as unchanged");
+}
+
+/// The gate must not swallow a real change: once the revision moves, the same
+/// client gets a full answer again.
+#[test]
+fn a_stale_revision_is_dispatched_and_answered() {
+    let (commands, mut received) = futures::channel::mpsc::unbounded();
+    let directory = tempfile::tempdir().unwrap();
+    let endpoint_path = directory.path().join("control.json");
+    let _server = ProcessControlServer::start_at(commands, endpoint_path.clone()).unwrap();
+    let endpoint: ControlEndpoint =
+        serde_json::from_slice(&fs::read(endpoint_path).unwrap()).unwrap();
+
+    let stale = crate::process_control::pane_theme_revision();
+    crate::process_control::bump_pane_theme_revision();
+    assert_ne!(crate::process_control::pane_theme_revision(), stale);
+
+    let client = thread::spawn(move || {
+        send_get_pane_theme_request(&endpoint, 42, Some(9), Some(stale)).unwrap()
+    });
+    let command = futures::executor::block_on(received.next()).unwrap();
+    let ProcessControlCommand::GetPaneTheme { completion, .. } = command else {
+        panic!("a stale revision must dispatch a pane theme query");
+    };
+    completion.send(Ok("One Dark".to_owned())).unwrap();
+
+    let PaneThemeAnswer::Resolved { name, revision } = client.join().unwrap() else {
+        panic!("a stale revision must be answered with the theme");
+    };
+    assert_eq!(name.as_deref(), Some("One Dark"));
+    assert!(
+        revision.is_some_and(|revision| revision > stale),
+        "the answer must carry the revision it was resolved at"
+    );
 }

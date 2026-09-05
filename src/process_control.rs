@@ -28,6 +28,7 @@ use zeroize::{Zeroize as _, Zeroizing};
 
 #[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
+use std::sync::atomic::{self, AtomicU64};
 #[cfg(windows)]
 use uds_windows::{UnixListener, UnixStream};
 
@@ -57,6 +58,8 @@ mod decode;
 mod endpoint;
 mod server;
 
+#[cfg(feature = "syntax-highlighting")]
+pub(crate) use client::PaneThemeAnswer;
 #[cfg(feature = "syntax-highlighting")]
 pub(crate) use client::ProcessPaneThemeQuery;
 pub(crate) use client::{
@@ -104,7 +107,9 @@ pub(crate) use server::ProcessControlServer;
 ///
 /// The current version also includes an explicit fresh-window request, which
 /// must not resume a dormant session the way the existing plain-launch request
-/// does.
+/// does, and a `pane_theme_revision` on `get_pane_theme` in both directions: a
+/// client that sends the revision it already has is answered `unchanged` by the
+/// connection thread, without the main thread being involved.
 pub(crate) const CONTROL_VERSION: u32 = zmux::protocol::CONTROL_VERSION;
 // A 64 KiB argv payload can expand substantially when it contains many
 // one-character arguments and each value is represented as JSON. Keep enough
@@ -112,7 +117,39 @@ pub(crate) const CONTROL_VERSION: u32 = zmux::protocol::CONTROL_VERSION;
 const MAX_CONTROL_MESSAGE_BYTES: usize = 256 * 1024;
 const MAX_ACTIVATION_TOKEN_BYTES: usize = 4096;
 const CONTROL_COMPLETION_TIMEOUT: Duration = Duration::from_secs(2);
+/// Bumped whenever anything that can change a pane's resolved theme happens.
+///
+/// `zetta vi` watches its pane's theme so an open editor recolours. It cannot be
+/// pushed to — the control socket only runs client to server — so it polls. The
+/// point of this counter is that the *server thread* can read it: an unchanged
+/// revision is answered without waking the thread that draws, which is what the
+/// poll used to cost twice a second for the life of the editor.
+///
+/// Over-bumping is harmless — it costs one extra query. Under-bumping is what
+/// would leave an editor showing stale colours, which is why the watcher also
+/// forces a full answer periodically rather than trusting this alone.
+static PANE_THEME_REVISION: AtomicU64 = AtomicU64::new(1);
+
+/// Records that a pane's theme may now resolve differently.
+pub(crate) fn bump_pane_theme_revision() {
+    PANE_THEME_REVISION.fetch_add(1, atomic::Ordering::Release);
+}
+
+pub(crate) fn pane_theme_revision() -> u64 {
+    PANE_THEME_REVISION.load(atomic::Ordering::Acquire)
+}
+
 const CONTROL_COMPLETION_POLL_INTERVAL: Duration = Duration::from_millis(25);
+/// How often a `zetta pane wait` connection re-checks the things that cannot
+/// wake it: the shutdown flag, and whether its client has gone.
+///
+/// Deliberately much longer than [`CONTROL_COMPLETION_POLL_INTERVAL`]. The event
+/// these loops exist for — the run resolving, or the client sending its
+/// completion — arrives on a channel and wakes the `recv_timeout` immediately,
+/// so this interval adds nothing to the latency a user can observe. It only
+/// bounds how quickly an abandoned wait is reaped, and a wait can outlive a long
+/// command, so waking forty times a second to learn nothing is the wrong trade.
+const RUN_WAIT_SUPERVISION_INTERVAL: Duration = Duration::from_millis(250);
 const CONTROL_CLIENT_TIMEOUT: Duration = Duration::from_secs(3);
 // Reconnecting a protected session costs an Argon2 verification and, when the
 // secret is wrong, `background_sessions::FAILED_AUTHENTICATION_DELAY` on top of
@@ -350,6 +387,9 @@ enum ControlRequestCommand {
     GetPaneTheme {
         attention_id: u64,
         pane_id: Option<u64>,
+        /// The revision the client already has. When it matches, the answer is
+        /// "unchanged" and the main thread is never involved.
+        known_revision: Option<u64>,
     },
     SetPaneOverlay {
         text: Option<String>,
@@ -406,6 +446,10 @@ struct ControlRequest {
     ssh_port: Option<u16>,
     icon: Option<String>,
     pane_theme: Option<String>,
+    /// The pane-theme revision the client already knows, so an unchanged theme
+    /// can be answered without involving the main thread.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pane_theme_revision: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pane_id: Option<u64>,
     pane_overlay: Option<String>,
@@ -629,6 +673,9 @@ struct ControlResponse {
     themes: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pane_theme: Option<String>,
+    /// The revision the returned pane theme was resolved at.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pane_theme_revision: Option<u64>,
     #[serde(default)]
     silent_mode: bool,
     #[serde(default)]

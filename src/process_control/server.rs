@@ -125,6 +125,7 @@ fn serve_control_connection(
         run_id: None,
         themes: Vec::new(),
         pane_theme: None,
+        pane_theme_revision: None,
         silent_mode: false,
         pane_labels: Vec::new(),
         error: None,
@@ -439,16 +440,28 @@ fn apply_appearance_command(
         ControlRequestCommand::GetPaneTheme {
             attention_id,
             pane_id,
-        } => dispatch.send_for(
-            response,
-            "pane_theme_unavailable",
-            |completion| ProcessControlCommand::GetPaneTheme {
-                attention_id,
-                pane_id,
-                completion,
-            },
-            |theme, response| response.pane_theme = Some(theme),
-        ),
+            known_revision,
+        } => {
+            // Answered here, on the connection thread, when the client is
+            // already current. `zetta vi` polls this for the life of an open
+            // editor; dispatching every poll to the main thread made an idle
+            // editor cost two wake-ups a second on the thread that draws.
+            let revision = pane_theme_revision();
+            response.pane_theme_revision = Some(revision);
+            if known_revision == Some(revision) {
+                return "unchanged";
+            }
+            dispatch.send_for(
+                response,
+                "pane_theme_unavailable",
+                |completion| ProcessControlCommand::GetPaneTheme {
+                    attention_id,
+                    pane_id,
+                    completion,
+                },
+                |theme, response| response.pane_theme = Some(theme),
+            )
+        }
         ControlRequestCommand::SetPaneOverlay {
             text,
             font_size,
@@ -613,6 +626,7 @@ fn serve_run_wait_connection(
                 run_id: None,
                 themes: Vec::new(),
                 pane_theme: None,
+                pane_theme_revision: None,
                 silent_mode: false,
                 pane_labels: Vec::new(),
                 error: Some(ControlError {
@@ -641,6 +655,7 @@ fn serve_run_wait_connection(
                 run_id: None,
                 themes: Vec::new(),
                 pane_theme: None,
+                pane_theme_revision: None,
                 silent_mode: false,
                 pane_labels: Vec::new(),
                 error: Some(ControlError {
@@ -667,6 +682,7 @@ fn serve_run_wait_connection(
                 run_id: None,
                 themes: Vec::new(),
                 pane_theme: None,
+                pane_theme_revision: None,
                 silent_mode: false,
                 pane_labels: Vec::new(),
                 error: Some(ControlError {
@@ -688,6 +704,7 @@ fn serve_run_wait_connection(
                     run_id: None,
                     themes: Vec::new(),
                     pane_theme: None,
+                    pane_theme_revision: None,
                     silent_mode: false,
                     pane_labels: Vec::new(),
                     error: Some(ControlError {
@@ -712,6 +729,7 @@ fn serve_run_wait_connection(
                     run_id: None,
                     themes: Vec::new(),
                     pane_theme: None,
+                    pane_theme_revision: None,
                     silent_mode: false,
                     pane_labels: Vec::new(),
                     error: Some(ControlError {
@@ -753,7 +771,7 @@ fn await_run_resolution(
             shutdown_run_connection(stream);
             return None;
         }
-        match registration.recv_timeout(CONTROL_COMPLETION_POLL_INTERVAL) {
+        match registration.recv_timeout(RUN_WAIT_SUPERVISION_INTERVAL) {
             Ok(resolution) => break resolution,
             Err(RecvTimeoutError::Timeout) => match client_requests.try_recv() {
                 Ok(_) | Err(TryRecvError::Disconnected) => {
@@ -790,6 +808,7 @@ fn write_run_resolution(
                     run_id: Some(id),
                     themes: Vec::new(),
                     pane_theme: None,
+                    pane_theme_revision: None,
                     silent_mode: false,
                     pane_labels: Vec::new(),
                     error: Some(ControlError {
@@ -811,6 +830,7 @@ fn write_run_resolution(
                     run_id: Some(id),
                     themes: Vec::new(),
                     pane_theme: None,
+                    pane_theme_revision: None,
                     silent_mode: false,
                     pane_labels: Vec::new(),
                     error: None,
@@ -828,7 +848,7 @@ fn write_run_resolution(
                     shutdown_run_connection(stream);
                     return;
                 }
-                match client_requests.recv_timeout(CONTROL_COMPLETION_POLL_INTERVAL) {
+                match client_requests.recv_timeout(RUN_WAIT_SUPERVISION_INTERVAL) {
                     Ok(request) => break request,
                     Err(RecvTimeoutError::Timeout) => {}
                     Err(RecvTimeoutError::Disconnected) => break None,
@@ -847,6 +867,7 @@ fn write_run_resolution(
                             run_id: Some(id),
                             themes: Vec::new(),
                             pane_theme: None,
+                            pane_theme_revision: None,
                             silent_mode: false,
                             pane_labels: Vec::new(),
                             error: None,

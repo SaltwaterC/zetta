@@ -112,6 +112,8 @@ impl ProjectState {
     }
 
     pub(crate) fn invalidate_active_context(&mut self) {
+        // A pane changing project can change the theme that project selects.
+        crate::process_control::bump_pane_theme_revision();
         self.active_context = None;
     }
 
@@ -321,6 +323,9 @@ impl Zetta {
         cx: &mut Context<Self>,
     ) {
         *SystemAppearance::global_mut(cx) = SystemAppearance(window.appearance().into());
+        // Every pane's resolved theme can flip with the system appearance, and
+        // nothing about that is user-initiated.
+        crate::process_control::bump_pane_theme_revision();
         let theme = self.window_theme(cx);
         GlobalTheme::update_theme(cx, theme);
         self.refresh_terminal_themes_for_appearance(cx);

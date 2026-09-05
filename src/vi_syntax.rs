@@ -25,6 +25,7 @@ use serde::Deserialize;
 use theme::{SyntaxTheme, Theme, ThemeRegistry};
 use tree_sitter_highlight::{Highlight, HighlightConfiguration, HighlightEvent, Highlighter};
 
+use crate::process_control::PaneThemeAnswer;
 use crate::{
     process_control::ProcessPaneThemeQuery, startup::selected_theme_name, zetta_assets::ZettaAssets,
 };
@@ -148,6 +149,14 @@ struct SyntaxThemeHandle {
 
 const PANE_THEME_POLL_INTERVAL: Duration = Duration::from_millis(500);
 
+/// How many revision-gated polls pass before one asks for the theme outright.
+///
+/// The gate is only as good as the host's bookkeeping: a theme change whose
+/// path forgets to bump the revision would leave this editor on stale colours
+/// forever. Forcing a full answer every so often bounds that to a few seconds
+/// instead, at a fraction of the cost of never gating at all.
+const PANE_THEME_FORCED_REFRESH_EVERY: u32 = 10;
+
 /// Watches the originating pane without putting control-socket I/O or theme
 /// parsing on vi's input thread. The receiver is checked from the editor's
 /// existing idle poll, so a changed palette causes a redraw even when the
@@ -165,12 +174,33 @@ impl SyntaxThemeWatcher {
         thread::Builder::new()
             .name("zetta-vi-theme-watch".to_owned())
             .spawn(move || {
+                let mut known_revision: Option<u64> = None;
+                let mut polls_since_forced_refresh = 0u32;
                 while !worker_shutdown.load(Ordering::Acquire) {
                     thread::sleep(PANE_THEME_POLL_INTERVAL);
                     if worker_shutdown.load(Ordering::Acquire) {
                         break;
                     }
-                    let Ok(Some(name)) = query.theme_name() else {
+                    // Periodically ask outright, so a change that never bumped
+                    // the revision still reaches the editor.
+                    let forced = polls_since_forced_refresh >= PANE_THEME_FORCED_REFRESH_EVERY;
+                    polls_since_forced_refresh = if forced {
+                        0
+                    } else {
+                        polls_since_forced_refresh + 1
+                    };
+                    let answer = query.theme_name(known_revision.filter(|_| !forced));
+                    let (name, revision) = match answer {
+                        // The host answered from the connection thread; the
+                        // theme in use is still correct.
+                        Ok(PaneThemeAnswer::Unchanged) => continue,
+                        Ok(PaneThemeAnswer::Resolved { name, revision }) => (name, revision),
+                        Err(_) => continue,
+                    };
+                    if revision.is_some() {
+                        known_revision = revision;
+                    }
+                    let Some(name) = name else {
                         continue;
                     };
                     if current_name.as_deref() == Some(name.as_str()) {
@@ -878,7 +908,10 @@ pub(crate) fn run(arguments: Vec<String>) -> i32 {
                 configured_theme.clone(),
                 pane_theme_query
                     .as_ref()
-                    .and_then(|query| query.theme_name().ok().flatten()),
+                    .and_then(|query| match query.theme_name(None) {
+                        Ok(PaneThemeAnswer::Resolved { name, .. }) => name,
+                        Ok(PaneThemeAnswer::Unchanged) | Err(_) => None,
+                    }),
                 inherited_terminal_theme(),
             );
             let theme = SyntaxThemeHandle::spawn(selected_theme.clone());

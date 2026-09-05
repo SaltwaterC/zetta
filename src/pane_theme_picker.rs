@@ -212,6 +212,9 @@ impl Zetta {
         theme_name: Option<String>,
         cx: &mut Context<Self>,
     ) -> bool {
+        // Covers every scope below; over-bumping costs one extra query, while
+        // under-bumping leaves an open `zetta vi` on stale colours.
+        crate::process_control::bump_pane_theme_revision();
         if scope == ThemeScope::Tab {
             let Some(tab_id) = self.tabs.get(self.active_tab).map(|tab| tab.id) else {
                 return false;

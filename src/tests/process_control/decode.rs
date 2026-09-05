@@ -570,6 +570,7 @@ fn tab_attention_control_requests_validate_target_and_payload() {
             attention_id: Some(42),
             attention_summary: Some("Build finished".to_owned()),
             pane_theme: Some("Dracula".to_owned()),
+            pane_theme_revision: None,
             ..request("token", "set_tab_attention")
         },
     ] {
@@ -616,6 +617,7 @@ fn focus_tab_control_requests_validate_target_and_reject_extra_fields() {
         ControlRequest {
             attention_id: Some(42),
             pane_theme: Some("Dracula".to_owned()),
+            pane_theme_revision: None,
             ..request("token", "focus_tab")
         },
     ] {
@@ -905,6 +907,7 @@ fn pane_theme_query_requires_an_attention_target_and_allows_legacy_panes() {
         Some(ControlRequestCommand::GetPaneTheme {
             attention_id: 42,
             pane_id: Some(9),
+            known_revision: None,
         })
     );
 
@@ -915,6 +918,7 @@ fn pane_theme_query_requires_an_attention_target_and_allows_legacy_panes() {
         Some(ControlRequestCommand::GetPaneTheme {
             attention_id: 42,
             pane_id: None,
+            known_revision: None,
         })
     );
 
@@ -1023,6 +1027,7 @@ fn reconnect_requests_carry_a_session_target_and_optional_secret() {
         ssh_port: None,
         icon: None,
         pane_theme: None,
+        pane_theme_revision: None,
         pane_id: None,
         pane_overlay: None,
         pane_overlay_font_size: None,

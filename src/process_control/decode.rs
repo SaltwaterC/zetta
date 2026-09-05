@@ -74,6 +74,7 @@ mod field {
     pub(super) const SCOPE: u32 = 1 << 22;
     pub(super) const PANE_REQUEST: u32 = 1 << 23;
     pub(super) const SHELL_COMMAND: u32 = 1 << 24;
+    pub(super) const PANE_THEME_REVISION: u32 = 1 << 25;
 
     /// The pane-styling fields that the oldest commands accept and never read.
     ///
@@ -107,6 +108,10 @@ fn control_request_fields(request: &ControlRequest) -> ControlFields {
             | bit(request.ssh_port.is_some(), field::SSH_PORT)
             | bit(request.icon.is_some(), field::ICON)
             | bit(request.pane_theme.is_some(), field::PANE_THEME)
+            | bit(
+                request.pane_theme_revision.is_some(),
+                field::PANE_THEME_REVISION,
+            )
             | bit(request.pane_id.is_some(), field::PANE_ID)
             | bit(request.pane_overlay.is_some(), field::PANE_OVERLAY)
             | bit(
@@ -180,7 +185,7 @@ fn allowed_control_fields(command: &str) -> Option<ControlFields> {
                 | SPLIT
                 | PROFILE
         }
-        "get_pane_theme" => ATTENTION_ID | PANE_ID,
+        "get_pane_theme" => ATTENTION_ID | PANE_ID | PANE_THEME_REVISION,
         "set_overlay" => UNREAD_STYLE,
         "set_tab_attention" => ATTENTION_ID | ATTENTION_SUMMARY | ATTENTION_BODY,
         "focus_tab" => ATTENTION_ID,
@@ -520,6 +525,7 @@ fn decode_appearance_command(request: &mut ControlRequest) -> Option<ControlRequ
             Some(ControlRequestCommand::GetPaneTheme {
                 attention_id: request.attention_id.take().filter(|id| *id != 0)?,
                 pane_id,
+                known_revision: request.pane_theme_revision.take(),
             })
         }
         "set_overlay" => {
