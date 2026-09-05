@@ -1144,6 +1144,10 @@ impl Zetta {
         let compact_tab_bar = layout.compact_tab_bar.take();
         let left_window_controls =
             std::mem::replace(&mut layout.left_window_controls, div().into_any_element());
+        let right_title_bar_controls = std::mem::replace(
+            &mut layout.right_title_bar_controls,
+            div().into_any_element(),
+        );
         let active_pane_size = layout.active_pane_size.take();
         let title_bar_height = layout.title_bar_height;
         let title_bar_background = layout.title_bar_background;
@@ -1204,7 +1208,12 @@ impl Zetta {
                 title_bar.child(tab_bar)
             })
             .when(!compact_mode, |title_bar| {
-                title_bar.child(div().min_w_0().flex_1())
+                title_bar.child(
+                    div()
+                        .min_w_0()
+                        .flex_1()
+                        .debug_selector(|| "title-bar-middle".to_owned()),
+                )
             })
             .when_some(active_pane_size, |title_bar, active_pane_size| {
                 title_bar.child(
@@ -1215,6 +1224,7 @@ impl Zetta {
                     ),
                 )
             })
+            .child(right_title_bar_controls)
             .into_any_element()
     }
 
@@ -1225,7 +1235,6 @@ impl Zetta {
             title_bar_background,
             compact_mode,
             is_macos_fullscreen,
-            right_title_bar_controls,
             show_title_bar_menus,
             application_menu,
             profile_menu,
@@ -1366,7 +1375,6 @@ impl Zetta {
             .when_some(silent_control, |controls, silent_control| {
                 controls.child(silent_control)
             })
-            .child(right_title_bar_controls)
             .into_any_element()
     }
 }

@@ -284,6 +284,138 @@ fn overflow_selection_places_tabs_at_the_selected_side() {
     );
 }
 
+struct TitleBarLayoutHarness {
+    zetta: gpui::Entity<crate::app::Zetta>,
+    compact_mode: bool,
+}
+
+impl Render for TitleBarLayoutHarness {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let compact_mode = self.compact_mode;
+        let left_window_controls = div()
+            .h_full()
+            .w(px(80.))
+            .flex_none()
+            .debug_selector(|| "title-bar-test-left".to_owned())
+            .into_any_element();
+        let compact_tab_bar = compact_mode.then(|| {
+            div()
+                .h_full()
+                .min_w_0()
+                .flex_1()
+                .debug_selector(|| "title-bar-middle".to_owned())
+                .into_any_element()
+        });
+        let right_title_bar_controls = h_flex()
+            .h_full()
+            .w(px(120.))
+            .flex_none()
+            .ml_auto()
+            .debug_selector(|| "title-bar-test-right".to_owned())
+            .into_any_element();
+        let layout = TitleBarLayout {
+            title_bar_height: px(40.),
+            title_bar_background: gpui::white(),
+            rounded_top_left: false,
+            rounded_top_right: false,
+            corner_radius: px(0.),
+            compact_mode,
+            is_macos_fullscreen: false,
+            compact_tab_bar,
+            left_window_controls,
+            right_title_bar_controls,
+            show_title_bar_menus: true,
+            application_menu: div().h_full().w(px(48.)).flex_none().into_any_element(),
+            profile_menu: div().h_full().w(px(32.)).flex_none().into_any_element(),
+            show_title_bar_buttons: false,
+            show_title_bar_control_labels: false,
+            no_mux: false,
+            auto_background_tab: false,
+            auto_background_protected: false,
+            reconnect_control: None,
+            show_broadcast_control: false,
+            broadcast_input: false,
+            show_silent_control: false,
+            silent_mode: false,
+            system_silent: false,
+            focus_status_access: FocusStatusAccess::Unknown,
+            active_pane_size: None,
+        };
+        let title_bar = self
+            .zetta
+            .update(cx, |zetta, cx| zetta.render_title_bar(layout, cx));
+        div().size_full().child(title_bar)
+    }
+}
+
+fn assert_title_bar_layout(compact_mode: bool, cx: &mut gpui::TestAppContext) {
+    let (_root, cx) = cx.add_window_view(|window, cx| {
+        let mut config = crate::config::Config::defaults(None, None);
+        // An empty profile list keeps this test entity from opening a terminal.
+        config.profiles.clear();
+        let zetta = cx.new(|cx| {
+            crate::app::Zetta::new(
+                config,
+                None,
+                crate::app::ZettaLaunchOptions {
+                    no_mux: true,
+                    ..Default::default()
+                },
+                window,
+                cx,
+            )
+        });
+        TitleBarLayoutHarness {
+            zetta,
+            compact_mode,
+        }
+    });
+    cx.simulate_resize(gpui::size(px(640.), px(120.)));
+    cx.run_until_parked();
+
+    let viewport = cx.update(|window, _| window.viewport_size());
+    let left = cx
+        .debug_bounds("title-bar-test-left")
+        .expect("left title-bar controls should be laid out");
+    let middle = cx
+        .debug_bounds("title-bar-middle")
+        .expect("title-bar middle should be laid out");
+    let right = cx
+        .debug_bounds("title-bar-test-right")
+        .expect("right title-bar controls should be laid out");
+    let right_edge = |bounds: gpui::Bounds<Pixels>| bounds.origin.x + bounds.size.width;
+
+    assert_eq!(
+        left.origin.x,
+        px(0.),
+        "left controls should start at the edge"
+    );
+    assert_eq!(
+        right_edge(right),
+        viewport.width,
+        "right controls should end at the viewport edge"
+    );
+    assert!(
+        middle.size.width > px(0.),
+        "the middle area should stay flexible"
+    );
+    assert!(
+        right_edge(left) <= middle.origin.x && right_edge(middle) <= right.origin.x,
+        "the flexible middle area should remain between the left and right controls"
+    );
+}
+
+#[gpui::test]
+fn right_title_bar_controls_stay_at_the_window_edge_in_both_modes(cx: &mut gpui::TestAppContext) {
+    cx.update(|cx| {
+        settings::init(cx);
+        theme_settings::init(theme::LoadThemes::JustBase, cx);
+    });
+    for compact_mode in [false, true] {
+        assert_title_bar_layout(compact_mode, cx);
+    }
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn profile_shortcut_alias_uses_unmapped_number_row_modifiers() {
