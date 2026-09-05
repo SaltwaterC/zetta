@@ -10772,6 +10772,7 @@ dependencies = [
  "async-channel 2.5.0",
  "async-compression",
  "async-tar",
+ "base64 0.22.1",
  "block2 0.6.2",
  "busy-v",
  "cpal",

@@ -70,6 +70,7 @@ path = "src/bin/zmux_pty.rs"
 [dependencies]
 anyhow = "1"
 async-channel = "2.5.0"
+base64 = "0.22"
 arboard = { version = "3", default-features = false, features = ["wayland-data-control"], optional = true }
 argon2 = "0.5"
 busy-v = { path = "busy-v" }

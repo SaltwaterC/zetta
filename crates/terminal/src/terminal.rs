@@ -1231,13 +1231,28 @@ type ClipboardFormatter = Arc<dyn Fn(&str) -> String + Sync + Send + 'static>;
 type ColorFormatter = Arc<dyn Fn(Rgb) -> String + Sync + Send + 'static>;
 type TextAreaSizeFormatter = Arc<dyn Fn(TerminalBounds) -> String + Sync + Send + 'static>;
 
-/// Resolves an image clipboard entry to text suitable for a terminal paste.
+/// The action a terminal should take after an image-paste handler has inspected
+/// the clipboard and, when necessary, transferred the image.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ImagePasteResult {
+    /// Paste the absolute path returned by the remote image store.
+    ResolvedPath(String),
+    /// Let the foreground application read the desktop clipboard itself.
+    UseNativeShortcut,
+}
+
+/// Resolves an image clipboard entry to an action suitable for a terminal
+/// paste.
 ///
-/// Local terminals do not need a handler: they receive the native image-paste
-/// shortcut. A shared remote terminal installs one so the image can be stored
-/// on the machine that owns the session before its path is sent to the child.
+/// The foreground process is a fresh best-effort argv snapshot. It is optional
+/// because display-only terminals, shared streams and platforms that cannot
+/// inspect their process tree may not have one.
 pub trait ImagePasteHandler: Send + Sync {
-    fn paste_image(&self, image: &gpui::Image) -> Result<String>;
+    fn paste_image(
+        &self,
+        image: &gpui::Image,
+        foreground_process: Option<&[String]>,
+    ) -> Result<ImagePasteResult>;
 }
 
 #[derive(Clone)]
@@ -2045,6 +2060,7 @@ impl TerminalBuilder {
             subprocess: None,
             byte_stream: None,
             image_paste_handler: None,
+            input_worker: None,
             pty_control: None,
             pty_control_is_local: false,
             console_palette_enabled: false,
@@ -2286,11 +2302,12 @@ impl TerminalBuilder {
         self
     }
 
-    /// Installs the resolver used when this byte stream receives an image
-    /// paste. The handler is captured by each queued image command, so it is
-    /// safe to add after [`Self::new_byte_stream`] has started its writer.
+    /// Installs the resolver used when this terminal receives an image paste.
+    /// The handler is captured by each queued image command, so it is safe to
+    /// add after [`Self::new_byte_stream`] has started its writer.
     pub fn with_image_paste_handler(mut self, handler: Arc<dyn ImagePasteHandler>) -> Self {
         self.terminal.image_paste_handler = Some(handler);
+        self.terminal.ensure_input_worker();
         self
     }
 
@@ -2794,6 +2811,7 @@ impl TerminalBuilder {
                 subprocess,
                 byte_stream: None,
                 image_paste_handler: None,
+                input_worker: None,
                 pty_control,
                 pty_control_is_local,
                 console_palette_enabled,
@@ -3054,8 +3072,11 @@ pub struct Terminal {
     subprocess: Option<SubprocessHandle>,
     /// Set for terminals connected to a blocking bidirectional byte stream.
     byte_stream: Option<ByteStreamHandle>,
-    /// Resolves image paste commands queued on a remote byte stream.
+    /// Resolves image paste commands for a local PTY or byte stream.
     image_paste_handler: Option<Arc<dyn ImagePasteHandler>>,
+    /// Serializes user input with a potentially blocking image transfer on a
+    /// PTY. Byte streams own the same worker inside [`ByteStreamHandle`].
+    input_worker: Option<InputWorker>,
     /// True when `pty_control` is this terminal's own pty sender rather than a
     /// control the multiplexer provided. Only the former is released along with
     /// the rest of the pty's resources.
@@ -4036,6 +4057,27 @@ impl Terminal {
 
     /// Write input to the interactive backend, if applicable.
     /// (This is a no-op for display-only terminals.)
+    fn ensure_input_worker(&mut self) {
+        if self.input_worker.is_some() || self.byte_stream.is_some() {
+            return;
+        }
+        let Some(pty_tx) = (match &self.terminal_type {
+            TerminalType::Pty {
+                pty_tx: Some(pty_tx),
+                ..
+            } => Some(pty_tx.clone()),
+            TerminalType::Pty { .. } | TerminalType::DisplayOnly => None,
+        }) else {
+            return;
+        };
+        self.input_worker = Some(InputWorker::new(
+            InputWriter::Pty(pty_tx),
+            self.events_tx.clone(),
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            "terminal-pty-input-writer",
+        ));
+    }
+
     fn write_to_pty(&self, input: impl Into<Cow<'static, [u8]>>) {
         let input = input.into();
         #[cfg(any(test, feature = "test-support"))]
@@ -4061,7 +4103,11 @@ impl Terminal {
                     log::debug!("Writing to PTY: {:?}", input);
                 }
             }
-            pty_tx.notify(input);
+            if let Some(input_worker) = &self.input_worker {
+                input_worker.write(InputCommand::Bytes(input.into_owned()));
+            } else {
+                pty_tx.notify(input);
+            }
         }
     }
 
@@ -4096,15 +4142,34 @@ impl Terminal {
             InputCommand::Image {
                 image,
                 bracketed_paste,
+                native_shortcut,
+                foreground_process,
                 handler,
             } => {
                 self.prepare_input(&[]);
-                if let Some(byte_stream) = &self.byte_stream {
+                if let Some(input_worker) = &self.input_worker {
+                    input_worker.write(InputCommand::Image {
+                        image,
+                        bracketed_paste,
+                        native_shortcut,
+                        foreground_process,
+                        handler,
+                    });
+                } else if let Some(byte_stream) = &self.byte_stream {
                     byte_stream.write(InputCommand::Image {
                         image,
                         bracketed_paste,
+                        native_shortcut,
+                        foreground_process,
                         handler,
                     });
+                } else {
+                    // A PTY can disappear between queuing the command and
+                    // reaching this method. Retain the local fallback in that
+                    // case instead of silently dropping the paste.
+                    if let Some(shortcut) = native_shortcut {
+                        self.write_input(shortcut);
+                    }
                 }
             }
         }
@@ -4584,25 +4649,28 @@ impl Terminal {
     /// Pastes an image into a terminal application.
     ///
     /// A local terminal receives the native image-paste shortcut so TUIs can
-    /// read the desktop clipboard themselves. A remote shared pane queues the
-    /// image for its handler, which stores it on the session host and sends the
-    /// resulting path as a bracketed paste.
+    /// read the desktop clipboard themselves. A handler may instead resolve
+    /// the image to a path, and the ordered input worker sends that path only
+    /// after the transfer completes.
     pub fn paste_image(&mut self, image: Arc<gpui::Image>, option_as_meta: bool) {
-        if self.byte_stream.is_some()
-            && let Some(handler) = self.image_paste_handler.clone()
+        if let Some(handler) = self.image_paste_handler.clone()
+            && (self.byte_stream.is_some() || self.input_worker.is_some())
         {
+            let mode = self.last_content.mode;
+            let native_shortcut = native_image_paste_shortcut(mode, option_as_meta);
             self.queue_input(InputCommand::Image {
                 image,
-                bracketed_paste: self.last_content.mode.contains(Modes::BRACKETED_PASTE),
+                bracketed_paste: mode.contains(Modes::BRACKETED_PASTE),
+                native_shortcut,
+                foreground_process: self.foreground_process_command_line_now(),
                 handler,
             });
             return;
         }
 
-        let key = if cfg!(windows) { "alt-v" } else { "ctrl-v" };
-        let keystroke = Keystroke::parse(key).expect("native image paste key is valid");
-        if let Some(input) = to_esc_str(&keystroke, self.last_content.mode, option_as_meta) {
-            self.input(input.into_owned().into_bytes());
+        if let Some(shortcut) = native_image_paste_shortcut(self.last_content.mode, option_as_meta)
+        {
+            self.input(shortcut);
         }
     }
 
@@ -5356,6 +5424,30 @@ impl Terminal {
         }
     }
 
+    /// Returns a fresh foreground-process argv snapshot for one-shot actions.
+    /// The periodic title refresh is intentionally not treated as current
+    /// enough for an image paste, where a stale `ssh` process could upload an
+    /// image after the terminal has already returned to its shell.
+    pub fn foreground_process_command_line_now(&self) -> Option<Vec<String>> {
+        #[cfg(windows)]
+        if posix_host(&self.template.shell).is_some() {
+            return self
+                .reported_foreground_command
+                .clone()
+                .map(|command| vec![command]);
+        }
+        match &self.terminal_type {
+            TerminalType::Pty { info, .. } => info.load_now().map(|process| {
+                if process.argv.is_empty() {
+                    vec![process.name]
+                } else {
+                    visible_process_argv(&process.argv).to_vec()
+                }
+            }),
+            TerminalType::DisplayOnly => None,
+        }
+    }
+
     /// Refreshes cached foreground process metadata without requiring a rendered view.
     pub fn refresh_foreground_process(&mut self, cx: &mut Context<Self>) {
         if let TerminalType::Pty { info, .. } = &self.terminal_type {
@@ -5615,6 +5707,9 @@ impl Terminal {
     ///
     /// Idempotent, and a no-op for a terminal that is not pty-backed.
     fn release_pty_resources(&mut self) {
+        if let Some(mut input_worker) = self.input_worker.take() {
+            input_worker.stop();
+        }
         let TerminalType::Pty { pty_tx, io, info } = &mut self.terminal_type else {
             return;
         };
@@ -5642,6 +5737,9 @@ impl Terminal {
     /// between them. The grid stays intact; the terminal just stops being
     /// fed until [`Terminal::attach_byte_stream`] reconnects it.
     pub fn stop_pty_loop(&mut self) -> Result<()> {
+        if let Some(mut input_worker) = self.input_worker.take() {
+            input_worker.stop();
+        }
         let TerminalType::Pty { pty_tx, io, info } = &mut self.terminal_type else {
             return Ok(());
         };
@@ -5756,6 +5854,7 @@ impl Terminal {
         self.child_is_the_multiplexers = true;
         self.template.shell = options.shell;
         self.template.env = options.env;
+        self.ensure_input_worker();
         self.content_dirty = true;
         cx.notify();
         Ok(child_events)
@@ -5976,6 +6075,8 @@ enum InputCommand {
     Image {
         image: Arc<gpui::Image>,
         bracketed_paste: bool,
+        native_shortcut: Option<Vec<u8>>,
+        foreground_process: Option<Vec<String>>,
         handler: Arc<dyn ImagePasteHandler>,
     },
 }
@@ -5988,27 +6089,137 @@ fn paste_bytes(text: &str, bracketed_paste: bool) -> Vec<u8> {
     }
 }
 
-struct ByteStreamHandle {
+fn native_image_paste_shortcut(mode: Modes, option_as_meta: bool) -> Option<Vec<u8>> {
+    let key = if cfg!(windows) { "alt-v" } else { "ctrl-v" };
+    let keystroke = Keystroke::parse(key).expect("native image paste key is valid");
+    to_esc_str(&keystroke, mode, option_as_meta)
+        .map(Cow::into_owned)
+        .map(String::into_bytes)
+}
+
+enum InputWriter {
+    ByteStream(Box<dyn Write + Send>),
+    Pty(PtySender),
+}
+
+impl InputWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        match self {
+            Self::ByteStream(writer) => writer.write_all(bytes).and_then(|()| writer.flush()),
+            Self::Pty(pty) => {
+                pty.notify(bytes.to_vec());
+                Ok(())
+            }
+        }
+    }
+}
+
+/// Serializes ordinary input behind an image transfer. The worker is also the
+/// byte-stream writer, so local PTYs and shared streams have identical ordering
+/// semantics.
+struct InputWorker {
     input_tx: Option<mpsc::Sender<InputCommand>>,
     stopped: Arc<std::sync::atomic::AtomicBool>,
-    /// Signalled by the reader thread as it returns, so a caller can tell
-    /// "everything the stream held is in the grid" from "the thread is still
-    /// working through it".
-    finished: mpsc::Receiver<()>,
-    _reader: thread::JoinHandle<()>,
     _writer: thread::JoinHandle<()>,
 }
 
-impl ByteStreamHandle {
+impl InputWorker {
+    fn new(
+        writer: InputWriter,
+        events_tx: futures::channel::mpsc::UnboundedSender<PtyEvent>,
+        stopped: Arc<std::sync::atomic::AtomicBool>,
+        thread_name: &'static str,
+    ) -> Self {
+        let (input_tx, input_rx) = mpsc::channel::<InputCommand>();
+        let writer_stopped = stopped.clone();
+        let writer_thread = thread::Builder::new()
+            .name(thread_name.to_owned())
+            .spawn(move || {
+                let mut writer = writer;
+                while !writer_stopped.load(Ordering::Acquire) {
+                    let Ok(command) = input_rx.recv() else { break };
+                    let result = write_input_command(&mut writer, command, &events_tx);
+                    if let Err(error) = result {
+                        log::warn!("terminal input write failed: {error}");
+                        break;
+                    }
+                }
+            })
+            .expect("spawning a terminal input writer");
+
+        Self {
+            input_tx: Some(input_tx),
+            stopped,
+            _writer: writer_thread,
+        }
+    }
+
     fn write(&self, command: InputCommand) {
         if let Some(input_tx) = &self.input_tx {
             input_tx.send(command).ok();
         }
     }
 
+    fn close_sender(&mut self) {
+        self.input_tx.take();
+    }
+
     fn stop(&mut self) {
         self.stopped.store(true, Ordering::Release);
-        self.input_tx.take();
+        self.close_sender();
+    }
+}
+
+fn write_input_command(
+    writer: &mut InputWriter,
+    command: InputCommand,
+    events_tx: &futures::channel::mpsc::UnboundedSender<PtyEvent>,
+) -> std::io::Result<()> {
+    match command {
+        InputCommand::Bytes(bytes) => writer.write(&bytes),
+        InputCommand::Image {
+            image,
+            bracketed_paste,
+            native_shortcut,
+            foreground_process,
+            handler,
+        } => match handler.paste_image(&image, foreground_process.as_deref()) {
+            Ok(ImagePasteResult::ResolvedPath(path)) => {
+                writer.write(&paste_bytes(&path, bracketed_paste))
+            }
+            Ok(ImagePasteResult::UseNativeShortcut) => native_shortcut
+                .as_deref()
+                .map_or(Ok(()), |shortcut| writer.write(shortcut)),
+            Err(error) => {
+                events_tx
+                    .unbounded_send(PtyEvent::Event(TerminalBackendEvent::PasteError(format!(
+                        "could not paste image: {error:#}"
+                    ))))
+                    .ok();
+                Ok(())
+            }
+        },
+    }
+}
+
+struct ByteStreamHandle {
+    stopped: Arc<std::sync::atomic::AtomicBool>,
+    input: InputWorker,
+    /// Signalled by the reader thread as it returns, so a caller can tell
+    /// "everything the stream held is in the grid" from "the thread is still
+    /// working through it".
+    finished: mpsc::Receiver<()>,
+    _reader: thread::JoinHandle<()>,
+}
+
+impl ByteStreamHandle {
+    fn write(&self, command: InputCommand) {
+        self.input.write(command);
+    }
+
+    fn stop(&mut self) {
+        self.stopped.store(true, Ordering::Release);
+        self.input.stop();
     }
 
     /// Stops the stream once it has read everything still in flight.
@@ -6022,13 +6233,14 @@ impl ByteStreamHandle {
     /// Waits for the reader's own end-of-stream, then falls back to the flag so a
     /// multiplexer that failed to close its end cannot hang the caller.
     fn drain_and_stop(&mut self, patience: Duration) {
-        self.input_tx.take();
+        self.input.close_sender();
         // `Disconnected` is the success case: the sender is dropped as the reader
         // thread returns, which is precisely "it read everything there was".
         match self.finished.recv_timeout(patience) {
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 log::warn!("a byte stream did not end within {patience:?}; abandoning it");
                 self.stopped.store(true, Ordering::Release);
+                self.input.stop();
             }
             Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => {}
         }
@@ -6037,7 +6249,7 @@ impl ByteStreamHandle {
 
 fn spawn_byte_stream(
     mut reader: Box<dyn Read + Send>,
-    mut writer: Box<dyn Write + Send>,
+    writer: Box<dyn Write + Send>,
     term: Arc<AlacrittyTermLock>,
     events_tx: futures::channel::mpsc::UnboundedSender<PtyEvent>,
     wakeup_gate: WakeupGate,
@@ -6093,51 +6305,18 @@ fn spawn_byte_stream(
         })
         .expect("spawning a terminal byte-stream reader");
 
-    let (input_tx, input_rx) = mpsc::channel::<InputCommand>();
-    let writer_stopped = stopped.clone();
-    let writer_events = events_tx;
-    let writer_thread = thread::Builder::new()
-        .name("terminal-byte-stream-writer".to_owned())
-        .spawn(move || {
-            while !writer_stopped.load(Ordering::Acquire) {
-                let Ok(command) = input_rx.recv() else { break };
-                let result = match command {
-                    InputCommand::Bytes(bytes) => {
-                        writer.write_all(&bytes).and_then(|()| writer.flush())
-                    }
-                    InputCommand::Image {
-                        image,
-                        bracketed_paste,
-                        handler,
-                    } => match handler.paste_image(&image) {
-                        Ok(path) => {
-                            let bytes = paste_bytes(&path, bracketed_paste);
-                            writer.write_all(&bytes).and_then(|()| writer.flush())
-                        }
-                        Err(error) => {
-                            writer_events
-                                .unbounded_send(PtyEvent::Event(TerminalBackendEvent::PasteError(
-                                    format!("could not paste image: {error:#}"),
-                                )))
-                                .ok();
-                            Ok(())
-                        }
-                    },
-                };
-                if let Err(error) = result {
-                    log::warn!("byte stream write failed: {error}");
-                    break;
-                }
-            }
-        })
-        .expect("spawning a terminal byte-stream writer");
+    let input = InputWorker::new(
+        InputWriter::ByteStream(writer),
+        events_tx.clone(),
+        stopped.clone(),
+        "terminal-byte-stream-writer",
+    );
 
     ByteStreamHandle {
-        input_tx: Some(input_tx),
         stopped,
+        input,
         finished,
         _reader: reader_thread,
-        _writer: writer_thread,
     }
 }
 
@@ -6261,6 +6440,9 @@ impl Drop for Terminal {
     fn drop(&mut self) {
         if let Some(mut byte_stream) = self.byte_stream.take() {
             byte_stream.stop();
+        }
+        if let Some(mut input_worker) = self.input_worker.take() {
+            input_worker.stop();
         }
         if let Some(subprocess) = self.subprocess.take() {
             subprocess.kill();
@@ -7318,8 +7500,61 @@ mod tests {
 
     #[cfg(unix)]
     impl ImagePasteHandler for TestImagePasteHandler {
-        fn paste_image(&self, _: &gpui::Image) -> anyhow::Result<String> {
-            Ok("/tmp/remote-image.png".to_owned())
+        fn paste_image(
+            &self,
+            _: &gpui::Image,
+            _: Option<&[String]>,
+        ) -> anyhow::Result<ImagePasteResult> {
+            Ok(ImagePasteResult::ResolvedPath(
+                "/tmp/remote-image.png".to_owned(),
+            ))
+        }
+    }
+
+    #[cfg(unix)]
+    struct BlockingImagePasteHandler {
+        started: Arc<std::sync::atomic::AtomicBool>,
+        release: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    #[cfg(unix)]
+    impl ImagePasteHandler for BlockingImagePasteHandler {
+        fn paste_image(
+            &self,
+            _: &gpui::Image,
+            _: Option<&[String]>,
+        ) -> anyhow::Result<ImagePasteResult> {
+            self.started.store(true, Ordering::Release);
+            while !self.release.load(Ordering::Acquire) {
+                std::thread::yield_now();
+            }
+            Ok(ImagePasteResult::ResolvedPath(
+                "/tmp/remote-image.png".to_owned(),
+            ))
+        }
+    }
+
+    #[cfg(unix)]
+    struct ReleaseImagePasteOnDrop(Arc<std::sync::atomic::AtomicBool>);
+
+    #[cfg(unix)]
+    impl Drop for ReleaseImagePasteOnDrop {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+
+    #[cfg(unix)]
+    struct FailingImagePasteHandler;
+
+    #[cfg(unix)]
+    impl ImagePasteHandler for FailingImagePasteHandler {
+        fn paste_image(
+            &self,
+            _: &gpui::Image,
+            _: Option<&[String]>,
+        ) -> anyhow::Result<ImagePasteResult> {
+            anyhow::bail!("test image transfer failed")
         }
     }
 
@@ -7460,6 +7695,120 @@ mod tests {
                 .as_slice(),
             b"/tmp/remote-image.png",
             "the byte stream must receive the resolved path, not image bytes"
+        );
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
+    async fn image_transfer_blocks_later_input_until_it_completes(cx: &mut TestAppContext) {
+        init_test(cx);
+        cx.executor().allow_parking();
+
+        let started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let release = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let _release_guard = ReleaseImagePasteOnDrop(release.clone());
+        let written = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let terminal = cx.new(|cx| {
+            TerminalBuilder::new_byte_stream(
+                Box::new(CannedReader { bytes: Vec::new() }),
+                Box::new(RecordingWriter(written.clone())),
+                String::new(),
+                SettingsCursorShape::default(),
+                AlternateScroll::On,
+                None,
+                0,
+                cx.background_executor(),
+                PathStyle::local(),
+            )
+            .with_image_paste_handler(Arc::new(BlockingImagePasteHandler {
+                started: started.clone(),
+                release: release.clone(),
+            }))
+            .subscribe(cx)
+        });
+
+        terminal.update(cx, |terminal, _| {
+            terminal.paste_image(
+                Arc::new(gpui::Image::from_bytes(
+                    gpui::ImageFormat::Png,
+                    vec![1, 2, 3],
+                )),
+                false,
+            );
+        });
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !started.load(Ordering::Acquire) && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(
+            started.load(Ordering::Acquire),
+            "the image transfer did not start"
+        );
+
+        terminal.update(cx, |terminal, _| terminal.input(b"typed".to_vec()));
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        assert!(
+            written
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .is_empty(),
+            "later typed input must remain queued behind the image transfer"
+        );
+
+        release.store(true, Ordering::Release);
+        while written
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .len()
+            < "/tmp/remote-image.pngtyped".len()
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(
+            written
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .as_slice(),
+            b"/tmp/remote-image.pngtyped"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_image_transfer_emits_an_error_without_writing_a_shortcut_or_path() {
+        let written = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut writer = InputWriter::ByteStream(Box::new(RecordingWriter(written.clone())));
+        let (events_tx, mut events_rx) = futures::channel::mpsc::unbounded();
+        write_input_command(
+            &mut writer,
+            InputCommand::Image {
+                image: Arc::new(gpui::Image::from_bytes(
+                    gpui::ImageFormat::Png,
+                    vec![1, 2, 3],
+                )),
+                bracketed_paste: false,
+                native_shortcut: Some(b"native-shortcut".to_vec()),
+                foreground_process: Some(vec!["ssh".to_owned(), "host".to_owned()]),
+                handler: Arc::new(FailingImagePasteHandler),
+            },
+            &events_tx,
+        )
+        .unwrap();
+        drop(events_tx);
+
+        let event = events_rx.try_recv().unwrap();
+        assert!(matches!(
+            event,
+            PtyEvent::Event(TerminalBackendEvent::PasteError(error))
+                if error.contains("test image transfer failed")
+        ));
+        assert!(
+            written
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .is_empty()
         );
     }
 

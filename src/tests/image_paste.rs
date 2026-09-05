@@ -9,8 +9,8 @@ fn raster_clipboard_images_are_normalized_to_png() {
             image::ImageFormat::Png,
         )
         .unwrap();
-    let image = Image {
-        format: ImageFormat::Png,
+    let image = gpui::Image {
+        format: gpui::ImageFormat::Png,
         bytes: source,
         id: 1,
     };
@@ -19,9 +19,9 @@ fn raster_clipboard_images_are_normalized_to_png() {
 }
 
 #[test]
-fn svg_clipboard_images_are_rejected_for_remote_paste() {
-    let image = Image {
-        format: ImageFormat::Svg,
+fn svg_clipboard_images_are_rejected() {
+    let image = gpui::Image {
+        format: gpui::ImageFormat::Svg,
         bytes: b"<svg/>".to_vec(),
         id: 1,
     };

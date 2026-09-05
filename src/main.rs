@@ -7,6 +7,7 @@ mod config;
 mod default_terminal;
 #[cfg(feature = "http-server")]
 mod http_server;
+mod image_paste;
 mod keymap_file;
 mod mux;
 #[cfg(feature = "session-persistence")]
@@ -32,6 +33,7 @@ mod session_state;
 mod settings_editor;
 mod shell_integration;
 mod silent_mode;
+mod ssh_image_paste;
 mod text_edit;
 mod text_edit_ui;
 #[cfg(tftp_enabled)]

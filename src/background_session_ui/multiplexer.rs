@@ -8,6 +8,7 @@ use super::*;
 
 use super::image_paste::RemoteImagePasteHandler;
 use super::shared_panes::SharedPaneWriter;
+use crate::ssh_image_paste::SshImagePasteHandler;
 
 impl Zetta {
     /// Gives a detached tab to the multiplexer to hold.
@@ -424,6 +425,13 @@ impl Zetta {
                 path_hyperlink_timeout_ms: settings.path_hyperlink_timeout_ms,
                 window_id: cx.entity_id().as_u64(),
             };
+            let local_image_paste_handler = (!runtime.is_remote()).then(|| {
+                Arc::new(SshImagePasteHandler::new(
+                    options.shell.clone(),
+                    options.env.clone(),
+                    working_directory.clone(),
+                ))
+            });
             let (mux_pane_id, built, child_events, shared) = match attached {
                 AttachedPaneKind::Exclusive(attached) => {
                     let mux_pane_id = attached.pane_id;
@@ -438,6 +446,9 @@ impl Zetta {
                         PathStyle::local(),
                     ) {
                         Ok(mut built) => {
+                            if let Some(handler) = local_image_paste_handler.clone() {
+                                built.builder = built.builder.with_image_paste_handler(handler);
+                            }
                             built.builder = built
                                 .builder
                                 .with_working_directory(working_directory.clone());
@@ -501,6 +512,8 @@ impl Zetta {
                             session_id,
                             mux_pane_id,
                         )))
+                    } else if let Some(handler) = local_image_paste_handler {
+                        built.with_image_paste_handler(handler)
                     } else {
                         built
                     };

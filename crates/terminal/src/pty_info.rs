@@ -449,6 +449,14 @@ impl PtyProcessInfo {
         Some(info)
     }
 
+    /// Refreshes and returns the foreground process in one operation. Image
+    /// paste is a one-shot decision, so using the cached periodic snapshot can
+    /// send an upload to a process that has already yielded the terminal back
+    /// to its shell.
+    pub(crate) fn load_now(&self) -> Option<ProcessInfo> {
+        self.load()
+    }
+
     #[cfg(all(test, unix))]
     pub(crate) fn load_for_test(&self) -> Option<ProcessInfo> {
         self.load()

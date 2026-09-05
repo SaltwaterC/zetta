@@ -74,6 +74,7 @@ struct SpawnedStackedTerminal {
     pane_routing_id: u64,
     terminal_theme: Option<Arc<Theme>>,
     mux_provider: Option<Arc<crate::mux::MuxPtyProvider>>,
+    image_paste_handler: Arc<crate::ssh_image_paste::SshImagePasteHandler>,
 }
 
 /// What the spawn callback still needs once the terminal builder resolves.
@@ -96,6 +97,7 @@ struct SpawnedTerminal {
     mux_provider: Option<Arc<crate::mux::MuxPtyProvider>>,
     shell_integration_startup_command: Option<Vec<u8>>,
     tracked_multi_command_launch: bool,
+    image_paste_handler: Arc<crate::ssh_image_paste::SshImagePasteHandler>,
 }
 
 /// Everything one interactive-terminal spawn needs. The tab, the pane and the
@@ -361,6 +363,11 @@ impl Zetta {
             path_hyperlink_timeout_ms: settings.path_hyperlink_timeout_ms,
             window_id: cx.entity_id().as_u64(),
         };
+        let image_paste_handler = Arc::new(crate::ssh_image_paste::SshImagePasteHandler::new(
+            options.shell.clone(),
+            options.env.clone(),
+            None,
+        ));
         let handover = request.into_handover();
         let run_identity = self.run_pane_identity(tab_id, pane_id);
         let build_executor = cx.background_executor().clone();
@@ -377,6 +384,7 @@ impl Zetta {
                         builder,
                         child_events,
                     } = attached;
+                    let builder = builder.with_image_paste_handler(image_paste_handler);
                     crate::windows_integration::monitor_handoff_child(child_handle, child_events);
                     this.update_in(cx, |this, window, cx| {
                         let terminal = cx.new(|cx| builder.subscribe(cx));
@@ -717,6 +725,11 @@ impl Zetta {
             };
         let initial_console_palette =
             (!is_wsl).then(|| terminal::console_palette_for_theme(effective_theme.as_ref()));
+        let image_paste_handler = Arc::new(crate::ssh_image_paste::SshImagePasteHandler::new(
+            shell.clone(),
+            environment.clone(),
+            working_directory.clone(),
+        ));
         let restored_working_directory = restore_options
             .is_some()
             .then(|| working_directory.clone())
@@ -764,6 +777,7 @@ impl Zetta {
             mux_provider,
             shell_integration_startup_command,
             tracked_multi_command_launch,
+            image_paste_handler,
         };
         window
             .spawn(cx, async move |cx| match builder.await {
@@ -867,8 +881,10 @@ impl Zetta {
             shell_integration_startup_command,
             tracked_multi_command_launch,
             mux_provider,
+            image_paste_handler,
             ..
         } = spawned;
+        builder = builder.with_image_paste_handler(image_paste_handler);
         let this = self;
         this.adopt_mux_pane(
             tab_id,
@@ -1261,6 +1277,11 @@ impl Zetta {
         };
         let initial_console_palette =
             (!is_wsl).then(|| terminal::console_palette_for_theme(effective_theme.as_ref()));
+        let image_paste_handler = Arc::new(crate::ssh_image_paste::SshImagePasteHandler::new(
+            shell.clone(),
+            environment.clone(),
+            working_directory.clone(),
+        ));
         let builder = TerminalBuilder::new_with_console_palette(
             working_directory,
             Some(task_state),
@@ -1292,6 +1313,7 @@ impl Zetta {
             pane_routing_id,
             terminal_theme,
             mux_provider,
+            image_paste_handler,
         };
         window
             .spawn(cx, async move |cx| match builder.await {
@@ -1338,7 +1360,9 @@ impl Zetta {
             pane_routing_id,
             terminal_theme,
             mux_provider,
+            image_paste_handler,
         } = spawned;
+        builder = builder.with_image_paste_handler(image_paste_handler);
         let this = self;
         this.adopt_mux_pane(
             tab_id,
