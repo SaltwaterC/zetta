@@ -639,6 +639,20 @@ share a background emitted one quad per cell, and `BoundsTree::insert` measured
 layer per call, so avoid emitting one text run per cell — see
 `paints_only_background`.
 
+A layer costs an insert even when it is nested inside another, so a *count* of
+layers matters as much as a count of primitives. `paint_batched_text_runs`
+covers the other half of the terminal's grid the same way `paint_grid_layer`
+covers its backgrounds: it paints every shaped run of a pane inside one layer,
+through `ShapedLine::paint_in_layer` rather than `paint`, taking a text screen
+from 336.8 layers and 376.2 tree inserts per frame to 40.8 and 79.9. That is
+order-preserving rather than a trade, and the reason is worth knowing before
+collapsing anything else: `Bounds::intersects` is strict about a shared edge, so
+runs tiling a grid never intersected one another and had all resolved to the
+same order already — pinned by
+`grid_tiled_bounds_that_only_touch_share_one_order` in `crates/gpui`. Collapsing
+elements that genuinely overlap is a different question, because the sprite
+vectors sort unstably within an order.
+
 ## Performance profiling
 
 Every change must consider its performance impact. Before completing a change,

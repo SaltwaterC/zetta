@@ -434,6 +434,50 @@ mod tests {
         assert_eq!(tree.insert(bounds6), 2); // bounds6 overlaps with bounds4, so it should have a different order
     }
 
+    /// Zetta: a terminal pane paints every one of its text runs inside a single
+    /// scene layer instead of the one per run `ShapedLine::paint` would open.
+    /// That is order-preserving rather than a trade only because the runs tile a
+    /// grid: each merely *touches* its neighbours, `intersects` is strict about
+    /// a shared edge, and so all of them already resolved to the same order —
+    /// one above the background layer they all sit on. Were a shared edge ever
+    /// to count as an intersection, the orders would climb per run and
+    /// collapsing them would start changing what is drawn.
+    #[test]
+    fn grid_tiled_bounds_that_only_touch_share_one_order() {
+        let cell = 10.0;
+        let mut tree = BoundsTree::<f32>::default();
+
+        // The pane's background layer, covering the whole grid.
+        assert_eq!(
+            tree.insert(Bounds {
+                origin: Point { x: 0.0, y: 0.0 },
+                size: Size {
+                    width: cell * 8.0,
+                    height: cell * 3.0
+                },
+            }),
+            1
+        );
+
+        // Runs tiling that grid: three rows of four, each abutting the next
+        // horizontally and the row below it vertically.
+        for line in 0..3 {
+            for run in 0..4 {
+                let order = tree.insert(Bounds {
+                    origin: Point {
+                        x: run as f32 * 2.0 * cell,
+                        y: line as f32 * cell,
+                    },
+                    size: Size {
+                        width: 2.0 * cell,
+                        height: cell,
+                    },
+                });
+                assert_eq!(order, 2, "run {run} of line {line} should not stack");
+            }
+        }
+    }
+
     #[test]
     fn test_random_iterations() {
         let max_bounds = 100;

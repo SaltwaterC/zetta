@@ -104,6 +104,44 @@ impl ShapedLine {
         Ok(())
     }
 
+    /// Paint the line of text without opening a scene layer for it.
+    ///
+    /// Zetta: [`ShapedLine::paint`] opens a layer per call, and a layer costs a
+    /// `BoundsTree` insert — a spatial search against every layer already in the
+    /// frame. A terminal pane emits one shaped line per run of same-styled cells,
+    /// which measured 336.8 layers and 376.2 tree inserts per frame against 40.8
+    /// and 79.9 once every run of a pane shared one layer.
+    ///
+    /// The caller must have opened a layer that covers this line, and is
+    /// responsible for the consequence: every line painted inside it shares that
+    /// layer's order, so their glyphs sort against each other by atlas tile
+    /// rather than by paint sequence. That is sound where the lines do not
+    /// overlap. It is what already happened for a terminal pane's runs — they
+    /// tile a grid, `Bounds::intersects` is strict about touching edges, so the
+    /// per-run layers all resolved to the same order anyway — which is why
+    /// collapsing them changes nothing but the insert count.
+    pub fn paint_in_layer(
+        &self,
+        origin: Point<Pixels>,
+        line_height: Pixels,
+        align: TextAlign,
+        align_width: Option<Pixels>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Result<()> {
+        paint_line_glyphs(
+            origin,
+            &self.layout,
+            line_height,
+            align,
+            align_width,
+            &self.decoration_runs,
+            &[],
+            window,
+            cx,
+        )
+    }
+
     /// Paint the background of the line to the window.
     pub fn paint_background(
         &self,
@@ -360,6 +398,40 @@ fn paint_line(
         ),
     );
     window.paint_layer(line_bounds, |window| {
+        paint_line_glyphs(
+            origin,
+            layout,
+            line_height,
+            align,
+            align_width,
+            decoration_runs,
+            wrap_boundaries,
+            window,
+            cx,
+        )
+    })
+}
+
+/// The body of [`paint_line`], without the enclosing scene layer.
+///
+/// Zetta: split out so [`ShapedLine::paint_in_layer`] can reach it; see that
+/// method for when painting without a layer of one's own is sound.
+#[allow(clippy::too_many_arguments)]
+fn paint_line_glyphs(
+    origin: Point<Pixels>,
+    layout: &LineLayout,
+    line_height: Pixels,
+    align: TextAlign,
+    align_width: Option<Pixels>,
+    decoration_runs: &[DecorationRun],
+    wrap_boundaries: &[WrapBoundary],
+    window: &mut Window,
+    cx: &mut App,
+) -> Result<()> {
+    // Zetta: a bare block, so this body stays byte-identical to the one
+    // upstream has inside `paint_line`'s `paint_layer` closure and a sync
+    // does not conflict on every line of it.
+    {
         let padding_top = (line_height - layout.ascent - layout.descent) / 2.;
         let baseline_offset = point(px(0.), padding_top + layout.ascent);
         let mut decoration_runs = decoration_runs.iter();
@@ -584,7 +656,7 @@ fn paint_line(
         }
 
         Ok(())
-    })
+    }
 }
 
 fn paint_line_background(

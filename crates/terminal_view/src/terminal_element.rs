@@ -279,7 +279,9 @@ impl BatchedTextRun {
                 std::slice::from_ref(&self.text_run(base_font)),
                 Some(dimensions.cell_width),
             )
-            .paint(
+            // Painted without a layer of its own: the caller wraps every run of
+            // the pane in one. See `paint_batched_text_runs`.
+            .paint_in_layer(
                 pos,
                 dimensions.line_height,
                 gpui::TextAlign::Left,
@@ -2078,9 +2080,7 @@ impl Element for TerminalElement {
                     // Built once for the pane, not once per cell: each run
                     // applies its own weight and style over it.
                     let base_font = layout.base_text_style.font();
-                    for batch in &layout.batched_text_runs {
-                        batch.paint(&base_font, origin, &layout.dimensions, window, cx);
-                    }
+                    paint_batched_text_runs(layout, &base_font, origin, bounds, window, cx);
                     paint_grid_layer(
                         &layout.block_element_rects,
                         bounds,
@@ -2163,6 +2163,37 @@ impl Element for TerminalElement {
             );
         });
     }
+}
+
+/// Paints every batched text run of the pane inside a single scene layer.
+///
+/// `ShapedLine::paint` opens a layer of its own, and a layer costs a
+/// `BoundsTree` insert — a spatial search against every layer already in the
+/// frame. A pane emits one shaped line per run of same-styled cells, so a text
+/// screen measured 336.8 layers and 376.2 tree inserts per frame against 40.8
+/// and 79.9 once every run of a pane shared one layer.
+///
+/// Collapsing them is order-preserving rather than a trade: the runs tile a grid
+/// and `Bounds::intersects` is strict about touching edges, so no run's layer
+/// intersected its neighbour and every one of them already resolved to the same
+/// order — one above the background grid layer they all sit on. What changes is
+/// that the order is computed once instead of once per run.
+fn paint_batched_text_runs(
+    layout: &LayoutState,
+    base_font: &Font,
+    origin: GpuiPoint<Pixels>,
+    bounds: Bounds<Pixels>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    if layout.batched_text_runs.is_empty() {
+        return;
+    }
+    window.paint_layer(bounds, |window| {
+        for batch in &layout.batched_text_runs {
+            batch.paint(base_font, origin, &layout.dimensions, window, cx);
+        }
+    });
 }
 
 /// Paints a run of grid-aligned quads inside a single scene layer.

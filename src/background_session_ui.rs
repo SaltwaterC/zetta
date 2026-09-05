@@ -19,7 +19,17 @@ use crate::project::resolve_registered_project_config_root;
 use crate::rename::resolve_tab_title;
 use crate::worktree_detection::terminal_event_requires_worktree_detection;
 
-const BACKGROUND_PROCESS_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
+/// How often a detached session's panes are asked to re-read their foreground
+/// process.
+///
+/// These panes are off screen: the answer feeds the reconnect picker and the
+/// published catalog, not anything being drawn. Each poke also costs a catalog
+/// publish when a title changes, so a short interval spends foreground wake-ups
+/// to keep a list nobody is looking at a few seconds fresher. The terminal's own
+/// refresh is throttled to `PROCESS_INFO_REFRESH_INTERVAL` and runs on the
+/// background executor regardless, so this only sets how often it is offered the
+/// chance.
+const BACKGROUND_PROCESS_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 
 #[derive(Clone)]
 pub(crate) struct DiskResumeIdentities {

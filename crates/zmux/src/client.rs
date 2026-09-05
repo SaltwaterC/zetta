@@ -172,6 +172,10 @@ pub struct SharedPane {
     /// [`Event::Size`] arrives. The holder of the pane applies the latest
     /// each time it is woken.
     sizes: Arc<Mutex<Vec<(u16, u16)>>>,
+    /// Signalled by the reader whenever it records a size, so the pane's holder
+    /// can wait for one instead of asking on a timer. Bounded at one: a pending
+    /// signal already means "there are sizes to take".
+    size_signal: (async_channel::Sender<()>, async_channel::Receiver<()>),
     /// Output produced while the pane was detached or shared, to be replayed
     /// into a fresh terminal before it is shown.
     pub replay: Vec<u8>,
@@ -244,6 +248,7 @@ impl SharedPane {
             pending: Vec::new(),
             offset: 0,
             sizes: self.sizes.clone(),
+            size_signal: self.size_signal.0.clone(),
         }
     }
 
@@ -251,6 +256,14 @@ impl SharedPane {
     /// first.
     pub fn take_sizes(&self) -> Vec<(u16, u16)> {
         self.sizes.lock().unwrap().drain(..).collect()
+    }
+
+    /// Resolves once the reader has recorded a size.
+    ///
+    /// The holder used to ask every 500 ms, which woke the thread that draws
+    /// that often for every shared pane, almost always to find nothing.
+    pub fn size_arrived(&self) -> async_channel::Receiver<()> {
+        self.size_signal.1.clone()
     }
 }
 
@@ -268,6 +281,7 @@ pub struct SharedReader {
     pending: Vec<u8>,
     offset: usize,
     sizes: Arc<Mutex<Vec<(u16, u16)>>>,
+    size_signal: async_channel::Sender<()>,
 }
 
 impl io::Read for SharedReader {
@@ -297,6 +311,9 @@ impl io::Read for SharedReader {
                 }
                 Ok((Event::Size { columns, lines, .. }, _)) => {
                     self.sizes.lock().unwrap().push((columns, lines));
+                    // Full means a signal is already pending, which says the
+                    // same thing.
+                    let _ = self.size_signal.try_send(());
                 }
                 Ok(_) => {}
                 Err(error) if is_would_block(&error) => {
@@ -888,6 +905,7 @@ impl Client {
                             child_pid,
                             connection: Mutex::new(connection),
                             sizes: Arc::new(Mutex::new(vec![(columns, lines)])),
+                            size_signal: async_channel::bounded(1),
                             replay,
                         },
                         state,

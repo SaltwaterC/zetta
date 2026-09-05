@@ -110,39 +110,54 @@ impl Zetta {
         cx: &mut Context<Self>,
     ) {
         let executor = cx.background_executor().clone();
+        let size_arrived = pane.size_arrived();
         cx.spawn_in(window, async move |this, cx| {
             // The size the pane attached at has to be applied once the tab
             // exists; without this the grid could stay at the window's size
             // while the multiplexer's pty runs at the arbitrated one.
-            let mut pending_size: Option<(u16, u16)> = None;
+            let mut pending_size: Option<(u16, u16)> = pane.take_sizes().last().copied();
             loop {
-                match exit_rx.try_recv() {
-                    Ok(report) => {
+                if let Some(size) = pending_size.take() {
+                    let applied = this
+                        .update_in(cx, |this, window, cx| {
+                            this.apply_shared_pane_size(tab_id, pane_id, size, window, cx)
+                        })
+                        .unwrap_or(true);
+                    if !applied {
+                        // The tab has not been laid out yet, so the size is
+                        // still owed. This is the one case that has to come back
+                        // on a timer, because what it waits for is a layout
+                        // rather than a message.
+                        pending_size = Some(size);
+                        executor.timer(SHARED_SIZE_POLL_INTERVAL).await;
+                        continue;
+                    }
+                }
+
+                // Wait for something to happen rather than asking whether it
+                // has. Both arms are messages, so an idle shared pane no longer
+                // wakes the thread that draws twice a second.
+                // Wait for something to happen rather than asking whether it
+                // has. Both arms are messages, so an idle shared pane no longer
+                // wakes the thread that draws twice a second.
+                let exited = Box::pin(exit_rx.recv());
+                let resized = Box::pin(size_arrived.recv());
+                match futures::future::select(exited, resized).await {
+                    futures::future::Either::Left((report, _)) => {
+                        let Ok(report) = report else { return };
                         this.update_in(cx, |this, _window, cx| {
                             this.route_shared_pane_exit(tab_id, pane_id, report, cx);
                         })
                         .ok();
                         return;
                     }
-                    Err(async_channel::TryRecvError::Empty) => {}
-                    Err(async_channel::TryRecvError::Closed) => return,
+                    futures::future::Either::Right((arrived, _)) => {
+                        if arrived.is_err() {
+                            return;
+                        }
+                        pending_size = pane.take_sizes().last().copied();
+                    }
                 }
-                if let Some(size) = pane.take_sizes().last().copied() {
-                    pending_size = Some(size);
-                }
-                let Some(size) = pending_size else {
-                    executor.timer(SHARED_SIZE_POLL_INTERVAL).await;
-                    continue;
-                };
-                let applied = this
-                    .update_in(cx, |this, window, cx| {
-                        this.apply_shared_pane_size(tab_id, pane_id, size, window, cx)
-                    })
-                    .unwrap_or(true);
-                if applied {
-                    pending_size = None;
-                }
-                executor.timer(SHARED_SIZE_POLL_INTERVAL).await;
             }
         })
         .detach();

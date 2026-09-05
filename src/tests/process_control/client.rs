@@ -672,6 +672,7 @@ fn control_server_delivers_authenticated_worktree_name_set_and_clear_requests() 
 /// a dispatched query rather than a wrong answer; the attempt is serviced and
 /// retried rather than being allowed to fail the run intermittently.
 #[test]
+#[cfg(feature = "syntax-highlighting")]
 fn a_current_revision_is_answered_without_reaching_the_main_loop() {
     let (commands, mut received) = futures::channel::mpsc::unbounded();
     let directory = tempfile::tempdir().unwrap();
@@ -718,6 +719,7 @@ fn a_current_revision_is_answered_without_reaching_the_main_loop() {
 /// The gate must not swallow a real change: once the revision moves, the same
 /// client gets a full answer again.
 #[test]
+#[cfg(feature = "syntax-highlighting")]
 fn a_stale_revision_is_dispatched_and_answered() {
     let (commands, mut received) = futures::channel::mpsc::unbounded();
     let directory = tempfile::tempdir().unwrap();

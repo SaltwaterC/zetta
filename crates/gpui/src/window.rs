@@ -721,6 +721,10 @@ pub struct DismissEvent;
 
 type FrameCallback = Box<dyn FnOnce(&mut Window, &mut App)>;
 
+/// Zetta: where a glyph lives in the sprite atlas and the raster origin it draws
+/// at, or `None` when it rasterizes to nothing. See [`Window::glyph_sprites`].
+type GlyphSprite = Option<(Point<DevicePixels>, AtlasTile)>;
+
 pub(crate) type AnyMouseListener =
     Box<dyn FnMut(&dyn Any, DispatchPhase, &mut Window, &mut App) + 'static>;
 
@@ -1140,6 +1144,21 @@ pub struct Window {
     is_resizable: bool,
     is_minimizable: bool,
     sprite_atlas: Arc<dyn PlatformAtlas>,
+    /// Zetta: what `paint_glyph`/`paint_emoji` already looked up this frame.
+    ///
+    /// Both used to hash the same eight-field `RenderGlyphParams` twice per
+    /// glyph — once against the text system's raster-bounds map behind an
+    /// `RwLock`, then again against the sprite atlas behind a `Mutex` — for
+    /// every glyph of every frame. A terminal screen paints ~3,300 glyphs drawn
+    /// from a few hundred distinct keys, because a glyph repeats across columns
+    /// at one of `SUBPIXEL_VARIANTS_X` phases, so most of that was answering the
+    /// same question again.
+    ///
+    /// Cleared at the start of every `draw`, which is the whole invalidation
+    /// story: an entry only ever outlives the paint pass that produced it by
+    /// nothing at all, and the two things that drop atlas tiles — the renderer's
+    /// incremental recovery and device loss — both run after paint.
+    glyph_sprites: FxHashMap<RenderGlyphParams, GlyphSprite>,
     text_system: Arc<WindowTextSystem>,
     text_rendering_mode: Rc<Cell<TextRenderingMode>>,
     rem_size: Pixels,
@@ -1841,6 +1860,7 @@ impl Window {
             is_resizable,
             is_minimizable,
             sprite_atlas,
+            glyph_sprites: FxHashMap::default(),
             text_system,
             text_rendering_mode: cx.text_rendering_mode.clone(),
             rem_size: px(16.),
@@ -2473,6 +2493,14 @@ impl Window {
         self.rendered_frame.scene.quads.clone()
     }
 
+    /// Zetta: how many glyph lookups the last draw memoized. See
+    /// [`Window::glyph_sprites`]; this exists so a test can see that the memo is
+    /// cleared per frame rather than accumulating.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn glyph_sprite_cache_len(&self) -> usize {
+        self.glyph_sprites.len()
+    }
+
     /// Set the content size of the window.
     pub fn resize(&mut self, size: Size<Pixels>) {
         self.platform_window.resize(size);
@@ -2866,6 +2894,11 @@ impl Window {
         // Set up the per-App arena for element allocation during this draw.
         // This ensures that multiple test Apps have isolated arenas.
         let arena_scope = ElementArenaScope::enter(&cx.element_arena);
+
+        // Zetta: see `glyph_sprites`. Nothing in it may outlive the frame it was
+        // produced for, because the atlas it names tiles in is reset between
+        // frames on renderer recovery and on device loss.
+        self.glyph_sprites.clear();
 
         self.invalidate_entities();
         cx.entities.clear_accessed();
@@ -4301,17 +4334,9 @@ impl Window {
             dilation,
         };
 
-        let raster_bounds = self.text_system().raster_bounds(&params)?;
-        if !raster_bounds.is_zero() {
-            let tile = self
-                .sprite_atlas
-                .get_or_insert_with(&params.clone().into(), &mut || {
-                    let (size, bytes) = self.text_system().rasterize_glyph(&params)?;
-                    Ok(Some((size, Cow::Owned(bytes))))
-                })?
-                .expect("Callback above only errors or returns Some");
+        if let Some((raster_origin, tile)) = self.glyph_sprite(params)? {
             let bounds = Bounds {
-                origin: integer_origin + raster_bounds.origin.map(Into::into),
+                origin: integer_origin + raster_origin.map(Into::into),
                 size: tile.bounds.size.map(Into::into),
             };
             let content_mask = self.snapped_content_mask();
@@ -4339,6 +4364,34 @@ impl Window {
             }
         }
         Ok(())
+    }
+
+    /// The atlas tile and raster origin for a glyph, memoized for the frame.
+    ///
+    /// `None` means the glyph rasterizes to nothing and paints no sprite. See
+    /// [`Window::glyph_sprites`] for why the memo is safe and why it exists.
+    fn glyph_sprite(&mut self, params: RenderGlyphParams) -> Result<GlyphSprite> {
+        // `copied` rather than a `match` on the `get`: the borrow of the map has
+        // to end before the miss arm can insert into it.
+        if let Some(sprite) = self.glyph_sprites.get(&params).copied() {
+            return Ok(sprite);
+        }
+
+        let raster_bounds = self.text_system().raster_bounds(&params)?;
+        let sprite = if raster_bounds.is_zero() {
+            None
+        } else {
+            let tile = self
+                .sprite_atlas
+                .get_or_insert_with(&params.clone().into(), &mut || {
+                    let (size, bytes) = self.text_system().rasterize_glyph(&params)?;
+                    Ok(Some((size, Cow::Owned(bytes))))
+                })?
+                .expect("Callback above only errors or returns Some");
+            Some((raster_bounds.origin, tile))
+        };
+        self.glyph_sprites.insert(params, sprite);
+        Ok(sprite)
     }
 
     fn should_use_subpixel_rendering(&self, font_id: FontId, font_size: Pixels) -> bool {
@@ -4391,18 +4444,9 @@ impl Window {
             dilation: 0,
         };
 
-        let raster_bounds = self.text_system().raster_bounds(&params)?;
-        if !raster_bounds.is_zero() {
-            let tile = self
-                .sprite_atlas
-                .get_or_insert_with(&params.clone().into(), &mut || {
-                    let (size, bytes) = self.text_system().rasterize_glyph(&params)?;
-                    Ok(Some((size, Cow::Owned(bytes))))
-                })?
-                .expect("Callback above only errors or returns Some");
-
+        if let Some((raster_origin, tile)) = self.glyph_sprite(params)? {
             let bounds = Bounds {
-                origin: integer_origin + raster_bounds.origin.map(Into::into),
+                origin: integer_origin + raster_origin.map(Into::into),
                 size: tile.bounds.size.map(Into::into),
             };
             let content_mask = self.snapped_content_mask();
@@ -6995,7 +7039,7 @@ mod tests {
         InputEvent as _, InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent,
         MouseMoveEvent, ParentElement, Pixels, Point, Render, RequestFrameOptions,
         StatefulInteractiveElement as _, Styled, TestAppContext, Window, WindowAppearance,
-        WindowOptions, canvas, div, point, px, size,
+        WindowOptions, canvas, div, point, px, size, util::FluentBuilder as _,
     };
 
     struct EmptyView;
@@ -7004,6 +7048,55 @@ mod tests {
         fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
             div()
         }
+    }
+
+    /// Zetta: paints text only while `showing_text`, so a test can draw a frame
+    /// that reaches `paint_glyph` and then one that does not.
+    struct SometimesPaintsText {
+        showing_text: bool,
+    }
+
+    impl Render for SometimesPaintsText {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .size_full()
+                .when(self.showing_text, |this| this.child("glyphs"))
+        }
+    }
+
+    /// Zetta: `Window::glyph_sprites` memoizes a glyph's raster bounds and atlas
+    /// tile for the frame that painted it, and nothing in it may outlive that
+    /// frame — the atlas it names tiles in is reset out from under it on
+    /// renderer recovery and on device loss. Painting no text at all has to
+    /// leave the memo empty, which it can only do if `draw` clears it.
+    #[gpui::test]
+    fn test_glyph_memo_does_not_outlive_a_frame(cx: &mut TestAppContext) {
+        // `add_window` draws once, so the memo already holds that frame's work.
+        let window = cx.add_window(|_, _| SometimesPaintsText { showing_text: true });
+        let painted = window
+            .update(cx, |_, window, _| window.glyph_sprite_cache_len())
+            .unwrap();
+        assert!(
+            painted > 0,
+            "a frame that paints text should have memoized at least one glyph"
+        );
+
+        window
+            .update(cx, |view, _, cx| {
+                view.showing_text = false;
+                cx.notify();
+            })
+            .unwrap();
+        cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear(cx))
+            .unwrap();
+
+        assert_eq!(
+            window
+                .update(cx, |_, window, _| window.glyph_sprite_cache_len())
+                .unwrap(),
+            0,
+            "the memo has to be cleared each frame, not carried into the next"
+        );
     }
 
     struct OpensWindowOnPaint {

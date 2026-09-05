@@ -593,18 +593,40 @@ enum ResizeRequestParserState {
 }
 
 impl ResizeRequestParser {
-    fn advance(&mut self, bytes: &[u8], mut on_request: impl FnMut(u16, u16)) {
-        // The common path is ordinary terminal output. Avoid a state-machine
-        // branch for every byte until an escape actually appears.
-        let bytes = if matches!(self.state, ResizeRequestParserState::Ground) {
-            let Some(first_escape) = bytes.iter().position(|byte| *byte == 0x1b) else {
-                return;
-            };
-            &bytes[first_escape..]
-        } else {
-            bytes
-        };
-        for &byte in bytes {
+    fn advance(&mut self, mut bytes: &[u8], mut on_request: impl FnMut(u16, u16)) {
+        // Ordinary output carries no escapes, so `Ground` skips ahead to the
+        // next one rather than testing every byte.
+        //
+        // The skip is re-applied every time the machine returns to `Ground`, not
+        // just once on entry. Coloured output and TUIs carry escapes throughout,
+        // so a single skip at the start left the whole rest of the buffer going
+        // through the state machine a byte at a time — for exactly the traffic
+        // this is meant to be cheap for. This scanner runs over every byte the
+        // pty produces, in addition to the vte parser.
+        while !bytes.is_empty() {
+            if matches!(self.state, ResizeRequestParserState::Ground) {
+                let Some(escape) = bytes.iter().position(|byte| *byte == 0x1b) else {
+                    return;
+                };
+                self.state = ResizeRequestParserState::Escape;
+                bytes = &bytes[escape + 1..];
+                continue;
+            }
+            let mut consumed = 0;
+            for &byte in bytes {
+                consumed += 1;
+                self.advance_escaped(byte, &mut on_request);
+                if matches!(self.state, ResizeRequestParserState::Ground) {
+                    break;
+                }
+            }
+            bytes = &bytes[consumed..];
+        }
+    }
+
+    /// One byte, with the machine already out of `Ground`.
+    fn advance_escaped(&mut self, byte: u8, on_request: &mut impl FnMut(u16, u16)) {
+        {
             match &mut self.state {
                 ResizeRequestParserState::Ground => {
                     if byte == 0x1b {
@@ -765,6 +787,45 @@ impl<T> PeekableReceiver<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The skip has to be re-applied every time the machine returns to
+    /// `Ground`. Coloured output puts escapes throughout the buffer, so a
+    /// sequence that arrives after earlier escapes is the normal case, not an
+    /// edge case.
+    #[test]
+    fn resize_request_parser_finds_a_request_after_earlier_escapes() {
+        let mut parser = ResizeRequestParser::default();
+        let mut seen = Vec::new();
+        parser.advance(
+            b"\x1b[31mred\x1b[0m plain \x1b[1;32mgreen\x1b[0m\x1b[8;24;80t after",
+            |rows, columns| seen.push((rows, columns)),
+        );
+        assert_eq!(seen, vec![(24, 80)]);
+    }
+
+    /// Escapes that are not window operations must leave the machine back in
+    /// `Ground` so the next skip starts from the right place.
+    #[test]
+    fn resize_request_parser_returns_to_ground_between_sequences() {
+        let mut parser = ResizeRequestParser::default();
+        let mut seen = Vec::new();
+        parser.advance(b"\x1b[0m\x1b[8;10;20t\x1b[0m\x1b[8;30;40t", |rows, columns| {
+            seen.push((rows, columns))
+        });
+        assert_eq!(seen, vec![(10, 20), (30, 40)]);
+    }
+
+    /// A buffer of ordinary output must not be walked byte by byte, and must
+    /// leave no state behind for the next one.
+    #[test]
+    fn resize_request_parser_ignores_output_without_escapes() {
+        let mut parser = ResizeRequestParser::default();
+        let mut seen = Vec::new();
+        parser.advance(b"no escapes here at all", |rows, columns| seen.push((rows, columns)));
+        assert!(seen.is_empty());
+        parser.advance(b"\x1b[8;5;6t", |rows, columns| seen.push((rows, columns)));
+        assert_eq!(seen, vec![(5, 6)]);
+    }
 
     #[test]
     fn resize_request_parser_handles_split_xterm_sequences() {

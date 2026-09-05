@@ -19,6 +19,29 @@ Retain these Zetta patches when synchronizing:
   overlap, which a layer does not guarantee in general. Measured at −5.7% median
   draw time on the standard terminal workload.
 
+- `ShapedLine::paint_in_layer`, and the `paint_line_glyphs` split that `paint`
+  and it share. `paint` opens a scene layer per call, and a layer costs a
+  `BoundsTree` insert — a spatial search against every layer already in the
+  frame. A terminal pane shapes one line per run of same-styled cells, which
+  measured 336.8 layers and 376.2 tree inserts per frame against 40.8 and 79.9
+  once `terminal_element.rs` wrapped every run of a pane in one layer instead.
+  Collapsing them is order-preserving rather than a trade: the runs tile a grid
+  and `Bounds::intersects` is strict about touching edges, so no run's layer
+  intersected its neighbour and all of them already resolved to the same order.
+  Measured at −24.6% mean draw time and −14.3% process CPU, 8 of 8 paired runs.
+
+- `Window::glyph_sprites`, a per-frame memo of the glyph lookup that
+  `paint_glyph` and `paint_emoji` both do, reached through `Window::glyph_sprite`.
+  Upstream hashes the same eight-field `RenderGlyphParams` twice per glyph — the
+  text system's raster-bounds map behind an `RwLock`, then the sprite atlas
+  behind a `Mutex` — and a terminal screen paints ~3,300 glyphs drawn from a few
+  hundred distinct keys, since a glyph repeats across columns at one of
+  `SUBPIXEL_VARIANTS_X` phases. Cleared at the top of `Window::draw`, which is
+  the whole invalidation story: no entry outlives the paint pass that made it,
+  and both things that drop atlas tiles — the renderer's incremental recovery
+  and device loss — run after paint. Measured at −10.6% mean and −11.2% median
+  draw time, 7 of 8 paired runs (8 of 8 on the median).
+
 ## Why this crate is forked at all
 
 Unlike the platform forks, `gpui` is not a leaf. Twenty-two other `zed/` crates
