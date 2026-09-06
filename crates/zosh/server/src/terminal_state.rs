@@ -26,6 +26,11 @@ struct ScrollbackClearDetector {
     parameters: [u8; 100],
     parameter_len: usize,
     overflowed: bool,
+
+    // Mosh parses PTY output as UTF-8 before feeding codepoints into its
+    // terminal parser. C1 controls U+0080..U+009F therefore arrive as
+    // UTF-8 C2 80..9F, never as standalone raw 80..9F bytes.
+    c1_utf8_prefix: bool,
 }
 
 impl Default for ScrollbackClearDetector {
@@ -35,6 +40,7 @@ impl Default for ScrollbackClearDetector {
             parameters: [0; 100],
             parameter_len: 0,
             overflowed: false,
+            c1_utf8_prefix: false,
         }
     }
 }
@@ -42,11 +48,42 @@ impl Default for ScrollbackClearDetector {
 impl ScrollbackClearDetector {
     fn feed(&mut self, bytes: &[u8]) -> u64 {
         let mut count = 0_u64;
+
         for &byte in bytes {
+            // Decode only the UTF-8 representation of C1 controls. This is
+            // enough for the terminal state machine while ensuring arbitrary
+            // UTF-8 continuation bytes cannot masquerade as CSI/OSC/etc.
+            //
+            // For example U+276F `❯` is E2 9D AF. Treating its 9D byte as a
+            // standalone C1 OSC poisons the detector and makes a later
+            // ESC [ 3 J disappear.
+            if self.c1_utf8_prefix {
+                self.c1_utf8_prefix = false;
+
+                if (0x80..=0x9f).contains(&byte) {
+                    if self.step(byte) {
+                        count = count.wrapping_add(1);
+                    }
+                    continue;
+                }
+            }
+
+            if byte == 0xc2 {
+                self.c1_utf8_prefix = true;
+                continue;
+            }
+
+            // All other non-ASCII bytes are UTF-8 payload from printable
+            // Unicode characters and are irrelevant to CSI detection.
+            if byte >= 0x80 {
+                continue;
+            }
+
             if self.step(byte) {
                 count = count.wrapping_add(1);
             }
         }
+
         count
     }
 
@@ -424,7 +461,7 @@ mod tests {
 
     #[test]
     fn clear_scrollback_detector_matches_moshs_first_parameter_rules() {
-        for sequence in [b"\x1b[03J".as_slice(), b"\x1b[3;0J", b"\x9b3J"] {
+        for sequence in [b"\x1b[03J".as_slice(), b"\x1b[3;0J", b"\xc2\x9b3J"] {
             let mut state = TerminalState::new(24, 80);
             state.process(sequence);
             assert_eq!(state.scrollback_clear_count(), 1, "{sequence:?}");
@@ -435,6 +472,58 @@ mod tests {
             state.process(sequence);
             assert_eq!(state.scrollback_clear_count(), 0, "{sequence:?}");
         }
+    }
+
+    #[test]
+    fn unicode_prompt_bytes_do_not_poison_clear_detection() {
+        let mut state = TerminalState::new(24, 80);
+
+        // This is present in the captured real zsh prompt. U+276F is encoded
+        // as E2 9D AF; the old raw-byte detector interpreted 9D as C1 OSC.
+        state.process("❯".as_bytes());
+        state.process(b"\x1b[3J");
+
+        assert_eq!(state.scrollback_clear_count(), 1);
+    }
+
+    #[test]
+    fn unicode_prompt_and_clear_in_same_chunk_are_detected() {
+        let mut state = TerminalState::new(24, 80);
+
+        state.process("prompt ❯ \x1b[3J".as_bytes());
+
+        assert_eq!(state.scrollback_clear_count(), 1);
+    }
+
+    #[test]
+    fn utf8_c1_csi_is_still_supported() {
+        let mut state = TerminalState::new(24, 80);
+
+        // U+009B CSI encoded as UTF-8.
+        state.process(b"\xc2\x9b3J");
+
+        assert_eq!(state.scrollback_clear_count(), 1);
+    }
+
+    #[test]
+    fn utf8_c1_csi_survives_pty_chunk_boundary() {
+        let mut state = TerminalState::new(24, 80);
+
+        state.process(b"\xc2");
+        state.process(b"\x9b3J");
+
+        assert_eq!(state.scrollback_clear_count(), 1);
+    }
+
+    #[test]
+    fn raw_utf8_continuation_byte_is_not_a_c1_control() {
+        let mut state = TerminalState::new(24, 80);
+
+        // Standalone 9D is not a valid UTF-8 encoding of U+009D.
+        state.process(b"\x9d");
+        state.process(b"\x1b[3J");
+
+        assert_eq!(state.scrollback_clear_count(), 1);
     }
 
     #[test]
