@@ -484,9 +484,9 @@ _zetta_complete() {
             [[ $host == "$current"* ]] && COMPREPLY+=("$host")
         done < <(awk '
             /^[[:space:]]*[Hh][Oo][Ss][Tt][[:space:]]+/ {
-                for (index = 2; index <= NF; index++)
-                    if ($index !~ /^!/ && $index !~ /[*?]/)
-                        print $index
+                for (field = 2; field <= NF; field++)
+                    if ($field !~ /^!/ && $field !~ /[*?]/)
+                        print $field
             }
         ' "$config" 2>/dev/null)
     }
@@ -664,6 +664,48 @@ _zetta_complete() {
         else
             COMPREPLY=()
         fi
+        return
+    fi
+
+    if [[ $command == mosh ]]; then
+        local candidate host_given=0 delimiter=0
+        for (( index = 2; index < COMP_CWORD; index++ )); do
+            candidate=${COMP_WORDS[index]}
+            if [[ $candidate == -- ]]; then
+                delimiter=1
+                continue
+            fi
+            [[ $candidate == -* ]] && continue
+            case ${COMP_WORDS[index-1]} in
+                --predict|--family|--experimental-remote-ip|--bind-server|--client|--server|--ssh|--port|-p) continue ;;
+            esac
+            host_given=1
+            break
+        done
+        if (( host_given )); then
+            COMPREPLY=()
+            return
+        fi
+        case $previous in
+            --predict) _zetta_compgen 'adaptive always never experimental' ;;
+            --family) _zetta_compgen 'prefer-inet prefer-inet6 inet inet6 auto all' ;;
+            --experimental-remote-ip) _zetta_compgen 'local remote proxy' ;;
+            --bind-server) _zetta_compgen 'ssh any' ;;
+            --client|--server) COMPREPLY=( $(compgen -f -- "$current") ) ;;
+            --ssh|--port|-p) COMPREPLY=() ;;
+            *)
+                if (( delimiter )); then
+                    _zetta_complete_ssh_targets
+                elif [[ $current == -* ]]; then
+                    _zetta_compgen '--client --server --predict -a -n -o --predict-overwrite --no-predict-overwrite -4 -6 --family -p --port --bind-server --ssh --ssh-pty --no-ssh-pty --init --no-init --local --experimental-remote-ip -h --help -V --version --'
+                else
+                    _zetta_complete_ssh_targets
+                    local -a mosh_hosts=("${COMPREPLY[@]}")
+                    _zetta_compgen '--client --server --predict -a -n -o --predict-overwrite --no-predict-overwrite -4 -6 --family -p --port --bind-server --ssh --ssh-pty --no-ssh-pty --init --no-init --local --experimental-remote-ip -h --help -V --version --'
+                    COMPREPLY=( "${mosh_hosts[@]}" "${COMPREPLY[@]}" )
+                fi
+                ;;
+        esac
         return
     fi
 
@@ -927,24 +969,6 @@ _zetta_complete() {
     fi
 
     case "$command" in
-        mosh)
-            case $previous in
-                --predict) _zetta_compgen 'adaptive always never experimental' ;;
-                --family) _zetta_compgen 'prefer-inet prefer-inet6 inet inet6 auto all' ;;
-                --experimental-remote-ip) _zetta_compgen 'local remote proxy' ;;
-                --client|--server) COMPREPLY=( $(compgen -f -- "$current") ) ;;
-                --ssh) COMPREPLY=() ;;
-                *)
-                    if [[ $current == -* ]]; then
-                        _zetta_compgen '--client --server --predict -a -n -o --predict-overwrite -4 -6 --family --port --bind-server --ssh --ssh-pty --no-ssh-pty --init --no-init --local --experimental-remote-ip --help --version --'
-                    elif (( COMP_CWORD == 2 )); then
-                        _zetta_complete_ssh_targets
-                    else
-                        COMPREPLY=()
-                    fi
-                    ;;
-            esac
-            ;;
         profile)
             if (( profile_command_index >= 0 && COMP_CWORD == profile_command_index + 1 )); then
                 _zetta_compgen 'list themes disable enable theme dark-theme icon default add remove --help'
@@ -1380,24 +1404,47 @@ zntfy() { zetta notify "$@"; }
 zcopy() { zetta copy "$@"; }
 zpaste() { zetta paste "$@"; }
 complete -F _zetta_complete zetta
-if [[ \${__ZETTA_MOSH_WRAPPER:-0} == 1 ]]; then
-    complete -F _zetta_complete mosh
+if [[ ${__ZETTA_MOSH_WRAPPER:-0} == 1 ]]; then
+    complete -F _zosh_complete mosh
 fi
 _zosh_complete() {
-    local current=\${COMP_WORDS[COMP_CWORD]} previous=\${COMP_WORDS[COMP_CWORD-1]}
+    local current=${COMP_WORDS[COMP_CWORD]} previous=${COMP_WORDS[COMP_CWORD-1]}
+    local candidate host_given=0 delimiter=0 index
+    for (( index = 1; index < COMP_CWORD; index++ )); do
+        candidate=${COMP_WORDS[index]}
+        if [[ $candidate == -- ]]; then
+            delimiter=1
+            continue
+        fi
+        [[ $candidate == -* ]] && continue
+        case ${COMP_WORDS[index-1]} in
+            --predict|--family|--experimental-remote-ip|--bind-server|--client|--server|--ssh|--port|-p) continue ;;
+        esac
+        host_given=1
+        break
+    done
+    if (( host_given )); then
+        COMPREPLY=()
+        return
+    fi
+    local zosh_options='-c --client --server --predict -a -n -o --predict-overwrite --no-predict-overwrite -4 -6 --family -p --port --bind-server --ssh --ssh-pty --no-ssh-pty --init --no-init --local --experimental-remote-ip -h --help -V --version --'
     case "$previous" in
         --predict) _zetta_compgen 'adaptive always never experimental' ;;
         --family) _zetta_compgen 'prefer-inet prefer-inet6 inet inet6 auto all' ;;
         --experimental-remote-ip) _zetta_compgen 'local remote proxy' ;;
+        --bind-server) _zetta_compgen 'ssh any' ;;
         --client|--server) COMPREPLY=( $(compgen -f -- "$current") ) ;;
-        --ssh|--port|-p|--bind-server) COMPREPLY=() ;;
+        --ssh|--port|-p) COMPREPLY=() ;;
         *)
-            if [[ $current == -* ]]; then
-                _zetta_compgen '-c --client --server --predict -a -n -o --predict-overwrite -4 -6 --family --port --bind-server --ssh --ssh-pty --no-ssh-pty --init --no-init --local --experimental-remote-ip --help --version --'
-            elif (( COMP_CWORD == 1 )); then
+            if (( delimiter )); then
                 _zetta_complete_ssh_targets
+            elif [[ $current == -* ]]; then
+                _zetta_compgen "$zosh_options"
             else
-                COMPREPLY=()
+                _zetta_complete_ssh_targets
+                local -a zosh_hosts=("${COMPREPLY[@]}")
+                _zetta_compgen "$zosh_options"
+                COMPREPLY=( "${zosh_hosts[@]}" "${COMPREPLY[@]}" )
             fi
             ;;
     esac

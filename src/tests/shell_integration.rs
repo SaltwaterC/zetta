@@ -538,14 +538,14 @@ fn mosh_integration_is_conditional_and_has_full_client_completion() {
     assert!(bash.contains("if ! type -t mosh >/dev/null 2>&1"));
     assert!(bash.contains("mosh() { zetta mosh \"$@\"; }"));
     assert!(bash.contains("complete -F _zosh_complete zosh"));
+    assert!(bash.contains("complete -F _zosh_complete mosh"));
     assert!(bash.contains("_zetta_complete_ssh_targets"));
 
     let fish = ShellIntegration::Fish.script();
     assert!(fish.contains("if not type -q mosh"));
     assert!(fish.contains("function mosh --wraps 'zetta mosh'"));
-    assert!(fish.contains("complete -c zosh -l client"));
-    assert!(fish.contains("complete -c zosh -a '(__zetta_ssh_targets)'"));
-    assert!(fish.contains("complete -c zosh -l help"));
+    assert!(fish.contains("-l client"));
+    assert!(fish.contains("-a '(__zetta_ssh_targets)'"));
     assert!(fish.contains("(__zetta_ssh_targets)"));
 
     let powershell = ShellIntegration::PowerShell.script();
@@ -558,8 +558,354 @@ fn mosh_integration_is_conditional_and_has_full_client_completion() {
     assert!(zsh.contains("$+commands[mosh]"));
     assert!(zsh.contains("function mosh { zetta mosh \"$@\"; }"));
     assert!(zsh.contains("compdef _zosh zosh"));
-    assert!(zsh.contains("--client=[mosh client]"));
     assert!(zsh.contains("_zmux_ssh_targets"));
+    assert!(zsh.contains("[[ $words[1] == mosh || ${words[2]} == mosh ]]"));
+    assert!(zsh.contains("_zosh() {"));
+}
+
+// Regression guard: the completions must offer every option the zosh launcher
+// (and therefore `zetta mosh`, which forwards its arguments unmodified)
+// actually parses. The launcher's own help and `parse_flag`/`parse_attached_value`
+// in crates/zosh/src/launcher.rs are the authority: `--no-predict-overwrite`,
+// the `-p` port short form, and the `-h`/`-V` help/version short forms were
+// missing from every completion, and `--bind-server` offered no `ssh`/`any`
+// values.
+#[test]
+fn mosh_completion_covers_every_option_the_zosh_launcher_accepts() {
+    let bash = ShellIntegration::Bash.script();
+    assert!(bash.contains("--no-predict-overwrite"));
+    assert!(bash.contains("-p --port --bind-server"));
+    assert!(bash.contains("-h --help -V --version --"));
+    assert_eq!(bash.matches("--no-predict-overwrite").count(), 3); // mosh x2 (option/empty current) + zosh
+
+    let fish = ShellIntegration::Fish.script();
+    assert!(fish.contains("-l no-predict-overwrite"));
+    assert!(fish.contains("-s p -r"));
+    assert!(fish.contains("-l bind-server -r -a 'ssh any'"));
+    assert!(fish.contains("-s h -d 'Print help'"));
+    assert!(fish.contains("-s V -d 'Print version'"));
+    assert!(fish.contains("function __zetta_mosh_host_given"));
+
+    let powershell = ShellIntegration::PowerShell.script();
+    assert!(powershell.contains("'--no-predict-overwrite', '-4'"));
+    assert!(powershell.contains("'-p', '--port', '--bind-server'"));
+    assert!(powershell.contains("'-h', '--help', '-V', '--version', '--'"));
+    assert!(powershell.contains("elseif ($previous -eq '--bind-server') { 'ssh', 'any' }"));
+
+    let zsh = ShellIntegration::Zsh.script();
+    assert!(zsh.contains("--no-predict-overwrite"));
+    assert!(zsh.contains("-h --help -V --version --"));
+    assert!(zsh.contains("--bind-server) compadd -- ssh any"));
+    assert!(zsh.contains("_zmux_ssh_targets"));
+    assert!(zsh.contains("compadd -V mosh-candidates --"));
+}
+
+// Regression guard: the bash template is embedded verbatim (include_str!, no
+// template expansion), so `\${...}` reaches Bash as a literal backslash
+// escape that prevents `__ZETTA_MOSH_WRAPPER` and `COMP_WORDS` from ever
+// expanding, which breaks the generated `mosh` wrapper completion and makes
+// `_zosh_complete` see nothing to complete.
+#[test]
+fn bash_template_has_no_literal_escaped_expansions() {
+    let bash = ShellIntegration::Bash.script();
+    assert!(bash.contains("if [[ ${__ZETTA_MOSH_WRAPPER:-0} == 1 ]]; then"));
+    assert!(bash.contains("local current=${COMP_WORDS[COMP_CWORD]}"));
+    assert!(
+        !bash.contains("\\${"),
+        "generated Bash must not contain literal \\${{...}}"
+    );
+}
+
+// Regression guard: every SSH-host helper runs `for (index = 2; ...)`, but
+// `index` is a builtin awk function and the awk shipped on macOS rejects it
+// as a loop variable (`awk: syntax error at source line 1`), so no host was
+// ever offered there. The loop variable must be a name awk everywhere
+// accepts.
+#[test]
+fn ssh_target_helpers_use_an_awk_portable_loop_variable() {
+    for shell in [
+        ShellIntegration::Bash,
+        ShellIntegration::Fish,
+        ShellIntegration::Zsh,
+    ] {
+        let script = shell.script();
+        assert!(
+            script.contains("for (field = 2; field <= NF; field++)"),
+            "{shell:?} SSH-target helper must use a portable awk loop variable"
+        );
+        assert!(!script.contains("for (index = 2;"));
+    }
+}
+
+// Regression guard: `zetta mosh` (subcommand at words[2]) used to fall
+// through the whole of `_zetta` because only the standalone wrapper
+// (`words[1] == mosh`) had a branch, so neither SSH targets nor Mosh options
+// were ever offered. A bare `mosh <TAB>` offered nothing either, because the
+// host position was tested at CURRENT == 3 (the second positional). The
+// first positional is the host for both forms.
+#[test]
+fn zsh_mosh_completion_offers_ssh_targets_and_options_for_wrapper_and_zetta_mosh() {
+    use std::io::Write as _;
+    use std::process::Stdio;
+
+    if clean_shell_command("zsh")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        return;
+    }
+
+    let temporary = tempfile::tempdir().unwrap();
+    let ssh_dir = temporary.path().join(".ssh");
+    fs::create_dir_all(&ssh_dir).unwrap();
+    fs::write(
+        ssh_dir.join("config"),
+        "Host web01 pi\n    User saltw\nHost *\n    StrictHostKeyChecking no\n",
+    )
+    .unwrap();
+
+    let script = ShellIntegration::Zsh.script();
+    let driver = format!(
+        "{script}\nfunction zetta {{ :; }}\nfunction compadd {{ print -r -- \"${{stage}}:candidates:$*\"; }}\nfunction _zetta_options {{ print -r -- \"${{stage}}:options:$*\"; }}\nstage=wrapper-host\nwords=(mosh '')\nCURRENT=2\n_zetta\nstage=wrapper-option\nwords=(mosh '--')\nCURRENT=2\n_zetta\nstage=zetta-host\nwords=(zetta mosh '')\nCURRENT=3\n_zetta\nstage=zetta-option\nwords=(zetta mosh '--')\nCURRENT=3\n_zetta\nstage=wrapper-after-host\nwords=(mosh 'web01' '')\nCURRENT=3\n_zetta\nstage=zetta-after-host\nwords=(zetta mosh 'web01' '')\nCURRENT=4\n_zetta\nstage=wrapper-after-flags\nwords=(mosh '--predict' 'always' '')\nCURRENT=4\n_zetta\nstage=zosh-host\nwords=(zosh '')\nCURRENT=2\n_zosh\nstage=zosh-after-host\nwords=(zosh 'web01' '')\nCURRENT=3\n_zosh\nstage=wrapper-bind\nwords=(mosh '--bind-server' '')\nCURRENT=3\n_zetta\nstage=zetta-bind\nwords=(zetta mosh '--bind-server' '')\nCURRENT=4\n_zetta\n"
+    );
+    let mut child = clean_shell_command("zsh")
+        .arg("-f")
+        .env("HOME", temporary.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(driver.as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "Zsh mosh completion failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let completions = String::from_utf8_lossy(&output.stdout);
+    for stage in [
+        "wrapper-host",
+        "zetta-host",
+        "wrapper-after-flags",
+        "zosh-host",
+    ] {
+        assert!(
+            completions.lines().any(|line| {
+                line.starts_with(&format!(
+                    "{stage}:candidates:-V mosh-candidates -- web01 pi --client"
+                ))
+            }),
+            "hosts must be offered before any option at {stage}: {completions}"
+        );
+        assert!(
+            completions.lines().any(|line| {
+                line.starts_with(&format!("{stage}:candidates:"))
+                    && line.contains("--no-predict-overwrite")
+                    && line.contains("-p --port")
+                    && line.contains("-h --help -V --version")
+            }),
+            "missing full Mosh option surface after the targets at {stage}: {completions}"
+        );
+    }
+    for stage in ["wrapper-option", "zetta-option"] {
+        assert!(
+            completions.lines().any(|line| {
+                line.starts_with(&format!("{stage}:options:--client --server --predict"))
+                    && line.contains("--no-predict-overwrite")
+                    && line.contains("-p --port")
+                    && line.contains("-h --help -V --version")
+            }),
+            "missing full Mosh option surface at {stage}: {completions}"
+        );
+        assert!(
+            !completions
+                .lines()
+                .any(|line| line.starts_with(&format!("{stage}:candidates:"))),
+            "hosts must not be offered while completing an option at {stage}: {completions}"
+        );
+    }
+    for stage in ["wrapper-after-host", "zetta-after-host", "zosh-after-host"] {
+        assert!(
+            !completions
+                .lines()
+                .any(|line| line.starts_with(&format!("{stage}:"))),
+            "nothing may be offered once the host is given at {stage}: {completions}"
+        );
+    }
+    for stage in ["wrapper-bind", "zetta-bind"] {
+        assert!(
+            completions
+                .lines()
+                .any(|line| line == format!("{stage}:candidates:-- ssh any")),
+            "missing bind-server values at {stage}: {completions}"
+        );
+    }
+}
+
+// Regression guard: the SSH-target completion must actually read the user's
+// SSH config and list its hosts; on macOS this is also where the awk `index`
+// loop-variable bug surfaced (`awk: syntax error at source line 1`).
+#[test]
+fn bash_ssh_target_completion_reads_the_ssh_config() {
+    let _bash_test_lock = lock_bash_tests();
+    if !bash_available() {
+        return;
+    }
+
+    let temporary = tempfile::tempdir().unwrap();
+    let ssh_dir = temporary.path().join(".ssh");
+    fs::create_dir_all(&ssh_dir).unwrap();
+    fs::write(
+        ssh_dir.join("config"),
+        "Host web01 pi\n    User saltw\nHost *\n    StrictHostKeyChecking no\n",
+    )
+    .unwrap();
+
+    let script = ShellIntegration::Bash.script();
+    let driver = format!(
+        "{script}\nCOMP_WORDS=(zetta mosh '')\nCOMP_CWORD=2\n_zetta_complete\nprintf 'zetta-mosh:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(mosh '')\nCOMP_CWORD=1\n_zosh_complete\nprintf 'wrapper:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zosh '')\nCOMP_CWORD=1\n_zosh_complete\nprintf 'zosh:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zosh 'web01' '')\nCOMP_CWORD=2\n_zosh_complete\nprintf 'zosh-after-host:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zetta mosh 'web01' '')\nCOMP_CWORD=3\n_zetta_complete\nprintf 'zetta-after-host:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zosh '--')\nCOMP_CWORD=1\n_zosh_complete\nprintf 'no-options:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zosh '--bind-server' '')\nCOMP_CWORD=2\n_zosh_complete\nprintf 'bind:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zetta mosh '--bind-server' '')\nCOMP_CWORD=3\n_zetta_complete\nprintf 'zetta-bind:%s\\n' \"${{COMPREPLY[@]}}\"\n"
+    );
+    let mut command = bash_completion_command();
+    command.env("HOME", temporary.path());
+    let output = run_bash_driver(command, &driver);
+    for label in ["zetta-mosh", "wrapper", "zosh"] {
+        for host in ["web01", "pi"] {
+            assert!(
+                output.lines().any(|line| line == format!("{label}:{host}")),
+                "missing {host} at {label}: {output}"
+            );
+        }
+    }
+    for label in ["zetta-mosh", "wrapper", "zosh"] {
+        for option in ["--no-init", "--no-predict-overwrite", "--bind-server", "-h"] {
+            assert!(
+                output
+                    .lines()
+                    .any(|line| line == format!("{label}:{option}")),
+                "missing option {option} after the targets at {label}: {output}"
+            );
+        }
+    }
+    for label in ["zosh-after-host", "zetta-after-host"] {
+        assert!(
+            !output.lines().any(|line| {
+                line.strip_prefix(&format!("{label}:"))
+                    .is_some_and(|rest| !rest.is_empty())
+            }),
+            "nothing may be offered once the host is given at {label}: {output}"
+        );
+    }
+    for option in ["--no-init", "--no-predict-overwrite", "--bind-server"] {
+        assert!(
+            output
+                .lines()
+                .any(|line| line == format!("no-options:{option}")),
+            "missing option {option} while completing a dash word: {output}"
+        );
+    }
+    assert!(
+        !output.lines().any(|line| line == "no-options:web01"),
+        "hosts must not be offered while completing an option: {output}"
+    );
+    for label in ["bind", "zetta-bind"] {
+        for value in ["ssh", "any"] {
+            assert!(
+                output
+                    .lines()
+                    .any(|line| line == format!("{label}:{value}")),
+                "missing bind-server value {value} at {label}: {output}"
+            );
+        }
+    }
+}
+
+// Regression guard: the fish `zetta mosh` and `zosh` completions both feed on
+// `__zetta_ssh_targets`, so the awk loop-variable fix has to be alive at
+// runtime there too.
+#[test]
+fn fish_mosh_and_zosh_completion_offer_ssh_targets() {
+    if clean_shell_command("fish")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        return;
+    }
+
+    let temporary = tempfile::tempdir().unwrap();
+    let ssh_dir = temporary.path().join(".ssh");
+    fs::create_dir_all(&ssh_dir).unwrap();
+    fs::write(
+        ssh_dir.join("config"),
+        "Host web01 pi\n    User saltw\nHost *\n    StrictHostKeyChecking no\n",
+    )
+    .unwrap();
+
+    let script = ShellIntegration::Fish.script();
+    let script_file = tempfile::NamedTempFile::new().unwrap();
+    fs::write(script_file.path(), script).unwrap();
+    for line in ["zetta mosh ", "zosh "] {
+        let output = clean_shell_command("fish")
+            .args([
+                "--no-config",
+                "-c",
+                "source $argv[1]; complete -C \"$argv[2]\"",
+                "--",
+                script_file.path().to_str().unwrap(),
+                line,
+            ])
+            .env_remove("ZETTA_HOST_EXECUTABLE")
+            .env("HOME", temporary.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "Fish rejected SSH-target completion for {line:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let completions = String::from_utf8_lossy(&output.stdout);
+        for host in ["web01", "pi"] {
+            assert!(
+                completions
+                    .lines()
+                    .any(|candidate| candidate == host
+                        || candidate.starts_with(&format!("{host}\t"))),
+                "expected {host:?} in Fish completions for {line:?}: {completions}"
+            );
+        }
+    }
+    for line in ["zetta mosh web01 ", "zosh web01 "] {
+        let output = clean_shell_command("fish")
+            .args([
+                "--no-config",
+                "-c",
+                "source $argv[1]; complete -C \"$argv[2]\"",
+                "--",
+                script_file.path().to_str().unwrap(),
+                line,
+            ])
+            .env_remove("ZETTA_HOST_EXECUTABLE")
+            .env("HOME", temporary.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "Fish rejected post-host completion for {line:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let completions = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            completions.trim().is_empty(),
+            "nothing may be offered once the host is given for {line:?}: {completions}"
+        );
+    }
 }
 
 #[cfg(unix)]

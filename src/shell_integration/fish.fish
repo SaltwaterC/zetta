@@ -738,11 +738,40 @@ function __zetta_ssh_targets
     test -r "$config"; or return
     awk '
         /^[[:space:]]*[Hh][Oo][Ss][Tt][[:space:]]+/ {
-            for (index = 2; index <= NF; index++)
-                if ($index !~ /^!/ && $index !~ /[*?]/)
-                    print $index
+            for (field = 2; field <= NF; field++)
+                if ($field !~ /^!/ && $field !~ /[*?]/)
+                    print $field
         }
     ' "$config" 2>/dev/null
+end
+
+# Whether a Mosh host positional has already been given. Everything after the
+# host is sent to the mosh-server, so no further candidates may be offered
+# once it is on the command line.
+function __zetta_mosh_host_given
+    set -l words (commandline -opc)
+    set -l start 2
+    if test "$words[1]" = zetta
+        set start 3
+    end
+    set -l count (count $words)
+    if test $start -gt $count
+        return 1
+    end
+    set -l index $start
+    while test $index -le $count
+        set -l token $words[$index]
+        if test "$token" != '--'
+            and not string match -q -- '-*' "$token"
+            switch $words[(math $index - 1)]
+                case --predict --family --experimental-remote-ip --bind-server --client --server --ssh --port -p
+                case '*'
+                    return 0
+            end
+        end
+        set index (math $index + 1)
+    end
+    return 1
 end
 
 function __zetta_mux_attach_arguments
@@ -1093,28 +1122,30 @@ complete -c zetta -s r -n '__zetta_has_profile_subcommand; and __zetta_profile_i
 complete -c zetta -s i -r -a 'auto zetta bash zsh fish' -n '__zetta_has_profile_subcommand; and __zetta_profile_is add; and __zetta_short_option -i'
 complete -c zetta -s r -n '__zetta_has_profile_subcommand; and __zetta_profile_is icon; and __zetta_short_option -r'
 complete -c zetta -n '__zetta_at_subcommand init' -a 'bash fish powershell pwsh zsh'
-complete -c zetta -n '__zetta_at_subcommand mosh' -l client -r -d 'Use a specific local Mosh client'
-complete -c zetta -n '__zetta_at_subcommand mosh' -l server -r -d 'Use a specific remote mosh-server'
-complete -c zetta -n '__zetta_at_subcommand mosh' -l predict -r -a 'adaptive always never experimental'
-complete -c zetta -n '__zetta_at_subcommand mosh' -s o -d 'Allow predictive overwrites'
-complete -c zetta -n '__zetta_at_subcommand mosh' -l predict-overwrite -d 'Allow predictive overwrites'
-complete -c zetta -n '__zetta_at_subcommand mosh' -s a -d 'Always predict'
-complete -c zetta -n '__zetta_at_subcommand mosh' -s n -d 'Never predict'
-complete -c zetta -n '__zetta_at_subcommand mosh' -s 4 -d 'Force IPv4'
-complete -c zetta -n '__zetta_at_subcommand mosh' -s 6 -d 'Force IPv6'
-complete -c zetta -n '__zetta_at_subcommand mosh' -l family -r -a 'prefer-inet prefer-inet6 inet inet6 auto all'
-complete -c zetta -n '__zetta_at_subcommand mosh' -l port -r
-complete -c zetta -n '__zetta_at_subcommand mosh' -l bind-server -r
-complete -c zetta -n '__zetta_at_subcommand mosh' -l ssh -r
-complete -c zetta -n '__zetta_at_subcommand mosh' -l ssh-pty -d 'Request an SSH PTY'
-complete -c zetta -n '__zetta_at_subcommand mosh' -l no-ssh-pty -d 'Do not request an SSH PTY'
-complete -c zetta -n '__zetta_at_subcommand mosh' -l init -d 'Initialize the terminal'
-complete -c zetta -n '__zetta_at_subcommand mosh' -l no-init -d 'Preserve the terminal'
-complete -c zetta -n '__zetta_at_subcommand mosh' -l local -d 'Use locally discovered addressing'
-complete -c zetta -n '__zetta_at_subcommand mosh' -l experimental-remote-ip -r -a 'local remote proxy'
-complete -c zetta -n '__zetta_at_subcommand mosh' -l help -d 'Print help'
-complete -c zetta -n '__zetta_at_subcommand mosh' -l version -d 'Print version'
-complete -c zetta -n '__zetta_at_subcommand mosh' -a '(__zetta_ssh_targets)'
+complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_given' -l client -r -d 'Use a specific local Mosh client'
+complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_given' -l server -r -d 'Use a specific remote mosh-server'
+complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_given' -l predict -r -a 'adaptive always never experimental'
+complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_given' -s o -d 'Allow predictive overwrites'
+complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_given' -l predict-overwrite -d 'Allow predictive overwrites'
+complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_given' -l no-predict-overwrite -d 'Do not overwrite predictions'
+complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_given' -s a -d 'Always predict'
+complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_given' -s n -d 'Never predict'
+complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_given' -s 4 -d 'Force IPv4'
+complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_given' -s 6 -d 'Force IPv6'
+complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_given' -l family -r -a 'prefer-inet prefer-inet6 inet inet6 auto all'
+complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_given' -s p -r -d 'Server UDP port or range'
+complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_given' -l port -r -d 'Server UDP port or range'
+complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_given' -l bind-server -r -a 'ssh any' -d 'Ask the server to reply from an address'
+complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_given' -l ssh -r
+complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_given' -l ssh-pty -d 'Request an SSH PTY'
+complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_given' -l no-ssh-pty -d 'Do not request an SSH PTY'
+complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_given' -l init -d 'Initialize the terminal'
+complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_given' -l no-init -d 'Preserve the terminal'
+complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_given' -l local -d 'Use locally discovered addressing'
+complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_given' -l experimental-remote-ip -r -a 'local remote proxy'
+complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_given' -l help -d 'Print help'
+complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_given' -l version -d 'Print version'
+complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_given' -a '(__zetta_ssh_targets)'
 complete -c zetta -n '__fish_seen_subcommand_from init' -l help -d 'Print help'
 complete -c zetta -n '__fish_seen_subcommand_from init' -a '(__zetta_long_options init)'
 complete -c zetta -n '__zetta_at_subcommand serial' -a 'console list'
@@ -1126,53 +1157,59 @@ complete -c zetta -n '__fish_seen_subcommand_from http' -a '(__zetta_long_option
 complete -c zetta -n '__fish_seen_subcommand_from terminal-size' -l json -d 'Print machine-readable JSON'
 
 complete -c zosh -f
-complete -c zosh -s c -d 'Print terminal color count'
-complete -c zosh -l client -r -d 'Mosh client on the local machine'
-complete -c zosh -l server -r -d 'Mosh server on the remote machine'
-complete -c zosh -l predict -r -a 'adaptive always never experimental'
-complete -c zosh -s o -d 'Allow predictive overwrites'
-complete -c zosh -l predict-overwrite -d 'Allow predictive overwrites'
-complete -c zosh -s a -d 'Always predict'
-complete -c zosh -s n -d 'Never predict'
-complete -c zosh -s 4 -d 'Force IPv4'
-complete -c zosh -s 6 -d 'Force IPv6'
-complete -c zosh -l family -r -a 'prefer-inet prefer-inet6 inet inet6 auto all'
-complete -c zosh -l port -r
-complete -c zosh -l bind-server -r
-complete -c zosh -l ssh -r
-complete -c zosh -l ssh-pty
-complete -c zosh -l no-ssh-pty
-complete -c zosh -l init
-complete -c zosh -l no-init
-complete -c zosh -l local
-complete -c zosh -l experimental-remote-ip -r -a 'local remote proxy'
-complete -c zosh -l help -d 'Print help'
-complete -c zosh -l version -d 'Print version'
-complete -c zosh -a '(__zetta_ssh_targets)'
+complete -c zosh -n 'not __zetta_mosh_host_given' -s c -d 'Print terminal color count'
+complete -c zosh -n 'not __zetta_mosh_host_given' -l client -r -d 'Mosh client on the local machine'
+complete -c zosh -n 'not __zetta_mosh_host_given' -l server -r -d 'Mosh server on the remote machine'
+complete -c zosh -n 'not __zetta_mosh_host_given' -l predict -r -a 'adaptive always never experimental'
+complete -c zosh -n 'not __zetta_mosh_host_given' -s o -d 'Allow predictive overwrites'
+complete -c zosh -n 'not __zetta_mosh_host_given' -l predict-overwrite -d 'Allow predictive overwrites'
+complete -c zosh -n 'not __zetta_mosh_host_given' -l no-predict-overwrite -d 'Do not overwrite predictions'
+complete -c zosh -n 'not __zetta_mosh_host_given' -s a -d 'Always predict'
+complete -c zosh -n 'not __zetta_mosh_host_given' -s n -d 'Never predict'
+complete -c zosh -n 'not __zetta_mosh_host_given' -s 4 -d 'Force IPv4'
+complete -c zosh -n 'not __zetta_mosh_host_given' -s 6 -d 'Force IPv6'
+complete -c zosh -n 'not __zetta_mosh_host_given' -l family -r -a 'prefer-inet prefer-inet6 inet inet6 auto all'
+complete -c zosh -n 'not __zetta_mosh_host_given' -s p -r -d 'Server UDP port or range'
+complete -c zosh -n 'not __zetta_mosh_host_given' -l port -r -d 'Server UDP port or range'
+complete -c zosh -n 'not __zetta_mosh_host_given' -l bind-server -r -a 'ssh any' -d 'Ask the server to reply from an address'
+complete -c zosh -n 'not __zetta_mosh_host_given' -l ssh -r
+complete -c zosh -n 'not __zetta_mosh_host_given' -l ssh-pty
+complete -c zosh -n 'not __zetta_mosh_host_given' -l no-ssh-pty
+complete -c zosh -n 'not __zetta_mosh_host_given' -l init
+complete -c zosh -n 'not __zetta_mosh_host_given' -l no-init
+complete -c zosh -n 'not __zetta_mosh_host_given' -l local
+complete -c zosh -n 'not __zetta_mosh_host_given' -l experimental-remote-ip -r -a 'local remote proxy'
+complete -c zosh -n 'not __zetta_mosh_host_given' -s h -d 'Print help'
+complete -c zosh -n 'not __zetta_mosh_host_given' -l help -d 'Print help'
+complete -c zosh -n 'not __zetta_mosh_host_given' -s V -d 'Print version'
+complete -c zosh -n 'not __zetta_mosh_host_given' -l version -d 'Print version'
+complete -c zosh -n 'not __zetta_mosh_host_given' -a '(__zetta_ssh_targets)'
 if set -q __ZETTA_MOSH_WRAPPER
     complete -c mosh -f
-    complete -c mosh -l client -r
-    complete -c mosh -l server -r
-    complete -c mosh -l predict -r -a 'adaptive always never experimental'
-    complete -c mosh -s o -d 'Allow predictive overwrites'
-    complete -c mosh -l predict-overwrite
-    complete -c mosh -s a
-    complete -c mosh -s n
-    complete -c mosh -s 4
-    complete -c mosh -s 6
-    complete -c mosh -l family -r -a 'prefer-inet prefer-inet6 inet inet6 auto all'
-    complete -c mosh -l port -r
-    complete -c mosh -l bind-server -r
-    complete -c mosh -l ssh -r
-    complete -c mosh -l ssh-pty
-    complete -c mosh -l no-ssh-pty
-    complete -c mosh -l init
-    complete -c mosh -l no-init
-    complete -c mosh -l local
-    complete -c mosh -l experimental-remote-ip -r -a 'local remote proxy'
-    complete -c mosh -l help
-    complete -c mosh -l version
-    complete -c mosh -a '(__zetta_ssh_targets)'
+    complete -c mosh -n 'not __zetta_mosh_host_given' -l client -r
+    complete -c mosh -n 'not __zetta_mosh_host_given' -l server -r
+    complete -c mosh -n 'not __zetta_mosh_host_given' -l predict -r -a 'adaptive always never experimental'
+    complete -c mosh -n 'not __zetta_mosh_host_given' -s o -d 'Allow predictive overwrites'
+    complete -c mosh -n 'not __zetta_mosh_host_given' -l predict-overwrite
+    complete -c mosh -n 'not __zetta_mosh_host_given' -l no-predict-overwrite
+    complete -c mosh -n 'not __zetta_mosh_host_given' -s a
+    complete -c mosh -n 'not __zetta_mosh_host_given' -s n
+    complete -c mosh -n 'not __zetta_mosh_host_given' -s 4
+    complete -c mosh -n 'not __zetta_mosh_host_given' -s 6
+    complete -c mosh -n 'not __zetta_mosh_host_given' -l family -r -a 'prefer-inet prefer-inet6 inet inet6 auto all'
+    complete -c mosh -n 'not __zetta_mosh_host_given' -s p -r
+    complete -c mosh -n 'not __zetta_mosh_host_given' -l port -r
+    complete -c mosh -n 'not __zetta_mosh_host_given' -l bind-server -r -a 'ssh any'
+    complete -c mosh -n 'not __zetta_mosh_host_given' -l ssh -r
+    complete -c mosh -n 'not __zetta_mosh_host_given' -l ssh-pty
+    complete -c mosh -n 'not __zetta_mosh_host_given' -l no-ssh-pty
+    complete -c mosh -n 'not __zetta_mosh_host_given' -l init
+    complete -c mosh -n 'not __zetta_mosh_host_given' -l no-init
+    complete -c mosh -n 'not __zetta_mosh_host_given' -l local
+    complete -c mosh -n 'not __zetta_mosh_host_given' -l experimental-remote-ip -r -a 'local remote proxy'
+    complete -c mosh -n 'not __zetta_mosh_host_given' -l help
+    complete -c mosh -n 'not __zetta_mosh_host_given' -l version
+    complete -c mosh -n 'not __zetta_mosh_host_given' -a '(__zetta_ssh_targets)'
 end
 complete -c zetta -n '__zetta_at_subcommand mux' -a list -d 'List the sessions the multiplexer is holding'
 complete -c zetta -n '__zetta_at_subcommand mux; and __zetta_mux_daemon_commands' -a stop -d 'Stop the multiplexer'

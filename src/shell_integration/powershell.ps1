@@ -390,17 +390,33 @@ $zettaCompletions = {
         }
     }
 
+    $moshHostGiven = $false
+    if ($commandName -eq 'zosh' -or $subcommand -eq 'mosh') {
+        $moshIndex = if ($commandName -eq 'zosh') { 0 } else { [array]::IndexOf($words, 'mosh') }
+        for ($index = $moshIndex + 1; $index -lt $words.Count; $index++) {
+            $moshToken = $words[$index]
+            if ($moshToken -eq '--') { continue }
+            if ($moshToken -like '-*') { continue }
+            if ($words[$index - 1] -in '--predict', '--family', '--experimental-remote-ip', '--bind-server', '--client', '--server', '--ssh', '--port', '-p') { continue }
+            $moshHostGiven = $true
+            break
+        }
+    }
+
     $candidates = if ($commandName -eq 'zosh') {
-        if ($previous -eq '--predict') { 'adaptive', 'always', 'never', 'experimental' }
+        if ($moshHostGiven) {
+            @()
+        } elseif ($previous -eq '--predict') { 'adaptive', 'always', 'never', 'experimental' }
         elseif ($previous -eq '--family') { 'prefer-inet', 'prefer-inet6', 'inet', 'inet6', 'auto', 'all' }
         elseif ($previous -eq '--experimental-remote-ip') { 'local', 'remote', 'proxy' }
+        elseif ($previous -eq '--bind-server') { 'ssh', 'any' }
         elseif ($previous -in '--client', '--server') {
             @(Get-ChildItem -Name -Path "$wordToComplete*" -ErrorAction SilentlyContinue)
         } elseif ($wordToComplete -like '-*') {
-            '-c', '--client', '--server', '--predict', '-a', '-n', '-o', '--predict-overwrite', '-4', '-6', '--family', '--port', '--bind-server', '--ssh', '--ssh-pty', '--no-ssh-pty', '--init', '--no-init', '--local', '--experimental-remote-ip', '--help', '--version', '--'
-        } elseif ($words.Count -eq 2) {
-            @(& $zettaSshTargets)
-        } else { @() }
+            '-c', '--client', '--server', '--predict', '-a', '-n', '-o', '--predict-overwrite', '--no-predict-overwrite', '-4', '-6', '--family', '-p', '--port', '--bind-server', '--ssh', '--ssh-pty', '--no-ssh-pty', '--init', '--no-init', '--local', '--experimental-remote-ip', '-h', '--help', '-V', '--version', '--'
+        } else {
+            @(& $zettaSshTargets) + '-c', '--client', '--server', '--predict', '-a', '-n', '-o', '--predict-overwrite', '--no-predict-overwrite', '-4', '-6', '--family', '-p', '--port', '--bind-server', '--ssh', '--ssh-pty', '--no-ssh-pty', '--init', '--no-init', '--local', '--experimental-remote-ip', '-h', '--help', '-V', '--version', '--'
+        }
     } elseif ($commandName -eq 'ztftp') {
         if ($words.Count -le 1) { 'get', 'put', '--help' } else { '--port', '--help' }
     } elseif ($commandName -eq 'zntfy') {
@@ -415,18 +431,19 @@ $zettaCompletions = {
         elseif ($previous -in '--prefer', '-prefer', '--Prefer', '-Prefer') { 'txt', 'rtf', 'ps' }
         else { '--pboard', '--prefer', '--help' }
     } elseif ($subcommand -eq 'mosh') {
-        if ($previous -eq '--predict') { 'adaptive', 'always', 'never', 'experimental' }
+        if ($moshHostGiven) {
+            @()
+        } elseif ($previous -eq '--predict') { 'adaptive', 'always', 'never', 'experimental' }
         elseif ($previous -in '--family', '--experimental-remote-ip') {
             if ($previous -eq '--family') { 'prefer-inet', 'prefer-inet6', 'inet', 'inet6', 'auto', 'all' }
             else { 'local', 'remote', 'proxy' }
-        } elseif ($previous -in '--client', '--server') {
+        } elseif ($previous -eq '--bind-server') { 'ssh', 'any' }
+        elseif ($previous -in '--client', '--server') {
             @(Get-ChildItem -Name -Path "$wordToComplete*" -ErrorAction SilentlyContinue)
-        } elseif ($wordToComplete -like '-*' -or $words.Count -le 2) {
-            '--client', '--server', '--predict', '-a', '-n', '-o', '--predict-overwrite', '-4', '-6', '--family', '--port', '--bind-server', '--ssh', '--ssh-pty', '--no-ssh-pty', '--init', '--no-init', '--local', '--experimental-remote-ip', '--help', '--version', '--'
-        } elseif ($words.Count -eq 3) {
-            & $zettaSshTargets
+        } elseif ($wordToComplete -like '-*') {
+            '--client', '--server', '--predict', '-a', '-n', '-o', '--predict-overwrite', '--no-predict-overwrite', '-4', '-6', '--family', '-p', '--port', '--bind-server', '--ssh', '--ssh-pty', '--no-ssh-pty', '--init', '--no-init', '--local', '--experimental-remote-ip', '-h', '--help', '-V', '--version', '--'
         } else {
-            @()
+            @(& $zettaSshTargets) + '--client', '--server', '--predict', '-a', '-n', '-o', '--predict-overwrite', '--no-predict-overwrite', '-4', '-6', '--family', '-p', '--port', '--bind-server', '--ssh', '--ssh-pty', '--no-ssh-pty', '--init', '--no-init', '--local', '--experimental-remote-ip', '-h', '--help', '-V', '--version', '--'
         }
     } elseif ($subcommand -eq 'cmd') {
         $delimiter = $false
@@ -600,7 +617,7 @@ $zettaCompletions = {
             'terminal-size' { '--json', '--resize', '--columns', '--rows', '--help' }
             'edit' { '--delete-after', '--help' }
             'vi' { '--help' }
-        'mosh' { '--client', '--server', '--predict', '-a', '-n', '-o', '--predict-overwrite', '-4', '-6', '--family', '--port', '--bind-server', '--ssh', '--ssh-pty', '--no-ssh-pty', '--init', '--no-init', '--local', '--experimental-remote-ip', '--help', '--version', '--' }
+        'mosh' { '--client', '--server', '--predict', '-a', '-n', '-o', '--predict-overwrite', '--no-predict-overwrite', '-4', '-6', '--family', '-p', '--port', '--bind-server', '--ssh', '--ssh-pty', '--no-ssh-pty', '--init', '--no-init', '--local', '--experimental-remote-ip', '-h', '--help', '-V', '--version', '--' }
             'mux' {
                 if ($words.Count -le 2) {
                     if ($noMux) { 'list', 'reconnect', '--json', '--help', '--version' }

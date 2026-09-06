@@ -418,11 +418,39 @@ _zmux_ssh_targets() {
     [[ -r $config ]] || return
     compadd -- "${(@f)$(awk '
         /^[[:space:]]*[Hh][Oo][Ss][Tt][[:space:]]+/ {
-            for (index = 2; index <= NF; index++)
-                if ($index !~ /^!/ && $index !~ /[*?]/)
-                    print $index
+            for (field = 2; field <= NF; field++)
+                if ($field !~ /^!/ && $field !~ /[*?]/)
+                    print $field
         }
     ' "$config" 2>/dev/null)}"
+}
+
+# The Mosh completers offer the SSH hosts first and the option surface after
+# them, in one unsorted group: a sorted group would list every `--option`
+# before the hosts because `-` sorts ahead of letters. `_zetta_option_unused`
+# drops options the command line already carries; the host scan lives in the
+# callers and stops all completion once a host positional is present.
+_zmux_mosh_candidates() {
+    local host_line option
+    local -a candidates=()
+    local config="${HOME:-}/.ssh/config"
+    if [[ -r $config ]]; then
+        while IFS= read -r host_line; do
+            candidates+=("$host_line")
+        done < <(awk '
+            /^[[:space:]]*[Hh][Oo][Ss][Tt][[:space:]]+/ {
+                for (field = 2; field <= NF; field++)
+                    if ($field !~ /^!/ && $field !~ /[*?]/)
+                        print $field
+            }
+        ' "$config" 2>/dev/null)
+    fi
+    for option in --client --server --predict -a -n -o --predict-overwrite --no-predict-overwrite -4 -6 --family -p --port --bind-server --ssh --ssh-pty --no-ssh-pty --init --no-init --local --experimental-remote-ip -h --help -V --version --; do
+        if [[ $option != -* ]] || _zetta_option_unused "$option"; then
+            candidates+=("$option")
+        fi
+    done
+    compadd -V mosh-candidates -- "${candidates[@]}"
 }
 
 _zmux_remote_session_ids() {
@@ -605,18 +633,39 @@ _zetta() {
         return
     fi
 
-    if [[ $words[1] == mosh ]]; then
+    if [[ $words[1] == mosh || ${words[2]} == mosh ]]; then
+        local mosh_host_index=2 candidate host_given=0 delimiter=0
+        [[ ${words[2]} == mosh ]] && mosh_host_index=3
+        for (( index = mosh_host_index; index < CURRENT; index++ )); do
+            candidate=${words[index]}
+            if [[ $candidate == -- ]]; then
+                delimiter=1
+                continue
+            fi
+            [[ $candidate == -* ]] && continue
+            case ${words[index-1]} in
+                --predict|--family|--experimental-remote-ip|--bind-server|--client|--server|--ssh|--port|-p) continue ;;
+            esac
+            host_given=1
+            break
+        done
+        if (( host_given )); then
+            return
+        fi
         case $words[CURRENT-1] in
             --predict) compadd -- adaptive always never experimental ;;
             --family) compadd -- prefer-inet prefer-inet6 inet inet6 auto all ;;
             --experimental-remote-ip) compadd -- local remote proxy ;;
+            --bind-server) compadd -- ssh any ;;
             --client|--server) _files ;;
-            --ssh) return ;;
+            --ssh|--port|-p) return ;;
             *)
-                if [[ $words[CURRENT] == -* ]]; then
-                    _zetta_options --client --server --predict -a -n -o --predict-overwrite -4 -6 --family --port --bind-server --ssh --ssh-pty --no-ssh-pty --init --no-init --local --experimental-remote-ip --help --version --
-                elif (( CURRENT == 3 )); then
+                if (( delimiter )); then
                     _zmux_ssh_targets
+                elif [[ $words[CURRENT] == -* ]]; then
+                    _zetta_options --client --server --predict -a -n -o --predict-overwrite --no-predict-overwrite -4 -6 --family -p --port --bind-server --ssh --ssh-pty --no-ssh-pty --init --no-init --local --experimental-remote-ip -h --help -V --version --
+                else
+                    _zmux_mosh_candidates
                 fi
                 ;;
         esac
@@ -1238,26 +1287,40 @@ if (( _zetta_mosh_missing )); then
     compdef _zetta mosh
 fi
 _zosh() {
-    _arguments \
-        '1:SSH target:_zmux_ssh_targets' \
-        '*:Mosh option:(-c --client --server --predict -a -n -o --predict-overwrite -4 -6 --family --port --bind-server --ssh --ssh-pty --no-ssh-pty --init --no-init --local --experimental-remote-ip --help --version --)' \
-        '--client=[mosh client]:path:_files' \
-        '--server=[mosh server]:command:' \
-        '--predict=[prediction]:mode:(adaptive always never experimental)' \
-        '--predict-overwrite[overwrite predictions]' \
-        '--family=[address family]:family:(prefer-inet prefer-inet6 inet inet6 auto all)' \
-        '--port=[server UDP port]:port:' \
-        '--bind-server=[server bind address]:address:' \
-        '--ssh=[SSH command]:command:' \
-        '--ssh-pty[request an SSH PTY]' \
-        '--no-ssh-pty[do not request an SSH PTY]' \
-        '--init[initialize the terminal]' \
-        '--no-init[preserve the terminal]' \
-        '--local[run mosh-server locally]' \
-        '--experimental-remote-ip=[address discovery]:mode:(local remote proxy)' \
-        '-a[always predict]' '-n[never predict]' '-o[overwrite predictions]' \
-        '-4[force IPv4]' '-6[force IPv6]' '-c[print terminal color count]' \
-        '--help[print help]' '--version[print version]'
+    local index candidate host_given=0 delimiter=0
+    for (( index = 2; index < CURRENT; index++ )); do
+        candidate=${words[index]}
+        if [[ $candidate == -- ]]; then
+            delimiter=1
+            continue
+        fi
+        [[ $candidate == -* ]] && continue
+        case ${words[index-1]} in
+            --predict|--family|--experimental-remote-ip|--bind-server|--client|--server|--ssh|--port|-p) continue ;;
+        esac
+        host_given=1
+        break
+    done
+    if (( host_given )); then
+        return
+    fi
+    case $words[CURRENT-1] in
+        --predict) compadd -- adaptive always never experimental ;;
+        --family) compadd -- prefer-inet prefer-inet6 inet inet6 auto all ;;
+        --experimental-remote-ip) compadd -- local remote proxy ;;
+        --bind-server) compadd -- ssh any ;;
+        --client|--server) _files ;;
+        --ssh|--port|-p) return ;;
+        *)
+            if (( delimiter )); then
+                _zmux_ssh_targets
+            elif [[ $words[CURRENT] == -* ]]; then
+                _zetta_options --client --server --predict -a -n -o --predict-overwrite --no-predict-overwrite -4 -6 --family -p --port --bind-server --ssh --ssh-pty --no-ssh-pty --init --no-init --local --experimental-remote-ip -h --help -V --version --
+            else
+                _zmux_mosh_candidates
+            fi
+            ;;
+    esac
 }
 compdef _zosh zosh
 # ZETTA_WORKTREE_INTEGRATION_BEGIN
