@@ -87,7 +87,8 @@ optimized release build.
 
 The default build also produces the standalone `zwt` Git worktree command. Set
 `WORKTREE=0` on `make build` and `make install` to omit the in-process
-`zetta wt` route and the root-produced `zwt` binary.
+`zetta wt` route and the root-produced `zwt` binary. Set `ZOSH=0` to omit the
+bundled `zosh` Mosh client, its executable, and the `zetta mosh` route.
 
 Corporate or otherwise restricted deployments can omit the serial console,
 network tools, and desktop notification support at build time. For example, `make

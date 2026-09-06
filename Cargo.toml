@@ -6,7 +6,7 @@ license = "GPL-3.0-or-later"
 default-run = "zetta"
 
 [features]
-default = ["wayland", "serial-console", "http-server", "tftp-server", "tftp-client", "notifications", "clipboard", "syntax-highlighting", "session-persistence", "worktree"]
+default = ["wayland", "serial-console", "http-server", "tftp-server", "tftp-client", "notifications", "clipboard", "syntax-highlighting", "session-persistence", "worktree", "zosh"]
 wayland = ["gpui_platform/wayland"]
 x11 = ["gpui_platform/x11"]
 windows-gui = []
@@ -44,6 +44,7 @@ tftp-client = []
 notifications = ["dep:notify-rust", "dep:cpal", "dep:mac-usernotifications", "dep:ashpd"]
 clipboard = ["dep:arboard"]
 worktree = ["dep:zwt", "zwt/recursive-submodules"]
+zosh = ["dep:zosh"]
 
 [[bin]]
 name = "zetta-gui"
@@ -70,6 +71,7 @@ path = "src/bin/zmux_pty.rs"
 [[bin]]
 name = "zosh"
 path = "src/bin/zosh.rs"
+required-features = ["zosh"]
 
 [dependencies]
 anyhow = "1"
@@ -152,7 +154,7 @@ util = { path = "zed/crates/util" }
 zeroize = "1"
 zed_actions = { path = "crates/zed_actions" }
 zmux = { path = "crates/zmux", default-features = false, features = ["scrollback-buffer"] }
-zosh = { path = "crates/zosh" }
+zosh = { path = "crates/zosh", optional = true }
 zwt = { path = "crates/zwt", optional = true }
 
 [target.'cfg(windows)'.dependencies]

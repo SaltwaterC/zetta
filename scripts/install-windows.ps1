@@ -16,6 +16,7 @@ param(
     [string]$SourceZoshBinary,
     [string]$SourceZwtBinary,
     [switch]$WorktreeEnabled,
+    [switch]$ZoshEnabled,
     [string]$InstallDirectory,
     [string]$ShortcutPath
 )
@@ -47,6 +48,9 @@ if (-not $SourceZoshBinary) {
 }
 if ($SourceZwtBinary) {
     $WorktreeEnabled = $true
+}
+if ($SourceZoshBinary) {
+    $ZoshEnabled = $true
 }
 if ($WorktreeEnabled -and -not $SourceZwtBinary) {
     $SourceZwtBinary = Join-Path (Split-Path -Parent $SourceBinary) "zwt.exe"
@@ -86,9 +90,11 @@ function Get-InstallFiles {
     $files = @(
         [pscustomobject]@{ Source = $SourceBinary; Destination = $installedBinary },
         [pscustomobject]@{ Source = $SourceGuiBinary; Destination = $installedGuiBinary },
-        [pscustomobject]@{ Source = $SourceMuxBinary; Destination = $installedMuxBinary },
-        [pscustomobject]@{ Source = $SourceZoshBinary; Destination = $installedZoshBinary }
+        [pscustomobject]@{ Source = $SourceMuxBinary; Destination = $installedMuxBinary }
     )
+    if ($ZoshEnabled) {
+        $files += [pscustomobject]@{ Source = $SourceZoshBinary; Destination = $installedZoshBinary }
+    }
     if ($WorktreeEnabled) {
         $files += [pscustomobject]@{ Source = $SourceZwtBinary; Destination = $installedZwtBinary }
     }
@@ -120,6 +126,26 @@ function Remove-DisabledWorktreeFiles {
                 Write-Host "Removed $path"
             } catch {
                 Write-Warning "Could not remove disabled worktree executable ${path}: $_"
+            }
+        }
+    }
+}
+
+function Remove-DisabledZoshFiles {
+    if ($ZoshEnabled) {
+        return
+    }
+    foreach ($path in @(
+        $installedZoshBinary,
+        (Get-VersionedPath $installedZoshBinary "new"),
+        (Get-VersionedPath $installedZoshBinary "old")
+    )) {
+        if (Test-Path -LiteralPath $path) {
+            try {
+                Remove-Item -LiteralPath $path -Force
+                Write-Host "Removed $path"
+            } catch {
+                Write-Warning "Could not remove disabled Mosh client executable ${path}: $_"
             }
         }
     }
@@ -261,6 +287,7 @@ function Install-Binary {
         Assert-PtyHostStopped
     }
     Remove-DisabledWorktreeFiles
+    Remove-DisabledZoshFiles
 
     if (-not $replacePty -and (Test-InstallFilesCurrent $installFiles)) {
         Ensure-PtyVersionMarker $sourcePtyVersion
@@ -432,6 +459,9 @@ function Uninstall-Binary {
     $filesToRemove += Get-PtyInstallFile
     if (-not $WorktreeEnabled) {
         $filesToRemove += [pscustomobject]@{ Source = $null; Destination = $installedZwtBinary }
+    }
+    if (-not $ZoshEnabled) {
+        $filesToRemove += [pscustomobject]@{ Source = $null; Destination = $installedZoshBinary }
     }
     foreach ($file in $filesToRemove) {
         foreach ($installedFile in @(

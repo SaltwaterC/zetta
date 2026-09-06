@@ -23,8 +23,10 @@ GNU Make reserves options beginning with `--`, so `RELEASE=1` is the portable
 Makefile equivalent of Cargo's `--release` flag.
 
 The default build includes the standalone `zwt` Git worktree command and the
-`zetta wt` compatibility route. Set `WORKTREE=0` on both build and install
-commands to omit them.
+`zetta wt` compatibility route, and the bundled `zosh` Mosh client. Set
+`WORKTREE=0` on both build and install commands to omit the worktree
+command, and `ZOSH=0` to omit zosh, the `zosh` executable, and the
+`zetta mosh` compatibility route.
 
 ## Linux build requirements
 
@@ -241,7 +243,8 @@ preference when it can be configured.
 
 To build a restricted binary, pass build flags to both the build and install
 steps. `SERIAL`, `HTTP`, `TFTP`, `TFTP_SERVER`, `TFTP_CLIENT`, `NOTIFY`,
-`CLIPBOARD`, and `WORKTREE` accept `0`, `false`, `no`, and `off`. `TFTP=0`
+`CLIPBOARD`, `WORKTREE`, and `ZOSH` accept `0`, `false`, `no`, and `off`.
+`TFTP=0`
 disables both TFTP components; the server and client switches can be used
 independently:
 
@@ -258,6 +261,10 @@ make build X11=1
 # Omit both the in-process route and the standalone zwt binary.
 make build WORKTREE=0
 make install WORKTREE=0
+
+# Omit the bundled zosh executable and the zetta mosh route.
+make build ZOSH=0
+make install ZOSH=0
 ```
 
 Disabled tools are omitted from the command palette, default keybindings, and

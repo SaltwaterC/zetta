@@ -102,6 +102,8 @@ pub(crate) fn help_text(profiles: &[Profile]) -> String {
         "Encrypted session retention",
         #[cfg(feature = "worktree")]
         "Git worktree workflow",
+        #[cfg(feature = "zosh")]
+        "Mosh client",
     ];
 
     let mut usage = vec![
@@ -136,6 +138,7 @@ pub(crate) fn help_text(profiles: &[Profile]) -> String {
         "zetta project <COMMAND>",
         "zetta attention [OPTIONS] [SUMMARY] [BODY]",
         "zetta init [SHELL]",
+        #[cfg(feature = "zosh")]
         "zetta mosh [OPTIONS] [--] [user@]HOST [COMMAND ...]",
     ];
     if cfg!(feature = "serial-console") {
@@ -191,6 +194,7 @@ pub(crate) fn help_text(profiles: &[Profile]) -> String {
         ("project", "List, add, remove, or open projects"),
         ("cmd", "Run a registered project command in the active pane"),
         ("init", "Configure or generate shell integration"),
+        #[cfg(feature = "zosh")]
         ("mosh", "Run an interactive Mosh session"),
     ];
     if cfg!(feature = "serial-console") {

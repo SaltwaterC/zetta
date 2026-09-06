@@ -89,8 +89,8 @@ CARGO_BUILD_JOBS := 1
 endif
 
 # Set any of SERIAL, HTTP, TFTP, TFTP_SERVER, TFTP_CLIENT, NOTIFY, CLIPBOARD,
-# SYNTAX_HIGHLIGHTING, SESSION_PERSISTENCE, or WORKTREE to 0, false, no, or off
-# to omit that capability from the built binary.
+# SYNTAX_HIGHLIGHTING, SESSION_PERSISTENCE, WORKTREE, or ZOSH to 0, false, no,
+# or off to omit that capability from the built binary.
 # TFTP is a convenient shorthand for disabling both the server and client.
 # Linux and FreeBSD default to Wayland; set X11=1 to include the X11 backend.
 tool_enabled = $(if $(filter 0 false no off,$(strip $(1))),,1)
@@ -127,6 +127,9 @@ endif
 ifneq ($(call tool_enabled,$(WORKTREE)),)
 CAPABILITY_FEATURES += worktree
 endif
+ifneq ($(call tool_enabled,$(ZOSH)),)
+CAPABILITY_FEATURES += zosh
+endif
 
 ifeq ($(OS),Windows_NT)
 PLATFORM_FEATURES := windows-gui
@@ -145,7 +148,7 @@ endif
 
 BUILD_FEATURES := $(PLATFORM_FEATURES) $(CAPABILITY_FEATURES)
 
-export SERIAL HTTP TFTP TFTP_SERVER TFTP_CLIENT NOTIFY CLIPBOARD SYNTAX_HIGHLIGHTING SESSION_PERSISTENCE WORKTREE X11
+export SERIAL HTTP TFTP TFTP_SERVER TFTP_CLIENT NOTIFY CLIPBOARD SYNTAX_HIGHLIGHTING SESSION_PERSISTENCE WORKTREE ZOSH X11
 export CARGO_BUILD_JOBS
 
 export CARGO
@@ -181,7 +184,7 @@ LINUX_USER_ZWT_PATH := $(LINUX_USER_BIN_DIR)/zwt
 LINUX_USER_ZOSH_PATH := $(LINUX_USER_BIN_DIR)/zosh
 
 WINDOWS_ZWT_ARGS := $(if $(call tool_enabled,$(WORKTREE)), -SourceZwtBinary "$(BUILD_TARGET_DIR)/zwt.exe",)
-WINDOWS_ZOSH_ARGS := -SourceZoshBinary "$(BUILD_TARGET_DIR)/zosh.exe"
+WINDOWS_ZOSH_ARGS := $(if $(call tool_enabled,$(ZOSH)), -SourceZoshBinary "$(BUILD_TARGET_DIR)/zosh.exe",)
 
 .PHONY: all build fmt test lint check-platforms check-features \
 	check-linux check-windows check-macos \
@@ -484,7 +487,11 @@ install-binary:
 	mkdir -p "$(MAC_BUNDLE)/Contents/MacOS" "$(BINDIR)"
 	$(INSTALL) -m 755 "$(BUILD_TARGET_DIR)/zetta" "$(MAC_BUNDLE)/Contents/MacOS/zetta"
 	$(INSTALL) -m 755 "$(BUILD_TARGET_DIR)/zmux" "$(MAC_BUNDLE)/Contents/MacOS/zmux"
-	$(INSTALL) -m 755 "$(BUILD_TARGET_DIR)/zosh" "$(MAC_BUNDLE)/Contents/MacOS/zosh"
+	if [ -n "$(call tool_enabled,$(ZOSH))" ]; then \
+		$(INSTALL) -m 755 "$(BUILD_TARGET_DIR)/zosh" "$(MAC_BUNDLE)/Contents/MacOS/zosh"; \
+	else \
+		$(RM) "$(MAC_BUNDLE)/Contents/MacOS/zosh"; \
+	fi
 	if [ -n "$(call tool_enabled,$(WORKTREE))" ]; then \
 		$(INSTALL) -m 755 "$(BUILD_TARGET_DIR)/zwt" "$(MAC_BUNDLE)/Contents/MacOS/zwt"; \
 	else \
@@ -501,8 +508,11 @@ install-binary:
 		$(RM) "$(MAC_ZWT_CLI_PATH)"; \
 	fi
 	$(RM) "$(MAC_ZOSH_CLI_PATH)"
-	sed 's|@MAC_RUNTIME_BUNDLE@|$(MAC_RUNTIME_BUNDLE)|g' resources/macos/zosh-cli.in > "$(MAC_ZOSH_CLI_PATH)"
-	chmod 755 "$(MAC_ZOSH_CLI_PATH)"
+	if [ -n "$(call tool_enabled,$(ZOSH))" ]; then \
+		$(RM) "$(MAC_ZOSH_CLI_PATH)"; \
+		sed 's|@MAC_RUNTIME_BUNDLE@|$(MAC_RUNTIME_BUNDLE)|g' resources/macos/zosh-cli.in > "$(MAC_ZOSH_CLI_PATH)"; \
+		chmod 755 "$(MAC_ZOSH_CLI_PATH)"; \
+	fi
 
 install-capabilities:
 
@@ -569,7 +579,11 @@ install-binary:
 	# beside Zetta: a client starts it from its own directory rather than
 	# through PATH, where an unrelated zmux could be picked up instead.
 	$(INSTALL) -Dm755 "$(BUILD_TARGET_DIR)/zmux" $(BINDIR)/zmux
+ifneq ($(call tool_enabled,$(ZOSH)),)
 	$(INSTALL) -Dm755 "$(BUILD_TARGET_DIR)/zosh" $(BINDIR)/zosh
+else
+	$(RM) $(BINDIR)/zosh
+endif
 ifneq ($(call tool_enabled,$(WORKTREE)),)
 	$(INSTALL) -Dm755 "$(BUILD_TARGET_DIR)/zwt" $(BINDIR)/zwt
 else
@@ -581,8 +595,12 @@ ifneq ($(LINUX_USER_INSTALL),)
 	ln -s "$(BINDIR)/zetta" "$(LINUX_USER_CLI_PATH)"
 	$(RM) "$(LINUX_USER_BIN_DIR)/zmux"
 	ln -s "$(BINDIR)/zmux" "$(LINUX_USER_BIN_DIR)/zmux"
+ifneq ($(call tool_enabled,$(ZOSH)),)
 	$(RM) "$(LINUX_USER_ZOSH_PATH)"
 	ln -s "$(BINDIR)/zosh" "$(LINUX_USER_ZOSH_PATH)"
+else
+	$(RM) "$(LINUX_USER_ZOSH_PATH)"
+endif
 ifneq ($(call tool_enabled,$(WORKTREE)),)
 	$(RM) "$(LINUX_USER_ZWT_PATH)"
 	ln -s "$(BINDIR)/zwt" "$(LINUX_USER_ZWT_PATH)"
