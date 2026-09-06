@@ -705,21 +705,7 @@ pub fn run(
         };
         let daemon = daemon.clone();
         let token = token.clone();
-        // Never `thread::spawn`, which panics when the process is briefly out of
-        // threads — and a panic here is on the accept loop, so it ends the
-        // daemon and every session it holds. A connection that cannot be served
-        // is one refused request the client will retry; the sessions are worth
-        // more than it is.
-        if let Err(error) = thread::Builder::new()
-            .name("zmux connection".to_owned())
-            .spawn(move || {
-                if let Err(error) = serve(&daemon, stream, &token) {
-                    log::debug!("multiplexer connection ended: {error:#}");
-                }
-            })
-        {
-            log::warn!("could not serve a multiplexer connection: {error}");
-        }
+        spawn_connection(daemon, stream, token);
     }
 
     #[cfg(feature = "session-persistence")]
@@ -1021,6 +1007,47 @@ fn spawn_worker(name: &str, make_worker: impl Fn() -> Box<dyn FnOnce() + Send>) 
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
             Err(error) => panic!("spawning the {name} thread failed: {error}"),
+        }
+    }
+}
+
+/// Serves one accepted connection, waiting out a transient shortage of threads.
+///
+/// `thread::Builder::spawn` consumes its closure even when the OS refuses to
+/// create the thread, so the stream lives in a slot shared by each retry. An
+/// accepted request must not be discarded just because a parallel workload
+/// briefly exhausted the process's thread capacity: the peer cannot tell that
+/// apart from a daemon that died, and idempotent requests are not all retried by
+/// their callers.
+fn spawn_connection(daemon: Arc<Daemon>, stream: Stream, token: String) {
+    let stream = Arc::new(Mutex::new(Some(stream)));
+    loop {
+        let stream_slot = Arc::clone(&stream);
+        let daemon = daemon.clone();
+        let token = token.clone();
+        match thread::Builder::new()
+            .name("zmux connection".to_owned())
+            .spawn(move || {
+                let stream = stream_slot
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .take()
+                    .expect("the accepted connection was already claimed");
+                if let Err(error) = serve(&daemon, stream, &token) {
+                    log::debug!("multiplexer connection ended: {error:#}");
+                }
+            }) {
+            Ok(_) => return,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                log::warn!(
+                    "spawning a multiplexer connection thread was momentarily refused; retrying"
+                );
+                thread::sleep(Duration::from_millis(50));
+            }
+            Err(error) => {
+                log::warn!("could not serve a multiplexer connection: {error}");
+                return;
+            }
         }
     }
 }

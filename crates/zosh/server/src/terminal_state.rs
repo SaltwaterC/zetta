@@ -23,7 +23,7 @@ enum ScrollbackDetectorState {
 #[derive(Clone)]
 struct ScrollbackClearDetector {
     state: ScrollbackDetectorState,
-    parameters: [u8; 32],
+    parameters: [u8; 100],
     parameter_len: usize,
     overflowed: bool,
 }
@@ -32,7 +32,7 @@ impl Default for ScrollbackClearDetector {
     fn default() -> Self {
         Self {
             state: ScrollbackDetectorState::Ground,
-            parameters: [0; 32],
+            parameters: [0; 100],
             parameter_len: 0,
             overflowed: false,
         }
@@ -83,7 +83,7 @@ impl ScrollbackClearDetector {
                 } else if (0x40..=0x7e).contains(&byte) {
                     let is_clear = !self.overflowed
                         && byte == b'J'
-                        && self.parameters[..self.parameter_len] == *b"3";
+                        && first_parameter_is_three(&self.parameters[..self.parameter_len]);
                     self.state = ScrollbackDetectorState::Ground;
                     self.parameter_len = 0;
                     self.overflowed = false;
@@ -124,6 +124,34 @@ impl ScrollbackClearDetector {
         self.parameter_len = 0;
         self.overflowed = false;
     }
+}
+
+/// Mosh's terminal dispatcher uses the first CSI parameter and accepts
+/// equivalent spellings such as `03J` and `3;0J`. Match that behavior instead
+/// of comparing the raw parameter bytes with only the shortest spelling.
+fn first_parameter_is_three(parameters: &[u8]) -> bool {
+    let first = parameters
+        .split(|&byte| byte == b';')
+        .next()
+        .unwrap_or_default();
+    if first.is_empty() {
+        return false;
+    }
+
+    let mut value = 0_u64;
+    for &byte in first {
+        if !byte.is_ascii_digit() {
+            return false;
+        }
+        let Some(next) = value
+            .checked_mul(10)
+            .and_then(|value| value.checked_add(u64::from(byte - b'0')))
+        else {
+            return false;
+        };
+        value = next;
+    }
+    value == 3
 }
 
 /// Authoritative server-side terminal state. Mosh synchronizes terminal state,
@@ -392,6 +420,21 @@ mod tests {
             state.diff_from_ack(),
             b"\x1b]777;zosh-clear-scrollback;1\x07"
         );
+    }
+
+    #[test]
+    fn clear_scrollback_detector_matches_moshs_first_parameter_rules() {
+        for sequence in [b"\x1b[03J".as_slice(), b"\x1b[3;0J", b"\x9b3J"] {
+            let mut state = TerminalState::new(24, 80);
+            state.process(sequence);
+            assert_eq!(state.scrollback_clear_count(), 1, "{sequence:?}");
+        }
+
+        for sequence in [b"\x1b[30J".as_slice(), b"\x1b[?3J", b"\x1b[3 J"] {
+            let mut state = TerminalState::new(24, 80);
+            state.process(sequence);
+            assert_eq!(state.scrollback_clear_count(), 0, "{sequence:?}");
+        }
     }
 
     #[test]
