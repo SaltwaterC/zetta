@@ -12,7 +12,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::{
-        Arc,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
@@ -187,6 +187,17 @@ fn daemon_sessions_dir(config: &Path) -> PathBuf {
         "sessions".to_owned()
     };
     config.join("zetta").join(name)
+}
+
+/// Re-exec tests share the same executable and OS process/descriptor
+/// machinery. Keep upgrades from multiple test threads from overlapping; the
+/// rest of the daemon tests remain parallel.
+fn upgrade_test_guard() -> std::sync::MutexGuard<'static, ()> {
+    static UPGRADE_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    UPGRADE_TEST_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 impl TestDaemon {
@@ -1924,6 +1935,7 @@ fn reconfiguring_to_memory_retains_a_snapshot_and_keeps_the_session_process() {
 
 #[test]
 fn an_upgrade_keeps_the_sessions_and_their_processes() {
+    let _upgrade_test_guard = upgrade_test_guard();
     let daemon = TestDaemon::start();
     let client = daemon.client();
 
@@ -2320,6 +2332,7 @@ fn reaped_process() -> u32 {
 
 #[test]
 fn replacing_the_binary_out_from_under_the_daemon_does_not_lose_its_sessions() {
+    let _upgrade_test_guard = upgrade_test_guard();
     // Rebuilding unlinks and recreates the executable, after which Linux reads
     // `/proc/self/exe` as "<path> (deleted)". Resolving the path at upgrade
     // time rather than at startup made `--upgrade` try to execute that, and
@@ -2504,6 +2517,7 @@ fn a_session_whose_process_ended_is_never_offered() {
 
 #[test]
 fn upgrading_twice_does_not_duplicate_a_session() {
+    let _upgrade_test_guard = upgrade_test_guard();
     // Each upgrade hands the sessions to the next image. If that image adopts
     // them without accounting for what it already has — or restores the
     // identifier counters in the wrong order — the same session comes back
@@ -4132,6 +4146,7 @@ fn process_is_zombie(pid: u32) -> bool {
 /// else's, never reaping it and reading its dead signal pipe as an exit.
 #[test]
 fn an_upgrade_keeps_a_pane_that_is_still_attached() {
+    let _upgrade_test_guard = upgrade_test_guard();
     let daemon = TestDaemon::start();
     let client = daemon.client();
     let subscription = client.subscribe().unwrap();
@@ -4238,6 +4253,7 @@ fn an_upgrade_keeps_a_pane_that_is_still_attached() {
 /// ever be told it had exited.
 #[test]
 fn a_subscription_survives_the_multiplexer_replacing_itself() {
+    let _upgrade_test_guard = upgrade_test_guard();
     let daemon = TestDaemon::start();
     let client = daemon.client();
     let subscription = client.subscribe().unwrap();
@@ -5054,6 +5070,7 @@ fn a_handed_over_screen_keeps_the_width_it_was_drawn_at() {
 /// this situation, which is when the command matters.
 #[test]
 fn an_upgrade_connects_to_a_multiplexer_of_another_protocol_version() {
+    let _upgrade_test_guard = upgrade_test_guard();
     let daemon = TestDaemon::start();
     let client = daemon.client();
 
@@ -5436,6 +5453,7 @@ fn a_stranded_session_cannot_be_seized_by_replacing_its_verifier() {
 #[cfg(all(unix, feature = "scrollback-buffer"))]
 #[test]
 fn an_upgrade_keeps_the_retained_screen_at_the_width_it_was_drawn_at() {
+    let _upgrade_test_guard = upgrade_test_guard();
     use std::os::fd::AsRawFd as _;
 
     let daemon = TestDaemon::start();

@@ -8,8 +8,8 @@ param(
     [string]$MuxBinaryPath,
     [Parameter(Mandatory = $true)]
     [string]$PtyBinaryPath,
-    [Parameter(Mandatory = $true)]
     [string]$ZoshBinaryPath,
+    [string]$MoshServerBinaryPath,
     [string]$WorktreeBinaryPath
 )
 
@@ -62,7 +62,14 @@ $consoleBinary = (Resolve-Path -LiteralPath $ConsoleBinaryPath).Path
 $guiBinary = (Resolve-Path -LiteralPath $GuiBinaryPath).Path
 $muxBinary = (Resolve-Path -LiteralPath $MuxBinaryPath).Path
 $ptyBinary = (Resolve-Path -LiteralPath $PtyBinaryPath).Path
-$zoshBinary = (Resolve-Path -LiteralPath $ZoshBinaryPath).Path
+$zoshBinary = $null
+if ($ZoshBinaryPath) {
+    $zoshBinary = (Resolve-Path -LiteralPath $ZoshBinaryPath).Path
+}
+$moshServerBinary = $null
+if ($MoshServerBinaryPath) {
+    $moshServerBinary = (Resolve-Path -LiteralPath $MoshServerBinaryPath).Path
+}
 $worktreeBinary = $null
 if ($WorktreeBinaryPath) {
     $worktreeBinary = (Resolve-Path -LiteralPath $WorktreeBinaryPath).Path
@@ -71,7 +78,14 @@ $actualConsoleSubsystem = Get-PeSubsystem $consoleBinary
 $actualGuiSubsystem = Get-PeSubsystem $guiBinary
 $actualMuxSubsystem = Get-PeSubsystem $muxBinary
 $actualPtySubsystem = Get-PeSubsystem $ptyBinary
-$actualZoshSubsystem = Get-PeSubsystem $zoshBinary
+$actualZoshSubsystem = $null
+if ($zoshBinary) {
+    $actualZoshSubsystem = Get-PeSubsystem $zoshBinary
+}
+$actualMoshServerSubsystem = $null
+if ($moshServerBinary) {
+    $actualMoshServerSubsystem = Get-PeSubsystem $moshServerBinary
+}
 if ($actualConsoleSubsystem -ne $consoleSubsystem) {
     throw "$consoleBinary uses PE subsystem $actualConsoleSubsystem; expected console subsystem $consoleSubsystem"
 }
@@ -84,8 +98,11 @@ if ($actualMuxSubsystem -ne $consoleSubsystem) {
 if ($actualPtySubsystem -ne $consoleSubsystem) {
     throw "$ptyBinary uses PE subsystem $actualPtySubsystem; expected console subsystem $consoleSubsystem"
 }
-if ($actualZoshSubsystem -ne $consoleSubsystem) {
+if ($zoshBinary -and ($actualZoshSubsystem -ne $consoleSubsystem)) {
     throw "$zoshBinary uses PE subsystem $actualZoshSubsystem; expected console subsystem $consoleSubsystem"
+}
+if ($moshServerBinary -and ($actualMoshServerSubsystem -ne $consoleSubsystem)) {
+    throw "$moshServerBinary uses PE subsystem $actualMoshServerSubsystem; expected console subsystem $consoleSubsystem"
 }
 if ($worktreeBinary) {
     $actualWorktreeSubsystem = Get-PeSubsystem $worktreeBinary
@@ -116,9 +133,19 @@ $muxVersion = & $muxBinary --version
 if ($LASTEXITCODE -ne 0 -or $muxVersion -notmatch '^zmux \S+ \(protocol \d+\)$') {
     throw "$muxBinary --version failed its CLI smoke test"
 }
-$zoshVersion = & $zoshBinary --version
-if ($LASTEXITCODE -ne 0 -or $zoshVersion -notmatch '^zosh \S+$') {
-    throw "$zoshBinary --version failed its CLI smoke test"
+$zoshVersion = $null
+if ($zoshBinary) {
+    $zoshVersion = & $zoshBinary --version
+    if ($LASTEXITCODE -ne 0 -or $zoshVersion -notmatch '^zosh \S+$') {
+        throw "$zoshBinary --version failed its CLI smoke test"
+    }
+}
+$moshServerVersion = $null
+if ($moshServerBinary) {
+    $moshServerVersion = ((& $moshServerBinary --version | Out-String).Trim() -replace "`r", "")
+    if ($LASTEXITCODE -ne 0 -or $moshServerVersion -notmatch '^mosh-server-rs \S+ \(Mosh protocol 2\)$') {
+        throw "$moshServerBinary --version failed its CLI smoke test"
+    }
 }
 $worktreeHelp = $null
 if ($worktreeBinary) {
@@ -132,7 +159,12 @@ Write-Host "Verified Windows console executable: $consoleBinary ($version)"
 Write-Host "Verified Windows GUI launcher: $guiBinary"
 Write-Host "Verified Windows multiplexer executable: $muxBinary ($muxVersion)"
 Write-Host "Verified Windows pseudoconsole host: $ptyBinary"
-Write-Host "Verified Zetta Mosh endpoint executable: $zoshBinary ($zoshVersion)"
+if ($zoshBinary) {
+    Write-Host "Verified Zetta Mosh endpoint executable: $zoshBinary ($zoshVersion)"
+}
+if ($moshServerBinary) {
+    Write-Host "Verified Zetta Mosh server executable: $moshServerBinary ($moshServerVersion)"
+}
 if ($worktreeBinary) {
     Write-Host "Verified standalone worktree executable: $worktreeBinary"
 }

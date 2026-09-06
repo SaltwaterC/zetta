@@ -1,6 +1,6 @@
 use super::*;
 
-#[cfg(feature = "zosh")]
+#[cfg(feature = "mosh-client")]
 fn parse_mosh(arguments: &[&str]) -> crate::mosh::MoshCommand {
     let arguments = arguments
         .iter()
@@ -9,7 +9,7 @@ fn parse_mosh(arguments: &[&str]) -> crate::mosh::MoshCommand {
     super::mosh::parse_mosh_args(&arguments).expect("valid Mosh arguments")
 }
 
-#[cfg(feature = "zosh")]
+#[cfg(feature = "mosh-client")]
 #[test]
 fn mosh_parser_preserves_target_and_remote_command() {
     let command = parse_mosh(&[
@@ -54,7 +54,7 @@ fn mosh_parser_preserves_target_and_remote_command() {
     assert_eq!(command.remote_command, ["zsh", "-lc", "printf hello"]);
 }
 
-#[cfg(feature = "zosh")]
+#[cfg(feature = "mosh-client")]
 #[test]
 fn mosh_parser_supports_delimiter_help_and_rejects_duplicates() {
     let command = parse_mosh(&["--", "-host", "--help"]);
@@ -87,7 +87,7 @@ fn mosh_parser_supports_delimiter_help_and_rejects_duplicates() {
     );
 }
 
-#[cfg(feature = "zosh")]
+#[cfg(feature = "mosh-client")]
 #[test]
 fn mosh_parser_accepts_aliases_and_terminal_modes() {
     let always = parse_mosh(&["-a", "host"]);

@@ -1,0 +1,29 @@
+[package]
+name = "mosh-server-rs"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+description = "Cross-platform Rust mosh-server implementation for Linux, macOS, and Windows"
+license = "GPL-3.0-or-later"
+publish = false
+
+[[bin]]
+name = "mosh-server"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+base64 = "0.22"
+getrandom = "0.3"
+flate2 = "1"
+portable-pty = "0.9"
+vt100 = "0.16.2"
+moshcatty = { git = "https://github.com/binaricat/MoshCatty.git", rev = "554b9d305e7ac4b11de740d764bbc3e05f816d7b" }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

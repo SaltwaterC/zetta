@@ -9,7 +9,7 @@ mod default_terminal;
 mod http_server;
 mod image_paste;
 mod keymap_file;
-#[cfg(feature = "zosh")]
+#[cfg(feature = "mosh-client")]
 mod mosh;
 mod mux;
 #[cfg(feature = "session-persistence")]

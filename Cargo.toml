@@ -6,7 +6,7 @@ license = "GPL-3.0-or-later"
 default-run = "zetta"
 
 [features]
-default = ["wayland", "serial-console", "http-server", "tftp-server", "tftp-client", "notifications", "clipboard", "syntax-highlighting", "session-persistence", "worktree", "zosh"]
+default = ["wayland", "serial-console", "http-server", "tftp-server", "tftp-client", "notifications", "clipboard", "syntax-highlighting", "session-persistence", "worktree", "mosh"]
 wayland = ["gpui_platform/wayland"]
 x11 = ["gpui_platform/x11"]
 windows-gui = []
@@ -44,7 +44,9 @@ tftp-client = []
 notifications = ["dep:notify-rust", "dep:cpal", "dep:mac-usernotifications", "dep:ashpd"]
 clipboard = ["dep:arboard"]
 worktree = ["dep:zwt", "zwt/recursive-submodules"]
-zosh = ["dep:zosh"]
+mosh = ["mosh-client", "mosh-server"]
+mosh-client = ["dep:zosh"]
+mosh-server = ["dep:flate2", "dep:moshcatty", "dep:portable-pty", "dep:vt100"]
 
 [[bin]]
 name = "zetta-gui"
@@ -71,7 +73,12 @@ path = "src/bin/zmux_pty.rs"
 [[bin]]
 name = "zosh"
 path = "src/bin/zosh.rs"
-required-features = ["zosh"]
+required-features = ["mosh-client"]
+
+[[bin]]
+name = "mosh-server"
+path = "crates/zosh/server/src/main.rs"
+required-features = ["mosh-server"]
 
 [dependencies]
 anyhow = "1"
@@ -88,6 +95,7 @@ log = "0.4"
 async-compression = { version = "0.4", features = ["gzip", "futures-io"] }
 async-tar = "0.6"
 assets = { path = "crates/assets" }
+flate2 = { version = "1", optional = true }
 futures = "0.3"
 getrandom = "0.3"
 gpui = { path = "crates/gpui", features = ["profiler"] }
@@ -103,6 +111,7 @@ image = { version = "0.25", default-features = false, features = [
     "webp",
 ] }
 menu = { path = "crates/menu" }
+moshcatty = { git = "https://github.com/binaricat/MoshCatty.git", rev = "554b9d305e7ac4b11de740d764bbc3e05f816d7b", optional = true }
 notify-rust = { version = "4", features = ["preview-macos-un"], optional = true }
 release_channel = { path = "crates/release_channel" }
 reqwest_client = { path = "zed/crates/reqwest_client" }
@@ -116,6 +125,7 @@ smallvec = "1"
 subtle = "2"
 sysinfo = "0.37"
 regex = "1.11"
+portable-pty = { version = "0.9", optional = true }
 strum = "0.28"
 serialport = { version = "4.9", default-features = false, optional = true }
 task = { path = "crates/task" }
@@ -155,6 +165,7 @@ zeroize = "1"
 zed_actions = { path = "crates/zed_actions" }
 zmux = { path = "crates/zmux", default-features = false, features = ["scrollback-buffer"] }
 zosh = { path = "crates/zosh", optional = true }
+vt100 = { version = "0.16.2", optional = true }
 zwt = { path = "crates/zwt", optional = true }
 
 [target.'cfg(windows)'.dependencies]

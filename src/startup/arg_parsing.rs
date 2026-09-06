@@ -9,7 +9,7 @@ use crate::cli_services::{NotificationRequest, parse_notification_timeout};
 use crate::command_panes::{
     MAX_PANE_COMMAND_BYTES, PaneCommand, pane_command_byte_len, parse_pane_direction,
 };
-#[cfg(feature = "zosh")]
+#[cfg(feature = "mosh-client")]
 use crate::mosh::MoshCommand;
 use crate::profile_cli::{ProfileCommand, parse_profile_args};
 use crate::project_cli::{ProjectCommand, parse_project_args};
@@ -23,7 +23,7 @@ const DEFAULT_PERFORMANCE_REPORT_DURATION: Duration = Duration::from_secs(10);
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum StartupMode {
     Application,
-    #[cfg(feature = "zosh")]
+    #[cfg(feature = "mosh-client")]
     Mosh(MoshCommand),
     /// Always open a fresh OS window, without activating or consuming an
     /// existing process's dormant sessions.
@@ -153,12 +153,12 @@ impl StartupArgs {
 }
 
 mod benchmark;
-#[cfg(feature = "zosh")]
+#[cfg(feature = "mosh-client")]
 mod mosh;
 mod subcommands;
 
 use benchmark::parse_benchmark_subcommand;
-#[cfg(feature = "zosh")]
+#[cfg(feature = "mosh-client")]
 use mosh::parse_mosh_subcommand;
 use subcommands::{
     parse_attention_subcommand, parse_copy_subcommand, parse_edit_subcommand,
@@ -210,9 +210,9 @@ fn parse_subcommand(arguments: &[OsString]) -> Result<Option<StartupArgs>> {
     let rest = &arguments[1..];
     let parsed = match name.as_ref() {
         "project" => StartupArgs::for_mode(StartupMode::Project(parse_project_args(rest)?)),
-        #[cfg(feature = "zosh")]
+        #[cfg(feature = "mosh-client")]
         "mosh" => parse_mosh_subcommand(rest)?,
-        #[cfg(not(feature = "zosh"))]
+        #[cfg(not(feature = "mosh-client"))]
         "mosh" => anyhow::bail!("Mosh support is disabled in this build"),
         "cmd" => StartupArgs::for_mode(StartupMode::ProjectCommand(parse_project_command_args(
             rest,

@@ -42,6 +42,7 @@ function Invoke-Installer([string]$Action = "InstallBinary") {
         "-SourceMuxBinary", (Join-Path $sourceDirectory "zmux.exe"),
         "-SourcePtyBinary", (Join-Path $sourceDirectory "zmux-pty.exe"),
         "-SourceZoshBinary", (Join-Path $sourceDirectory "zosh.exe"),
+        "-SourceMoshServerBinary", (Join-Path $sourceDirectory "mosh-server.exe"),
         "-InstallDirectory", $installDirectory
     )
     $output = @(& powershell.exe @arguments 2>&1)
@@ -63,6 +64,7 @@ function Set-SourceGeneration([string]$Generation) {
     Write-TestFile (Join-Path $sourceDirectory "zmux.exe") "mux-$Generation"
     Write-TestFile (Join-Path $sourceDirectory "zmux-pty.exe") "pty-$Generation"
     Write-TestFile (Join-Path $sourceDirectory "zosh.exe") "zosh-$Generation"
+    Write-TestFile (Join-Path $sourceDirectory "mosh-server.exe") "mosh-server-$Generation"
     Write-TestFile (Join-Path $sourceDirectory "conpty.dll") "conpty-$Generation"
     Write-TestFile (Join-Path $sourceDirectory "OpenConsole.exe") "console-$Generation"
 }
@@ -90,6 +92,7 @@ try {
     Assert-InstallerSucceeded (Invoke-Installer) "initial install failed"
     Assert-FileContents $installedPty "pty-first" "initial helper was not installed"
     Assert-FileContents (Join-Path $installDirectory "zosh.exe") "zosh-first" "zosh was not installed"
+    Assert-FileContents (Join-Path $installDirectory "mosh-server.exe") "mosh-server-first" "mosh-server was not installed"
     Assert-FileContents $installedPtyVersion "1" "initial helper marker is wrong"
 
     # A rebuilt helper with the same host protocol is compatible even when its
@@ -188,6 +191,7 @@ try {
     Remove-Item -LiteralPath (Join-Path $installDirectory "zetta.exe") -Force
     Assert-InstallerSucceeded (Invoke-Installer "UninstallBinary") "uninstall failed"
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $installDirectory "zosh.exe"))) "uninstall left zosh"
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $installDirectory "mosh-server.exe"))) "uninstall left mosh-server"
     Assert-True (-not (Test-Path -LiteralPath $installedPtyVersion)) "uninstall left the helper marker"
     Write-Host "Windows installer tests passed."
 } finally {

@@ -214,13 +214,13 @@ fn help_text_uses_title_case_and_lists_built_in_features() {
     #[cfg(not(feature = "session-persistence"))]
     assert!(!help.contains("Encrypted session retention"));
 
-    #[cfg(feature = "zosh")]
+    #[cfg(feature = "mosh-client")]
     {
         assert!(help.contains("Mosh client"));
         assert!(help.contains("zetta mosh [OPTIONS] [--] [user@]HOST [COMMAND ...]"));
         assert!(help.contains("Run an interactive Mosh session"));
     }
-    #[cfg(not(feature = "zosh"))]
+    #[cfg(not(feature = "mosh-client"))]
     {
         assert!(!help.contains("Mosh client"));
         assert!(!help.contains("zetta mosh"));

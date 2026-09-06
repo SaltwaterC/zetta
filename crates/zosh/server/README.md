@@ -1,12 +1,37 @@
-# Remote scrollback-clear support
+# Mosh server implementations
 
 Zosh can honor a remote shell's standard `CSI 3 J` (erase saved lines) request
-when the remote Mosh server preserves it. The shell widget and its bindings
-do not need to change. An ordinary screen redraw does not erase saved lines.
+when the remote Mosh server preserves it. This directory contains the Rust
+`mosh-server-rs` implementation used by the bundled `mosh-server` binary and
+the patch for building the upstream C++ server. The shell widget and its
+bindings do not need to change. An ordinary screen redraw does not erase saved
+lines.
 
 Unmodified Mosh 1.4.0 discards `CSI 3 J`. SSH works because it transports the
 terminal byte stream; Mosh sends reconstructed screen state. Rebuilding only
 the local Zosh binary does **not** enable this feature on an unmodified server.
+
+## Build the bundled Rust server
+
+The Rust server is a standalone Cargo package as well as a root Zetta binary
+target. Build it from this directory when preparing a server for a remote host:
+
+```sh
+cargo build --release --locked
+```
+
+The resulting `target/release/mosh-server` can be copied to the remote host
+and selected from the local machine:
+
+```sh
+zosh --server=/absolute/path/to/mosh-server pi
+```
+
+It implements Mosh protocol v2 and detects `CSI 3 J` in PTY output. The server
+adds the same absolute `OSC 777;zosh-clear-scrollback;N` generation used by the
+Zosh display code, including for a clear that does not change screen cells.
+Snapshots retain the generation, so retransmitted and out-of-order states do
+not clear the local terminal more than once.
 
 `mosh-1.4.0-scrollback.patch` adds the missing server state. It applies to the
 official [Mosh 1.4.0 release](https://github.com/mobile-shell/mosh/releases/tag/mosh-1.4.0).
@@ -15,7 +40,7 @@ The source archive's SHA-256 is
 The patch modifies Mosh's GPL-licensed terminal implementation; the upstream
 license and copyright notices remain in the source distribution.
 
-## Build on the remote host
+## Build the patched upstream server
 
 Copy this patch to the remote host. Install Mosh's build prerequisites first;
 on Debian these include `build-essential`, `pkg-config`, `libprotobuf-dev`,
@@ -76,5 +101,6 @@ ZOSH_TEST_SERVER=/absolute/path/to/mosh-server cargo test --locked a_remote_shel
 This starts a temporary loopback session and runs a shell fixture. It checks
 the shell's clear-and-redraw output, an ordinary redraw, and a clear with no
 changed cells. The same test must fail with `remote CSI 3 J was lost` against
-unmodified Mosh. Unit tests additionally cover repeated and out-of-order
-states, fragmented markers, malformed markers, and unrelated terminal output.
+unmodified Mosh. The server and client unit tests additionally cover repeated
+and out-of-order states, fragmented markers, malformed markers, and unrelated
+terminal output.

@@ -3,10 +3,11 @@ use mosh_rs::Screen;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-// Build the server patch in ../../server and point ZOSH_TEST_SERVER at the
-// resulting executable. This uses loopback only and no user's shell config.
+// Build the bundled server in ../../server, or a patched upstream server, and
+// point ZOSH_TEST_SERVER at the resulting executable. This uses loopback only
+// and no user's shell config.
 #[test]
-#[ignore = "requires ZOSH_TEST_SERVER pointing at a patched Mosh server"]
+#[ignore = "requires ZOSH_TEST_SERVER pointing at a scrollback-aware Mosh server"]
 fn a_remote_shell_clear_reaches_the_terminal_without_a_key_binding() {
     let server = std::env::var_os("ZOSH_TEST_SERVER").expect("set ZOSH_TEST_SERVER");
     let output = Command::new(server)

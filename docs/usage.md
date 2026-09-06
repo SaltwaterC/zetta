@@ -150,7 +150,8 @@ from stock `mosh`: the session stays on the current screen and preserves its
 normal scrollback instead of entering an alternate screen. Pass `--init` to
 Zosh when the stock Mosh terminal initialization behavior is required. Zosh
 honors the remote shell's explicit clear-scrollback request (`CSI 3 J`) when
-used with the [patched Mosh server](../crates/zosh/server/README.md). Existing
+used with the bundled Rust server or the
+[patched Mosh server](../crates/zosh/server/README.md). Existing
 shell widgets and their bindings work unchanged. A clear erases the local
 terminal's saved lines and redraws the current screen; ordinary redraws retain
 scrollback. This deliberately extends upstream Mosh. The unmodified server
