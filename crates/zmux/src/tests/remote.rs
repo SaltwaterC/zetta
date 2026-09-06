@@ -89,6 +89,9 @@ fn mux_probe_uses_a_different_connection_than_the_real_request() {
     let socket_path = directory.path().join("forward.sock");
     let listener = UnixListener::bind(&socket_path).unwrap();
     listener.set_nonblocking(true).unwrap();
+    // Darwin can carry the listener's nonblocking mode onto accepted sockets;
+    // reset each one below because the framed protocol reader expects blocking
+    // I/O once the polling accept loop has handed a connection over.
     let endpoint = crate::transport::Endpoint {
         version: crate::transport::ENDPOINT_VERSION,
         protocol_version: crate::messages::PROTOCOL_VERSION,
@@ -121,7 +124,10 @@ fn mux_probe_uses_a_different_connection_than_the_real_request() {
         let deadline = Instant::now() + Duration::from_secs(2);
         let first = loop {
             match listener.accept() {
-                Ok((stream, _)) => break stream,
+                Ok((stream, _)) => {
+                    stream.set_nonblocking(false).unwrap();
+                    break stream;
+                }
                 Err(error) if error.kind() == ErrorKind::WouldBlock => {
                     if Instant::now() >= deadline {
                         report_sender
@@ -145,7 +151,10 @@ fn mux_probe_uses_a_different_connection_than_the_real_request() {
 
         let second = loop {
             match listener.accept() {
-                Ok((stream, _)) => break stream,
+                Ok((stream, _)) => {
+                    stream.set_nonblocking(false).unwrap();
+                    break stream;
+                }
                 Err(error) if error.kind() == ErrorKind::WouldBlock => {
                     if Instant::now() >= deadline {
                         report_sender

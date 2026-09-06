@@ -2127,6 +2127,7 @@ fn a_client_from_a_newer_build_is_told_why_rather_than_dropped() {
 /// build and keeping the sessions the old daemon holds.
 #[test]
 fn an_upgrade_is_accepted_from_a_client_that_disagrees_about_the_protocol() {
+    let _upgrade_test_guard = upgrade_test_guard();
     let daemon = TestDaemon::start();
     let client = daemon.client();
 
