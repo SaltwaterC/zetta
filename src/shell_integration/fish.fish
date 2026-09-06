@@ -139,6 +139,13 @@ if set -q ZETTA_HOST_EXECUTABLE; and test -n "$ZETTA_HOST_EXECUTABLE"
     end
 end
 
+if not type -q mosh
+    function mosh --wraps 'zetta mosh'
+        command zetta mosh $argv
+    end
+    set -g __ZETTA_MOSH_WRAPPER 1
+end
+
 if not functions -q __zetta_report_cwd
     set -g __ZETTA_LIFECYCLE_TRACKING_INSTALLED 1
     if set -q ZETTA_PANE_ROUTING_ID
@@ -831,6 +838,25 @@ function __zetta_long_options
                 --no-mux 'Keep background sessions in this process for this launch' \
                 --new-window 'Open a fresh OS window without resuming a dormant session' \
                 --command 'Open a tab and run COMMAND; remaining arguments go to the child'
+        case mosh
+            printf '%s\t%s\n' \
+                --client 'Use a specific local Mosh client' \
+                --server 'Use a specific remote mosh-server' \
+                --predict 'Prediction mode' \
+                -o 'Allow predictive overwrites' \
+                --predict-overwrite 'Allow predictive overwrites' \
+                --family 'Address family' \
+                --port 'Mosh server port or range' \
+                --bind-server 'Mosh server bind address' \
+                --ssh 'SSH command' \
+                --ssh-pty 'Request an SSH PTY' \
+                --no-ssh-pty 'Do not request an SSH PTY' \
+                --init 'Initialize the terminal' \
+                --no-init 'Preserve the terminal' \
+                --local 'Use locally discovered addressing' \
+                --experimental-remote-ip 'Address discovery mode' \
+                --help 'Print help' \
+                --version 'Print version'
         case profile
             printf '%s\t%s\n' \
                 list 'List all resolved profiles' \
@@ -1001,6 +1027,7 @@ complete -c zetta -n '__zetta_at_root' -a cmd -d 'Run a registered project comma
 complete -c zetta -n '__zetta_at_root' -a edit -d 'Edit files with EDITOR or Zetta vi'
 complete -c zetta -n '__zetta_at_root' -a vi -d "Edit files with Zetta's built-in vi"
 complete -c zetta -n '__zetta_at_root' -a init -d 'Generate shell integration'
+complete -c zetta -n '__zetta_at_root' -a mosh -d 'Run an interactive Mosh session'
 complete -c zetta -n '__zetta_at_root' -a serial -d 'List or connect to serial devices'
 complete -c zetta -n '__zetta_at_root' -a http -d 'Serve static files over HTTP'
 complete -c zetta -n '__zetta_at_root' -a tftp -d 'Transfer a file with TFTP'
@@ -1066,6 +1093,28 @@ complete -c zetta -s r -n '__zetta_has_profile_subcommand; and __zetta_profile_i
 complete -c zetta -s i -r -a 'auto zetta bash zsh fish' -n '__zetta_has_profile_subcommand; and __zetta_profile_is add; and __zetta_short_option -i'
 complete -c zetta -s r -n '__zetta_has_profile_subcommand; and __zetta_profile_is icon; and __zetta_short_option -r'
 complete -c zetta -n '__zetta_at_subcommand init' -a 'bash fish powershell pwsh zsh'
+complete -c zetta -n '__zetta_at_subcommand mosh' -l client -r -d 'Use a specific local Mosh client'
+complete -c zetta -n '__zetta_at_subcommand mosh' -l server -r -d 'Use a specific remote mosh-server'
+complete -c zetta -n '__zetta_at_subcommand mosh' -l predict -r -a 'adaptive always never experimental'
+complete -c zetta -n '__zetta_at_subcommand mosh' -s o -d 'Allow predictive overwrites'
+complete -c zetta -n '__zetta_at_subcommand mosh' -l predict-overwrite -d 'Allow predictive overwrites'
+complete -c zetta -n '__zetta_at_subcommand mosh' -s a -d 'Always predict'
+complete -c zetta -n '__zetta_at_subcommand mosh' -s n -d 'Never predict'
+complete -c zetta -n '__zetta_at_subcommand mosh' -s 4 -d 'Force IPv4'
+complete -c zetta -n '__zetta_at_subcommand mosh' -s 6 -d 'Force IPv6'
+complete -c zetta -n '__zetta_at_subcommand mosh' -l family -r -a 'prefer-inet prefer-inet6 inet inet6 auto all'
+complete -c zetta -n '__zetta_at_subcommand mosh' -l port -r
+complete -c zetta -n '__zetta_at_subcommand mosh' -l bind-server -r
+complete -c zetta -n '__zetta_at_subcommand mosh' -l ssh -r
+complete -c zetta -n '__zetta_at_subcommand mosh' -l ssh-pty -d 'Request an SSH PTY'
+complete -c zetta -n '__zetta_at_subcommand mosh' -l no-ssh-pty -d 'Do not request an SSH PTY'
+complete -c zetta -n '__zetta_at_subcommand mosh' -l init -d 'Initialize the terminal'
+complete -c zetta -n '__zetta_at_subcommand mosh' -l no-init -d 'Preserve the terminal'
+complete -c zetta -n '__zetta_at_subcommand mosh' -l local -d 'Use locally discovered addressing'
+complete -c zetta -n '__zetta_at_subcommand mosh' -l experimental-remote-ip -r -a 'local remote proxy'
+complete -c zetta -n '__zetta_at_subcommand mosh' -l help -d 'Print help'
+complete -c zetta -n '__zetta_at_subcommand mosh' -l version -d 'Print version'
+complete -c zetta -n '__zetta_at_subcommand mosh' -a '(__zetta_ssh_targets)'
 complete -c zetta -n '__fish_seen_subcommand_from init' -l help -d 'Print help'
 complete -c zetta -n '__fish_seen_subcommand_from init' -a '(__zetta_long_options init)'
 complete -c zetta -n '__zetta_at_subcommand serial' -a 'console list'
@@ -1075,6 +1124,56 @@ complete -c zetta -n '__zetta_at_subcommand http' -a server
 complete -c zetta -n '__fish_seen_subcommand_from http' -l help -d 'Print help'
 complete -c zetta -n '__fish_seen_subcommand_from http' -a '(__zetta_long_options http)'
 complete -c zetta -n '__fish_seen_subcommand_from terminal-size' -l json -d 'Print machine-readable JSON'
+
+complete -c zosh -f
+complete -c zosh -s c -d 'Print terminal color count'
+complete -c zosh -l client -r -d 'Mosh client on the local machine'
+complete -c zosh -l server -r -d 'Mosh server on the remote machine'
+complete -c zosh -l predict -r -a 'adaptive always never experimental'
+complete -c zosh -s o -d 'Allow predictive overwrites'
+complete -c zosh -l predict-overwrite -d 'Allow predictive overwrites'
+complete -c zosh -s a -d 'Always predict'
+complete -c zosh -s n -d 'Never predict'
+complete -c zosh -s 4 -d 'Force IPv4'
+complete -c zosh -s 6 -d 'Force IPv6'
+complete -c zosh -l family -r -a 'prefer-inet prefer-inet6 inet inet6 auto all'
+complete -c zosh -l port -r
+complete -c zosh -l bind-server -r
+complete -c zosh -l ssh -r
+complete -c zosh -l ssh-pty
+complete -c zosh -l no-ssh-pty
+complete -c zosh -l init
+complete -c zosh -l no-init
+complete -c zosh -l local
+complete -c zosh -l experimental-remote-ip -r -a 'local remote proxy'
+complete -c zosh -l help -d 'Print help'
+complete -c zosh -l version -d 'Print version'
+complete -c zosh -a '(__zetta_ssh_targets)'
+if set -q __ZETTA_MOSH_WRAPPER
+    complete -c mosh -f
+    complete -c mosh -l client -r
+    complete -c mosh -l server -r
+    complete -c mosh -l predict -r -a 'adaptive always never experimental'
+    complete -c mosh -s o -d 'Allow predictive overwrites'
+    complete -c mosh -l predict-overwrite
+    complete -c mosh -s a
+    complete -c mosh -s n
+    complete -c mosh -s 4
+    complete -c mosh -s 6
+    complete -c mosh -l family -r -a 'prefer-inet prefer-inet6 inet inet6 auto all'
+    complete -c mosh -l port -r
+    complete -c mosh -l bind-server -r
+    complete -c mosh -l ssh -r
+    complete -c mosh -l ssh-pty
+    complete -c mosh -l no-ssh-pty
+    complete -c mosh -l init
+    complete -c mosh -l no-init
+    complete -c mosh -l local
+    complete -c mosh -l experimental-remote-ip -r -a 'local remote proxy'
+    complete -c mosh -l help
+    complete -c mosh -l version
+    complete -c mosh -a '(__zetta_ssh_targets)'
+end
 complete -c zetta -n '__zetta_at_subcommand mux' -a list -d 'List the sessions the multiplexer is holding'
 complete -c zetta -n '__zetta_at_subcommand mux; and __zetta_mux_daemon_commands' -a stop -d 'Stop the multiplexer'
 complete -c zetta -n '__zetta_at_subcommand mux' -a reconnect -d 'Open a session in a Zetta window'

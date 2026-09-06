@@ -55,6 +55,23 @@ for active development.
 
 ## Quick start
 
+The build also produces zosh, Zetta's standalone cross-platform Mosh client.
+Run either zosh USER@HOST or zetta mosh USER@HOST for interactive remote
+shells; zetta mosh is a transparent proxy to zosh. The launcher starts
+mosh-server through SSH and falls back to plain SSH only when the remote
+mosh-server is clearly missing or unsupported. Native background sessions and
+zmux remote transport remain SSH because they need framed session streams.
+
+Zosh intentionally defaults to `--no-init`, unlike stock `mosh`: it keeps the
+current terminal screen and its scrollback instead of entering an alternate
+screen. Use `zosh --init USER@HOST` when the stock Mosh terminal behavior is
+required. With the [remote server patch](crates/zosh/server/README.md), Zosh
+honors a shell's explicit clear-scrollback request (`CSI 3 J`) and redraws the
+current screen. Existing shell widgets work unchanged, regardless of their
+bindings. This is an extension to stock Mosh: the unmodified server discards
+the request, so this feature requires the patched server on the remote host
+as well as the updated local client.
+
 Initialize the Zed submodule, then run Zetta with the pinned Rust toolchain:
 
 ```sh

@@ -532,6 +532,36 @@ fn vi_integration_is_conditional_and_has_cli_completion() {
     assert!(zsh.contains("_files"));
 }
 
+#[test]
+fn mosh_integration_is_conditional_and_has_full_client_completion() {
+    let bash = ShellIntegration::Bash.script();
+    assert!(bash.contains("if ! type -t mosh >/dev/null 2>&1"));
+    assert!(bash.contains("mosh() { zetta mosh \"$@\"; }"));
+    assert!(bash.contains("complete -F _zosh_complete zosh"));
+    assert!(bash.contains("_zetta_complete_ssh_targets"));
+
+    let fish = ShellIntegration::Fish.script();
+    assert!(fish.contains("if not type -q mosh"));
+    assert!(fish.contains("function mosh --wraps 'zetta mosh'"));
+    assert!(fish.contains("complete -c zosh -l client"));
+    assert!(fish.contains("complete -c zosh -a '(__zetta_ssh_targets)'"));
+    assert!(fish.contains("complete -c zosh -l help"));
+    assert!(fish.contains("(__zetta_ssh_targets)"));
+
+    let powershell = ShellIntegration::PowerShell.script();
+    assert!(powershell.contains("Get-Command mosh -ErrorAction SilentlyContinue"));
+    assert!(powershell.contains("function global:mosh { & zetta mosh @args }"));
+    assert!(powershell.contains("Register-ArgumentCompleter -Native -CommandName zosh"));
+    assert!(powershell.contains("$zettaSshTargets"));
+
+    let zsh = ShellIntegration::Zsh.script();
+    assert!(zsh.contains("$+commands[mosh]"));
+    assert!(zsh.contains("function mosh { zetta mosh \"$@\"; }"));
+    assert!(zsh.contains("compdef _zosh zosh"));
+    assert!(zsh.contains("--client=[mosh client]"));
+    assert!(zsh.contains("_zmux_ssh_targets"));
+}
+
 #[cfg(unix)]
 #[test]
 fn posix_zetta_routes_standalone_commands_to_path_and_live_commands_to_owner() {
@@ -2232,7 +2262,7 @@ fn generated_scripts_only_offer_long_form_flags() {
         match shell {
             ShellIntegration::Bash => {
                 assert!(script.contains(
-                    "terminal-size mux pane profile project cmd edit vi init serial http tftp notify attention copy paste splits tabicon theme overlay wt --help --version --config --keymap --profile --split --replace-pane --theme --no-mux --new-window --command'"
+                    "terminal-size mux pane profile project cmd edit vi init mosh serial http tftp notify attention copy paste splits tabicon theme overlay wt --help --version --config --keymap --profile --split --replace-pane --theme --no-mux --new-window --command'"
                 ));
                 assert!(script.contains("auto zetta bash zsh fish"));
                 assert!(script.contains("_zetta_complete_project_commands"));

@@ -8,6 +8,8 @@ param(
     [string]$MuxBinaryPath,
     [Parameter(Mandatory = $true)]
     [string]$PtyBinaryPath,
+    [Parameter(Mandatory = $true)]
+    [string]$ZoshBinaryPath,
     [string]$WorktreeBinaryPath
 )
 
@@ -60,6 +62,7 @@ $consoleBinary = (Resolve-Path -LiteralPath $ConsoleBinaryPath).Path
 $guiBinary = (Resolve-Path -LiteralPath $GuiBinaryPath).Path
 $muxBinary = (Resolve-Path -LiteralPath $MuxBinaryPath).Path
 $ptyBinary = (Resolve-Path -LiteralPath $PtyBinaryPath).Path
+$zoshBinary = (Resolve-Path -LiteralPath $ZoshBinaryPath).Path
 $worktreeBinary = $null
 if ($WorktreeBinaryPath) {
     $worktreeBinary = (Resolve-Path -LiteralPath $WorktreeBinaryPath).Path
@@ -68,6 +71,7 @@ $actualConsoleSubsystem = Get-PeSubsystem $consoleBinary
 $actualGuiSubsystem = Get-PeSubsystem $guiBinary
 $actualMuxSubsystem = Get-PeSubsystem $muxBinary
 $actualPtySubsystem = Get-PeSubsystem $ptyBinary
+$actualZoshSubsystem = Get-PeSubsystem $zoshBinary
 if ($actualConsoleSubsystem -ne $consoleSubsystem) {
     throw "$consoleBinary uses PE subsystem $actualConsoleSubsystem; expected console subsystem $consoleSubsystem"
 }
@@ -79,6 +83,9 @@ if ($actualMuxSubsystem -ne $consoleSubsystem) {
 }
 if ($actualPtySubsystem -ne $consoleSubsystem) {
     throw "$ptyBinary uses PE subsystem $actualPtySubsystem; expected console subsystem $consoleSubsystem"
+}
+if ($actualZoshSubsystem -ne $consoleSubsystem) {
+    throw "$zoshBinary uses PE subsystem $actualZoshSubsystem; expected console subsystem $consoleSubsystem"
 }
 if ($worktreeBinary) {
     $actualWorktreeSubsystem = Get-PeSubsystem $worktreeBinary
@@ -109,6 +116,10 @@ $muxVersion = & $muxBinary --version
 if ($LASTEXITCODE -ne 0 -or $muxVersion -notmatch '^zmux \S+ \(protocol \d+\)$') {
     throw "$muxBinary --version failed its CLI smoke test"
 }
+$zoshVersion = & $zoshBinary --version
+if ($LASTEXITCODE -ne 0 -or $zoshVersion -notmatch '^zosh \S+$') {
+    throw "$zoshBinary --version failed its CLI smoke test"
+}
 $worktreeHelp = $null
 if ($worktreeBinary) {
     $worktreeHelp = ((& $worktreeBinary --help | Out-String).Trim() -replace "`r", "")
@@ -121,6 +132,7 @@ Write-Host "Verified Windows console executable: $consoleBinary ($version)"
 Write-Host "Verified Windows GUI launcher: $guiBinary"
 Write-Host "Verified Windows multiplexer executable: $muxBinary ($muxVersion)"
 Write-Host "Verified Windows pseudoconsole host: $ptyBinary"
+Write-Host "Verified Zetta Mosh endpoint executable: $zoshBinary ($zoshVersion)"
 if ($worktreeBinary) {
     Write-Host "Verified standalone worktree executable: $worktreeBinary"
 }

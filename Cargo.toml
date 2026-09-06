@@ -67,6 +67,10 @@ required-features = ["worktree"]
 name = "zmux-pty"
 path = "src/bin/zmux_pty.rs"
 
+[[bin]]
+name = "zosh"
+path = "src/bin/zosh.rs"
+
 [dependencies]
 anyhow = "1"
 async-channel = "2.5.0"
@@ -148,6 +152,7 @@ util = { path = "zed/crates/util" }
 zeroize = "1"
 zed_actions = { path = "crates/zed_actions" }
 zmux = { path = "crates/zmux", default-features = false, features = ["scrollback-buffer"] }
+zosh = { path = "crates/zosh" }
 zwt = { path = "crates/zwt", optional = true }
 
 [target.'cfg(windows)'.dependencies]

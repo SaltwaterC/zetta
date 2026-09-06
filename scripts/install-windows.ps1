@@ -13,6 +13,7 @@ param(
     [string]$SourceGuiBinary,
     [string]$SourceMuxBinary,
     [string]$SourcePtyBinary,
+    [string]$SourceZoshBinary,
     [string]$SourceZwtBinary,
     [switch]$WorktreeEnabled,
     [string]$InstallDirectory,
@@ -41,6 +42,9 @@ if (-not $SourceMuxBinary) {
 if (-not $SourcePtyBinary) {
     $SourcePtyBinary = Join-Path (Split-Path -Parent $SourceBinary) "zmux-pty.exe"
 }
+if (-not $SourceZoshBinary) {
+    $SourceZoshBinary = Join-Path (Split-Path -Parent $SourceBinary) "zosh.exe"
+}
 if ($SourceZwtBinary) {
     $WorktreeEnabled = $true
 }
@@ -58,6 +62,7 @@ $installedBinary = Join-Path $InstallDirectory "zetta.exe"
 $installedGuiBinary = Join-Path $InstallDirectory "zetta-gui.exe"
 $installedMuxBinary = Join-Path $InstallDirectory "zmux.exe"
 $installedPtyBinary = Join-Path $InstallDirectory "zmux-pty.exe"
+$installedZoshBinary = Join-Path $InstallDirectory "zosh.exe"
 $installedZwtBinary = Join-Path $InstallDirectory "zwt.exe"
 $runtimeFileNames = @("conpty.dll", "OpenConsole.exe")
 $sourceDirectory = Split-Path -Parent $SourceBinary
@@ -81,7 +86,8 @@ function Get-InstallFiles {
     $files = @(
         [pscustomobject]@{ Source = $SourceBinary; Destination = $installedBinary },
         [pscustomobject]@{ Source = $SourceGuiBinary; Destination = $installedGuiBinary },
-        [pscustomobject]@{ Source = $SourceMuxBinary; Destination = $installedMuxBinary }
+        [pscustomobject]@{ Source = $SourceMuxBinary; Destination = $installedMuxBinary },
+        [pscustomobject]@{ Source = $SourceZoshBinary; Destination = $installedZoshBinary }
     )
     if ($WorktreeEnabled) {
         $files += [pscustomobject]@{ Source = $SourceZwtBinary; Destination = $installedZwtBinary }

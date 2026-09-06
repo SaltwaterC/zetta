@@ -1,0 +1,97 @@
+diff --git a/src/terminal/terminaldisplay.cc b/src/terminal/terminaldisplay.cc
+index e7595c2..5cf0cd4 100644
+--- a/src/terminal/terminaldisplay.cc
++++ b/src/terminal/terminaldisplay.cc
+@@ -64,6 +64,14 @@ std::string Display::new_frame( bool initialized, const Framebuffer &last, const
+ 
+   char tmp[ 64 ];
+ 
++  /* Zosh extension: send an absolute generation, so retransmission and
++     diffs against an older acknowledged frame cannot repeat a clear. */
++  if ( f.get_scrollback_clear_count() != last.get_scrollback_clear_count() ) {
++    snprintf( tmp, sizeof tmp, "\033]777;zosh-clear-scrollback;%llu\007",
++              static_cast<unsigned long long>( f.get_scrollback_clear_count() ) );
++    frame.append( tmp );
++  }
++
+   /* has bell been rung? */
+   if ( f.get_bell_count() != frame.last_frame.get_bell_count() ) {
+     frame.append( '\007' );
+diff --git a/src/terminal/terminalframebuffer.cc b/src/terminal/terminalframebuffer.cc
+index 70284a4..aa182f3 100644
+--- a/src/terminal/terminalframebuffer.cc
++++ b/src/terminal/terminalframebuffer.cc
+@@ -78,7 +78,7 @@ DrawState::DrawState( int s_width, int s_height )
+ }
+ 
+ Framebuffer::Framebuffer( int s_width, int s_height )
+-  : rows(), icon_name(), window_title(), clipboard(), bell_count( 0 ), title_initialized( false ), ds( s_width, s_height )
++  : rows(), icon_name(), window_title(), clipboard(), bell_count( 0 ), scrollback_clear_count( 0 ), title_initialized( false ), ds( s_width, s_height )
+ {
+   assert( s_height > 0 );
+   assert( s_width > 0 );
+@@ -90,6 +90,7 @@ Framebuffer::Framebuffer( int s_width, int s_height )
+ Framebuffer::Framebuffer( const Framebuffer &other )
+   : rows( other.rows ), icon_name( other.icon_name ), window_title( other.window_title ),
+     clipboard( other.clipboard ), bell_count( other.bell_count ),
++    scrollback_clear_count( other.scrollback_clear_count ),
+     title_initialized( other.title_initialized ), ds( other.ds )
+ {
+ }
+@@ -102,6 +103,7 @@ Framebuffer & Framebuffer::operator=( const Framebuffer &other )
+     window_title = other.window_title;
+     clipboard = other.clipboard;
+     bell_count = other.bell_count;
++    scrollback_clear_count = other.scrollback_clear_count;
+     title_initialized = other.title_initialized;
+     ds = other.ds;
+   }
+@@ -384,7 +386,7 @@ void Framebuffer::reset( void )
+   rows = rows_type( height, newrow() );
+   window_title.clear();
+   clipboard.clear();
+-  /* do not reset bell_count */
++  /* do not reset bell_count or scrollback_clear_count */
+ }
+ 
+ void Framebuffer::soft_reset( void )
+diff --git a/src/terminal/terminalframebuffer.h b/src/terminal/terminalframebuffer.h
+index de93869..adad42d 100644
+--- a/src/terminal/terminalframebuffer.h
++++ b/src/terminal/terminalframebuffer.h
+@@ -381,6 +381,7 @@ namespace Terminal {
+     title_type window_title;
+     title_type clipboard;
+     unsigned int bell_count;
++    uint64_t scrollback_clear_count;
+     bool title_initialized; /* true if the window title has been set via an OSC */
+ 
+     row_pointer newrow( void )
+@@ -467,9 +468,12 @@ namespace Terminal {
+     void ring_bell( void ) { bell_count++; }
+     unsigned int get_bell_count( void ) const { return bell_count; }
+ 
++    void clear_scrollback( void ) { scrollback_clear_count++; }
++    uint64_t get_scrollback_clear_count( void ) const { return scrollback_clear_count; }
++
+     bool operator==( const Framebuffer &x ) const
+     {
+-      return ( rows == x.rows ) && ( window_title == x.window_title ) && ( clipboard  == x.clipboard ) && ( bell_count == x.bell_count ) && ( ds == x.ds );
++      return ( rows == x.rows ) && ( window_title == x.window_title ) && ( clipboard  == x.clipboard ) && ( bell_count == x.bell_count ) && ( scrollback_clear_count == x.scrollback_clear_count ) && ( ds == x.ds );
+     }
+   };
+ }
+diff --git a/src/terminal/terminalfunctions.cc b/src/terminal/terminalfunctions.cc
+index ca141dd..a351f3a 100644
+--- a/src/terminal/terminalfunctions.cc
++++ b/src/terminal/terminalfunctions.cc
+@@ -90,6 +90,9 @@ static void CSI_ED( Framebuffer *fb, Dispatcher *dispatch ) {
+       fb->reset_row( fb->get_mutable_row( y ) );
+     }
+     break;
++  case 3: /* saved lines: preserve the request across state synchronization */
++    fb->clear_scrollback();
++    break;
+   default:
+     break;
+   }

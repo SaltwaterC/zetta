@@ -15,6 +15,12 @@ shortcuts for the clipboard; each has the same completion as its corresponding
 `zetta` command. The top-level `attention` command also completes its long
 notification options while retaining all short aliases.
 
+When no real command, alias, function, or builtin named mosh exists, the
+integration defines a mosh function that runs zetta mosh. Existing Mosh
+installations are left unchanged. The wrapper completes Mosh options and
+SSH targets from the existing SSH configuration helper; zosh completion
+offers the full Mosh option surface and SSH targets as well.
+
 The `zetta` function uses the executable that owns the current terminal for
 commands that need to reach its running process: plain launches,
 `--new-window`, `--command`, `--replace-pane`, `pane`, `cmd NAME`, attention

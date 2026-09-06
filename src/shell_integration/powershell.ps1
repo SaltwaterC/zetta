@@ -93,6 +93,11 @@ if ($zettaViMissing) {
 
 function zvi { & zetta vi @args }
 
+$zettaMoshMissing = $null -eq (Get-Command mosh -ErrorAction SilentlyContinue)
+if ($zettaMoshMissing) {
+    function global:mosh { & zetta mosh @args }
+}
+
 # ZETTA_WORKTREE_INTEGRATION_BEGIN
 function zwt {
     $zwtApplication = Get-Command zwt -CommandType Application -ErrorAction SilentlyContinue |
@@ -357,7 +362,7 @@ $zettaCompletions = {
         }
     }
     $subcommand = $words | Where-Object {
-        $_ -in 'benchmark', 'terminal-size', 'mux', 'splits', 'pane', 'profile', 'project', 'cmd', 'edit', 'vi', 'init', 'serial', 'http', 'tftp', 'notify', 'attention', 'copy', 'paste', 'tabicon', 'theme', 'overlay'ZETTA_WORKTREE_ROOT_COMMANDS
+        $_ -in 'benchmark', 'terminal-size', 'mux', 'splits', 'pane', 'profile', 'project', 'cmd', 'edit', 'vi', 'init', 'mosh', 'serial', 'http', 'tftp', 'notify', 'attention', 'copy', 'paste', 'tabicon', 'theme', 'overlay'ZETTA_WORKTREE_ROOT_COMMANDS
     } | Select-Object -First 1
     $worktreeCommand = $false
     $worktreeOperation = ''
@@ -385,7 +390,18 @@ $zettaCompletions = {
         }
     }
 
-    $candidates = if ($commandName -eq 'ztftp') {
+    $candidates = if ($commandName -eq 'zosh') {
+        if ($previous -eq '--predict') { 'adaptive', 'always', 'never', 'experimental' }
+        elseif ($previous -eq '--family') { 'prefer-inet', 'prefer-inet6', 'inet', 'inet6', 'auto', 'all' }
+        elseif ($previous -eq '--experimental-remote-ip') { 'local', 'remote', 'proxy' }
+        elseif ($previous -in '--client', '--server') {
+            @(Get-ChildItem -Name -Path "$wordToComplete*" -ErrorAction SilentlyContinue)
+        } elseif ($wordToComplete -like '-*') {
+            '-c', '--client', '--server', '--predict', '-a', '-n', '-o', '--predict-overwrite', '-4', '-6', '--family', '--port', '--bind-server', '--ssh', '--ssh-pty', '--no-ssh-pty', '--init', '--no-init', '--local', '--experimental-remote-ip', '--help', '--version', '--'
+        } elseif ($words.Count -eq 2) {
+            @(& $zettaSshTargets)
+        } else { @() }
+    } elseif ($commandName -eq 'ztftp') {
         if ($words.Count -le 1) { 'get', 'put', '--help' } else { '--port', '--help' }
     } elseif ($commandName -eq 'zntfy') {
         if ($previous -in '--timeout', '-t') { 'default', 'never' }
@@ -398,6 +414,20 @@ $zettaCompletions = {
         if ($previous -in '--pboard', '-pboard') { 'general', 'ruler', 'find', 'font' }
         elseif ($previous -in '--prefer', '-prefer', '--Prefer', '-Prefer') { 'txt', 'rtf', 'ps' }
         else { '--pboard', '--prefer', '--help' }
+    } elseif ($subcommand -eq 'mosh') {
+        if ($previous -eq '--predict') { 'adaptive', 'always', 'never', 'experimental' }
+        elseif ($previous -in '--family', '--experimental-remote-ip') {
+            if ($previous -eq '--family') { 'prefer-inet', 'prefer-inet6', 'inet', 'inet6', 'auto', 'all' }
+            else { 'local', 'remote', 'proxy' }
+        } elseif ($previous -in '--client', '--server') {
+            @(Get-ChildItem -Name -Path "$wordToComplete*" -ErrorAction SilentlyContinue)
+        } elseif ($wordToComplete -like '-*' -or $words.Count -le 2) {
+            '--client', '--server', '--predict', '-a', '-n', '-o', '--predict-overwrite', '-4', '-6', '--family', '--port', '--bind-server', '--ssh', '--ssh-pty', '--no-ssh-pty', '--init', '--no-init', '--local', '--experimental-remote-ip', '--help', '--version', '--'
+        } elseif ($words.Count -eq 3) {
+            & $zettaSshTargets
+        } else {
+            @()
+        }
     } elseif ($subcommand -eq 'cmd') {
         $delimiter = $false
         for ($index = 2; $index -lt $words.Count; $index++) {
@@ -557,7 +587,7 @@ $zettaCompletions = {
         }
 # ZETTA_WORKTREE_INTEGRATION_END
     } elseif ($null -eq $subcommand) {
-        'benchmark', 'terminal-size', 'mux', 'profile', 'project', 'cmd', 'splits', 'pane', 'edit', 'vi', 'init', 'serial', 'http', 'tftp', 'notify', 'attention', 'copy', 'paste', 'tabicon', 'theme', 'overlay'ZETTA_WORKTREE_ROOT_COMMANDS, '--help', '--version', '--config', '--keymap', '--profile', '--split', '--replace-pane', '--theme', '--no-mux', '--new-window', '--command'
+        'benchmark', 'terminal-size', 'mux', 'profile', 'project', 'cmd', 'splits', 'pane', 'edit', 'vi', 'init', 'mosh', 'serial', 'http', 'tftp', 'notify', 'attention', 'copy', 'paste', 'tabicon', 'theme', 'overlay'ZETTA_WORKTREE_ROOT_COMMANDS, '--help', '--version', '--config', '--keymap', '--profile', '--split', '--replace-pane', '--theme', '--no-mux', '--new-window', '--command'
     } else {
         switch ($subcommand) {
             'benchmark' {
@@ -570,6 +600,7 @@ $zettaCompletions = {
             'terminal-size' { '--json', '--resize', '--columns', '--rows', '--help' }
             'edit' { '--delete-after', '--help' }
             'vi' { '--help' }
+        'mosh' { '--client', '--server', '--predict', '-a', '-n', '-o', '--predict-overwrite', '-4', '-6', '--family', '--port', '--bind-server', '--ssh', '--ssh-pty', '--no-ssh-pty', '--init', '--no-init', '--local', '--experimental-remote-ip', '--help', '--version', '--' }
             'mux' {
                 if ($words.Count -le 2) {
                     if ($noMux) { 'list', 'reconnect', '--json', '--help', '--version' }
@@ -728,6 +759,7 @@ $zettaCompletions = {
 }
 
 Register-ArgumentCompleter -Native -CommandName zetta -ScriptBlock $zettaCompletions
+Register-ArgumentCompleter -Native -CommandName zosh -ScriptBlock $zettaCompletions
 Register-ArgumentCompleter -Native -CommandName zmux -ScriptBlock $zettaCompletions
 Register-ArgumentCompleter -CommandName ztftp -ScriptBlock $zettaCompletions
 Register-ArgumentCompleter -CommandName zntfy -ScriptBlock $zettaCompletions
@@ -739,6 +771,9 @@ Register-ArgumentCompleter -CommandName zwt -ScriptBlock $zettaCompletions
 # ZETTA_WORKTREE_INTEGRATION_END
 if ($zettaViMissing) {
     Register-ArgumentCompleter -CommandName vi -ScriptBlock $zettaCompletions
+}
+if ($zettaMoshMissing) {
+    Register-ArgumentCompleter -CommandName mosh -ScriptBlock $zettaCompletions
 }
 if (-not $IsMacOS) {
     Register-ArgumentCompleter -CommandName pbcopy -ScriptBlock $zettaCompletions

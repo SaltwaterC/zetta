@@ -229,6 +229,13 @@ fi
 
 function zvi { zetta vi "$@"; }
 
+if (( ! $+commands[mosh] && ! $+aliases[mosh] && ! $+functions[mosh] && ! $+builtins[mosh] )); then
+    function mosh { zetta mosh "$@"; }
+    _zetta_mosh_missing=1
+else
+    _zetta_mosh_missing=0
+fi
+
 # ZETTA_WORKTREE_INTEGRATION_BEGIN
 function zwt {
     case $1 in
@@ -598,8 +605,26 @@ _zetta() {
         return
     fi
 
+    if [[ $words[1] == mosh ]]; then
+        case $words[CURRENT-1] in
+            --predict) compadd -- adaptive always never experimental ;;
+            --family) compadd -- prefer-inet prefer-inet6 inet inet6 auto all ;;
+            --experimental-remote-ip) compadd -- local remote proxy ;;
+            --client|--server) _files ;;
+            --ssh) return ;;
+            *)
+                if [[ $words[CURRENT] == -* ]]; then
+                    _zetta_options --client --server --predict -a -n -o --predict-overwrite -4 -6 --family --port --bind-server --ssh --ssh-pty --no-ssh-pty --init --no-init --local --experimental-remote-ip --help --version --
+                elif (( CURRENT == 3 )); then
+                    _zmux_ssh_targets
+                fi
+                ;;
+        esac
+        return
+    fi
+
     if (( CURRENT == 2 )); then
-        compadd -S ' ' -- benchmark terminal-size mux profile project cmd edit vi init serial http tftp notify attention copy paste splits pane tabicon theme overlay ZETTA_WORKTREE_ROOT_COMMAND
+        compadd -S ' ' -- benchmark terminal-size mux profile project cmd edit vi init mosh serial http tftp notify attention copy paste splits pane tabicon theme overlay ZETTA_WORKTREE_ROOT_COMMAND
         _zetta_options --help --version --config --keymap --profile --split --replace-pane --theme --no-mux --new-window --command
         return
     fi
@@ -1209,6 +1234,32 @@ _zpaste() {
 }
 
 compdef _zetta zetta
+if (( _zetta_mosh_missing )); then
+    compdef _zetta mosh
+fi
+_zosh() {
+    _arguments \
+        '1:SSH target:_zmux_ssh_targets' \
+        '*:Mosh option:(-c --client --server --predict -a -n -o --predict-overwrite -4 -6 --family --port --bind-server --ssh --ssh-pty --no-ssh-pty --init --no-init --local --experimental-remote-ip --help --version --)' \
+        '--client=[mosh client]:path:_files' \
+        '--server=[mosh server]:command:' \
+        '--predict=[prediction]:mode:(adaptive always never experimental)' \
+        '--predict-overwrite[overwrite predictions]' \
+        '--family=[address family]:family:(prefer-inet prefer-inet6 inet inet6 auto all)' \
+        '--port=[server UDP port]:port:' \
+        '--bind-server=[server bind address]:address:' \
+        '--ssh=[SSH command]:command:' \
+        '--ssh-pty[request an SSH PTY]' \
+        '--no-ssh-pty[do not request an SSH PTY]' \
+        '--init[initialize the terminal]' \
+        '--no-init[preserve the terminal]' \
+        '--local[run mosh-server locally]' \
+        '--experimental-remote-ip=[address discovery]:mode:(local remote proxy)' \
+        '-a[always predict]' '-n[never predict]' '-o[overwrite predictions]' \
+        '-4[force IPv4]' '-6[force IPv6]' '-c[print terminal color count]' \
+        '--help[print help]' '--version[print version]'
+}
+compdef _zosh zosh
 # ZETTA_WORKTREE_INTEGRATION_BEGIN
 _zetta_worktree_commits() {
     local current_branch source_branch split_point

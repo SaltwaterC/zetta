@@ -122,10 +122,10 @@ make install
 ```
 
 This installs `~/Applications/Zetta.app`, including the Zetta icon and the
-development binaries, and creates `~/.local/bin/zetta` and `~/.local/bin/zwt`
-as command-line launchers for the bundled executables. It also adds
-`~/.local/bin` to the installing user's shell startup file so new shells can
-invoke both commands directly. Native panes prepend the running executable's
+development binaries, and creates `~/.local/bin/zetta`, `~/.local/bin/zosh`,
+and `~/.local/bin/zwt` as command-line launchers for the bundled executables.
+It also adds `~/.local/bin` to the installing user's shell startup file so new
+shells can invoke them directly. Native panes prepend the running executable's
 directory to `PATH` as before. `make uninstall` removes the application
 bundle, CLI entry points, and PATH entry.
 
@@ -133,6 +133,10 @@ For a system-wide installation, run `sudo make install PREFIX=/usr/local
 MAC_APPLICATIONS_DIR=/Applications`.
 
 ## Windows
+
+The Windows build includes zosh.exe beside the Zetta and zmux executables.
+The installer copies it into the application directory so zetta mosh can
+find the standalone Mosh client next to the running executable.
 
 Build a development executable from PowerShell with Chocolatey's GNU Make:
 
@@ -148,11 +152,13 @@ The build produces the following runtime files in `target\debug`:
 
 - `zetta.exe`, the console executable
 - `zetta-gui.exe`, the no-console launcher used by the Start Menu shortcut
+- `zosh.exe`, the bundled standalone Mosh client
 - `zwt.exe`, the standalone Git worktree executable
 - `conpty.dll`
 - `OpenConsole.exe`
 
-All four files are required. Both executables contain the application icon.
+The executable and runtime files required by the installed features must stay
+together. Both application executables contain the application icon.
 
 Install Zetta for the current user without administrator privileges:
 
@@ -194,6 +200,11 @@ Additional installation targets are:
   shortcut.
 
 ## Linux desktop integration
+
+Linux installs zosh beside zetta and zmux, and also creates a user-local zosh
+symlink when using the user-local install. The standalone Mosh client is
+therefore available directly as zosh and is also resolved automatically by
+zetta mosh.
 
 Zetta uses `Zetta` as its Wayland application ID and X11 `WM_CLASS`. Build and
 install the development binary, desktop entry, and icons for the current user with:

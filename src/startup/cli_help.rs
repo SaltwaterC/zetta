@@ -136,6 +136,7 @@ pub(crate) fn help_text(profiles: &[Profile]) -> String {
         "zetta project <COMMAND>",
         "zetta attention [OPTIONS] [SUMMARY] [BODY]",
         "zetta init [SHELL]",
+        "zetta mosh [OPTIONS] [--] [user@]HOST [COMMAND ...]",
     ];
     if cfg!(feature = "serial-console") {
         usage.push("zetta serial <COMMAND>");
@@ -190,6 +191,7 @@ pub(crate) fn help_text(profiles: &[Profile]) -> String {
         ("project", "List, add, remove, or open projects"),
         ("cmd", "Run a registered project command in the active pane"),
         ("init", "Configure or generate shell integration"),
+        ("mosh", "Run an interactive Mosh session"),
     ];
     if cfg!(feature = "serial-console") {
         commands.push(("serial", "List or connect to serial devices"));

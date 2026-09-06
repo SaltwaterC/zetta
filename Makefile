@@ -62,7 +62,8 @@ ZETTA_CRATE_DIRS := \
 	crates/terminal \
 	crates/terminal_view \
 	crates/zwt \
-	crates/zmux
+	crates/zmux \
+	crates/zosh
 # These standalone test workspaces have checked-in lockfiles. The other local
 # platform crates are included in formatting coverage but do not have an
 # independent locked test graph.
@@ -70,7 +71,8 @@ ZETTA_TEST_CRATE_DIRS := \
 	crates/alacritty_terminal \
 	crates/terminal \
 	crates/zwt \
-	crates/zmux
+	crates/zmux \
+	crates/zosh
 
 ifeq ($(OS),Windows_NT)
 CARGO_BUILD_JOBS ?= $(shell powershell.exe -NoProfile -Command "[Environment]::ProcessorCount")
@@ -169,14 +171,17 @@ MAC_RUNTIME_BUNDLE := $(MAC_APPLICATIONS_DIR)/$(APP_ID).app
 MAC_CLI_DIR := $(DESTDIR)$(PREFIX)/bin
 MAC_CLI_PATH := $(MAC_CLI_DIR)/zetta
 MAC_ZWT_CLI_PATH := $(MAC_CLI_DIR)/zwt
+MAC_ZOSH_CLI_PATH := $(MAC_CLI_DIR)/zosh
 LINUX_USER_INSTALL := $(if $(and $(filter Linux,$(UNAME_S)),$(IS_ROOT)),,1)
 LINUX_USER_DATA_DIR := $(DESTDIR)$(HOME)/.local/share
 LINUX_USER_BIN_DIR := $(DESTDIR)$(HOME)/.local/bin
 LINUX_USER_DESKTOP_DIR := $(LINUX_USER_DATA_DIR)/applications
 LINUX_USER_CLI_PATH := $(LINUX_USER_BIN_DIR)/zetta
 LINUX_USER_ZWT_PATH := $(LINUX_USER_BIN_DIR)/zwt
+LINUX_USER_ZOSH_PATH := $(LINUX_USER_BIN_DIR)/zosh
 
 WINDOWS_ZWT_ARGS := $(if $(call tool_enabled,$(WORKTREE)), -SourceZwtBinary "$(BUILD_TARGET_DIR)/zwt.exe",)
+WINDOWS_ZOSH_ARGS := -SourceZoshBinary "$(BUILD_TARGET_DIR)/zosh.exe"
 
 .PHONY: all build fmt test lint check-platforms check-features \
 	check-linux check-windows check-macos \
@@ -433,10 +438,10 @@ build:
 	cmd.exe /d /c scripts\build-windows.cmd $(CARGO_PROFILE_ARGS)
 
 install: build
-	powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/install-windows.ps1 -Action Install -SourceBinary "$(BUILD_TARGET_DIR)/zetta.exe" -SourceGuiBinary "$(BUILD_TARGET_DIR)/zetta-gui.exe" -SourceMuxBinary "$(BUILD_TARGET_DIR)/zmux.exe" -SourcePtyBinary "$(BUILD_TARGET_DIR)/zmux-pty.exe"$(WINDOWS_ZWT_ARGS)
+	powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/install-windows.ps1 -Action Install -SourceBinary "$(BUILD_TARGET_DIR)/zetta.exe" -SourceGuiBinary "$(BUILD_TARGET_DIR)/zetta-gui.exe" -SourceMuxBinary "$(BUILD_TARGET_DIR)/zmux.exe" -SourcePtyBinary "$(BUILD_TARGET_DIR)/zmux-pty.exe" $(WINDOWS_ZOSH_ARGS)$(WINDOWS_ZWT_ARGS)
 
 install-binary:
-	powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/install-windows.ps1 -Action InstallBinary -SourceBinary "$(BUILD_TARGET_DIR)/zetta.exe" -SourceGuiBinary "$(BUILD_TARGET_DIR)/zetta-gui.exe" -SourceMuxBinary "$(BUILD_TARGET_DIR)/zmux.exe" -SourcePtyBinary "$(BUILD_TARGET_DIR)/zmux-pty.exe"$(WINDOWS_ZWT_ARGS)
+	powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/install-windows.ps1 -Action InstallBinary -SourceBinary "$(BUILD_TARGET_DIR)/zetta.exe" -SourceGuiBinary "$(BUILD_TARGET_DIR)/zetta-gui.exe" -SourceMuxBinary "$(BUILD_TARGET_DIR)/zmux.exe" -SourcePtyBinary "$(BUILD_TARGET_DIR)/zmux-pty.exe" $(WINDOWS_ZOSH_ARGS)$(WINDOWS_ZWT_ARGS)
 
 install-capabilities:
 
@@ -479,6 +484,7 @@ install-binary:
 	mkdir -p "$(MAC_BUNDLE)/Contents/MacOS" "$(BINDIR)"
 	$(INSTALL) -m 755 "$(BUILD_TARGET_DIR)/zetta" "$(MAC_BUNDLE)/Contents/MacOS/zetta"
 	$(INSTALL) -m 755 "$(BUILD_TARGET_DIR)/zmux" "$(MAC_BUNDLE)/Contents/MacOS/zmux"
+	$(INSTALL) -m 755 "$(BUILD_TARGET_DIR)/zosh" "$(MAC_BUNDLE)/Contents/MacOS/zosh"
 	if [ -n "$(call tool_enabled,$(WORKTREE))" ]; then \
 		$(INSTALL) -m 755 "$(BUILD_TARGET_DIR)/zwt" "$(MAC_BUNDLE)/Contents/MacOS/zwt"; \
 	else \
@@ -494,6 +500,9 @@ install-binary:
 	else \
 		$(RM) "$(MAC_ZWT_CLI_PATH)"; \
 	fi
+	$(RM) "$(MAC_ZOSH_CLI_PATH)"
+	sed 's|@MAC_RUNTIME_BUNDLE@|$(MAC_RUNTIME_BUNDLE)|g' resources/macos/zosh-cli.in > "$(MAC_ZOSH_CLI_PATH)"
+	chmod 755 "$(MAC_ZOSH_CLI_PATH)"
 
 install-capabilities:
 
@@ -525,8 +534,10 @@ uninstall:
 uninstall-binary:
 	$(RM) "$(MAC_CLI_PATH)"
 	$(RM) "$(MAC_ZWT_CLI_PATH)"
+	$(RM) "$(MAC_ZOSH_CLI_PATH)"
 	$(RM) "$(MAC_BUNDLE)/Contents/MacOS/zetta"
 	$(RM) "$(MAC_BUNDLE)/Contents/MacOS/zmux"
+	$(RM) "$(MAC_BUNDLE)/Contents/MacOS/zosh"
 	$(RM) "$(MAC_BUNDLE)/Contents/MacOS/zwt"
 	$(MAKE) uninstall-user-path
 
@@ -558,6 +569,7 @@ install-binary:
 	# beside Zetta: a client starts it from its own directory rather than
 	# through PATH, where an unrelated zmux could be picked up instead.
 	$(INSTALL) -Dm755 "$(BUILD_TARGET_DIR)/zmux" $(BINDIR)/zmux
+	$(INSTALL) -Dm755 "$(BUILD_TARGET_DIR)/zosh" $(BINDIR)/zosh
 ifneq ($(call tool_enabled,$(WORKTREE)),)
 	$(INSTALL) -Dm755 "$(BUILD_TARGET_DIR)/zwt" $(BINDIR)/zwt
 else
@@ -569,6 +581,8 @@ ifneq ($(LINUX_USER_INSTALL),)
 	ln -s "$(BINDIR)/zetta" "$(LINUX_USER_CLI_PATH)"
 	$(RM) "$(LINUX_USER_BIN_DIR)/zmux"
 	ln -s "$(BINDIR)/zmux" "$(LINUX_USER_BIN_DIR)/zmux"
+	$(RM) "$(LINUX_USER_ZOSH_PATH)"
+	ln -s "$(BINDIR)/zosh" "$(LINUX_USER_ZOSH_PATH)"
 ifneq ($(call tool_enabled,$(WORKTREE)),)
 	$(RM) "$(LINUX_USER_ZWT_PATH)"
 	ln -s "$(BINDIR)/zwt" "$(LINUX_USER_ZWT_PATH)"
@@ -634,10 +648,12 @@ uninstall:
 uninstall-binary:
 	$(RM) $(BINDIR)/zetta
 	$(RM) $(BINDIR)/zmux
+	$(RM) $(BINDIR)/zosh
 	$(RM) $(BINDIR)/zwt
 ifneq ($(LINUX_USER_INSTALL),)
 	$(RM) "$(LINUX_USER_CLI_PATH)"
 	$(RM) "$(LINUX_USER_BIN_DIR)/zmux"
+	$(RM) "$(LINUX_USER_ZOSH_PATH)"
 	$(RM) "$(LINUX_USER_ZWT_PATH)"
 endif
 	$(MAKE) uninstall-user-path

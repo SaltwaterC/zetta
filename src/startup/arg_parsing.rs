@@ -9,6 +9,7 @@ use crate::cli_services::{NotificationRequest, parse_notification_timeout};
 use crate::command_panes::{
     MAX_PANE_COMMAND_BYTES, PaneCommand, pane_command_byte_len, parse_pane_direction,
 };
+use crate::mosh::MoshCommand;
 use crate::profile_cli::{ProfileCommand, parse_profile_args};
 use crate::project_cli::{ProjectCommand, parse_project_args};
 use crate::project_commands::{ProjectCommandInvocation, parse_project_command_args};
@@ -21,6 +22,7 @@ const DEFAULT_PERFORMANCE_REPORT_DURATION: Duration = Duration::from_secs(10);
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum StartupMode {
     Application,
+    Mosh(MoshCommand),
     /// Always open a fresh OS window, without activating or consuming an
     /// existing process's dormant sessions.
     NewWindow,
@@ -149,9 +151,11 @@ impl StartupArgs {
 }
 
 mod benchmark;
+mod mosh;
 mod subcommands;
 
 use benchmark::parse_benchmark_subcommand;
+use mosh::parse_mosh_subcommand;
 use subcommands::{
     parse_attention_subcommand, parse_copy_subcommand, parse_edit_subcommand,
     parse_http_subcommand, parse_notify_subcommand, parse_pane_subcommand, parse_paste_subcommand,
@@ -202,6 +206,7 @@ fn parse_subcommand(arguments: &[OsString]) -> Result<Option<StartupArgs>> {
     let rest = &arguments[1..];
     let parsed = match name.as_ref() {
         "project" => StartupArgs::for_mode(StartupMode::Project(parse_project_args(rest)?)),
+        "mosh" => parse_mosh_subcommand(rest)?,
         "cmd" => StartupArgs::for_mode(StartupMode::ProjectCommand(parse_project_command_args(
             rest,
         )?)),

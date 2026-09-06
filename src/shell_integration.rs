@@ -698,8 +698,9 @@ pub(crate) fn shell_integration_help() -> String {
     } else {
         ""
     };
+    let mosh_help = "\n\nThe generated integration also defines a mosh wrapper only when no real mosh command, alias, function, or builtin already exists; it routes through zetta mosh and completes Mosh options and SSH targets. The bundled zosh command is the full Mosh-compatible launcher and terminal client, with the same option surface available through zosh --help.";
     format!(
-        "{help}{worktree_help}\n\nProfile administration also completes the fixed icon values auto, zetta, bash, zsh, and fish."
+        "{help}{mosh_help}{worktree_help}\n\nProfile administration also completes the fixed icon values auto, zetta, bash, zsh, and fish."
     )
 }
 

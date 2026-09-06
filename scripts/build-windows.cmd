@@ -55,8 +55,8 @@ call :append_feature "%SYNTAX_HIGHLIGHTING%" syntax-highlighting
 call :append_feature "%SESSION_PERSISTENCE%" session-persistence
 call :append_feature "%WORKTREE%" worktree
 
-set "BINARIES=--bin zetta --bin zetta-gui --bin zmux --bin zmux-pty"
-set "VERIFY_ARGS="
+set "BINARIES=--bin zetta --bin zetta-gui --bin zmux --bin zmux-pty --bin zosh"
+set "VERIFY_ARGS=-ZoshBinaryPath !TARGET_DIR!\zosh.exe"
 call :append_worktree_targets "%WORKTREE%"
 
 call scripts\cargo-windows.cmd build %PROFILE_ARGS% --jobs %CARGO_BUILD_JOBS% --locked --no-default-features --features %FEATURES% !BINARIES!

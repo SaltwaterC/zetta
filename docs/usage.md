@@ -134,6 +134,34 @@ and pane limits are preserved. If no accepting Zetta process is available, the
 command falls back to the normal new-window launch; `--config` and `--keymap`
 always use that normal launch path.
 
+## Launching a Mosh session
+
+Use zosh USER@HOST for an interactive remote shell, or use zetta mosh
+USER@HOST as its transparent proxy. The full Mosh launcher starts
+mosh-server through SSH, preserves SSH configuration aliases and command
+arguments, and then runs the bundled terminal endpoint over UDP. Prediction,
+address-family, port, bind, SSH, and terminal-initialization options are
+available from either command's --help. If the remote host clearly lacks a
+usable mosh-server, the launcher falls back to plain SSH; authentication,
+transport, UDP, and protocol failures remain errors.
+
+Zosh intentionally defaults to `--no-init`, which is a deliberate difference
+from stock `mosh`: the session stays on the current screen and preserves its
+normal scrollback instead of entering an alternate screen. Pass `--init` to
+Zosh when the stock Mosh terminal initialization behavior is required. Zosh
+honors the remote shell's explicit clear-scrollback request (`CSI 3 J`) when
+used with the [patched Mosh server](../crates/zosh/server/README.md). Existing
+shell widgets and their bindings work unchanged. A clear erases the local
+terminal's saved lines and redraws the current screen; ordinary redraws retain
+scrollback. This deliberately extends upstream Mosh. The unmodified server
+discards the request, so both the local client and remote server must support
+the extension. See the linked instructions to build the server and select it
+with `--server=/absolute/remote/path/to/mosh-server`.
+
+The native background-session and zmux remote-session commands continue to use
+SSH because Mosh carries terminal state rather than the framed streams needed
+for listing, attach, sharing, and restoration.
+
 ## CLI command panes
 
 Run a command in the active pane, a pane selected by label, or a newly created

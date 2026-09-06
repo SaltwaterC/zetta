@@ -9,6 +9,7 @@ mod default_terminal;
 mod http_server;
 mod image_paste;
 mod keymap_file;
+mod mosh;
 mod mux;
 #[cfg(feature = "session-persistence")]
 mod mux_identity;

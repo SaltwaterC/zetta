@@ -1,0 +1,21 @@
+[package]
+name = "zosh"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "GPL-3.0-or-later"
+description = "Cross-platform Mosh terminal client for Zetta"
+
+[lib]
+path = "src/lib.rs"
+doctest = false
+
+[dependencies]
+anyhow = "1"
+crossterm = "0.29"
+mosh-rs = { git = "https://github.com/wilsonglasser/mosh-rs", rev = "90b37125f5e4a598be91dec37d23921b6865276e" }
+shlex = "1.3.0"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+signal-hook = "0.4.4"

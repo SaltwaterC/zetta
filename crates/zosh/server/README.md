@@ -1,0 +1,80 @@
+# Remote scrollback-clear support
+
+Zosh can honor a remote shell's standard `CSI 3 J` (erase saved lines) request
+when the remote Mosh server preserves it. The shell widget and its bindings
+do not need to change. An ordinary screen redraw does not erase saved lines.
+
+Unmodified Mosh 1.4.0 discards `CSI 3 J`. SSH works because it transports the
+terminal byte stream; Mosh sends reconstructed screen state. Rebuilding only
+the local Zosh binary does **not** enable this feature on an unmodified server.
+
+`mosh-1.4.0-scrollback.patch` adds the missing server state. It applies to the
+official [Mosh 1.4.0 release](https://github.com/mobile-shell/mosh/releases/tag/mosh-1.4.0).
+The source archive's SHA-256 is
+`872e4b134e5df29c8933dff12350785054d2fd2839b5ae6b5587b14db1465ddd`.
+The patch modifies Mosh's GPL-licensed terminal implementation; the upstream
+license and copyright notices remain in the source distribution.
+
+## Build on the remote host
+
+Copy this patch to the remote host. Install Mosh's build prerequisites first;
+on Debian these include `build-essential`, `pkg-config`, `libprotobuf-dev`,
+`protobuf-compiler`, `libssl-dev`, `libncurses-dev`, and `zlib1g-dev`.
+Use a fresh source directory:
+
+```sh
+curl -fLO https://github.com/mobile-shell/mosh/releases/download/mosh-1.4.0/mosh-1.4.0.tar.gz
+printf '%s\n' '872e4b134e5df29c8933dff12350785054d2fd2839b5ae6b5587b14db1465ddd  mosh-1.4.0.tar.gz' | sha256sum -c -
+tar -xzf mosh-1.4.0.tar.gz
+patch -d mosh-1.4.0 -p1 < /absolute/path/to/mosh-1.4.0-scrollback.patch
+cd mosh-1.4.0
+./configure --disable-client --without-utempter CXXFLAGS='-O2 -std=c++17'
+make -j2
+```
+
+The resulting `src/frontend/mosh-server` can run directly from the build
+directory. Select that absolute **remote** path from the local machine:
+
+```sh
+zosh --server=/absolute/path/to/mosh-1.4.0/src/frontend/mosh-server pi
+```
+
+This leaves the system Mosh installation available. The existing `--server`
+option also works through `zetta mosh`. Deployment is separate from the normal
+local Zetta build; Zosh does not automatically install software on the host.
+
+## State and rendering
+
+The server increments a 64-bit generation on each `CSI 3 J`. Copies, resizes,
+and terminal resets preserve it; framebuffer equality includes it, so a clear
+with no changed cells still produces an update. When the generation differs
+from the acknowledged base frame, the display diff includes:
+
+```text
+ESC ] 777 ; zosh-clear-scrollback ; DECIMAL_GENERATION BEL
+```
+
+This is a Zosh extension inside Mosh's existing authenticated host display
+message, not a change to the Mosh transport version. Zosh stores the generation
+in each reconstructed screen. Only displaying a changed generation emits a
+local `CSI 3 J`, together with a full redraw of the current screen. Repeated
+diffs against an older base and late frames therefore do not repeat the clear.
+The internal marker is consumed locally and is not printed or used as a title.
+Stock clients ignore the marker and retain their existing behavior.
+
+The operation clears the local emulator's saved lines, including any history
+that predates a `--no-init` session, just as the shell's request does over SSH.
+
+## Verification
+
+With a patched server built on the test machine, run from `crates/zosh`:
+
+```sh
+ZOSH_TEST_SERVER=/absolute/path/to/mosh-server cargo test --locked a_remote_shell_clear -- --ignored
+```
+
+This starts a temporary loopback session and runs a shell fixture. It checks
+the shell's clear-and-redraw output, an ordinary redraw, and a clear with no
+changed cells. The same test must fail with `remote CSI 3 J was lost` against
+unmodified Mosh. Unit tests additionally cover repeated and out-of-order
+states, fragmented markers, malformed markers, and unrelated terminal output.
