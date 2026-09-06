@@ -26,6 +26,17 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 const POLL_INTERVAL: Duration = Duration::from_millis(20);
 const MAX_SSH_OUTPUT_BYTES: usize = 1024 * 1024;
 
+// OpenSSH runs a remote command through the account's shell without making it
+// interactive. Zetta's installed CLI path is commonly added to an
+// interactive shell rc file, so ask that same shell to load its rc file
+// before resolving zmux. Startup files may write prompts or terminal-control
+// sequences to stdout, so keep that output away from the endpoint JSON and
+// send only the command's stdout through fd 3. The POSIX wrapper owns the fd
+// setup so the account's shell can be fish or another shell with different
+// redirection syntax. Keep this as one command argument: OpenSSH joins the
+// remote command arguments into the command string it gives the server.
+const REMOTE_ENDPOINT_COMMAND: &str = r#"/bin/sh -c 'exec 3>&1 1>/dev/null; exec "${SHELL:-/bin/sh}" -lic "command zmux endpoint --json >&3"'"#;
+
 /// A destination understood by OpenSSH.
 ///
 /// `destination` is deliberately passed as one argument to `ssh`, so aliases,
@@ -384,9 +395,7 @@ fn endpoint_arguments(target: &RemoteTarget) -> Vec<String> {
     }
     arguments.extend([
         target.destination.clone(),
-        "zmux".to_owned(),
-        "endpoint".to_owned(),
-        "--json".to_owned(),
+        REMOTE_ENDPOINT_COMMAND.to_owned(),
     ]);
     arguments
 }

@@ -32,9 +32,7 @@ fn endpoint_queries_preserve_the_user_ssh_configuration() {
             "-p",
             "2222",
             "dev@example.test",
-            "zmux",
-            "endpoint",
-            "--json",
+            r#"/bin/sh -c 'exec 3>&1 1>/dev/null; exec "${SHELL:-/bin/sh}" -lic "command zmux endpoint --json >&3"'"#,
         ]
     );
 }
