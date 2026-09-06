@@ -173,6 +173,7 @@ MAC_BUNDLE := $(DESTDIR)$(MAC_APPLICATIONS_DIR)/$(APP_ID).app
 MAC_RUNTIME_BUNDLE := $(MAC_APPLICATIONS_DIR)/$(APP_ID).app
 MAC_CLI_DIR := $(DESTDIR)$(PREFIX)/bin
 MAC_CLI_PATH := $(MAC_CLI_DIR)/zetta
+MAC_ZMUX_CLI_PATH := $(MAC_CLI_DIR)/zmux
 MAC_ZWT_CLI_PATH := $(MAC_CLI_DIR)/zwt
 MAC_ZOSH_CLI_PATH := $(MAC_CLI_DIR)/zosh
 LINUX_USER_INSTALL := $(if $(and $(filter Linux,$(UNAME_S)),$(IS_ROOT)),,1)
@@ -500,6 +501,9 @@ install-binary:
 	$(RM) "$(MAC_CLI_PATH)"
 	sed 's|@MAC_RUNTIME_BUNDLE@|$(MAC_RUNTIME_BUNDLE)|g' resources/macos/zetta-cli.in > "$(MAC_CLI_PATH)"
 	chmod 755 "$(MAC_CLI_PATH)"
+	$(RM) "$(MAC_ZMUX_CLI_PATH)"
+	sed 's|@MAC_RUNTIME_BUNDLE@|$(MAC_RUNTIME_BUNDLE)|g' resources/macos/zmux-cli.in > "$(MAC_ZMUX_CLI_PATH)"
+	chmod 755 "$(MAC_ZMUX_CLI_PATH)"
 	if [ -n "$(call tool_enabled,$(WORKTREE))" ]; then \
 		$(RM) "$(MAC_ZWT_CLI_PATH)"; \
 		sed 's|@MAC_RUNTIME_BUNDLE@|$(MAC_RUNTIME_BUNDLE)|g' resources/macos/zwt-cli.in > "$(MAC_ZWT_CLI_PATH)"; \
@@ -543,6 +547,7 @@ uninstall:
 
 uninstall-binary:
 	$(RM) "$(MAC_CLI_PATH)"
+	$(RM) "$(MAC_ZMUX_CLI_PATH)"
 	$(RM) "$(MAC_ZWT_CLI_PATH)"
 	$(RM) "$(MAC_ZOSH_CLI_PATH)"
 	$(RM) "$(MAC_BUNDLE)/Contents/MacOS/zetta"

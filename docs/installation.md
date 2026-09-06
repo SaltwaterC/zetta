@@ -124,8 +124,9 @@ make install
 ```
 
 This installs `~/Applications/Zetta.app`, including the Zetta icon and the
-development binaries, and creates `~/.local/bin/zetta`, `~/.local/bin/zosh`,
-and `~/.local/bin/zwt` as command-line launchers for the bundled executables.
+development binaries, and creates `~/.local/bin/zetta`, `~/.local/bin/zmux`,
+`~/.local/bin/zosh`, and `~/.local/bin/zwt` as command-line launchers for the
+bundled executables.
 It also adds `~/.local/bin` to the installing user's shell startup file so new
 shells can invoke them directly. Native panes prepend the running executable's
 directory to `PATH` as before. `make uninstall` removes the application
@@ -154,6 +155,7 @@ The build produces the following runtime files in `target\debug`:
 
 - `zetta.exe`, the console executable
 - `zetta-gui.exe`, the no-console launcher used by the Start Menu shortcut
+- `zmux.exe`, the standalone background-session multiplexer
 - `zosh.exe`, the bundled standalone Mosh client
 - `zwt.exe`, the standalone Git worktree executable
 - `conpty.dll`
@@ -173,8 +175,9 @@ For an optimized release build, use `make build RELEASE=1` and
 
 This copies the runtime to `%LOCALAPPDATA%\Programs\Zetta`, adds that directory
 to the user `PATH`, and creates a Start Menu shortcut. New console sessions can
-then run `zetta` and `zwt`. The shortcut launches `zetta-gui.exe`, which starts
-the console-native executable without opening an extra console window.
+then run `zetta`, `zmux`, and `zwt`. The shortcut launches `zetta-gui.exe`,
+which starts the console-native executable without opening an extra console
+window.
 
 Zetta can be reinstalled while it is running. Windows keeps the previous
 runtime under names such as `zetta.old.exe` until its processes exit. Repeating
@@ -217,8 +220,8 @@ make install
 ```
 
 The Linux user-local install stores the application in `~/.local/zetta.app`,
-links `~/.local/bin/zetta` and `~/.local/bin/zwt` to their binaries, and
-installs the desktop entry under
+links `~/.local/bin/zetta`, `~/.local/bin/zmux`, and `~/.local/bin/zwt` to their
+binaries, and installs the desktop entry under
 `~/.local/share/applications`. The desktop entry uses the installed binary and
 icon paths directly, so it works even when the desktop session does not have
 `~/.local/bin` in its `PATH`. The installer also adds `~/.local/bin` to
