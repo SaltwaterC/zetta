@@ -192,8 +192,25 @@ impl RemoteTransport {
             }
 
             match Stream::connect(&local_socket) {
-                Ok(stream) => match self.probe(&endpoint, &stream) {
-                    Ok(()) => return Ok((endpoint, stream)),
+                Ok(stream) => match self.probe(&endpoint, stream) {
+                    Ok(()) => match Stream::connect(&local_socket) {
+                        Ok(stream) => return Ok((endpoint, stream)),
+                        Err(error) if attempt == 0 => {
+                            log::debug!(
+                                "remote SSH forward for {} disappeared after its mux probe: {error}",
+                                self.target.destination()
+                            );
+                            state.forward = None;
+                        }
+                        Err(error) => {
+                            return Err(error).with_context(|| {
+                                format!(
+                                    "opening a request connection to the SSH forward for {}",
+                                    self.target.destination()
+                                )
+                            });
+                        }
+                    },
                     Err(error) if attempt == 0 => {
                         log::debug!(
                             "remote SSH forward for {} failed its mux probe: {error:#}",
@@ -247,8 +264,12 @@ impl RemoteTransport {
     /// the next real request would otherwise be sent with a stale token or to a
     /// stale remote socket. The probe is a normal mux request and never starts
     /// another SSH process.
-    fn probe(&self, endpoint: &Endpoint, stream: &Stream) -> Result<()> {
-        let mut connection = Connection::new(stream.try_clone()?);
+    fn probe(&self, endpoint: &Endpoint, stream: Stream) -> Result<()> {
+        // Ping is served on a one-request connection and the daemon closes it
+        // after replying. Consume this connection completely and let the
+        // caller open a fresh one for its actual request; reusing it would
+        // make the request race with the peer's EOF.
+        let mut connection = Connection::new(stream);
         connection.set_read_timeout(Some(PROBE_TIMEOUT))?;
         connection.stream().set_write_timeout(Some(PROBE_TIMEOUT))?;
         connection.send(&Envelope {

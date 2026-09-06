@@ -73,6 +73,133 @@ fn forwards_are_stream_local_and_do_not_request_a_shell() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn mux_probe_uses_a_different_connection_than_the_real_request() {
+    use std::{
+        io::ErrorKind,
+        os::unix::net::UnixListener,
+        process::{Command, Stdio},
+        sync::mpsc,
+        thread,
+        time::{Duration, Instant},
+    };
+
+    let directory = tempfile::tempdir().unwrap();
+    let socket_path = directory.path().join("forward.sock");
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let endpoint = crate::transport::Endpoint {
+        version: crate::transport::ENDPOINT_VERSION,
+        protocol_version: crate::messages::PROTOCOL_VERSION,
+        process_id: 4242,
+        socket_path: socket_path.clone(),
+        token: "test-token".to_owned(),
+    };
+    let child = Command::new("sh")
+        .args(["-c", "sleep 60"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let forward = ForwardState {
+        child,
+        directory,
+        local_socket: socket_path,
+        endpoint: endpoint.clone(),
+    };
+    let transport = RemoteTransport {
+        target: RemoteTarget::new("test"),
+        ssh_program: "ssh".into(),
+        state: std::sync::Mutex::new(RemoteState {
+            forward: Some(forward),
+        }),
+    };
+    let (report_sender, report_receiver) = mpsc::channel::<Result<(), String>>();
+    let server = thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let first = loop {
+            match listener.accept() {
+                Ok((stream, _)) => break stream,
+                Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                    if Instant::now() >= deadline {
+                        report_sender
+                            .send(Err("the probe connection was not opened".to_owned()))
+                            .unwrap();
+                        return;
+                    }
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => {
+                    report_sender.send(Err(error.to_string())).unwrap();
+                    return;
+                }
+            }
+        };
+        let mut first = Connection::new(first);
+        let (request, _) = first.receive::<Envelope>().unwrap();
+        assert!(matches!(request.request, Request::Ping));
+        first.send(&Response::Ok).unwrap();
+        drop(first);
+
+        let second = loop {
+            match listener.accept() {
+                Ok((stream, _)) => break stream,
+                Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                    if Instant::now() >= deadline {
+                        report_sender
+                            .send(Err(
+                                "the real request reused the probe connection".to_owned()
+                            ))
+                            .unwrap();
+                        return;
+                    }
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => {
+                    report_sender.send(Err(error.to_string())).unwrap();
+                    return;
+                }
+            }
+        };
+        report_sender.send(Ok(())).unwrap();
+        let mut second = Connection::new(second);
+        let (request, _) = second.receive::<Envelope>().unwrap();
+        assert!(matches!(request.request, Request::List));
+        second
+            .send(&Response::Sessions {
+                sessions: Vec::new(),
+                restorable: Vec::new(),
+            })
+            .unwrap();
+    });
+
+    let (returned_endpoint, stream) = transport.connect().unwrap();
+    assert_eq!(returned_endpoint, endpoint);
+    let report = report_receiver
+        .recv_timeout(Duration::from_secs(1))
+        .unwrap();
+    assert!(report.is_ok(), "{report:?}");
+    let mut connection = Connection::new(stream);
+    connection
+        .send(&Envelope {
+            version: crate::messages::PROTOCOL_VERSION,
+            token: endpoint.token,
+            client_process_id: std::process::id(),
+            client_id: crate::messages::ClientId::new("test-client"),
+            stream_only: true,
+            session_secret: None,
+            request: Request::List,
+        })
+        .unwrap();
+    assert!(matches!(
+        connection.receive::<Response>().unwrap().0,
+        Response::Sessions { .. }
+    ));
+    server.join().unwrap();
+}
+
 #[test]
 fn client_ids_are_random_and_serializable() {
     let first = crate::messages::ClientId::random().unwrap();
