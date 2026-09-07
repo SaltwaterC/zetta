@@ -55,9 +55,22 @@ pub(super) fn run_wait_command(command: PaneWaitCommand) -> Result<()> {
             command: command.command,
         },
     )?;
-    let child_status = wait_command_process(&Shell::System, &connection.command)
-        .status()
-        .with_context(|| format!("failed to start command {:?}", connection.command[0]))?;
+    let is_terminal_foreground = this_process_is_the_terminal_foreground();
+    let child_status =
+        wait_command_process(&Shell::System, &connection.command, is_terminal_foreground)
+            .status()
+            .with_context(|| format!("failed to start command {:?}", connection.command[0]))?;
+    // The wrapped shell legitimately took over the terminal's foreground
+    // process group on its own initiative (see `wait_command_process`), but
+    // it isn't a job-control shell that hands that back on exit the way an
+    // interactive one would before reading its next line. Left unreclaimed,
+    // the terminal's foreground pgrp stays pointed at the now-dead shell, and
+    // the very next read from it by anyone — including whatever spawned this
+    // `zetta pane wait` invocation — gets SIGTTIN'd, because nothing alive
+    // matches that stale pgid.
+    if is_terminal_foreground {
+        reclaim_terminal_foreground();
+    }
     let exit_code = child_status.code();
     connection.complete(exit_code)?;
     std::process::exit(exit_code.unwrap_or(1));
@@ -71,10 +84,99 @@ pub(super) fn run_wait_command(command: PaneWaitCommand) -> Result<()> {
 /// still arrives at the target program unmangled, because `ShellBuilder`
 /// quotes each element as an inert shell literal rather than concatenating
 /// raw text.
-fn wait_command_process(shell: &Shell, command: &[String]) -> std::process::Command {
-    ShellBuilder::new(shell, cfg!(windows))
-        .build_std_command(Some(command[0].clone()), &command[1..])
+///
+/// A POSIX shell only sources the user's rc file — and so only sees aliases
+/// and functions — when it considers itself interactive, which is what
+/// `ShellBuilder` signals with `-i`. But `-i` also makes bash/zsh perform
+/// their own job-control startup, which unconditionally tries to acquire the
+/// controlling terminal for the shell's own process group. When this command
+/// already is the terminal's sole foreground occupant that's exactly what
+/// should happen — the same harmless takeover any nested interactive shell
+/// performs. But when it runs concurrently with a different, already-running
+/// foreground job (invoked from a background shell hook, say), that same
+/// takeover attempt steals the terminal out from under that job, freezing it
+/// with `SIGTTIN`. A shell flag (`+m`) does not prevent this: both bash and
+/// zsh still attempt the acquisition regardless of that flag and just stop
+/// themselves on failure — which is still enough to trigger the controlling
+/// shell's own job-status housekeeping and disturb the unrelated foreground
+/// job. The only reliable way to suppress the attempt is to detach the child
+/// from the controlling terminal's session entirely (`setsid`) before it
+/// execs; every POSIX shell treats that identically to having no controlling
+/// terminal at all and silently disables job control, while rc-file/alias
+/// sourcing is unaffected. That detachment is applied only when this process
+/// is not already the terminal's foreground occupant, so the common, non-racy
+/// case keeps normal signal delivery (Ctrl-C, SIGWINCH, ...) to the wrapped
+/// command.
+///
+/// `is_terminal_foreground` — this process's own state at the moment it is
+/// about to spawn the child — decides whether the child is allowed to touch
+/// the controlling terminal's job control at all; see `run_wait_command` for
+/// the other half of this contract (reclaiming the terminal afterward).
+fn wait_command_process(
+    shell: &Shell,
+    command: &[String],
+    #[cfg_attr(not(unix), allow(unused_variables))] is_terminal_foreground: bool,
+) -> std::process::Command {
+    let mut child = ShellBuilder::new(shell, cfg!(windows))
+        .build_std_command(Some(command[0].clone()), &command[1..]);
+    #[cfg(unix)]
+    if !is_terminal_foreground {
+        use std::os::unix::process::CommandExt as _;
+        // SAFETY: `setsid` is async-signal-safe and only affects this
+        // about-to-be-replaced child's own session; nothing else is read,
+        // written, or allocated.
+        unsafe {
+            child.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+    child
 }
+
+/// Whether this process's stdin is a controlling terminal on which this
+/// process's own process group already holds the foreground.
+///
+/// False both when stdin isn't a terminal at all (`tcgetpgrp` fails) and when
+/// it is one but a different job currently holds the foreground — the two
+/// cases in which the spawned shell must not be allowed to fight for
+/// terminal control, since this process isn't the terminal's rightful
+/// current occupant either way.
+#[cfg(unix)]
+fn this_process_is_the_terminal_foreground() -> bool {
+    // SAFETY: both calls only read process/terminal identity by fd number;
+    // nothing is taken, dropped, or mutated.
+    unsafe {
+        let terminal_pgrp = libc::tcgetpgrp(libc::STDIN_FILENO);
+        terminal_pgrp != -1 && terminal_pgrp == libc::getpgrp()
+    }
+}
+
+#[cfg(not(unix))]
+fn this_process_is_the_terminal_foreground() -> bool {
+    false
+}
+
+/// Reasserts this process's own process group as the terminal's foreground
+/// occupant, undoing the handover `wait_command_process` lets its spawned
+/// shell perform when this process was already the foreground.
+///
+/// Best-effort: failure (no controlling terminal at all, or one already
+/// reclaimed by something else) is not actionable, so the result is ignored.
+#[cfg(unix)]
+fn reclaim_terminal_foreground() {
+    // SAFETY: touches only this process's own controlling terminal (by fd
+    // number) and its own process group.
+    unsafe {
+        libc::tcsetpgrp(libc::STDIN_FILENO, libc::getpgrp());
+    }
+}
+
+#[cfg(not(unix))]
+fn reclaim_terminal_foreground() {}
 
 /// A registered project command, run in the project the current directory
 /// belongs to.
