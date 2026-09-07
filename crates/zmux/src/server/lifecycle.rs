@@ -216,7 +216,16 @@ pub(super) fn spawn(
         pending_input: Vec::new(),
     });
     let pane = session.panes.last().expect("the pane was just pushed");
-    let handover = handover_handles(daemon, pane, request.client_process_id).and_then(|handles| {
+    let handles = handover_handles(daemon, pane, request.client_process_id);
+    // The reply travels on the connection that asked for it, which may be
+    // arbitrarily slow to read — a burst of concurrent spawns is exactly when
+    // that matters. Holding the sessions lock across that write would
+    // serialize every other session-mutating request behind this one
+    // client's socket; `handover_handles`'s borrowed descriptor stays valid
+    // regardless, because nothing removes this pane except the rollback
+    // below, which re-locks first.
+    drop(sessions);
+    let handover = handles.and_then(|handles| {
         connection.send_with(
             &Response::Spawned {
                 session_id,
@@ -229,7 +238,10 @@ pub(super) fn spawn(
     });
     if let Err(error) = handover {
         // Nobody received this terminal, so nothing can ever read it.
-        session.panes.retain(|pane| pane.id != pane_id);
+        let mut sessions = daemon.sessions.lock().unwrap();
+        if let Some(session) = sessions.iter_mut().find(|session| session.id == session_id) {
+            session.panes.retain(|pane| pane.id != pane_id);
+        }
         sessions.retain(|session| !session.panes.is_empty());
         #[cfg(windows)]
         let _ = daemon.pty_host.close(console_id);

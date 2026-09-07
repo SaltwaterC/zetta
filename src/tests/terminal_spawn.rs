@@ -1,6 +1,80 @@
 use super::*;
 use crate::config::PaneSplitCommand;
 
+/// The exact race a rapid new-tab-then-close can hit: the tab is gone before
+/// the pane's spawn resolves and the multiplexer tells this process about it.
+/// Without releasing it here, the pane stays marked as held by this process
+/// forever — see `Zetta::release_mux_pane` and `finish_terminal_spawn`'s
+/// orphan branch.
+#[gpui::test]
+fn a_spawn_that_resolves_after_its_tab_closed_releases_the_mux_pane(cx: &mut gpui::TestAppContext) {
+    cx.update(|cx| {
+        theme_settings::init(theme::LoadThemes::JustBase, cx);
+        terminal::terminal_settings::TerminalSettings::init(cx);
+    });
+    let (zetta, cx) = cx.add_window_view(|window, cx| {
+        let mut config = crate::config::Config::defaults(None, None);
+        // An empty profile list keeps `Zetta::new` from opening its own tab,
+        // so the only spawn in this test is the one it drives below.
+        config.profiles.clear();
+        crate::app::Zetta::new(
+            config,
+            None,
+            crate::app::ZettaLaunchOptions {
+                no_mux: true,
+                ..Default::default()
+            },
+            window,
+            cx,
+        )
+    });
+
+    #[cfg(not(windows))]
+    let command = Shell::Program("true".to_owned());
+    #[cfg(windows)]
+    let command = Shell::WithArguments {
+        program: "cmd.exe".to_owned(),
+        args: vec!["/c".to_owned(), "exit".to_owned()],
+        title_override: None,
+    };
+    let profile = Profile {
+        name: "Test".to_owned(),
+        command,
+        theme: None,
+        dark_theme: None,
+        icon: ProfileIcon::Zetta,
+    };
+
+    let pane_id = zetta.update_in(cx, |zetta, window, cx| {
+        zetta.open_tab_with_profile(profile, window, cx);
+        let tab = zetta.tabs.last().expect("the tab was just opened");
+        let tab_id = tab.id;
+        let pane_id = tab.active_pane;
+        // The tab closes — and, standing in for the multiplexer telling this
+        // process about the pane, which in the real race arrives only after
+        // the tab is already gone — the pane is recorded as held. Neither
+        // step goes through the normal close path, which would release it
+        // itself; the point is to reach `finish_terminal_spawn` with a pane
+        // that is tracked but belongs to no live tab.
+        zetta.tabs.retain(|tab| tab.id != tab_id);
+        zetta.mux_panes.record(pane_id, 900);
+        pane_id
+    });
+
+    // Lets the still in-flight spawn resolve and `finish_terminal_spawn` run
+    // against the state set up above.
+    cx.run_until_parked();
+
+    zetta.update(cx, |zetta, _cx| {
+        assert_eq!(
+            zetta.mux_panes.mux_pane_id(pane_id),
+            None,
+            "a spawn resolving after its tab closed must release the pane back to the \
+             multiplexer instead of leaking it as held by this process forever"
+        );
+    });
+}
+
 #[test]
 fn native_stacked_commands_use_one_interactive_shell_command() {
     let shell = stacked_task_shell(&Shell::Program("bash".to_owned()), "echo {one,two}", None);

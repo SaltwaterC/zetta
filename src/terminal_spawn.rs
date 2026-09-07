@@ -946,6 +946,21 @@ impl Zetta {
             if stored_in_background {
                 this.observe_background_terminal(tab_id, pane_id, terminal.clone(), cx);
                 this.publish_background_session_catalog(cx);
+            } else {
+                // Either this pane, or its whole tab, closed while the spawn
+                // above was still in flight. `adopt_mux_pane` just registered
+                // it as held by this process, and nothing else will ever ask
+                // the multiplexer to let it go — dropping `terminal` below
+                // only closes this process's copy of the descriptor, not the
+                // daemon's, so without this the pane stays wedged as ours
+                // until the window exits. See `Zetta::release_mux_pane`.
+                this.release_mux_pane(tab_id, pane_id, cx);
+                // Only when the whole tab is gone: a pane closed on its own
+                // still leaves the tab's other panes sharing this session, so
+                // their mapping to it must not be erased here.
+                if tab_index.is_none() {
+                    this.mux_panes.forget_tab(tab_id);
+                }
             }
         }
         this.schedule_worktree_detection_for_pane(tab_id, pane_id, cx);

@@ -27,8 +27,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-#[cfg(feature = "session-persistence")]
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result};
 use gpui::AppContext as _;
@@ -41,6 +40,16 @@ use zmux::{
     messages::{SpawnRequest, TerminalSize},
     retention::Retention,
 };
+
+/// How long a failed connection attempt is remembered before another tab open
+/// is allowed to retry it.
+///
+/// Connecting is a blocking round trip to the daemon, made from the same
+/// single-threaded render loop every tab open runs on. Without this, a burst
+/// of rapid tab opens against a slow or unreachable daemon would each pay the
+/// full connect timeout in turn, one after another, turning one slow daemon
+/// into a UI freeze lasting as long as every attempt combined.
+const MUX_CONNECT_RETRY_BACKOFF: Duration = Duration::from_secs(3);
 
 #[cfg(feature = "session-persistence")]
 const MUX_RECOVERY_DELAYS: [Duration; 5] = [
@@ -874,6 +883,11 @@ impl crate::Zetta {
             anyhow::bail!("remote sessions cannot spawn additional panes");
         }
         if self.mux.is_none() {
+            if let Some((failed_at, message)) = self.mux_connect_failure.as_ref()
+                && failed_at.elapsed() < MUX_CONNECT_RETRY_BACKOFF
+            {
+                anyhow::bail!("{message}");
+            }
             match self
                 .launch_config
                 .sessions
@@ -894,12 +908,17 @@ impl crate::Zetta {
                         MuxRuntime::connect_with_retention(retention)
                     }
                 }) {
-                Ok(runtime) => self.install_mux_runtime(runtime, cx),
+                Ok(runtime) => {
+                    self.mux_connect_failure = None;
+                    self.install_mux_runtime(runtime, cx);
+                }
                 Err(error) => {
-                    self.configuration_error = Some(format!(
+                    let message = format!(
                         "Could not reach the session multiplexer, so this terminal cannot be \
                          backgrounded: {error:#}"
-                    ));
+                    );
+                    self.mux_connect_failure = Some((Instant::now(), message.clone()));
+                    self.configuration_error = Some(message);
                     cx.notify();
                     return Err(error).context("connecting to the session multiplexer");
                 }

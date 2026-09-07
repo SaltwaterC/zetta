@@ -457,6 +457,11 @@ pub(crate) struct Zetta {
     /// `None` until then. Normal launches require the daemon; `--no-mux` is an
     /// explicit compatibility escape hatch for the legacy in-process owner.
     pub(crate) mux: Option<MuxRuntime>,
+    /// When and why the last connection attempt failed, so a burst of rapid
+    /// tab opens against a slow or unreachable daemon reuses that failure
+    /// briefly instead of each paying a fresh connect timeout in turn — see
+    /// `MUX_CONNECT_RETRY_BACKOFF`.
+    pub(crate) mux_connect_failure: Option<(std::time::Instant, String)>,
     #[cfg(feature = "session-persistence")]
     /// Invalidates a disk-recovery task whenever the effective configuration or
     /// the runtime it belongs to changes.
@@ -849,6 +854,7 @@ impl Zetta {
             tabs: Vec::new(),
             background_sessions: BackgroundSessionRunner::default(),
             mux: None,
+            mux_connect_failure: None,
             #[cfg(feature = "session-persistence")]
             mux_recovery_generation: 0,
             #[cfg(feature = "session-persistence")]
