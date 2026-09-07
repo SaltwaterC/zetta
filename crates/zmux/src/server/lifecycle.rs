@@ -239,10 +239,19 @@ pub(super) fn spawn(
     if let Err(error) = handover {
         // Nobody received this terminal, so nothing can ever read it.
         let mut sessions = daemon.sessions.lock().unwrap();
-        if let Some(session) = sessions.iter_mut().find(|session| session.id == session_id) {
-            session.panes.retain(|pane| pane.id != pane_id);
-        }
+        let discarded = sessions
+            .iter_mut()
+            .find(|session| session.id == session_id)
+            .and_then(|session| {
+                session
+                    .panes
+                    .iter()
+                    .position(|pane| pane.id == pane_id)
+                    .map(|index| session.panes.remove(index))
+            });
         sessions.retain(|session| !session.panes.is_empty());
+        drop(sessions);
+        drop(discarded);
         #[cfg(windows)]
         let _ = daemon.pty_host.close(console_id);
         return Err(error);
@@ -1123,8 +1132,11 @@ pub(super) fn kill(
         .iter()
         .map(|pane| pane.console_id)
         .collect::<Vec<_>>();
-    sessions.retain(|session| session.id != session_id);
+    let discarded = sessions
+        .extract_if(.., |session| session.id == session_id)
+        .collect::<Vec<_>>();
     drop(sessions);
+    drop(discarded);
     #[cfg(feature = "session-persistence")]
     if let Some(persistence) = daemon.persistence.lock().unwrap().as_mut() {
         persistence.forget(session_id)?;
@@ -1155,8 +1167,11 @@ pub(super) fn forget(
             .iter()
             .map(|pane| pane.console_id)
             .collect::<Vec<_>>();
-        sessions.retain(|session| session.id != session_id);
+        let discarded = sessions
+            .extract_if(.., |session| session.id == session_id)
+            .collect::<Vec<_>>();
         drop(sessions);
+        drop(discarded);
         #[cfg(feature = "session-persistence")]
         if let Some(persistence) = daemon.persistence.lock().unwrap().as_mut() {
             persistence.forget(session_id)?;
@@ -1300,15 +1315,10 @@ pub(super) fn close_pane(
         // pane here would evict the other viewers too.
         _ => anyhow::bail!("client {client_process_id} does not hold pane {pane_id}"),
     }
-    let (released, _consoles, ended_sessions) = end_abandoned_sessions(&mut sessions);
+    let ended_sessions = take_abandoned_sessions(&mut sessions);
+    let released = !ended_sessions.is_empty();
     drop(sessions);
-    for session_id in ended_sessions {
-        remove_image_session(daemon, session_id);
-    }
-    #[cfg(windows)]
-    for console_id in _consoles {
-        close_host_console(daemon, console_id);
-    }
+    dispose_sessions(daemon, ended_sessions);
     // An attach may have been waiting on this pane's revoke handover.
     daemon.sessions_condvar.notify_all();
     prune_exited_panes(daemon);

@@ -19,6 +19,9 @@ Retain these Zetta changes when synchronizing:
 - Windows ConPTY fragmented-read coalescing and terminal-hangup handling;
 - shell integration, resize, and sequence handling needed by Zetta's PTY
   lifecycle;
+- Unix PTY teardown reaps owned and reclaimed children, escalating from SIGHUP
+  to SIGKILL after a short grace period. A shell that ignores hangup
+  must not block the multiplexer session lock or application shutdown.
 - attached PTYs (`tty::unix::attach`), where the master file descriptor is
   passed in by the `zmux` multiplexer and the child belongs to that process.
   Upstream's `Pty` assumes it spawned the child, so four things diverge and

@@ -3294,6 +3294,64 @@ fn sharing_a_session_does_not_ask_for_it_to_outlive_its_window() {
     );
 }
 
+#[test]
+fn closing_a_pane_that_ignores_hangup_does_not_block_the_daemon() {
+    let daemon = TestDaemon::start();
+    let client = daemon.client();
+    // A finite fallback keeps the regression from leaving a stuck test daemon.
+    let pane = client
+        .spawn(spawn_request(
+            None,
+            "trap '' HUP; printf ready; exec sleep 5",
+        ))
+        .unwrap();
+    let descriptor = std::fs::File::from(pane.descriptor);
+    read_until(&descriptor, "ready");
+    drop(descriptor);
+
+    let started = Instant::now();
+    client.close_pane(pane.session_id, pane.pane_id).unwrap();
+    let next = client.spawn(spawn_request(None, "sleep 5")).unwrap();
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "closing a pane blocked new terminals"
+    );
+    client.close_pane(next.session_id, next.pane_id).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while process_is_alive(pane.child_pid) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        !process_is_alive(pane.child_pid),
+        "closed pane's child was not reaped"
+    );
+}
+
+#[test]
+fn rapid_spawn_and_close_keeps_the_daemon_responsive() {
+    let daemon = TestDaemon::start();
+    let client = daemon.client();
+    let mut children = Vec::new();
+    for _ in 0..50 {
+        let pane = client.spawn(spawn_request(None, "exec sleep 30")).unwrap();
+        children.push(pane.child_pid);
+        drop(pane.descriptor);
+        client.close_pane(pane.session_id, pane.pane_id).unwrap();
+    }
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while children.iter().any(|pid| process_is_alive(*pid)) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(children.iter().all(|pid| !process_is_alive(*pid)));
+    let client = daemon.client();
+    let pane = client
+        .spawn(spawn_request(None, "printf still-working"))
+        .unwrap();
+    let descriptor = std::fs::File::from(pane.descriptor);
+    read_until(&descriptor, "still-working");
+    client.close_pane(pane.session_id, pane.pane_id).unwrap();
+}
+
 /// Only a client that is showing a session may offer it.
 ///
 /// Not merely tidiness: the request republishes the session's verifier, so

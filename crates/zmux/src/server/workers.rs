@@ -595,15 +595,9 @@ pub(super) fn reclaim_panes_from_departed_clients(daemon: &Arc<Daemon>) {
         }
     }
 
-    let (_, _consoles, ended_sessions) = end_abandoned_sessions(&mut sessions);
+    let ended_sessions = take_abandoned_sessions(&mut sessions);
     drop(sessions);
-    for session_id in ended_sessions {
-        remove_image_session(daemon, session_id);
-    }
-    #[cfg(windows)]
-    for console_id in _consoles {
-        close_host_console(daemon, console_id);
-    }
+    dispose_sessions(daemon, ended_sessions);
     if reclaimed {
         // An attach may be waiting on this pane's revoke handover.
         daemon.sessions_condvar.notify_all();
@@ -625,30 +619,40 @@ pub(super) fn reclaim_panes_from_departed_clients(daemon: &Arc<Daemon>) {
 /// pile of sessions holding stray shells the user never asked for and could not
 /// meaningfully attach.
 ///
-/// Dropping a `Session` drops its panes' PTYs, which hangs up their children, so
-/// this is also what stops an orphaned shell from lingering. Returns whether
-/// anything ended.
-pub(super) fn end_abandoned_sessions(sessions: &mut Vec<Session>) -> (bool, Vec<u64>, Vec<u64>) {
-    let before = sessions.len();
-    #[cfg(windows)]
-    let mut consoles = Vec::new();
-    #[cfg(not(windows))]
-    let consoles = Vec::new();
-    let mut ended_sessions = Vec::new();
-    sessions.retain(|session| {
-        let abandoned = !session.keep && session.panes.iter().all(|pane| pane.attachment.is_none());
-        if abandoned {
-            ended_sessions.push(session.id);
-            log::info!(
-                "ending session {}, which no window holds and nobody asked to keep",
-                session.id
-            );
-            #[cfg(windows)]
-            consoles.extend(session.panes.iter().map(|pane| pane.console_id));
+/// Return ownership so the caller releases the sessions lock before dropping
+/// PTYs: hanging up and reaping a shell may take time.
+pub(super) fn take_abandoned_sessions(sessions: &mut Vec<Session>) -> Vec<Session> {
+    sessions
+        .extract_if(.., |session| {
+            let abandoned =
+                !session.keep && session.panes.iter().all(|pane| pane.attachment.is_none());
+            if abandoned {
+                log::info!(
+                    "ending session {}, which no window holds and nobody asked to keep",
+                    session.id
+                );
+            }
+            abandoned
+        })
+        .collect()
+}
+
+/// The caller must release `Daemon::sessions` before entering this cleanup.
+pub(super) fn dispose_sessions(daemon: &Daemon, sessions: Vec<Session>) {
+    for session in sessions {
+        remove_image_session(daemon, session.id);
+        #[cfg(windows)]
+        let consoles = session
+            .panes
+            .iter()
+            .map(|pane| pane.console_id)
+            .collect::<Vec<_>>();
+        drop(session);
+        #[cfg(windows)]
+        for console_id in consoles {
+            close_host_console(daemon, console_id);
         }
-        !abandoned
-    });
-    (sessions.len() != before, consoles, ended_sessions)
+    }
 }
 
 pub(super) fn process_is_running(process_id: u32) -> bool {

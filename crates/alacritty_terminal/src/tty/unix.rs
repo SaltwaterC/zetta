@@ -494,12 +494,10 @@ impl Drop for Pty {
 
         match &mut self.child {
             PtyChild::Owned(child) => {
-                // Make sure the PTY is terminated properly.
-                unsafe {
-                    libc::kill(child.id() as i32, libc::SIGHUP);
+                // `Child` caches a reaped status; do not signal a recycled PID.
+                if matches!(child.try_wait(), Ok(None)) {
+                    terminate_child(child.id() as i32);
                 }
-
-                let _ = child.wait();
             },
             // An attached child outlives this process by design: detaching a
             // session is exactly dropping the PTY here. Hanging it up would
@@ -507,13 +505,54 @@ impl Drop for Pty {
             // would reap a process this one did not spawn.
             PtyChild::Attached { .. } => {},
             PtyChild::Reclaimed { pid } => {
-                let pid = *pid as i32;
-                unsafe {
-                    libc::kill(pid, libc::SIGHUP);
-                    let mut status = 0;
-                    libc::waitpid(pid, &mut status, 0);
-                }
+                terminate_child(*pid as i32);
             },
+        }
+    }
+}
+
+/// Closing a terminal must not wait on a shell that ignores or blocks SIGHUP.
+/// Allow a short graceful exit before forcing termination, and finish reaping
+/// before returning so application shutdown cannot abandon the cleanup.
+/// Callers must drop live PTYs outside shared locks. Attached children never
+/// reach this path.
+fn terminate_child(pid: libc::pid_t) {
+    if child_has_exited(pid) {
+        return;
+    }
+    unsafe { libc::kill(pid, libc::SIGHUP) };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(250);
+    loop {
+        if child_has_exited(pid) {
+            return;
+        }
+        if std::time::Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    kill_and_reap_child(pid);
+}
+
+fn child_has_exited(pid: libc::pid_t) -> bool {
+    loop {
+        let result = unsafe { libc::waitpid(pid, ptr::null_mut(), libc::WNOHANG) };
+        if result >= 0 {
+            return result != 0;
+        }
+        if Error::last_os_error().kind() != ErrorKind::Interrupted {
+            // ECHILD also means there is no longer a child we may signal.
+            return true;
+        }
+    }
+}
+
+fn kill_and_reap_child(pid: libc::pid_t) {
+    unsafe { libc::kill(pid, libc::SIGKILL) };
+    loop {
+        let result = unsafe { libc::waitpid(pid, ptr::null_mut(), 0) };
+        if result >= 0 || Error::last_os_error().kind() != ErrorKind::Interrupted {
+            return;
         }
     }
 }
@@ -1062,5 +1101,39 @@ mod attached_tests {
         drop(reclaimed);
         let _ = child.kill();
         let _ = child.wait();
+    }
+
+    #[expect(
+        clippy::zombie_processes,
+        reason = "the reclaimed PTY owns reaping; the test verifies the PID disappears"
+    )]
+    fn assert_hangup_resistant_child_is_reaped(reclaimed: bool) {
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", "trap '' HUP; printf ready; exec sleep 5"])
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut ready = [0; 5];
+        child.stdout.take().unwrap().read_exact(&mut ready).unwrap();
+        let pid = child.id();
+        let (mut pty, _events) = attached_pty(pid);
+        pty.child = if reclaimed { PtyChild::Reclaimed { pid } } else { PtyChild::Owned(child) };
+        let started = Instant::now();
+        drop(pty);
+        assert!(started.elapsed() < Duration::from_secs(1), "PTY drop waited on its child");
+        // Cleanup must finish before returning: the daemon can exit immediately
+        // after its final close. Signal zero sees zombies too, proving reaping.
+        assert_eq!(unsafe { libc::kill(pid as i32, 0) }, -1);
+        assert_eq!(Error::last_os_error().raw_os_error(), Some(libc::ESRCH));
+    }
+
+    #[test]
+    fn owned_pty_cleanup_does_not_wait_for_a_child_ignoring_hangup() {
+        assert_hangup_resistant_child_is_reaped(false);
+    }
+
+    #[test]
+    fn reclaimed_pty_cleanup_does_not_wait_for_a_child_ignoring_hangup() {
+        assert_hangup_resistant_child_is_reaped(true);
     }
 }
