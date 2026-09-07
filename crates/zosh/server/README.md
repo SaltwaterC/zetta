@@ -33,6 +33,11 @@ Zosh display code, including for a clear that does not change screen cells.
 Snapshots retain the generation, so retransmitted and out-of-order states do
 not clear the local terminal more than once.
 
+Prediction acknowledgements wait until input has been written to the PTY,
+then allow a 50 ms grace period for shell output. Unrelated output does not
+confirm newer input. Each cumulative screen update carries the current echo
+acknowledgement, including when an earlier update was lost or combined away.
+
 `mosh-1.4.0-scrollback.patch` adds the missing server state. It applies to the
 official [Mosh 1.4.0 release](https://github.com/mobile-shell/mosh/releases/tag/mosh-1.4.0).
 The source archive's SHA-256 is

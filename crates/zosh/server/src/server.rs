@@ -9,6 +9,7 @@ use base64::engine::general_purpose::STANDARD_NO_PAD;
 use moshcatty::Ocb;
 use moshcatty::pb::HostInstruction;
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
+use std::collections::VecDeque;
 use std::io::{Read, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
@@ -19,7 +20,9 @@ const INITIAL_ROWS: u16 = 24;
 const INITIAL_COLS: u16 = 80;
 const ASSOCIATION_TIMEOUT: Duration = Duration::from_secs(60);
 const LOOP_SLEEP: Duration = Duration::from_millis(5);
-const ECHO_FALLBACK_DELAY: Duration = Duration::from_millis(100);
+// Match stock Mosh's late acknowledgement grace period. PTY output is not
+// proof that the shell has processed a particular input frame.
+const ECHO_DELAY: Duration = Duration::from_millis(50);
 const MAX_ROWS: u16 = 1024;
 const MAX_COLS: u16 = 1024;
 const MAX_CELLS: u32 = 262_144;
@@ -89,7 +92,7 @@ fn serve_session(cfg: Config, socket: UdpSocket, mut transport: ServerTransport)
     let master = pair.master;
 
     let (pty_event_tx, pty_event_rx) = mpsc::sync_channel::<PtyEvent>(PTY_QUEUE_DEPTH);
-    let (pty_write_tx, pty_write_rx) = mpsc::sync_channel::<Vec<u8>>(PTY_QUEUE_DEPTH);
+    let (pty_write_tx, pty_write_rx) = mpsc::sync_channel::<PtyWrite>(PTY_QUEUE_DEPTH);
     spawn_pty_reader(reader, pty_event_tx.clone());
     spawn_pty_writer(writer, pty_write_rx, pty_event_tx);
 
@@ -102,59 +105,25 @@ fn serve_session(cfg: Config, socket: UdpSocket, mut transport: ServerTransport)
     let network_timeout = configured_network_timeout();
 
     let mut dirty = true;
-    let mut pending_echo: Option<(u64, Instant)> = None;
-    let mut confirmed_echo: u64 = 0;
+    let mut echo = EchoAcknowledgements::default();
     let mut enqueued_echo: u64 = 0;
     let mut local_shutdown = false;
     let mut remote_shutdown = false;
     let mut child_exited = false;
 
     loop {
-        // Drain PTY output without allowing a noisy process to monopolize the
-        // network loop. Reader backpressure is bounded by sync_channel.
-        for _ in 0..64 {
-            match pty_event_rx.try_recv() {
-                Ok(PtyEvent::Output(bytes)) => {
-                    terminal.process(&bytes);
-                    dirty = true;
+        let pty = drain_pty_events(
+            &pty_event_rx,
+            &mut terminal,
+            &mut responder,
+            &pty_write_tx,
+            &mut echo,
+            cfg.verbose > 0,
+        )?;
+        dirty |= pty.dirty;
+        child_exited |= pty.ended;
 
-                    if let Some((frame, _)) = pending_echo.take() {
-                        confirmed_echo = confirmed_echo.max(frame);
-                    }
-
-                    let replies =
-                        responder.feed(&bytes, terminal.cursor_position(), terminal.size());
-                    for reply in replies {
-                        queue_pty_write(&pty_write_tx, reply)?;
-                    }
-                }
-                Ok(PtyEvent::Eof) => {
-                    child_exited = true;
-                    break;
-                }
-                Ok(PtyEvent::Error(error)) => {
-                    if cfg.verbose > 0 {
-                        eprintln!("mosh-server-rs: PTY I/O ended: {error}");
-                    }
-                    child_exited = true;
-                    break;
-                }
-                Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => {
-                    child_exited = true;
-                    break;
-                }
-            }
-        }
-
-        // A terminal application may suppress echo/output (password prompts are
-        // the common case). Confirm delivery to the PTY after a small grace
-        // period so client-side prediction does not remain tentative forever.
-        if let Some((frame, _)) =
-            pending_echo.take_if(|(_, written_at)| written_at.elapsed() >= ECHO_FALLBACK_DELAY)
-        {
-            confirmed_echo = confirmed_echo.max(frame);
-        }
+        let confirmed_echo = echo.advance(Instant::now());
 
         // Drain authenticated UDP datagrams. The peer address is deliberately
         // updated only after Mosh crypto accepted the packet, which implements
@@ -186,7 +155,6 @@ fn serve_session(cfg: Config, socket: UdpSocket, mut transport: ServerTransport)
                                 master.as_ref(),
                                 &mut terminal,
                                 &pty_write_tx,
-                                &mut pending_echo,
                                 &mut dirty,
                             )?;
                         }
@@ -219,42 +187,7 @@ fn serve_session(cfg: Config, socket: UdpSocket, mut transport: ServerTransport)
             // visual base. SSP may discard an unsent intermediate state; every
             // newer state is independently valid from the acknowledged base.
             if !local_shutdown && !remote_shutdown && (dirty || confirmed_echo > enqueued_echo) {
-                let host_bytes = terminal.diff_from_ack();
-                let resize = terminal.resize_from_ack();
-                let mut host_instructions = Vec::with_capacity(3);
-
-                // Stock CompleteTerminal serializes these as distinct protobuf
-                // instructions and applies them with an else-if chain. Keep
-                // the same shape and ordering: echo ACK, resize, host bytes.
-                if confirmed_echo > enqueued_echo {
-                    host_instructions.push(HostInstruction {
-                        hoststring: Vec::new(),
-                        width: 0,
-                        height: 0,
-                        echo_ack_num: confirmed_echo.min(i64::MAX as u64) as i64,
-                    });
-                }
-
-                if let Some((rows, cols)) = resize {
-                    host_instructions.push(HostInstruction {
-                        hoststring: Vec::new(),
-                        width: i32::from(cols),
-                        height: i32::from(rows),
-                        echo_ack_num: -1,
-                    });
-                }
-
-                if !host_bytes.is_empty() {
-                    host_instructions.push(HostInstruction {
-                        hoststring: host_bytes,
-                        width: 0,
-                        height: 0,
-                        echo_ack_num: -1,
-                    });
-                }
-
-                if !host_instructions.is_empty() {
-                    let payload = HostInstruction::encode_message(&host_instructions);
+                if let Some(payload) = host_update(&terminal, confirmed_echo) {
                     let state_num = transport.set_pending(payload);
                     terminal.snapshot_for_state(state_num);
                     enqueued_echo = enqueued_echo.max(confirmed_echo);
@@ -329,13 +262,93 @@ fn serve_session(cfg: Config, socket: UdpSocket, mut transport: ServerTransport)
     Ok(())
 }
 
+#[derive(Default)]
+struct PtyProgress {
+    dirty: bool,
+    ended: bool,
+}
+
+fn drain_pty_events(
+    events: &Receiver<PtyEvent>,
+    terminal: &mut TerminalState,
+    responder: &mut QueryResponder,
+    writes: &SyncSender<PtyWrite>,
+    echo: &mut EchoAcknowledgements,
+    verbose: bool,
+) -> Result<PtyProgress> {
+    let mut progress = PtyProgress::default();
+    // Bound work so a noisy process cannot monopolize the network loop.
+    for _ in 0..64 {
+        match events.try_recv() {
+            Ok(PtyEvent::Output(bytes)) => {
+                terminal.process(&bytes);
+                progress.dirty = true;
+                for reply in responder.feed(&bytes, terminal.cursor_position(), terminal.size()) {
+                    queue_pty_write(writes, reply)?;
+                }
+            }
+            Ok(PtyEvent::InputWritten(frame)) => {
+                // Start the grace period on observation, allowing queued reader
+                // events to drain before the frame becomes eligible for ACK.
+                echo.written(frame, Instant::now());
+            }
+            Ok(PtyEvent::Error(error)) => {
+                if verbose {
+                    eprintln!("mosh-server-rs: PTY I/O ended: {error}");
+                }
+                progress.ended = true;
+                break;
+            }
+            Ok(PtyEvent::Eof) | Err(TryRecvError::Disconnected) => {
+                progress.ended = true;
+                break;
+            }
+            Err(TryRecvError::Empty) => break,
+        }
+    }
+    Ok(progress)
+}
+
+fn host_update(terminal: &TerminalState, confirmed_echo: u64) -> Option<Vec<u8>> {
+    let mut instructions = Vec::with_capacity(3);
+    // Stock CompleteTerminal applies distinct instructions with an else-if
+    // chain. Preserve its ordering: echo ACK, resize, host bytes.
+    // Repeat the current echo ACK in every cumulative diff: an intermediate
+    // update may be coalesced away or lost before the remote acknowledges it.
+    if confirmed_echo > 0 {
+        instructions.push(HostInstruction {
+            hoststring: Vec::new(),
+            width: 0,
+            height: 0,
+            echo_ack_num: confirmed_echo.min(i64::MAX as u64) as i64,
+        });
+    }
+    if let Some((rows, cols)) = terminal.resize_from_ack() {
+        instructions.push(HostInstruction {
+            hoststring: Vec::new(),
+            width: i32::from(cols),
+            height: i32::from(rows),
+            echo_ack_num: -1,
+        });
+    }
+    let host_bytes = terminal.diff_from_ack();
+    if !host_bytes.is_empty() {
+        instructions.push(HostInstruction {
+            hoststring: host_bytes,
+            width: 0,
+            height: 0,
+            echo_ack_num: -1,
+        });
+    }
+    (!instructions.is_empty()).then(|| HostInstruction::encode_message(&instructions))
+}
+
 fn apply_user_events(
     events: Vec<UserEvent>,
     input_frame: u64,
     master: &dyn portable_pty::MasterPty,
     terminal: &mut TerminalState,
-    pty_write_tx: &SyncSender<Vec<u8>>,
-    pending_echo: &mut Option<(u64, Instant)>,
+    pty_write_tx: &SyncSender<PtyWrite>,
     dirty: &mut bool,
 ) -> Result<()> {
     let mut keys = Vec::with_capacity(PTY_CHUNK);
@@ -381,7 +394,7 @@ fn apply_user_events(
 
     flush_keys(&mut keys)?;
     if any_keys {
-        *pending_echo = Some((input_frame, Instant::now()));
+        queue_pty_request(pty_write_tx, PtyWrite::InputFrame(input_frame))?;
     }
     Ok(())
 }
@@ -396,8 +409,12 @@ fn validate_terminal_size(rows: u16, cols: u16) -> Result<()> {
     Ok(())
 }
 
-fn queue_pty_write(tx: &SyncSender<Vec<u8>>, data: Vec<u8>) -> Result<()> {
-    match tx.try_send(data) {
+fn queue_pty_write(tx: &SyncSender<PtyWrite>, data: Vec<u8>) -> Result<()> {
+    queue_pty_request(tx, PtyWrite::Bytes(data))
+}
+
+fn queue_pty_request(tx: &SyncSender<PtyWrite>, request: PtyWrite) -> Result<()> {
+    match tx.try_send(request) {
         Ok(()) => Ok(()),
         Err(TrySendError::Full(_)) => {
             bail!("PTY input queue saturated; child is not consuming terminal input")
@@ -432,14 +449,23 @@ fn spawn_pty_reader(mut reader: Box<dyn Read + Send>, tx: SyncSender<PtyEvent>) 
 
 fn spawn_pty_writer(
     mut writer: Box<dyn Write + Send>,
-    rx: Receiver<Vec<u8>>,
+    rx: Receiver<PtyWrite>,
     event_tx: SyncSender<PtyEvent>,
 ) {
     thread::spawn(move || {
-        while let Ok(data) = rx.recv() {
-            if let Err(error) = writer.write_all(&data) {
-                let _ = event_tx.send(PtyEvent::Error(error.to_string()));
-                return;
+        while let Ok(request) = rx.recv() {
+            match request {
+                PtyWrite::Bytes(data) => {
+                    if let Err(error) = writer.write_all(&data) {
+                        let _ = event_tx.send(PtyEvent::Error(error.to_string()));
+                        return;
+                    }
+                }
+                PtyWrite::InputFrame(frame) => {
+                    if event_tx.send(PtyEvent::InputWritten(frame)).is_err() {
+                        return;
+                    }
+                }
             }
         }
     });
@@ -500,18 +526,41 @@ fn configured_network_timeout() -> Option<Duration> {
 
 enum PtyEvent {
     Output(Vec<u8>),
+    InputWritten(u64),
     Eof,
     Error(String),
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+enum PtyWrite {
+    Bytes(Vec<u8>),
+    InputFrame(u64),
+}
 
-    #[test]
-    fn rejects_pathological_terminal_sizes() {
-        assert!(validate_terminal_size(24, 80).is_ok());
-        assert!(validate_terminal_size(1024, 1024).is_err());
-        assert!(validate_terminal_size(1, 1024).is_ok());
+#[derive(Default)]
+struct EchoAcknowledgements {
+    pending: VecDeque<(u64, Instant)>,
+    confirmed: u64,
+}
+
+impl EchoAcknowledgements {
+    fn written(&mut self, frame: u64, now: Instant) {
+        self.pending.push_back((frame, now));
+    }
+
+    fn advance(&mut self, now: Instant) -> u64 {
+        while self
+            .pending
+            .front()
+            .is_some_and(|(_, written_at)| now.saturating_duration_since(*written_at) >= ECHO_DELAY)
+        {
+            if let Some((frame, _)) = self.pending.pop_front() {
+                self.confirmed = self.confirmed.max(frame);
+            }
+        }
+        self.confirmed
     }
 }
+
+#[cfg(test)]
+#[path = "tests/server.rs"]
+mod tests;
