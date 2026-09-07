@@ -1810,9 +1810,33 @@ impl Client {
         let mut connection = self.open(Request::Upgrade)?;
         let response = Self::receive(&mut connection)?.0;
         match response {
-            Response::Ok => Ok(()),
+            Response::Ok => {
+                Self::wait_for_upgrade_disconnect(&mut connection)?;
+                Ok(())
+            }
             Response::Error { message } => anyhow::bail!("{message}"),
             other => anyhow::bail!("unexpected response to upgrade: {other:?}"),
+        }
+    }
+
+    /// Waits until the daemon that acknowledged an upgrade has left the request
+    /// connection behind.
+    ///
+    /// The successful response is sent before execv, because the old image
+    /// cannot answer after it replaces itself. Returning as soon as that
+    /// response arrives leaves a small window in which a follow-up request can
+    /// still land in the old listener — especially on macOS, where the endpoint
+    /// and socket path are deliberately unchanged while the replacement
+    /// rebinds. The close is the completion signal that distinguishes the old
+    /// image from its replacement.
+    fn wait_for_upgrade_disconnect(connection: &mut Connection) -> Result<()> {
+        use std::io::Read as _;
+
+        let mut byte = [0; 1];
+        match connection.stream().read(&mut byte) {
+            Ok(0) => Ok(()),
+            Ok(_) => anyhow::bail!("the multiplexer sent data after accepting its upgrade"),
+            Err(error) => Err(error).context("waiting for the multiplexer to finish upgrading"),
         }
     }
 
