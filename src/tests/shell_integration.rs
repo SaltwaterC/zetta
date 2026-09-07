@@ -281,7 +281,12 @@ fn fish_pane_wait_completion_labels_then_delegates_to_the_wrapped_command() {
         "pane labels must not be offered past the delimiter: {completions}"
     );
 
-    let completions = complete("zetta pane wait api -- git Carg");
+    // `cat` (rather than `git`) here deliberately: git's own fish completion
+    // fuzzy-matches subcommand names since fish 4 and, unlike fish 3, that
+    // now suppresses the file-completion fallback for a token that doesn't
+    // match any subcommand, which made this assert on the delegation target's
+    // completion quirks rather than on zetta's own delegation.
+    let completions = complete("zetta pane wait api -- cat Carg");
     assert!(
         completions
             .lines()
