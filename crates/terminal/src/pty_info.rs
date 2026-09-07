@@ -433,12 +433,8 @@ impl PtyProcessInfo {
             ProcessRefreshKind::nothing(),
         );
 
-        let Some(login) = system.process(shell) else {
-            return None;
-        };
-        let Some(foreground_process) = system.process(foreground) else {
-            return None;
-        };
+        let login = system.process(shell)?;
+        let foreground_process = system.process(foreground)?;
 
         Some(is_macos_login_shell(
             login.name().to_str(),
