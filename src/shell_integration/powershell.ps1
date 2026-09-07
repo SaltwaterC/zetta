@@ -413,9 +413,9 @@ $zettaCompletions = {
         elseif ($previous -in '--client', '--server') {
             @(Get-ChildItem -Name -Path "$wordToComplete*" -ErrorAction SilentlyContinue)
         } elseif ($wordToComplete -like '-*') {
-            '-c', '--client', '--server', '--predict', '-a', '-n', '-o', '--predict-overwrite', '--no-predict-overwrite', '-4', '-6', '--family', '-p', '--port', '--bind-server', '--ssh', '--ssh-pty', '--no-ssh-pty', '--init', '--no-init', '--local', '--experimental-remote-ip', '-h', '--help', '-V', '--version', '--'
+            '-c', '--client', '--server', '--predict', '-a', '-n', '-o', '--predict-overwrite', '--no-predict-overwrite', '-k', '--keep-alive', '-4', '-6', '--family', '-p', '--port', '--bind-server', '--ssh', '--ssh-pty', '--no-ssh-pty', '--init', '--no-init', '--local', '--experimental-remote-ip', '-h', '--help', '-V', '--version', '--'
         } else {
-            @(& $zettaSshTargets) + '-c', '--client', '--server', '--predict', '-a', '-n', '-o', '--predict-overwrite', '--no-predict-overwrite', '-4', '-6', '--family', '-p', '--port', '--bind-server', '--ssh', '--ssh-pty', '--no-ssh-pty', '--init', '--no-init', '--local', '--experimental-remote-ip', '-h', '--help', '-V', '--version', '--'
+            @(& $zettaSshTargets) + '-c', '--client', '--server', '--predict', '-a', '-n', '-o', '--predict-overwrite', '--no-predict-overwrite', '-k', '--keep-alive', '-4', '-6', '--family', '-p', '--port', '--bind-server', '--ssh', '--ssh-pty', '--no-ssh-pty', '--init', '--no-init', '--local', '--experimental-remote-ip', '-h', '--help', '-V', '--version', '--'
         }
     } elseif ($commandName -eq 'ztftp') {
         if ($words.Count -le 1) { 'get', 'put', '--help' } else { '--port', '--help' }
@@ -441,9 +441,9 @@ $zettaCompletions = {
         elseif ($previous -in '--client', '--server') {
             @(Get-ChildItem -Name -Path "$wordToComplete*" -ErrorAction SilentlyContinue)
         } elseif ($wordToComplete -like '-*') {
-            '--client', '--server', '--predict', '-a', '-n', '-o', '--predict-overwrite', '--no-predict-overwrite', '-4', '-6', '--family', '-p', '--port', '--bind-server', '--ssh', '--ssh-pty', '--no-ssh-pty', '--init', '--no-init', '--local', '--experimental-remote-ip', '-h', '--help', '-V', '--version', '--'
+            '--client', '--server', '--predict', '-a', '-n', '-o', '--predict-overwrite', '--no-predict-overwrite', '-k', '--keep-alive', '-4', '-6', '--family', '-p', '--port', '--bind-server', '--ssh', '--ssh-pty', '--no-ssh-pty', '--init', '--no-init', '--local', '--experimental-remote-ip', '-h', '--help', '-V', '--version', '--'
         } else {
-            @(& $zettaSshTargets) + '--client', '--server', '--predict', '-a', '-n', '-o', '--predict-overwrite', '--no-predict-overwrite', '-4', '-6', '--family', '-p', '--port', '--bind-server', '--ssh', '--ssh-pty', '--no-ssh-pty', '--init', '--no-init', '--local', '--experimental-remote-ip', '-h', '--help', '-V', '--version', '--'
+            @(& $zettaSshTargets) + '--client', '--server', '--predict', '-a', '-n', '-o', '--predict-overwrite', '--no-predict-overwrite', '-k', '--keep-alive', '-4', '-6', '--family', '-p', '--port', '--bind-server', '--ssh', '--ssh-pty', '--no-ssh-pty', '--init', '--no-init', '--local', '--experimental-remote-ip', '-h', '--help', '-V', '--version', '--'
         }
     } elseif ($subcommand -eq 'cmd') {
         $delimiter = $false
@@ -617,7 +617,7 @@ $zettaCompletions = {
             'terminal-size' { '--json', '--resize', '--columns', '--rows', '--help' }
             'edit' { '--delete-after', '--help' }
             'vi' { '--help' }
-        'mosh' { '--client', '--server', '--predict', '-a', '-n', '-o', '--predict-overwrite', '--no-predict-overwrite', '-4', '-6', '--family', '-p', '--port', '--bind-server', '--ssh', '--ssh-pty', '--no-ssh-pty', '--init', '--no-init', '--local', '--experimental-remote-ip', '-h', '--help', '-V', '--version', '--' }
+        'mosh' { '--client', '--server', '--predict', '-a', '-n', '-o', '--predict-overwrite', '--no-predict-overwrite', '-k', '--keep-alive', '-4', '-6', '--family', '-p', '--port', '--bind-server', '--ssh', '--ssh-pty', '--no-ssh-pty', '--init', '--no-init', '--local', '--experimental-remote-ip', '-h', '--help', '-V', '--version', '--' }
             'mux' {
                 if ($words.Count -le 2) {
                     if ($noMux) { 'list', 'reconnect', '--json', '--help', '--version' }

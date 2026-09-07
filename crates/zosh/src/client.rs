@@ -11,7 +11,9 @@ use std::{
 };
 
 use anyhow::{Context as _, Result};
-use mosh_rs::{Base64Key, DisplayPreference, HostEvent, MoshSession, Screen};
+use mosh_rs::{
+    Base64Key, DisplayPreference, HostEvent, MoshSession, Screen, sender::KEEP_ALIVE_DEFAULT_MS,
+};
 
 #[cfg(not(unix))]
 use std::{io::IsTerminal as _, sync::mpsc, thread, time::Duration};
@@ -29,6 +31,19 @@ use crate::{
 const IDLE_WAIT_MS: u64 = 100;
 type ClientSession = MoshSession<DisplayScreen>;
 
+/// Bounds on `--keep-alive=MS`.
+///
+/// The floor is Mosh's own minimum frame interval
+/// (`sender::SEND_INTERVAL_MIN_MS`): below it a keep-alive cannot go out
+/// any sooner anyway. The ceiling is Mosh's unassisted heartbeat, since
+/// asking for a keep-alive slower than the one already there is asking
+/// for nothing.
+pub(crate) const KEEP_ALIVE_MIN_MS: u64 = 20;
+pub(crate) const KEEP_ALIVE_MAX_MS: u64 = 3000;
+/// The environment variable that carries `--keep-alive` to an external
+/// endpoint client, alongside Mosh's own `MOSH_*` settings.
+pub(crate) const KEEP_ALIVE_ENV: &str = "MOSH_KEEPALIVE";
+
 /// Parsed endpoint arguments for `zosh SERVER_IP UDP_PORT`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ClientArgs {
@@ -37,6 +52,7 @@ pub struct ClientArgs {
     pub help: bool,
     pub version: bool,
     pub colors: bool,
+    pub keep_alive: Option<u64>,
 }
 
 /// The part of the Mosh launcher contract that is consumed by the bundled
@@ -47,6 +63,9 @@ pub(crate) struct SessionSettings {
     pub(crate) prediction: DisplayPreference,
     pub(crate) predict_overwrite: bool,
     pub(crate) initialize_terminal: bool,
+    /// How long the session may go without sending before it emits a
+    /// keep-alive, or `None` for Mosh's own three-second heartbeat.
+    pub(crate) keep_alive: Option<u64>,
 }
 
 impl SessionSettings {
@@ -71,8 +90,48 @@ impl SessionSettings {
             // launcher passes this setting explicitly; keep the legacy
             // endpoint entry point consistent when it is invoked directly.
             initialize_terminal: false,
+            keep_alive: keep_alive_from_environment(),
         }
     }
+}
+
+fn keep_alive_from_environment() -> Option<u64> {
+    let value = std::env::var(KEEP_ALIVE_ENV).ok()?;
+    match parse_keep_alive_interval(&value) {
+        Ok(interval) => Some(interval),
+        Err(error) => {
+            eprintln!("zosh: ignoring {KEEP_ALIVE_ENV}={value:?} ({error})");
+            None
+        }
+    }
+}
+
+/// The interval `-k`, `--keep-alive`, `-k=MS` or `--keep-alive=MS` asks
+/// for, or `None` when `value` is none of them.
+fn keep_alive_argument(value: &str) -> Result<Option<u64>> {
+    let (name, interval) = match value.split_once('=') {
+        Some((name, interval)) => (name, Some(interval)),
+        None => (value, None),
+    };
+    if name != "-k" && name != "--keep-alive" {
+        return Ok(None);
+    }
+    match interval {
+        Some(interval) => parse_keep_alive_interval(interval).map(Some),
+        None => Ok(Some(KEEP_ALIVE_DEFAULT_MS)),
+    }
+}
+
+/// Parse a `--keep-alive=MS` value, in milliseconds.
+pub(crate) fn parse_keep_alive_interval(value: &str) -> Result<u64> {
+    let interval = value
+        .parse::<u64>()
+        .with_context(|| format!("invalid keep-alive interval {value:?}"))?;
+    anyhow::ensure!(
+        (KEEP_ALIVE_MIN_MS..=KEEP_ALIVE_MAX_MS).contains(&interval),
+        "keep-alive interval must be between {KEEP_ALIVE_MIN_MS} and {KEEP_ALIVE_MAX_MS} milliseconds"
+    );
+    Ok(interval)
 }
 
 /// Run the endpoint client with the supplied argument vector.
@@ -107,9 +166,19 @@ pub(crate) fn parse_args(arguments: impl IntoIterator<Item = OsString>) -> Resul
     let mut help = false;
     let mut version = false;
     let mut colors = false;
+    let mut keep_alive = None;
     let mut positional = Vec::new();
     for argument in arguments {
-        match argument.to_string_lossy().as_ref() {
+        let value = argument.to_string_lossy().into_owned();
+        // Matched ahead of the flags because it is the only option here
+        // that takes an attached value. Splitting every argument on '='
+        // instead would misread a positional host that contains one.
+        if let Some(interval) = keep_alive_argument(&value)? {
+            anyhow::ensure!(keep_alive.is_none(), "duplicate --keep-alive");
+            keep_alive = Some(interval);
+            continue;
+        }
+        match value.as_str() {
             "--help" | "-h" => help = true,
             "--version" | "-V" => version = true,
             "-c" => colors = true,
@@ -136,6 +205,7 @@ pub(crate) fn parse_args(arguments: impl IntoIterator<Item = OsString>) -> Resul
             help,
             version,
             colors,
+            keep_alive,
         });
     }
     anyhow::ensure!(positional.len() == 2, "usage: zosh SERVER_IP UDP_PORT");
@@ -149,22 +219,25 @@ pub(crate) fn parse_args(arguments: impl IntoIterator<Item = OsString>) -> Resul
         help,
         version,
         colors,
+        keep_alive,
     })
 }
 
 fn print_help() {
     println!(
-        "Zetta Mosh client\n\nUsage: zosh SERVER_IP UDP_PORT\n       zosh -c\n\nReads the session key from MOSH_KEY. `-c` prints the terminal color count for the Mosh bootstrap.\n\nOptions:\n  -c               Print terminal color count\n  -h, --help       Print help\n  -V, --version    Print version"
+        "Zetta Mosh client\n\nUsage: zosh SERVER_IP UDP_PORT\n       zosh -c\n\nReads the session key from MOSH_KEY. `-c` prints the terminal color count for the Mosh bootstrap.\n\nOptions:\n  -c                 Print terminal color count\n  -k, --keep-alive   Hold the link to a packet every {KEEP_ALIVE_DEFAULT_MS} ms (=MS to change, {KEEP_ALIVE_MIN_MS}-{KEEP_ALIVE_MAX_MS})\n  -h, --help         Print help\n  -V, --version      Print version"
     );
 }
 
 fn run_session(args: &ClientArgs, key: &Base64Key) -> Result<()> {
-    run_session_with_settings(
-        &args.host,
-        args.port,
-        key,
-        SessionSettings::from_environment(),
-    )
+    let mut settings = SessionSettings::from_environment();
+    // An explicit argument beats the environment, the way the endpoint
+    // client's other settings do not need to because only the launcher
+    // sets them.
+    if args.keep_alive.is_some() {
+        settings.keep_alive = args.keep_alive;
+    }
+    run_session_with_settings(&args.host, args.port, key, settings)
 }
 
 pub(crate) fn run_session_with_settings(
@@ -218,6 +291,7 @@ fn configure_session(session: &mut ClientSession, settings: SessionSettings) {
     if settings.predict_overwrite {
         session.prediction_mut().set_predict_overwrite(true);
     }
+    session.set_keep_alive(settings.keep_alive);
     if std::env::var_os("MOSH_TITLE_NOPREFIX").is_none() {
         session.set_title_prefix("[mosh] ");
     }

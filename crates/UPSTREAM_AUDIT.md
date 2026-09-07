@@ -19,6 +19,7 @@ is still upstream `master`, so that fork has no upstream to catch up with.
 | `crates/gpui_macos` | `zed/crates/gpui_macos@2890c340` | Input-source lifetime/context gating, keyboard-layout recovery, pasteboard lifetime safety, native menu/profile shortcuts, and related tests. The Metal renderer is no longer forked: it now comes from the submodule's `gpui_apple`. |
 | `crates/gpui_windows` | `zed/crates/gpui_windows@2890c340` | Correct maximize/restore toggle, DirectX scene annotations, one-shot attention flashing, inactive popup behavior, and input activation fixes. |
 | `crates/gpui` | `zed/crates/gpui@2890c340` | Unstable sort for the three sprite vectors in `Scene::finish`. |
+| `crates/mosh_rs` | `wilsonglasser/mosh-rs@90b37125` | Zosh's `-k/--keep-alive` client half: a keep-alive `UserStream` event at protobuf tag 20 and the send-floor timer that mints it. Upstream's standalone front end (`src/bin/`) and live-server integration suite (`tests/`) are not carried. |
 | `crates/theme_settings` | `zed/crates/theme_settings@2890c340` | `ThemeSettings` as a plain gpui global rather than a `SettingsStore` entry, with `IntoGpui` vendored and the unused settings-file writers removed. |
 
 ### Routing-only forks

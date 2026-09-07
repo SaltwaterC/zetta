@@ -24,7 +24,9 @@ PTY backend
 POSIX     ConPTY
 ```
 
-No client-side changes are part of the design.
+The one addition to that wire is zosh's keep-alive, specified in
+`../PROTOCOL.md`.  Nothing else in this server departs from stock Mosh
+protocol v2.
 
 ## Why `ReceivedState` is required
 
@@ -45,6 +47,23 @@ If state 1 has already committed `l`, state 2's diff from state 0 still contains
 
 `UserStreamTracker` keeps state metadata and the uncommitted suffix needed to
 reconstruct such branches without retaining the entire lifetime input history.
+
+## Keep-alive
+
+`../PROTOCOL.md` is the specification.  Two things about it matter to the
+design above.
+
+A keep-alive decodes to **zero** UserStream events, so it does not disturb the
+event counting `UserStreamTracker` depends on.  A server that counted one as an
+event would skip a real keystroke in the next cumulative diff.  `decode_events`
+is therefore left alone, and `carries_keep_alive` is a separate,
+allocation-free walk of the same bytes.
+
+SSP already answers any non-empty diff within its 100 ms delayed-ack window, so
+the server needs nothing to be *correct* here.  What recognising the field buys
+is `force_next_send`: the answer leaves on the same loop pass, because the
+delayed ack exists to let real data ride along and an idle keep-alive has none
+to wait for.
 
 ## Terminal state
 

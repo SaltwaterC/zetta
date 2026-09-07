@@ -4699,20 +4699,16 @@ dependencies = [
 [[package]]
 name = "mosh-rs"
 version = "0.1.0"
-source = "git+https://github.com/wilsonglasser/mosh-rs?rev=90b37125f5e4a598be91dec37d23921b6865276e#90b37125f5e4a598be91dec37d23921b6865276e"
 dependencies = [
  "aes",
  "base64 0.22.1",
  "flate2",
  "ocb3",
  "prost",
- "rustix",
- "signal-hook 0.4.4",
  "thiserror 2.0.18",
  "unicode-width 0.2.2",
  "vt100",
  "vte",
- "windows-sys 0.61.2",
 ]
 
 [[package]]

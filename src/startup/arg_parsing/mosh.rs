@@ -1,8 +1,8 @@
 use super::*;
 
 use crate::mosh::{
-    AddressFamily, BindServer, MoshCommand, PredictionMode, parse_family, parse_port_request,
-    parse_remote_ip, parse_ssh_command,
+    AddressFamily, BindServer, KEEP_ALIVE_DEFAULT_MS, MoshCommand, PredictionMode, parse_family,
+    parse_keep_alive_interval, parse_port_request, parse_remote_ip, parse_ssh_command,
 };
 
 pub(crate) fn parse_mosh_subcommand(arguments: &[OsString]) -> Result<StartupArgs> {
@@ -76,6 +76,7 @@ struct SeenOptions {
     ssh_pty: bool,
     init: bool,
     remote_ip: bool,
+    keep_alive: bool,
 }
 
 fn parse_flag(
@@ -100,6 +101,9 @@ fn parse_flag(
             anyhow::ensure!(!seen.overwrite, "duplicate --predict-overwrite");
             seen.overwrite = true;
             command.predict_overwrite = false;
+        }
+        "--keep-alive" | "-k" => {
+            set_keep_alive(command, seen, KEEP_ALIVE_DEFAULT_MS)?;
         }
         "-4" => {
             set_family(command, seen, AddressFamily::Inet)?;
@@ -166,6 +170,7 @@ fn parse_attached_value(
             Ok(())
         }),
         "--predict" => set_prediction(command, seen, parse_prediction(value)?),
+        "--keep-alive" | "-k" => set_keep_alive(command, seen, parse_keep_alive_interval(value)?),
         "--family" => set_family(command, seen, parse_family(value)?),
         "--port" => set_port(command, seen, value),
         "--bind-server" => set_once(&mut seen.bind_server, "--bind-server", || {
@@ -246,6 +251,13 @@ fn set_prediction(
     seen.prediction = true;
     command.prediction = prediction;
     command.prediction_explicit = true;
+    Ok(())
+}
+
+fn set_keep_alive(command: &mut MoshCommand, seen: &mut SeenOptions, interval: u64) -> Result<()> {
+    anyhow::ensure!(!seen.keep_alive, "duplicate --keep-alive");
+    seen.keep_alive = true;
+    command.keep_alive = Some(interval);
     Ok(())
 }
 

@@ -1,0 +1,48 @@
+[package]
+name = "mosh-rs"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "GPL-3.0-or-later"
+description = "A wire-compatible Rust client for mosh's State Synchronization Protocol, interoperating with the stock mosh-server"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+# The screen the standalone client uses. An application embedding this
+# alongside its own terminal turns it OFF and implements `Screen` over
+# the emulator it already has, so its binary carries one rather than
+# two. Without the gate vt100 would be compiled in regardless of
+# whether anything called it. Zosh's `DisplayScreen` wraps `Vt100Screen`
+# rather than replacing it, so the default stays on here.
+default = ["vt100-screen"]
+vt100-screen = ["dep:vt100"]
+
+[dependencies]
+# Datagram layer: AES-128-OCB3 (RFC 7253) exactly as mosh uses it.
+# ocb3 0.1 pins the aes 0.8 / aead 0.5 generation, the newest the
+# RustCrypto OCB3 implementation compiles against.
+aes = "0.8"
+ocb3 = "0.1"
+base64 = "0.22"
+thiserror = "2"
+prost = "0.14"
+flate2 = "1.1"
+# The default screen. vt100 gives us `contents_diff` between two
+# framebuffers, which is mosh's `Display::new_frame` already written.
+vt100 = { version = "0.16", optional = true }
+# Predictive echo classifies USER input the way mosh's own parser does
+# (print / execute / CSI / ESC), and vte's `Perform` callbacks are that
+# same set. Both of these are already in the tree under vt100, so they
+# cost nothing extra to depend on directly.
+vte = "0.15"
+unicode-width = "0.2"
+
+[dev-dependencies]
+# The crypto tests state their vectors as hex, the way RFC 7253 prints
+# them. Upstream's other dev-dependency, a git `alacritty_terminal` used
+# by the integration suite in `tests/`, is not carried by this fork; see
+# UPSTREAM.md.
+hex = "0.4"

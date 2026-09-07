@@ -89,6 +89,41 @@ fn mosh_parser_supports_delimiter_help_and_rejects_duplicates() {
 
 #[cfg(feature = "mosh-client")]
 #[test]
+fn mosh_parser_forwards_a_keep_alive_with_or_without_an_interval() {
+    assert_eq!(parse_mosh(&["host"]).keep_alive, None, "off by default");
+    assert_eq!(
+        parse_mosh(&["-k", "host"]).keep_alive,
+        Some(crate::mosh::KEEP_ALIVE_DEFAULT_MS)
+    );
+    assert_eq!(
+        parse_mosh(&["--keep-alive", "host"]).keep_alive,
+        Some(crate::mosh::KEEP_ALIVE_DEFAULT_MS)
+    );
+    assert_eq!(
+        parse_mosh(&["--keep-alive=250", "host"]).keep_alive,
+        Some(250)
+    );
+    assert_eq!(parse_mosh(&["-k=250", "host"]).keep_alive, Some(250));
+    // A bare `-k` takes no separate value, so the target after it is
+    // still the target.
+    assert_eq!(parse_mosh(&["-k", "host"]).target.as_deref(), Some("host"));
+
+    for rejected in [
+        vec!["--keep-alive=5", "host"],
+        vec!["--keep-alive=99999", "host"],
+        vec!["--keep-alive=soon", "host"],
+        vec!["-k", "--keep-alive=250", "host"],
+    ] {
+        let arguments = rejected.iter().map(OsString::from).collect::<Vec<_>>();
+        assert!(
+            super::mosh::parse_mosh_args(&arguments).is_err(),
+            "{rejected:?} must not parse"
+        );
+    }
+}
+
+#[cfg(feature = "mosh-client")]
+#[test]
 fn mosh_parser_accepts_aliases_and_terminal_modes() {
     let always = parse_mosh(&["-a", "host"]);
     assert_eq!(always.prediction, crate::mosh::PredictionMode::Always);

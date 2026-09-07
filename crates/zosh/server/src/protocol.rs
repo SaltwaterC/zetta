@@ -105,6 +105,14 @@ impl ServerTransport {
         self.inner.tick()
     }
 
+    /// Send on the next `tick` rather than at the next scheduled
+    /// deadline.  SSP would already answer a non-empty diff within its
+    /// 100 ms delayed-ack window; this is what turns a keep-alive's
+    /// answer into the same loop pass.
+    pub fn force_next_send(&mut self) {
+        self.inner.force_next_send();
+    }
+
     pub fn acked_by_remote(&self) -> u64 {
         self.inner.acked_by_remote()
     }

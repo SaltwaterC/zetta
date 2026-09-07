@@ -33,6 +33,12 @@ Zosh display code, including for a clear that does not change screen cells.
 Snapshots retain the generation, so retransmitted and out-of-order states do
 not clear the local terminal more than once.
 
+It also recognises the keep-alive `zosh -k` sends and answers it on the same
+event-loop pass rather than after Mosh's 100 ms delayed acknowledgement. This
+is an optimization, not a requirement: `zosh -k` works against an unmodified
+`mosh-server` too, which answers the same keep-alive within 100 ms because
+SSP acknowledges any non-empty diff promptly. See `../PROTOCOL.md`.
+
 Prediction acknowledgements wait until input has been written to the PTY,
 then allow a 50 ms grace period for shell output. Unrelated output does not
 confirm newer input. Each cumulative screen update carries the current echo

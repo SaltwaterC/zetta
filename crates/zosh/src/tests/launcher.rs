@@ -61,6 +61,47 @@ fn launcher_parser_rejects_invalid_and_duplicate_options() {
     assert!(parse_args(args(&["--family", "invalid", "host"])).is_err());
     assert!(parse_args(args(&["--predict", "adaptive", "-a", "host"])).is_err());
     assert!(parse_args(args(&["--port", "60001", "--port", "60002", "host"])).is_err());
+    assert!(parse_args(args(&["-k", "--keep-alive=250", "host"])).is_err());
+    assert!(parse_args(args(&["--keep-alive=0", "host"])).is_err());
+}
+
+#[test]
+fn the_launcher_takes_a_keep_alive_with_or_without_an_interval() {
+    let keep_alive = |values: &[&str]| parse_args(args(values)).map(|command| command.keep_alive);
+    assert_eq!(keep_alive(&["host"]).unwrap(), None, "off by default");
+    assert_eq!(
+        keep_alive(&["-k", "host"]).unwrap(),
+        Some(KEEP_ALIVE_DEFAULT_MS)
+    );
+    assert_eq!(
+        keep_alive(&["--keep-alive", "host"]).unwrap(),
+        Some(KEEP_ALIVE_DEFAULT_MS)
+    );
+    assert_eq!(
+        keep_alive(&["--keep-alive=250", "host"]).unwrap(),
+        Some(250)
+    );
+    assert_eq!(keep_alive(&["-k=250", "host"]).unwrap(), Some(250));
+    // The value is attached-only, so a bare `-k` before the target is
+    // never mistaken for an option that swallowed the host.
+    assert_eq!(
+        parse_args(args(&["-k", "host"])).unwrap().target.as_deref(),
+        Some("host")
+    );
+}
+
+#[test]
+fn the_keep_alive_reaches_the_bundled_endpoint_as_a_session_setting() {
+    let settings = |values: &[&str]| endpoint_settings(&parse_args(args(values)).unwrap());
+    assert_eq!(
+        settings(&["--keep-alive=250", "host"]).keep_alive,
+        Some(250)
+    );
+    assert_eq!(
+        settings(&["-k", "host"]).keep_alive,
+        Some(KEEP_ALIVE_DEFAULT_MS)
+    );
+    assert_eq!(settings(&["host"]).keep_alive, None);
 }
 
 #[test]
@@ -350,11 +391,16 @@ fn launcher_help_has_the_stock_mosh_surface() {
         "--no-init",
         "--local",
         "--experimental-remote-ip",
+        "--keep-alive",
         "--help",
         "--version",
     ] {
         assert!(help.contains(option), "missing {option}");
     }
+    assert!(
+        help.contains("--keep-alive=MS"),
+        "the interval form is offered"
+    );
     assert!(
         help.contains(
             "--no-init               do not send terminal initialization string [default]"

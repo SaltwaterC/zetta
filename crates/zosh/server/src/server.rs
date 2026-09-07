@@ -178,6 +178,16 @@ fn serve_session(cfg: Config, socket: UdpSocket, mut transport: ServerTransport)
                                 accepted.frame,
                                 accepted.events.len() as u64,
                             );
+                            if accepted.keep_alive {
+                                // The client is holding the link open
+                                // against radio power management, so the
+                                // answer is worth more than the delayed
+                                // ack's chance to carry data with it.
+                                // `send_updates` runs later in this same
+                                // pass.
+                                timing::record("keepalive", accepted.frame, 0);
+                                transport.force_next_send();
+                            }
                             apply_user_events(
                                 accepted.events,
                                 accepted.frame,

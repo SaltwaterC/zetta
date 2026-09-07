@@ -20,6 +20,9 @@ pub enum UserEvent {
 pub struct AcceptedInput {
     pub frame: u64,
     pub events: Vec<UserEvent>,
+    /// Whether this state carried zosh's keep-alive.  It contributes no
+    /// input; see `../../PROTOCOL.md` for what the server owes it.
+    pub keep_alive: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -62,8 +65,15 @@ impl UserStreamTracker {
             return Ok(AcceptedInput {
                 frame: state.new_num,
                 events: Vec::new(),
+                keep_alive: false,
             });
         }
+
+        // Read before decoding, so every return below carries it. A
+        // keep-alive is deliberately invisible to `decode_events`: the
+        // prefix arithmetic here counts decoded events, and a stock Mosh
+        // server decodes none from it either.
+        let keep_alive = carries_keep_alive(&state.diff);
 
         let base = self.states.get(&state.old_num).cloned().ok_or_else(|| {
             anyhow!(
@@ -121,6 +131,7 @@ impl UserStreamTracker {
             return Ok(AcceptedInput {
                 frame: state.new_num,
                 events: Vec::new(),
+                keep_alive,
             });
         }
 
@@ -155,7 +166,106 @@ impl UserStreamTracker {
         Ok(AcceptedInput {
             frame: state.new_num,
             events: pending,
+            keep_alive,
         })
+    }
+}
+
+/// `UserMessage.instruction`, the repeated field every user instruction
+/// arrives in.
+const INSTRUCTION_FIELD: u64 = 1;
+/// Zosh's keep-alive on `ClientBuffers.Instruction`; see `PROTOCOL.md`.
+const KEEP_ALIVE_FIELD: u64 = 20;
+const WIRE_VARINT: u64 = 0;
+const WIRE_FIXED64: u64 = 1;
+const WIRE_BYTES: u64 = 2;
+const WIRE_FIXED32: u64 = 5;
+
+/// Whether a UserStream diff carries a keep-alive.
+///
+/// This is a second pass over the same bytes rather than a change to
+/// `decode_events`, because `moshcatty`'s decoder discards the fields it
+/// does not know and remains the authority on keystroke/resize
+/// precedence.  It costs almost nothing: the walk skips a length-delimited
+/// field by its length, so it is linear in the number of protobuf fields
+/// and not in the size of a paste, and it allocates nothing.
+///
+/// A byte it cannot read is reported as "no keep-alive" rather than as an
+/// error.  `decode_events` runs over the same diff and is what rejects a
+/// malformed UserMessage properly.
+fn carries_keep_alive(diff: &[u8]) -> bool {
+    let mut rest = diff;
+    while let Some((field, wire)) = read_tag(&mut rest) {
+        if (field, wire) == (INSTRUCTION_FIELD, WIRE_BYTES) {
+            match read_bytes(&mut rest) {
+                Some(instruction) if instruction_is_keep_alive(instruction) => return true,
+                Some(_) => continue,
+                None => return false,
+            }
+        }
+        if !skip_field(&mut rest, wire) {
+            return false;
+        }
+    }
+    false
+}
+
+fn instruction_is_keep_alive(mut rest: &[u8]) -> bool {
+    while let Some((field, wire)) = read_tag(&mut rest) {
+        if (field, wire) == (KEEP_ALIVE_FIELD, WIRE_VARINT) {
+            return read_varint(&mut rest).is_some();
+        }
+        if !skip_field(&mut rest, wire) {
+            return false;
+        }
+    }
+    false
+}
+
+fn read_varint(rest: &mut &[u8]) -> Option<u64> {
+    let mut value = 0u64;
+    for (index, byte) in rest.iter().enumerate().take(10) {
+        value |= u64::from(byte & 0x7f) << (index * 7);
+        if byte & 0x80 == 0 {
+            *rest = &rest[index + 1..];
+            return Some(value);
+        }
+    }
+    None
+}
+
+fn read_tag(rest: &mut &[u8]) -> Option<(u64, u64)> {
+    let tag = read_varint(rest)?;
+    Some((tag >> 3, tag & 0x7))
+}
+
+fn read_bytes<'a>(rest: &mut &'a [u8]) -> Option<&'a [u8]> {
+    let length = usize::try_from(read_varint(rest)?).ok()?;
+    let (head, tail) = rest.split_at_checked(length)?;
+    *rest = tail;
+    Some(head)
+}
+
+fn skip_field(rest: &mut &[u8], wire: u64) -> bool {
+    match wire {
+        WIRE_VARINT => read_varint(rest).is_some(),
+        WIRE_FIXED64 => advance(rest, 8),
+        WIRE_BYTES => read_bytes(rest).is_some(),
+        WIRE_FIXED32 => advance(rest, 4),
+        // Wire types 3 and 4 are proto2 groups, which neither Mosh proto
+        // uses, and the rest are not wire types at all.  Stop rather than
+        // guess at a length.
+        _ => false,
+    }
+}
+
+fn advance(rest: &mut &[u8], count: usize) -> bool {
+    match rest.split_at_checked(count) {
+        Some((_, tail)) => {
+            *rest = tail;
+            true
+        }
+        None => false,
     }
 }
 
@@ -250,6 +360,84 @@ mod tests {
             message(&[UserInstruction::keystroke(b"ab".to_vec())]),
         );
         assert!(tracker.accept(&older).unwrap().events.is_empty());
+    }
+
+    /// A keep-alive as the client encodes it: `UserMessage.instruction`
+    /// holding `Instruction` field 20.  Written out by hand because the
+    /// point is to track the wire, not `moshcatty`'s encoder, which has
+    /// no idea the field exists.
+    fn keep_alive(seq: u8) -> Vec<u8> {
+        vec![0x0A, 0x03, 0xA0, 0x01, seq]
+    }
+
+    #[test]
+    fn a_keep_alive_is_answered_without_reaching_the_pty() {
+        let mut tracker = UserStreamTracker::new();
+        let accepted = tracker.accept(&state(0, 1, 0, keep_alive(1))).unwrap();
+        assert!(accepted.keep_alive);
+        assert!(accepted.events.is_empty(), "a keep-alive is not input");
+        assert_eq!(
+            tracker.committed_events, 0,
+            "a keep-alive must not move the committed prefix, or every \
+             later cumulative diff is skipped by one event"
+        );
+
+        // And the input either side of it still lands exactly once.
+        let typed = tracker
+            .accept(&state(
+                1,
+                2,
+                0,
+                message(&[UserInstruction::keystroke(b"ls".to_vec())]),
+            ))
+            .unwrap();
+        assert_eq!(
+            typed.events,
+            vec![UserEvent::Byte(b'l'), UserEvent::Byte(b's')]
+        );
+        assert!(!typed.keep_alive);
+    }
+
+    #[test]
+    fn a_keep_alive_beside_typing_yields_only_the_typing() {
+        let mut tracker = UserStreamTracker::new();
+        // One diff carrying a keystroke instruction and a keep-alive,
+        // which is what a keep-alive minted in the same tick as input
+        // looks like on the wire.
+        let mut diff = message(&[UserInstruction::keystroke(b"a".to_vec())]);
+        diff.extend_from_slice(&keep_alive(4));
+        let accepted = tracker.accept(&state(0, 1, 0, diff)).unwrap();
+        assert!(accepted.keep_alive);
+        assert_eq!(accepted.events, vec![UserEvent::Byte(b'a')]);
+        assert_eq!(tracker.committed_events, 1);
+    }
+
+    #[test]
+    fn an_ordinary_diff_is_not_mistaken_for_a_keep_alive() {
+        assert!(!carries_keep_alive(&[]));
+        assert!(!carries_keep_alive(&message(&[
+            UserInstruction::keystroke(b"ls -l\r".to_vec())
+        ])));
+        assert!(!carries_keep_alive(&message(&[UserInstruction::resize(
+            120, 40
+        )])));
+        // Some other extension nobody here knows: field 21, varint.
+        assert!(!carries_keep_alive(&[0x0A, 0x03, 0xA8, 0x01, 0x01]));
+        // Truncated rather than absent. The scan gives up; `decode_events`
+        // is what reports the diff as malformed.
+        assert!(!carries_keep_alive(&[0x0A, 0x03, 0xA0]));
+        assert!(!carries_keep_alive(&[0x0A, 0x7F]));
+    }
+
+    #[test]
+    fn a_keep_alive_survives_a_long_keystroke_field_in_front_of_it() {
+        // The walk must skip a length-delimited field by its length
+        // rather than scanning through it, or a paste containing the
+        // bytes 0xA0 0x01 would read as a keep-alive.
+        let mut diff = message(&[UserInstruction::keystroke(vec![0xA0, 0x01, 0x09])]);
+        assert!(!carries_keep_alive(&diff));
+        diff.extend_from_slice(&keep_alive(9));
+        assert!(carries_keep_alive(&diff));
     }
 
     #[test]

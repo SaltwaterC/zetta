@@ -13,7 +13,7 @@ doctest = false
 [dependencies]
 anyhow = "1"
 crossterm = "0.29"
-mosh-rs = { git = "https://github.com/wilsonglasser/mosh-rs", rev = "90b37125f5e4a598be91dec37d23921b6865276e" }
+mosh-rs = { path = "../mosh_rs" }
 shlex = "1.3.0"
 
 [target.'cfg(unix)'.dependencies]

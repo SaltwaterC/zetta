@@ -17,7 +17,7 @@ use std::{
 };
 
 use anyhow::{Context as _, Result};
-use mosh_rs::{Base64Key, DisplayPreference};
+use mosh_rs::{Base64Key, DisplayPreference, sender::KEEP_ALIVE_DEFAULT_MS};
 
 use crate::{
     client::{self, SessionSettings},
@@ -139,6 +139,9 @@ struct MoshCommand {
     prediction_explicit: bool,
     predict_overwrite: bool,
     predict_overwrite_explicit: bool,
+    /// `-k`/`--keep-alive`: how long the session may go without sending
+    /// before it emits a keep-alive, or `None` for Mosh's own heartbeat.
+    keep_alive: Option<u64>,
     family: AddressFamily,
     port: Option<PortRequest>,
     bind_server: BindServer,
@@ -165,6 +168,7 @@ impl Default for MoshCommand {
             prediction_explicit: false,
             predict_overwrite: false,
             predict_overwrite_explicit: false,
+            keep_alive: None,
             family: AddressFamily::default(),
             port: None,
             bind_server: BindServer::default(),
@@ -581,16 +585,18 @@ fn launch_endpoint(command: &MoshCommand, host: &str, endpoint: &BootstrapEndpoi
         return launch_external_client(command, Path::new(client_path), host, endpoint);
     }
     let key = Base64Key::from_printable(&endpoint.key).context("invalid MOSH CONNECT key")?;
-    client::run_session_with_settings(
-        host,
-        endpoint.port,
-        &key,
-        SessionSettings {
-            prediction: command.prediction.display_preference(),
-            predict_overwrite: command.predict_overwrite,
-            initialize_terminal: command.init,
-        },
-    )
+    client::run_session_with_settings(host, endpoint.port, &key, endpoint_settings(command))
+}
+
+/// The launcher options the bundled endpoint client consumes. Named so
+/// it can be asserted without opening a socket.
+fn endpoint_settings(command: &MoshCommand) -> SessionSettings {
+    SessionSettings {
+        prediction: command.prediction.display_preference(),
+        predict_overwrite: command.predict_overwrite,
+        initialize_terminal: command.init,
+        keep_alive: command.keep_alive,
+    }
 }
 
 fn launch_external_client(
@@ -608,6 +614,14 @@ fn launch_external_client(
         process.env("MOSH_PREDICTION_OVERWRITE", "yes");
     } else {
         process.env_remove("MOSH_PREDICTION_OVERWRITE");
+    }
+    // An external client is not necessarily Zosh, so the keep-alive
+    // travels the way Mosh's own settings do rather than as an argument
+    // stock `mosh-client` would reject.
+    if let Some(interval) = command.keep_alive {
+        process.env(client::KEEP_ALIVE_ENV, interval.to_string());
+    } else {
+        process.env_remove(client::KEEP_ALIVE_ENV);
     }
     if !command.init {
         process.env("MOSH_NO_TERM_INIT", "1");
@@ -1022,6 +1036,7 @@ struct SeenOptions {
     ssh_pty: bool,
     init: bool,
     remote_ip: bool,
+    keep_alive: bool,
 }
 
 fn parse_args(arguments: impl IntoIterator<Item = std::ffi::OsString>) -> Result<MoshCommand> {
@@ -1096,6 +1111,7 @@ fn parse_flag(
             command.predict_overwrite = false;
             command.predict_overwrite_explicit = true;
         }
+        "--keep-alive" | "-k" => set_keep_alive(command, seen, KEEP_ALIVE_DEFAULT_MS)?,
         "-4" => set_family(command, seen, AddressFamily::Inet)?,
         "-6" => set_family(command, seen, AddressFamily::Inet6)?,
         "--ssh-pty" => {
@@ -1157,6 +1173,9 @@ fn parse_attached_value(
             Ok(())
         }),
         "--predict" => set_prediction(command, seen, parse_prediction(value)?),
+        "--keep-alive" | "-k" => {
+            set_keep_alive(command, seen, client::parse_keep_alive_interval(value)?)
+        }
         "-p" | "--port" => set_port(command, seen, value),
         "--family" => set_family(command, seen, parse_family(value)?),
         "--bind-server" => set_once(&mut seen.bind_server, "--bind-server", || {
@@ -1235,6 +1254,13 @@ fn set_prediction(
     seen.prediction = true;
     command.prediction = prediction;
     command.prediction_explicit = true;
+    Ok(())
+}
+
+fn set_keep_alive(command: &mut MoshCommand, seen: &mut SeenOptions, interval: u64) -> Result<()> {
+    anyhow::ensure!(!seen.keep_alive, "duplicate --keep-alive");
+    seen.keep_alive = true;
+    command.keep_alive = Some(interval);
     Ok(())
 }
 
@@ -1423,6 +1449,11 @@ pub(crate) fn help_text() -> &'static str {
         --predict=experimental  aggressively echo even when incorrect
 
 -o      --predict-overwrite     prediction overwrites instead of inserting
+
+-k      --keep-alive            hold the session to a packet every 500 ms,
+                                so aggressive WiFi power management cannot
+                                park the radio between Mosh's 3 s heartbeats
+        --keep-alive=MS         use MS milliseconds instead (20-3000)
 
 -4      --family=inet           use IPv4 only
 -6      --family=inet6           use IPv6 only

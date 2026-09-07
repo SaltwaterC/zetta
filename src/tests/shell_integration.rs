@@ -677,12 +677,15 @@ fn mosh_integration_is_conditional_and_has_full_client_completion() {
 fn mosh_completion_covers_every_option_the_zosh_launcher_accepts() {
     let bash = ShellIntegration::Bash.script();
     assert!(bash.contains("--no-predict-overwrite"));
+    assert!(bash.contains("-k --keep-alive"));
     assert!(bash.contains("-p --port --bind-server"));
     assert!(bash.contains("-h --help -V --version --"));
     assert_eq!(bash.matches("--no-predict-overwrite").count(), 3); // mosh x2 (option/empty current) + zosh
 
     let fish = ShellIntegration::Fish.script();
     assert!(fish.contains("-l no-predict-overwrite"));
+    assert!(fish.contains("-l keep-alive"));
+    assert!(fish.contains("-s k -d 'Send a keep-alive packet every 500 ms'"));
     assert!(fish.contains("-s p -r"));
     assert!(fish.contains("-l bind-server -r -a 'ssh any'"));
     assert!(fish.contains("-s h -d 'Print help'"));
@@ -690,13 +693,14 @@ fn mosh_completion_covers_every_option_the_zosh_launcher_accepts() {
     assert!(fish.contains("function __zetta_mosh_host_given"));
 
     let powershell = ShellIntegration::PowerShell.script();
-    assert!(powershell.contains("'--no-predict-overwrite', '-4'"));
+    assert!(powershell.contains("'--no-predict-overwrite', '-k', '--keep-alive', '-4'"));
     assert!(powershell.contains("'-p', '--port', '--bind-server'"));
     assert!(powershell.contains("'-h', '--help', '-V', '--version', '--'"));
     assert!(powershell.contains("elseif ($previous -eq '--bind-server') { 'ssh', 'any' }"));
 
     let zsh = ShellIntegration::Zsh.script();
     assert!(zsh.contains("--no-predict-overwrite"));
+    assert!(zsh.contains("-k --keep-alive"));
     assert!(zsh.contains("-h --help -V --version --"));
     assert!(zsh.contains("--bind-server) compadd -- ssh any"));
     assert!(zsh.contains("_zmux_ssh_targets"));

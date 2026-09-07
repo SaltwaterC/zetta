@@ -908,6 +908,7 @@ function __zetta_long_options
                 --predict 'Prediction mode' \
                 -o 'Allow predictive overwrites' \
                 --predict-overwrite 'Allow predictive overwrites' \
+                --keep-alive 'Send a keep-alive packet every 500 ms' \
                 --family 'Address family' \
                 --port 'Mosh server port or range' \
                 --bind-server 'Mosh server bind address' \
@@ -1162,6 +1163,8 @@ complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_give
 complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_given' -s o -d 'Allow predictive overwrites'
 complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_given' -l predict-overwrite -d 'Allow predictive overwrites'
 complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_given' -l no-predict-overwrite -d 'Do not overwrite predictions'
+complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_given' -s k -d 'Send a keep-alive packet every 500 ms'
+complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_given' -l keep-alive -d 'Send a keep-alive packet every 500 ms'
 complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_given' -s a -d 'Always predict'
 complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_given' -s n -d 'Never predict'
 complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_given' -s 4 -d 'Force IPv4'
@@ -1198,6 +1201,8 @@ complete -c zosh -n 'not __zetta_mosh_host_given' -l predict -r -a 'adaptive alw
 complete -c zosh -n 'not __zetta_mosh_host_given' -s o -d 'Allow predictive overwrites'
 complete -c zosh -n 'not __zetta_mosh_host_given' -l predict-overwrite -d 'Allow predictive overwrites'
 complete -c zosh -n 'not __zetta_mosh_host_given' -l no-predict-overwrite -d 'Do not overwrite predictions'
+complete -c zosh -n 'not __zetta_mosh_host_given' -s k -d 'Send a keep-alive packet every 500 ms'
+complete -c zosh -n 'not __zetta_mosh_host_given' -l keep-alive -d 'Send a keep-alive packet every 500 ms'
 complete -c zosh -n 'not __zetta_mosh_host_given' -s a -d 'Always predict'
 complete -c zosh -n 'not __zetta_mosh_host_given' -s n -d 'Never predict'
 complete -c zosh -n 'not __zetta_mosh_host_given' -s 4 -d 'Force IPv4'
@@ -1226,6 +1231,8 @@ if set -q __ZETTA_MOSH_WRAPPER
     complete -c mosh -n 'not __zetta_mosh_host_given' -s o -d 'Allow predictive overwrites'
     complete -c mosh -n 'not __zetta_mosh_host_given' -l predict-overwrite
     complete -c mosh -n 'not __zetta_mosh_host_given' -l no-predict-overwrite
+    complete -c mosh -n 'not __zetta_mosh_host_given' -s k
+    complete -c mosh -n 'not __zetta_mosh_host_given' -l keep-alive
     complete -c mosh -n 'not __zetta_mosh_host_given' -s a
     complete -c mosh -n 'not __zetta_mosh_host_given' -s n
     complete -c mosh -n 'not __zetta_mosh_host_given' -s 4

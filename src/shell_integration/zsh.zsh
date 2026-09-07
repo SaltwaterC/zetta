@@ -445,7 +445,7 @@ _zmux_mosh_candidates() {
             }
         ' "$config" 2>/dev/null)
     fi
-    for option in --client --server --predict -a -n -o --predict-overwrite --no-predict-overwrite -4 -6 --family -p --port --bind-server --ssh --ssh-pty --no-ssh-pty --init --no-init --local --experimental-remote-ip -h --help -V --version --; do
+    for option in --client --server --predict -a -n -o --predict-overwrite --no-predict-overwrite -k --keep-alive -4 -6 --family -p --port --bind-server --ssh --ssh-pty --no-ssh-pty --init --no-init --local --experimental-remote-ip -h --help -V --version --; do
         if [[ $option != -* ]] || _zetta_option_unused "$option"; then
             candidates+=("$option")
         fi
@@ -663,7 +663,7 @@ _zetta() {
                 if (( delimiter )); then
                     _zmux_ssh_targets
                 elif [[ $words[CURRENT] == -* ]]; then
-                    _zetta_options --client --server --predict -a -n -o --predict-overwrite --no-predict-overwrite -4 -6 --family -p --port --bind-server --ssh --ssh-pty --no-ssh-pty --init --no-init --local --experimental-remote-ip -h --help -V --version --
+                    _zetta_options --client --server --predict -a -n -o --predict-overwrite --no-predict-overwrite -k --keep-alive -4 -6 --family -p --port --bind-server --ssh --ssh-pty --no-ssh-pty --init --no-init --local --experimental-remote-ip -h --help -V --version --
                 else
                     _zmux_mosh_candidates
                 fi
@@ -1323,7 +1323,7 @@ _zosh() {
             if (( delimiter )); then
                 _zmux_ssh_targets
             elif [[ $words[CURRENT] == -* ]]; then
-                _zetta_options --client --server --predict -a -n -o --predict-overwrite --no-predict-overwrite -4 -6 --family -p --port --bind-server --ssh --ssh-pty --no-ssh-pty --init --no-init --local --experimental-remote-ip -h --help -V --version --
+                _zetta_options --client --server --predict -a -n -o --predict-overwrite --no-predict-overwrite -k --keep-alive -4 -6 --family -p --port --bind-server --ssh --ssh-pty --no-ssh-pty --init --no-init --local --experimental-remote-ip -h --help -V --version --
             else
                 _zmux_mosh_candidates
             fi

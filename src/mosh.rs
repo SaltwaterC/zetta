@@ -79,6 +79,9 @@ pub(crate) struct MoshCommand {
     pub(crate) prediction: PredictionMode,
     pub(crate) prediction_explicit: bool,
     pub(crate) predict_overwrite: bool,
+    /// `-k`/`--keep-alive`, in milliseconds. Validated here and forwarded
+    /// verbatim; `zosh` owns what it does with it.
+    pub(crate) keep_alive: Option<u64>,
     pub(crate) family: AddressFamily,
     pub(crate) port: Option<PortRequest>,
     pub(crate) bind_server: BindServer,
@@ -107,6 +110,7 @@ impl Default for MoshCommand {
             prediction: PredictionMode::Adaptive,
             prediction_explicit: false,
             predict_overwrite: false,
+            keep_alive: None,
             family: AddressFamily::PreferInet,
             port: None,
             bind_server: BindServer::Ssh,
@@ -228,6 +232,24 @@ pub(crate) fn parse_family(value: &str) -> Result<AddressFamily> {
             "invalid address family {value:?}; expected inet, inet6, auto, all, prefer-inet, or prefer-inet6"
         ),
     }
+}
+
+/// Bounds on `--keep-alive=MS`, matching `zosh`'s own.  Below Mosh's
+/// minimum frame interval a keep-alive cannot go out any sooner; above
+/// its unassisted heartbeat there is nothing left to ask for.
+pub(crate) const KEEP_ALIVE_DEFAULT_MS: u64 = 500;
+const KEEP_ALIVE_MIN_MS: u64 = 20;
+const KEEP_ALIVE_MAX_MS: u64 = 3000;
+
+pub(crate) fn parse_keep_alive_interval(value: &str) -> Result<u64> {
+    let interval = value
+        .parse::<u64>()
+        .with_context(|| format!("invalid keep-alive interval {value:?}"))?;
+    anyhow::ensure!(
+        (KEEP_ALIVE_MIN_MS..=KEEP_ALIVE_MAX_MS).contains(&interval),
+        "keep-alive interval must be between {KEEP_ALIVE_MIN_MS} and {KEEP_ALIVE_MAX_MS} milliseconds"
+    );
+    Ok(interval)
 }
 
 pub(crate) fn parse_remote_ip(value: &str) -> Result<RemoteIpMode> {

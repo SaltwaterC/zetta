@@ -63,6 +63,13 @@ only when the remote mosh-server is clearly missing or unsupported. Native
 background sessions and zmux remote transport remain SSH because they need
 framed session streams.
 
+Pass `-k`/`--keep-alive` when a link's WiFi power management stalls an idle
+session: it holds the connection to a packet in each direction every 500 ms
+(`--keep-alive=MS` to choose another interval) instead of Mosh's three-second
+heartbeat, and costs nothing while the session is busy. It works against an
+unmodified `mosh-server` as well as the bundled one; see
+[the protocol note](crates/zosh/PROTOCOL.md).
+
 Zosh intentionally defaults to `--no-init`, unlike stock `mosh`: it keeps the
 current terminal screen and its scrollback instead of entering an alternate
 screen. Use `zosh --init USER@HOST` when the stock Mosh terminal behavior is
