@@ -464,6 +464,17 @@ function __zetta_pane_wait
     and test "$words[3]" = wait
 end
 
+# `__fish_seen_argument --` cannot be used for this: its `argparse` call
+# treats a literal `--` in its own arguments as an end-of-options marker and
+# silently drops it, so it can never report a bare `--` as seen.
+function __zetta_pane_wait_after_delimiter
+    set -l words (commandline -opc)
+    test (count $words) -ge 4
+    and test "$words[2]" = pane
+    and test "$words[3]" = wait
+    and contains -- -- $words[4..-1]
+end
+
 function __zetta_run_pane_labels
     set -l current (commandline -ct)
     set -l prefix ''
@@ -479,6 +490,29 @@ function __zetta_run_pane_labels
         contains -- "$label" $selected; and continue
         printf '%s%s\n' "$prefix" "$label"
     end
+end
+
+# Everything after `--` is the wrapped command's own argv, so reconstruct it
+# and hand completion off to fish's normal dispatcher for that command rather
+# than offering nothing.
+function __zetta_pane_wait_remaining_args
+    set -l tokens (commandline -opc) (commandline -ct)
+    set -l delimiter_index 0
+    for i in (seq (count $tokens))
+        if test "$tokens[$i]" = --
+            set delimiter_index $i
+            break
+        end
+    end
+    test $delimiter_index -gt 0
+    or return 1
+    set -e tokens[1..$delimiter_index]
+    string join0 -- $tokens
+end
+
+function __zetta_complete_pane_wait_subcommand
+    set -l args (__zetta_pane_wait_remaining_args | string split0)
+    __fish_complete_subcommand --commandline $args
 end
 
 # zetta-default/zetta-ok/zetta-alarm/zetta-gong are bundled tones Zetta plays itself, so
@@ -1277,11 +1311,12 @@ complete -c zetta -s o -r -n '__fish_seen_subcommand_from pane; and not __zetta_
 complete -c zetta -s S -r -a 'sm base lg xl 2xl 3xl' -n '__fish_seen_subcommand_from pane; and not __zetta_pane_wait; and __zetta_short_option -S'
 complete -c zetta -s O -r -n '__fish_seen_subcommand_from pane; and not __zetta_pane_wait; and __zetta_short_option -O'
 complete -c zetta -s c -r -a 'ZETTA_OVERLAY_COLORS' -n '__fish_seen_subcommand_from pane; and not __zetta_pane_wait; and __zetta_short_option -c'
-complete -c zetta -n '__zetta_pane_wait; and not __fish_seen_argument --' -r -a '(__zetta_run_pane_labels)' -d 'Wait for comma-separated pane labels'
-complete -c zetta -n '__zetta_pane_wait; and not __fish_seen_argument --' -l allow-failure -d 'Continue after a dependency fails'
-complete -c zetta -n '__zetta_pane_wait; and not __fish_seen_argument --' -l help -d 'Print help'
-complete -c zetta -n '__zetta_pane_wait; and not __fish_seen_argument --' -a '(__zetta_long_options pane_wait)'
-complete -c zetta -s a -n '__zetta_pane_wait; and not __fish_seen_argument --; and __zetta_short_option -a'
+complete -c zetta -n '__zetta_pane_wait; and not __zetta_pane_wait_after_delimiter' -r -a '(__zetta_run_pane_labels)' -d 'Wait for comma-separated pane labels'
+complete -c zetta -n '__zetta_pane_wait; and not __zetta_pane_wait_after_delimiter' -l allow-failure -d 'Continue after a dependency fails'
+complete -c zetta -n '__zetta_pane_wait; and not __zetta_pane_wait_after_delimiter' -l help -d 'Print help'
+complete -c zetta -n '__zetta_pane_wait; and not __zetta_pane_wait_after_delimiter' -a '(__zetta_long_options pane_wait)'
+complete -c zetta -s a -n '__zetta_pane_wait; and not __zetta_pane_wait_after_delimiter; and __zetta_short_option -a'
+complete -c zetta -n '__zetta_pane_wait; and __zetta_pane_wait_after_delimiter' -a '(__zetta_complete_pane_wait_subcommand)'
 complete -c zetta -n '__fish_seen_subcommand_from edit' -l delete-after -d 'Delete a managed buffer after editing'
 complete -c zetta -n '__fish_seen_subcommand_from edit' -l help -d 'Print help'
 complete -c zetta -n '__fish_seen_subcommand_from edit' -a '(__zetta_long_options edit)'

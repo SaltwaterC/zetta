@@ -685,17 +685,25 @@ _zetta() {
     fi
 
     if [[ $pane_operation == wait ]]; then
-        local wait_delimiter=0 wait_dependency=0 argument
+        local wait_delimiter=0 wait_dependency=0 wait_delimiter_index=-1 argument
         for (( index = 4; index < CURRENT; index++ )); do
             argument=${words[index]}
             if [[ $argument == -- ]]; then
                 wait_delimiter=1
+                wait_delimiter_index=$index
                 break
             elif [[ $argument != --allow-failure && $argument != -a ]]; then
                 wait_dependency=1
             fi
         done
         if (( wait_delimiter )); then
+            # Everything after the delimiter is the wrapped command's own
+            # argv, so shift it into position and let zsh's own dispatcher
+            # complete it exactly as if `zetta pane wait ... --` were absent.
+            local wait_offset=$(( wait_delimiter_index + 1 ))
+            words=( "${words[@]:$((wait_offset - 1))}" )
+            (( CURRENT -= wait_offset - 1 ))
+            _normal
             return
         elif [[ ${words[CURRENT]} == -* ]]; then
             _zetta_options --allow-failure --help --

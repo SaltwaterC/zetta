@@ -55,13 +55,25 @@ pub(super) fn run_wait_command(command: PaneWaitCommand) -> Result<()> {
             command: command.command,
         },
     )?;
-    let child_status = std::process::Command::new(&connection.command[0])
-        .args(&connection.command[1..])
+    let child_status = wait_command_process(&Shell::System, &connection.command)
         .status()
         .with_context(|| format!("failed to start command {:?}", connection.command[0]))?;
     let exit_code = child_status.code();
     connection.complete(exit_code)?;
     std::process::exit(exit_code.unwrap_or(1));
+}
+
+/// Builds the child process for `zetta pane wait`'s wrapped command.
+///
+/// Routed through `shell` (rather than exec'd directly) so a shell alias,
+/// function, or builtin the wrapped command names resolves the same way it
+/// would if typed into the pane's own interactive shell; the command's argv
+/// still arrives at the target program unmangled, because `ShellBuilder`
+/// quotes each element as an inert shell literal rather than concatenating
+/// raw text.
+fn wait_command_process(shell: &Shell, command: &[String]) -> std::process::Command {
+    ShellBuilder::new(shell, cfg!(windows))
+        .build_std_command(Some(command[0].clone()), &command[1..])
 }
 
 /// A registered project command, run in the project the current directory

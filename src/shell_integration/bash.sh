@@ -611,18 +611,30 @@ _zetta_complete() {
     }
 
     if [[ $pane_operation == wait ]]; then
-        local wait_delimiter=0 wait_dependency=0 argument
+        local wait_delimiter=0 wait_dependency=0 wait_delimiter_index=-1 argument
         for (( index = 3; index < COMP_CWORD; index++ )); do
             argument=${COMP_WORDS[index]}
             if [[ $argument == -- ]]; then
                 wait_delimiter=1
+                wait_delimiter_index=$index
                 break
             elif [[ $argument != --allow-failure && $argument != -a ]]; then
                 wait_dependency=1
             fi
         done
         if (( wait_delimiter )); then
-            COMPREPLY=()
+            # Everything after the delimiter is the wrapped command's own
+            # argv, so hand completion off to it rather than offer nothing:
+            # delegate to bash-completion's dispatcher when it is loaded, and
+            # otherwise approximate plain shell completion ourselves.
+            local wait_offset=$(( wait_delimiter_index + 1 ))
+            if declare -F _command_offset >/dev/null; then
+                _command_offset "$wait_offset"
+            elif (( wait_offset == COMP_CWORD )); then
+                COMPREPLY=( $(compgen -A command -- "$current") )
+            else
+                COMPREPLY=( $(compgen -f -- "$current") )
+            fi
         elif [[ $current == -* ]]; then
             _zetta_compgen '--allow-failure --help --'
         elif [[ $previous == wait || $previous == --allow-failure || $previous == -a || $current == *,* || $wait_dependency == 0 ]]; then

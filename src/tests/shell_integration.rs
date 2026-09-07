@@ -145,7 +145,7 @@ fn supported_shells_generate_completion_and_tftp_shortcut() {
 }
 
 #[test]
-fn bash_pane_wait_completion_fetches_origin_pane_labels_and_preserves_commas() {
+fn bash_pane_wait_completion_labels_then_delegates_to_the_wrapped_command() {
     use std::io::Write as _;
     use std::process::Stdio;
 
@@ -156,7 +156,7 @@ fn bash_pane_wait_completion_fetches_origin_pane_labels_and_preserves_commas() {
 
     let script = ShellIntegration::Bash.script();
     let driver = format!(
-        "{script}\nprintf '\\n'\nzetta() {{ if [[ $1 == pane && $2 == --list ]]; then printf '%s\\n' api db deploy; fi; }}\nCOMP_WORDS=(zetta pane wait '')\nCOMP_CWORD=3\n_zetta_complete\nprintf 'first:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zetta pane wait api,)\nCOMP_CWORD=3\n_zetta_complete\nprintf 'second:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zetta pane wait api -- '')\nCOMP_CWORD=5\n_zetta_complete\nprintf 'after-delimiter:%s\\n' \"${{COMPREPLY[@]}}\"\n"
+        "{script}\nprintf '\\n'\nzetta() {{ if [[ $1 == pane && $2 == --list ]]; then printf '%s\\n' api db deploy; fi; }}\nCOMP_WORDS=(zetta pane wait '')\nCOMP_CWORD=3\n_zetta_complete\nprintf 'first:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zetta pane wait api,)\nCOMP_CWORD=3\n_zetta_complete\nprintf 'second:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zetta pane wait api -- tru)\nCOMP_CWORD=5\n_zetta_complete\nprintf 'after-delimiter-command:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zetta pane wait api -- git Carg)\nCOMP_CWORD=6\n_zetta_complete\nprintf 'after-delimiter-arg:%s\\n' \"${{COMPREPLY[@]}}\"\n"
     );
     let mut child = bash_command()
         .args(["--noprofile", "--norc"])
@@ -189,7 +189,105 @@ fn bash_pane_wait_completion_fetches_origin_pane_labels_and_preserves_commas() {
     assert!(completions.lines().any(|line| line == "second:api,db"));
     assert!(completions.lines().any(|line| line == "second:api,deploy"));
     assert!(!completions.lines().any(|line| line == "second:api,api"));
-    assert!(completions.lines().any(|line| line == "after-delimiter:"));
+    // Past the `--`, completion must behave as if `zetta pane wait ... --`
+    // were not on the command line at all: the wrapped command's own name
+    // completes normally (here, against Bash's builtin/PATH commands)...
+    assert!(
+        completions
+            .lines()
+            .any(|line| line == "after-delimiter-command:true"),
+        "the wrapped command's own name should complete normally past the delimiter: {completions}"
+    );
+    assert!(
+        !completions
+            .lines()
+            .any(|line| line == "after-delimiter-command:api"),
+        "pane labels must not be offered past the delimiter: {completions}"
+    );
+    // ...and, once that command is named, its own arguments fall back to
+    // plain file completion rather than going silent.
+    assert!(
+        completions
+            .lines()
+            .any(|line| line == "after-delimiter-arg:Cargo.toml"),
+        "the wrapped command's arguments should fall back to file completion past the delimiter: {completions}"
+    );
+}
+
+// zsh's `_normal` dispatch can only run inside a real completion context (it
+// panics with "can only be called from completion function" otherwise), so
+// unlike the Bash and Fish variants this is asserted statically rather than
+// by driving a live completion, matching how `_files` is covered elsewhere
+// in this file (for example `vi_integration_is_conditional_and_has_cli_completion`).
+#[test]
+fn zsh_pane_wait_completion_shifts_words_and_delegates_past_the_delimiter() {
+    let zsh = ShellIntegration::Zsh.script();
+    assert!(zsh.contains("if (( wait_delimiter )); then"));
+    let wait_block = zsh
+        .split("if [[ $pane_operation == wait ]]; then")
+        .nth(1)
+        .expect("missing pane wait completion block");
+    let wait_block = &wait_block[..wait_block
+        .find("\n    fi\n")
+        .expect("missing end of pane wait completion block")];
+    assert!(wait_block.contains("words=( \"${words[@]:$((wait_offset - 1))}\" )"));
+    assert!(wait_block.contains("(( CURRENT -= wait_offset - 1 ))"));
+    assert!(wait_block.contains("_normal"));
+}
+
+#[test]
+fn fish_pane_wait_completion_labels_then_delegates_to_the_wrapped_command() {
+    if clean_shell_command("fish")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        return;
+    }
+
+    let script = ShellIntegration::Fish.script();
+    let script_file = tempfile::NamedTempFile::new().unwrap();
+    fs::write(script_file.path(), &script).unwrap();
+
+    let complete = |line: &str| {
+        let output = clean_shell_command("fish")
+            .args([
+                "--no-config",
+                "-c",
+                "source $argv[1]; complete -C \"$argv[2]\"",
+                "--",
+                script_file.path().to_str().unwrap(),
+                line,
+            ])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    };
+
+    let completions = complete("zetta pane wait a");
+    assert!(
+        completions.lines().any(|line| line.starts_with("--")),
+        "missing pane wait options before the delimiter: {completions}"
+    );
+
+    let completions = complete("zetta pane wait api -- tru");
+    assert!(
+        completions.lines().any(|line| line.starts_with("true")),
+        "the wrapped command's own name should complete normally past the delimiter: {completions}"
+    );
+    assert!(
+        !completions.lines().any(|line| line.starts_with("api")),
+        "pane labels must not be offered past the delimiter: {completions}"
+    );
+
+    let completions = complete("zetta pane wait api -- git Carg");
+    assert!(
+        completions
+            .lines()
+            .any(|line| line.starts_with("Cargo.toml")),
+        "the wrapped command's arguments should fall back to file completion past the delimiter: {completions}"
+    );
 }
 
 #[test]
