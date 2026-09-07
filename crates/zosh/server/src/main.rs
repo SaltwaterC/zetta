@@ -3,6 +3,7 @@ mod lifecycle;
 mod protocol;
 mod server;
 mod terminal_state;
+mod timing;
 mod user_stream;
 
 use anyhow::Result;

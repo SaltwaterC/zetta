@@ -97,6 +97,59 @@ that predates a `--no-init` session, just as the shell's request does over SSH.
 
 ## Verification
 
+### Opt-in timing diagnostics
+
+Set `MOSH_SERVER_TIMING_LOG` **on the server** to a new file in an existing
+directory. The file must not already exist; on Unix it is created with mode
+0600. For example, from the client:
+
+```sh
+zosh --server='env MOSH_SERVER_TIMING_LOG=/tmp/zosh-timing-1.log /absolute/path/to/mosh-server' mac-host
+```
+
+The reference `mosh` wrapper accepts the same `--server` value. Rebuild the
+remote Rust server first and open a new session. Use a different filename for
+each session. Logging survives server daemonization and does not use stdout,
+which remains reserved for the bootstrap protocol.
+
+Reproduce the pause during normal use, note the approximate time and action,
+then retrieve the log from the Mac. Records contain elapsed microseconds,
+an event name, two numeric fields (`a`, `b`), and a cumulative dropped-record
+count. The header gives the process, platform, and approximate Unix start time.
+No typed text, terminal output, session keys, or peer addresses are logged.
+
+| Event | a | b |
+| --- | --- | --- |
+| `input_state` | accepted client state | acknowledged server state |
+| `input_apply` | client frame | new user-event count |
+| `input_queued`, `input_written`, `input_written_observed` | client frame | 0 |
+| `pty_write_begin`, `pty_write_end`, `pty_read`, `pty_output_apply` | byte count | 0 |
+| `udp_authenticated`, `udp_sent` | datagram byte count | 0 |
+| `host_update` | queued server state | echo acknowledgement |
+| `udp_send_error` | OS error code, or 0 | 0 |
+| `loop_gap`, `*_slow` | elapsed microseconds (at least 100 ms) | 0 |
+| `heartbeat`, `session_start`, `child_exited`, `pty_eof`, `pty_write_error` | 0 | 0 |
+| `session_end` | 1 on error, otherwise 0 | 0 |
+
+Compare write begin/end to locate a blocked PTY write, read/apply to locate
+reader-queue delays, and host-update/send to locate transport pacing. Frame
+records connect accepted input to writer completion. A heartbeat is emitted
+each second that the main loop runs; `loop_gap` includes work and sleeping.
+Slow-phase records identify PTY draining, input processing, screen diffing,
+transport processing/sending, or child polling that takes at least 100 ms.
+A successful UDP send only means the local OS accepted it, not that the client
+received it.
+
+Logging uses a bounded queue and a separate disk writer; full queues drop
+records rather than blocking input. Timestamps are captured on producer
+threads, so adjacent lines can arrive slightly out of timestamp order.
+Logging stops at approximately 64 MiB and marks the limit in the file.
+Disk errors stop logging without terminating the session. Unset the variable
+to disable diagnostics. Abrupt termination can lose queued tail records;
+normal shutdown allows up to 250 ms to drain them.
+
+### Scrollback verification
+
 With a patched server built on the test machine, run from `crates/zosh`:
 
 ```sh
