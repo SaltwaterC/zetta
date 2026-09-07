@@ -21,6 +21,7 @@ const INITIAL_ROWS: u16 = 24;
 const INITIAL_COLS: u16 = 80;
 const ASSOCIATION_TIMEOUT: Duration = Duration::from_secs(60);
 const LOOP_SLEEP: Duration = Duration::from_millis(5);
+const IO_BUDGET: Duration = Duration::from_millis(2);
 // Match stock Mosh's late acknowledgement grace period. PTY output is not
 // proof that the shell has processed a particular input frame.
 const ECHO_DELAY: Duration = Duration::from_millis(50);
@@ -99,6 +100,10 @@ fn serve_session(cfg: Config, socket: UdpSocket, mut transport: ServerTransport)
     let master = pair.master;
 
     let (pty_event_tx, pty_event_rx) = mpsc::sync_channel::<PtyEvent>(PTY_QUEUE_DEPTH);
+    let pty_event_tx = PtyEventSender {
+        sender: pty_event_tx,
+        consumer: thread::current(),
+    };
     let (pty_write_tx, pty_write_rx) = mpsc::sync_channel::<PtyWrite>(PTY_QUEUE_DEPTH);
     spawn_pty_reader(reader, pty_event_tx.clone());
     spawn_pty_writer(writer, pty_write_rx, pty_event_tx);
@@ -140,7 +145,12 @@ fn serve_session(cfg: Config, socket: UdpSocket, mut transport: ServerTransport)
         // updated only after Mosh crypto accepted the packet, which implements
         // Mosh's IP/port roaming without allowing unauthenticated rebinding.
         let phase = timing::begin();
+        let udp_started = Instant::now();
+        let mut udp_budget_exhausted = true;
         for _ in 0..128 {
+            if udp_started.elapsed() >= IO_BUDGET {
+                break;
+            }
             match socket.recv_from(&mut udp_buf) {
                 Ok((n, addr)) => {
                     let outcome = transport.receive(&udp_buf[..n])?;
@@ -179,7 +189,10 @@ fn serve_session(cfg: Config, socket: UdpSocket, mut transport: ServerTransport)
                         }
                     }
                 }
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    udp_budget_exhausted = false;
+                    break;
+                }
                 Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
                 Err(error) => return Err(error).context("receiving UDP datagram"),
             }
@@ -257,7 +270,12 @@ fn serve_session(cfg: Config, socket: UdpSocket, mut transport: ServerTransport)
             dirty = true;
         }
 
-        thread::sleep(LOOP_SLEEP);
+        // A producer unparks after publishing an event. The park token also
+        // covers events published between draining the queue and this wait.
+        // Never wait when a bounded drain may have left work queued.
+        if !pty.budget_exhausted && !udp_budget_exhausted {
+            thread::park_timeout(LOOP_SLEEP);
+        }
     }
 
     if !child_exited {
@@ -271,6 +289,21 @@ fn serve_session(cfg: Config, socket: UdpSocket, mut transport: ServerTransport)
 struct PtyProgress {
     dirty: bool,
     ended: bool,
+    budget_exhausted: bool,
+}
+
+#[derive(Clone)]
+struct PtyEventSender {
+    sender: SyncSender<PtyEvent>,
+    consumer: thread::Thread,
+}
+
+impl PtyEventSender {
+    fn send(&self, event: PtyEvent) -> Result<(), mpsc::SendError<PtyEvent>> {
+        self.sender.send(event)?;
+        self.consumer.unpark();
+        Ok(())
+    }
 }
 
 fn send_updates(
@@ -316,9 +349,16 @@ fn drain_pty_events(
     echo: &mut EchoAcknowledgements,
     verbose: bool,
 ) -> Result<PtyProgress> {
-    let mut progress = PtyProgress::default();
+    let mut progress = PtyProgress {
+        budget_exhausted: true,
+        ..PtyProgress::default()
+    };
+    let started = Instant::now();
     // Bound work so a noisy process cannot monopolize the network loop.
     for _ in 0..64 {
+        if started.elapsed() >= IO_BUDGET {
+            break;
+        }
         match events.try_recv() {
             Ok(PtyEvent::Output(bytes)) => {
                 timing::record("pty_output_apply", bytes.len() as u64, 0);
@@ -339,13 +379,18 @@ fn drain_pty_events(
                     eprintln!("mosh-server-rs: PTY I/O ended: {error}");
                 }
                 progress.ended = true;
+                progress.budget_exhausted = false;
                 break;
             }
             Ok(PtyEvent::Eof) | Err(TryRecvError::Disconnected) => {
                 progress.ended = true;
+                progress.budget_exhausted = false;
                 break;
             }
-            Err(TryRecvError::Empty) => break,
+            Err(TryRecvError::Empty) => {
+                progress.budget_exhausted = false;
+                break;
+            }
         }
     }
     Ok(progress)
@@ -469,7 +514,7 @@ fn queue_pty_request(tx: &SyncSender<PtyWrite>, request: PtyWrite) -> Result<()>
     }
 }
 
-fn spawn_pty_reader(mut reader: Box<dyn Read + Send>, tx: SyncSender<PtyEvent>) {
+fn spawn_pty_reader(mut reader: Box<dyn Read + Send>, tx: PtyEventSender) {
     thread::spawn(move || {
         let mut buf = [0u8; PTY_CHUNK];
         loop {
@@ -498,7 +543,7 @@ fn spawn_pty_reader(mut reader: Box<dyn Read + Send>, tx: SyncSender<PtyEvent>) 
 fn spawn_pty_writer(
     mut writer: Box<dyn Write + Send>,
     rx: Receiver<PtyWrite>,
-    event_tx: SyncSender<PtyEvent>,
+    event_tx: PtyEventSender,
 ) {
     thread::spawn(move || {
         while let Ok(request) = rx.recv() {

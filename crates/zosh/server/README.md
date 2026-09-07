@@ -99,6 +99,12 @@ that predates a `--no-init` session, just as the shell's request does over SSH.
 
 ### Opt-in timing diagnostics
 
+PTY output and input-write completions wake the server loop immediately.
+UDP and PTY draining each yield after a 2 ms work budget (checked between
+items), retaining their packet/event count limits. A budget-limited pass
+does not take the idle wait. Idle UDP polling still uses a 5 ms timeout;
+individual terminal-processing or transport operations can exceed the budget.
+
 Set `MOSH_SERVER_TIMING_LOG` **on the server** to a new file in an existing
 directory. The file must not already exist; on Unix it is created with mode
 0600. For example, from the client:

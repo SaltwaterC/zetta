@@ -1,4 +1,46 @@
 use super::*;
+
+#[test]
+fn publishing_pty_event_preserves_wakeup_before_park() {
+    // Use a fresh thread so another test cannot leave a park token behind.
+    thread::spawn(|| {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let events = PtyEventSender {
+            sender,
+            consumer: thread::current(),
+        };
+        events.send(PtyEvent::InputWritten(1)).unwrap();
+        let started = Instant::now();
+        thread::park_timeout(Duration::from_secs(2));
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(matches!(receiver.try_recv(), Ok(PtyEvent::InputWritten(1))));
+    })
+    .join()
+    .unwrap();
+}
+
+#[test]
+fn bounded_pty_drain_reports_remaining_work() {
+    let (sender, receiver) = mpsc::sync_channel(128);
+    let (writes, _write_rx) = mpsc::sync_channel(1);
+    for frame in 1..=128 {
+        sender.send(PtyEvent::InputWritten(frame)).unwrap();
+    }
+    let mut terminal = TerminalState::new(24, 80);
+    let mut responder = QueryResponder::new();
+    let mut echo = EchoAcknowledgements::default();
+    let progress = drain_pty_events(
+        &receiver,
+        &mut terminal,
+        &mut responder,
+        &writes,
+        &mut echo,
+        false,
+    )
+    .unwrap();
+    assert!(progress.budget_exhausted);
+    assert!(receiver.try_recv().is_ok());
+}
 use moshcatty::transport::Transport;
 
 #[test]
@@ -79,7 +121,10 @@ fn input_completion_follows_actual_write_not_enqueue_or_unrelated_output() {
             release: release_rx,
         }),
         write_rx,
-        event_tx.clone(),
+        PtyEventSender {
+            sender: event_tx.clone(),
+            consumer: thread::current(),
+        },
     );
     queue_pty_write(&write_tx, b"x".to_vec()).unwrap();
     queue_pty_request(&write_tx, PtyWrite::InputFrame(9)).unwrap();
