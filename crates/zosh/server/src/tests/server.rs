@@ -20,6 +20,54 @@ fn publishing_pty_event_preserves_wakeup_before_park() {
 }
 
 #[test]
+fn the_server_keeps_its_half_alive_without_hearing_anything() {
+    let interval = Duration::from_millis(500);
+    let armed = Some(interval);
+
+    // A client that never announced one leaves the server on Mosh's own
+    // heartbeat, however long it has been.
+    assert!(!keep_alive_due(
+        None,
+        Duration::from_secs(60),
+        Duration::ZERO
+    ));
+
+    // Armed: due on the interval since the last SEND. What has been heard
+    // does not enter into it, which is the whole point — a server that
+    // only replies goes quiet exactly when the client's packets are the
+    // ones being delayed.
+    assert!(!keep_alive_due(
+        armed,
+        interval - Duration::from_millis(1),
+        Duration::ZERO
+    ));
+    assert!(keep_alive_due(armed, interval, Duration::from_secs(3)));
+
+    // But not forever: once nothing has been heard for the linger, a
+    // detached session stops transmitting into the void.
+    assert!(keep_alive_due(
+        armed,
+        interval,
+        KEEP_ALIVE_LINGER - Duration::from_millis(1)
+    ));
+    assert!(!keep_alive_due(armed, interval, KEEP_ALIVE_LINGER));
+}
+
+#[test]
+fn an_announced_keep_alive_interval_is_clamped_before_it_is_believed() {
+    // The interval arrives over the network, so it is clamped rather than
+    // trusted: a peer must not be able to ask this server for a datagram
+    // every microsecond, nor for one so rare it is not a keep-alive.
+    let clamp = |announced: u32| {
+        Duration::from_millis(u64::from(announced)).clamp(KEEP_ALIVE_MIN, KEEP_ALIVE_MAX)
+    };
+    assert_eq!(clamp(0), KEEP_ALIVE_MIN);
+    assert_eq!(clamp(1), KEEP_ALIVE_MIN);
+    assert_eq!(clamp(500), Duration::from_millis(500));
+    assert_eq!(clamp(u32::MAX), KEEP_ALIVE_MAX);
+}
+
+#[test]
 fn bounded_pty_drain_reports_remaining_work() {
     let (sender, receiver) = mpsc::sync_channel(128);
     let (writes, _write_rx) = mpsc::sync_channel(1);

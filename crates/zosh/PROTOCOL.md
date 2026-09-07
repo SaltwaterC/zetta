@@ -30,7 +30,7 @@ Mosh's `userinput.proto`:
 ```proto
 // zosh extension
 extend ClientBuffers.Instruction {
-  optional uint32 zosh_keepalive_seq = 20;
+  optional uint32 zosh_keepalive_ms = 20;   // the interval being held to
 }
 ```
 
@@ -40,21 +40,22 @@ nested `Keystroke` and `ResizeMessage`) and by `hostinput.proto` (2, 3
 and 7).
 
 It is a bare varint rather than a nested message so the whole instruction
-costs five bytes inside a `UserMessage`:
+costs five or six bytes inside a `UserMessage`:
 
 ```
-0x0A 0x03            UserMessage.instruction (field 1), length 3
-  0xA0 0x01 <seq>    Instruction field 20, varint
+0x0A 0x04                 UserMessage.instruction (field 1), length 4
+  0xA0 0x01 0xF4 0x03     Instruction field 20, varint 500
 ```
+
+The value is the interval the client is holding the session to, in
+milliseconds. It doubles as the marker, and it is repeated on **every**
+keep-alive rather than sent once, so a server that missed the first — or
+that started answering mid-session — can learn it from any later one.
 
 A keep-alive is always its own instruction. It never shares one with a
 keystroke or a resize, so a peer that ignores field 20 sees an
 instruction with nothing in it and the keystroke runs either side of it
 are unaffected.
-
-`seq` counts keep-alives on this session, from 1, wrapping. **It is never
-interpreted.** It exists so consecutive keep-alives differ on the wire
-and so a packet capture can be read.
 
 ## Semantics
 
@@ -70,11 +71,31 @@ mechanism. There is no server → client keep-alive field, and none is
 needed. The client already surfaces the round trip as
 `LinkHealth::since_ack_ms`.
 
-**A keep-alive is a floor on sending, not a timer on top of one.** The
-client mints one only when it has sent nothing at all for the interval,
-so a session carrying real traffic emits nothing extra. On an idle
-session the sequence is: keep-alive out, answer back, interval restarts
-from that send.
+**A keep-alive is a floor on sending, not a timer on top of one.** Each
+side mints one only when it has sent nothing at all for the interval, so
+a session carrying real traffic emits nothing extra. On an idle session
+the sequence is: keep-alive out, answer back, interval restarts from that
+send.
+
+**Both sides hold up their own half.** This is the part that matters, and
+the part a reply-only design gets wrong. A server that only ever answers
+what arrives goes quiet exactly when the client's packets are the ones
+being delayed — which is the condition a keep-alive exists to survive.
+So a server that understands field 20 arms a timer of its own on the
+announced interval and transmits on it **regardless of what it is
+hearing**. Measured on loopback with the uplink blackholed, that is the
+difference between a worst-case downlink gap of 3005 ms and one of
+506 ms.
+
+The server's timer lingers for 10 s past the last thing it heard
+(`KEEP_ALIVE_LINGER`, matching Mosh's own `ACTIVE_RETRY_TIMEOUT`) and
+then stops. That is an order of magnitude more than any power-management
+stall observed, and it is what stops a detached session whose client has
+genuinely gone from transmitting into the void forever.
+
+The announced interval is clamped to 20-3000 ms before the server
+believes it. It arrives over the network, so it is not trusted to be
+sane even though it is authenticated.
 
 **A keep-alive is suppressed when it could not be acknowledged.** The
 client stops minting them while shutting down, and once the peer has
@@ -112,25 +133,36 @@ The instruction itself is inert everywhere it is not understood:
 
 ## What zosh's own server adds
 
-Recognising the field buys one thing: the answer leaves on the same
-event-loop pass instead of waiting out the 100 ms delayed-ack window,
-which is the window's whole purpose (giving real data a chance to ride
-along) and is worth nothing to a keep-alive on an idle session.
+Two things.
 
-`UserStreamTracker::accept` reports `keep_alive` alongside the input
-events, and `serve_session` calls `ServerTransport::force_next_send`. A
-keep-alive queues no PTY write, does not mark the terminal dirty, and
-does not advance the echo acknowledgement.
+**A prompt answer.** It leaves on the same event-loop pass instead of
+waiting out the 100 ms delayed-ack window. That window exists to give
+real data a chance to ride along, and is worth nothing to a keep-alive on
+an idle session.
 
-It is also recorded in the server's timing instrumentation as
-`keepalive`, with the state number.
+**Its own half of the keep-alive**, described above: a timer armed by the
+announced interval, independent of what the server is hearing. This is
+the half a stock `mosh-server` cannot provide, and the reason `-k` alone
+did not fix a link whose *server* is the one with broken power
+management.
+
+`UserStreamTracker::accept` reports `keep_alive_ms` alongside the input
+events; `serve_session` clamps and latches it, calls
+`ServerTransport::force_next_send`, and drives `keep_alive_due` from its
+own last send. A keep-alive queues no PTY write, does not mark the
+terminal dirty, and does not advance the echo acknowledgement.
+
+Both halves are recorded in the server's timing instrumentation, as
+`keepalive` (one arrived, with the state number and the announced
+interval) and `keepalive_send` (this side's timer fired, with the gap
+since its last send). See "Proving it" below.
 
 ## Interoperability
 
 | Client | Server | Behaviour |
 | --- | --- | --- |
-| `zosh -k` | zosh `mosh-server` | Recognised; answered on the same loop pass. |
-| `zosh -k` | reference `mosh-server` | Field ignored; answered within 100 ms by SSP's delayed-ack path. |
+| `zosh -k` | zosh `mosh-server` | Recognised; answered on the same loop pass, **and** the server holds up its own half on the same interval. |
+| `zosh -k` | reference `mosh-server` | Field ignored; answered within 100 ms by SSP's delayed-ack path, but only ever in reply. |
 | `zosh` without `-k`, or stock `mosh-client` | zosh `mosh-server` | No keep-alives; the server behaves exactly as before. |
 | stock `mosh-client` | reference `mosh-server` | Untouched. |
 
@@ -138,11 +170,50 @@ It is also recorded in the server's timing instrumentation as
 
 On an idle session with the default interval, roughly two datagrams per
 second in each direction instead of one every three seconds. Each is a
-Mosh datagram of a few tens of bytes — the keep-alive diff is five bytes
-before Mosh's own random chaff, OCB tag and headers.
+Mosh datagram of a few tens of bytes — the keep-alive diff is five or six
+bytes before Mosh's own random chaff, OCB tag and headers.
+
+Measured on loopback over ten seconds:
+
+| | client -> server | server -> client |
+| --- | --- | --- |
+| without `-k` | 0.44/s, 3000 ms gaps | 0.44/s, 3000 ms gaps |
+| with `-k` | 2.10/s, median gap 500 ms | 2.13/s, median gap 499 ms |
+
+The server's own timer adds nothing to that: it is a floor on sending, so
+an ordinary reply resets it and it only ever fires when the reply did not
+happen.
 
 On a session that is doing anything at all, nothing: the interval is
 measured from the last send, and ordinary traffic keeps resetting it.
+
+## Proving it
+
+The server's timing instrumentation is the way to confirm a real link,
+and it needs no privileges. Start the session with the log enabled:
+
+```sh
+zosh -k --server="env MOSH_SERVER_TIMING_LOG=\$HOME/zosh-timing.log mosh-server" user@host
+```
+
+Then, on the server, the gaps between arriving keep-alives in
+milliseconds, worst last:
+
+```sh
+awk '$2=="keepalive"{if(p)printf "%.0f\n",($1-p)/1000; p=$1}' ~/zosh-timing.log | sort -n | tail
+```
+
+A healthy link reads `496 500 502 ...`. No `keepalive` lines at all means
+the client is not sending them — check that `zosh --help` lists
+`--keep-alive`, and note that `--client=PATH` hands the setting to an
+external client as `MOSH_KEEPALIVE`, which only zosh honours. Gaps far
+above the interval mean the keep-alives are being delayed on the way in,
+which is the stall itself; `keepalive_send` lines are this server's own
+timer covering exactly that.
+
+The log file must not already exist, and this needs the bundled Rust
+server. With `sudo`, `tcpdump -ni any -ttt udp port PORT` shows the same
+thing from either end, `-ttt` printing the gap between packets.
 
 ## Command line
 

@@ -67,8 +67,11 @@ Pass `-k`/`--keep-alive` when a link's WiFi power management stalls an idle
 session: it holds the connection to a packet in each direction every 500 ms
 (`--keep-alive=MS` to choose another interval) instead of Mosh's three-second
 heartbeat, and costs nothing while the session is busy. It works against an
-unmodified `mosh-server` as well as the bundled one; see
-[the protocol note](crates/zosh/PROTOCOL.md).
+unmodified `mosh-server`, which answers each keep-alive within 100 ms; with the
+bundled server the remote side also holds up its own half on the same interval,
+which is what is needed when the machine with unreliable power management is the
+remote one. [The protocol note](crates/zosh/PROTOCOL.md) covers the wire format
+and how to prove it is working on a real link.
 
 Zosh intentionally defaults to `--no-init`, unlike stock `mosh`: it keeps the
 current terminal screen and its scrollback instead of entering an alternate

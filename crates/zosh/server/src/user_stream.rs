@@ -20,9 +20,10 @@ pub enum UserEvent {
 pub struct AcceptedInput {
     pub frame: u64,
     pub events: Vec<UserEvent>,
-    /// Whether this state carried zosh's keep-alive.  It contributes no
-    /// input; see `../../PROTOCOL.md` for what the server owes it.
-    pub keep_alive: bool,
+    /// The keep-alive interval this state announced, in milliseconds, if
+    /// it carried one.  It contributes no input; see `../../PROTOCOL.md`
+    /// for what the server owes it.
+    pub keep_alive_ms: Option<u32>,
 }
 
 #[derive(Debug, Clone)]
@@ -65,7 +66,7 @@ impl UserStreamTracker {
             return Ok(AcceptedInput {
                 frame: state.new_num,
                 events: Vec::new(),
-                keep_alive: false,
+                keep_alive_ms: None,
             });
         }
 
@@ -73,7 +74,7 @@ impl UserStreamTracker {
         // keep-alive is deliberately invisible to `decode_events`: the
         // prefix arithmetic here counts decoded events, and a stock Mosh
         // server decodes none from it either.
-        let keep_alive = carries_keep_alive(&state.diff);
+        let keep_alive_ms = keep_alive_interval(&state.diff);
 
         let base = self.states.get(&state.old_num).cloned().ok_or_else(|| {
             anyhow!(
@@ -131,7 +132,7 @@ impl UserStreamTracker {
             return Ok(AcceptedInput {
                 frame: state.new_num,
                 events: Vec::new(),
-                keep_alive,
+                keep_alive_ms,
             });
         }
 
@@ -166,7 +167,7 @@ impl UserStreamTracker {
         Ok(AcceptedInput {
             frame: state.new_num,
             events: pending,
-            keep_alive,
+            keep_alive_ms,
         })
     }
 }
@@ -181,7 +182,8 @@ const WIRE_FIXED64: u64 = 1;
 const WIRE_BYTES: u64 = 2;
 const WIRE_FIXED32: u64 = 5;
 
-/// Whether a UserStream diff carries a keep-alive.
+/// The keep-alive interval a UserStream diff announces, if it carries a
+/// keep-alive at all.
 ///
 /// This is a second pass over the same bytes rather than a change to
 /// `decode_events`, because `moshcatty`'s decoder discards the fields it
@@ -193,33 +195,34 @@ const WIRE_FIXED32: u64 = 5;
 /// A byte it cannot read is reported as "no keep-alive" rather than as an
 /// error.  `decode_events` runs over the same diff and is what rejects a
 /// malformed UserMessage properly.
-fn carries_keep_alive(diff: &[u8]) -> bool {
+fn keep_alive_interval(diff: &[u8]) -> Option<u32> {
     let mut rest = diff;
+    let mut found = None;
     while let Some((field, wire)) = read_tag(&mut rest) {
         if (field, wire) == (INSTRUCTION_FIELD, WIRE_BYTES) {
-            match read_bytes(&mut rest) {
-                Some(instruction) if instruction_is_keep_alive(instruction) => return true,
-                Some(_) => continue,
-                None => return false,
-            }
+            let instruction = read_bytes(&mut rest)?;
+            // Keep walking rather than returning: a diff can carry several
+            // keep-alives, and the newest one is the interval now in force.
+            found = instruction_keep_alive(instruction).or(found);
+            continue;
         }
         if !skip_field(&mut rest, wire) {
-            return false;
+            return found;
         }
     }
-    false
+    found
 }
 
-fn instruction_is_keep_alive(mut rest: &[u8]) -> bool {
+fn instruction_keep_alive(mut rest: &[u8]) -> Option<u32> {
     while let Some((field, wire)) = read_tag(&mut rest) {
         if (field, wire) == (KEEP_ALIVE_FIELD, WIRE_VARINT) {
-            return read_varint(&mut rest).is_some();
+            return u32::try_from(read_varint(&mut rest)?).ok();
         }
         if !skip_field(&mut rest, wire) {
-            return false;
+            return None;
         }
     }
-    false
+    None
 }
 
 fn read_varint(rest: &mut &[u8]) -> Option<u64> {
@@ -363,18 +366,36 @@ mod tests {
     }
 
     /// A keep-alive as the client encodes it: `UserMessage.instruction`
-    /// holding `Instruction` field 20.  Written out by hand because the
-    /// point is to track the wire, not `moshcatty`'s encoder, which has
-    /// no idea the field exists.
-    fn keep_alive(seq: u8) -> Vec<u8> {
-        vec![0x0A, 0x03, 0xA0, 0x01, seq]
+    /// holding `Instruction` field 20, carrying the interval.  Written
+    /// out by hand because the point is to track the wire, not
+    /// `moshcatty`'s encoder, which has no idea the field exists.
+    ///
+    /// The interval is a real varint, so anything from 128 up spans two
+    /// bytes: writing it as one is what an earlier version of this
+    /// helper did, and it silently produced a truncated field.
+    fn keep_alive(interval_ms: u32) -> Vec<u8> {
+        let mut varint = Vec::new();
+        let mut value = interval_ms;
+        loop {
+            let byte = (value & 0x7f) as u8;
+            value >>= 7;
+            varint.push(if value == 0 { byte } else { byte | 0x80 });
+            if value == 0 {
+                break;
+            }
+        }
+        let mut instruction = vec![0xA0, 0x01];
+        instruction.extend_from_slice(&varint);
+        let mut message = vec![0x0A, instruction.len() as u8];
+        message.extend_from_slice(&instruction);
+        message
     }
 
     #[test]
     fn a_keep_alive_is_answered_without_reaching_the_pty() {
         let mut tracker = UserStreamTracker::new();
-        let accepted = tracker.accept(&state(0, 1, 0, keep_alive(1))).unwrap();
-        assert!(accepted.keep_alive);
+        let accepted = tracker.accept(&state(0, 1, 0, keep_alive(100))).unwrap();
+        assert_eq!(accepted.keep_alive_ms, Some(100));
         assert!(accepted.events.is_empty(), "a keep-alive is not input");
         assert_eq!(
             tracker.committed_events, 0,
@@ -395,7 +416,7 @@ mod tests {
             typed.events,
             vec![UserEvent::Byte(b'l'), UserEvent::Byte(b's')]
         );
-        assert!(!typed.keep_alive);
+        assert_eq!(typed.keep_alive_ms, None);
     }
 
     #[test]
@@ -405,28 +426,46 @@ mod tests {
         // which is what a keep-alive minted in the same tick as input
         // looks like on the wire.
         let mut diff = message(&[UserInstruction::keystroke(b"a".to_vec())]);
-        diff.extend_from_slice(&keep_alive(4));
+        diff.extend_from_slice(&keep_alive(100));
         let accepted = tracker.accept(&state(0, 1, 0, diff)).unwrap();
-        assert!(accepted.keep_alive);
+        assert_eq!(accepted.keep_alive_ms, Some(100));
         assert_eq!(accepted.events, vec![UserEvent::Byte(b'a')]);
         assert_eq!(tracker.committed_events, 1);
     }
 
     #[test]
     fn an_ordinary_diff_is_not_mistaken_for_a_keep_alive() {
-        assert!(!carries_keep_alive(&[]));
-        assert!(!carries_keep_alive(&message(&[
-            UserInstruction::keystroke(b"ls -l\r".to_vec())
-        ])));
-        assert!(!carries_keep_alive(&message(&[UserInstruction::resize(
-            120, 40
-        )])));
+        assert_eq!(keep_alive_interval(&[]), None);
+        assert_eq!(
+            keep_alive_interval(&message(&[UserInstruction::keystroke(b"ls -l\r".to_vec())])),
+            None
+        );
+        assert_eq!(
+            keep_alive_interval(&message(&[UserInstruction::resize(120, 40)])),
+            None
+        );
         // Some other extension nobody here knows: field 21, varint.
-        assert!(!carries_keep_alive(&[0x0A, 0x03, 0xA8, 0x01, 0x01]));
+        assert_eq!(keep_alive_interval(&[0x0A, 0x03, 0xA8, 0x01, 0x01]), None);
         // Truncated rather than absent. The scan gives up; `decode_events`
         // is what reports the diff as malformed.
-        assert!(!carries_keep_alive(&[0x0A, 0x03, 0xA0]));
-        assert!(!carries_keep_alive(&[0x0A, 0x7F]));
+        assert_eq!(keep_alive_interval(&[0x0A, 0x03, 0xA0]), None);
+        assert_eq!(keep_alive_interval(&[0x0A, 0x7F]), None);
+    }
+
+    #[test]
+    fn a_multi_byte_interval_and_the_newest_of_several_are_read() {
+        // 500 ms needs a two-byte varint, and the helper must agree with
+        // the bytes PROTOCOL.md documents.
+        assert_eq!(keep_alive(500), vec![0x0A, 0x04, 0xA0, 0x01, 0xF4, 0x03]);
+        assert_eq!(
+            keep_alive_interval(&[0x0A, 0x04, 0xA0, 0x01, 0xF4, 0x03]),
+            Some(500)
+        );
+        // A cumulative diff can carry several. The last is the interval
+        // now in force, so it is the one that wins.
+        let mut diff = keep_alive(100);
+        diff.extend_from_slice(&keep_alive(250));
+        assert_eq!(keep_alive_interval(&diff), Some(250));
     }
 
     #[test]
@@ -435,9 +474,9 @@ mod tests {
         // rather than scanning through it, or a paste containing the
         // bytes 0xA0 0x01 would read as a keep-alive.
         let mut diff = message(&[UserInstruction::keystroke(vec![0xA0, 0x01, 0x09])]);
-        assert!(!carries_keep_alive(&diff));
-        diff.extend_from_slice(&keep_alive(9));
-        assert!(carries_keep_alive(&diff));
+        assert_eq!(keep_alive_interval(&diff), None);
+        diff.extend_from_slice(&keep_alive(100));
+        assert_eq!(keep_alive_interval(&diff), Some(100));
     }
 
     #[test]

@@ -31,6 +31,18 @@ const MAX_CELLS: u32 = 262_144;
 const UDP_BUFFER: usize = 65_535;
 const PTY_CHUNK: usize = 8192;
 const PTY_QUEUE_DEPTH: usize = 256;
+// Bounds on a client-announced keep-alive interval. The client validates its
+// own, but this one arrives over the network, so it is clamped rather than
+// trusted: the floor is Mosh's minimum frame interval and the ceiling its
+// unassisted heartbeat, past which a keep-alive asks for nothing.
+const KEEP_ALIVE_MIN: Duration = Duration::from_millis(20);
+const KEEP_ALIVE_MAX: Duration = Duration::from_millis(3000);
+// How long the server goes on keeping its half alive after the last thing it
+// heard. Matching Mosh's own ACTIVE_RETRY_TIMEOUT is what stops a session
+// whose client has vanished from transmitting into the void forever, while
+// still covering a power-management stall an order of magnitude longer than
+// any that has been observed.
+const KEEP_ALIVE_LINGER: Duration = Duration::from_secs(10);
 
 pub fn run(mut cfg: Config) -> Result<()> {
     let timing_file = timing::open()?;
@@ -123,6 +135,10 @@ fn serve_session(cfg: Config, socket: UdpSocket, mut transport: ServerTransport)
     let mut remote_shutdown = false;
     let mut child_exited = false;
     let mut loop_timing = timing::LoopTiming::new();
+    // The interval a client has asked this session to be held to, once it has
+    // announced one, and when this side last put a datagram on the wire.
+    let mut keep_alive: Option<Duration> = None;
+    let mut last_send = Instant::now();
 
     loop {
         loop_timing.tick();
@@ -178,14 +194,18 @@ fn serve_session(cfg: Config, socket: UdpSocket, mut transport: ServerTransport)
                                 accepted.frame,
                                 accepted.events.len() as u64,
                             );
-                            if accepted.keep_alive {
+                            if let Some(announced) = accepted.keep_alive_ms {
                                 // The client is holding the link open
                                 // against radio power management, so the
                                 // answer is worth more than the delayed
                                 // ack's chance to carry data with it.
                                 // `send_updates` runs later in this same
                                 // pass.
-                                timing::record("keepalive", accepted.frame, 0);
+                                timing::record("keepalive", accepted.frame, u64::from(announced));
+                                keep_alive = Some(
+                                    Duration::from_millis(u64::from(announced))
+                                        .clamp(KEEP_ALIVE_MIN, KEEP_ALIVE_MAX),
+                                );
                                 transport.force_next_send();
                             }
                             apply_user_events(
@@ -239,7 +259,27 @@ fn serve_session(cfg: Config, socket: UdpSocket, mut transport: ServerTransport)
                 dirty = false;
             }
 
-            send_updates(&mut transport, &socket, peer, cfg.verbose > 1);
+            // The server's own half of the keep-alive, and the reason the
+            // client's is not enough on its own: replying to what arrives
+            // makes this side go quiet exactly when the other side's
+            // packets are the ones being delayed. This timer does not care
+            // whether anything arrived.
+            //
+            // Like the client's, it is a floor on sending rather than an
+            // extra timer: an ordinary reply resets `last_send`, so a
+            // healthy session pays nothing for it.
+            if keep_alive_due(
+                keep_alive,
+                last_send.elapsed(),
+                transport.last_recv().elapsed(),
+            ) {
+                timing::record("keepalive_send", last_send.elapsed().as_millis() as u64, 0);
+                transport.force_next_send();
+            }
+
+            if send_updates(&mut transport, &socket, peer, cfg.verbose > 1) {
+                last_send = Instant::now();
+            }
 
             if transport.crypto_exhausted() {
                 let _ = child.kill();
@@ -316,19 +356,45 @@ impl PtyEventSender {
     }
 }
 
+/// Whether this side owes a keep-alive of its own right now.
+///
+/// The point of it is what it does *not* depend on: anything arriving. A
+/// server that only ever replies goes quiet exactly when the other side's
+/// packets are the ones being delayed, which is the condition a keep-alive
+/// exists to survive.  `KEEP_ALIVE_LINGER` bounds that independence, so a
+/// client that has genuinely gone does not leave the server transmitting
+/// into the void for the life of a detached session.
+///
+/// `since_send` is measured from the last datagram that actually left, so
+/// an ordinary reply resets it and a healthy session pays nothing.
+fn keep_alive_due(
+    keep_alive: Option<Duration>,
+    since_send: Duration,
+    since_recv: Duration,
+) -> bool {
+    keep_alive.is_some_and(|interval| since_send >= interval && since_recv < KEEP_ALIVE_LINGER)
+}
+
+/// Send whatever the transport has due, reporting whether anything actually
+/// left this host. The keep-alive timer is measured from that, so a datagram
+/// the transport built but could not send must not restart it.
 fn send_updates(
     transport: &mut ServerTransport,
     socket: &UdpSocket,
     peer: Option<SocketAddr>,
     verbose: bool,
-) {
+) -> bool {
     let phase = timing::begin();
     let datagrams = transport.tick();
     timing::slow("transport_tick_slow", phase);
+    let mut sent = false;
     if let Some(addr) = peer {
         for datagram in datagrams {
             match socket.send_to(&datagram, addr) {
-                Ok(n) => timing::record("udp_sent", n as u64, 0),
+                Ok(n) => {
+                    sent = true;
+                    timing::record("udp_sent", n as u64, 0);
+                }
                 Err(error) => {
                     timing::record(
                         "udp_send_error",
@@ -349,6 +415,7 @@ fn send_updates(
         }
     }
     timing::slow("transport_send_slow", phase);
+    sent
 }
 
 fn drain_pty_events(

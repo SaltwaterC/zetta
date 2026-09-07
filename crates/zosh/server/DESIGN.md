@@ -56,14 +56,22 @@ design above.
 A keep-alive decodes to **zero** UserStream events, so it does not disturb the
 event counting `UserStreamTracker` depends on.  A server that counted one as an
 event would skip a real keystroke in the next cumulative diff.  `decode_events`
-is therefore left alone, and `carries_keep_alive` is a separate,
+is therefore left alone, and `keep_alive_interval` is a separate,
 allocation-free walk of the same bytes.
 
 SSP already answers any non-empty diff within its 100 ms delayed-ack window, so
-the server needs nothing to be *correct* here.  What recognising the field buys
-is `force_next_send`: the answer leaves on the same loop pass, because the
+the server needs nothing to be *correct* here.  Recognising the field buys two
+things.  `force_next_send` puts the answer on the same loop pass, because the
 delayed ack exists to let real data ride along and an idle keep-alive has none
 to wait for.
+
+More importantly, the announced interval arms a timer of the server's own
+(`keep_alive_due`), driven from `last_send` and deliberately independent of
+anything arriving.  A server that only ever replies goes quiet exactly when the
+client's packets are the ones being delayed, which is the condition the
+keep-alive exists to survive; that is why the timer does not consult
+`last_recv` except to stop lingering after ten seconds.  The interval is
+clamped before it is believed, because it arrives over the network.
 
 ## Terminal state
 

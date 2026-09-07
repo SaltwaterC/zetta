@@ -67,8 +67,12 @@ pub struct UserInstruction {
     pub keystroke: Option<Keystroke>,
     #[prost(message, optional, tag = "3")]
     pub resize: Option<ResizeMessage>,
+    /// The keep-alive interval this client is holding the session to,
+    /// in milliseconds. Doubles as the marker: a server that recognises
+    /// it may keep the session alive from its own side on the same
+    /// interval, which a client-driven keep-alive alone cannot do.
     #[prost(uint32, optional, tag = "20")]
-    pub zosh_keepalive_seq: Option<u32>,
+    pub zosh_keepalive_ms: Option<u32>,
 }
 
 #[derive(Clone, PartialEq, Eq, prost::Message)]
@@ -109,9 +113,10 @@ pub enum UserEvent {
     /// off (`!inst.diff().empty()` sets the data-ack), so a peer answers
     /// within `ACK_DELAY` instead of at the three-second heartbeat.
     ///
-    /// The sequence number is never interpreted. It is carried so
-    /// consecutive keep-alives differ on the wire and so a capture can
-    /// be read.
+    /// It carries the interval, in milliseconds, that the client is
+    /// holding the session to. A server that understands the field can
+    /// then hold up its own half on the same interval instead of only
+    /// ever replying; see `zosh`'s `PROTOCOL.md`.
     KeepAlive(u32),
 }
 
@@ -143,9 +148,10 @@ impl UserStream {
         self.events.push(UserEvent::Resize { width, height });
     }
 
-    /// Append a keep-alive carrying `seq`. See [`UserEvent::KeepAlive`].
-    pub fn push_keep_alive(&mut self, seq: u32) {
-        self.events.push(UserEvent::KeepAlive(seq));
+    /// Append a keep-alive announcing `interval_ms`. See
+    /// [`UserEvent::KeepAlive`].
+    pub fn push_keep_alive(&mut self, interval_ms: u32) {
+        self.events.push(UserEvent::KeepAlive(interval_ms));
     }
 
     pub fn is_empty(&self) -> bool {
@@ -193,7 +199,7 @@ impl UserStream {
                                 keys: Some(vec![*b]),
                             }),
                             resize: None,
-                            zosh_keepalive_seq: None,
+                            zosh_keepalive_ms: None,
                         }),
                     }
                 }
@@ -204,18 +210,18 @@ impl UserStream {
                             width: Some(*width),
                             height: Some(*height),
                         }),
-                        zosh_keepalive_seq: None,
+                        zosh_keepalive_ms: None,
                     });
                 }
                 // Its own instruction, like a resize: a keep-alive
                 // breaks the keystroke run rather than joining it, so a
                 // peer that ignores field 20 sees an instruction with
                 // nothing in it and the run either side stays intact.
-                UserEvent::KeepAlive(seq) => {
+                UserEvent::KeepAlive(interval_ms) => {
                     msg.instruction.push(UserInstruction {
                         keystroke: None,
                         resize: None,
-                        zosh_keepalive_seq: Some(*seq),
+                        zosh_keepalive_ms: Some(*interval_ms),
                     });
                 }
             }
@@ -244,8 +250,8 @@ impl UserStream {
             {
                 self.push_resize(width, height);
             }
-            if let Some(seq) = inst.zosh_keepalive_seq {
-                self.push_keep_alive(seq);
+            if let Some(interval_ms) = inst.zosh_keepalive_ms {
+                self.push_keep_alive(interval_ms);
             }
         }
         Ok(())
@@ -397,25 +403,29 @@ mod tests {
     }
 
     #[test]
-    fn a_keep_alive_is_five_bytes_of_field_twenty() {
+    fn a_keep_alive_is_field_twenty_carrying_its_interval() {
         let mut s = UserStream::new();
-        s.push_keep_alive(7);
+        s.push_keep_alive(100);
         // The specification in zosh's PROTOCOL.md, byte for byte:
         //   0x0A 0x03        UserMessage.instruction, length 3
-        //   0xA0 0x01 0x07   Instruction field 20, varint 7
-        assert_eq!(s.init_diff(), vec![0x0A, 0x03, 0xA0, 0x01, 0x07]);
+        //   0xA0 0x01 0x64   Instruction field 20, varint 100
+        assert_eq!(s.init_diff(), vec![0x0A, 0x03, 0xA0, 0x01, 0x64]);
+        // 500 needs a two-byte varint, so the instruction is one longer.
+        let mut s = UserStream::new();
+        s.push_keep_alive(500);
+        assert_eq!(s.init_diff(), vec![0x0A, 0x04, 0xA0, 0x01, 0xF4, 0x03]);
     }
 
     #[test]
     fn a_keep_alive_breaks_the_run_and_is_not_typing() {
         let mut s = UserStream::new();
         s.push_bytes(b"ab");
-        s.push_keep_alive(1);
+        s.push_keep_alive(500);
         s.push_bytes(b"cd");
         let diff = s.init_diff();
         let msg = UserMessage::decode(diff.as_slice()).unwrap();
         assert_eq!(msg.instruction.len(), 3);
-        assert_eq!(msg.instruction[1].zosh_keepalive_seq, Some(1));
+        assert_eq!(msg.instruction[1].zosh_keepalive_ms, Some(500));
         assert!(msg.instruction[1].keystroke.is_none());
         assert!(msg.instruction[1].resize.is_none());
         // A peer that ignores field 20 sees an instruction with nothing
@@ -428,14 +438,14 @@ mod tests {
         let mut old = UserStream::new();
         old.push_bytes(b"ls");
         let mut new = old.clone();
-        new.push_keep_alive(3);
+        new.push_keep_alive(250);
         new.push_bytes(b"\r");
 
         let diff = new.diff_from(&old).expect("old is a prefix");
         let mut rebuilt = old.clone();
         rebuilt.apply_string(&diff).unwrap();
         assert_eq!(rebuilt, new);
-        assert_eq!(rebuilt.events()[2], UserEvent::KeepAlive(3));
+        assert_eq!(rebuilt.events()[2], UserEvent::KeepAlive(250));
     }
 
     #[test]

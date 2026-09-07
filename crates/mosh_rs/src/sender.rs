@@ -109,10 +109,9 @@ pub struct TransportSender {
     shutdown_tries: u32,
     shutdown_start: Option<u64>,
     /// How long the session may go without SENDING before a keep-alive
-    /// is minted, or `None` for mosh's own behaviour.
+    /// is minted, or `None` for mosh's own behaviour. Also what each
+    /// keep-alive announces, so a peer can hold up its own half.
     keep_alive_ms: Option<u64>,
-    /// The number the next keep-alive carries. Diagnostic only.
-    keep_alive_seq: u32,
 }
 
 impl Default for TransportSender {
@@ -144,7 +143,6 @@ impl TransportSender {
             shutdown_tries: 0,
             shutdown_start: None,
             keep_alive_ms: None,
-            keep_alive_seq: 0,
         }
     }
 
@@ -365,9 +363,12 @@ impl TransportSender {
         // ACK_DELAY, and an empty one only at its own heartbeat.
         let keep_alive_due = self.next_keep_alive.is_some_and(|due| now >= due);
         if keep_alive_due {
-            self.keep_alive_seq = self.keep_alive_seq.wrapping_add(1);
-            let seq = self.keep_alive_seq;
-            self.current_state.push_keep_alive(seq);
+            // The interval is the payload: it is what lets a server that
+            // understands the field hold up its own half of the session
+            // rather than only ever replying.
+            let interval = self.keep_alive_ms.unwrap_or(KEEP_ALIVE_DEFAULT_MS);
+            self.current_state
+                .push_keep_alive(u32::try_from(interval).unwrap_or(u32::MAX));
             self.calculate_timers(now, srtt_ms, rto_ms);
         }
 
@@ -801,26 +802,26 @@ mod tests {
     }
 
     #[test]
-    fn consecutive_keep_alives_are_numbered() {
+    fn every_keep_alive_announces_the_interval_it_is_holding_to() {
         use prost::Message as _;
 
         let mut s = TransportSender::new();
-        s.set_keep_alive(Some(KEEP_ALIVE_DEFAULT_MS));
+        s.set_keep_alive(Some(250));
         s.tick(0, SRTT, RTO);
-        let seq_of = |inst: Instruction| {
+        let announced = |inst: Instruction| {
             let msg =
                 crate::statesync::UserMessage::decode(inst.diff.expect("diff").as_slice()).unwrap();
             msg.instruction
                 .last()
                 .expect("one instruction")
-                .zosh_keepalive_seq
+                .zosh_keepalive_ms
         };
-        let first = s.tick(500, SRTT, RTO).expect("first keep-alive");
-        let second = s.tick(1_000, SRTT, RTO).expect("second keep-alive");
-        assert_eq!(seq_of(first), Some(1));
-        // The diff is cumulative until the peer acknowledges, so the
-        // second instruction is the one that matters here.
-        assert_eq!(seq_of(second), Some(2));
+        // Repeated on every one, not just the first: a server that missed
+        // the first has to be able to learn it from any later keep-alive.
+        let first = s.tick(250, SRTT, RTO).expect("first keep-alive");
+        let second = s.tick(500, SRTT, RTO).expect("second keep-alive");
+        assert_eq!(announced(first), Some(250));
+        assert_eq!(announced(second), Some(250));
     }
 
     #[test]

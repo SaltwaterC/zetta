@@ -56,10 +56,11 @@ reapply the keep-alive patch below.
 specification; this is where the client half of it lives.
 
 - `src/statesync.rs`: `UserEvent::KeepAlive(u32)`,
-  `UserStream::push_keep_alive`, the `zosh_keepalive_seq` field at tag 20
+  `UserStream::push_keep_alive`, the `zosh_keepalive_ms` field at tag 20
   on `UserInstruction`, and its handling in `diff_from`/`apply_string`. A
   keep-alive is its own instruction, the way a resize is, so it never
-  splices into a keystroke run.
+  splices into a keystroke run, and it carries the interval so the peer
+  can hold up its own half.
 - `src/sender.rs`: `KEEP_ALIVE_DEFAULT_MS`,
   `TransportSender::set_keep_alive`, the `next_keep_alive` deadline
   computed by `calculate_timers` and folded into `next_due`, and the mint

@@ -33,11 +33,14 @@ Zosh display code, including for a clear that does not change screen cells.
 Snapshots retain the generation, so retransmitted and out-of-order states do
 not clear the local terminal more than once.
 
-It also recognises the keep-alive `zosh -k` sends and answers it on the same
-event-loop pass rather than after Mosh's 100 ms delayed acknowledgement. This
-is an optimization, not a requirement: `zosh -k` works against an unmodified
-`mosh-server` too, which answers the same keep-alive within 100 ms because
-SSP acknowledges any non-empty diff promptly. See `../PROTOCOL.md`.
+It also recognises the keep-alive `zosh -k` sends, answers it on the same
+event-loop pass rather than after Mosh's 100 ms delayed acknowledgement, and
+holds up its own half of the session on the interval the client announced.
+That last part is what an unmodified `mosh-server` cannot do: it answers a
+keep-alive within 100 ms, because SSP acknowledges any non-empty diff promptly,
+but only ever in reply — so its side falls silent exactly when the client's
+packets are the ones being delayed. Use this server when the machine with
+unreliable WiFi power management is the *remote* one. See `../PROTOCOL.md`.
 
 Prediction acknowledgements wait until input has been written to the PTY,
 then allow a 50 ms grace period for shell output. Unrelated output does not
