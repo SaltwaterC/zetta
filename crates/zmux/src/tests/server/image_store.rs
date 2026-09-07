@@ -1,3 +1,4 @@
+#[cfg(all(unix, not(target_os = "macos")))]
 use super::*;
 
 #[test]
