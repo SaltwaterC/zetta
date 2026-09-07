@@ -273,6 +273,9 @@ fmt:
 
 lint:
 	$(CARGO_RUN) clippy --locked --all-targets --no-default-features --features "$(BUILD_FEATURES)" -- -D warnings
+	$(call parallel_for,$(ZETTA_TEST_CRATE_DIRS), \
+		cd "$$item" && $(CARGO_RUN) clippy --locked --all-targets -- -D warnings, \
+		Crate lint)
 
 # The cargo subcommand the per-platform targets run, and anything passed after
 # `--`. `check` with no extra arguments by default; the `clippy-*` targets below

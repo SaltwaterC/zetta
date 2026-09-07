@@ -307,15 +307,14 @@ impl<T: Clone> Storage<T> {
     #[inline]
     pub fn take_history(&mut self) -> Self {
         let history_live = self.live.split_off(self.visible_lines);
-        let history = Self {
+        Self {
             live: history_live,
             archive_head: std::mem::take(&mut self.archive_head),
             archive_chunks: std::mem::take(&mut self.archive_chunks),
             archived_lines: std::mem::take(&mut self.archived_lines),
             pending: std::mem::take(&mut self.pending),
             visible_lines: 0,
-        };
-        history
+        }
     }
 
     /// Resize every retained row, cloning only archive chunks held by an active snapshot.

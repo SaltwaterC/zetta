@@ -19,6 +19,11 @@ use super::*;
 const PNG_SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
 
 /// Stores an image for an active shared viewer.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the store-image request's decoded fields, plus the daemon, the requesting \
+              client's identity, and the connection to answer on"
+)]
 pub(super) fn store_image(
     daemon: &Arc<Daemon>,
     session_id: u64,

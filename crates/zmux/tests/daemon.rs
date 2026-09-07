@@ -1796,17 +1796,25 @@ fn retention_none_keeps_a_session_running_without_holding_its_output() {
     // draining it. The marker file is the evidence: a child blocked mid-write
     // is still "alive", so liveness alone would prove nothing.
     let marker = daemon.config.join("finished-writing");
-    let pane = client
-        .spawn(spawn_request(
-            None,
-            &format!(
-                "printf ready; i=0; while [ $i -lt 400 ]; do \
-                 printf 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\\n'; \
-                 i=$((i+1)); done; : > {}; sleep 60",
-                marker.display()
-            ),
-        ))
-        .unwrap();
+    let release = daemon.config.join("start-writing");
+    // The readiness read must not drain the workload, and PTY buffer capacity
+    // must not decide whether the child reaches its marker before detach.
+    let mut request = spawn_request(
+        None,
+        "printf ready; while [ ! -f \"$ZMUX_TEST_RELEASE\" ]; do sleep 0.05; done; \
+         i=0; while [ $i -lt 4000 ]; do \
+         printf 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\\n'; \
+         i=$((i+1)); done; : > \"$ZMUX_TEST_MARKER\"; sleep 60",
+    );
+    request.env.insert(
+        "ZMUX_TEST_RELEASE".to_owned(),
+        release.to_string_lossy().into_owned(),
+    );
+    request.env.insert(
+        "ZMUX_TEST_MARKER".to_owned(),
+        marker.to_string_lossy().into_owned(),
+    );
+    let pane = client.spawn(request).unwrap();
     let descriptor = std::fs::File::from(pane.descriptor);
     read_until(&descriptor, "ready");
     assert!(
@@ -1824,6 +1832,8 @@ fn retention_none_keeps_a_session_running_without_holding_its_output() {
             vec![(pane.pane_id, b"a snapshot that must not be kept".to_vec())],
         )
         .unwrap();
+
+    std::fs::write(&release, []).expect("releasing the detached pane to write");
 
     let deadline = Instant::now() + Duration::from_secs(10);
     while !marker.exists() && Instant::now() < deadline {

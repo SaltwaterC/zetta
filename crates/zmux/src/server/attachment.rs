@@ -8,6 +8,11 @@
 
 use super::*;
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the attach request's decoded fields, plus the daemon, the requesting \
+              client's identity, and the connection to answer on"
+)]
 pub(super) fn attach(
     daemon: &Arc<Daemon>,
     session_id: u64,

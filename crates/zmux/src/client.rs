@@ -2076,7 +2076,7 @@ fn resubscribe(
             // two arrives on the new subscription, whereas one reported between
             // a reconcile and a subscribe would fall down the same gap this is
             // closing.
-            reconcile_missed_exits(&client, reporters);
+            reconcile_missed_exits(client, reporters);
             return Some(Resubscribed::Connection(connection));
         }
         if Instant::now() >= deadline {

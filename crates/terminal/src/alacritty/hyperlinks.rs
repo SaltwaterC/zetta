@@ -135,7 +135,7 @@ pub(crate) fn find_from_grid_point<T: EventListener>(
             Some((url, true, url_match))
         } else {
             path_match(
-                &term,
+                term,
                 line_start,
                 line_end,
                 point,
@@ -416,9 +416,8 @@ fn path_match<T>(
     for regex in path_hyperlink_regexes {
         let mut path_found = false;
 
-        for (line_start_offset, captures) in regex
-            .captures_iter(&line)
-            .map(|captures| (0usize, captures))
+        for (line_start_offset, captures) in
+            regex.captures_iter(line).map(|captures| (0usize, captures))
         {
             path_found = true;
             let match_range = captures.get(0).unwrap().range();
@@ -493,7 +492,7 @@ mod tests {
         vte::ansi::Handler,
     };
     use regex::Regex;
-    use std::{cell::RefCell, ops::RangeInclusive, path::PathBuf, rc::Rc};
+    use std::{cell::RefCell, ops::RangeInclusive, path::PathBuf};
     use url::Url;
     use util::paths::PathWithPosition;
 
@@ -1145,7 +1144,7 @@ mod tests {
                 index::{Column, Point as AlacPoint},
                 term::{Term, test::mock_term},
             };
-            use std::{cell::RefCell, rc::Rc};
+            use std::cell::RefCell;
             use util_macros::perf;
 
             fn build_test_term(
@@ -1269,7 +1268,7 @@ mod tests {
 ";
                 thread_local! {
                     static TEST_TERM_AND_POINT: (Term<VoidListener>, AlacPoint) =
-                        build_test_term(&LINE, 5, 50);
+                        build_test_term(LINE, 5, 50);
                 }
                 TEST_TERM_AND_POINT.with(|(term, point)| {
                     assert_eq!(
@@ -1303,7 +1302,7 @@ mod tests {
 ";
                 thread_local! {
                     static TEST_TERM_AND_POINT: (Term<VoidListener>, AlacPoint) =
-                        build_test_term(&LINE, 5, 50);
+                        build_test_term(LINE, 5, 50);
                 }
                 TEST_TERM_AND_POINT.with(|(term, point)| {
                     assert_eq!(
@@ -1336,7 +1335,7 @@ mod tests {
 
                 TEST_REGEX_SEARCHES.with(|regex_searches| {
                     find_from_grid_point(
-                        &term,
+                        term,
                         point,
                         &mut regex_searches.borrow_mut(),
                         PathStyle::local(),
@@ -1579,7 +1578,7 @@ mod tests {
         fn process_input(term: &mut Term<VoidListener>, c: char) {
             match c {
                 '\t' => term.put_tab(1),
-                c @ _ => term.input(c),
+                c => term.input(c),
             }
         }
 
@@ -1889,7 +1888,7 @@ mod tests {
 
                 match cell.c {
                     '\t' => result.push(' '),
-                    c @ _ => result.push(c),
+                    c => result.push(c),
                 }
             }
 
@@ -1961,8 +1960,7 @@ mod tests {
                 if expected_hyperlink.hyperlink_match.start()
                     != expected_hyperlink.hyperlink_match.end()
                 {
-                    assert!(
-                        false,
+                    panic!(
                         "No hyperlink found\n     at {source_location}:\n{}",
                         check_hyperlink_match.format_renderable_content()
                     )

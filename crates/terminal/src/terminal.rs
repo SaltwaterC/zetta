@@ -28,7 +28,6 @@ use serde::{Deserialize, Serialize};
 use task::{HideStrategy, Shell, ShellKind, SpawnInTerminal};
 use terminal_settings::{AlternateScroll, CursorShape as SettingsCursorShape, TerminalSettings};
 use theme::{ActiveTheme, Theme};
-use urlencoding;
 #[cfg(windows)]
 use util::paths::PathWithPosition;
 use util::{ResultExt as _, paths::PathStyle, truncate_and_trailoff};
@@ -868,9 +867,7 @@ fn editor_invocation_command(
     path_argument: &str,
     delete_after: bool,
 ) -> String {
-    let delete_after = delete_after
-        .then_some("--delete-after ")
-        .unwrap_or_default();
+    let delete_after = if delete_after { "--delete-after " } else { "" };
     format!("{zetta_command} edit {delete_after}-- {path_argument}")
 }
 
@@ -1821,28 +1818,50 @@ impl TerminalBuilder {
     }
 }
 
+/// What `open_provided_pty` hands back: the attached PTY, its child-event
+/// stream (Windows only), any bytes the provider had already buffered, and a
+/// handle to control the child the provider owns.
+type OpenedProvidedPty = (
+    AlacrittyPty,
+    Option<alacritty_terminal::tty::AttachedChildEvents>,
+    Vec<u8>,
+    Option<Arc<dyn PtyControl>>,
+);
+
+/// Bundles what `open_provided_pty` needs to ask `provider` for a PTY and
+/// attach it. A plain struct rather than a `Copy` context bundle: several
+/// fields are moved or borrowed mutably, and the function has exactly one
+/// call site.
+struct ProvidedPtyRequest<'a> {
+    provider: &'a dyn PtyProvider,
+    pty_options: &'a alacritty_terminal::tty::Options,
+    shell: Option<(String, Vec<String>)>,
+    working_directory: Option<PathBuf>,
+    env: HashMap<String, String>,
+    term: &'a Arc<AlacrittyTermLock>,
+    output_processor: &'a mut Processor<StdSyncHandler>,
+    console_palette: ConsolePalette,
+    defer_replay: bool,
+}
+
 /// Asks `provider` for a PTY and turns it into one this process can drive.
 ///
 /// The replay is processed into the grid here, before the event loop starts, so
 /// the first frame already shows what the provider had retained rather than
 /// painting a blank terminal and filling it in a frame later.
 #[cfg(unix)]
-fn open_provided_pty(
-    provider: &dyn PtyProvider,
-    pty_options: &alacritty_terminal::tty::Options,
-    shell: Option<(String, Vec<String>)>,
-    working_directory: Option<PathBuf>,
-    env: HashMap<String, String>,
-    term: &Arc<AlacrittyTermLock>,
-    output_processor: &mut Processor<StdSyncHandler>,
-    console_palette: ConsolePalette,
-    _defer_replay: bool,
-) -> Result<(
-    AlacrittyPty,
-    Option<alacritty_terminal::tty::AttachedChildEvents>,
-    Vec<u8>,
-    Option<Arc<dyn PtyControl>>,
-)> {
+fn open_provided_pty(request: ProvidedPtyRequest) -> Result<OpenedProvidedPty> {
+    let ProvidedPtyRequest {
+        provider,
+        pty_options,
+        shell,
+        working_directory,
+        env,
+        term,
+        output_processor,
+        console_palette,
+        defer_replay: _defer_replay,
+    } = request;
     let _ = pty_options;
     let (program, args) = match shell {
         Some((program, args)) => (Some(program), args),
@@ -1867,22 +1886,18 @@ fn open_provided_pty(
 }
 
 #[cfg(windows)]
-fn open_provided_pty(
-    provider: &dyn PtyProvider,
-    pty_options: &alacritty_terminal::tty::Options,
-    shell: Option<(String, Vec<String>)>,
-    working_directory: Option<PathBuf>,
-    env: HashMap<String, String>,
-    term: &Arc<AlacrittyTermLock>,
-    output_processor: &mut Processor<StdSyncHandler>,
-    console_palette: ConsolePalette,
-    defer_replay: bool,
-) -> Result<(
-    AlacrittyPty,
-    Option<alacritty_terminal::tty::AttachedChildEvents>,
-    Vec<u8>,
-    Option<Arc<dyn PtyControl>>,
-)> {
+fn open_provided_pty(request: ProvidedPtyRequest) -> Result<OpenedProvidedPty> {
+    let ProvidedPtyRequest {
+        provider,
+        pty_options,
+        shell,
+        working_directory,
+        env,
+        term,
+        output_processor,
+        console_palette,
+        defer_replay,
+    } = request;
     let _ = pty_options;
     let (program, args) = match shell {
         Some((program, args)) => (Some(program), args),
@@ -1903,27 +1918,16 @@ fn open_provided_pty(
     // Ordinary Windows handovers are replayed immediately because ConPTY has
     // already been attached. Fresh-shell restores keep the bytes pending so
     // they follow the same post-layout path as Unix and can be normalized.
-    let replay = defer_replay.then_some(handover.replay).unwrap_or_default();
+    let replay = if defer_replay {
+        handover.replay
+    } else {
+        Vec::new()
+    };
     Ok((pty, Some(child_events), replay, Some(handover.control)))
 }
 
 #[cfg(not(any(unix, windows)))]
-fn open_provided_pty(
-    _provider: &dyn PtyProvider,
-    _pty_options: &alacritty_terminal::tty::Options,
-    _shell: Option<(String, Vec<String>)>,
-    _working_directory: Option<PathBuf>,
-    _env: HashMap<String, String>,
-    _term: &Arc<AlacrittyTermLock>,
-    _output_processor: &mut Processor<StdSyncHandler>,
-    _console_palette: ConsolePalette,
-    _defer_replay: bool,
-) -> Result<(
-    AlacrittyPty,
-    Option<alacritty_terminal::tty::AttachedChildEvents>,
-    Vec<u8>,
-    Option<Arc<dyn PtyControl>>,
-)> {
+fn open_provided_pty(_request: ProvidedPtyRequest) -> Result<OpenedProvidedPty> {
     anyhow::bail!("the multiplexer cannot hand over a console on this platform")
 }
 
@@ -2262,6 +2266,10 @@ impl TerminalBuilder {
     ///
     /// The reader must periodically return (for example by using an I/O timeout)
     /// so dropping the terminal can stop its worker thread promptly.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each parameter is an independent, unrelated builder input with no natural grouping"
+    )]
     pub fn new_byte_stream(
         reader: Box<dyn Read + Send>,
         writer: Box<dyn Write + Send>,
@@ -2345,6 +2353,10 @@ impl TerminalBuilder {
         self
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "forwards one-for-one to new_with_console_palette, which carries the same suppression"
+    )]
     pub fn new(
         working_directory: Option<PathBuf>,
         task: Option<TaskState>,
@@ -2652,16 +2664,16 @@ impl TerminalBuilder {
                     ),
                     None => (util::shell::get_system_shell(), Vec::new()),
                 };
-                let subprocess = match spawn_task_subprocess(
+                let subprocess = match spawn_task_subprocess(TaskSubprocessRequest {
                     program,
                     args,
-                    env.clone(),
-                    working_directory.clone(),
-                    term.clone(),
-                    events_tx.clone(),
-                    wakeup_gate.clone(),
-                    &background_executor,
-                ) {
+                    env: env.clone(),
+                    working_directory: working_directory.clone(),
+                    term: term.clone(),
+                    events_tx: events_tx.clone(),
+                    wakeup_gate: wakeup_gate.clone(),
+                    executor: &background_executor,
+                }) {
                     Ok(subprocess) => subprocess,
                     Err(error) => {
                         bail!(TerminalError {
@@ -2724,17 +2736,17 @@ impl TerminalBuilder {
                     // The multiplexer opens it and owns the child, so this
                     // process gets a descriptor rather than a process. What
                     // comes back is otherwise an ordinary PTY.
-                    Some(provider) => open_provided_pty(
-                        provider.as_ref(),
-                        &pty_options,
-                        alacritty_shell.clone(),
-                        working_directory.clone(),
-                        env.clone(),
-                        &term,
-                        &mut output_processor,
+                    Some(provider) => open_provided_pty(ProvidedPtyRequest {
+                        provider: provider.as_ref(),
+                        pty_options: &pty_options,
+                        shell: alacritty_shell.clone(),
+                        working_directory: working_directory.clone(),
+                        env: env.clone(),
+                        term: &term,
+                        output_processor: &mut output_processor,
                         console_palette,
-                        require_pty_provider,
-                    ),
+                        defer_replay: require_pty_provider,
+                    }),
                     None => open_pty(&pty_options, TerminalBounds::default(), window_id)
                         .map(|pty| (pty, None, Vec::new(), None))
                         .map_err(anyhow::Error::from),
@@ -4743,15 +4755,8 @@ impl Terminal {
 
     fn mouse_changed(&mut self, point: Point, side: SelectionSide) -> bool {
         match self.last_mouse {
-            Some((old_point, old_side)) => {
-                if old_point == point && old_side == side {
-                    false
-                } else {
-                    self.last_mouse = Some((point, side));
-                    true
-                }
-            }
-            None => {
+            Some((old_point, old_side)) if old_point == point && old_side == side => false,
+            _ => {
                 self.last_mouse = Some((point, side));
                 true
             }
@@ -4829,17 +4834,14 @@ impl Terminal {
 
         // Throttle hyperlink searches to avoid excessive processing
         let now = Instant::now();
-        if self
-            .last_hyperlink_search_position
-            .map_or(true, |last_pos| {
-                // Only search if mouse moved significantly or enough time passed
-                let distance_moved = ((position.x - last_pos.x).abs()
-                    + (position.y - last_pos.y).abs())
-                    > FIND_HYPERLINK_THROTTLE_PX;
-                let time_elapsed = now.duration_since(self.last_mouse_move_time).as_millis() > 100;
-                distance_moved || time_elapsed
-            })
-        {
+        if self.last_hyperlink_search_position.is_none_or(|last_pos| {
+            // Only search if mouse moved significantly or enough time passed
+            let distance_moved = ((position.x - last_pos.x).abs()
+                + (position.y - last_pos.y).abs())
+                > FIND_HYPERLINK_THROTTLE_PX;
+            let time_elapsed = now.duration_since(self.last_mouse_move_time).as_millis() > 100;
+            distance_moved || time_elapsed
+        }) {
             self.last_mouse_move_time = now;
             self.last_hyperlink_search_position = Some(position);
             self.events.push_back(InternalEvent::FindHyperlink(
@@ -5670,7 +5672,7 @@ impl Terminal {
             );
         }
         if let Some(exit_status) = exit_status.as_ref() {
-            self.child_exited = Some(exit_status.clone());
+            self.child_exited = Some(*exit_status);
         }
         self.complete_init_command_startup_handshake();
         self.init_command_startup_done_title = None;
@@ -5981,7 +5983,7 @@ impl Terminal {
     }
 
     pub fn clone_builder(&self, cx: &App, cwd: Option<PathBuf>) -> Task<Result<TerminalBuilder>> {
-        let working_directory = self.working_directory().or_else(|| cwd);
+        let working_directory = self.working_directory().or(cwd);
         TerminalBuilder::new(
             working_directory,
             None,
@@ -6331,7 +6333,10 @@ impl SubprocessHandle {
 /// Spawns `program`/`args` as a plain subprocess with piped stdout/stderr and
 /// drives its output into `term`, mirroring what the Alacritty event loop does
 /// for a PTY but without one. Used when [`HeadlessTerminal`] is enabled.
-fn spawn_task_subprocess(
+/// Bundles what `spawn_task_subprocess` needs to launch a task's shell
+/// command. A plain struct rather than a `Copy` context bundle: most fields
+/// are moved, and the function has exactly one call site.
+struct TaskSubprocessRequest<'a> {
     program: String,
     args: Vec<String>,
     env: HashMap<String, String>,
@@ -6339,8 +6344,20 @@ fn spawn_task_subprocess(
     term: Arc<AlacrittyTermLock>,
     events_tx: futures::channel::mpsc::UnboundedSender<PtyEvent>,
     wakeup_gate: WakeupGate,
-    executor: &BackgroundExecutor,
-) -> Result<SubprocessHandle> {
+    executor: &'a BackgroundExecutor,
+}
+
+fn spawn_task_subprocess(request: TaskSubprocessRequest) -> Result<SubprocessHandle> {
+    let TaskSubprocessRequest {
+        program,
+        args,
+        env,
+        working_directory,
+        term,
+        events_tx,
+        wakeup_gate,
+        executor,
+    } = request;
     use futures::io::AsyncReadExt as _;
     use std::process::Stdio;
 
@@ -8868,9 +8885,8 @@ mod tests {
                 shell_kind == ShellKind::Posix,
                 "Bash-compatible startup history should be removed before the handshake: {shell_kind:?}"
             );
-            assert_eq!(
-                command.contains("HISTORY_IGNORE"),
-                false,
+            assert!(
+                !command.contains("HISTORY_IGNORE"),
                 "startup history filtering must happen in the shell hook: {shell_kind:?}"
             );
             assert_eq!(
@@ -9528,9 +9544,8 @@ mod tests {
 
             let completion = completion_rx.recv().await.unwrap();
             let event_code = loop {
-                match event_rx.recv().await.unwrap() {
-                    Event::TaskFinished { exit_code } => break exit_code,
-                    _ => {}
+                if let Event::TaskFinished { exit_code } = event_rx.recv().await.unwrap() {
+                    break exit_code;
                 }
             };
             assert_eq!(completion.and_then(|status| status.code()), expected_code);

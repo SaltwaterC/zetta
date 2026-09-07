@@ -193,7 +193,7 @@ fn an_alternate_screen_session_starts_with_alt_screen_entry() {
     // And replaying the snapshot puts the fresh terminal back on the
     // alternate screen the session actually ran in.
     let replayed = term_showing(snapshot.as_bytes());
-    let mode = replayed.lock().mode().clone();
+    let mode = *replayed.lock().mode();
     assert!(mode.contains(TermMode::ALT_SCREEN), "{mode:?}");
 }
 
@@ -322,7 +322,7 @@ fn replaying_an_alternate_screen_snapshot_restores_the_session_state() {
 
     let replayed = term_showing(&snapshot);
     let term = replayed.lock();
-    let mode = term.mode().clone();
+    let mode = *term.mode();
 
     assert!(mode.contains(TermMode::ALT_SCREEN), "{mode:?}");
     assert!(!mode.contains(TermMode::SHOW_CURSOR), "{mode:?}");
@@ -396,6 +396,5 @@ fn the_sessions_modes_survive_the_snapshot() {
 fn round_trip_modes(input: &[u8]) -> TermMode {
     let snapshot = ansi_snapshot(&term_showing(input).lock(), 1000);
     let replayed = term_showing(&snapshot);
-    let mode = replayed.lock().mode().to_owned();
-    mode
+    *replayed.lock().mode()
 }

@@ -704,6 +704,11 @@ pub(super) fn share(
 /// the flag — and, because the caller is a command that exits a moment later,
 /// scoping back means scoping to the process that last held the session rather
 /// than to whoever asked.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the set-scope request's decoded fields, plus the daemon, the requesting \
+              client's identity, and the connection to answer on"
+)]
 pub(super) fn set_session_scope(
     daemon: &Arc<Daemon>,
     session_id: u64,
