@@ -676,9 +676,18 @@ fn run_ssh_process(spec: LaunchSpec, input: Vec<u8>, timeout: Duration) -> Resul
     if let Some(directory) = &spec.working_directory {
         command.current_dir(directory);
     }
-    let mut child = command
-        .spawn()
-        .with_context(|| format!("starting auxiliary SSH client {}", spec.program))?;
+    let mut child = loop {
+        match command.spawn() {
+            Ok(process) => break process,
+            Err(error) if error.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                thread::sleep(Duration::from_millis(20));
+            }
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("starting auxiliary SSH client {}", spec.program));
+            }
+        }
+    };
     let mut stdout = child
         .stdout
         .take()

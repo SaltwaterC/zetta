@@ -1,3 +1,5 @@
+use super::*;
+
 #[test]
 #[cfg(all(unix, not(target_os = "macos")))]
 fn startup_sweep_removes_numeric_stale_directories() {

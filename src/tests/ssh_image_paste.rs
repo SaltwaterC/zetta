@@ -278,6 +278,8 @@ mod process_tests {
     use super::*;
     use std::{
         fs,
+        fs::File,
+        io::Write,
         os::unix::fs::PermissionsExt,
         path::Path,
         sync::atomic::{AtomicU64, Ordering},
@@ -303,7 +305,9 @@ mod process_tests {
 
     fn temporary_executable(script: &str) -> TemporaryExecutable {
         let path = temporary_path("ssh-image-paste");
-        fs::write(&path, script).unwrap();
+        let mut file = File::create(&path).unwrap();
+        file.write_all(script.as_bytes()).unwrap();
+        file.sync_all().unwrap();
         let mut permissions = fs::metadata(&path).unwrap().permissions();
         permissions.set_mode(0o700);
         fs::set_permissions(&path, permissions).unwrap();
