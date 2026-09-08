@@ -31,6 +31,29 @@ function Assert-FileContents([string]$Path, [string]$Expected, [string]$Message)
     Assert-Equal $Expected (Read-TestFile $Path) $Message
 }
 
+function Get-UserPathEntries {
+    $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+    if ([string]::IsNullOrWhiteSpace($userPath)) {
+        return @()
+    }
+    return @($userPath -split ';' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+}
+
+function Assert-UserPathEntries([string[]]$Expected, [string]$Message) {
+    $actual = @(Get-UserPathEntries)
+    Assert-Equal $Expected.Count $actual.Count $Message
+    for ($index = 0; $index -lt $Expected.Count; $index++) {
+        Assert-Equal $Expected[$index] $actual[$index] "$Message (entry $index)"
+    }
+}
+
+function Assert-UserPathContainsOnce([string]$ExpectedEntry, [string]$Message) {
+    $matches = @(Get-UserPathEntries | Where-Object {
+        $_.Equals($ExpectedEntry, [StringComparison]::OrdinalIgnoreCase)
+    })
+    Assert-Equal 1 $matches.Count $Message
+}
+
 function Invoke-Installer([string]$Action = "InstallBinary") {
     $arguments = @(
         "-NoProfile",
@@ -82,11 +105,20 @@ $installedPtyVersion = Join-Path $installDirectory "zmux-pty.version"
 $oldAppData = $env:APPDATA
 $oldLocalAppData = $env:LOCALAPPDATA
 $oldUserPath = [Environment]::GetEnvironmentVariable("Path", "User")
+$unrelatedUserPathEntries = @(
+    (Join-Path $testRoot "unrelated-first"),
+    (Join-Path $testRoot "unrelated-second")
+)
 
 try {
     New-Item -ItemType Directory -Force -Path $sourceDirectory, $appData, $localAppData | Out-Null
     $env:APPDATA = $appData
     $env:LOCALAPPDATA = $localAppData
+    [Environment]::SetEnvironmentVariable(
+        "Path",
+        ($unrelatedUserPathEntries -join ';'),
+        "User"
+    )
     Set-SourceGeneration "first"
 
     Assert-InstallerSucceeded (Invoke-Installer) "initial install failed"
@@ -94,6 +126,8 @@ try {
     Assert-FileContents (Join-Path $installDirectory "zosh.exe") "zosh-first" "zosh was not installed"
     Assert-FileContents (Join-Path $installDirectory "mosh-server.exe") "mosh-server-first" "mosh-server was not installed"
     Assert-FileContents $installedPtyVersion "1" "initial helper marker is wrong"
+    Assert-UserPathEntries ($unrelatedUserPathEntries + $installDirectory) "initial install disturbed or omitted user PATH entries"
+    Assert-UserPathContainsOnce $installDirectory "initial install did not add its executable directory to the user PATH"
 
     # A rebuilt helper with the same host protocol is compatible even when its
     # bytes differ. Its current image and every generation must remain intact.
@@ -101,6 +135,7 @@ try {
     $initialHelper = Read-TestFile $installedPty
     Assert-InstallerSucceeded (Invoke-Installer) "same-marker install failed"
     Assert-FileContents $installedPty $initialHelper "same-marker install replaced the helper"
+    Assert-UserPathEntries ($unrelatedUserPathEntries + $installDirectory) "same-marker install changed user PATH entries"
 
     # An old installation has no sidecar yet. Version 1 is the known legacy
     # value, so the marker is backfilled without replacing its helper.
@@ -190,6 +225,10 @@ try {
     # part of the hash-checked application file list.
     Remove-Item -LiteralPath (Join-Path $installDirectory "zetta.exe") -Force
     Assert-InstallerSucceeded (Invoke-Installer "UninstallBinary") "uninstall failed"
+    Assert-UserPathEntries $unrelatedUserPathEntries "uninstall removed or changed unrelated user PATH entries"
+    Assert-True (-not (Get-UserPathEntries | Where-Object {
+        $_.Equals($installDirectory, [StringComparison]::OrdinalIgnoreCase)
+    })) "uninstall left the installed directory in the user PATH"
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $installDirectory "zosh.exe"))) "uninstall left zosh"
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $installDirectory "mosh-server.exe"))) "uninstall left mosh-server"
     Assert-True (-not (Test-Path -LiteralPath $installedPtyVersion)) "uninstall left the helper marker"

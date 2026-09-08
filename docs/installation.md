@@ -28,6 +28,25 @@ The default build includes the standalone `zwt` Git worktree command and the
 worktree command, and `MOSH=0` to omit the bundled Mosh client and server
 executables and the `zetta mosh` compatibility route.
 
+## User-local shell PATH setup
+
+On Linux and macOS, a user-local `make install` adds the installed executable
+directory to the startup files appropriate for the configured login shell:
+
+- Zsh: `${ZDOTDIR:-$HOME}/.zshenv`, which is read by noninteractive commands as
+  well as interactive shells. Any older installer entry in `~/.zshrc` is
+  migrated, while `zetta init` remains in `~/.zshrc`.
+- Bash: `~/.bashrc` before its interactive-shell guard, plus the first existing
+  login file among `~/.bash_profile`, `~/.bash_login`, and `~/.profile`.
+- Fish: `${XDG_CONFIG_HOME:-$HOME/.config}/fish/config.fish`, using
+  `fish_add_path --path`.
+- Other POSIX shells: `~/.profile`.
+
+The PATH blocks are marked and idempotent, and uninstall removes only those
+managed blocks while preserving the rest of each file. Explicit startup-file
+bypasses such as `zsh -f`, `bash --norc`, and `fish --no-config` do not read
+these entries.
+
 ## Linux build requirements
 
 Linux defaults to Wayland. Build with `make build X11=1` to include the X11
@@ -128,9 +147,10 @@ development binaries, and creates `~/.local/bin/zetta`, `~/.local/bin/zmux`,
 `~/.local/bin/zosh`, `~/.local/bin/mosh-server`, and `~/.local/bin/zwt` as
 command-line launchers or binaries for the bundled tools.
 It also adds `~/.local/bin` to the installing user's shell startup file so new
-shells can invoke them directly. Native panes prepend the running executable's
-directory to `PATH` as before. `make uninstall` removes the application
-bundle, CLI entry points, and PATH entry.
+shells can invoke them directly. See [user-local shell PATH setup](#user-local-shell-path-setup)
+for the shell-specific startup files. Native panes prepend the running
+executable's directory to `PATH` as before. `make uninstall` removes the
+application bundle, CLI entry points, and managed PATH blocks.
 
 For a system-wide installation, run `sudo make install PREFIX=/usr/local
 MAC_APPLICATIONS_DIR=/Applications`.
@@ -176,10 +196,11 @@ For an optimized release build, use `make build RELEASE=1` and
 `make install RELEASE=1`; those commands use `target\release`.
 
 This copies the runtime to `%LOCALAPPDATA%\Programs\Zetta`, adds that directory
-to the user `PATH`, and creates a Start Menu shortcut. New console sessions can
-then run `zetta`, `zmux`, and `zwt`. The shortcut launches `zetta-gui.exe`,
-which starts the console-native executable without opening an extra console
-window.
+to the per-user Windows `PATH`, and creates a Start Menu shortcut. The PATH
+change is inherited by new processes, so open a new console (or restart a
+process that was already running) before invoking `zetta`, `zmux`, `zosh`,
+`mosh-server`, or `zwt`. The shortcut launches `zetta-gui.exe`, which starts
+the console-native executable without opening an extra console window.
 
 Zetta can be reinstalled while it is running. Windows keeps the previous
 runtime under names such as `zetta.old.exe` until its processes exit. Repeating
@@ -227,9 +248,10 @@ links `~/.local/bin/zetta`, `~/.local/bin/zmux`, and `~/.local/bin/zwt` to their
 binaries, and installs the desktop entry under
 `~/.local/share/applications`. The desktop entry uses the installed binary and
 icon paths directly, so it works even when the desktop session does not have
-`~/.local/bin` in its `PATH`. The installer also adds `~/.local/bin` to
-the installing user's shell startup file, and `make uninstall` removes that
-PATH entry. The desktop entry's **New Window** action invokes
+`~/.local/bin` in its `PATH`. The installer uses the shell-specific startup
+files described in [user-local shell PATH setup](#user-local-shell-path-setup),
+and `make uninstall` removes its managed PATH blocks. The desktop entry's
+**New Window** action invokes
 `zetta --new-window`; visible profiles are added as additional actions while
 Zetta is running. The primary launch keeps normal activate-or-reopen behavior.
 
