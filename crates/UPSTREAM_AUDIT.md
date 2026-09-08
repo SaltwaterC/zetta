@@ -11,6 +11,7 @@ is still upstream `master`, so that fork has no upstream to catch up with.
 
 | Local fork | Upstream/base | Current retained change |
 | --- | --- | --- |
+| `crates/vt100` | crates.io `vt100@0.16.2` | CSI b (REP) support, with preceding-character state retained across Mosh screen clones; see `vt100/UPSTREAM.md`. |
 | `crates/alacritty_terminal` | `zed-industries/alacritty@4c129667` | Hybrid bounded-memory scrollback, allocator/performance fixes, Windows ConPTY read and hangup handling, shell integration, resize behavior, and attached PTYs whose child belongs to the multiplexer. |
 | `crates/terminal` | `zed/crates/terminal@2890c340` | Standalone terminal engine with Zetta identity, PTY/process-group/CWD tracking, shell integration, unbounded scrollback coordinates, input mapping, export/serial support, diagnostics, and performance work. |
 | `crates/terminal_view` | `zed/crates/terminal_view@2890c340` | Standalone renderer and interaction model, independent cursor/text layout, pixel-snapped subcell block/sextant painting, themes and font overrides, pane controls, path targets, literal/asynchronous search, inline sizing, alternate-screen anchoring, and scrollback editing. |

@@ -72,6 +72,8 @@ bundled server the remote side also holds up its own half on the same interval,
 which is what is needed when the machine with unreliable power management is the
 remote one. [The protocol note](crates/zosh/PROTOCOL.md) covers the wire format
 and how to prove it is working on a real link.
+The Mosh client and bundled Rust server support repeated-character (REP)
+updates, including repeated spaces used to align full-screen applications.
 
 Zosh intentionally defaults to `--no-init`, unlike stock `mosh`: it keeps the
 current terminal screen and its scrollback instead of entering an alternate

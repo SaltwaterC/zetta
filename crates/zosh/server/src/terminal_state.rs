@@ -415,6 +415,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn htop_ascii_padding_survives_server_state_updates() {
+        let mut terminal = TerminalState::new(3, 80);
+        // ncurses emits REP for runs of spaces in htop's ASCII mode,
+        // triggered when macOS forwards LC_CTYPE=UTF-8 to a Linux host.
+        terminal.process(b"\x1b[2;5H275 \x1b[90;1mroot \x1b[");
+        terminal.process(b"6b\x1b[0m 20   0 43360");
+        let mut client = vt100::Parser::new(3, 80, 0);
+        client.process(&terminal.diff_from_ack());
+        assert_eq!(client.screen().cell(1, 20).unwrap().contents(), "2");
+        assert_eq!(client.screen().cell(1, 30).unwrap().contents(), "6");
+        terminal.snapshot_for_state(1);
+        terminal.acknowledge(1);
+        terminal.process(b"\x1b[2;31H9");
+        client.process(&terminal.diff_from_ack());
+        assert_eq!(client.screen().cell(1, 20).unwrap().contents(), "2");
+        assert_eq!(client.screen().cell(1, 30).unwrap().contents(), "9");
+    }
+
+    #[test]
     fn query_split_across_reads() {
         let mut responder = QueryResponder::new();
         assert!(responder.feed(b"hello\x1b[", (2, 3), (24, 80)).is_empty());

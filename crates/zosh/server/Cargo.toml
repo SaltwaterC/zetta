@@ -18,7 +18,11 @@ getrandom = "0.3"
 flate2 = "1"
 portable-pty = "0.9"
 vt100 = "0.16.2"
+
 moshcatty = { git = "https://github.com/binaricat/MoshCatty.git", rev = "554b9d305e7ac4b11de740d764bbc3e05f816d7b" }
+
+[patch.crates-io]
+vt100 = { path = "../../vt100" }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

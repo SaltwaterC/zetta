@@ -1,6 +1,19 @@
 use super::*;
 
 #[test]
+fn repeated_padding_preserves_columns_across_protocol_states() {
+    let mut first = DisplayScreen::new(3, 40);
+    first.feed(b"root ");
+    let mut next = first.clone();
+    next.feed(b"\x1b[5b20   0\x1b[1;11H99");
+    assert_eq!(next.text().trim_end(), "root      99   0");
+    let mut physical = DisplayScreen::new(3, 40);
+    physical.feed(&first.repaint());
+    physical.feed(&next.diff_from(&first));
+    assert_eq!(physical.text(), next.text());
+}
+
+#[test]
 fn a_clear_is_applied_once_when_its_protocol_state_is_displayed() {
     use mosh_rs::{ClientTerminal, screen::OverlayCursor};
     let mut terminal = ClientTerminal::new(DisplayScreen::new(5, 20));
