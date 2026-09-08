@@ -192,18 +192,25 @@ impl Zetta {
         Ok(target)
     }
 
-    pub(crate) fn load_remote_sessions(&mut self, cx: &mut Context<Self>) {
-        let Some(picker) = self.remote_session_picker.as_mut() else {
+    pub(crate) fn load_remote_sessions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(picker) = self.remote_session_picker.as_ref() else {
             return;
         };
         let target = match Self::remote_target_from_picker(picker) {
             Ok(target) => target,
             Err(error) => {
-                picker.error = Some(format!("{error:#}"));
+                if let Some(picker) = self.remote_session_picker.as_mut() {
+                    picker.error = Some(format!("{error:#}"));
+                }
+                self.remote_session_focus.focus(window, cx);
                 cx.notify();
                 return;
             }
         };
+        let picker = self
+            .remote_session_picker
+            .as_mut()
+            .expect("the remote session picker was checked above");
         picker.generation = picker.generation.wrapping_add(1);
         picker.task.take();
         picker.sessions.clear();
@@ -211,7 +218,7 @@ impl Zetta {
         picker.loading = true;
         picker.error = None;
         let generation = picker.generation;
-        let task = cx.spawn(async move |this, cx| {
+        let task = cx.spawn_in(window, async move |this, cx| {
             let result = cx
                 .background_spawn(async move {
                     let client = zmux::client::Client::connect_remote(target)
@@ -219,30 +226,41 @@ impl Zetta {
                     client.list().context("listing remote sessions")
                 })
                 .await;
-            this.update(cx, |this, cx| {
-                let Some(picker) = this.remote_session_picker.as_mut() else {
-                    return;
-                };
-                if picker.generation != generation {
-                    return;
-                }
-                picker.loading = false;
-                picker.task = None;
-                match result {
-                    Ok(sessions) => {
-                        picker.sessions = sessions;
-                        picker.selected = 0;
-                        if picker.sessions.is_empty() {
-                            picker.error = Some("The remote host has no shared sessions.".into());
-                        }
-                    }
-                    Err(error) => picker.error = Some(format!("{error:#}")),
-                }
-                cx.notify();
+            this.update_in(cx, |this, window, cx| {
+                this.apply_remote_session_result(generation, result, window, cx);
             })
             .ok();
         });
         picker.task = Some(task);
+        cx.notify();
+    }
+
+    fn apply_remote_session_result(
+        &mut self,
+        generation: u64,
+        result: anyhow::Result<Vec<zmux::protocol::BackgroundSessionSummary>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(picker) = self.remote_session_picker.as_mut() else {
+            return;
+        };
+        if picker.generation != generation {
+            return;
+        }
+        picker.loading = false;
+        picker.task = None;
+        match result {
+            Ok(sessions) => {
+                picker.sessions = sessions;
+                picker.selected = 0;
+                if picker.sessions.is_empty() {
+                    picker.error = Some("The remote host has no shared sessions.".into());
+                }
+            }
+            Err(error) => picker.error = Some(format!("{error:#}")),
+        }
+        self.remote_session_focus.focus(window, cx);
         cx.notify();
     }
 
@@ -259,6 +277,7 @@ impl Zetta {
                 if let Some(picker) = self.remote_session_picker.as_mut() {
                     picker.error = Some(format!("{error:#}"));
                 }
+                self.remote_session_focus.focus(window, cx);
                 cx.notify();
                 return;
             }
@@ -318,7 +337,7 @@ impl Zetta {
                 if field == RemoteSessionField::List && has_sessions {
                     self.select_remote_session(selected, window, cx);
                 } else if !loading {
-                    self.load_remote_sessions(cx);
+                    self.load_remote_sessions(window, cx);
                 }
             }
             cx.stop_propagation();
@@ -327,8 +346,8 @@ impl Zetta {
         let Some(picker) = self.remote_session_picker.as_mut() else {
             return false;
         };
-        match event.keystroke.key.as_str() {
-            "tab" => {
+        match (event.keystroke.key.as_str(), picker.field) {
+            ("tab", _) => {
                 picker.field = match (picker.field, event.keystroke.modifiers.shift) {
                     (RemoteSessionField::Target, false) => RemoteSessionField::Port,
                     (RemoteSessionField::Port, false) => RemoteSessionField::List,
@@ -340,13 +359,11 @@ impl Zetta {
                 picker.reset_suggestion_navigation();
                 cx.notify();
             }
-            "up" | "down" if picker.field == RemoteSessionField::Target => {
+            ("up" | "down", RemoteSessionField::Target) => {
                 picker.navigate_suggestions(event.keystroke.key == "up");
                 cx.notify();
             }
-            "up" | "down"
-                if picker.field == RemoteSessionField::List && !picker.sessions.is_empty() =>
-            {
+            ("up" | "down", RemoteSessionField::List) if !picker.sessions.is_empty() => {
                 if event.keystroke.key == "up" {
                     picker.selected = picker.selected.saturating_sub(1);
                 } else {
@@ -357,11 +374,7 @@ impl Zetta {
                     .scroll_to_item(picker.selected, ScrollStrategy::Nearest);
                 cx.notify();
             }
-            _ if matches!(
-                picker.field,
-                RemoteSessionField::Target | RemoteSessionField::Port
-            ) =>
-            {
+            (_, RemoteSessionField::Target | RemoteSessionField::Port) => {
                 let field = match picker.field {
                     RemoteSessionField::Target => &mut picker.target,
                     RemoteSessionField::Port => &mut picker.port,
@@ -408,6 +421,18 @@ impl Zetta {
         }
         cx.stop_propagation();
         true
+    }
+
+    pub(crate) fn remote_session_key_down_capture(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.remote_session_picker.is_some() && event.keystroke.key == "escape" {
+            self.dismiss_remote_session_picker(window, cx);
+            cx.stop_propagation();
+        }
     }
 
     pub(crate) fn render_remote_session_overlay(
@@ -898,10 +923,10 @@ fn remote_session_actions(actions: RemoteSessionActions<'_>) -> impl IntoElement
                     .style(ButtonStyle::Outlined)
                     .color(Color::Custom(colors.text))
                     .disabled(loading)
-                    .on_click(move |_, _, cx| {
+                    .on_click(move |_, window, cx| {
                         load_handle
                             .update(cx, |this, cx| {
-                                this.load_remote_sessions(cx);
+                                this.load_remote_sessions(window, cx);
                             })
                             .ok();
                     }),

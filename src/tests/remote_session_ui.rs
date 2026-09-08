@@ -1,5 +1,49 @@
 use super::*;
-use gpui::{TestAppContext, UniformListScrollHandle, px, size};
+use gpui::{Context, FocusHandle, TestAppContext, UniformListScrollHandle, px, size};
+use std::{cell::Cell, rc::Rc};
+
+struct RemoteSessionEscapeHarness {
+    zetta: Entity<Zetta>,
+    picker_focus: FocusHandle,
+    child_focus: FocusHandle,
+    bubble_seen: Rc<Cell<bool>>,
+}
+
+impl Render for RemoteSessionEscapeHarness {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let zetta = self.zetta.downgrade();
+        let bubble_seen = self.bubble_seen.clone();
+        let error_visible = self
+            .zetta
+            .read(cx)
+            .remote_session_picker
+            .as_ref()
+            .is_some_and(|picker| picker.error.is_some());
+        div()
+            .size_full()
+            .capture_key_down(move |event, window, cx| {
+                zetta
+                    .update(cx, |zetta, cx| {
+                        zetta.remote_session_key_down_capture(event, window, cx);
+                    })
+                    .ok();
+            })
+            .child(
+                div().size_full().track_focus(&self.picker_focus).child(
+                    div()
+                        .size_full()
+                        .track_focus(&self.child_focus)
+                        .when(error_visible, |child| {
+                            child.child("Remote session validation error")
+                        })
+                        .on_key_down(move |_, _, cx| {
+                            bubble_seen.set(true);
+                            cx.stop_propagation();
+                        }),
+                ),
+            )
+    }
+}
 
 struct RemoteSessionSuggestionsHarness {
     suggestions: Vec<String>,
@@ -50,6 +94,97 @@ fn remote_picker_starts_on_the_target_field() {
     assert!(picker.sessions.is_empty());
     assert!(!picker.loading);
     assert!(picker.suggestion_navigation.is_none());
+}
+
+#[gpui::test]
+fn remote_picker_capture_escape_dismisses_error_and_ignores_stale_results(cx: &mut TestAppContext) {
+    cx.update(|cx| theme_settings::init(theme::LoadThemes::JustBase, cx));
+    let bubble_seen = Rc::new(Cell::new(false));
+    let bubble_seen_for_view = bubble_seen.clone();
+    let (harness, cx) = cx.add_window_view(move |window, cx| {
+        let mut config = Config::defaults(None, None);
+        config.profiles.clear();
+        let zetta = cx.new(|cx| {
+            let mut zetta = Zetta::new(
+                config,
+                None,
+                ZettaLaunchOptions {
+                    no_mux: true,
+                    ..Default::default()
+                },
+                window,
+                cx,
+            );
+            zetta.remote_session_picker = Some(RemoteSessionPicker {
+                error: Some("enter an SSH target".to_owned()),
+                ..Default::default()
+            });
+            zetta
+        });
+        let picker_focus = zetta.read(cx).remote_session_focus.clone();
+        RemoteSessionEscapeHarness {
+            zetta,
+            picker_focus,
+            child_focus: cx.focus_handle(),
+            bubble_seen: bubble_seen_for_view,
+        }
+    });
+    let zetta = harness.update(cx, |harness, _| harness.zetta.clone());
+    let child_focus = harness.update(cx, |harness, _| harness.child_focus.clone());
+    harness.update_in(cx, |harness, window, cx| {
+        harness.child_focus.focus(window, cx);
+    });
+    cx.run_until_parked();
+
+    let validation_restored_focus = zetta.update_in(cx, |zetta, window, cx| {
+        zetta.load_remote_sessions(window, cx);
+        window.focused(cx) == Some(zetta.remote_session_focus.clone())
+    });
+    assert!(
+        validation_restored_focus,
+        "validation errors should return focus to the remote picker"
+    );
+
+    harness.update_in(cx, |harness, window, cx| {
+        harness.child_focus.focus(window, cx);
+    });
+    cx.run_until_parked();
+    cx.simulate_keystrokes("x");
+    assert!(
+        bubble_seen.get(),
+        "the focused child should stop ordinary key events in the bubble phase"
+    );
+
+    bubble_seen.set(false);
+    cx.simulate_keystrokes("escape");
+    assert!(
+        !bubble_seen.get(),
+        "capture-phase Escape should run before the focused child can stop propagation"
+    );
+    assert!(zetta.update(cx, |zetta, _| zetta.remote_session_picker.is_none()));
+
+    zetta.update(cx, |zetta, _| {
+        zetta.remote_session_picker = Some(RemoteSessionPicker {
+            generation: 7,
+            ..Default::default()
+        });
+    });
+    let stale_result_preserved_focus = zetta.update_in(cx, |zetta, window, cx| {
+        zetta.dismiss_remote_session_picker(window, cx);
+        child_focus.focus(window, cx);
+        zetta.apply_remote_session_result(
+            7,
+            Err(anyhow::anyhow!("late remote result")),
+            window,
+            cx,
+        );
+        window.focused(cx) == Some(child_focus.clone())
+    });
+    assert!(
+        stale_result_preserved_focus,
+        "a result for a dismissed picker must not restore its focus"
+    );
+    assert!(zetta.update(cx, |zetta, _| zetta.remote_session_picker.is_none()));
 }
 
 #[test]
