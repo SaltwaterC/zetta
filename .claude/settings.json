@@ -1,5 +1,17 @@
 {
   "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "^AskUserQuestion$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh scripts/request-user-input-hook.sh \"Claude input required\"",
+            "statusMessage": "Notifying Zetta about pending Claude input"
+          }
+        ]
+      }
+    ],
     "Stop": [
       {
         "hooks": [

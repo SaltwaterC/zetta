@@ -7,8 +7,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh \"$(git rev-parse --show-toplevel)/scripts/request-user-input-hook.sh\"",
-            "commandWindows": "powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \"& (Join-Path (& git rev-parse --show-toplevel) 'scripts/request-user-input-hook.ps1')\"",
+            "command": "sh \"$(git rev-parse --show-toplevel)/scripts/request-user-input-hook.sh\" \"Codex input required\"",
+            "commandWindows": "powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \"& (Join-Path (& git rev-parse --show-toplevel) 'scripts/request-user-input-hook.ps1') 'Codex input required'\"",
             "statusMessage": "Notifying Zetta about pending Codex input"
           }
         ]
