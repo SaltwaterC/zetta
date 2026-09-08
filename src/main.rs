@@ -135,7 +135,8 @@ use theme_extensions::{InstalledThemeExtension, ThemeExtension};
 use ui::{
     Banner, Button, ButtonCommon as _, ButtonLike, ButtonLink, ButtonSize, ButtonStyle,
     Clickable as _, Color, Icon, IconButton, IconButtonShape, IconName, IconSize, Label, LabelSize,
-    PopoverMenu, PopoverMenuHandle, Severity, Tooltip, prelude::*, switch,
+    PopoverMenu, PopoverMenuHandle, ScrollAxes, Scrollbars, Severity, Tooltip, WithScrollbar as _,
+    prelude::*, switch,
 };
 use util::{ResultExt as _, paths::PathStyle};
 use zetta_assets::ZettaAssets;

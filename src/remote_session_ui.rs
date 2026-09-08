@@ -8,7 +8,9 @@
 use super::*;
 use crate::background_session_ui::AttachOutcomeSummary;
 
-const MAX_REMOTE_SESSION_SUGGESTIONS: usize = 6;
+const REMOTE_SESSION_SUGGESTION_VIEWPORT_ROWS: usize = 6;
+const REMOTE_SESSION_SUGGESTION_VIEWPORT_HEIGHT: gpui::Rems =
+    gpui::rems(1.75 * REMOTE_SESSION_SUGGESTION_VIEWPORT_ROWS as f32);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RemoteSessionField {
@@ -33,6 +35,7 @@ pub(crate) struct RemoteSessionPicker {
     pub(crate) error: Option<String>,
     pub(crate) suggestions: Vec<String>,
     suggestion_navigation: Option<RemoteSessionSuggestionNavigation>,
+    pub(crate) suggestion_scroll: UniformListScrollHandle,
     pub(crate) scroll: UniformListScrollHandle,
     pub(crate) generation: u64,
     pub(crate) task: Option<Task<()>>,
@@ -50,6 +53,7 @@ impl Default for RemoteSessionPicker {
             error: None,
             suggestions: Vec::new(),
             suggestion_navigation: None,
+            suggestion_scroll: UniformListScrollHandle::new(),
             scroll: UniformListScrollHandle::new(),
             generation: 0,
             task: None,
@@ -73,6 +77,8 @@ impl RemoteSessionPicker {
 
     fn reset_suggestion_navigation(&mut self) {
         self.suggestion_navigation = None;
+        self.suggestion_scroll
+            .scroll_to_item(0, ScrollStrategy::Top);
     }
 
     fn visible_suggestions(&self) -> Vec<String> {
@@ -88,7 +94,6 @@ impl RemoteSessionPicker {
             .filter(|suggestion| {
                 filter.is_empty() || suggestion.to_lowercase().starts_with(&filter)
             })
-            .take(MAX_REMOTE_SESSION_SUGGESTIONS)
             .cloned()
             .collect()
     }
@@ -117,6 +122,8 @@ impl RemoteSessionPicker {
         self.target = TextField::new(suggestions[selected].clone());
         self.invalidate_results();
         self.suggestion_navigation = Some(RemoteSessionSuggestionNavigation { filter, selected });
+        self.suggestion_scroll
+            .scroll_to_item(selected, ScrollStrategy::Nearest);
         true
     }
 }
@@ -408,6 +415,8 @@ impl Zetta {
         colors: &ThemeColors,
         error_color: Hsla,
         handle: &WeakEntity<Self>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let picker = self.remote_session_picker.as_ref()?;
         let target = picker.target.clone();
@@ -423,6 +432,7 @@ impl Zetta {
             .suggestion_navigation
             .as_ref()
             .map(|navigation| navigation.selected);
+        let suggestion_scroll = picker.suggestion_scroll.clone();
         let picker_scroll = picker.scroll.clone();
         let rows = remote_session_rows(handle, colors, &picker_scroll, sessions, selected);
 
@@ -430,8 +440,15 @@ impl Zetta {
         let load_handle = handle.clone();
         let attach_handle = handle.clone();
         let has_suggestions = !suggestions.is_empty();
+        let suggestion_rows = remote_session_suggestion_rows(
+            handle,
+            colors,
+            &suggestion_scroll,
+            suggestions,
+            suggestion_selected,
+        );
         let suggestion_rows =
-            remote_session_suggestion_rows(handle, colors, suggestions, suggestion_selected);
+            remote_session_suggestion_list(suggestion_rows, &suggestion_scroll, window, cx);
 
         let session_list = div()
             .id("remote-session-list-panel")
@@ -519,10 +536,7 @@ impl Zetta {
                         .when(
                             field == RemoteSessionField::Target && has_suggestions,
                             |panel| {
-                                panel.child(
-                                    div()
-                                        .children(suggestion_rows),
-                                )
+                                panel.child(suggestion_rows)
                             },
                         )
                         .child(
@@ -646,52 +660,86 @@ fn remote_session_rows(
 fn remote_session_suggestion_rows(
     handle: &WeakEntity<Zetta>,
     colors: &ThemeColors,
+    suggestion_scroll: &gpui::UniformListScrollHandle,
     suggestions: Vec<String>,
     selected: Option<usize>,
-) -> Vec<gpui::Stateful<gpui::Div>> {
-    let handle = handle.clone();
-    let colors = colors.clone();
-    suggestions
-        .into_iter()
-        .enumerate()
-        .map(|(index, suggestion)| {
-            let suggestion_handle = handle.clone();
-            let suggestion_label = suggestion.clone();
-            div()
-                .id(("remote-session-suggestion", index))
-                .h_7()
-                .px_2()
-                .flex()
-                .items_center()
-                .cursor_pointer()
-                .text_xs()
-                .text_color(colors.text_muted)
-                .border_1()
-                .border_color(if selected == Some(index) {
-                    colors.border_focused
-                } else {
-                    transparent_black()
-                })
-                .when(selected == Some(index), |row| {
-                    row.bg(colors.element_selected)
-                })
-                .hover(|style| style.bg(colors.element_hover))
-                .on_click(move |_, _, cx| {
-                    suggestion_handle
-                        .update(cx, |this, cx| {
-                            if let Some(picker) = this.remote_session_picker.as_mut() {
-                                picker.target = TextField::new(suggestion.clone());
-                                picker.field = RemoteSessionField::Port;
-                                picker.reset_suggestion_navigation();
-                                picker.invalidate_results();
-                                cx.notify();
-                            }
+) -> gpui::UniformList {
+    let row_colors = colors.clone();
+    let row_handle = handle.clone();
+    uniform_list(
+        "remote-session-suggestions",
+        suggestions.len(),
+        move |range: std::ops::Range<usize>, _, _| {
+            range
+                .map(|index| {
+                    let suggestion = suggestions[index].clone();
+                    let suggestion_handle = row_handle.clone();
+                    let suggestion_label = suggestion.clone();
+                    div()
+                        .id(("remote-session-suggestion", index))
+                        .debug_selector(|| format!("remote-session-suggestion-{index}"))
+                        .h_7()
+                        .w_full()
+                        .px_2()
+                        .flex()
+                        .items_center()
+                        .cursor_pointer()
+                        .text_xs()
+                        .text_color(row_colors.text_muted)
+                        .border_1()
+                        .border_color(if selected == Some(index) {
+                            row_colors.border_focused
+                        } else {
+                            transparent_black()
                         })
-                        .ok();
+                        .when(selected == Some(index), |row| {
+                            row.bg(row_colors.element_selected)
+                        })
+                        .hover(|style| style.bg(row_colors.element_hover))
+                        .on_click(move |_, _, cx| {
+                            suggestion_handle
+                                .update(cx, |this, cx| {
+                                    if let Some(picker) = this.remote_session_picker.as_mut() {
+                                        picker.target = TextField::new(suggestion.clone());
+                                        picker.field = RemoteSessionField::Port;
+                                        picker.reset_suggestion_navigation();
+                                        picker.invalidate_results();
+                                        cx.notify();
+                                    }
+                                })
+                                .ok();
+                        })
+                        .child(suggestion_label)
                 })
-                .child(suggestion_label)
-        })
-        .collect()
+                .collect::<Vec<_>>()
+        },
+    )
+    .with_sizing_behavior(ListSizingBehavior::Infer)
+    .max_h(REMOTE_SESSION_SUGGESTION_VIEWPORT_HEIGHT)
+    .track_scroll(suggestion_scroll)
+    .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+}
+
+fn remote_session_suggestion_list(
+    rows: gpui::UniformList,
+    suggestion_scroll: &gpui::UniformListScrollHandle,
+    window: &mut Window,
+    cx: &mut App,
+) -> gpui::Div {
+    div().relative().w_full().child(rows).child(
+        div()
+            .id("remote-session-suggestions-scrollbar-layer")
+            .debug_selector(|| "remote-session-suggestions-scrollbar".to_owned())
+            .absolute()
+            .inset_0()
+            .custom_scrollbars(
+                Scrollbars::always_visible(ScrollAxes::Vertical)
+                    .tracked_scroll_handle(suggestion_scroll)
+                    .id("remote-session-suggestions-scrollbar-state"),
+                window,
+                cx,
+            ),
+    )
 }
 
 /// One of the picker's two text fields — the SSH target and the port.

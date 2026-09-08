@@ -115,6 +115,8 @@ impl Zetta {
                 colors,
                 error_color,
                 handle,
+                window,
+                cx,
             )),
             session_authentication: modal_overlay(self.render_session_authentication_overlay(cx)),
             close_confirmation: modal_overlay(self.render_tab_close_confirmation_overlay(cx)),
