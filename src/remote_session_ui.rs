@@ -8,11 +8,19 @@
 use super::*;
 use crate::background_session_ui::AttachOutcomeSummary;
 
+const MAX_REMOTE_SESSION_SUGGESTIONS: usize = 6;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RemoteSessionField {
     Target,
     Port,
     List,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RemoteSessionSuggestionNavigation {
+    filter: String,
+    selected: usize,
 }
 
 pub(crate) struct RemoteSessionPicker {
@@ -24,6 +32,7 @@ pub(crate) struct RemoteSessionPicker {
     pub(crate) loading: bool,
     pub(crate) error: Option<String>,
     pub(crate) suggestions: Vec<String>,
+    suggestion_navigation: Option<RemoteSessionSuggestionNavigation>,
     pub(crate) scroll: UniformListScrollHandle,
     pub(crate) generation: u64,
     pub(crate) task: Option<Task<()>>,
@@ -40,6 +49,7 @@ impl Default for RemoteSessionPicker {
             loading: false,
             error: None,
             suggestions: Vec::new(),
+            suggestion_navigation: None,
             scroll: UniformListScrollHandle::new(),
             generation: 0,
             task: None,
@@ -59,6 +69,55 @@ impl RemoteSessionPicker {
         self.selected = 0;
         self.loading = false;
         self.error = None;
+    }
+
+    fn reset_suggestion_navigation(&mut self) {
+        self.suggestion_navigation = None;
+    }
+
+    fn visible_suggestions(&self) -> Vec<String> {
+        let filter = self
+            .suggestion_navigation
+            .as_ref()
+            .map_or(self.target.text.as_str(), |navigation| {
+                navigation.filter.as_str()
+            })
+            .to_lowercase();
+        self.suggestions
+            .iter()
+            .filter(|suggestion| {
+                filter.is_empty() || suggestion.to_lowercase().starts_with(&filter)
+            })
+            .take(MAX_REMOTE_SESSION_SUGGESTIONS)
+            .cloned()
+            .collect()
+    }
+
+    fn navigate_suggestions(&mut self, reverse: bool) -> bool {
+        let suggestions = self.visible_suggestions();
+        if suggestions.is_empty() {
+            return false;
+        }
+        let filter = self.suggestion_navigation.as_ref().map_or_else(
+            || self.target.text.clone(),
+            |navigation| navigation.filter.clone(),
+        );
+        let selected = match self.suggestion_navigation.as_ref() {
+            Some(navigation) => {
+                let selected = navigation.selected % suggestions.len();
+                if reverse {
+                    (selected + suggestions.len() - 1) % suggestions.len()
+                } else {
+                    (selected + 1) % suggestions.len()
+                }
+            }
+            None if reverse => suggestions.len() - 1,
+            None => 0,
+        };
+        self.target = TextField::new(suggestions[selected].clone());
+        self.invalidate_results();
+        self.suggestion_navigation = Some(RemoteSessionSuggestionNavigation { filter, selected });
+        true
     }
 }
 
@@ -271,6 +330,11 @@ impl Zetta {
                     (RemoteSessionField::Port, true) => RemoteSessionField::Target,
                     (RemoteSessionField::List, true) => RemoteSessionField::Port,
                 };
+                picker.reset_suggestion_navigation();
+                cx.notify();
+            }
+            "up" | "down" if picker.field == RemoteSessionField::Target => {
+                picker.navigate_suggestions(event.keystroke.key == "up");
                 cx.notify();
             }
             "up" | "down"
@@ -285,15 +349,6 @@ impl Zetta {
                     .scroll
                     .scroll_to_item(picker.selected, ScrollStrategy::Nearest);
                 cx.notify();
-            }
-            "down"
-                if picker.field == RemoteSessionField::Target && picker.target.text.is_empty() =>
-            {
-                if let Some(suggestion) = picker.suggestions.first().cloned() {
-                    picker.target = TextField::new(suggestion);
-                    picker.field = RemoteSessionField::Port;
-                    cx.notify();
-                }
             }
             _ if matches!(
                 picker.field,
@@ -312,6 +367,9 @@ impl Zetta {
                         return true;
                     }
                     ClipboardOutcome::Edited => {
+                        if picker.field == RemoteSessionField::Target {
+                            picker.reset_suggestion_navigation();
+                        }
                         picker.invalidate_results();
                         cx.notify();
                         cx.stop_propagation();
@@ -328,8 +386,13 @@ impl Zetta {
                         .key_char
                         .as_ref()
                         .is_some_and(|text| !text.chars().all(|c| c.is_ascii_digit()));
-                if !typed_a_rejected_character {
-                    apply_text_field_key(field, &event.keystroke);
+                let edit = if typed_a_rejected_character {
+                    TextFieldEdit::Ignored
+                } else {
+                    apply_text_field_key(field, &event.keystroke)
+                };
+                if picker.field == RemoteSessionField::Target && edit == TextFieldEdit::Edited {
+                    picker.reset_suggestion_navigation();
                 }
                 picker.invalidate_results();
                 cx.notify();
@@ -355,18 +418,11 @@ impl Zetta {
         let session_count = picker.sessions.len();
         let selected = picker.selected.min(session_count.saturating_sub(1));
         let sessions = picker.sessions.clone();
-        let suggestions = picker
-            .suggestions
-            .iter()
-            .filter(|suggestion| {
-                target.text.is_empty()
-                    || suggestion
-                        .to_lowercase()
-                        .starts_with(&target.text.to_lowercase())
-            })
-            .take(6)
-            .cloned()
-            .collect::<Vec<_>>();
+        let suggestions = picker.visible_suggestions();
+        let suggestion_selected = picker
+            .suggestion_navigation
+            .as_ref()
+            .map(|navigation| navigation.selected);
         let picker_scroll = picker.scroll.clone();
         let rows = remote_session_rows(handle, colors, &picker_scroll, sessions, selected);
 
@@ -374,7 +430,8 @@ impl Zetta {
         let load_handle = handle.clone();
         let attach_handle = handle.clone();
         let has_suggestions = !suggestions.is_empty();
-        let suggestion_rows = remote_session_suggestion_rows(handle, colors, suggestions);
+        let suggestion_rows =
+            remote_session_suggestion_rows(handle, colors, suggestions, suggestion_selected);
 
         let session_list = div()
             .id("remote-session-list-panel")
@@ -590,6 +647,7 @@ fn remote_session_suggestion_rows(
     handle: &WeakEntity<Zetta>,
     colors: &ThemeColors,
     suggestions: Vec<String>,
+    selected: Option<usize>,
 ) -> Vec<gpui::Stateful<gpui::Div>> {
     let handle = handle.clone();
     let colors = colors.clone();
@@ -608,6 +666,15 @@ fn remote_session_suggestion_rows(
                 .cursor_pointer()
                 .text_xs()
                 .text_color(colors.text_muted)
+                .border_1()
+                .border_color(if selected == Some(index) {
+                    colors.border_focused
+                } else {
+                    transparent_black()
+                })
+                .when(selected == Some(index), |row| {
+                    row.bg(colors.element_selected)
+                })
                 .hover(|style| style.bg(colors.element_hover))
                 .on_click(move |_, _, cx| {
                     suggestion_handle
@@ -615,6 +682,7 @@ fn remote_session_suggestion_rows(
                             if let Some(picker) = this.remote_session_picker.as_mut() {
                                 picker.target = TextField::new(suggestion.clone());
                                 picker.field = RemoteSessionField::Port;
+                                picker.reset_suggestion_navigation();
                                 picker.invalidate_results();
                                 cx.notify();
                             }
@@ -680,6 +748,9 @@ fn remote_session_field(
             click_handle
                 .update(cx, |this, cx| {
                     if let Some(picker) = this.remote_session_picker.as_mut() {
+                        if selected_field == RemoteSessionField::Target {
+                            picker.reset_suggestion_navigation();
+                        }
                         picker.field = selected_field;
                         cx.notify();
                     }
