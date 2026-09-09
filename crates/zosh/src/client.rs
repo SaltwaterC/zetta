@@ -425,7 +425,7 @@ pub(crate) fn parse_args(arguments: impl IntoIterator<Item = OsString>) -> Resul
 
 fn print_help() {
     println!(
-        "Zetta Mosh client\n\nUsage: zosh SERVER_IP UDP_PORT\n       zosh -c\n\nReads the session key from MOSH_KEY. `-c` prints the terminal color count for the Mosh bootstrap.\n\nOptions:\n  -c                 Print terminal color count\n  -k, --keep-alive   Hold the link to a packet every {KEEP_ALIVE_DEFAULT_MS} ms (=MS to change, {KEEP_ALIVE_MIN_MS}-{KEEP_ALIVE_MAX_MS})\n  -h, --help         Print help\n  -V, --version      Print version"
+        "Zosh client\n\nUsage: zosh SERVER_IP UDP_PORT\n       zosh -c\n\nReads the session key from MOSH_KEY. `-c` prints the terminal color count for the Mosh bootstrap.\n\nOptions:\n  -c                 Print terminal color count\n  -k, --keep-alive   Hold the link to a packet every {KEEP_ALIVE_DEFAULT_MS} ms (=MS to change, {KEEP_ALIVE_MIN_MS}-{KEEP_ALIVE_MAX_MS})\n  -h, --help         Print help\n  -V, --version      Print version"
     );
 }
 

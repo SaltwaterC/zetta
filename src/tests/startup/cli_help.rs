@@ -217,18 +217,25 @@ fn help_text_uses_title_case_and_lists_built_in_features() {
     #[cfg(not(feature = "session-persistence"))]
     assert!(!help.contains("Encrypted session retention"));
 
-    #[cfg(feature = "mosh-client")]
+    #[cfg(feature = "zosh-client")]
     {
-        assert!(help.contains("Mosh client"));
+        assert!(help.contains("Zosh client"));
         assert!(help.contains("zetta mosh [OPTIONS] [--] [user@]HOST [COMMAND ...]"));
         assert!(help.contains("Run an interactive Mosh session"));
     }
-    #[cfg(not(feature = "mosh-client"))]
+    #[cfg(not(feature = "zosh-client"))]
     {
-        assert!(!help.contains("Mosh client"));
+        assert!(!help.contains("Zosh client"));
         assert!(!help.contains("zetta mosh"));
         assert!(!help.contains("Run an interactive Mosh session"));
     }
+    #[cfg(feature = "zosh-server")]
+    assert!(help.contains("Zosh server"));
+    #[cfg(not(feature = "zosh-server"))]
+    assert!(!help.contains("Zosh server"));
+
+    #[cfg(all(feature = "zosh-client", feature = "zosh-server"))]
+    assert!(help.find("Zosh server").unwrap() < help.find("Zosh client").unwrap());
 }
 
 #[cfg(feature = "worktree")]

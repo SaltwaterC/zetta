@@ -20,14 +20,21 @@ set "BINARIES=!BINARIES! --bin zwt"
 set "VERIFY_ARGS=!VERIFY_ARGS! -WorktreeBinaryPath !TARGET_DIR!\zwt.exe"
 exit /b 0
 
-:append_mosh_targets
+:append_zosh_client_targets
 if /i "%~1"=="0" exit /b 0
 if /i "%~1"=="false" exit /b 0
 if /i "%~1"=="no" exit /b 0
 if /i "%~1"=="off" exit /b 0
 set "BINARIES=!BINARIES! --bin zosh"
-set "BINARIES=!BINARIES! --bin zosh-server"
 set "VERIFY_ARGS=!VERIFY_ARGS! -ZoshBinaryPath !TARGET_DIR!\zosh.exe"
+exit /b 0
+
+:append_zosh_server_targets
+if /i "%~1"=="0" exit /b 0
+if /i "%~1"=="false" exit /b 0
+if /i "%~1"=="no" exit /b 0
+if /i "%~1"=="off" exit /b 0
+set "BINARIES=!BINARIES! --bin zosh-server"
 set "VERIFY_ARGS=!VERIFY_ARGS! -ZoshServerBinaryPath !TARGET_DIR!\zosh-server.exe"
 exit /b 0
 
@@ -43,7 +50,9 @@ if not defined NOTIFY set "NOTIFY=1"
 if not defined SYNTAX_HIGHLIGHTING set "SYNTAX_HIGHLIGHTING=1"
 if not defined SESSION_PERSISTENCE set "SESSION_PERSISTENCE=1"
 if not defined WORKTREE set "WORKTREE=1"
-if not defined MOSH set "MOSH=1"
+if not defined ZOSH set "ZOSH=1"
+if not defined ZOSH_CLIENT set "ZOSH_CLIENT=%ZOSH%"
+if not defined ZOSH_SERVER set "ZOSH_SERVER=%ZOSH%"
 
 set "FEATURES=windows-gui"
 set "PROFILE_ARGS="
@@ -66,11 +75,13 @@ call :append_feature "%NOTIFY%" notifications
 call :append_feature "%SYNTAX_HIGHLIGHTING%" syntax-highlighting
 call :append_feature "%SESSION_PERSISTENCE%" session-persistence
 call :append_feature "%WORKTREE%" worktree
-call :append_feature "%MOSH%" mosh
+call :append_feature "%ZOSH_CLIENT%" zosh-client
+call :append_feature "%ZOSH_SERVER%" zosh-server
 
 set "BINARIES=--bin zetta --bin zetta-gui --bin zmux --bin zmux-pty"
 set "VERIFY_ARGS="
-call :append_mosh_targets "%MOSH%"
+call :append_zosh_client_targets "%ZOSH_CLIENT%"
+call :append_zosh_server_targets "%ZOSH_SERVER%"
 call :append_worktree_targets "%WORKTREE%"
 
 call scripts\cargo-windows.cmd build %PROFILE_ARGS% --jobs %CARGO_BUILD_JOBS% --locked --no-default-features --features %FEATURES% !BINARIES!

@@ -174,7 +174,7 @@ fn dispatch_startup_mode(args: &StartupArgs) -> Option<Result<()>> {
         #[cfg(windows)]
         StartupMode::WindowsEmbedding => return None,
         StartupMode::PaneWait(command) => cli_modes::run_wait_command(command.clone()),
-        #[cfg(feature = "mosh-client")]
+        #[cfg(feature = "zosh-client")]
         StartupMode::Mosh(command) => crate::mosh::run(command),
         StartupMode::ProjectCommand(invocation) => {
             cli_modes::run_registered_project_command(invocation)

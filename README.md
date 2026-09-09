@@ -55,7 +55,7 @@ for active development.
 
 ## Quick start
 
-The build also produces zosh, Zetta's standalone cross-platform Mosh client,
+The build also produces `zosh`, Zetta's standalone cross-platform client,
 and the bundled Rust `zosh-server`. Run either zosh USER@HOST or zetta mosh
 USER@HOST for interactive remote shells; zetta mosh is a transparent proxy to
 zosh. The launcher prefers `zosh-server` through SSH, falls back to the stock
@@ -73,7 +73,7 @@ bundled server the remote side also holds up its own half on the same interval,
 which is what is needed when the machine with unreliable power management is the
 remote one. [The protocol note](crates/zosh/PROTOCOL.md) covers the wire format
 and how to prove it is working on a real link.
-The Mosh client and bundled Rust server support repeated-character (REP)
+The Zosh client and bundled Rust server support repeated-character (REP)
 updates, including repeated spaces used to align full-screen applications.
 
 Zosh intentionally defaults to `--no-init`, unlike stock `mosh`: it keeps the
@@ -102,8 +102,9 @@ optimized release build.
 
 The default build also produces the standalone `zwt` Git worktree command. Set
 `WORKTREE=0` on `make build` and `make install` to omit the in-process
-`zetta wt` route and the root-produced `zwt` binary. Set `MOSH=0` to omit the
-bundled Mosh client and server executables and the `zetta mosh` route.
+`zetta wt` route and the root-produced `zwt` binary. Set `ZOSH=0` to omit the
+bundled Zosh client and server executables and the `zetta mosh` route. Set
+`ZOSH_CLIENT=0` or `ZOSH_SERVER=0` to omit either component independently.
 
 Corporate or otherwise restricted deployments can omit the serial console,
 network tools, and desktop notification support at build time. For example, `make

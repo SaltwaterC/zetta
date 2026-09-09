@@ -23,10 +23,11 @@ GNU Make reserves options beginning with `--`, so `RELEASE=1` is the portable
 Makefile equivalent of Cargo's `--release` flag.
 
 The default build includes the standalone `zwt` Git worktree command and the
-`zetta wt` compatibility route, plus the bundled `zosh` Mosh client and
+`zetta wt` compatibility route, plus the bundled Zosh client (`zosh`) and
 `zosh-server`. Set `WORKTREE=0` on both build and install commands to omit the
-worktree command, and `MOSH=0` to omit the bundled Mosh client and server
-executables and the `zetta mosh` compatibility route.
+worktree command, and `ZOSH=0` to omit the bundled Zosh client and server
+executables and the `zetta mosh` compatibility route. `ZOSH_CLIENT=0` and
+`ZOSH_SERVER=0` omit either component independently.
 
 ## User-local shell PATH setup
 
@@ -159,7 +160,7 @@ MAC_APPLICATIONS_DIR=/Applications`.
 
 The Windows build includes zosh.exe and zosh-server.exe beside the Zetta and
 zmux executables. The installer copies them into the application directory so
-zetta mosh can find the standalone Mosh client and the local Mosh server can be
+zetta mosh can find the standalone Zosh client and the local Zosh server can be
 run directly.
 
 Build a development executable from PowerShell with Chocolatey's GNU Make:
@@ -177,8 +178,8 @@ The build produces the following runtime files in `target\debug`:
 - `zetta.exe`, the console executable
 - `zetta-gui.exe`, the no-console launcher used by the Start Menu shortcut
 - `zmux.exe`, the standalone background-session multiplexer
-- `zosh.exe`, the bundled standalone Mosh client
-- `zosh-server.exe`, the bundled Rust Mosh server
+- `zosh.exe`, the bundled standalone Zosh client
+- `zosh-server.exe`, the bundled Rust Zosh server
 - `zwt.exe`, the standalone Git worktree executable
 - `conpty.dll`
 - `OpenConsole.exe`
@@ -230,7 +231,7 @@ Additional installation targets are:
 ## Linux desktop integration
 
 Linux installs zosh and zosh-server beside zetta and zmux, and also creates a
-user-local zosh symlink when using the user-local install. The standalone Mosh
+user-local zosh symlink when using the user-local install. The standalone Zosh
 client is therefore available directly as zosh and is also resolved
 automatically by zetta mosh; the server is available as zosh-server for local
 sessions and for copying to remote hosts. On a remote host, zetta mosh tries
@@ -272,7 +273,8 @@ preference when it can be configured.
 
 To build a restricted binary, pass build flags to both the build and install
 steps. `SERIAL`, `HTTP`, `TFTP`, `TFTP_SERVER`, `TFTP_CLIENT`, `NOTIFY`,
-`CLIPBOARD`, `WORKTREE`, and `MOSH` accept `0`, `false`, `no`, and `off`.
+`CLIPBOARD`, `WORKTREE`, `ZOSH`, `ZOSH_CLIENT`, and
+`ZOSH_SERVER` accept `0`, `false`, `no`, and `off`.
 `TFTP=0`
 disables both TFTP components; the server and client switches can be used
 independently:
@@ -291,9 +293,16 @@ make build X11=1
 make build WORKTREE=0
 make install WORKTREE=0
 
-# Omit the bundled Mosh client/server executables and the zetta mosh route.
-make build MOSH=0
-make install MOSH=0
+# Omit the bundled Zosh client/server executables and the zetta mosh route.
+make build ZOSH=0
+make install ZOSH=0
+
+# Keep only the bundled Zosh client.
+make build ZOSH_SERVER=0
+make install ZOSH_SERVER=0
+# Keep only the bundled Zosh server.
+make build ZOSH_CLIENT=0
+make install ZOSH_CLIENT=0
 ```
 
 Disabled tools are omitted from the command palette, default keybindings, and

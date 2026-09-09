@@ -1,4 +1,4 @@
-//! `zosh`, Zetta's standalone cross-platform Mosh client.
+//! `zosh`, Zetta's standalone cross-platform Zosh client.
 //!
 //! The crate owns both halves of the Mosh launcher contract: it bootstraps a
 //! remote Mosh server over SSH and speaks the Mosh State Synchronization
@@ -17,7 +17,7 @@ mod terminal;
 pub use client::ClientArgs;
 pub use escape::{EscapeAction, EscapeKey, EscapeState};
 
-/// Run the standalone Mosh-compatible launcher.
+/// Run the standalone Zosh launcher.
 pub fn run(arguments: impl IntoIterator<Item = std::ffi::OsString>) -> anyhow::Result<()> {
     launcher::run(arguments)
 }

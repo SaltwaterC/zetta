@@ -161,7 +161,7 @@ function Remove-DisabledZoshFiles {
                 Remove-Item -LiteralPath $path -Force
                 Write-Host "Removed $path"
             } catch {
-                Write-Warning "Could not remove disabled Mosh client executable ${path}: $_"
+                Write-Warning "Could not remove disabled Zosh client executable ${path}: $_"
             }
         }
     }

@@ -6,7 +6,7 @@ license = "GPL-3.0-or-later"
 default-run = "zetta"
 
 [features]
-default = ["wayland", "serial-console", "http-server", "tftp-server", "tftp-client", "notifications", "clipboard", "syntax-highlighting", "session-persistence", "worktree", "mosh"]
+default = ["wayland", "serial-console", "http-server", "tftp-server", "tftp-client", "notifications", "clipboard", "syntax-highlighting", "session-persistence", "worktree", "zosh"]
 wayland = ["gpui_platform/wayland"]
 x11 = ["gpui_platform/x11"]
 windows-gui = []
@@ -44,8 +44,8 @@ tftp-client = []
 notifications = ["dep:notify-rust", "dep:cpal", "dep:mac-usernotifications", "dep:ashpd"]
 clipboard = ["dep:arboard"]
 worktree = ["dep:zwt", "zwt/recursive-submodules"]
-mosh = ["mosh-client", "zosh-server"]
-mosh-client = ["dep:zosh"]
+zosh = ["zosh-client", "zosh-server"]
+zosh-client = ["dep:zosh"]
 zosh-server = ["dep:flate2", "dep:moshcatty", "dep:portable-pty", "dep:vt100"]
 
 [[bin]]
@@ -73,7 +73,7 @@ path = "src/bin/zmux_pty.rs"
 [[bin]]
 name = "zosh"
 path = "src/bin/zosh.rs"
-required-features = ["mosh-client"]
+required-features = ["zosh-client"]
 
 [[bin]]
 name = "zosh-server"

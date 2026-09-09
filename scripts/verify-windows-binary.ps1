@@ -160,10 +160,10 @@ Write-Host "Verified Windows GUI launcher: $guiBinary"
 Write-Host "Verified Windows multiplexer executable: $muxBinary ($muxVersion)"
 Write-Host "Verified Windows pseudoconsole host: $ptyBinary"
 if ($zoshBinary) {
-    Write-Host "Verified Zetta Mosh endpoint executable: $zoshBinary ($zoshVersion)"
+    Write-Host "Verified Zosh client executable: $zoshBinary ($zoshVersion)"
 }
 if ($zoshServerBinary) {
-    Write-Host "Verified Zetta Mosh server executable: $zoshServerBinary ($zoshServerVersion)"
+    Write-Host "Verified Zosh server executable: $zoshServerBinary ($zoshServerVersion)"
 }
 if ($worktreeBinary) {
     Write-Host "Verified standalone worktree executable: $worktreeBinary"

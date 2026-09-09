@@ -137,7 +137,7 @@ always use that normal launch path.
 ## Launching a Mosh session
 
 Use zosh USER@HOST for an interactive remote shell, or use zetta mosh
-USER@HOST as its transparent proxy. The full Mosh launcher starts
+USER@HOST as its transparent proxy. The full Zosh launcher starts
 `zosh-server` through SSH when it is available, otherwise falls back to stock
 `mosh-server`, preserves SSH configuration aliases and command arguments, and
 then runs the bundled terminal endpoint over UDP. Prediction, address-family,
