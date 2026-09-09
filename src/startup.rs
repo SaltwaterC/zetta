@@ -23,8 +23,8 @@ use crate::process_control::{
     request_existing_process_project_with_working_directory,
     request_existing_process_projects_reload, request_existing_process_replace_pane,
     request_existing_process_shell_command, request_existing_process_tab_icon,
-    request_existing_process_theme, request_existing_process_theme_list, request_process_run_wait,
-    request_process_tab_attention,
+    request_existing_process_tab_icon_reset, request_existing_process_theme,
+    request_existing_process_theme_list, request_process_run_wait, request_process_tab_attention,
 };
 use crate::project_commands::{ProjectCommandInvocation, merge_command_environment};
 use crate::run_command::{PaneWaitCommand, RunWaitRequest, process_run_registry};
@@ -204,6 +204,7 @@ fn dispatch_startup_mode(args: &StartupArgs) -> Option<Result<()>> {
             Ok(())
         }
         StartupMode::ConfigureCurrentShellIntegration => cli_modes::configure_shell_integration(),
+        StartupMode::ResetTabIcon => cli_modes::reset_tab_icon(),
         StartupMode::ListTabIcons => cli_modes::list_tab_icons(),
         StartupMode::SetTabIcon { icon } => cli_modes::set_tab_icon(*icon),
         StartupMode::SetTheme { scope, theme } => cli_modes::set_theme(*scope, theme.clone()),

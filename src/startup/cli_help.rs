@@ -118,6 +118,7 @@ pub(crate) fn help_text(profiles: &[Profile]) -> String {
         "zetta mux resume SESSION [-i PATH]",
         "zetta splits",
         "zetta tabicon [OPTIONS] ICON",
+        "zetta tabicon --reset",
         "zetta tabicon --list",
         "zetta theme pane [OPTIONS] THEME",
         "zetta theme tab [OPTIONS] THEME",
@@ -177,7 +178,7 @@ pub(crate) fn help_text(profiles: &[Profile]) -> String {
             "Create, integrate, synchronize, configure, or abort Git worktrees",
         ),
         ("splits", "List configured pane split templates"),
-        ("tabicon", "Set the active tab's icon override"),
+        ("tabicon", "Set the active tab's icon override or reset it"),
         (
             "theme",
             "Non-persistently change the active pane or tab's theme",
@@ -410,17 +411,22 @@ pub(crate) fn tab_icon_help() -> String {
             "-i, --icon NAME",
             "Set the icon by option instead of as a positional argument",
         ),
+        (
+            "-r, --reset",
+            "Restore the active project's or application's configured icon",
+        ),
         ("-l, --list", "Print built-in icon names, including none"),
         ("-h, --help", "Print help"),
     ]);
     format!(
-        "Set the active tab's per-tab icon override through the running Zetta process\n\nUsage: zetta tabicon [OPTIONS] ICON\n       zetta tabicon --list\n\nICON is a built-in icon name. Use none to explicitly hide the icon. The choice remains with the logical tab across project changes and background/shared-session handoffs, and is never written to user or project configuration. The icon list is fetched dynamically with --list.\n\nOptions:\n{options}"
+        "Set the active tab's per-tab icon override through the running Zetta process\n\nUsage: zetta tabicon [OPTIONS] ICON\n       zetta tabicon --reset\n       zetta tabicon --list\n\nICON is a built-in icon name. Use none to explicitly hide the icon. Use --reset to clear the explicit override and use the active project's effective icon, or the configured application default outside a project. The choice remains with the logical tab across project changes and background/shared-session handoffs, and is never written to user or project configuration. The icon list is fetched dynamically with --list.\n\nOptions:\n{options}"
     )
 }
 
 pub(crate) fn parse_tab_icon_args(args: &[OsString]) -> Result<StartupMode> {
     let mut icon_name = None;
     let mut list = false;
+    let mut reset = false;
     let mut arguments = args.iter();
     while let Some(argument) = arguments.next() {
         match argument.to_string_lossy().as_ref() {
@@ -431,6 +437,10 @@ pub(crate) fn parse_tab_icon_args(args: &[OsString]) -> Result<StartupMode> {
             "--list" | "-l" => {
                 anyhow::ensure!(!list, "--list may only be specified once");
                 list = true;
+            }
+            "--reset" | "-r" => {
+                anyhow::ensure!(!reset, "--reset may only be specified once");
+                reset = true;
             }
             "--icon" | "-i" => {
                 anyhow::ensure!(icon_name.is_none(), "--icon may only be specified once");
@@ -450,6 +460,14 @@ pub(crate) fn parse_tab_icon_args(args: &[OsString]) -> Result<StartupMode> {
                 icon_name = Some(value.to_owned());
             }
         }
+    }
+    if reset {
+        anyhow::ensure!(!list, "--reset cannot be combined with --list");
+        anyhow::ensure!(
+            icon_name.is_none(),
+            "--reset cannot be combined with an icon name"
+        );
+        return Ok(StartupMode::ResetTabIcon);
     }
     if list {
         anyhow::ensure!(

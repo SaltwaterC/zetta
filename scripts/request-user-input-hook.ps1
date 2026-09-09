@@ -1,3 +1,7 @@
+param(
+    [string] $Summary = "Codex input required"
+)
+
 $ErrorActionPreference = "Stop"
 
 function Write-HookWarning {
@@ -142,7 +146,7 @@ if ($null -eq $zettaCommand) {
 
 $previousErrorActionPreference = $ErrorActionPreference
 $ErrorActionPreference = "Continue"
-& $zettaCommand.Source attention --notify --sound zetta-alarm "Codex input required" $body 2>&1 | ForEach-Object {
+& $zettaCommand.Source attention --notify --sound zetta-alarm $Summary $body 2>&1 | ForEach-Object {
     [Console]::Error.WriteLine($_.ToString())
 }
 $zettaExitCode = $LASTEXITCODE

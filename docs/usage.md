@@ -228,7 +228,9 @@ Tab names follow the active terminal process. Press `Ctrl-Shift-R` or double-cli
 a tab to set a persistent name. Use `Ctrl-Shift-Y` or the tab context menu
 to choose a tab icon. Submit an empty name to resume automatic naming.
 From a Zetta pane, `zetta tabicon ICON` changes the active tab icon;
-`zetta tabicon none` hides it, and `zetta tabicon --list` prints the available
+`zetta tabicon none` explicitly hides it, and `zetta tabicon --reset` (or `-r`)
+clears the override so the active project's icon, or the configured application
+default outside a project, is used. `zetta tabicon --list` prints the available
 built-in icon names.
 Tabs retain a fixed width as their names change.
 

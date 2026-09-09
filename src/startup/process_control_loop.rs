@@ -114,6 +114,12 @@ fn dispatch(command: ProcessControlCommand, cx: &mut AsyncApp) {
                 .unwrap_or(false)
             }));
         }
+        ProcessControlCommand::ResetTabIcon { completion } => {
+            let _ = completion.send(cx.update(|cx| {
+                with_any_window(cx, |zetta, _, cx| zetta.reset_active_tab_icon_from_cli(cx))
+                    .unwrap_or(false)
+            }));
+        }
         ProcessControlCommand::SetTheme {
             scope,
             theme,

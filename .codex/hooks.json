@@ -1,6 +1,32 @@
 {
   "description": "Lint, test, and build Zetta after each completed Codex turn, then report the result.",
   "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "^(startup|resume|clear)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"$(git rev-parse --show-toplevel)/scripts/codex-tab-icon-hook.sh\" idle",
+            "commandWindows": "powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \"& (Join-Path (& git rev-parse --show-toplevel) 'scripts/codex-tab-icon-hook.ps1') 'idle'\"",
+            "statusMessage": "Updating Zetta Codex tab icon"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"$(git rev-parse --show-toplevel)/scripts/codex-tab-icon-hook.sh\" reset",
+            "commandWindows": "powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \"& (Join-Path (& git rev-parse --show-toplevel) 'scripts/codex-tab-icon-hook.ps1') 'reset'\"",
+            "timeout": 3,
+            "statusMessage": "Resetting Zetta Codex tab icon"
+          }
+        ]
+      }
+    ],
     "PreToolUse": [
       {
         "matcher": "^request_user_input$",
@@ -14,14 +40,44 @@
         ]
       }
     ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"$(git rev-parse --show-toplevel)/scripts/codex-tab-icon-hook.sh\" prompt",
+            "commandWindows": "powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \"& (Join-Path (& git rev-parse --show-toplevel) 'scripts/codex-tab-icon-hook.ps1') 'prompt'\"",
+            "statusMessage": "Updating Zetta Codex tab icon"
+          }
+        ]
+      }
+    ],
     "Stop": [
       {
         "hooks": [
           {
             "type": "command",
+            "command": "sh \"$(git rev-parse --show-toplevel)/scripts/codex-tab-icon-hook.sh\" idle",
+            "commandWindows": "powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \"& (Join-Path (& git rev-parse --show-toplevel) 'scripts/codex-tab-icon-hook.ps1') 'idle'\"",
+            "statusMessage": "Updating Zetta Codex tab icon"
+          },
+          {
+            "type": "command",
             "command": "sh scripts/agent-stop-hook.sh",
             "commandWindows": "powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \"& (Join-Path (& git rev-parse --show-toplevel) 'scripts/agent-stop-hook.ps1')\"",
             "statusMessage": "Linting, testing, and building Zetta"
+          }
+        ]
+      }
+    ],
+    "Interrupt": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"$(git rev-parse --show-toplevel)/scripts/codex-tab-icon-hook.sh\" idle",
+            "commandWindows": "powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \"& (Join-Path (& git rev-parse --show-toplevel) 'scripts/codex-tab-icon-hook.ps1') 'idle'\"",
+            "statusMessage": "Updating Zetta Codex tab icon"
           }
         ]
       }

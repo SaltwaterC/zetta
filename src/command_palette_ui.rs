@@ -241,53 +241,75 @@ impl Zetta {
         cx.notify();
     }
 
+    /// Routes a key in the capture phase whenever a focus-managed surface is
+    /// visible. Terminal views can retain focus briefly while an overlay is
+    /// opening or after a window is reactivated, so the modal must claim the
+    /// event before the terminal's own capture handler sees it.
+    pub(crate) fn modal_key_down_capture(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.focus_active_surface(window, cx) {
+            return;
+        }
+        self.command_palette_key_down(event, window, cx);
+        cx.stop_propagation();
+    }
+
     pub(crate) fn command_palette_key_down(
         &mut self,
         event: &KeyDownEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.remote_session_key_down(event, window, cx) {
-            return;
-        }
         if self.close_confirmation_key_down(event, window, cx) {
             return;
         }
         if self.session_authentication_key_down(event, window, cx) {
             return;
         }
+        if self.remote_session_key_down(event, window, cx) {
+            return;
+        }
         #[cfg(feature = "serial-console")]
         if self.serial_console_key_down(event, window, cx) {
             return;
         }
-        if self.tab_icon_picker.is_some() {
-            self.tab_icon_picker_key_down(event, window, cx);
+        if self.is_picking_overlay_style() {
+            self.overlay_style_key_down(event, window, cx);
             return;
         }
         if self.theme_picker.is_some() {
             self.theme_picker_key_down(event, window, cx);
             return;
         }
-        if self.settings_editor.is_some() {
-            self.settings_key_down(event, window, cx);
+        if self.tab_icon_picker.is_some() {
+            self.tab_icon_picker_key_down(event, window, cx);
             return;
         }
-        if self.multi_command.is_some() {
-            self.multi_command_key_down(event, window, cx);
+        if self.settings_editor.is_some() {
+            self.settings_key_down(event, window, cx);
             return;
         }
         if self.tab_search.is_some() {
             self.tab_search_key_down(event, window, cx);
             return;
         }
-        let Some(palette) = self.command_palette.as_mut() else {
+        if self.multi_command.is_some() {
+            self.multi_command_key_down(event, window, cx);
+            return;
+        }
+        if self.command_palette.is_none() {
             if self.is_editing_pane_overlay() {
                 self.overlay_key_down(event, window, cx);
-            } else if self.is_picking_overlay_style() {
-                self.overlay_style_key_down(event, window, cx);
             } else {
                 self.rename_key_down(event, window, cx);
             }
+            return;
+        }
+        let Some(palette) = self.command_palette.as_mut() else {
             return;
         };
         // Settled before the palette's own keys, so `Ctrl-X` cuts rather than

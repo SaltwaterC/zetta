@@ -840,6 +840,31 @@ fn tab_icon_control_requests_decode_names_and_allow_clearing() {
 }
 
 #[test]
+fn tab_icon_reset_control_requests_are_payload_free() {
+    assert_eq!(
+        decode_control_request(&mut request("token", "reset_tab_icon"), "token"),
+        Some(ControlRequestCommand::ResetTabIcon)
+    );
+
+    for mut invalid_request in [
+        ControlRequest {
+            icon: Some("terminal".to_owned()),
+            ..request("token", "reset_tab_icon")
+        },
+        ControlRequest {
+            scope: Some("tab".to_owned()),
+            ..request("token", "reset_tab_icon")
+        },
+        ControlRequest {
+            attention_id: Some(42),
+            ..request("token", "reset_tab_icon")
+        },
+    ] {
+        assert_eq!(decode_control_request(&mut invalid_request, "token"), None);
+    }
+}
+
+#[test]
 fn theme_control_requests_decode_scopes_and_allow_resetting() {
     let mut theme_request = request("token", "set_theme");
     theme_request.scope = Some("pane".to_owned());

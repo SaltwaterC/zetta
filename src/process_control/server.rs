@@ -223,6 +223,7 @@ fn apply_control_request(
             apply_session_command(command, &dispatch)
         }
         ControlRequestCommand::SetTabIcon { .. }
+        | ControlRequestCommand::ResetTabIcon
         | ControlRequestCommand::SetTheme { .. }
         | ControlRequestCommand::ListThemes
         | ControlRequestCommand::GetPaneTheme { .. }
@@ -412,6 +413,9 @@ fn apply_appearance_command(
     match command {
         ControlRequestCommand::SetTabIcon { icon } => {
             dispatch.send(|completion| ProcessControlCommand::SetTabIcon { icon, completion })
+        }
+        ControlRequestCommand::ResetTabIcon => {
+            dispatch.send(|completion| ProcessControlCommand::ResetTabIcon { completion })
         }
         ControlRequestCommand::SetTheme { scope, theme } => {
             dispatch.send(|completion| ProcessControlCommand::SetTheme {

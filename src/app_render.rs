@@ -431,6 +431,7 @@ impl Zetta {
             .when(self.remote_session_picker.is_some(), |content| {
                 content.track_focus(&self.remote_session_focus)
             })
+            .capture_key_down(cx.listener(Self::modal_key_down_capture))
             .capture_key_down(cx.listener(Self::remote_session_key_down_capture))
             .capture_key_up(cx.listener(Self::pane_resize_key_up))
             .on_key_down(cx.listener(Self::command_palette_key_down))

@@ -201,6 +201,15 @@ impl Zetta {
         true
     }
 
+    pub(crate) fn reset_active_tab_icon_from_cli(&mut self, cx: &mut Context<Self>) -> bool {
+        let reset = self.reset_active_project_tab_icon();
+        if !reset {
+            return false;
+        }
+        cx.notify();
+        true
+    }
+
     /// Shared icon entries (icon + precomputed lowercase label) backing the
     /// tab icon picker, whether opened for a specific tab or for the
     /// config default icon. Reads the background-populated cache, falling

@@ -389,6 +389,15 @@ pub(super) fn set_tab_icon(icon: Option<IconName>) -> Result<()> {
     Ok(())
 }
 
+/// `zetta tabicon --reset`.
+pub(super) fn reset_tab_icon() -> Result<()> {
+    anyhow::ensure!(
+        request_existing_process_tab_icon_reset()?,
+        "no running Zetta process accepted the tab icon reset request"
+    );
+    Ok(())
+}
+
 /// `zetta theme [pane] NAME`.
 pub(super) fn set_theme(scope: ThemeScope, theme: Option<String>) -> Result<()> {
     anyhow::ensure!(

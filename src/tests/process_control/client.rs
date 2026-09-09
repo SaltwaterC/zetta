@@ -59,6 +59,25 @@ fn control_server_delivers_a_token_authenticated_open_request() {
 }
 
 #[test]
+fn control_server_delivers_a_token_authenticated_tab_icon_reset_request() {
+    let directory = tempfile::tempdir().unwrap();
+    let endpoint_path = directory.path().join("control.json");
+    let (commands, mut received) = futures::channel::mpsc::unbounded();
+    let _server = ProcessControlServer::start_at(commands, endpoint_path.clone()).unwrap();
+    let endpoint: ControlEndpoint =
+        serde_json::from_slice(&fs::read(endpoint_path).unwrap()).unwrap();
+    assert_eq!(endpoint.version, CONTROL_VERSION);
+
+    let client = thread::spawn(move || send_reset_tab_icon_request(&endpoint).unwrap());
+    let command = futures::executor::block_on(received.next()).unwrap();
+    let ProcessControlCommand::ResetTabIcon { completion } = command else {
+        panic!("unexpected process control command");
+    };
+    completion.send(true).unwrap();
+    assert!(client.join().unwrap());
+}
+
+#[test]
 fn control_server_delivers_a_token_authenticated_fresh_window_request() {
     let directory = tempfile::tempdir().unwrap();
     let endpoint_path = directory.path().join("control.json");

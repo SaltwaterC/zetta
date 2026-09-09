@@ -27,7 +27,8 @@ after it is sent to the mosh-server as its remote command.
 The `zetta` function uses the executable that owns the current terminal for
 commands that need to reach its running process: plain launches,
 `--new-window`, `--command`, `--replace-pane`, `pane`, `cmd NAME`, attention
-and notification commands, theme and overlay changes, tab-icon changes,
+and notification commands, theme and overlay changes, tab-icon changes
+(including `tabicon --reset`),
 project `open`/`add`/`remove`, and profile mutations. Standalone commands use
 the first `zetta` executable on `PATH`, including `vi`/`edit`, initialization,
 completion catalogs, benchmarks, `mux`, terminal-size, project and profile
@@ -140,7 +141,8 @@ Tab-icon completion is dynamic too: completing `zetta tabicon` runs
 `zetta tabicon --list` at completion time, so the generated script does not
 embed the built-in icon list. Use `zetta tabicon ICON` (or
 `zetta tabicon --icon ICON`) from a Zetta pane; `none` hides the active tab
-icon.
+icon. Use `zetta tabicon --reset` (or `-r`) to clear that explicit override;
+completion stops suggesting icon names after reset.
 
 Theme completion works the same way: completing `zetta theme pane` or
 `zetta theme tab` runs `zetta theme <scope> --list` at completion time against

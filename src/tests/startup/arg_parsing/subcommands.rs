@@ -216,6 +216,26 @@ fn tabicon_subcommand_parses_icons_and_dynamic_listing() {
             .mode,
         StartupMode::ListTabIcons
     );
+    for reset in ["--reset", "-r"] {
+        assert_eq!(
+            parse_args_from([OsString::from("tabicon"), OsString::from(reset)])
+                .unwrap()
+                .mode,
+            StartupMode::ResetTabIcon
+        );
+    }
+    for arguments in [
+        vec!["tabicon", "--reset", "--reset"],
+        vec!["tabicon", "--reset", "terminal"],
+        vec!["tabicon", "--reset", "--icon", "terminal"],
+        vec!["tabicon", "--reset", "--list"],
+        vec!["tabicon", "--list", "--reset"],
+    ] {
+        assert!(
+            parse_args_from(arguments.iter().map(|argument| OsString::from(*argument))).is_err(),
+            "expected tabicon reset arguments to be rejected: {arguments:?}"
+        );
+    }
     assert!(parse_args_from([OsString::from("tabicon")]).is_err());
     assert!(parse_args_from([OsString::from("tabicon"), OsString::from("not-an-icon")]).is_err());
 }

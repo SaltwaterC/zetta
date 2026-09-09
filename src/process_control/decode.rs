@@ -176,6 +176,7 @@ fn allowed_control_fields(command: &str) -> Option<ControlFields> {
         "reconnect_session" => RUNNER_ID | SESSION_ID | SECRET | ATTENTION_ID,
         "resume_disk_session" => SESSION_ID | SECRET | CONFIG_PATH,
         "set_tab_icon" => UNREAD_STYLE,
+        "reset_tab_icon" => 0,
         "set_theme" => UNREAD_STYLE | SCOPE,
         "list_themes" => {
             PANE_OVERLAY
@@ -493,7 +494,7 @@ fn decode_session_command(request: &mut ControlRequest) -> Option<ControlRequest
 
 /// Commands that change how a tab or pane looks.
 ///
-/// `set_tab_icon`, `set_theme`, `list_themes`, `get_pane_theme` and
+/// `set_tab_icon`, `reset_tab_icon`, `set_theme`, `list_themes`, `get_pane_theme` and
 /// `set_overlay`.
 fn decode_appearance_command(request: &mut ControlRequest) -> Option<ControlRequestCommand> {
     match request.command.as_str() {
@@ -504,6 +505,7 @@ fn decode_appearance_command(request: &mut ControlRequest) -> Option<ControlRequ
             };
             Some(ControlRequestCommand::SetTabIcon { icon })
         }
+        "reset_tab_icon" => Some(ControlRequestCommand::ResetTabIcon),
         "set_theme" => {
             let scope = match request.scope.take()?.as_str() {
                 "pane" => crate::ThemeScope::Pane,

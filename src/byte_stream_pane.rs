@@ -155,7 +155,8 @@ impl Zetta {
             pane.terminal = Some(view.read(cx).terminal().clone());
             pane.view = Some(view.clone());
         }
-        view.focus_handle(cx).focus(window, cx);
+        let focus_handle = view.focus_handle(cx);
+        self.focus_terminal_if_allowed(&focus_handle, window, cx);
         cx.notify();
         Some(pane_id)
     }

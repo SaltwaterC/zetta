@@ -7,17 +7,139 @@
 
 use super::*;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FocusSurface {
+    CloseConfirmation,
+    SessionAuthentication,
+    RemoteSession,
+    SerialConsole,
+    OverlayStylePicker,
+    ThemePicker,
+    TabIconPicker,
+    Settings,
+    TabSearch,
+    MultiCommand,
+    CommandPalette,
+    InlineEditing,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct FocusSurfaceAvailability {
+    close_confirmation: bool,
+    session_authentication: bool,
+    remote_session: bool,
+    serial_console: bool,
+    overlay_style_picker: bool,
+    theme_picker: bool,
+    tab_icon_picker: bool,
+    settings: bool,
+    tab_search: bool,
+    multi_command: bool,
+    command_palette: bool,
+    inline_editing: bool,
+}
+
+fn focus_surface(available: FocusSurfaceAvailability) -> Option<FocusSurface> {
+    if available.close_confirmation {
+        Some(FocusSurface::CloseConfirmation)
+    } else if available.session_authentication {
+        Some(FocusSurface::SessionAuthentication)
+    } else if available.remote_session {
+        Some(FocusSurface::RemoteSession)
+    } else if available.serial_console {
+        Some(FocusSurface::SerialConsole)
+    } else if available.overlay_style_picker {
+        Some(FocusSurface::OverlayStylePicker)
+    } else if available.theme_picker {
+        Some(FocusSurface::ThemePicker)
+    } else if available.tab_icon_picker {
+        Some(FocusSurface::TabIconPicker)
+    } else if available.settings {
+        Some(FocusSurface::Settings)
+    } else if available.tab_search {
+        Some(FocusSurface::TabSearch)
+    } else if available.multi_command {
+        Some(FocusSurface::MultiCommand)
+    } else if available.command_palette {
+        Some(FocusSurface::CommandPalette)
+    } else if available.inline_editing {
+        Some(FocusSurface::InlineEditing)
+    } else {
+        None
+    }
+}
+
 impl Zetta {
+    fn active_focus_surface(&self) -> Option<FocusSurface> {
+        focus_surface(FocusSurfaceAvailability {
+            close_confirmation: self.close_tab_confirmation.is_some(),
+            session_authentication: self.session_authentication.is_some(),
+            remote_session: self.remote_session_picker.is_some(),
+            serial_console: self.serial_console_is_open(),
+            overlay_style_picker: self.is_picking_overlay_style(),
+            theme_picker: self.theme_picker.is_some(),
+            tab_icon_picker: self.tab_icon_picker.is_some(),
+            settings: self.settings_editor.is_some(),
+            tab_search: self.tab_search.is_some(),
+            multi_command: self.multi_command.is_some(),
+            command_palette: self.command_palette.is_some(),
+            inline_editing: self.is_renaming() || self.is_editing_pane_overlay(),
+        })
+    }
+
+    /// Focuses the highest visible focus-managed surface, if there is one.
+    ///
+    /// The order mirrors the deferred overlay paint order. It is deliberately
+    /// centralized because focus can be restored by window activation, a
+    /// terminal finishing its spawn, or a prompt dismissing itself.
+    pub(crate) fn focus_active_surface(&self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(surface) = self.active_focus_surface() else {
+            return false;
+        };
+        match surface {
+            FocusSurface::CloseConfirmation => self.close_confirmation_focus.focus(window, cx),
+            FocusSurface::SessionAuthentication => {
+                self.session_authentication_focus.focus(window, cx);
+            }
+            FocusSurface::RemoteSession => self.remote_session_focus.focus(window, cx),
+            #[cfg(feature = "serial-console")]
+            FocusSurface::SerialConsole => self.serial_console_focus.focus(window, cx),
+            #[cfg(not(feature = "serial-console"))]
+            FocusSurface::SerialConsole => unreachable!("serial console is disabled"),
+            FocusSurface::OverlayStylePicker => self.overlay_style_focus.focus(window, cx),
+            FocusSurface::ThemePicker => self.theme_picker_focus.focus(window, cx),
+            FocusSurface::TabIconPicker => self.tab_icon_picker_focus.focus(window, cx),
+            FocusSurface::Settings => self.settings_focus.focus(window, cx),
+            FocusSurface::TabSearch => self.tab_search_focus.focus(window, cx),
+            FocusSurface::MultiCommand => self.multi_command_focus.focus(window, cx),
+            FocusSurface::CommandPalette => self.command_palette_focus.focus(window, cx),
+            FocusSurface::InlineEditing => self.rename_focus.focus(window, cx),
+        }
+        true
+    }
+
+    /// Gives focus to an automatically selected terminal only when no modal
+    /// surface is open. If one is open, restore that surface instead so a late
+    /// spawn or byte-stream pane cannot steal its keyboard input.
+    pub(crate) fn focus_terminal_if_allowed(
+        &self,
+        terminal_focus: &gpui::FocusHandle,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.focus_active_surface(window, cx) {
+            return false;
+        }
+        terminal_focus.focus(window, cx);
+        true
+    }
+
     pub(super) fn focus_after_window_activation(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.is_picking_overlay_style() {
-            self.overlay_style_focus.focus(window, cx);
-        } else {
-            self.focus_active(window, cx);
-        }
+        self.focus_active(window, cx);
     }
 
     pub(crate) fn has_visible_tab_by_attention_id(&self, attention_id: u64) -> bool {
@@ -266,6 +388,10 @@ impl Zetta {
 
     pub(crate) fn focus_active(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.activate_current_project(window, cx);
+        if self.focus_active_surface(window, cx) {
+            cx.notify();
+            return;
+        }
         if let Some(tab) = self.tabs.get(self.active_tab) {
             let active_is_visible = tab.pane_is_visible(tab.active_pane);
             if active_is_visible {
@@ -293,3 +419,7 @@ impl Zetta {
         ))
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/app/attention.rs"]
+mod tests;

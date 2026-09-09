@@ -123,8 +123,11 @@ left alone. Plain `zetta notify` outside Zetta remains fire-and-forget.
 Packaged macOS app builds support click routing; unbundled development builds
 still display notifications but do not route clicks.
 From a Zetta pane, `zetta tabicon ICON` sets a per-tab icon override on the
-active tab (`none` explicitly hides its icon); it is kept with the logical tab
-but is not written to user or project configuration. `zetta theme pane THEME`
+active tab (`none` explicitly hides its icon); `zetta tabicon --reset` (or `-r`)
+clears that override so the active project's effective icon, or the configured
+application default outside a project, is used. The choice is kept with the
+logical tab but is not written to user or project configuration.
+`zetta theme pane THEME`
 sets a session-scoped theme on the active pane, while `zetta theme tab THEME`
 sets one for the whole tab. Pane themes take precedence over tab themes, and
 `--reset` restores the next configured theme in the chain. **Reset Pane Theme**

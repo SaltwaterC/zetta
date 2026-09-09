@@ -60,6 +60,7 @@ pub(crate) enum StartupMode {
     SetTabIcon {
         icon: Option<IconName>,
     },
+    ResetTabIcon,
     ListTabIcons,
     SetTheme {
         scope: ThemeScope,

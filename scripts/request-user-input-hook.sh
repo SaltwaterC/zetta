@@ -102,6 +102,8 @@ else:
 '
 }
 
+summary=${1:-"Codex input required"}
+
 payload=$(cat) || {
     warn "could not read the hook input"
     exit 0
@@ -127,7 +129,7 @@ if ! command -v zetta >/dev/null 2>&1; then
     exit 0
 fi
 
-if ! zetta attention --notify --sound zetta-alarm "Codex input required" "$body" >&2; then
+if ! zetta attention --notify --sound zetta-alarm "$summary" "$body" >&2; then
     warn "could not show Zetta desktop notification"
 fi
 

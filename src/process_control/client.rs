@@ -193,12 +193,57 @@ fn request_process_pane_labels(
 }
 
 pub(crate) fn request_existing_process_tab_icon(icon: Option<IconName>) -> Result<bool> {
+    if let Ok(process_id) = env::var("ZETTA_PROCESS_ID") {
+        let process_id = process_id
+            .parse::<u32>()
+            .context("ZETTA_PROCESS_ID must be a positive process ID")?;
+        anyhow::ensure!(
+            process_id != 0,
+            "ZETTA_PROCESS_ID must be a positive process ID"
+        );
+        return request_process_tab_icon(process_id, icon);
+    }
+
     for endpoint in live_control_endpoints()? {
         if send_set_tab_icon_request(&endpoint, icon).unwrap_or(false) {
             return Ok(true);
         }
     }
     Ok(false)
+}
+
+pub(crate) fn request_existing_process_tab_icon_reset() -> Result<bool> {
+    if let Ok(process_id) = env::var("ZETTA_PROCESS_ID") {
+        let process_id = process_id
+            .parse::<u32>()
+            .context("ZETTA_PROCESS_ID must be a positive process ID")?;
+        anyhow::ensure!(
+            process_id != 0,
+            "ZETTA_PROCESS_ID must be a positive process ID"
+        );
+        return request_process_tab_icon_reset(process_id);
+    }
+
+    for endpoint in live_control_endpoints()? {
+        if send_reset_tab_icon_request(&endpoint).unwrap_or(false) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn request_process_tab_icon(process_id: u32, icon: Option<IconName>) -> Result<bool> {
+    let Some(endpoint) = live_control_endpoint(process_id)? else {
+        return Ok(false);
+    };
+    send_set_tab_icon_request(&endpoint, icon)
+}
+
+fn request_process_tab_icon_reset(process_id: u32) -> Result<bool> {
+    let Some(endpoint) = live_control_endpoint(process_id)? else {
+        return Ok(false);
+    };
+    send_reset_tab_icon_request(&endpoint)
 }
 
 pub(crate) fn request_existing_process_theme(
@@ -652,6 +697,10 @@ fn send_set_tab_icon_request(endpoint: &ControlEndpoint, icon: Option<IconName>)
             ..Default::default()
         },
     )
+}
+
+fn send_reset_tab_icon_request(endpoint: &ControlEndpoint) -> Result<bool> {
+    send_control_command(endpoint, "reset_tab_icon", ControlRequest::default())
 }
 
 fn send_set_theme_request(

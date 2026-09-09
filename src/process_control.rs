@@ -73,8 +73,9 @@ pub(crate) use client::{
     request_existing_process_project_with_working_directory,
     request_existing_process_projects_reload, request_existing_process_replace_pane,
     request_existing_process_shell_command, request_existing_process_tab_icon,
-    request_existing_process_theme, request_existing_process_theme_list,
-    request_existing_process_window, request_process_run_wait, request_process_tab_attention,
+    request_existing_process_tab_icon_reset, request_existing_process_theme,
+    request_existing_process_theme_list, request_existing_process_window, request_process_run_wait,
+    request_process_tab_attention,
 };
 pub(crate) use endpoint::config_path_identity;
 pub(crate) use server::ProcessControlServer;
@@ -103,6 +104,10 @@ pub(crate) use server::ProcessControlServer;
 /// a registered project from a managed worktree can preserve that directory.
 ///
 /// 19 adds a raw shell-command request for registered project commands.
+///
+/// 20 adds the payload-free `reset_tab_icon` request, which clears a tab's
+/// explicit icon override and reapplies its active project or application
+/// default.
 ///
 /// A New Window request may carry an optional profile name and a short-lived Wayland activation token in
 /// the private string payload so an existing process can focus its surface.
@@ -278,6 +283,9 @@ pub(crate) enum ProcessControlCommand {
         icon: Option<IconName>,
         completion: Sender<bool>,
     },
+    ResetTabIcon {
+        completion: Sender<bool>,
+    },
     SetTheme {
         scope: crate::ThemeScope,
         theme: Option<String>,
@@ -381,6 +389,7 @@ enum ControlRequestCommand {
     SetTabIcon {
         icon: Option<IconName>,
     },
+    ResetTabIcon,
     SetTheme {
         scope: crate::ThemeScope,
         theme: Option<String>,

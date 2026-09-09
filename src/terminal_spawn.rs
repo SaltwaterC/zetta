@@ -422,7 +422,8 @@ impl Zetta {
                         this.schedule_worktree_detection_for_pane(tab_id, pane_id, cx);
                         this.schedule_project_detection_for_pane(tab_id, pane_id, window, cx);
                         if should_focus {
-                            view.focus_handle(cx).focus(window, cx);
+                            let focus_handle = view.focus_handle(cx);
+                            this.focus_terminal_if_allowed(&focus_handle, window, cx);
                         }
                         this.sync_visible_terminals(cx);
                         this.schedule_terminal_spawn_notify(cx);
@@ -966,7 +967,8 @@ impl Zetta {
         this.schedule_worktree_detection_for_pane(tab_id, pane_id, cx);
         this.schedule_project_detection_for_pane(tab_id, pane_id, window, cx);
         if should_focus {
-            view.focus_handle(cx).focus(window, cx);
+            let focus_handle = view.focus_handle(cx);
+            this.focus_terminal_if_allowed(&focus_handle, window, cx);
         }
         this.sync_visible_terminals(cx);
         this.schedule_terminal_spawn_notify(cx);
@@ -1502,7 +1504,8 @@ impl Zetta {
             }
         }
         if should_focus {
-            view.focus_handle(cx).focus(window, cx);
+            let focus_handle = view.focus_handle(cx);
+            this.focus_terminal_if_allowed(&focus_handle, window, cx);
         }
         this.sync_visible_terminals(cx);
         this.schedule_terminal_spawn_notify(cx);

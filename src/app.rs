@@ -676,14 +676,7 @@ impl Zetta {
             }));
         self._subscriptions
             .push(cx.observe_window_activation(window, |this, window, cx| {
-                if window.is_window_active()
-                    && !this.is_renaming()
-                    && this.command_palette.is_none()
-                    && this.multi_command.is_none()
-                    && !this.serial_console_is_open()
-                    && this.session_authentication.is_none()
-                    && this.tab_search.is_none()
-                {
+                if window.is_window_active() {
                     this.focus_after_window_activation(window, cx);
                 }
             }));
@@ -950,14 +943,7 @@ impl Zetta {
                     cx.notify();
                 }),
                 cx.observe_window_activation(window, |this, window, cx| {
-                    if window.is_window_active()
-                        && !this.is_renaming()
-                        && this.command_palette.is_none()
-                        && this.multi_command.is_none()
-                        && !this.serial_console_is_open()
-                        && this.session_authentication.is_none()
-                        && this.tab_search.is_none()
-                    {
+                    if window.is_window_active() {
                         this.focus_after_window_activation(window, cx);
                     }
                 }),

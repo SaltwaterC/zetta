@@ -435,6 +435,51 @@ fn an_explicit_hidden_tab_icon_wins_over_project_changes_and_leaving() {
     assert!(inherited.is_empty());
 }
 
+#[test]
+fn resetting_a_tab_icon_uses_the_active_project_and_clears_the_inherited_fallback() {
+    let project = icon_test_project(Some(IconName::Folder));
+    let mut inherited = HashMap::from([(1, Some(IconName::Star))]);
+    let mut icon = None;
+    let mut icon_override = TabIconOverride::Hidden;
+
+    reset_project_tab_icon(
+        1,
+        &mut icon,
+        &mut icon_override,
+        Some(IconName::Terminal),
+        Some(&project),
+        &mut inherited,
+    );
+
+    assert_eq!(icon, Some(IconName::Folder));
+    assert_eq!(icon_override, TabIconOverride::None);
+    assert_eq!(inherited.get(&1), Some(&Some(IconName::Terminal)));
+
+    apply_project_tab_icon(1, &mut icon, icon_override, None, &mut inherited);
+    assert_eq!(icon, Some(IconName::Terminal));
+    assert!(inherited.is_empty());
+}
+
+#[test]
+fn resetting_outside_a_project_restores_the_application_default_even_from_hidden() {
+    let mut inherited = HashMap::from([(1, Some(IconName::Star))]);
+    let mut icon = None;
+    let mut icon_override = TabIconOverride::Hidden;
+
+    reset_project_tab_icon(
+        1,
+        &mut icon,
+        &mut icon_override,
+        Some(IconName::Terminal),
+        None,
+        &mut inherited,
+    );
+
+    assert_eq!(icon, Some(IconName::Terminal));
+    assert_eq!(icon_override, TabIconOverride::None);
+    assert!(inherited.is_empty());
+}
+
 #[gpui::test]
 fn active_project_theme_overrides_a_profile_theme_it_never_mentioned(
     cx: &mut gpui::TestAppContext,

@@ -39,7 +39,8 @@ impl Zetta {
             tab.active_view()
         };
         if let Some(view) = view {
-            view.focus_handle(cx).focus(window, cx);
+            let focus_handle = view.focus_handle(cx);
+            self.focus_terminal_if_allowed(&focus_handle, window, cx);
         } else {
             self.focus_active(window, cx);
         }
@@ -63,7 +64,8 @@ impl Zetta {
             tab.active_view()
         };
         if let Some(view) = view {
-            view.focus_handle(cx).focus(window, cx);
+            let focus_handle = view.focus_handle(cx);
+            self.focus_terminal_if_allowed(&focus_handle, window, cx);
         } else {
             self.focus_active(window, cx);
         }

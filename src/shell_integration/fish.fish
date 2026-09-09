@@ -139,6 +139,28 @@ if set -q ZETTA_HOST_EXECUTABLE; and test -n "$ZETTA_HOST_EXECUTABLE"
     end
 end
 
+# Codex can restore an existing thread before it dispatches SessionStart.
+# Seed the idle icon at the shell boundary; Codex hooks take over once a turn
+# is submitted. Reset the icon when the Codex process returns to this shell.
+function __zetta_is_codex_command
+    string match -rq -- '^[[:space:]]*(/[^[:space:]]*/)?codex([[:space:]]|$)' "$argv[1]"
+end
+
+function __zetta_set_codex_boot_icon
+    set -q __ZETTA_CODEX_ICON_UPDATE_ACTIVE; and return
+    set -g __ZETTA_CODEX_COMMAND_ACTIVE 1
+    set -g __ZETTA_CODEX_ICON_UPDATE_ACTIVE 1
+    __zetta_run_owner tabicon ai_open_ai >/dev/null 2>/dev/null
+    set -e __ZETTA_CODEX_ICON_UPDATE_ACTIVE
+end
+
+function __zetta_reset_codex_tab_icon
+    set -q __ZETTA_CODEX_ICON_UPDATE_ACTIVE; and return
+    set -g __ZETTA_CODEX_ICON_UPDATE_ACTIVE 1
+    __zetta_run_owner tabicon --reset >/dev/null 2>/dev/null
+    set -e __ZETTA_CODEX_ICON_UPDATE_ACTIVE
+end
+
 if not type -q mosh
     function mosh --wraps 'zetta mosh'
         command zetta mosh $argv
@@ -148,6 +170,7 @@ end
 
 if not functions -q __zetta_report_cwd
     set -g __ZETTA_LIFECYCLE_TRACKING_INSTALLED 1
+    set -g __ZETTA_LIFECYCLE_TRACKING_VERSION 4
     if set -q ZETTA_PANE_ROUTING_ID
         set -g __ZETTA_LIFECYCLE_TRACKING_ENABLED 1
     else if set -q ZETTA_PANE_ID
@@ -163,6 +186,9 @@ if not functions -q __zetta_report_cwd
     function __zetta_report_preexec --on-event fish_preexec
         test "$__ZETTA_LIFECYCLE_TRACKING_ENABLED" = 1; or return
         set -g __ZETTA_COMMAND_STARTED 1
+        if __zetta_is_codex_command "$argv[1]"
+            __zetta_set_codex_boot_icon
+        end
         printf '\033]2;zetta-event:command-started:%s\033\\' "$argv[1]"
     end
     function __zetta_report_cwd --on-event fish_prompt
@@ -170,6 +196,10 @@ if not functions -q __zetta_report_cwd
         if test "$__ZETTA_LIFECYCLE_TRACKING_ENABLED" = 1; and test "$__ZETTA_COMMAND_STARTED" = 1
             printf '\033]2;zetta-event:command-finished:%s\033\\' "$command_status"
             set -g __ZETTA_COMMAND_STARTED 0
+            if set -q __ZETTA_CODEX_COMMAND_ACTIVE; and test "$__ZETTA_CODEX_COMMAND_ACTIVE" = 1
+                __zetta_reset_codex_tab_icon
+                set -g __ZETTA_CODEX_COMMAND_ACTIVE 0
+            end
         end
         printf '\033]2;zetta-cwd:%s\033\\' "$PWD"
     end
@@ -183,12 +213,17 @@ set -l __zetta_lifecycle_needs_install 0
 if not set -q __ZETTA_LIFECYCLE_TRACKING_INSTALLED
     set -g __ZETTA_LIFECYCLE_TRACKING_INSTALLED 1
     set __zetta_lifecycle_needs_install 1
+else if not set -q __ZETTA_LIFECYCLE_TRACKING_VERSION
+    set __zetta_lifecycle_needs_install 1
+else if test "$__ZETTA_LIFECYCLE_TRACKING_VERSION" != 4
+    set __zetta_lifecycle_needs_install 1
 else if set -q ZETTA_PANE_ROUTING_ID; or set -q ZETTA_PANE_ID
     if test "$__ZETTA_LIFECYCLE_TRACKING_ENABLED" != 1
         set __zetta_lifecycle_needs_install 1
     end
 end
 if test "$__zetta_lifecycle_needs_install" = 1
+    set -g __ZETTA_LIFECYCLE_TRACKING_VERSION 4
     if set -q ZETTA_PANE_ROUTING_ID; or set -q ZETTA_PANE_ID
         set -g __ZETTA_LIFECYCLE_TRACKING_ENABLED 1
         set -g __ZETTA_COMMAND_STARTED 0
@@ -201,6 +236,9 @@ if test "$__zetta_lifecycle_needs_install" = 1
         function __zetta_report_preexec --on-event fish_preexec
             test "$__ZETTA_LIFECYCLE_TRACKING_ENABLED" = 1; or return
             set -g __ZETTA_COMMAND_STARTED 1
+            if __zetta_is_codex_command "$argv[1]"
+                __zetta_set_codex_boot_icon
+            end
             printf '\033]2;zetta-event:command-started:%s\033\\' "$argv[1]"
         end
         function __zetta_report_cwd --on-event fish_prompt
@@ -208,6 +246,10 @@ if test "$__zetta_lifecycle_needs_install" = 1
             if test "$__ZETTA_LIFECYCLE_TRACKING_ENABLED" = 1; and test "$__ZETTA_COMMAND_STARTED" = 1
                 printf '\033]2;zetta-event:command-finished:%s\033\\' "$command_status"
                 set -g __ZETTA_COMMAND_STARTED 0
+                if set -q __ZETTA_CODEX_COMMAND_ACTIVE; and test "$__ZETTA_CODEX_COMMAND_ACTIVE" = 1
+                    __zetta_reset_codex_tab_icon
+                    set -g __ZETTA_CODEX_COMMAND_ACTIVE 0
+                end
             end
             printf '\033]2;zetta-cwd:%s\033\\' "$PWD"
         end
@@ -538,6 +580,16 @@ function __zetta_short_option
     set -l words (commandline -opc)
     test (count $words) -gt 0
     and test "$words[-1]" = "$argv[1]"
+end
+
+function __zetta_tabicon_has_reset
+    set -l words (commandline -opc)
+    for word in $words[3..-1]
+        if test "$word" = --reset; or test "$word" = -r
+            return 0
+        end
+    end
+    return 1
 end
 
 function __zetta_at_subcommand
@@ -974,6 +1026,7 @@ function __zetta_long_options
         case tabicon
             printf '%s\t%s\n' \
                 --icon 'Set the tab icon' \
+                --reset 'Restore the configured project or application icon' \
                 --list 'Print built-in icon names' \
                 --help 'Print help'
         case overlay
@@ -1384,8 +1437,8 @@ complete -c zetta -s p -r -n '__zetta_tftp_server; and __zetta_short_option -p'
 complete -c zetta -s c -r -n '__zetta_tftp_server; and __zetta_short_option -c'
 complete -c zetta -n '__zetta_notify_root' -l app-name -r -d 'Application name'
 complete -c zetta -n '__zetta_notify_root' -l icon -r -d 'Image to show with the notification'
-complete -c zetta -n '__fish_seen_subcommand_from tabicon' -l icon -r -a '(__zetta_tab_icons)' -d 'Set the tab icon'
-complete -c zetta -s i -r -a '(__zetta_tab_icons)' -n '__fish_seen_subcommand_from tabicon; and __zetta_short_option -i'
+complete -c zetta -n '__fish_seen_subcommand_from tabicon; and not __zetta_tabicon_has_reset' -l icon -r -a '(__zetta_tab_icons)' -d 'Set the tab icon'
+complete -c zetta -s i -r -a '(__zetta_tab_icons)' -n '__fish_seen_subcommand_from tabicon; and not __zetta_tabicon_has_reset; and __zetta_short_option -i'
 complete -c zetta -n '__zetta_notify_root' -l sound -r -a '(__zetta_sound_names)' -d 'Sound name'
 complete -c zetta -n '__zetta_notify_root' -l timeout -r -a 'default never' -d 'Timeout'
 complete -c zetta -n '__zetta_notify_root' -l help -d 'Print help'
@@ -1420,10 +1473,12 @@ complete -c zetta -n '__fish_seen_subcommand_from paste' -l help -d 'Print help'
 complete -c zetta -n '__fish_seen_subcommand_from paste' -a '(__zetta_long_options paste)'
 complete -c zetta -n '__fish_seen_subcommand_from paste; and __zetta_short_option -pboard' -a 'general ruler find font'
 complete -c zetta -n '__fish_seen_subcommand_from paste; and __zetta_short_option -prefer' -a 'txt rtf ps'
+complete -c zetta -n '__fish_seen_subcommand_from tabicon' -l reset -d 'Restore the configured project or application icon'
+complete -c zetta -s r -n '__fish_seen_subcommand_from tabicon; and __zetta_short_option -r'
 complete -c zetta -n '__fish_seen_subcommand_from tabicon' -l list -d 'Print built-in icon names'
 complete -c zetta -n '__fish_seen_subcommand_from tabicon' -l help -d 'Print help'
 complete -c zetta -n '__fish_seen_subcommand_from tabicon' -a '(__zetta_long_options tabicon)'
-complete -c zetta -n '__fish_seen_subcommand_from tabicon' -a '(__zetta_tab_icons)'
+complete -c zetta -n '__fish_seen_subcommand_from tabicon; and not __zetta_tabicon_has_reset' -a '(__zetta_tab_icons)'
 complete -c zetta -n '__zetta_theme_pane' -l theme -r -a '(__zetta_themes pane)' -d 'Set the pane theme'
 complete -c zetta -s t -r -a '(__zetta_themes pane)' -n '__zetta_theme_pane; and __zetta_short_option -t'
 complete -c zetta -n '__zetta_theme_pane' -l reset -d 'Restore the tab or configured theme'

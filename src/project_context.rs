@@ -614,6 +614,23 @@ impl Zetta {
         }
     }
 
+    pub(crate) fn reset_active_project_tab_icon(&mut self) -> bool {
+        let default_tab_icon = self.launch_config.default_tab_icon;
+        let project = self.active_project_config().cloned();
+        let Some(tab) = self.tabs.get_mut(self.active_tab) else {
+            return false;
+        };
+        reset_project_tab_icon(
+            tab.id,
+            &mut tab.icon,
+            &mut tab.icon_override,
+            default_tab_icon,
+            project.as_deref(),
+            &mut self.projects.inherited_tab_icons,
+        );
+        true
+    }
+
     pub(crate) fn apply_effective_themes_to_tab(&mut self, tab_id: u64, cx: &mut Context<Self>) {
         let Some(tab_index) = self.tabs.iter().position(|tab| tab.id == tab_id) else {
             return;
@@ -1039,6 +1056,30 @@ pub(crate) fn apply_project_tab_icon(
             }
         }
     }
+}
+
+/// Clears a tab's explicit icon choice and reapplies the project fallback.
+/// Removing the inherited value first is important when a previous project
+/// application left stale state behind: the application default is the value
+/// that leaving the current project must restore.
+pub(crate) fn reset_project_tab_icon(
+    tab_id: u64,
+    tab_icon: &mut Option<IconName>,
+    tab_icon_override: &mut TabIconOverride,
+    default_tab_icon: Option<IconName>,
+    project: Option<&ProjectConfig>,
+    inherited_tab_icons: &mut HashMap<u64, Option<IconName>>,
+) {
+    inherited_tab_icons.remove(&tab_id);
+    *tab_icon = default_tab_icon;
+    *tab_icon_override = TabIconOverride::None;
+    apply_project_tab_icon(
+        tab_id,
+        tab_icon,
+        *tab_icon_override,
+        project,
+        inherited_tab_icons,
+    );
 }
 
 /// The theme a terminal pane should render with. Mirrors the precedence

@@ -113,8 +113,11 @@ fn help_text_uses_title_case_and_lists_built_in_features() {
         assert!(!help.contains("Git worktree workflow"));
     }
     assert!(help.contains("zetta tabicon [OPTIONS] ICON"));
+    assert!(help.contains("zetta tabicon --reset"));
     assert!(help.contains("Set the active tab's icon override"));
     assert!(tab_icon_help().contains("per-tab icon override"));
+    assert!(tab_icon_help().contains("--reset"));
+    assert!(tab_icon_help().contains("active project's effective icon"));
     assert!(tab_icon_help().contains("never written to user or project configuration"));
     assert!(help.contains("zetta attention [OPTIONS] [SUMMARY] [BODY]"));
     assert!(help.contains("Mark the originating tab as needing attention"));
