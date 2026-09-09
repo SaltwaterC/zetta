@@ -26,9 +26,10 @@ use zmux::persistence::{PersistedSession, PersistedSnapshot, PersistenceStore};
 
 use zmux::{
     client::{AttachOutcome, Client},
-    messages::{SpawnRequest, TerminalSize},
+    messages::{ClientId, Envelope, Event, Request, Response, SpawnRequest, TerminalSize},
     protocol::{BackgroundPaneLayout, BackgroundSessionSummary},
     retention::Retention,
+    transport::{Connection, Stream},
 };
 
 /// A daemon with a private configuration directory, stopped when dropped.
@@ -2787,11 +2788,12 @@ fn shared_clients_are_sized_to_the_smallest_of_them() {
     let pane = client
         .spawn(spawn_request(
             None,
-            "printf ready; while true; do sleep 0.3; stty size; done",
+            "printf ready; stty size; while read -r line; do printf 'input:%s\\n' \"$line\"; done",
         ))
         .unwrap();
     let descriptor = std::fs::File::from(pane.descriptor);
-    read_until(&descriptor, "ready");
+    // One read can contain both markers; wait for the size in the same
+    // accumulated read so the first assertion cannot consume it.
     read_until(&descriptor, "24 80");
 
     // Shared first, as `Ctrl-Shift-K` does: a session belongs to the process
@@ -2838,24 +2840,108 @@ fn shared_clients_are_sized_to_the_smallest_of_them() {
     let holder_pane = holder.join().expect("the holder.s handover failed");
     let mut holder_reader = holder_pane.reader();
     let mut second_reader = second.reader();
-    read_until_reader(&mut holder_reader, "24 80");
+
+    // The holder reattached as a new shared client and starts unmeasured. Its
+    // explicit report establishes the real 80x24 viewer size; the attach
+    // response alone must not do that on its behalf.
+    holder_pane
+        .send_resize(80, 24)
+        .expect("reporting the holder's initialized size");
+
+    // A remote client reaches the same shared data path with a stream-only
+    // envelope. It has no descriptor or exclusive handover, but its input must
+    // still be attributed and delivered over the full-duplex shared socket.
+    let endpoint: zmux::transport::Endpoint =
+        serde_json::from_slice(&std::fs::read(daemon.sessions_dir().join("zmux.json")).unwrap())
+            .unwrap();
+    let stream = Stream::connect(&endpoint.socket_path).unwrap();
+    let mut remote = Connection::new(stream);
+    remote
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    remote
+        .send(&Envelope {
+            version: zmux::messages::PROTOCOL_VERSION,
+            token: endpoint.token,
+            client_process_id: std::process::id(),
+            client_id: ClientId::new("remote-style-test"),
+            stream_only: true,
+            session_secret: None,
+            request: Request::Attach {
+                session_id: pane.session_id,
+                pane_id: Some(pane.pane_id),
+                secret: Some(TEST_SECRET.to_owned()),
+            },
+        })
+        .unwrap();
+    let (response, _) = remote.receive::<Response>().unwrap();
+    let replay_length = match response {
+        Response::SharedAttached { replay_length, .. } => replay_length,
+        other => panic!("the stream-only client must attach as shared: {other:?}"),
+    };
+    remote.read_exact(replay_length).unwrap();
+    let remote_input = b"remote-style\n";
+    remote
+        .send(&Request::Input {
+            length: remote_input.len(),
+        })
+        .unwrap();
+    remote.write_all(remote_input).unwrap();
+    let mut remote_output = Vec::new();
+    while !remote_output
+        .windows(b"input:remote-style".len())
+        .any(|bytes| bytes == b"input:remote-style")
+    {
+        let (event, _) = remote.receive::<Event>().unwrap();
+        if let Event::Output { length, .. } = event {
+            remote_output.extend(remote.read_exact(length).unwrap());
+        }
+    }
 
     // The smaller client's size wins, and is announced to everyone.
     second
         .send_resize(40, 10)
         .expect("reporting a smaller size");
-    read_until_reader(&mut holder_reader, "10 40");
-    read_until_reader(&mut second_reader, "10 40");
-    assert_eq!(holder_pane.take_sizes().last(), Some(&(40, 10)));
-    assert_eq!(second.take_sizes().last(), Some(&(40, 10)));
+    assert_eq!(
+        wait_for_shared_size(&mut holder_reader, &holder_pane, (40, 10)).last(),
+        Some(&(40, 10))
+    );
+    assert_eq!(
+        wait_for_shared_size(&mut second_reader, &second, (40, 10)).last(),
+        Some(&(40, 10))
+    );
 
-    // The largest client no longer sets the smallest size; the pane grows
-    // back to the other client's.
+    // Once the holder has observed that correction, a larger report from the
+    // second client does not change the effective size. It still gets the
+    // existing size broadcast back, rather than being left divergent.
+    holder_pane
+        .send_resize(40, 10)
+        .expect("recording the holder's corrected size");
     second
         .send_resize(120, 40)
-        .expect("reporting a larger size");
-    read_until_reader(&mut holder_reader, "24 80");
-    read_until_reader(&mut second_reader, "24 80");
+        .expect("reporting a larger size that needs correction");
+    assert_eq!(
+        wait_for_shared_size(&mut holder_reader, &holder_pane, (40, 10)).last(),
+        Some(&(40, 10))
+    );
+    assert_eq!(
+        wait_for_shared_size(&mut second_reader, &second, (40, 10)).last(),
+        Some(&(40, 10))
+    );
+
+    // The largest client no longer sets the smallest size; after the holder
+    // reports its real size again, the pane grows back to it.
+    holder_pane
+        .send_resize(80, 24)
+        .expect("reporting the holder's larger size");
+    assert_eq!(
+        wait_for_shared_size(&mut holder_reader, &holder_pane, (80, 24)).last(),
+        Some(&(80, 24))
+    );
+    assert_eq!(
+        wait_for_shared_size(&mut second_reader, &second, (80, 24)).last(),
+        Some(&(80, 24))
+    );
     reap(second_process);
 }
 
@@ -4142,6 +4228,32 @@ fn read_until_reader(reader: &mut impl Read, expected: &str) -> String {
         std::thread::sleep(Duration::from_millis(10));
     }
     panic!("never saw {expected:?}; read {seen:?}");
+}
+
+/// Reads a shared stream until its reader has recorded the requested size.
+/// Size events are intentionally not bytes, so the ordinary output helper
+/// cannot observe them without losing the assertion's useful history.
+fn wait_for_shared_size(
+    reader: &mut impl Read,
+    pane: &zmux::client::SharedPane,
+    expected: (u16, u16),
+) -> Vec<(u16, u16)> {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut sizes = Vec::new();
+    let mut buffer = [0; 4096];
+    while Instant::now() < deadline {
+        match reader.read(&mut buffer) {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(error) => panic!("reading the shared pane failed: {error}"),
+        }
+        sizes.extend(pane.take_sizes());
+        if sizes.contains(&expected) {
+            return sizes;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    panic!("never saw shared size {expected:?}; read {sizes:?}");
 }
 
 /// Starts a daemon from a freshly copied binary, retrying `ETXTBSY`.

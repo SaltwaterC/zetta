@@ -29,6 +29,30 @@ fn shared_clients_are_arbitrated_down_to_the_smallest_of_them() {
 }
 
 #[test]
+fn unmeasured_shared_clients_do_not_constrain_established_clients() {
+    assert_eq!(
+        smallest_size(
+            [None, Some((120, 30)), None, Some((80, 50))]
+                .into_iter()
+                .flatten(),
+            size(200, 60),
+        ),
+        (80, 30)
+    );
+    assert_eq!(
+        smallest_size([None, None].into_iter().flatten(), size(200, 60)),
+        (200, 60)
+    );
+}
+
+#[test]
+fn a_larger_reporter_is_sent_the_existing_effective_size() {
+    assert!(should_broadcast_size((120, 40), (80, 24), (80, 24)));
+    assert!(should_broadcast_size((40, 10), (40, 10), (80, 24)));
+    assert!(!should_broadcast_size((80, 24), (80, 24), (80, 24)));
+}
+
+#[test]
 fn a_shared_pane_with_no_clients_left_is_unheld() {
     // Only the explicit "a client left" path used to do this, so a viewer
     // dropped for being unwritable — wedged past the relay's write timeout —

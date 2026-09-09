@@ -137,9 +137,6 @@ impl Zetta {
                 // Wait for something to happen rather than asking whether it
                 // has. Both arms are messages, so an idle shared pane no longer
                 // wakes the thread that draws twice a second.
-                // Wait for something to happen rather than asking whether it
-                // has. Both arms are messages, so an idle shared pane no longer
-                // wakes the thread that draws twice a second.
                 let exited = Box::pin(exit_rx.recv());
                 let resized = Box::pin(size_arrived.recv());
                 match futures::future::select(exited, resized).await {
@@ -163,10 +160,9 @@ impl Zetta {
         .detach();
     }
 
-    /// Applies the size the multiplexer arbitrated for a shared pane, by
-    /// resizing the layout to it: the grid is laid out from the pane's
-    /// bounds, so the shell's wraps can only line up with the cells drawn
-    /// when the two agree.
+    /// Applies the size the multiplexer arbitrated for a shared pane without
+    /// moving its split boundaries. Shared panes synchronize the outer window;
+    /// interactive pane resizing remains the operation that changes layout.
     fn apply_shared_pane_size(
         &mut self,
         tab_id: u64,
@@ -175,18 +171,24 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let bounds = self
+        let terminal = self
             .tabs
             .iter()
             .find(|tab| tab.id == tab_id)
             .and_then(|tab| tab.pane(pane_id))
-            .and_then(TerminalPane::selected_terminal)
-            .map(|terminal| terminal.read(cx).last_content().terminal_bounds);
-        match shared_size_action(bounds, columns, lines) {
+            .and_then(TerminalPane::selected_terminal);
+        let (size_initialized, bounds) = terminal.map_or((false, None), |terminal| {
+            let terminal = terminal.read(cx);
+            (
+                terminal.is_size_initialized(),
+                Some(terminal.last_content().terminal_bounds),
+            )
+        });
+        match shared_size_action(size_initialized, bounds, columns, lines) {
             SharedSizeAction::WaitForLayout => false,
             SharedSizeAction::AlreadyMatches => true,
             SharedSizeAction::Resize => {
-                self.resize_pane_to(
+                self.resize_shared_pane_to(
                     tab_id,
                     pane_id,
                     Some(columns as usize),
@@ -258,8 +260,10 @@ impl Zetta {
         let Some(entry) = self.shared_panes.get(&pane_id) else {
             return;
         };
-        let bounds = terminal.read(cx).last_content().terminal_bounds;
-        let Some((columns, lines)) = shared_size_to_report(bounds) else {
+        let terminal = terminal.read(cx);
+        let bounds = terminal.last_content().terminal_bounds;
+        let Some((columns, lines)) = shared_size_to_report(terminal.is_size_initialized(), bounds)
+        else {
             // Not laid out yet, so this viewer has no size to arbitrate against.
             // The first layout emits `GridSizeChanged`, which reports it then.
             return;
@@ -552,8 +556,9 @@ impl Zetta {
         // This pane's view was wired up when it was spawned, long before it
         // became shared, so its size reports have to be subscribed here rather
         // than in `connect_terminal_view`. Without this the pane joins size
-        // arbitration silently: the daemon only ever knows the size it was
-        // handed over at, so every other viewer is sized against a stale figure.
+        // arbitration silently: the daemon only has its applied fallback size
+        // until this viewer reports, so every other viewer is sized against a
+        // stale figure.
         self.subscribe_shared_pane_size(ids.pane_id, &terminal, window, cx);
         cx.notify();
     }

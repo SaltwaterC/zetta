@@ -894,8 +894,8 @@ impl Client {
                     replay_length,
                     state,
                     summary,
-                    columns,
-                    lines,
+                    columns: _,
+                    lines: _,
                 } => {
                     let replay = connection.read_exact(replay_length)?;
                     Ok(AttachOutcome::SharedAttached {
@@ -904,7 +904,11 @@ impl Client {
                             pane_id,
                             child_pid,
                             connection: Mutex::new(connection),
-                            sizes: Arc::new(Mutex::new(vec![(columns, lines)])),
+                            // The dimensions in `SharedAttached` describe the
+                            // pane's current effective size, not this client's
+                            // laid-out window. It must report its first real
+                            // layout before it participates in arbitration.
+                            sizes: Arc::new(Mutex::new(Vec::new())),
                             size_signal: async_channel::bounded(1),
                             replay,
                         },
@@ -1238,7 +1242,8 @@ impl Client {
     /// save even if the window never gets as far as backgrounding the tab.
     ///
     /// `columns`/`lines` are the size the pane was being shown at, which the
-    /// multiplexer records as the pane's size for shared clients to join at.
+    /// multiplexer records as its current applied size. A shared client still
+    /// reports its own initialized layout separately after it joins.
     pub fn send_snapshot(
         &self,
         session_id: u64,

@@ -757,10 +757,11 @@ pub enum Event {
         rows: usize,
         columns: usize,
     },
-    /// The grid's dimensions changed, after a layout-driven resize or a font
-    /// size change. Distinct from [`Event::Wakeup`], which also fires for
-    /// ordinary output: this is for the chrome around the terminal, which
-    /// displays the grid size and must not repaint on every byte written.
+    /// The grid was laid out or its dimensions changed, after a layout-driven
+    /// resize or a font size change. Distinct from [`Event::Wakeup`], which
+    /// also fires for ordinary output: this is for the chrome around the
+    /// terminal, which displays the grid size and must not repaint on every
+    /// byte written.
     GridSizeChanged,
     SelectionsChanged,
     NewNavigationTarget(Option<MaybeNavigationTarget>),
@@ -1205,6 +1206,9 @@ enum InternalEvent {
         bounds: TerminalBounds,
         reflow: bool,
     },
+    /// Marks the first layout even when it has the same grid dimensions and
+    /// pixels as the constructor's placeholder bounds.
+    InitializeSize,
     Clear,
     // FocusNextMatch,
     Scroll(Scroll),
@@ -2026,7 +2030,7 @@ impl TerminalBuilder {
         background_executor: &BackgroundExecutor,
         path_style: PathStyle,
     ) -> TerminalBuilder {
-        Self::new_display_only_with_bounds(
+        let mut builder = Self::new_display_only_with_bounds(
             cursor_shape,
             alternate_scroll,
             max_scroll_history_lines,
@@ -2034,7 +2038,11 @@ impl TerminalBuilder {
             background_executor,
             path_style,
             TerminalBounds::default(),
-        )
+        );
+        // The no-bounds constructor uses the same dimensions as the debug
+        // placeholder, but it has not received a real pane layout yet.
+        builder.terminal.terminal_size_initialized = false;
+        builder
     }
 
     pub fn new_display_only_with_bounds(
@@ -2118,7 +2126,11 @@ impl TerminalBuilder {
             },
             child_is_the_multiplexers: false,
             pending_replay: None,
-            terminal_size_initialized: terminal_bounds != TerminalBounds::default(),
+            // Explicit bounds are an initialized display-only layout even when
+            // they happen to equal the default 100x6 dimensions. The no-bounds
+            // constructor resets this after calling us above.
+            terminal_size_initialized: true,
+            size_initialization_queued: false,
             fresh_shell_restore: false,
             restore_startup_ready: false,
             restore_prefill: None,
@@ -2880,6 +2892,7 @@ impl TerminalBuilder {
                 child_is_the_multiplexers: false,
                 pending_replay,
                 terminal_size_initialized: false,
+                size_initialization_queued: false,
                 fresh_shell_restore: false,
                 restore_startup_ready: false,
                 restore_prefill: None,
@@ -3157,6 +3170,9 @@ pub struct Terminal {
     /// Whether a real pane layout has supplied the terminal's grid size. The
     /// constructor's debug bounds are only a placeholder for PTYs.
     terminal_size_initialized: bool,
+    /// Whether the first layout notification has been queued but not processed.
+    /// This keeps repeated pre-sync `set_size` calls from creating extra events.
+    size_initialization_queued: bool,
     /// A disk restore creates a new shell rather than reattaching the process
     /// that produced the snapshot. Its replay waits for startup integration,
     /// then becomes the primary screen with ordinary shell modes.
@@ -3567,8 +3583,10 @@ impl Terminal {
                 let grid_size_changed = term.screen_lines() != new_bounds.num_lines()
                     || term.columns() != new_bounds.num_columns();
                 let columns_changed = term.columns() != new_bounds.num_columns();
+                let was_size_initialized = self.terminal_size_initialized;
                 self.last_content.terminal_bounds = new_bounds;
                 self.terminal_size_initialized = true;
+                self.size_initialization_queued = false;
 
                 #[cfg(windows)]
                 if let TerminalType::Pty { pty_tx, .. } = &self.terminal_type {
@@ -3597,7 +3615,7 @@ impl Terminal {
                 // first moment a restored screen can be written without being
                 // wrapped at the wrong width.
                 self.replay_pending(term);
-                if grid_size_changed {
+                if grid_size_changed || !was_size_initialized {
                     cx.emit(Event::GridSizeChanged);
                 }
                 // A reflow rewraps the scrollback, which moves every line the
@@ -3611,6 +3629,12 @@ impl Terminal {
                 if !self.matches.is_empty() {
                     cx.emit(Event::Wakeup);
                 }
+            }
+            InternalEvent::InitializeSize => {
+                self.terminal_size_initialized = true;
+                self.size_initialization_queued = false;
+                self.replay_pending(term);
+                cx.emit(Event::GridSizeChanged);
             }
             InternalEvent::ReplayFreshShell => self.replay_pending(term),
             InternalEvent::Clear => {
@@ -3850,6 +3874,17 @@ impl Terminal {
         &self.last_content
     }
 
+    /// Whether the terminal has received a real pane layout.
+    ///
+    /// PTYs start with placeholder content bounds until their first resize;
+    /// those bounds are not a measurement a shared-session client can report.
+    /// Display-only terminals created with explicit bounds are initialized
+    /// immediately, even when those bounds happen to be the placeholder's
+    /// dimensions.
+    pub fn is_size_initialized(&self) -> bool {
+        self.terminal_size_initialized
+    }
+
     pub fn content_revision(&self) -> u64 {
         self.content_revision
     }
@@ -4039,9 +4074,16 @@ impl Terminal {
             if old_bounds == new_bounds {
                 self.reflow_on_next_resize = true;
             }
+            if !self.terminal_size_initialized && !self.size_initialization_queued {
+                self.size_initialization_queued = true;
+                self.events.push_back(InternalEvent::InitializeSize);
+            }
             return;
         }
 
+        if !self.terminal_size_initialized {
+            self.size_initialization_queued = true;
+        }
         let reflow = mem::replace(&mut self.reflow_on_next_resize, true);
 
         match self.events.back_mut() {
@@ -6791,6 +6833,22 @@ mod tests {
             PathStyle::local(),
         )
         .terminal
+    }
+
+    #[gpui::test]
+    fn explicit_default_bounds_are_initialized_but_the_placeholder_is_not(cx: &mut TestAppContext) {
+        let explicit = TerminalBuilder::new_display_only_with_bounds(
+            SettingsCursorShape::default(),
+            AlternateScroll::On,
+            None,
+            0,
+            &cx.background_executor,
+            PathStyle::local(),
+            TerminalBounds::default(),
+        )
+        .terminal;
+        assert!(explicit.is_size_initialized());
+        assert!(!make_display_only_terminal(cx).is_size_initialized());
     }
 
     #[gpui::test]
@@ -10492,6 +10550,20 @@ mod tests {
             })
             .detach();
 
+        // The first real layout can have the same 100x6 dimensions as the
+        // display-only placeholder. It still has to initialize the semantic
+        // size state and notify shared-session observers.
+        window.update_window_entity(&terminal, |terminal, window, cx| {
+            terminal.set_size(TerminalBounds::default());
+            terminal.sync(window, cx);
+        });
+        assert_eq!(
+            grid_size_changes.get(),
+            1,
+            "the first layout is reported even when its dimensions are unchanged"
+        );
+        grid_size_changes.set(0);
+
         let base_bounds = TerminalBounds {
             cell_width: Pixels::from(10.),
             line_height: Pixels::from(10.),
@@ -10561,7 +10633,10 @@ mod tests {
 
         terminal.truncate_on_next_resize();
         terminal.set_size(pixel_only);
-        assert!(terminal.events.is_empty());
+        assert!(matches!(
+            terminal.events.back(),
+            Some(InternalEvent::InitializeSize)
+        ));
 
         let mut resized = pixel_only;
         resized.bounds.size.width += resized.cell_width;
@@ -10603,7 +10678,10 @@ mod tests {
 
         terminal.truncate_on_next_resize();
         terminal.set_size(base_bounds);
-        assert!(terminal.events.is_empty());
+        assert!(matches!(
+            terminal.events.back(),
+            Some(InternalEvent::InitializeSize)
+        ));
 
         let mut resized = base_bounds;
         resized.bounds.size.width += resized.cell_width;

@@ -75,10 +75,8 @@ struct Pane {
     /// while a revoke is outstanding: the holder still has the descriptor
     /// until its snapshot arrives.
     attachment: Attachment,
-    /// The size the daemon last applied, or the size the client reported when
-    /// it handed the pane over. Shared clients join at this size and report
-    /// their own over [`Request::Resize`], which is what size arbitration
-    /// starts from.
+    /// The size the daemon last applied. Shared clients report their own sizes
+    /// over [`Request::Resize`], which is what size arbitration starts from.
     size: TerminalSize,
     retained: crate::retention::Retained,
     /// The client that handed this pane over to sharing, and how far into the
@@ -173,8 +171,11 @@ struct SharedClient {
     /// stopped reading stops writing, and only that one is dropped.
     written_seen: usize,
     wrote_at: Instant,
-    columns: u16,
-    lines: u16,
+    /// A client does not constrain a shared pane until its first initialized
+    /// layout report arrives. The response's dimensions are advisory only:
+    /// they tell the client what the pane is currently running at, not what
+    /// this unmeasured client is showing.
+    size: Option<(u16, u16)>,
     input_sent: bool,
 }
 

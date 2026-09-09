@@ -7,14 +7,14 @@
 
 use super::*;
 
-/// The size every shared client must show the pane at: the smallest any of
-/// them asked for, falling back to the size the daemon last applied.
+/// The size every shared client must show the pane at: the smallest any
+/// measured client asked for, falling back to the size the daemon last applied
+/// while all clients are still unmeasured.
 pub(super) fn effective_size(pane: &Pane) -> (u16, u16) {
     match &pane.attachment {
-        Attachment::Shared(clients) => smallest_size(
-            clients.iter().map(|client| (client.columns, client.lines)),
-            pane.size,
-        ),
+        Attachment::Shared(clients) => {
+            smallest_size(clients.iter().filter_map(|client| client.size), pane.size)
+        }
         _ => (pane.size.columns, pane.size.lines),
     }
 }
@@ -39,6 +39,20 @@ pub(super) fn smallest_size(
         });
     }
     smallest.unwrap_or((fallback.columns, fallback.lines))
+}
+
+/// Whether a shared size event is needed after one client reports.
+///
+/// A changed effective size must be applied to the PTY and announced. Even
+/// when the effective size stays put, a client that reported something larger
+/// than it is allowed to show must receive the effective size back; otherwise
+/// it can keep rendering at a divergent size and start a resize feedback loop.
+pub(super) fn should_broadcast_size(
+    reported: (u16, u16),
+    effective: (u16, u16),
+    applied: (u16, u16),
+) -> bool {
+    effective != applied || reported != effective
 }
 
 /// Applies a size to a pane's terminal, recording it as the pane's size.

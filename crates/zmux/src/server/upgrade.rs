@@ -288,8 +288,8 @@ pub(super) fn attachment_handover(attachment: &Attachment) -> crate::upgrade::At
                     process_id: client.process_id,
                     client_id: client.client_id.clone(),
                     stream_only: client.stream_only,
-                    columns: client.columns,
-                    lines: client.lines,
+                    columns: client.size.map(|(columns, _)| columns),
+                    lines: client.size.map(|(_, lines)| lines),
                     input_sent: client.input_sent,
                 })
                 .collect(),

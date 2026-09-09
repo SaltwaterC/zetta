@@ -303,15 +303,16 @@ fn restored_directories_are_correlated_with_base_and_stacked_routing_ids() {
 }
 
 #[test]
-fn a_viewer_reports_no_size_until_its_pane_is_laid_out() {
+fn a_viewer_reports_no_size_until_its_pane_is_initialized() {
     use terminal::TerminalBounds;
 
-    // The placeholder a `TerminalContent` starts with. Reporting it made a window
-    // that had only just joined claim six rows, and because a shared pane has to
-    // fit inside every viewer, the window that had been showing it at fifty-one was
-    // resized down to match — which is what a joining window did to both of them.
+    // The placeholder a `TerminalContent` starts with is not a measurement until
+    // the terminal says its layout was initialized.
     assert_eq!(TerminalBounds::default().num_lines(), 6);
-    assert_eq!(shared_size_to_report(TerminalBounds::default()), None);
+    assert_eq!(
+        shared_size_to_report(false, TerminalBounds::default()),
+        None
+    );
 
     let laid_out = TerminalBounds::new(
         gpui::px(10.),
@@ -324,7 +325,13 @@ fn a_viewer_reports_no_size_until_its_pane_is_laid_out() {
             },
         },
     );
-    assert_eq!(shared_size_to_report(laid_out), Some((98, 51)));
+    assert_eq!(shared_size_to_report(true, laid_out), Some((98, 51)));
+    // 100x6 is also a valid initialized terminal size; only the semantic flag
+    // distinguishes it from the pre-layout placeholder.
+    assert_eq!(
+        shared_size_to_report(true, TerminalBounds::default()),
+        Some((100, 6))
+    );
 }
 
 #[test]
@@ -349,17 +356,17 @@ fn an_arbitrated_size_is_only_applied_when_it_differs() {
     // resizing one of them to the size it already had moves the user's window for
     // no reason at all.
     assert_eq!(
-        shared_size_action(Some(bounds(98., 51.)), 98, 51),
+        shared_size_action(true, Some(bounds(98., 51.)), 98, 51),
         SharedSizeAction::AlreadyMatches
     );
     // A viewer larger than the arbitrated size has to shrink, or the shell's
     // wrapping stops lining up with the cells drawn.
     assert_eq!(
-        shared_size_action(Some(bounds(120., 51.)), 98, 51),
+        shared_size_action(true, Some(bounds(120., 51.)), 98, 51),
         SharedSizeAction::Resize
     );
     assert_eq!(
-        shared_size_action(Some(bounds(98., 60.)), 98, 51),
+        shared_size_action(true, Some(bounds(98., 60.)), 98, 51),
         SharedSizeAction::Resize
     );
 
@@ -374,12 +381,12 @@ fn an_arbitrated_size_is_only_applied_when_it_differs() {
     );
     assert_eq!(TerminalBounds::default().num_lines(), 6);
     assert_eq!(
-        shared_size_action(Some(TerminalBounds::default()), 98, 51),
+        shared_size_action(false, Some(TerminalBounds::default()), 98, 51),
         SharedSizeAction::WaitForLayout
     );
     // No terminal yet is the same answer: wait, and stay pending.
     assert_eq!(
-        shared_size_action(None, 98, 51),
+        shared_size_action(false, None, 98, 51),
         SharedSizeAction::WaitForLayout
     );
 }

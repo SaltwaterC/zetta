@@ -200,29 +200,17 @@ enum SharedSizeAction {
     Resize,
 }
 
-/// Whether these bounds describe a pane that has been laid out, rather than the
-/// placeholder a `TerminalContent` starts with.
-///
-/// The placeholder is 100 columns by 6 lines, and mistaking it for a real layout
-/// has now caused two separate faults — a window resized to fit a size it already
-/// had, and a joining window telling the multiplexer its pane was six rows tall,
-/// which arbitrated *every* viewer down to six. Both sides of the size exchange ask
-/// this, so they cannot disagree about what counts as known.
-#[cfg(feature = "zmux")]
-fn bounds_are_laid_out(bounds: terminal::TerminalBounds) -> bool {
-    bounds != terminal::TerminalBounds::default()
-}
-
 /// The size to tell the multiplexer this viewer is showing a pane at, if it is
 /// known yet.
 ///
-/// `None` before the pane's first layout. Reporting the placeholder instead made a
-/// window that had only just joined claim six rows, and since the pane must fit
-/// inside every viewer, the window that had been showing it perfectly well was
-/// resized down to match.
+/// `None` before the terminal's first real layout. The bounds themselves are not
+/// a reliable sentinel: a valid initialized terminal can really be 100x6.
 #[cfg(feature = "zmux")]
-fn shared_size_to_report(bounds: terminal::TerminalBounds) -> Option<(u16, u16)> {
-    bounds_are_laid_out(bounds).then(|| (bounds.num_columns() as u16, bounds.num_lines() as u16))
+fn shared_size_to_report(
+    size_initialized: bool,
+    bounds: terminal::TerminalBounds,
+) -> Option<(u16, u16)> {
+    size_initialized.then(|| (bounds.num_columns() as u16, bounds.num_lines() as u16))
 }
 
 /// Decides whether an arbitrated size has to be imposed on this viewer.
@@ -234,14 +222,16 @@ fn shared_size_to_report(bounds: terminal::TerminalBounds) -> Option<(u16, u16)>
 /// the same size by a compositor are the common case, and resizing one of them to
 /// the size it already had moves the user's window for no reason.
 ///
-/// The layout check is the other half of the same bug. A terminal reports the
-/// placeholder bounds a `TerminalContent` starts with until its pane has been laid
-/// out and synced once, and those are 100x6 — so a pane that was *already* the
-/// arbitrated 98x51 looked like a two-column, forty-five-row difference, and the
-/// window was resized to fit a size it already had. This ran before the first
-/// paint and then reported success, so nothing ever corrected it.
+/// The semantic initialization check is the other half of the same bug. A
+/// terminal exposes the placeholder bounds a `TerminalContent` starts with
+/// until its pane has been laid out and synced once, and those are 100x6 — so a
+/// pane that was *already* the arbitrated 98x51 looked like a two-column,
+/// forty-five-row difference, and the window was resized to fit a size it
+/// already had. This ran before the first paint and then reported success, so
+/// nothing ever corrected it.
 #[cfg(feature = "zmux")]
 fn shared_size_action(
+    size_initialized: bool,
     bounds: Option<terminal::TerminalBounds>,
     columns: u16,
     lines: u16,
@@ -249,7 +239,7 @@ fn shared_size_action(
     let Some(bounds) = bounds else {
         return SharedSizeAction::WaitForLayout;
     };
-    if !bounds_are_laid_out(bounds) {
+    if !size_initialized {
         return SharedSizeAction::WaitForLayout;
     }
     if (bounds.num_columns(), bounds.num_lines()) == (columns as usize, lines as usize) {

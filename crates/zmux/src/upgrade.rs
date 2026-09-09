@@ -34,7 +34,7 @@ use serde::{Deserialize, Serialize};
 /// Bumped whenever [`Handover`] changes shape. The replacement refuses a
 /// version it does not know rather than guessing at the layout of a session it
 /// is about to take responsibility for.
-pub const HANDOVER_VERSION: u32 = 6;
+pub const HANDOVER_VERSION: u32 = 7;
 
 /// Everything the next image needs to carry on.
 ///
@@ -150,8 +150,12 @@ pub struct SharedClientHandover {
     pub client_id: crate::messages::ClientId,
     #[serde(default)]
     pub stream_only: bool,
-    pub columns: u16,
-    pub lines: u16,
+    /// A client may still be waiting for its first initialized layout when the
+    /// daemon is replaced, so the measurement is carried as optional state.
+    #[serde(default)]
+    pub columns: Option<u16>,
+    #[serde(default)]
+    pub lines: Option<u16>,
     /// Kept because a pane's exit reports which viewers typed into it, and an
     /// upgrade must not launder that away.
     pub input_sent: bool,

@@ -516,9 +516,9 @@ pub(super) fn attach_shared(
     let Attachment::Shared(clients) = &mut pane.attachment else {
         unreachable!("the attachment was just checked to be shared");
     };
-    // A shared client starts at the size everyone is showing, and reports its
-    // own over Resize right after attaching; that report is what may change
-    // the pane's effective size.
+    // A shared client is unmeasured until its first initialized layout report.
+    // The response below carries the current effective size as advice, but an
+    // unlaid-out terminal must not constrain the other viewers with it.
     clients.push(SharedClient {
         process_id: client_process_id,
         client_id: client_id.clone(),
@@ -526,8 +526,7 @@ pub(super) fn attach_shared(
         relay,
         written_seen: 0,
         wrote_at: Instant::now(),
-        columns: pane.size.columns,
-        lines: pane.size.lines,
+        size: None,
         input_sent: false,
     });
     let (columns, lines) = effective_size(pane);
@@ -746,17 +745,26 @@ pub(super) fn serve_shared(
                 else {
                     anyhow::bail!("pane {pane_id} no longer exists");
                 };
-                if let Attachment::Shared(clients) = &mut pane.attachment {
+                let reported = if let Attachment::Shared(clients) = &mut pane.attachment {
                     if let Some(client) = clients
                         .iter_mut()
                         .find(|client| client.client_id == client_id)
                     {
-                        client.columns = columns;
-                        client.lines = lines;
+                        client.size = Some((columns, lines));
+                        Some((columns, lines))
+                    } else {
+                        None
                     }
+                } else {
+                    None
+                };
+                if let Some(reported) = reported {
                     let (columns, lines) = effective_size(pane);
-                    if (columns, lines) != (pane.size.columns, pane.size.lines) {
+                    let applied = (pane.size.columns, pane.size.lines);
+                    if (columns, lines) != applied {
                         apply_size(daemon, pane, columns, lines);
+                    }
+                    if should_broadcast_size(reported, (columns, lines), applied) {
                         broadcast_size(
                             session_id,
                             pane_id,

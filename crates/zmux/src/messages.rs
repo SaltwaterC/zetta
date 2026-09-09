@@ -114,10 +114,9 @@ pub enum Request {
     /// [`Request::Share`] publication. The raw snapshot bytes follow the
     /// message. The connection carries nothing else and closes afterwards.
     ///
-    /// `columns`/`lines` are the size the holder was showing the pane at:
-    /// shared clients join at that size until their own reports refine it,
-    /// which matters because an exclusive client resizes through its own
-    /// descriptor and the multiplexer would otherwise never learn the size.
+    /// `columns`/`lines` are the size the holder was showing the pane at. The
+    /// daemon uses them as the pane's current applied size; shared clients
+    /// still remain unmeasured until they report their own initialized layout.
     Snapshot {
         session_id: u64,
         pane_id: u64,
@@ -444,8 +443,9 @@ pub enum Response {
     ///
     /// No handles are attached: the connection *is* the terminal. The raw
     /// replay bytes follow the message, exactly as with [`Response::Attached`].
-    /// `columns`/`lines` are the size every shared client shows the pane at,
-    /// which the client applies before reporting its own over `Resize`.
+    /// `columns`/`lines` are the daemon's current effective size. They are
+    /// advisory: a client reports its own initialized layout over `Resize`
+    /// before it participates in shared-size arbitration.
     SharedAttached {
         pane_id: u64,
         child_pid: u32,
@@ -550,8 +550,9 @@ pub enum Event {
         length: usize,
     },
     /// The size every shared client must show this pane at: the smallest size
-    /// any of them asked for, applied by the multiplexer. Broadcast to every
-    /// shared client whenever the smallest changes.
+    /// any measured client asked for, applied by the multiplexer. Broadcast to
+    /// every shared client whenever the smallest changes, and also to a client
+    /// whose larger report needs correction back to the effective size.
     Size {
         session_id: u64,
         pane_id: u64,

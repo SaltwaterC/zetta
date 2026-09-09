@@ -59,8 +59,8 @@ fn handover() -> Handover {
                         process_id: 4321,
                         client_id: crate::messages::ClientId::new("local-test"),
                         stream_only: false,
-                        columns: 100,
-                        lines: 30,
+                        columns: Some(100),
+                        lines: Some(30),
                         input_sent: true,
                     }],
                 },
@@ -131,7 +131,10 @@ fn a_panes_mode_and_size_survive_the_handover() {
         AttachmentHandover::Shared { clients } => {
             assert_eq!(clients.len(), 1);
             assert_eq!(clients[0].process_id, 4321);
-            assert_eq!((clients[0].columns, clients[0].lines), (100, 30));
+            assert_eq!(
+                (clients[0].columns, clients[0].lines),
+                (Some(100), Some(30))
+            );
             // A pane's exit reports which viewers typed into it; an upgrade must
             // not launder that away.
             assert!(clients[0].input_sent);

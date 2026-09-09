@@ -544,7 +544,14 @@ impl Connection {
     }
 
     pub fn try_clone(&self) -> Result<Self> {
-        Ok(Self::new(self.stream.try_clone()?))
+        Ok(Self {
+            stream: self.stream.try_clone()?,
+            // A response and the raw replay (and possibly the first shared
+            // events) can arrive in one socket read. The reader clone must
+            // inherit bytes already parsed off the socket or they disappear
+            // when the original connection is kept for full-duplex input.
+            leftover: self.leftover.clone(),
+        })
     }
 
     pub fn send(&mut self, message: &impl Serialize) -> Result<()> {

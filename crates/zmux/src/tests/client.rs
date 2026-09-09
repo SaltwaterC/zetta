@@ -347,3 +347,74 @@ fn an_exit_report_waits_for_a_late_shared_reporter() {
         }
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn a_shared_reader_keeps_coalesced_replay_events_and_full_duplex_input() {
+    use std::io::{Read as _, Write as _};
+
+    let (mut server_stream, client_stream) = Stream::pair().unwrap();
+    let replay = b"replay";
+    let output = b"live-output";
+    let response = Response::SharedAttached {
+        pane_id: 2,
+        child_pid: 3,
+        replay_length: replay.len(),
+        state: serde_json::json!({}),
+        summary: Box::new(crate::protocol::BackgroundSessionSummary {
+            id: 1,
+            title: "shared".to_owned(),
+            authentication_required: false,
+            active_pane: 2,
+            layout: crate::protocol::BackgroundPaneLayout::Pane { pane_id: 2 },
+            panes: Vec::new(),
+            held: false,
+            scoped_to: None,
+            key_envelope: None,
+        }),
+        columns: 80,
+        lines: 24,
+    };
+    let size = Event::Size {
+        session_id: 1,
+        pane_id: 2,
+        columns: 72,
+        lines: 20,
+    };
+    let output_event = Event::Output {
+        pane_id: 2,
+        length: output.len(),
+    };
+    let mut wire = crate::transport::encode_message(&response).unwrap();
+    wire.extend_from_slice(replay);
+    wire.extend_from_slice(&crate::transport::encode_message(&size).unwrap());
+    wire.extend_from_slice(&crate::transport::encode_message(&output_event).unwrap());
+    wire.extend_from_slice(output);
+    server_stream.write_all(&wire).unwrap();
+
+    let mut connection = Connection::new(client_stream);
+    let (received, _) = connection.receive::<Response>().unwrap();
+    assert!(matches!(received, Response::SharedAttached { .. }));
+    assert_eq!(connection.read_exact(replay.len()).unwrap(), replay);
+
+    let shared = SharedPane {
+        session_id: 1,
+        pane_id: 2,
+        child_pid: 3,
+        connection: Mutex::new(connection),
+        sizes: Arc::new(Mutex::new(Vec::new())),
+        size_signal: async_channel::bounded(1),
+        replay: replay.to_vec(),
+    };
+    let mut reader = shared.reader();
+    let mut received_output = vec![0; output.len()];
+    reader.read_exact(&mut received_output).unwrap();
+    assert_eq!(received_output, output);
+    assert_eq!(shared.take_sizes(), vec![(72, 20)]);
+
+    shared.send_input(b"typed").unwrap();
+    let mut server_connection = Connection::new(server_stream);
+    let (request, _) = server_connection.receive::<Request>().unwrap();
+    assert!(matches!(request, Request::Input { length: 5 }));
+    assert_eq!(server_connection.read_exact(5).unwrap(), b"typed");
+}
