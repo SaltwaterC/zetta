@@ -121,11 +121,8 @@ fn supported_shells_generate_completion_and_tftp_shortcut() {
         assert!(script.contains("zetta-event:tracking-ready"));
         assert!(script.contains("zetta-event:command-started:"));
         assert!(script.contains("zetta-event:command-finished:"));
-        assert!(script.contains("__zetta_is_codex_command"));
-        assert!(script.contains("__zetta_set_codex_boot_icon"));
-        assert!(script.contains("__zetta_reset_codex_tab_icon"));
-        assert!(script.contains("tabicon --reset"));
-        assert!(script.contains("ai_open_ai"));
+        assert!(!script.contains("codex"));
+        assert!(!script.contains("tabicon ai_open_ai"));
         assert!(!script.contains("run --wait"));
         assert!(script.contains("allow-failure"));
         assert!(script.contains("replace-pane"));
@@ -466,7 +463,7 @@ fn zsh_lifecycle_tracker_does_not_assign_to_read_only_status() {
 
     assert!(zsh.contains("local zetta_status=$?"));
     assert!(!zsh.contains("local status=$?"));
-    assert!(zsh.contains("__ZETTA_LIFECYCLE_TRACKING_VERSION:-0} != 4"));
+    assert!(zsh.contains("__ZETTA_LIFECYCLE_TRACKING_VERSION:-0} != 3"));
 }
 
 #[test]
@@ -537,36 +534,6 @@ typeset -g __ZETTA_LIFECYCLE_TRACKING_VERSION=2"#,
     assert!(
         stdout.contains("zetta-event:command-finished:1"),
         "{stdout}"
-    );
-}
-
-#[test]
-fn bash_codex_lifecycle_resets_the_tab_icon_after_the_process_exits() {
-    let _bash_test_lock = lock_bash_tests();
-    if !bash_available() {
-        return;
-    }
-
-    let driver = [
-        ShellIntegration::Bash.script().to_owned(),
-        r#"__zetta_test_calls=""
-__zetta_run_owner() { __zetta_test_calls="${__zetta_test_calls}|$*"; }
-codex() { :; }
-__zetta_at_prompt=1
-codex
-__zetta_report_cwd
-printf 'calls:%s\n' "$__zetta_test_calls"
-"#
-        .to_owned(),
-    ]
-    .join("\n");
-    let mut command = bash_completion_command();
-    command.env("ZETTA_PANE_ID", "7");
-    let output = run_bash_driver(command, &driver);
-
-    assert!(
-        output.contains("calls:|tabicon ai_open_ai|tabicon --reset"),
-        "Codex lifecycle did not reset the icon: {output}"
     );
 }
 

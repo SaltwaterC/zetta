@@ -8,58 +8,11 @@ if (-not $terminalTrackerActive) {
     $global:__ZettaOriginalPrompt = $function:prompt
 }
 
-# Codex can restore an existing thread before it dispatches SessionStart.
-# Seed the idle icon at the shell boundary; Codex hooks take over once a turn
-# is submitted. Reset the icon when the Codex process returns to this shell.
-function global:__zetta_is_codex_command([string] $command) {
-    return $command -match '^\s*(?:[^\s]*[\\/])?codex(?:\s|$)'
-}
-
-function global:__zetta_set_codex_boot_icon {
-    if ($global:__ZettaCodexIconUpdateActive) { return }
-    $global:__ZettaCodexCommandActive = $true
-    $global:__ZettaCodexIconUpdateActive = $true
-    try {
-        $zettaExecutable = $env:ZETTA_HOST_EXECUTABLE
-        if ([string]::IsNullOrWhiteSpace($zettaExecutable) -or
-            -not (Test-Path -LiteralPath $zettaExecutable -PathType Leaf)) {
-            $zettaCommand = Get-Command zetta -CommandType Application -ErrorAction SilentlyContinue |
-                Select-Object -First 1
-            if ($null -eq $zettaCommand) { return }
-            $zettaExecutable = $zettaCommand.Source
-        }
-        & $zettaExecutable tabicon ai_open_ai *> $null
-    } catch {}
-    finally {
-        $global:__ZettaCodexIconUpdateActive = $false
-    }
-}
-
-function global:__zetta_reset_codex_tab_icon {
-    if ($global:__ZettaCodexIconUpdateActive) { return }
-    $global:__ZettaCodexIconUpdateActive = $true
-    try {
-        $zettaExecutable = $env:ZETTA_HOST_EXECUTABLE
-        if ([string]::IsNullOrWhiteSpace($zettaExecutable) -or
-            -not (Test-Path -LiteralPath $zettaExecutable -PathType Leaf)) {
-            $zettaCommand = Get-Command zetta -CommandType Application -ErrorAction SilentlyContinue |
-                Select-Object -First 1
-            if ($null -eq $zettaCommand) { return }
-            $zettaExecutable = $zettaCommand.Source
-        }
-        & $zettaExecutable tabicon --reset *> $null
-    } catch {}
-    finally {
-        $global:__ZettaCodexIconUpdateActive = $false
-    }
-}
-
 # Install, or upgrade, the lifecycle half of the tracker. Keeping the prompt
 # implementation in one place is important: sourcing a newer integration must
 # not create a second CWD marker or wrap the saved prompt recursively.
 function global:__zetta_install_lifecycle_tracking([bool] $trackingEnabled) {
     $global:__ZettaLifecycleTrackerInstalled = $true
-    $global:__ZettaLifecycleTrackingVersion = 4
     $global:__ZettaLifecycleTrackingEnabled = $trackingEnabled
     $global:__ZettaCommandStarted = $false
     if ($null -eq (Get-Variable -Name __ZettaOriginalPrompt -Scope Global -ErrorAction SilentlyContinue)) {
@@ -74,9 +27,6 @@ function global:__zetta_install_lifecycle_tracking([bool] $trackingEnabled) {
         if (-not $global:__ZettaLifecycleTrackingEnabled) { return }
         if ($global:__ZettaCommandStarted) { return }
         $global:__ZettaCommandStarted = $true
-        if (__zetta_is_codex_command $command) {
-            __zetta_set_codex_boot_icon
-        }
         [Console]::Write("$([char]27)]2;zetta-event:command-started:$command$([char]27)\")
     }
     function global:prompt {
@@ -92,10 +42,6 @@ function global:__zetta_install_lifecycle_tracking([bool] $trackingEnabled) {
                 }
                 [Console]::Write("$([char]27)]2;zetta-event:command-finished:$status$([char]27)\")
                 $global:__ZettaCommandStarted = $false
-                if ($global:__ZettaCodexCommandActive) {
-                    __zetta_reset_codex_tab_icon
-                    $global:__ZettaCodexCommandActive = $false
-                }
             }
             $zettaDirectory = $ExecutionContext.SessionState.Path.CurrentFileSystemLocation.ProviderPath
             [Console]::Write("$([char]27)]2;zetta-cwd:$zettaDirectory$([char]27)\")
@@ -131,10 +77,7 @@ function global:__zetta_install_lifecycle_tracking([bool] $trackingEnabled) {
 }
 
 $zettaLifecycleTracker = Get-Variable -Name __ZettaLifecycleTrackerInstalled -Scope Global -ErrorAction SilentlyContinue
-$zettaLifecycleVersion = Get-Variable -Name __ZettaLifecycleTrackingVersion -Scope Global -ErrorAction SilentlyContinue
 if ($null -eq $zettaLifecycleTracker -or
-    $null -eq $zettaLifecycleVersion -or
-    $zettaLifecycleVersion.Value -ne 4 -or
     ($zettaPaneIdentityAvailable -and -not $global:__ZettaLifecycleTrackingEnabled)) {
     __zetta_install_lifecycle_tracking $zettaPaneIdentityAvailable
 }

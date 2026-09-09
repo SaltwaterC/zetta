@@ -136,35 +136,9 @@ if [[ -n ${ZETTA_HOST_EXECUTABLE:-} ]]; then
     }
 fi
 
-# Codex can restore an existing thread before it dispatches SessionStart.
-# Seed the idle icon at the shell boundary; Codex hooks take over once a turn
-# is submitted. Reset the icon when the Codex process returns to this shell.
-__zetta_is_codex_command() {
-    local command=$1 first_word
-    first_word=${command%%[[:space:]]*}
-    first_word=${first_word##*/}
-    [[ $first_word == codex ]]
-}
-
-__zetta_set_codex_boot_icon() {
-    [[ ${__ZETTA_CODEX_ICON_UPDATE_ACTIVE:-0} == 1 ]] && return
-    __ZETTA_CODEX_COMMAND_ACTIVE=1
-    __ZETTA_CODEX_ICON_UPDATE_ACTIVE=1
-    __zetta_run_owner tabicon ai_open_ai >/dev/null 2>&1
-    __ZETTA_CODEX_ICON_UPDATE_ACTIVE=0
-}
-
-__zetta_reset_codex_tab_icon() {
-    [[ ${__ZETTA_CODEX_ICON_UPDATE_ACTIVE:-0} == 1 ]] && return
-    __ZETTA_CODEX_ICON_UPDATE_ACTIVE=1
-    __zetta_run_owner tabicon --reset >/dev/null 2>&1
-    __ZETTA_CODEX_ICON_UPDATE_ACTIVE=0
-}
-
 if [[ -z ${__ZETTA_CWD_TRACKING_INSTALLED:-} ]]; then
     __ZETTA_CWD_TRACKING_INSTALLED=1
     __ZETTA_LIFECYCLE_TRACKING_INSTALLED=1
-    __ZETTA_LIFECYCLE_TRACKING_VERSION=4
     if [[ -n ${ZETTA_PANE_ROUTING_ID:-${ZETTA_PANE_ID:-}} ]]; then
         __ZETTA_LIFECYCLE_TRACKING_ENABLED=1
     else
@@ -184,9 +158,6 @@ if [[ -z ${__ZETTA_CWD_TRACKING_INSTALLED:-} ]]; then
             __zetta_report_cwd|__zetta_mark_prompt) return ;;
         esac
         __ZETTA_COMMAND_STARTED=1
-        if __zetta_is_codex_command "$BASH_COMMAND"; then
-            __zetta_set_codex_boot_icon
-        fi
         printf '\033]2;zetta-event:command-started:%s\033\\' "$BASH_COMMAND"
     }
     __zetta_report_cwd() {
@@ -194,10 +165,6 @@ if [[ -z ${__ZETTA_CWD_TRACKING_INSTALLED:-} ]]; then
         if [[ ${__ZETTA_LIFECYCLE_TRACKING_ENABLED:-0} == 1 && ${__ZETTA_COMMAND_STARTED:-0} == 1 ]]; then
             printf '\033]2;zetta-event:command-finished:%s\033\\' "$status"
             __ZETTA_COMMAND_STARTED=0
-            if [[ ${__ZETTA_CODEX_COMMAND_ACTIVE:-0} == 1 ]]; then
-                __zetta_reset_codex_tab_icon
-                __ZETTA_CODEX_COMMAND_ACTIVE=0
-            fi
         fi
         printf '\033]2;zetta-cwd:%s\033\\' "$PWD"
         return "$status"
@@ -224,11 +191,9 @@ fi
 # separate from the CWD guard: the shell may already have
 # __ZETTA_CWD_TRACKING_INSTALLED set when a new Zetta binary is installed.
 if [[ -z ${__ZETTA_LIFECYCLE_TRACKING_INSTALLED:-} ||
-    ${__ZETTA_LIFECYCLE_TRACKING_VERSION:-0} != 4 ||
     ( -n ${ZETTA_PANE_ROUTING_ID:-${ZETTA_PANE_ID:-}} &&
         ${__ZETTA_LIFECYCLE_TRACKING_ENABLED:-0} != 1 ) ]]; then
     __ZETTA_LIFECYCLE_TRACKING_INSTALLED=1
-    __ZETTA_LIFECYCLE_TRACKING_VERSION=4
     if [[ -n ${ZETTA_PANE_ROUTING_ID:-${ZETTA_PANE_ID:-}} ]]; then
         __ZETTA_LIFECYCLE_TRACKING_ENABLED=1
         __ZETTA_COMMAND_STARTED=0
@@ -245,9 +210,6 @@ if [[ -z ${__ZETTA_LIFECYCLE_TRACKING_INSTALLED:-} ||
                 __zetta_report_cwd|__zetta_mark_prompt) return ;;
             esac
             __ZETTA_COMMAND_STARTED=1
-            if __zetta_is_codex_command "$BASH_COMMAND"; then
-                __zetta_set_codex_boot_icon
-            fi
             printf '\033]2;zetta-event:command-started:%s\033\\' "$BASH_COMMAND"
         }
         # An older integration already registered this function in
@@ -257,10 +219,6 @@ if [[ -z ${__ZETTA_LIFECYCLE_TRACKING_INSTALLED:-} ||
             if [[ ${__ZETTA_LIFECYCLE_TRACKING_ENABLED:-0} == 1 && ${__ZETTA_COMMAND_STARTED:-0} == 1 ]]; then
                 printf '\033]2;zetta-event:command-finished:%s\033\\' "$status"
                 __ZETTA_COMMAND_STARTED=0
-                if [[ ${__ZETTA_CODEX_COMMAND_ACTIVE:-0} == 1 ]]; then
-                    __zetta_reset_codex_tab_icon
-                    __ZETTA_CODEX_COMMAND_ACTIVE=0
-                fi
             fi
             printf '\033]2;zetta-cwd:%s\033\\' "$PWD"
             return "$status"

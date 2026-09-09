@@ -139,28 +139,6 @@ if set -q ZETTA_HOST_EXECUTABLE; and test -n "$ZETTA_HOST_EXECUTABLE"
     end
 end
 
-# Codex can restore an existing thread before it dispatches SessionStart.
-# Seed the idle icon at the shell boundary; Codex hooks take over once a turn
-# is submitted. Reset the icon when the Codex process returns to this shell.
-function __zetta_is_codex_command
-    string match -rq -- '^[[:space:]]*(/[^[:space:]]*/)?codex([[:space:]]|$)' "$argv[1]"
-end
-
-function __zetta_set_codex_boot_icon
-    set -q __ZETTA_CODEX_ICON_UPDATE_ACTIVE; and return
-    set -g __ZETTA_CODEX_COMMAND_ACTIVE 1
-    set -g __ZETTA_CODEX_ICON_UPDATE_ACTIVE 1
-    __zetta_run_owner tabicon ai_open_ai >/dev/null 2>/dev/null
-    set -e __ZETTA_CODEX_ICON_UPDATE_ACTIVE
-end
-
-function __zetta_reset_codex_tab_icon
-    set -q __ZETTA_CODEX_ICON_UPDATE_ACTIVE; and return
-    set -g __ZETTA_CODEX_ICON_UPDATE_ACTIVE 1
-    __zetta_run_owner tabicon --reset >/dev/null 2>/dev/null
-    set -e __ZETTA_CODEX_ICON_UPDATE_ACTIVE
-end
-
 if not type -q mosh
     function mosh --wraps 'zetta mosh'
         command zetta mosh $argv
@@ -170,7 +148,6 @@ end
 
 if not functions -q __zetta_report_cwd
     set -g __ZETTA_LIFECYCLE_TRACKING_INSTALLED 1
-    set -g __ZETTA_LIFECYCLE_TRACKING_VERSION 4
     if set -q ZETTA_PANE_ROUTING_ID
         set -g __ZETTA_LIFECYCLE_TRACKING_ENABLED 1
     else if set -q ZETTA_PANE_ID
@@ -186,9 +163,6 @@ if not functions -q __zetta_report_cwd
     function __zetta_report_preexec --on-event fish_preexec
         test "$__ZETTA_LIFECYCLE_TRACKING_ENABLED" = 1; or return
         set -g __ZETTA_COMMAND_STARTED 1
-        if __zetta_is_codex_command "$argv[1]"
-            __zetta_set_codex_boot_icon
-        end
         printf '\033]2;zetta-event:command-started:%s\033\\' "$argv[1]"
     end
     function __zetta_report_cwd --on-event fish_prompt
@@ -196,10 +170,6 @@ if not functions -q __zetta_report_cwd
         if test "$__ZETTA_LIFECYCLE_TRACKING_ENABLED" = 1; and test "$__ZETTA_COMMAND_STARTED" = 1
             printf '\033]2;zetta-event:command-finished:%s\033\\' "$command_status"
             set -g __ZETTA_COMMAND_STARTED 0
-            if set -q __ZETTA_CODEX_COMMAND_ACTIVE; and test "$__ZETTA_CODEX_COMMAND_ACTIVE" = 1
-                __zetta_reset_codex_tab_icon
-                set -g __ZETTA_CODEX_COMMAND_ACTIVE 0
-            end
         end
         printf '\033]2;zetta-cwd:%s\033\\' "$PWD"
     end
@@ -213,17 +183,12 @@ set -l __zetta_lifecycle_needs_install 0
 if not set -q __ZETTA_LIFECYCLE_TRACKING_INSTALLED
     set -g __ZETTA_LIFECYCLE_TRACKING_INSTALLED 1
     set __zetta_lifecycle_needs_install 1
-else if not set -q __ZETTA_LIFECYCLE_TRACKING_VERSION
-    set __zetta_lifecycle_needs_install 1
-else if test "$__ZETTA_LIFECYCLE_TRACKING_VERSION" != 4
-    set __zetta_lifecycle_needs_install 1
 else if set -q ZETTA_PANE_ROUTING_ID; or set -q ZETTA_PANE_ID
     if test "$__ZETTA_LIFECYCLE_TRACKING_ENABLED" != 1
         set __zetta_lifecycle_needs_install 1
     end
 end
 if test "$__zetta_lifecycle_needs_install" = 1
-    set -g __ZETTA_LIFECYCLE_TRACKING_VERSION 4
     if set -q ZETTA_PANE_ROUTING_ID; or set -q ZETTA_PANE_ID
         set -g __ZETTA_LIFECYCLE_TRACKING_ENABLED 1
         set -g __ZETTA_COMMAND_STARTED 0
@@ -236,9 +201,6 @@ if test "$__zetta_lifecycle_needs_install" = 1
         function __zetta_report_preexec --on-event fish_preexec
             test "$__ZETTA_LIFECYCLE_TRACKING_ENABLED" = 1; or return
             set -g __ZETTA_COMMAND_STARTED 1
-            if __zetta_is_codex_command "$argv[1]"
-                __zetta_set_codex_boot_icon
-            end
             printf '\033]2;zetta-event:command-started:%s\033\\' "$argv[1]"
         end
         function __zetta_report_cwd --on-event fish_prompt
@@ -246,10 +208,6 @@ if test "$__zetta_lifecycle_needs_install" = 1
             if test "$__ZETTA_LIFECYCLE_TRACKING_ENABLED" = 1; and test "$__ZETTA_COMMAND_STARTED" = 1
                 printf '\033]2;zetta-event:command-finished:%s\033\\' "$command_status"
                 set -g __ZETTA_COMMAND_STARTED 0
-                if set -q __ZETTA_CODEX_COMMAND_ACTIVE; and test "$__ZETTA_CODEX_COMMAND_ACTIVE" = 1
-                    __zetta_reset_codex_tab_icon
-                    set -g __ZETTA_CODEX_COMMAND_ACTIVE 0
-                end
             end
             printf '\033]2;zetta-cwd:%s\033\\' "$PWD"
         end
