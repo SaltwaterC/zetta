@@ -78,6 +78,13 @@ fn terminal_query_proxy_does_not_consume_an_escape_before_a_response() {
 }
 
 #[test]
+fn exit_message_uses_zosh_branding() {
+    let mut output = Vec::new();
+    write_exit_message(&mut output).unwrap();
+    assert_eq!(output, b"\r\n[zosh is exiting.]\r\n");
+}
+
+#[test]
 fn terminal_query_proxy_matches_color_responses_by_kind() {
     let mut proxy = TerminalQueryProxy::default();
     proxy.register_query(b"\x1b]10;?\x07");

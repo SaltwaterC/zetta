@@ -30,6 +30,7 @@ use crate::{
 };
 
 const IDLE_WAIT_MS: u64 = 100;
+const EXIT_MESSAGE: &[u8] = b"\r\n[zosh is exiting.]\r\n";
 type ClientSession = MoshSession<DisplayScreen>;
 
 const MAX_TERMINAL_QUERY_SEQUENCE: usize = 4096;
@@ -467,7 +468,7 @@ pub(crate) fn run_session_with_settings(
     );
     terminal_guard.restore();
     if result.is_ok() {
-        print_exit_message().context("printing the Mosh exit message")?;
+        print_exit_message().context("printing the Zosh exit message")?;
     }
     result
 }
@@ -1062,7 +1063,11 @@ fn paint(
 
 fn print_exit_message() -> io::Result<()> {
     let mut stdout = io::stdout();
-    stdout.write_all(b"\r\n[mosh is exiting.]\r\n")?;
+    write_exit_message(&mut stdout)
+}
+
+fn write_exit_message(stdout: &mut impl Write) -> io::Result<()> {
+    stdout.write_all(EXIT_MESSAGE)?;
     stdout.flush()
 }
 
