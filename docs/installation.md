@@ -29,6 +29,14 @@ worktree command, and `ZOSH=0` to omit the bundled Zosh client and server
 executables and the `zetta mosh` compatibility route. `ZOSH_CLIENT=0` and
 `ZOSH_SERVER=0` omit either component independently.
 
+The `zmux` session multiplexer is enabled by default. Set `ZMUX=0` on both
+build and install commands, or omit the Cargo `zmux` feature, to build a
+Zetta that keeps background sessions in its owning process and uses ordinary
+local PTYs. That build does not produce or install the standalone `zmux`
+executables, and `zetta -h` omits the multiplexer commands and the
+`-n`/`--no-mux` option. Encrypted session persistence depends on `zmux`, so it
+is omitted automatically when `ZMUX=0`.
+
 ## User-local shell PATH setup
 
 On Linux and macOS, a user-local `make install` adds the installed executable

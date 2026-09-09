@@ -186,7 +186,7 @@ impl Zetta {
                 })
             })
             .collect::<Result<Vec<_>>>()?;
-        #[cfg(feature = "session-persistence")]
+        #[cfg(all(feature = "zmux", feature = "session-persistence"))]
         if let Some(runtime) = self.mux.as_mut() {
             runtime.reconfigure_with_retention_and_persistence(
                 config.sessions.to_zmux_retention()?,
@@ -196,7 +196,7 @@ impl Zetta {
                 },
             )?;
         }
-        #[cfg(not(feature = "session-persistence"))]
+        #[cfg(all(feature = "zmux", not(feature = "session-persistence")))]
         if let Some(runtime) = self.mux.as_mut() {
             runtime.reconfigure_with_retention(config.sessions.to_zmux_retention()?)?;
         }

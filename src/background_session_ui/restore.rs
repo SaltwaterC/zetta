@@ -92,6 +92,7 @@ impl Zetta {
             metadata.panes.insert(
                 routing_id,
                 RestoredPaneInfo {
+                    #[cfg(feature = "zmux")]
                     working_directory,
                     project_root,
                 },
@@ -384,7 +385,15 @@ impl Zetta {
                 .background_session_entries
                 .clone();
             let shown_here = |entry: &ProcessBackgroundSessionEntry| {
-                session_is_already_shown_here(&self.mux_panes, entry, own_runner)
+                #[cfg(feature = "zmux")]
+                {
+                    session_is_already_shown_here(&self.mux_panes, entry, own_runner)
+                }
+                #[cfg(not(feature = "zmux"))]
+                {
+                    let _ = entry;
+                    false
+                }
             };
             if !entries.iter().any(shown_here) {
                 return entries;

@@ -1,7 +1,9 @@
 use super::*;
+#[cfg(feature = "zmux")]
+use crate::background_session_ui::AttachOutcomeSummary;
 #[cfg(feature = "session-persistence")]
 use crate::background_session_ui::DiskResumeIdentities;
-use crate::background_session_ui::{AttachOutcomeSummary, ProtectedSessionAction};
+use crate::background_session_ui::ProtectedSessionAction;
 use zeroize::{Zeroize as _, Zeroizing};
 
 #[cfg_attr(not(feature = "session-persistence"), allow(dead_code))]
@@ -165,6 +167,7 @@ impl Zetta {
         );
     }
 
+    #[cfg(feature = "zmux")]
     pub(crate) fn prompt_to_attach_remote_session(
         &mut self,
         target: zmux::remote::RemoteTarget,
@@ -780,81 +783,89 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        // A session the multiplexer is holding keeps its verifier in the
-        // multiplexer, not in any Zetta process, so there is nothing to check
-        // here: the secret is handed to the daemon as part of the attach, and
-        // the daemon evaluates it. Without this branch the local verifier
-        // lookup returns nothing and a correct secret is reported as "no
-        // longer available".
-        if let SessionAuthenticationPromptMode::Reconnect { session_id, .. } = mode
-            && self.multiplexer_holds_session(session_id)
+        #[cfg(not(feature = "zmux"))]
         {
-            match self.attach_multiplexer_session(
-                session_id,
-                Some(SessionSecret::from_zeroizing(secret.clone())),
-                window,
-                cx,
-            ) {
-                Ok(AttachOutcomeSummary::Attached) => {
-                    self.session_authentication = None;
-                    cx.notify();
-                }
-                Ok(AttachOutcomeSummary::AuthenticationFailed)
-                | Ok(AttachOutcomeSummary::AuthenticationRequired) => {
-                    if let Some(prompt) = self.session_authentication.as_mut() {
-                        prompt.working = false;
-                        prompt.secret = TextField::default();
-                        prompt.error = Some("Authentication failed.".into());
-                    }
-                    cx.notify();
-                }
-                Err(error) => {
-                    if let Some(prompt) = self.session_authentication.as_mut() {
-                        prompt.working = false;
-                        prompt.error = Some(format!("{error:#}"));
-                    }
-                    cx.notify();
-                }
-            }
-            return true;
+            let _ = (mode, secret, window, cx);
+            false
         }
-        if let SessionAuthenticationPromptMode::RemoteAttach { session_id } = mode {
-            let Some(target) = self.remote_session_target.clone() else {
+        #[cfg(feature = "zmux")]
+        {
+            // A session the multiplexer is holding keeps its verifier in the
+            // multiplexer, not in any Zetta process, so there is nothing to check
+            // here: the secret is handed to the daemon as part of the attach, and
+            // the daemon evaluates it. Without this branch the local verifier
+            // lookup returns nothing and a correct secret is reported as "no
+            // longer available".
+            if let SessionAuthenticationPromptMode::Reconnect { session_id, .. } = mode
+                && self.multiplexer_holds_session(session_id)
+            {
+                match self.attach_multiplexer_session(
+                    session_id,
+                    Some(SessionSecret::from_zeroizing(secret.clone())),
+                    window,
+                    cx,
+                ) {
+                    Ok(AttachOutcomeSummary::Attached) => {
+                        self.session_authentication = None;
+                        cx.notify();
+                    }
+                    Ok(AttachOutcomeSummary::AuthenticationFailed)
+                    | Ok(AttachOutcomeSummary::AuthenticationRequired) => {
+                        if let Some(prompt) = self.session_authentication.as_mut() {
+                            prompt.working = false;
+                            prompt.secret = TextField::default();
+                            prompt.error = Some("Authentication failed.".into());
+                        }
+                        cx.notify();
+                    }
+                    Err(error) => {
+                        if let Some(prompt) = self.session_authentication.as_mut() {
+                            prompt.working = false;
+                            prompt.error = Some(format!("{error:#}"));
+                        }
+                        cx.notify();
+                    }
+                }
+                return true;
+            }
+            if let SessionAuthenticationPromptMode::RemoteAttach { session_id } = mode {
+                let Some(target) = self.remote_session_target.clone() else {
+                    if let Some(prompt) = self.session_authentication.as_mut() {
+                        prompt.working = false;
+                        prompt.error = Some("The remote SSH target is no longer available.".into());
+                    }
+                    cx.notify();
+                    return true;
+                };
+                let result = match self.attach_remote_multiplexer_session(
+                    target,
+                    session_id,
+                    Some(SessionSecret::from_zeroizing(secret.clone())),
+                    window,
+                    cx,
+                ) {
+                    Ok(AttachOutcomeSummary::Attached) => {
+                        self.session_authentication = None;
+                        self.remote_session_target = None;
+                        cx.notify();
+                        return true;
+                    }
+                    Ok(AttachOutcomeSummary::AuthenticationRequired)
+                    | Ok(AttachOutcomeSummary::AuthenticationFailed) => {
+                        "Authentication failed.".to_owned()
+                    }
+                    Err(error) => format!("{error:#}"),
+                };
                 if let Some(prompt) = self.session_authentication.as_mut() {
                     prompt.working = false;
-                    prompt.error = Some("The remote SSH target is no longer available.".into());
+                    prompt.secret = TextField::default();
+                    prompt.error = Some(result);
                 }
                 cx.notify();
                 return true;
-            };
-            let result = match self.attach_remote_multiplexer_session(
-                target,
-                session_id,
-                Some(SessionSecret::from_zeroizing(secret.clone())),
-                window,
-                cx,
-            ) {
-                Ok(AttachOutcomeSummary::Attached) => {
-                    self.session_authentication = None;
-                    self.remote_session_target = None;
-                    cx.notify();
-                    return true;
-                }
-                Ok(AttachOutcomeSummary::AuthenticationRequired)
-                | Ok(AttachOutcomeSummary::AuthenticationFailed) => {
-                    "Authentication failed.".to_owned()
-                }
-                Err(error) => format!("{error:#}"),
-            };
-            if let Some(prompt) = self.session_authentication.as_mut() {
-                prompt.working = false;
-                prompt.secret = TextField::default();
-                prompt.error = Some(result);
             }
-            cx.notify();
-            return true;
+            false
         }
-        false
     }
 
     /// What the verified secret does to the prompt and the session behind it.

@@ -23,8 +23,8 @@ const DEFAULT_MAX_SCROLL_HISTORY_LINES: usize = MAX_SCROLL_HISTORY_LINES;
 pub(crate) const DEFAULT_INACTIVE_PANE_OPACITY: f32 = 0.8;
 pub(crate) const DEFAULT_HTTP_PORT: u16 = 8000;
 pub(crate) const DEFAULT_TFTP_SERVER_PORT: u16 = 69;
-pub(crate) const DEFAULT_SESSION_RING_BYTES: usize = zmux::retention::DEFAULT_RING_BYTES;
-pub(crate) const MAX_SESSION_RING_BYTES: usize = zmux::retention::MAX_RING_BYTES;
+pub(crate) const DEFAULT_SESSION_RING_BYTES: usize = 256 * 1024;
+pub(crate) const MAX_SESSION_RING_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SessionRetention {
@@ -128,6 +128,7 @@ impl Default for SessionsConfig {
 }
 
 impl SessionsConfig {
+    #[cfg(feature = "zmux")]
     pub(crate) fn to_zmux_retention(&self) -> Result<zmux::retention::Retention> {
         let retention = match self.retention {
             SessionRetention::None => zmux::retention::Retention::None,
@@ -138,6 +139,19 @@ impl SessionsConfig {
         };
         retention.validate()?;
         Ok(retention)
+    }
+
+    #[cfg(not(feature = "zmux"))]
+    pub(crate) fn validate_without_zmux(&self) -> Result<()> {
+        anyhow::ensure!(
+            (4 * 1024..=MAX_SESSION_RING_BYTES).contains(&self.ring_bytes),
+            "memory retention must be between 4096 and {MAX_SESSION_RING_BYTES} bytes"
+        );
+        anyhow::ensure!(
+            !matches!(self.retention, SessionRetention::Disk),
+            "sessions.retention=\"disk\" requires the session-persistence feature (which depends on zmux)"
+        );
+        Ok(())
     }
 
     #[cfg(feature = "session-persistence")]
@@ -785,7 +799,10 @@ impl Config {
             sessions.apply(&mut self.sessions)?;
             // Only a file that named `sessions` is held to a retention this
             // build can actually serve.
+            #[cfg(feature = "zmux")]
             self.sessions.to_zmux_retention()?;
+            #[cfg(not(feature = "zmux"))]
+            self.sessions.validate_without_zmux()?;
         }
 
         if let Some(profiles) = file.profiles.get() {
@@ -1475,7 +1492,14 @@ impl ProfileFile {
 /// Resolved by `zmux`, which needs the same directory without depending on
 /// this module: it holds the session catalogs and the control endpoint.
 pub(crate) fn platform_config_dir() -> PathBuf {
-    zmux::paths::platform_config_dir()
+    #[cfg(feature = "zmux")]
+    {
+        zmux::paths::platform_config_dir()
+    }
+    #[cfg(not(feature = "zmux"))]
+    {
+        crate::local_sessions::paths::platform_config_dir()
+    }
 }
 
 pub fn themes_dir() -> PathBuf {

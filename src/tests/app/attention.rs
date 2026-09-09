@@ -1,6 +1,8 @@
 use super::*;
 
+#[cfg(feature = "zmux")]
 use gpui::{FocusHandle, TestAppContext};
+#[cfg(feature = "zmux")]
 use std::{cell::Cell, rc::Rc};
 
 fn available_for(surfaces: &[FocusSurface]) -> FocusSurfaceAvailability {
@@ -85,6 +87,7 @@ fn overlapping_settings_and_picker_surfaces_follow_paint_order() {
     );
 }
 
+#[cfg(feature = "zmux")]
 struct ModalKeyboardHarness {
     zetta: Entity<Zetta>,
     picker_focus: FocusHandle,
@@ -92,6 +95,7 @@ struct ModalKeyboardHarness {
     terminal_received: Rc<Cell<usize>>,
 }
 
+#[cfg(feature = "zmux")]
 impl Render for ModalKeyboardHarness {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         let zetta = self.zetta.downgrade();
@@ -119,6 +123,7 @@ impl Render for ModalKeyboardHarness {
     }
 }
 
+#[cfg(feature = "zmux")]
 #[gpui::test]
 fn modal_capture_routes_stale_terminal_keys_and_preserves_normal_tab_input(
     cx: &mut TestAppContext,

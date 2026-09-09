@@ -192,6 +192,7 @@ fn native_terminal_points_shell_integration_at_this_executable() {
     );
 }
 
+#[cfg(feature = "zmux")]
 #[test]
 fn ordinary_and_explicit_new_window_launches_are_handoff_eligible() {
     let plain = parse_args_from(Vec::<OsString>::new()).unwrap();
@@ -240,6 +241,19 @@ fn ordinary_and_explicit_new_window_launches_are_handoff_eligible() {
     assert!(parse_args_from([OsString::from("--no-mux"), OsString::from("sessions")]).is_err());
 }
 
+#[cfg(not(feature = "zmux"))]
+#[test]
+fn no_zmux_builds_default_to_local_sessions_and_reject_mux_options() {
+    let plain = parse_args_from(Vec::<OsString>::new()).unwrap();
+    let new_window = parse_args_from([OsString::from("--new-window")]).unwrap();
+
+    assert!(plain.no_mux);
+    assert!(new_window.no_mux);
+    assert!(parse_args_from([OsString::from("mux")]).is_err());
+    assert!(parse_args_from([OsString::from("--no-mux")]).is_err());
+    assert!(parse_args_from([OsString::from("-n")]).is_err());
+}
+
 #[test]
 fn profile_action_generation_preserves_normal_application_handoff() {
     let args = parse_args_from([
@@ -249,7 +263,10 @@ fn profile_action_generation_preserves_normal_application_handoff() {
     .unwrap();
 
     assert_eq!(args.mode, StartupMode::Application);
+    #[cfg(feature = "zmux")]
     assert!(should_handoff_to_existing_process(&args));
+    #[cfg(not(feature = "zmux"))]
+    assert!(!should_handoff_to_existing_process(&args));
 }
 
 #[test]
@@ -319,7 +336,10 @@ fn command_launch_consumes_the_remaining_arguments() {
         ])
     );
     assert_eq!(short.profile, None);
+    #[cfg(feature = "zmux")]
     assert!(should_handoff_to_existing_process(&short));
+    #[cfg(not(feature = "zmux"))]
+    assert!(!should_handoff_to_existing_process(&short));
     assert!(parse_args_from([OsString::from("-e")]).is_err());
 }
 
@@ -395,7 +415,10 @@ fn replace_pane_accepts_long_and_short_forms_in_any_option_order() {
 
     assert_eq!(short, long);
     assert!(long.replace_pane);
+    #[cfg(feature = "zmux")]
     assert!(should_replace_pane_in_existing_process(&long));
+    #[cfg(not(feature = "zmux"))]
+    assert!(!should_replace_pane_in_existing_process(&long));
     assert!(!should_handoff_to_existing_process(&long));
 
     let profile_only = parse_args_from([
@@ -406,7 +429,10 @@ fn replace_pane_accepts_long_and_short_forms_in_any_option_order() {
     .unwrap();
     assert_eq!(profile_only.split, None);
     assert_eq!(profile_only.profile.as_deref(), Some("System"));
+    #[cfg(feature = "zmux")]
     assert!(should_replace_pane_in_existing_process(&profile_only));
+    #[cfg(not(feature = "zmux"))]
+    assert!(!should_replace_pane_in_existing_process(&profile_only));
 }
 
 #[test]

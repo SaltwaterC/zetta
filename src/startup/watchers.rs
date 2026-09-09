@@ -8,6 +8,7 @@
 
 use super::*;
 
+#[cfg(feature = "zmux")]
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// How often the configuration file is checked for changes made outside the
@@ -156,20 +157,24 @@ pub(super) fn start_configuration_watcher(cx: &mut App) {
 }
 
 /// How often the multiplexer's published catalog is checked for changes.
+#[cfg(feature = "zmux")]
 const MULTIPLEXER_CATALOG_POLL: Duration = Duration::from_secs(1);
 
+#[cfg(feature = "zmux")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct SessionCatalogFileStamp {
     modified: Option<SystemTime>,
     len: u64,
 }
 
+#[cfg(feature = "zmux")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct SessionCatalogStamp {
     catalog: Option<SessionCatalogFileStamp>,
     persistence_manifest: Option<SessionCatalogFileStamp>,
 }
 
+#[cfg(feature = "zmux")]
 fn session_catalog_file_stamp(path: &Path) -> Option<SessionCatalogFileStamp> {
     let metadata = fs::metadata(path).ok()?;
     Some(SessionCatalogFileStamp {
@@ -178,6 +183,7 @@ fn session_catalog_file_stamp(path: &Path) -> Option<SessionCatalogFileStamp> {
     })
 }
 
+#[cfg(feature = "zmux")]
 fn session_catalog_stamp(directory: &Path) -> SessionCatalogStamp {
     SessionCatalogStamp {
         catalog: session_catalog_file_stamp(directory),
@@ -202,6 +208,7 @@ fn session_catalog_stamp(directory: &Path) -> SessionCatalogStamp {
 /// a disk record being consumed by `resume`. That keeps an idle process from
 /// parsing the catalog and scanning the process table once a second for no
 /// reason while still invalidating both live-session and disk-session entries.
+#[cfg(feature = "zmux")]
 pub(super) fn start_multiplexer_session_watcher(cx: &mut App) {
     let directory = crate::background_sessions::session_catalog_dir();
     let mut last_seen: Option<SessionCatalogStamp> = None;
@@ -229,7 +236,9 @@ pub(super) fn start_multiplexer_session_watcher(cx: &mut App) {
 /// A publish happens on every `TitleChanged` of every background pane, so
 /// several can land in one frame; without this each would start its own read of
 /// the same directory. The same shape as `PtyProcessInfo`'s refresh guard.
+#[cfg(feature = "zmux")]
 static CATALOG_REFRESH_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+#[cfg(feature = "zmux")]
 static CATALOG_REFRESH_PENDING: AtomicBool = AtomicBool::new(false);
 
 /// Rebuilds the process-wide reconnect list.
@@ -240,6 +249,12 @@ static CATALOG_REFRESH_PENDING: AtomicBool = AtomicBool::new(false);
 /// records. That ran on the thread that draws, on every title change of every
 /// background pane. It now runs on the background executor and only the
 /// combining step returns to the foreground.
+#[cfg(not(feature = "zmux"))]
+pub(crate) fn refresh_process_background_sessions(cx: &mut App) {
+    apply_background_session_entries(Vec::new(), cx);
+}
+
+#[cfg(feature = "zmux")]
 pub(crate) fn refresh_process_background_sessions(cx: &mut App) {
     if CATALOG_REFRESH_IN_FLIGHT.swap(true, Ordering::AcqRel) {
         CATALOG_REFRESH_PENDING.store(true, Ordering::Release);
@@ -328,6 +343,7 @@ pub(crate) fn prune_empty_dormant_runners(cx: &mut App) {
 /// cost a round trip. Catalogs published by *this* process are skipped: those
 /// describe sessions kept in memory here because the multiplexer was
 /// unreachable, and they are already in the list.
+#[cfg(feature = "zmux")]
 fn multiplexer_session_entries() -> Vec<ProcessBackgroundSessionEntry> {
     let catalogs = match crate::background_sessions::read_session_catalogs(
         &crate::background_sessions::session_catalog_dir(),
@@ -405,6 +421,6 @@ fn multiplexer_session_entries() -> Vec<ProcessBackgroundSessionEntry> {
     entries
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "zmux"))]
 #[path = "../tests/startup/watchers.rs"]
 mod tests;

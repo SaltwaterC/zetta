@@ -4,9 +4,7 @@ param(
     [string]$ConsoleBinaryPath,
     [Parameter(Mandatory = $true)]
     [string]$GuiBinaryPath,
-    [Parameter(Mandatory = $true)]
     [string]$MuxBinaryPath,
-    [Parameter(Mandatory = $true)]
     [string]$PtyBinaryPath,
     [string]$ZoshBinaryPath,
     [string]$ZoshServerBinaryPath,
@@ -60,8 +58,14 @@ $consoleSubsystem = 3
 $guiSubsystem = 2
 $consoleBinary = (Resolve-Path -LiteralPath $ConsoleBinaryPath).Path
 $guiBinary = (Resolve-Path -LiteralPath $GuiBinaryPath).Path
-$muxBinary = (Resolve-Path -LiteralPath $MuxBinaryPath).Path
-$ptyBinary = (Resolve-Path -LiteralPath $PtyBinaryPath).Path
+$muxBinary = $null
+if ($MuxBinaryPath) {
+    $muxBinary = (Resolve-Path -LiteralPath $MuxBinaryPath).Path
+}
+$ptyBinary = $null
+if ($PtyBinaryPath) {
+    $ptyBinary = (Resolve-Path -LiteralPath $PtyBinaryPath).Path
+}
 $zoshBinary = $null
 if ($ZoshBinaryPath) {
     $zoshBinary = (Resolve-Path -LiteralPath $ZoshBinaryPath).Path
@@ -76,8 +80,14 @@ if ($WorktreeBinaryPath) {
 }
 $actualConsoleSubsystem = Get-PeSubsystem $consoleBinary
 $actualGuiSubsystem = Get-PeSubsystem $guiBinary
-$actualMuxSubsystem = Get-PeSubsystem $muxBinary
-$actualPtySubsystem = Get-PeSubsystem $ptyBinary
+$actualMuxSubsystem = $null
+if ($muxBinary) {
+    $actualMuxSubsystem = Get-PeSubsystem $muxBinary
+}
+$actualPtySubsystem = $null
+if ($ptyBinary) {
+    $actualPtySubsystem = Get-PeSubsystem $ptyBinary
+}
 $actualZoshSubsystem = $null
 if ($zoshBinary) {
     $actualZoshSubsystem = Get-PeSubsystem $zoshBinary
@@ -92,10 +102,10 @@ if ($actualConsoleSubsystem -ne $consoleSubsystem) {
 if ($actualGuiSubsystem -ne $guiSubsystem) {
     throw "$guiBinary uses PE subsystem $actualGuiSubsystem; expected GUI subsystem $guiSubsystem"
 }
-if ($actualMuxSubsystem -ne $consoleSubsystem) {
+if ($muxBinary -and $actualMuxSubsystem -ne $consoleSubsystem) {
     throw "$muxBinary uses PE subsystem $actualMuxSubsystem; expected console subsystem $consoleSubsystem"
 }
-if ($actualPtySubsystem -ne $consoleSubsystem) {
+if ($ptyBinary -and $actualPtySubsystem -ne $consoleSubsystem) {
     throw "$ptyBinary uses PE subsystem $actualPtySubsystem; expected console subsystem $consoleSubsystem"
 }
 if ($zoshBinary -and ($actualZoshSubsystem -ne $consoleSubsystem)) {
@@ -115,8 +125,8 @@ $version = ((& $consoleBinary --version | Out-String).Trim() -replace "`r", "")
 $versionExitCode = $LASTEXITCODE
 if ($versionExitCode -ne 0 -or $version -notmatch '(?m)^Zetta \S+$' -or
     $version -notmatch '(?m)^CONTROL_VERSION=\d+$' -or
-    $version -notmatch '(?m)^CATALOG_VERSION=\d+$' -or
-    $version -notmatch '(?m)^ZMUX_PROTOCOL_VERSION=\d+$') {
+    ($muxBinary -and ($version -notmatch '(?m)^CATALOG_VERSION=\d+$' -or
+        $version -notmatch '(?m)^ZMUX_PROTOCOL_VERSION=\d+$'))) {
     throw "$consoleBinary --version failed its CLI smoke test"
 }
 $guiVersion = Invoke-GuiLauncher $guiBinary "--version"
@@ -129,9 +139,12 @@ if ($guiInvalidArgument.ExitCode -eq 0 -or
     $guiInvalidArgument.Stderr -notmatch 'unknown argument') {
     throw "$guiBinary failed to propagate errors from $consoleBinary"
 }
-$muxVersion = & $muxBinary --version
-if ($LASTEXITCODE -ne 0 -or $muxVersion -notmatch '^zmux \S+ \(protocol \d+\)$') {
-    throw "$muxBinary --version failed its CLI smoke test"
+$muxVersion = $null
+if ($muxBinary) {
+    $muxVersion = & $muxBinary --version
+    if ($LASTEXITCODE -ne 0 -or $muxVersion -notmatch '^zmux \S+ \(protocol \d+\)$') {
+        throw "$muxBinary --version failed its CLI smoke test"
+    }
 }
 $zoshVersion = $null
 if ($zoshBinary) {
@@ -157,8 +170,12 @@ if ($worktreeBinary) {
 
 Write-Host "Verified Windows console executable: $consoleBinary ($version)"
 Write-Host "Verified Windows GUI launcher: $guiBinary"
-Write-Host "Verified Windows multiplexer executable: $muxBinary ($muxVersion)"
-Write-Host "Verified Windows pseudoconsole host: $ptyBinary"
+if ($muxBinary) {
+    Write-Host "Verified Windows multiplexer executable: $muxBinary ($muxVersion)"
+}
+if ($ptyBinary) {
+    Write-Host "Verified Windows pseudoconsole host: $ptyBinary"
+}
 if ($zoshBinary) {
     Write-Host "Verified Zosh client executable: $zoshBinary ($zoshVersion)"
 }

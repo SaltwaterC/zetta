@@ -115,6 +115,7 @@ fn supported_shells_generate_completion_and_tftp_shortcut() {
         assert!(script.contains("zetta splits"));
         assert!(script.contains("zetta pane --list"));
         assert!(script.contains("zetta cmd --list"));
+        #[cfg(feature = "zmux")]
         assert!(script.contains("ZETTA_NO_MUX"));
         assert!(script.contains("--direction"));
         assert!(script.contains("--pane"));
@@ -134,6 +135,7 @@ fn supported_shells_generate_completion_and_tftp_shortcut() {
             assert!(script.contains("zwt"));
             assert!(script.contains("wt"));
         }
+        #[cfg(feature = "zmux")]
         assert!(script.contains("zmux"));
         #[cfg(feature = "worktree")]
         for operation in ["new", "done", "abort", "status", "sync", "config"] {
@@ -143,6 +145,31 @@ fn supported_shells_generate_completion_and_tftp_shortcut() {
         {
             assert!(script.contains("--path-only"));
             assert!(script.contains("--copy"));
+        }
+    }
+}
+
+#[cfg(not(feature = "zmux"))]
+#[test]
+fn generated_shell_integrations_omit_the_zmux_cli_surface() {
+    for shell in [
+        ShellIntegration::Bash,
+        ShellIntegration::Fish,
+        ShellIntegration::PowerShell,
+        ShellIntegration::Zsh,
+    ] {
+        let script = shell.script();
+        assert!(!script.contains("--no-mux"));
+        assert!(!script.contains("zetta mux"));
+        match shell {
+            ShellIntegration::Bash => {
+                assert!(!script.contains("complete -F _zetta_complete_zmux zmux"));
+            }
+            ShellIntegration::Fish => assert!(!script.contains("complete -c zmux")),
+            ShellIntegration::PowerShell => {
+                assert!(!script.contains("CommandName zmux"));
+            }
+            ShellIntegration::Zsh => assert!(!script.contains("compdef _zmux zmux")),
         }
     }
 }
@@ -1297,6 +1324,7 @@ fn bash_worktree_completion_offers_operations_and_long_worktree_options() {
     );
 }
 
+#[cfg(feature = "zmux")]
 #[test]
 fn bash_zmux_completes_the_same_as_zetta_mux() {
     use std::io::Write as _;
@@ -1392,6 +1420,7 @@ COMP_WORDS=(zetta mux share '')\nCOMP_CWORD=3\n_zetta_complete\nprintf 'no-mux-s
     );
 }
 
+#[cfg(feature = "zmux")]
 #[test]
 fn zsh_and_powershell_wire_up_zmux_completion() {
     let zsh = ShellIntegration::Zsh.script();
@@ -2707,7 +2736,7 @@ fn generated_scripts_offer_the_shared_overlay_colour_catalogue() {
     }
 }
 
-#[cfg(feature = "worktree")]
+#[cfg(all(feature = "worktree", feature = "zmux"))]
 #[test]
 fn generated_scripts_only_offer_long_form_flags() {
     for shell in [
@@ -2760,6 +2789,7 @@ fn generated_scripts_only_offer_long_form_flags() {
     }
 }
 
+#[cfg(feature = "zmux")]
 #[test]
 fn fish_script_emits_long_option_candidates_for_every_command_context() {
     let script = ShellIntegration::Fish.script();
@@ -2805,6 +2835,7 @@ fn fish_script_emits_long_option_candidates_for_every_command_context() {
     }
 }
 
+#[cfg(feature = "zmux")]
 #[test]
 fn fish_displays_long_option_candidates_and_supports_short_option_values() {
     if clean_shell_command("fish")
@@ -3135,6 +3166,7 @@ fn fish_displays_long_option_candidates_and_supports_short_option_values() {
     }
 }
 
+#[cfg(feature = "zmux")]
 #[test]
 fn fish_omits_daemon_only_mux_candidates_in_no_mux_shells() {
     if clean_shell_command("fish")

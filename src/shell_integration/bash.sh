@@ -463,6 +463,7 @@ _zetta_complete() {
         done
     }
 
+# ZETTA_ZMUX_INTEGRATION_BEGIN
     _zetta_complete_mux_session_ids() {
         COMPREPLY=()
         local session_id
@@ -474,6 +475,7 @@ _zetta_complete() {
             [[ $session_id == "$current"* ]] && COMPREPLY+=("$session_id")
         done < <("${mux_list_command[@]}" 2>/dev/null | awk '$1 == "reconnect" && $2 == "id:" && $3 ~ /^[0-9]+:[0-9]+:[0-9]+$/ { print $3 }')
     }
+# ZETTA_ZMUX_INTEGRATION_END
 
     _zetta_complete_ssh_targets() {
         COMPREPLY=()
@@ -491,6 +493,7 @@ _zetta_complete() {
         ' "$config" 2>/dev/null)
     }
 
+# ZETTA_ZMUX_INTEGRATION_BEGIN
     _zetta_complete_remote_mux_session_ids() {
         COMPREPLY=()
         local target=$1 port=$2 session_id
@@ -544,7 +547,9 @@ _zetta_complete() {
             _zetta_complete_ssh_targets
         fi
     }
+# ZETTA_ZMUX_INTEGRATION_END
 
+# ZETTA_ZMUX_INTEGRATION_BEGIN
     _zetta_complete_mux_restorable_ids() {
         COMPREPLY=()
         local session_id
@@ -556,6 +561,7 @@ _zetta_complete() {
             [[ $session_id == "$current"* ]] && COMPREPLY+=("$session_id")
         done < <("${mux_list_command[@]}" 2>/dev/null | awk '$1 == "resume" && $2 == "id:" && $3 ~ /^[0-9]+$/ { print $3 }')
     }
+# ZETTA_ZMUX_INTEGRATION_END
 
     _zetta_complete_tab_icons() {
         local icons
@@ -834,7 +840,7 @@ _zetta_complete() {
             ;;
         --replace-pane)
             if [[ $current == -* || -z $current ]]; then
-                _zetta_compgen '--help --version --config --keymap --profile --split --theme --no-mux --new-window --command'
+                _zetta_compgen '--help --version --config --keymap --profile --split --theme ZETTA_NO_MUX_OPTION --new-window --command'
             else
                 COMPREPLY=()
             fi
@@ -939,7 +945,7 @@ _zetta_complete() {
                 COMPREPLY=()
             elif [[ $command == -* || -z $command ]]; then
                 if [[ $current == -* || -z $current ]]; then
-                    _zetta_compgen '--help --version --config --keymap --profile --split --theme --no-mux --new-window --command'
+                    _zetta_compgen '--help --version --config --keymap --profile --split --theme ZETTA_NO_MUX_OPTION --new-window --command'
                 else
                     COMPREPLY=()
                 fi
@@ -975,7 +981,7 @@ _zetta_complete() {
     esac
 
     if (( COMP_CWORD == 1 )); then
-        _zetta_compgen 'benchmark terminal-size mux pane profile project cmd edit vi init mosh serial http tftp notify attention copy paste splits tabicon theme overlay ZETTA_WORKTREE_ROOT_COMMAND --help --version --config --keymap --profile --split --replace-pane --theme --no-mux --new-window --command'
+        _zetta_compgen 'benchmark terminal-size ZETTA_MUX_ROOT_COMMAND pane profile project cmd edit vi init mosh serial http tftp notify attention copy paste splits tabicon theme overlay ZETTA_WORKTREE_ROOT_COMMAND --help --version --config --keymap --profile --split --replace-pane --theme ZETTA_NO_MUX_OPTION --new-window --command'
         return
     fi
 
@@ -984,7 +990,7 @@ _zetta_complete() {
     # offering the remaining top-level flags instead of falling through to
     # the subcommand-specific cases below, which would offer nothing.
     if [[ $command == -* ]]; then
-        _zetta_compgen '--help --version --config --keymap --profile --split --replace-pane --theme --no-mux --new-window --command'
+        _zetta_compgen '--help --version --config --keymap --profile --split --replace-pane --theme ZETTA_NO_MUX_OPTION --new-window --command'
         return
     fi
 
@@ -1124,6 +1130,7 @@ _zetta_complete() {
                 COMPREPLY=( $(compgen -f -- "$current") )
             fi
             ;;
+# ZETTA_ZMUX_INTEGRATION_BEGIN
         mux)
             if (( COMP_CWORD == 2 )); then
                 if [[ ${ZETTA_NO_MUX:-0} == 1 ]]; then
@@ -1155,6 +1162,7 @@ _zetta_complete() {
                 _zetta_compgen '--json --ids-only --ssh-target --port --identity --help'
             fi
             ;;
+# ZETTA_ZMUX_INTEGRATION_END
         init)
             _zetta_compgen 'bash fish powershell pwsh zsh --help'
             ;;
@@ -1288,6 +1296,7 @@ _zetta_complete_zwt() {
 }
 # ZETTA_WORKTREE_INTEGRATION_END
 
+# ZETTA_ZMUX_INTEGRATION_BEGIN
 _zetta_complete_zmux() {
     local _zetta_mux_completion_command=zmux
     local saved_words=("${COMP_WORDS[@]}")
@@ -1298,6 +1307,7 @@ _zetta_complete_zmux() {
     COMP_WORDS=("${saved_words[@]}")
     COMP_CWORD=$saved_cword
 }
+# ZETTA_ZMUX_INTEGRATION_END
 
 _zetta_tftp_complete() {
     local operation_index=$1 current previous operation argument
@@ -1479,7 +1489,9 @@ complete -F _zosh_complete zosh
 # ZETTA_WORKTREE_INTEGRATION_BEGIN
 complete -F _zetta_complete_zwt zwt
 # ZETTA_WORKTREE_INTEGRATION_END
+# ZETTA_ZMUX_INTEGRATION_BEGIN
 complete -F _zetta_complete_zmux zmux
+# ZETTA_ZMUX_INTEGRATION_END
 complete -F _zetta_complete zvi
 complete -F _ztftp_complete ztftp
 complete -F _zntfy_complete zntfy

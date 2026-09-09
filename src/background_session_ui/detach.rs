@@ -404,6 +404,7 @@ impl Zetta {
     /// Returns `false` when the tab has no multiplexer session at all — a pane
     /// that fell back to a local process — because there is then nothing another
     /// window could attach to.
+    #[cfg(feature = "zmux")]
     fn publish_session_offer(
         &self,
         index: usize,
@@ -477,6 +478,17 @@ impl Zetta {
         Ok(true)
     }
 
+    #[cfg(not(feature = "zmux"))]
+    fn publish_session_offer(
+        &self,
+        _: usize,
+        _: bool,
+        _: Option<SessionAuthentication>,
+        _: &App,
+    ) -> anyhow::Result<bool> {
+        Ok(false)
+    }
+
     /// A fresh publication for a tab that is being shared, or `None` when it is
     /// not being shared or has no multiplexer session.
     ///
@@ -484,6 +496,7 @@ impl Zetta {
     /// offered — panes are split and closed, the tab is renamed — so what the
     /// multiplexer holds has to be refreshed at the one moment a joining client
     /// is about to read it.
+    #[cfg(feature = "zmux")]
     pub(super) fn shared_session_refresh(
         &self,
         tab_id: u64,

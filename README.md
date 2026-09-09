@@ -19,6 +19,8 @@ for active development.
 - Detachable background sessions, held by the `zmux` multiplexer so they
   outlive Zetta itself,
   with retained diagnostics for unexpected terminal exits
+- A no-`zmux` build mode that keeps background sessions local to the owning
+  Zetta process and removes the multiplexer-only CLI surface
 - Shareable tabs: offer a tab that is still on screen and join it from another
   Zetta window, with both driving the same panes
 - Remote shared sessions over OpenSSH: `zetta mux attach HOST SESSION_ID`, with

@@ -1087,7 +1087,7 @@ pub(crate) fn apply_terminal_environment_overrides<S>(
         pane_routing_id.to_string(),
     );
     environment.insert(
-        zmux::NO_MUX_ENVIRONMENT_VARIABLE.to_owned(),
+        "ZETTA_NO_MUX".to_owned(),
         if no_mux { "1" } else { "0" }.to_owned(),
     );
 }

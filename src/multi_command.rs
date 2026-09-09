@@ -539,6 +539,7 @@ fn ssh_config_hosts(path: &Path) -> Vec<String> {
 /// Host aliases offered by the remote-session picker. Keep this backed by the
 /// same parser as shell-command completion so Zetta never grows a second SSH
 /// configuration format.
+#[cfg(feature = "zmux")]
 pub(crate) fn ssh_config_host_suggestions() -> Vec<String> {
     ssh_config_hosts(&util::paths::home_dir().join(".ssh").join("config"))
 }

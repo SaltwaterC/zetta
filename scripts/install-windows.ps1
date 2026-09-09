@@ -17,6 +17,7 @@ param(
     [string]$SourceZoshServerBinary,
     [string]$SourceZwtBinary,
     [switch]$WorktreeEnabled,
+    [switch]$MuxDisabled,
     [switch]$ZoshEnabled,
     [switch]$ZoshServerEnabled,
     [string]$InstallDirectory,
@@ -36,16 +37,17 @@ $zoshSourceProvided = [bool]$SourceZoshBinary
 $zoshServerSourceProvided = [bool]$SourceZoshServerBinary
 
 $repositoryRoot = Split-Path -Parent $PSScriptRoot
+$muxEnabled = -not $MuxDisabled
 if (-not $SourceBinary) {
     $SourceBinary = Join-Path $repositoryRoot "target\debug\zetta.exe"
 }
 if (-not $SourceGuiBinary) {
     $SourceGuiBinary = Join-Path (Split-Path -Parent $SourceBinary) "zetta-gui.exe"
 }
-if (-not $SourceMuxBinary) {
+if ($muxEnabled -and -not $SourceMuxBinary) {
     $SourceMuxBinary = Join-Path (Split-Path -Parent $SourceBinary) "zmux.exe"
 }
-if (-not $SourcePtyBinary) {
+if ($muxEnabled -and -not $SourcePtyBinary) {
     $SourcePtyBinary = Join-Path (Split-Path -Parent $SourceBinary) "zmux-pty.exe"
 }
 if (-not $SourceZoshBinary) {
@@ -102,9 +104,11 @@ function Get-VersionedPath([string]$Path, [string]$Version) {
 function Get-InstallFiles {
     $files = @(
         [pscustomobject]@{ Source = $SourceBinary; Destination = $installedBinary },
-        [pscustomobject]@{ Source = $SourceGuiBinary; Destination = $installedGuiBinary },
-        [pscustomobject]@{ Source = $SourceMuxBinary; Destination = $installedMuxBinary }
+        [pscustomobject]@{ Source = $SourceGuiBinary; Destination = $installedGuiBinary }
     )
+    if ($muxEnabled) {
+        $files += [pscustomobject]@{ Source = $SourceMuxBinary; Destination = $installedMuxBinary }
+    }
     if ($ZoshEnabled) {
         $files += [pscustomobject]@{ Source = $SourceZoshBinary; Destination = $installedZoshBinary }
     }
@@ -124,6 +128,9 @@ function Get-InstallFiles {
 }
 
 function Get-PtyInstallFile {
+    if (-not $muxEnabled) {
+        return $null
+    }
     return [pscustomobject]@{ Source = $SourcePtyBinary; Destination = $installedPtyBinary }
 }
 
@@ -182,6 +189,30 @@ function Remove-DisabledZoshServerFiles {
                 Write-Host "Removed $path"
             } catch {
                 Write-Warning "Could not remove disabled zosh-server executable ${path}: $_"
+            }
+        }
+    }
+}
+
+function Remove-DisabledMuxFiles {
+    if ($muxEnabled) {
+        return
+    }
+    foreach ($path in @(
+        $installedMuxBinary,
+        (Get-VersionedPath $installedMuxBinary "new"),
+        (Get-VersionedPath $installedMuxBinary "old"),
+        $installedPtyBinary,
+        (Get-VersionedPath $installedPtyBinary "new"),
+        (Get-VersionedPath $installedPtyBinary "old"),
+        $installedPtyVersionMarker
+    )) {
+        if (Test-Path -LiteralPath $path) {
+            try {
+                Remove-Item -LiteralPath $path -Force
+                Write-Host "Removed $path"
+            } catch {
+                Write-Warning "Could not remove disabled multiplexer file ${path}: $_"
             }
         }
     }
@@ -328,34 +359,46 @@ function Remove-InstallDirectoryFromUserPath {
 
 function Install-Binary {
     $installFiles = @(Get-InstallFiles)
-    $ptyInstallFile = Get-PtyInstallFile
-    foreach ($file in @($installFiles) + @($ptyInstallFile)) {
+    $ptyInstallFile = $null
+    $ptyInstallFiles = @()
+    if ($muxEnabled) {
+        $ptyInstallFile = Get-PtyInstallFile
+        $ptyInstallFiles = @($ptyInstallFile)
+    }
+    foreach ($file in @($installFiles) + $ptyInstallFiles) {
         if (-not (Test-Path -LiteralPath $file.Source -PathType Leaf)) {
             throw "Required Windows file not found at $($file.Source). Run 'make build' first."
         }
     }
 
-    $sourcePtyVersion = Get-PtyProtocolVersion $sourcePtyVersionMarker
-    $replacePty = -not (Test-PtyInstallCurrent $sourcePtyVersion)
+    $sourcePtyVersion = $null
+    $replacePty = $false
+    if ($muxEnabled) {
+        $sourcePtyVersion = Get-PtyProtocolVersion $sourcePtyVersionMarker
+        $replacePty = -not (Test-PtyInstallCurrent $sourcePtyVersion)
+    }
     if ($replacePty) {
         # This check must happen before Remove-DisabledWorktreeFiles, creating
         # the install directory, or touching any staged/rollback generation.
         Assert-PtyHostStopped
     }
     Remove-DisabledWorktreeFiles
+    Remove-DisabledMuxFiles
     Remove-DisabledZoshFiles
     Remove-DisabledZoshServerFiles
     Remove-LegacyMoshServerFiles
 
     if (-not $replacePty -and (Test-InstallFilesCurrent $installFiles)) {
-        Ensure-PtyVersionMarker $sourcePtyVersion
+        if ($muxEnabled) {
+            Ensure-PtyVersionMarker $sourcePtyVersion
+        }
         Add-InstallDirectoryToUserPath
         Write-Host "Zetta and its Windows runtime are already current at $InstallDirectory"
         return
     }
 
     New-Item -ItemType Directory -Force -Path $InstallDirectory | Out-Null
-    if (-not $replacePty) {
+    if ($muxEnabled -and -not $replacePty) {
         Ensure-PtyVersionMarker $sourcePtyVersion
     }
 
@@ -514,7 +557,12 @@ function Uninstall-Binary {
     Unregister-WindowsIntegration
     Remove-InstallDirectoryFromUserPath
     $filesToRemove = @(Get-InstallFiles)
-    $filesToRemove += Get-PtyInstallFile
+    if ($muxEnabled) {
+        $filesToRemove += Get-PtyInstallFile
+    } else {
+        $filesToRemove += [pscustomobject]@{ Source = $null; Destination = $installedMuxBinary }
+        $filesToRemove += [pscustomobject]@{ Source = $null; Destination = $installedPtyBinary }
+    }
     if (-not $WorktreeEnabled) {
         $filesToRemove += [pscustomobject]@{ Source = $null; Destination = $installedZwtBinary }
     }

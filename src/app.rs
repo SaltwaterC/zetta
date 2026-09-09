@@ -456,11 +456,13 @@ pub(crate) struct Zetta {
     /// The multiplexer that owns every pane's process, connected on first use.
     /// `None` until then. Normal launches require the daemon; `--no-mux` is an
     /// explicit compatibility escape hatch for the legacy in-process owner.
+    #[cfg(feature = "zmux")]
     pub(crate) mux: Option<MuxRuntime>,
     /// When and why the last connection attempt failed, so a burst of rapid
     /// tab opens against a slow or unreachable daemon reuses that failure
     /// briefly instead of each paying a fresh connect timeout in turn — see
     /// `MUX_CONNECT_RETRY_BACKOFF`.
+    #[cfg(feature = "zmux")]
     pub(crate) mux_connect_failure: Option<(std::time::Instant, String)>,
     #[cfg(feature = "session-persistence")]
     /// Invalidates a disk-recovery task whenever the effective configuration or
@@ -473,6 +475,7 @@ pub(crate) struct Zetta {
     /// The panes this window shows in shared mode, keyed by pane id. A shared
     /// pane's terminal reads a relayed byte stream rather than the pty, so the
     /// shared connection and the sizes that arrive on it live here.
+    #[cfg(feature = "zmux")]
     pub(crate) shared_panes: HashMap<u64, crate::mux::SharedPaneEntry>,
     pub(crate) background_observed_panes: HashSet<u64>,
     pub(crate) background_process_refresh_running: bool,
@@ -579,7 +582,6 @@ pub(crate) struct Zetta {
     pub(crate) _subscriptions: Vec<Subscription>,
 }
 
-#[derive(Default)]
 pub(crate) struct ZettaLaunchOptions {
     pub(crate) initial_profile: Option<Profile>,
     pub(crate) initial_project: Option<ProjectConfig>,
@@ -588,6 +590,20 @@ pub(crate) struct ZettaLaunchOptions {
     pub(crate) initial_command: Option<Vec<String>>,
     pub(crate) initial_working_directory: Option<PathBuf>,
     pub(crate) initial_launch: Option<TerminalLaunch>,
+}
+
+impl Default for ZettaLaunchOptions {
+    fn default() -> Self {
+        Self {
+            initial_profile: None,
+            initial_project: None,
+            launch_theme_override: None,
+            no_mux: !cfg!(feature = "zmux"),
+            initial_command: None,
+            initial_working_directory: None,
+            initial_launch: None,
+        }
+    }
 }
 
 /// The window's starting state, as [`Zetta::new`] has resolved it: the
@@ -846,14 +862,20 @@ impl Zetta {
             transient_notice: TransientNotice::default(),
             tabs: Vec::new(),
             background_sessions: BackgroundSessionRunner::default(),
+            #[cfg(feature = "zmux")]
             mux: None,
+            #[cfg(feature = "zmux")]
             mux_connect_failure: None,
             #[cfg(feature = "session-persistence")]
             mux_recovery_generation: 0,
             #[cfg(feature = "session-persistence")]
             mux_recovery_task: None,
             no_mux,
+            #[cfg(feature = "zmux")]
             mux_panes: MuxPanes::default(),
+            #[cfg(not(feature = "zmux"))]
+            mux_panes: MuxPanes,
+            #[cfg(feature = "zmux")]
             shared_panes: HashMap::new(),
             background_observed_panes: HashSet::new(),
             background_process_refresh_running: false,

@@ -8,9 +8,39 @@ mod default_terminal;
 #[cfg(feature = "http-server")]
 mod http_server;
 mod image_paste;
+#[cfg(not(feature = "zmux"))]
+mod local_sessions;
+#[cfg(not(feature = "zmux"))]
+mod zmux {
+    pub(crate) mod remote {
+        #[derive(Clone, Debug, PartialEq, Eq)]
+        pub(crate) struct RemoteTarget {
+            pub(crate) destination: String,
+            pub(crate) port: Option<u16>,
+        }
+
+        impl RemoteTarget {
+            pub(crate) fn new(destination: String) -> Self {
+                Self {
+                    destination,
+                    port: None,
+                }
+            }
+
+            pub(crate) fn with_port(mut self, port: Option<u16>) -> Self {
+                self.port = port;
+                self
+            }
+        }
+    }
+}
 mod keymap_file;
 #[cfg(feature = "zosh-client")]
 mod mosh;
+#[cfg(feature = "zmux")]
+mod mux;
+#[cfg(not(feature = "zmux"))]
+#[path = "mux_stub.rs"]
 mod mux;
 #[cfg(feature = "session-persistence")]
 mod mux_identity;
@@ -31,6 +61,10 @@ mod server_ui;
 mod session_auth_ui;
 #[cfg(feature = "session-persistence")]
 mod session_auto_protect;
+#[cfg(feature = "zmux")]
+mod session_state;
+#[cfg(not(feature = "zmux"))]
+#[path = "session_state_stub.rs"]
 mod session_state;
 mod settings_editor;
 mod shell_integration;
@@ -93,7 +127,9 @@ use gpui::{
     deferred, div, point, profiler, px, size, svg, transparent_black, uniform_list,
 };
 use keymap_file::{DEFAULT_KEYMAP_PATH, KeymapFile, KeymapFileLoadResult};
-use mux::{MuxPanes, MuxRuntime};
+use mux::MuxPanes;
+#[cfg(feature = "zmux")]
+use mux::MuxRuntime;
 use process_control::{
     ProcessControlCommand, ProcessControlServer, ReconnectSessionResult, TabAttentionRequest,
     request_existing_process_window,
@@ -135,9 +171,10 @@ use theme_extensions::{InstalledThemeExtension, ThemeExtension};
 use ui::{
     Banner, Button, ButtonCommon as _, ButtonLike, ButtonLink, ButtonSize, ButtonStyle,
     Clickable as _, Color, Icon, IconButton, IconButtonShape, IconName, IconSize, Label, LabelSize,
-    PopoverMenu, PopoverMenuHandle, ScrollAxes, Scrollbars, Severity, Tooltip, WithScrollbar as _,
-    prelude::*, switch,
+    PopoverMenu, PopoverMenuHandle, Severity, Tooltip, prelude::*, switch,
 };
+#[cfg(feature = "zmux")]
+use ui::{ScrollAxes, Scrollbars, WithScrollbar as _};
 use util::{ResultExt as _, paths::PathStyle};
 use zetta_assets::ZettaAssets;
 
@@ -393,6 +430,10 @@ mod pane_overlay;
 mod pane_render;
 mod pane_theme_picker;
 mod pane_view_state;
+#[cfg(feature = "zmux")]
+mod remote_session_ui;
+#[cfg(not(feature = "zmux"))]
+#[path = "remote_session_ui_stub.rs"]
 mod remote_session_ui;
 mod stacked_panes;
 mod tab_bar_render;

@@ -1023,6 +1023,7 @@ fn tftp_server_subcommand_bypasses_application_startup() {
     assert!(!should_handoff_to_existing_process(&args));
 }
 
+#[cfg(feature = "zmux")]
 #[test]
 fn mux_subcommand_forwards_its_arguments_verbatim() {
     // The multiplexer's own argument parsing lives in `zmux`, so `zetta mux`
@@ -1084,6 +1085,7 @@ fn splits_subcommand_lists_configured_templates_without_starting_the_application
     assert!(validate_launch_split(&custom_config, Some("custom-layout")).is_ok());
 }
 
+#[cfg(feature = "zmux")]
 #[test]
 fn mux_reconnect_subcommand_is_forwarded_with_its_stable_id() {
     let args = parse_args_from([

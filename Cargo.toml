@@ -6,7 +6,7 @@ license = "GPL-3.0-or-later"
 default-run = "zetta"
 
 [features]
-default = ["wayland", "serial-console", "http-server", "tftp-server", "tftp-client", "notifications", "clipboard", "syntax-highlighting", "session-persistence", "worktree", "zosh"]
+default = ["wayland", "serial-console", "http-server", "tftp-server", "tftp-client", "notifications", "clipboard", "syntax-highlighting", "zmux", "session-persistence", "worktree", "zosh"]
 wayland = ["gpui_platform/wayland"]
 x11 = ["gpui_platform/x11"]
 windows-gui = []
@@ -36,7 +36,8 @@ syntax-highlighting = [
     "dep:tree-sitter-powershell",
     "dep:tree-sitter-batch",
 ]
-session-persistence = ["zmux/session-persistence"]
+zmux = ["dep:zmux"]
+session-persistence = ["zmux", "zmux/session-persistence"]
 serial-console = ["dep:serialport"]
 http-server = []
 tftp-server = []
@@ -60,6 +61,7 @@ required-features = ["windows-gui"]
 [[bin]]
 name = "zmux"
 path = "src/bin/zmux.rs"
+required-features = ["zmux"]
 
 [[bin]]
 name = "zwt"
@@ -69,6 +71,7 @@ required-features = ["worktree"]
 [[bin]]
 name = "zmux-pty"
 path = "src/bin/zmux_pty.rs"
+required-features = ["zmux"]
 
 [[bin]]
 name = "zosh"
@@ -163,7 +166,7 @@ ui = { path = "crates/ui" }
 util = { path = "zed/crates/util" }
 zeroize = "1"
 zed_actions = { path = "crates/zed_actions" }
-zmux = { path = "crates/zmux", default-features = false, features = ["scrollback-buffer"] }
+zmux = { path = "crates/zmux", default-features = false, features = ["scrollback-buffer"], optional = true }
 zosh = { path = "crates/zosh", optional = true }
 vt100 = { version = "0.16.2", optional = true }
 zwt = { path = "crates/zwt", optional = true }

@@ -441,6 +441,7 @@ pub(super) fn set_pane_overlay(request: PaneOverlayRequest) -> Result<()> {
 
 /// `zetta mux ...`, forwarded to the multiplexer client so the subcommand and
 /// the `zmux` binary cannot accept different arguments.
+#[cfg(feature = "zmux")]
 pub(super) fn run_mux_command(arguments: &[OsString], config_path: Option<PathBuf>) -> Result<()> {
     // The same reader `src/bin/zmux.rs` uses, so `zetta mux` and `zmux`
     // resolve the identity identically.

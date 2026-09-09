@@ -6,6 +6,7 @@ use crate::config::PaneSplitCommand;
 /// Without releasing it here, the pane stays marked as held by this process
 /// forever — see `Zetta::release_mux_pane` and `finish_terminal_spawn`'s
 /// orphan branch.
+#[cfg(feature = "zmux")]
 #[gpui::test]
 fn a_spawn_that_resolves_after_its_tab_closed_releases_the_mux_pane(cx: &mut gpui::TestAppContext) {
     cx.update(|cx| {

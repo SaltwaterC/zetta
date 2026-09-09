@@ -12,15 +12,34 @@ use std::{path::PathBuf, time::Instant};
 use anyhow::Result;
 use terminal::{TerminalExitReason, TerminalExitSource, TerminalExited};
 
+#[cfg(not(feature = "zmux"))]
+pub(crate) use crate::local_sessions::auth::{
+    SessionAuthentication, SessionSecret, VerifiedSession,
+};
+#[cfg(not(feature = "zmux"))]
+pub(crate) use crate::local_sessions::catalog::{
+    application_from_command_line, create_private_dir, read_session_catalogs,
+};
+#[cfg(not(feature = "zmux"))]
+pub(crate) use crate::local_sessions::protocol::{
+    BackgroundPaneExit, BackgroundPaneExitReason, BackgroundPaneExitSource, BackgroundPaneLayout,
+    BackgroundPaneState, BackgroundPaneSummary, BackgroundSessionCatalog, BackgroundSessionSummary,
+};
+#[cfg(feature = "zmux")]
 pub(crate) use zmux::auth::{SessionAuthentication, SessionSecret, VerifiedSession};
+#[cfg(feature = "zmux")]
 pub(crate) use zmux::catalog::{
     application_from_command_line, create_private_dir, read_session_catalogs,
 };
+#[cfg(feature = "zmux")]
 pub(crate) use zmux::protocol::{
     BackgroundPaneExit, BackgroundPaneExitReason, BackgroundPaneExitSource, BackgroundPaneLayout,
     BackgroundPaneState, BackgroundPaneSummary, BackgroundSessionCatalog, BackgroundSessionSummary,
 };
 
+#[cfg(not(feature = "zmux"))]
+use crate::local_sessions::catalog::SessionCatalogPublisher;
+#[cfg(feature = "zmux")]
 use zmux::catalog::SessionCatalogPublisher;
 
 /// Sentinel runner ID used for encrypted disk records, which have no live
@@ -124,7 +143,9 @@ impl<T> BackgroundSessionRunner<T> {
         if let Some(session) = self.sessions.get_mut(index) {
             session.failed_authentications = session.failed_authentications.saturating_add(1);
             session.refuse_until = Instant::now().checked_add(
-                zmux::auth::failed_authentication_delay(session.failed_authentications),
+                crate::background_sessions::failed_authentication_delay(
+                    session.failed_authentications,
+                ),
             );
         }
     }
@@ -190,7 +211,24 @@ impl<T> BackgroundSessionRunner<T> {
 }
 
 pub(crate) fn session_catalog_dir() -> PathBuf {
-    zmux::paths::session_catalog_dir()
+    #[cfg(feature = "zmux")]
+    {
+        zmux::paths::session_catalog_dir()
+    }
+    #[cfg(not(feature = "zmux"))]
+    {
+        crate::local_sessions::paths::session_catalog_dir()
+    }
+}
+
+#[cfg(feature = "zmux")]
+fn failed_authentication_delay(failures: u32) -> std::time::Duration {
+    zmux::auth::failed_authentication_delay(failures)
+}
+
+#[cfg(not(feature = "zmux"))]
+fn failed_authentication_delay(failures: u32) -> std::time::Duration {
+    crate::local_sessions::auth::failed_authentication_delay(failures)
 }
 
 /// Whether a published session's process is a Zetta window rather than the

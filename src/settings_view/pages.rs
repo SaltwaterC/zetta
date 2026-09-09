@@ -356,18 +356,27 @@ fn configuration_session_rows(
                 div()
                     .text_sm()
                     .text_color(colors.text_muted)
-                    .child("Background sessions (zmux)"),
+                    .child(if cfg!(feature = "zmux") {
+                        "Background sessions (zmux)"
+                    } else {
+                        "Background sessions"
+                    }),
             )
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(colors.text_muted)
-                    .child("Screen retention for detached and shared sessions"),
-            )
+            .child(div().text_xs().text_color(colors.text_muted).child(
+                if cfg!(feature = "session-persistence") {
+                    "Screen retention for detached and shared sessions"
+                } else {
+                    "Screen retention for detached sessions"
+                },
+            ))
             .into_any_element(),
         setting_row(
             "Detached session retention",
-            "Keep no screen, a bounded in-memory screen, or encrypted disk state; a temporary GitHub outage uses memory until persistence returns",
+            if cfg!(feature = "session-persistence") {
+                "Keep no screen, a bounded in-memory screen, or encrypted disk state; a temporary GitHub outage uses memory until persistence returns"
+            } else {
+                "Keep no screen or a bounded in-memory screen"
+            },
             SettingsControl::Dropdown(SettingsDropdown::SessionRetention),
             session_retention,
         ),

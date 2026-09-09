@@ -312,17 +312,24 @@ pub(crate) fn quit_zetta_process(cx: &mut App) {
 /// anything still depends on the daemon, and only actually stops it once
 /// nothing does.
 pub(super) fn shutdown_multiplexer_if_idle(cx: &App) {
-    if cx.has_global::<ZettaProcessState>() && cx.global::<ZettaProcessState>().no_mux {
-        return;
+    #[cfg(not(feature = "zmux"))]
+    {
+        let _ = cx;
     }
-    match zmux::client::Client::connect_existing() {
-        Ok(Some(client)) => {
-            if let Err(error) = client.shutdown() {
-                log::debug!("multiplexer still needed, not stopped: {error:#}");
-            }
+    #[cfg(feature = "zmux")]
+    {
+        if cx.has_global::<ZettaProcessState>() && cx.global::<ZettaProcessState>().no_mux {
+            return;
         }
-        Ok(None) => {}
-        Err(error) => log::debug!("checking for a running multiplexer to stop: {error:#}"),
+        match zmux::client::Client::connect_existing() {
+            Ok(Some(client)) => {
+                if let Err(error) = client.shutdown() {
+                    log::debug!("multiplexer still needed, not stopped: {error:#}");
+                }
+            }
+            Ok(None) => {}
+            Err(error) => log::debug!("checking for a running multiplexer to stop: {error:#}"),
+        }
     }
 }
 

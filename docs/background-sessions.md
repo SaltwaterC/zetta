@@ -5,7 +5,9 @@ scrollback alive. In normal daemon mode, detached sessions can be reconnected
 from any Zetta window and survive Zetta closing entirely. `zetta --no-mux` uses
 the compatibility owner inside the Zetta process instead: background sessions
 still work, but they are not shared with another process and end when that
-Zetta process ends.
+Zetta process ends. Builds without the Cargo `zmux` feature use that
+process-local mode by default; the `--no-mux` option and multiplexer commands
+are omitted from those builds.
 
 ## Where a session lives
 

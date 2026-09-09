@@ -18,14 +18,22 @@ fn version_flags_and_output_are_defined() {
         "CONTROL_VERSION={}",
         crate::process_control::CONTROL_VERSION
     )));
-    assert!(version.contains(&format!(
-        "CATALOG_VERSION={}",
-        zmux::protocol::CATALOG_VERSION
-    )));
-    assert!(version.contains(&format!(
-        "ZMUX_PROTOCOL_VERSION={}",
-        zmux::messages::PROTOCOL_VERSION
-    )));
+    #[cfg(feature = "zmux")]
+    {
+        assert!(version.contains(&format!(
+            "CATALOG_VERSION={}",
+            zmux::protocol::CATALOG_VERSION
+        )));
+        assert!(version.contains(&format!(
+            "ZMUX_PROTOCOL_VERSION={}",
+            zmux::messages::PROTOCOL_VERSION
+        )));
+    }
+    #[cfg(not(feature = "zmux"))]
+    {
+        assert!(!version.contains("CATALOG_VERSION="));
+        assert!(!version.contains("ZMUX_PROTOCOL_VERSION="));
+    }
 }
 
 #[test]
@@ -82,7 +90,18 @@ fn help_text_uses_title_case_and_lists_built_in_features() {
     assert!(help.contains("Select one of the profiles listed above"));
     assert!(help.contains("-s, --split NAME"));
     assert!(help.contains("-r, --replace-pane"));
-    assert!(help.contains("-n, --no-mux"));
+    #[cfg(feature = "zmux")]
+    {
+        assert!(help.contains("Session multiplexer (zmux)"));
+        assert!(help.contains("zetta mux [COMMAND]"));
+        assert!(help.contains("-n, --no-mux"));
+    }
+    #[cfg(not(feature = "zmux"))]
+    {
+        assert!(!help.contains("Session multiplexer (zmux)"));
+        assert!(!help.contains("zetta mux [COMMAND]"));
+        assert!(!help.contains("-n, --no-mux"));
+    }
     assert!(help.contains("-w, --new-window"));
     assert!(help.contains("fresh OS window"));
     assert!(help.contains("-e, --command COMMAND [ARGUMENT ...]"));

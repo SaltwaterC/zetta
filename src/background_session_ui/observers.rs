@@ -400,6 +400,7 @@ impl Zetta {
         if let Some(identity) = run_identity {
             run_registry.pane_reopened(identity);
         }
+        #[cfg(feature = "zmux")]
         if self.shared_panes.contains_key(&pane_id) {
             self.subscribe_shared_pane_size(pane_id, &terminal, window, cx);
         }

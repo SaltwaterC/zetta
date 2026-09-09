@@ -755,6 +755,7 @@ function __zetta_tftp_server
     and test "$words[3]" = server
 end
 
+# ZETTA_ZMUX_INTEGRATION_BEGIN
 function __zetta_mux_session_ids
     set -l command_name zetta
     set -l command_arguments mux list
@@ -776,6 +777,7 @@ function __zetta_mux_restorable_ids
     end
     $command_name $command_arguments 2>/dev/null | awk '$1 == "resume" && $2 == "id:" && $3 ~ /^[0-9]+$/ { print $3 }'
 end
+# ZETTA_ZMUX_INTEGRATION_END
 
 function __zetta_ssh_targets
     set -l config "$HOME/.ssh/config"
@@ -818,6 +820,7 @@ function __zetta_mosh_host_given
     return 1
 end
 
+# ZETTA_ZMUX_INTEGRATION_BEGIN
 function __zetta_mux_attach_arguments
     set -l words (commandline -opc)
     set -l command_index 3
@@ -876,6 +879,7 @@ end
 function __zetta_mux_daemon_commands
     test "$ZETTA_NO_MUX" != 1
 end
+# ZETTA_ZMUX_INTEGRATION_END
 
 # Fish only considers options registered with `-l` after the user has typed a
 # dash. Emit the same long options as ordinary completion candidates too, so
@@ -908,7 +912,9 @@ function __zetta_long_options
                 --split 'Apply a configured pane split template' \
                 --replace-pane 'Replace the active pane in a running process' \
                 --theme 'Non-persistently override the profile theme' \
+# ZETTA_ZMUX_INTEGRATION_BEGIN
                 --no-mux 'Keep background sessions in this process for this launch' \
+# ZETTA_ZMUX_INTEGRATION_END
                 --new-window 'Open a fresh OS window without resuming a dormant session' \
                 --command 'Open a tab and run COMMAND; remaining arguments go to the child'
         case mosh
@@ -1017,12 +1023,14 @@ function __zetta_long_options
             printf '%s\t%s\n' --delete-after 'Delete a managed buffer after editing' --help 'Print help'
         case vi
             printf '%s\t%s\n' --help 'Print help'
+# ZETTA_ZMUX_INTEGRATION_BEGIN
         case mux
             if test "$ZETTA_NO_MUX" = 1
                 printf '%s\t%s\n' --json 'Print machine-readable JSON' --ids-only 'Print one numeric session ID per line' --ssh-target 'OpenSSH destination' --port 'SSH port' --help 'Print help' --version 'Print version'
             else
                 printf '%s\t%s\n' --json 'Print machine-readable JSON' --ids-only 'Print one numeric session ID per line' --ssh-target 'OpenSSH destination' --port 'SSH port' --force 'Stop even while sessions are running' --upgrade 'Replace the multiplexer, keeping its sessions' --identity 'Age identity file for resume and reconnect' --help 'Print help' --version 'Print version'
             end
+# ZETTA_ZMUX_INTEGRATION_END
         case benchmark_output
             printf '%s\t%s\n' \
                 --size 'Set the output size in MiB' \
@@ -1095,7 +1103,9 @@ end
 complete -c zetta -f
 complete -c zetta -n '__zetta_at_root' -a benchmark -d 'Profile terminal rendering'
 complete -c zetta -n '__zetta_at_root' -a terminal-size -d 'Print the current terminal size'
+# ZETTA_ZMUX_INTEGRATION_BEGIN
 complete -c zetta -n '__zetta_at_root' -a mux -d 'Control the session multiplexer'
+# ZETTA_ZMUX_INTEGRATION_END
 complete -c zetta -n '__zetta_at_root' -a profile -d 'List and manage profiles'
 complete -c zetta -n '__zetta_at_root' -a project -d 'List and manage projects'
 complete -c zetta -n '__zetta_at_root' -a cmd -d 'Run a registered project command in the active pane'
@@ -1129,7 +1139,9 @@ complete -c zetta -n '__zetta_use_subcommand' -l profile -r -a '(__zetta_profile
 complete -c zetta -n '__zetta_use_subcommand' -l split -r -a '(__zetta_pane_splits)' -d 'Apply a configured pane split template'
 complete -c zetta -n '__zetta_use_subcommand' -l replace-pane -d 'Replace the active pane in a running process'
 complete -c zetta -n '__zetta_use_subcommand' -l theme -r -a '(__zetta_profile_themes)' -d 'Non-persistently override the profile theme'
+# ZETTA_ZMUX_INTEGRATION_BEGIN
 complete -c zetta -n '__zetta_use_subcommand' -l no-mux -d 'Keep background sessions in this process for this launch'
+# ZETTA_ZMUX_INTEGRATION_END
 complete -c zetta -n '__zetta_use_subcommand' -l command -r -d 'Open a tab and run COMMAND'
 complete -c zetta -n '__zetta_use_subcommand' -a '(__zetta_long_options root)'
 complete -c zetta -s c -r -n '__zetta_use_subcommand; and __zetta_short_option -c'
@@ -1263,6 +1275,7 @@ if set -q __ZETTA_MOSH_WRAPPER
     complete -c mosh -n 'not __zetta_mosh_host_given' -l version
     complete -c mosh -n 'not __zetta_mosh_host_given' -a '(__zetta_ssh_targets)'
 end
+# ZETTA_ZMUX_INTEGRATION_BEGIN
 complete -c zetta -n '__zetta_at_subcommand mux' -a list -d 'List the sessions the multiplexer is holding'
 complete -c zetta -n '__zetta_at_subcommand mux; and __zetta_mux_daemon_commands' -a stop -d 'Stop the multiplexer'
 complete -c zetta -n '__zetta_at_subcommand mux' -a reconnect -d 'Open a session in a Zetta window'
@@ -1286,7 +1299,7 @@ complete -c zetta -s p -r -n '__fish_seen_subcommand_from mux; and __zetta_short
 complete -c zetta -n '__fish_seen_subcommand_from mux; and __zetta_mux_daemon_commands' -l identity -r -F -d 'Age identity file for resume and reconnect'
 complete -c zetta -n '__fish_seen_subcommand_from mux' -l help -d 'Print help'
 complete -c zetta -n '__fish_seen_subcommand_from mux' -a '(__zetta_long_options mux)'
-complete -c zetta -n '__fish_seen_subcommand_from mux attach' -a '(__zetta_mux_attach_arguments)' -d 'SSH target or remote session ID'
+# ZETTA_ZMUX_INTEGRATION_END
 complete -c zetta -n '__fish_seen_subcommand_from terminal-size' -l resize -d 'Resize the current pane'
 complete -c zetta -n '__fish_seen_subcommand_from terminal-size' -l columns -r -d 'Set pane width in columns'
 complete -c zetta -n '__fish_seen_subcommand_from terminal-size' -l rows -r -d 'Set pane height in rows'
@@ -1480,6 +1493,7 @@ complete -c zwt -s c -r -F -n '__fish_seen_subcommand_from new; and __zetta_shor
 complete -c zwt -n '__fish_seen_subcommand_from new done abort status sync config' -l help -d 'Print help'
 complete -c zwt -n '__zetta_worktree_sync_target' -a '(__zetta_worktree_commits)' -d 'Source-branch commit'
 # ZETTA_WORKTREE_INTEGRATION_END
+# ZETTA_ZMUX_INTEGRATION_BEGIN
 complete -c zmux -f
 complete -c zmux -n '__fish_use_subcommand' -a list -d 'List the sessions the multiplexer is holding'
 complete -c zmux -n '__fish_use_subcommand; and __zetta_mux_daemon_commands' -a stop -d 'Stop the multiplexer'
@@ -1505,7 +1519,7 @@ complete -c zmux -l identity -r -F -d 'Age identity file for resume and reconnec
 complete -c zmux -l help -d 'Print help'
 complete -c zmux -l version -d 'Print version'
 complete -c zmux -a '(__zetta_long_options mux)'
-complete -c zmux -n '__fish_seen_subcommand_from attach' -a '(__zetta_mux_attach_arguments)' -d 'SSH target or remote session ID'
+# ZETTA_ZMUX_INTEGRATION_END
 complete -c ztftp -f -a 'get put'
 complete -c ztftp -l port -r -d 'Server port'
 complete -c ztftp -l help -d 'Print help'

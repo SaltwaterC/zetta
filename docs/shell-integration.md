@@ -95,6 +95,11 @@ unrelated configuration.
 
 Builds made with `WORKTREE=0` omit the `zwt` wrapper and its completion entries.
 
+Builds made without the Cargo `zmux` feature omit the `mux` and `zmux`
+commands, their completion entries, and the root `-n`/`--no-mux` option from
+the generated integration. Local background sessions remain available through
+the owning Zetta process.
+
 The root `--split`/`-s` launch option runs `zetta splits` at completion time,
 so it completes every currently configured layout name without embedding a
 hardcoded list in the integration script. Run `zetta splits` directly to

@@ -152,9 +152,13 @@ impl ShellIntegration {
 fn render_worktree_integration(template: &str) -> String {
     const BEGIN: &str = "ZETTA_WORKTREE_INTEGRATION_BEGIN";
     const END: &str = "ZETTA_WORKTREE_INTEGRATION_END";
+    const ZMUX_BEGIN: &str = "ZETTA_ZMUX_INTEGRATION_BEGIN";
+    const ZMUX_END: &str = "ZETTA_ZMUX_INTEGRATION_END";
     let worktree_enabled = cfg!(feature = "worktree");
+    let zmux_enabled = cfg!(feature = "zmux");
     let mut rendered = String::with_capacity(template.len());
     let mut in_optional_section = false;
+    let mut in_zmux_section = false;
 
     for line in template.split_inclusive('\n') {
         if line.contains(BEGIN) {
@@ -165,12 +169,36 @@ fn render_worktree_integration(template: &str) -> String {
             in_optional_section = false;
             continue;
         }
-        if !in_optional_section || worktree_enabled {
+        if line.contains(ZMUX_BEGIN) {
+            in_zmux_section = true;
+            continue;
+        }
+        if line.contains(ZMUX_END) {
+            in_zmux_section = false;
+            continue;
+        }
+        if (!in_optional_section || worktree_enabled) && (!in_zmux_section || zmux_enabled) {
             rendered.push_str(line);
         }
     }
 
     rendered
+        .replace(
+            "ZETTA_MUX_ROOT_COMMAND_PS",
+            if zmux_enabled { "'mux'," } else { "" },
+        )
+        .replace(
+            "ZETTA_NO_MUX_OPTION_PS",
+            if zmux_enabled { "'--no-mux'," } else { "" },
+        )
+        .replace(
+            "ZETTA_MUX_ROOT_COMMAND",
+            if zmux_enabled { "mux" } else { "" },
+        )
+        .replace(
+            "ZETTA_NO_MUX_OPTION",
+            if zmux_enabled { "--no-mux" } else { "" },
+        )
         .replace(
             "ZETTA_WORKTREE_ROOT_COMMANDS",
             if worktree_enabled { ", 'wt'" } else { "" },

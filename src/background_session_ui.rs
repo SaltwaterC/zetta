@@ -14,6 +14,7 @@
 //! - `shared_panes.rs` — panes several windows watch at once.
 
 use super::*;
+#[cfg(feature = "zmux")]
 use crate::mux::{MuxPaneIds, SharedPaneEntry};
 use crate::project::resolve_registered_project_config_root;
 use crate::rename::resolve_tab_title;
@@ -67,6 +68,7 @@ fn reconnect_request(session_count: usize) -> ReconnectRequest {
 /// numbered from a different counter than the multiplexer's, so the two id spaces
 /// can collide; an entry under this window's own runner is therefore never
 /// hidden, and the reconnect path refuses the duplicate anyway.
+#[cfg(feature = "zmux")]
 fn session_is_already_shown_here(
     panes: &crate::mux::MuxPanes,
     (runner_id, session_id, _, _): &ProcessBackgroundSessionEntry,
@@ -100,11 +102,13 @@ struct RestoredPaneMetadata {
 
 #[derive(Clone, Debug)]
 struct RestoredPaneInfo {
+    #[cfg(feature = "zmux")]
     working_directory: Option<PathBuf>,
     project_root: Option<PathBuf>,
 }
 
 impl RestoredPaneMetadata {
+    #[cfg(feature = "zmux")]
     fn working_directory(&self, routing_id: u64) -> Option<PathBuf> {
         self.panes
             .get(&routing_id)
@@ -118,6 +122,7 @@ impl RestoredPaneMetadata {
     }
 }
 
+#[cfg(feature = "zmux")]
 fn restored_pane_metadata(
     state: &crate::session_state::TabState,
     summary: &BackgroundSessionSummary,
@@ -160,6 +165,7 @@ fn restored_project_directory(profile: &Profile, directory: &Path) -> PathBuf {
     directory.to_path_buf()
 }
 
+#[cfg(feature = "zmux")]
 fn pane_theme_source_is_stale(
     source: Option<crate::session_state::PaneThemeSource>,
     process_id: u32,
@@ -171,6 +177,7 @@ fn pane_theme_source_is_stale(
     })
 }
 
+#[cfg(feature = "zmux")]
 fn clear_session_theme_overrides(state: &mut crate::session_state::TabState) {
     state.theme_override = None;
     for pane in &mut state.panes {
@@ -183,6 +190,7 @@ fn clear_session_theme_overrides(state: &mut crate::session_state::TabState) {
 
 /// What to do with the size the multiplexer arbitrated for a shared pane.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg(feature = "zmux")]
 enum SharedSizeAction {
     /// The viewer's own size is not known yet. Keep the arbitrated size pending
     /// rather than resizing against a guess.
@@ -200,6 +208,7 @@ enum SharedSizeAction {
 /// had, and a joining window telling the multiplexer its pane was six rows tall,
 /// which arbitrated *every* viewer down to six. Both sides of the size exchange ask
 /// this, so they cannot disagree about what counts as known.
+#[cfg(feature = "zmux")]
 fn bounds_are_laid_out(bounds: terminal::TerminalBounds) -> bool {
     bounds != terminal::TerminalBounds::default()
 }
@@ -211,6 +220,7 @@ fn bounds_are_laid_out(bounds: terminal::TerminalBounds) -> bool {
 /// window that had only just joined claim six rows, and since the pane must fit
 /// inside every viewer, the window that had been showing it perfectly well was
 /// resized down to match.
+#[cfg(feature = "zmux")]
 fn shared_size_to_report(bounds: terminal::TerminalBounds) -> Option<(u16, u16)> {
     bounds_are_laid_out(bounds).then(|| (bounds.num_columns() as u16, bounds.num_lines() as u16))
 }
@@ -230,6 +240,7 @@ fn shared_size_to_report(bounds: terminal::TerminalBounds) -> Option<(u16, u16)>
 /// arbitrated 98x51 looked like a two-column, forty-five-row difference, and the
 /// window was resized to fit a size it already had. This ran before the first
 /// paint and then reported success, so nothing ever corrected it.
+#[cfg(feature = "zmux")]
 fn shared_size_action(
     bounds: Option<terminal::TerminalBounds>,
     columns: u16,
@@ -358,18 +369,74 @@ pub(crate) enum SealedKeyAuthorization {
 /// How much scrollback is handed over with a detached pane. Enough to restore a
 /// screen and the context above it, without making detaching a tab an expensive
 /// operation on a session that has been running for hours.
+#[cfg(feature = "zmux")]
 const SNAPSHOT_LINES: usize = 2_000;
 
 mod detach;
+#[cfg(feature = "zmux")]
 mod image_paste;
+#[cfg(feature = "zmux")]
 mod multiplexer;
 mod observers;
 mod reconnect;
 mod restore;
+#[cfg(feature = "zmux")]
 mod shared_panes;
 
+#[cfg(feature = "zmux")]
 pub(crate) use multiplexer::AttachOutcomeSummary;
 
-#[cfg(test)]
+#[cfg(not(feature = "zmux"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[expect(
+    dead_code,
+    reason = "Attach outcomes are part of the shared authentication API, but a no-zmux build always rejects before constructing one"
+)]
+pub(crate) enum AttachOutcomeSummary {
+    Attached,
+    AuthenticationRequired,
+    AuthenticationFailed,
+}
+
+#[cfg(not(feature = "zmux"))]
+impl Zetta {
+    pub(crate) fn drop_shared_pane(&mut self, _: u64) {}
+
+    pub(super) fn hand_session_to_multiplexer(
+        &mut self,
+        _: &mut Tab,
+        _: Option<&SessionAuthentication>,
+        _: &mut Context<Self>,
+    ) -> anyhow::Result<bool> {
+        Ok(false)
+    }
+
+    pub(crate) fn attach_multiplexer_session(
+        &mut self,
+        _: u64,
+        _: Option<SessionSecret>,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) -> anyhow::Result<AttachOutcomeSummary> {
+        anyhow::bail!("session multiplexer support is disabled in this build")
+    }
+
+    pub(crate) fn attach_remote_multiplexer_session(
+        &mut self,
+        _: zmux::remote::RemoteTarget,
+        _: u64,
+        _: Option<SessionSecret>,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) -> anyhow::Result<AttachOutcomeSummary> {
+        anyhow::bail!("session multiplexer support is disabled in this build")
+    }
+
+    pub(crate) fn multiplexer_holds_session(&self, _: u64) -> bool {
+        false
+    }
+}
+
+#[cfg(all(test, feature = "zmux"))]
 #[path = "tests/background_session_ui.rs"]
 mod tests;

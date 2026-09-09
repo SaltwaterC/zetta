@@ -73,6 +73,16 @@ impl Zetta {
         let serial_console = self.render_serial_console_overlay(cx);
         #[cfg(not(feature = "serial-console"))]
         let serial_console: Option<AnyElement> = None;
+        #[cfg(feature = "zmux")]
+        let remote_session = modal_overlay(self.render_remote_session_overlay(
+            colors,
+            error_color,
+            handle,
+            window,
+            cx,
+        ));
+        #[cfg(not(feature = "zmux"))]
+        let remote_session: Option<AnyElement> = None;
 
         ZettaOverlays {
             notice: self.render_transient_notice_overlay(colors),
@@ -111,13 +121,7 @@ impl Zetta {
                 self.render_overlay_style_picker_overlay(window, cx),
             ),
             serial_console: modal_overlay(serial_console),
-            remote_session: modal_overlay(self.render_remote_session_overlay(
-                colors,
-                error_color,
-                handle,
-                window,
-                cx,
-            )),
+            remote_session,
             session_authentication: modal_overlay(self.render_session_authentication_overlay(cx)),
             close_confirmation: modal_overlay(self.render_tab_close_confirmation_overlay(cx)),
         }
@@ -190,7 +194,9 @@ impl Zetta {
             .on_action(cx.listener(Self::toggle_tab_sharing))
             .on_action(cx.listener(Self::toggle_auto_background_tab))
             .on_action(cx.listener(Self::reconnect_session))
-            .on_action(cx.listener(Self::open_remote_session))
+            .when(cfg!(feature = "zmux"), |content| {
+                content.on_action(cx.listener(Self::open_remote_session))
+            })
             .on_action(cx.listener(Self::close_active_pane))
             .on_action(cx.listener(Self::next_tab))
             .on_action(cx.listener(Self::previous_tab))
@@ -428,11 +434,14 @@ impl Zetta {
             .when(self.close_tab_confirmation.is_some(), |content| {
                 content.track_focus(&self.close_confirmation_focus)
             })
-            .when(self.remote_session_picker.is_some(), |content| {
-                content.track_focus(&self.remote_session_focus)
-            })
+            .when(
+                cfg!(feature = "zmux") && self.remote_session_picker.is_some(),
+                |content| content.track_focus(&self.remote_session_focus),
+            )
             .capture_key_down(cx.listener(Self::modal_key_down_capture))
-            .capture_key_down(cx.listener(Self::remote_session_key_down_capture))
+            .when(cfg!(feature = "zmux"), |content| {
+                content.capture_key_down(cx.listener(Self::remote_session_key_down_capture))
+            })
             .capture_key_up(cx.listener(Self::pane_resize_key_up))
             .on_key_down(cx.listener(Self::command_palette_key_down))
             .child(column);

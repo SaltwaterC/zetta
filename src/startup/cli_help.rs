@@ -29,13 +29,23 @@ pub(crate) fn parse_tftp_args(_: impl IntoIterator<Item = OsString>) -> Result<T
 }
 
 pub(crate) fn version_text() -> String {
-    format!(
-        "Zetta {}\nCONTROL_VERSION={}\nCATALOG_VERSION={}\nZMUX_PROTOCOL_VERSION={}",
+    let version = format!(
+        "Zetta {}\nCONTROL_VERSION={}",
         env!("CARGO_PKG_VERSION"),
         crate::process_control::CONTROL_VERSION,
-        zmux::protocol::CATALOG_VERSION,
-        zmux::messages::PROTOCOL_VERSION,
-    )
+    );
+    #[cfg(feature = "zmux")]
+    {
+        format!(
+            "{version}\nCATALOG_VERSION={}\nZMUX_PROTOCOL_VERSION={}",
+            zmux::protocol::CATALOG_VERSION,
+            zmux::messages::PROTOCOL_VERSION,
+        )
+    }
+    #[cfg(not(feature = "zmux"))]
+    {
+        version
+    }
 }
 
 pub(crate) fn format_help_table<'a>(rows: impl AsRef<[(&'a str, &'a str)]>) -> String {
@@ -98,6 +108,8 @@ pub(crate) fn help_text(profiles: &[Profile]) -> String {
         "Desktop notifications",
         #[cfg(feature = "clipboard")]
         "Clipboard access",
+        #[cfg(feature = "zmux")]
+        "Session multiplexer (zmux)",
         #[cfg(feature = "session-persistence")]
         "Encrypted session retention",
         #[cfg(feature = "worktree")]
@@ -113,10 +125,13 @@ pub(crate) fn help_text(profiles: &[Profile]) -> String {
         "zetta benchmark [OPTIONS]",
         "zetta benchmark output [OPTIONS]",
         "zetta terminal-size [--json | --resize [--columns COLUMNS] [--rows ROWS]]",
+        #[cfg(feature = "zmux")]
         "zetta mux [COMMAND]",
         #[cfg(feature = "worktree")]
         "zetta wt <COMMAND>",
+        #[cfg(feature = "zmux")]
         "zetta mux reconnect SESSION_ID",
+        #[cfg(feature = "zmux")]
         "zetta mux resume SESSION [-i PATH]",
         "zetta splits",
         "zetta tabicon [OPTIONS] ICON",
@@ -170,6 +185,7 @@ pub(crate) fn help_text(profiles: &[Profile]) -> String {
             "Write and time a text payload (default: 10 MiB)",
         ),
         ("terminal-size", "Print or resize the current terminal pane"),
+        #[cfg(feature = "zmux")]
         (
             "mux",
             "Control, list, reconnect, and resume background sessions",
@@ -226,7 +242,7 @@ pub(crate) fn help_text(profiles: &[Profile]) -> String {
     }
     let commands = format_help_table(commands);
 
-    let options = format_help_table([
+    let option_rows = vec![
         ("-h, --help", "Print help"),
         ("-v, --version", "Print version and compatibility versions"),
         ("-c, --config PATH", "Use a configuration file"),
@@ -248,10 +264,6 @@ pub(crate) fn help_text(profiles: &[Profile]) -> String {
             "Non-persistently override --profile's theme for this launch",
         ),
         (
-            "-n, --no-mux",
-            "Keep background sessions in this process for this launch; sharing unavailable",
-        ),
-        (
             "-w, --new-window",
             "Open a fresh OS window without resuming a dormant session",
         ),
@@ -259,7 +271,17 @@ pub(crate) fn help_text(profiles: &[Profile]) -> String {
             "-e, --command COMMAND [ARGUMENT ...]",
             "Open a tab and run COMMAND",
         ),
-    ]);
+    ];
+    #[cfg(feature = "zmux")]
+    let option_rows = {
+        let mut option_rows = option_rows;
+        option_rows.push((
+            "-n, --no-mux",
+            "Keep background sessions in this process for this launch; sharing unavailable",
+        ));
+        option_rows
+    };
+    let options = format_help_table(option_rows);
     let profiles = profiles
         .iter()
         .map(|profile| profile.name.as_str())

@@ -117,7 +117,7 @@ pub(crate) use server::ProcessControlServer;
 /// does, and a `pane_theme_revision` on `get_pane_theme` in both directions: a
 /// client that sends the revision it already has is answered `unchanged` by the
 /// connection thread, without the main thread being involved.
-pub(crate) const CONTROL_VERSION: u32 = zmux::protocol::CONTROL_VERSION;
+pub(crate) const CONTROL_VERSION: u32 = 4;
 // A 64 KiB argv payload can expand substantially when it contains many
 // one-character arguments and each value is represented as JSON. Keep enough
 // framing headroom for that worst case as well as the endpoint token.

@@ -407,50 +407,11 @@ _zetta_run_pane_labels() {
     done
 }
 
+# ZETTA_ZMUX_INTEGRATION_BEGIN
 _zmux_session_ids() {
     local -a mux_list_command=(zetta mux list)
     [[ ${_zetta_mux_completion_command:-} == zmux ]] && mux_list_command=(zmux list)
     compadd -- "${(@f)$(${mux_list_command[@]} 2>/dev/null | awk '$1 == "reconnect" && $2 == "id:" && $3 ~ /^[0-9]+:[0-9]+:[0-9]+$/ { print $3 }')}"
-}
-
-_zmux_ssh_targets() {
-    local config="${HOME:-}/.ssh/config"
-    [[ -r $config ]] || return
-    compadd -- "${(@f)$(awk '
-        /^[[:space:]]*[Hh][Oo][Ss][Tt][[:space:]]+/ {
-            for (field = 2; field <= NF; field++)
-                if ($field !~ /^!/ && $field !~ /[*?]/)
-                    print $field
-        }
-    ' "$config" 2>/dev/null)}"
-}
-
-# The Mosh completers offer the SSH hosts first and the option surface after
-# them, in one unsorted group: a sorted group would list every `--option`
-# before the hosts because `-` sorts ahead of letters. `_zetta_option_unused`
-# drops options the command line already carries; the host scan lives in the
-# callers and stops all completion once a host positional is present.
-_zmux_mosh_candidates() {
-    local host_line option
-    local -a candidates=()
-    local config="${HOME:-}/.ssh/config"
-    if [[ -r $config ]]; then
-        while IFS= read -r host_line; do
-            candidates+=("$host_line")
-        done < <(awk '
-            /^[[:space:]]*[Hh][Oo][Ss][Tt][[:space:]]+/ {
-                for (field = 2; field <= NF; field++)
-                    if ($field !~ /^!/ && $field !~ /[*?]/)
-                        print $field
-            }
-        ' "$config" 2>/dev/null)
-    fi
-    for option in --client --server --predict -a -n -o --predict-overwrite --no-predict-overwrite -k --keep-alive -4 -6 --family -p --port --bind-server --ssh --ssh-pty --no-ssh-pty --init --no-init --local --experimental-remote-ip -h --help -V --version --; do
-        if [[ $option != -* ]] || _zetta_option_unused "$option"; then
-            candidates+=("$option")
-        fi
-    done
-    compadd -V mosh-candidates -- "${candidates[@]}"
 }
 
 _zmux_remote_session_ids() {
@@ -504,6 +465,47 @@ _zmux_restorable_ids() {
     local -a mux_list_command=(zetta mux list)
     [[ ${_zetta_mux_completion_command:-} == zmux ]] && mux_list_command=(zmux list)
     compadd -- "${(@f)$(${mux_list_command[@]} 2>/dev/null | awk '$1 == "resume" && $2 == "id:" && $3 ~ /^[0-9]+$/ { print $3 }')}"
+}
+# ZETTA_ZMUX_INTEGRATION_END
+
+_zmux_ssh_targets() {
+    local config="${HOME:-}/.ssh/config"
+    [[ -r $config ]] || return
+    compadd -- "${(@f)$(awk '
+        /^[[:space:]]*[Hh][Oo][Ss][Tt][[:space:]]+/ {
+            for (field = 2; field <= NF; field++)
+                if ($field !~ /^!/ && $field !~ /[*?]/)
+                    print $field
+        }
+    ' "$config" 2>/dev/null)}"
+}
+
+# The Mosh completers offer the SSH hosts first and the option surface after
+# them, in one unsorted group: a sorted group would list every `--option`
+# before the hosts because `-` sorts ahead of letters. `_zetta_option_unused`
+# drops options the command line already carries; the host scan lives in the
+# callers and stops all completion once a host positional is present.
+_zmux_mosh_candidates() {
+    local host_line option
+    local -a candidates=()
+    local config="${HOME:-}/.ssh/config"
+    if [[ -r $config ]]; then
+        while IFS= read -r host_line; do
+            candidates+=("$host_line")
+        done < <(awk '
+            /^[[:space:]]*[Hh][Oo][Ss][Tt][[:space:]]+/ {
+                for (field = 2; field <= NF; field++)
+                    if ($field !~ /^!/ && $field !~ /[*?]/)
+                        print $field
+            }
+        ' "$config" 2>/dev/null)
+    fi
+    for option in --client --server --predict -a -n -o --predict-overwrite --no-predict-overwrite -k --keep-alive -4 -6 --family -p --port --bind-server --ssh --ssh-pty --no-ssh-pty --init --no-init --local --experimental-remote-ip -h --help -V --version --; do
+        if [[ $option != -* ]] || _zetta_option_unused "$option"; then
+            candidates+=("$option")
+        fi
+    done
+    compadd -V mosh-candidates -- "${candidates[@]}"
 }
 
 _zetta_tab_icons() {
@@ -673,8 +675,8 @@ _zetta() {
     fi
 
     if (( CURRENT == 2 )); then
-        compadd -S ' ' -- benchmark terminal-size mux profile project cmd edit vi init mosh serial http tftp notify attention copy paste splits pane tabicon theme overlay ZETTA_WORKTREE_ROOT_COMMAND
-        _zetta_options --help --version --config --keymap --profile --split --replace-pane --theme --no-mux --new-window --command
+        compadd -S ' ' -- benchmark terminal-size ZETTA_MUX_ROOT_COMMAND profile project cmd edit vi init mosh serial http tftp notify attention copy paste splits pane tabicon theme overlay ZETTA_WORKTREE_ROOT_COMMAND
+        _zetta_options --help --version --config --keymap --profile --split --replace-pane --theme ZETTA_NO_MUX_OPTION --new-window --command
         return
     fi
 
@@ -809,7 +811,7 @@ _zetta() {
             ;;
         --replace-pane)
             if [[ $words[CURRENT] == -* || -z $words[CURRENT] ]]; then
-                _zetta_options --help --version --config --keymap --profile --split --theme --no-mux --new-window --command
+                _zetta_options --help --version --config --keymap --profile --split --theme ZETTA_NO_MUX_OPTION --new-window --command
             fi
             return
             ;;
@@ -900,7 +902,7 @@ _zetta() {
             fi
             if [[ $words[2] == terminal-size || $words[2] == profile || $words[2] == -* || -z $words[2] ]]; then
                 if [[ $words[2] == -* && ($words[CURRENT] == -* || -z $words[CURRENT]) ]]; then
-                    _zetta_options --help --version --config --keymap --profile --split --theme --no-mux --new-window --command
+                    _zetta_options --help --version --config --keymap --profile --split --theme ZETTA_NO_MUX_OPTION --new-window --command
                 fi
                 return
             fi
@@ -977,7 +979,7 @@ _zetta() {
     # offering the remaining top-level flags instead of falling through to
     # the subcommand-specific cases below, which would offer nothing.
     if [[ $words[2] == -* ]]; then
-        _zetta_options --help --version --config --keymap --profile --split --replace-pane --theme --no-mux --new-window --command
+        _zetta_options --help --version --config --keymap --profile --split --replace-pane --theme ZETTA_NO_MUX_OPTION --new-window --command
         return
     fi
 
@@ -1011,6 +1013,7 @@ _zetta() {
                 _files
             fi
             ;;
+# ZETTA_ZMUX_INTEGRATION_BEGIN
         mux)
             if (( CURRENT == 3 )); then
                 if [[ ${ZETTA_NO_MUX:-0} == 1 ]]; then
@@ -1052,6 +1055,7 @@ _zetta() {
                 _zetta_options --json --ids-only --ssh-target --port --identity --help
             fi
             ;;
+# ZETTA_ZMUX_INTEGRATION_END
         init)
             compadd -- bash fish powershell pwsh zsh --help
             ;;
@@ -1362,6 +1366,7 @@ _zwt() {
 }
 compdef _zwt zwt
 # ZETTA_WORKTREE_INTEGRATION_END
+# ZETTA_ZMUX_INTEGRATION_BEGIN
 _zmux() {
     local _zetta_mux_completion_command=zmux
     local -a saved_words=("${words[@]}")
@@ -1373,6 +1378,7 @@ _zmux() {
     CURRENT=$saved_current
 }
 compdef _zmux zmux
+# ZETTA_ZMUX_INTEGRATION_END
 compdef _ztftp ztftp
 compdef _zntfy zntfy
 compdef _zcopy zcopy

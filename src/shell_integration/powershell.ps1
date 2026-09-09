@@ -232,6 +232,7 @@ $zettaSoundNames = @('zetta-default', 'zetta-ok', 'zetta-alarm', 'zetta-gong') +
     }
 )
 
+# ZETTA_ZMUX_INTEGRATION_BEGIN
 $zmuxSessionIds = {
     try {
         $lines = if ($commandName -eq 'zmux') { @(zmux list 2>$null) } else { @(zetta mux list 2>$null) }
@@ -312,6 +313,7 @@ $zmuxRestorableIds = {
         }
     } catch {}
 }
+# ZETTA_ZMUX_INTEGRATION_END
 
 $zettaCompletions = {
     param($wordToComplete, $commandAst, $cursorPosition)
@@ -319,11 +321,13 @@ $zettaCompletions = {
     $commandName = $commandAst.CommandElements[0].Value
     $noMux = $env:ZETTA_NO_MUX -eq '1'
     $words = @($commandAst.CommandElements | ForEach-Object { $_.Value })
+# ZETTA_ZMUX_INTEGRATION_BEGIN
     if ($commandName -eq 'zmux') {
         # `zmux` takes the same arguments as `zetta mux`, so completing it
         # reuses that logic by inserting the subcommand it stands in for.
         $words = @($words[0], 'mux') + @($words | Select-Object -Skip 1)
     }
+# ZETTA_ZMUX_INTEGRATION_END
     for ($index = 1; $index -lt $words.Count; $index++) {
         if ($words[$index] -in '--command', '-e') {
             # --command owns the rest of argv, including tokens that happen to
@@ -362,7 +366,7 @@ $zettaCompletions = {
         }
     }
     $subcommand = $words | Where-Object {
-        $_ -in 'benchmark', 'terminal-size', 'mux', 'splits', 'pane', 'profile', 'project', 'cmd', 'edit', 'vi', 'init', 'mosh', 'serial', 'http', 'tftp', 'notify', 'attention', 'copy', 'paste', 'tabicon', 'theme', 'overlay'ZETTA_WORKTREE_ROOT_COMMANDS
+        $_ -in 'benchmark', 'terminal-size', ZETTA_MUX_ROOT_COMMAND_PS 'splits', 'pane', 'profile', 'project', 'cmd', 'edit', 'vi', 'init', 'mosh', 'serial', 'http', 'tftp', 'notify', 'attention', 'copy', 'paste', 'tabicon', 'theme', 'overlay'ZETTA_WORKTREE_ROOT_COMMANDS
     } | Select-Object -First 1
     $worktreeCommand = $false
     $worktreeOperation = ''
@@ -475,7 +479,7 @@ $zettaCompletions = {
         & $zettaSplits
     } elseif ($previous -eq '--replace-pane' -or ($previous -eq '-r' -and $null -eq $subcommand)) {
         if ($wordToComplete -like '-*' -or [string]::IsNullOrEmpty($wordToComplete)) {
-            '--help', '--version', '--config', '--keymap', '--profile', '--split', '--theme', '--no-mux', '--new-window', '--command'
+            '--help', '--version', '--config', '--keymap', '--profile', '--split', '--theme', ZETTA_NO_MUX_OPTION_PS '--new-window', '--command'
         } else {
             @()
         }
@@ -558,6 +562,7 @@ $zettaCompletions = {
         $profileArguments = @($words | Select-Object -Skip ($profileIndex + 2) | Where-Object { $_ -notlike '-*' -and -not [string]::IsNullOrEmpty($_) })
         if ($profileArguments.Count -ge 2 -or ($profileArguments.Count -eq 1 -and [string]::IsNullOrEmpty($wordToComplete))) { & $zettaProfileThemes $configArguments }
         else { & $zettaProfiles $configArguments }
+# ZETTA_ZMUX_INTEGRATION_BEGIN
     } elseif ($subcommand -eq 'mux' -and $words.Count -ge 3 -and $words[2] -eq 'attach' -and $wordToComplete -notlike '-*') {
         if ($previous -in '--ssh-target', '-H') {
             & $zettaSshTargets
@@ -574,6 +579,7 @@ $zettaCompletions = {
         (-not $noMux -and $words[2] -in 'share', 'unshare', 'kill', 'forget')
     ) -and $wordToComplete -notlike '-*') {
         if ($words[2] -eq 'resume') { & $zmuxRestorableIds } else { & $zmuxSessionIds }
+# ZETTA_ZMUX_INTEGRATION_END
 # ZETTA_WORKTREE_INTEGRATION_BEGIN
     } elseif ZETTA_WORKTREE_COMPLETION_CHECK {
         if ([string]::IsNullOrEmpty($worktreeOperation)) {
@@ -606,7 +612,7 @@ $zettaCompletions = {
         }
 # ZETTA_WORKTREE_INTEGRATION_END
     } elseif ($null -eq $subcommand) {
-        'benchmark', 'terminal-size', 'mux', 'profile', 'project', 'cmd', 'splits', 'pane', 'edit', 'vi', 'init', 'mosh', 'serial', 'http', 'tftp', 'notify', 'attention', 'copy', 'paste', 'tabicon', 'theme', 'overlay'ZETTA_WORKTREE_ROOT_COMMANDS, '--help', '--version', '--config', '--keymap', '--profile', '--split', '--replace-pane', '--theme', '--no-mux', '--new-window', '--command'
+        'benchmark', 'terminal-size', ZETTA_MUX_ROOT_COMMAND_PS 'profile', 'project', 'cmd', 'splits', 'pane', 'edit', 'vi', 'init', 'mosh', 'serial', 'http', 'tftp', 'notify', 'attention', 'copy', 'paste', 'tabicon', 'theme', 'overlay'ZETTA_WORKTREE_ROOT_COMMANDS, '--help', '--version', '--config', '--keymap', '--profile', '--split', '--replace-pane', '--theme', ZETTA_NO_MUX_OPTION_PS '--new-window', '--command'
     } else {
         switch ($subcommand) {
             'benchmark' {
@@ -620,6 +626,7 @@ $zettaCompletions = {
             'edit' { '--delete-after', '--help' }
             'vi' { '--help' }
         'mosh' { '--client', '--server', '--predict', '-a', '-n', '-o', '--predict-overwrite', '--no-predict-overwrite', '-k', '--keep-alive', '-4', '-6', '--family', '-p', '--port', '--bind-server', '--ssh', '--ssh-pty', '--no-ssh-pty', '--init', '--no-init', '--local', '--experimental-remote-ip', '-h', '--help', '-V', '--version', '--' }
+# ZETTA_ZMUX_INTEGRATION_BEGIN
             'mux' {
                 if ($words.Count -le 2) {
                     if ($noMux) { 'list', 'reconnect', '--json', '--help', '--version' }
@@ -631,6 +638,7 @@ $zettaCompletions = {
                 elseif ($words[2] -in 'resume', 'reconnect') { '--identity', '--help' }
                 else { '--json', '--ids-only', '--ssh-target', '--port', '--help' }
             }
+# ZETTA_ZMUX_INTEGRATION_END
             'splits' { '--help' }
             'pane' {
                 if ($words.Count -gt 2 -and $words[2] -eq 'wait') {
@@ -779,7 +787,9 @@ $zettaCompletions = {
 
 Register-ArgumentCompleter -Native -CommandName zetta -ScriptBlock $zettaCompletions
 Register-ArgumentCompleter -Native -CommandName zosh -ScriptBlock $zettaCompletions
+# ZETTA_ZMUX_INTEGRATION_BEGIN
 Register-ArgumentCompleter -Native -CommandName zmux -ScriptBlock $zettaCompletions
+# ZETTA_ZMUX_INTEGRATION_END
 Register-ArgumentCompleter -CommandName ztftp -ScriptBlock $zettaCompletions
 Register-ArgumentCompleter -CommandName zntfy -ScriptBlock $zettaCompletions
 Register-ArgumentCompleter -CommandName zcopy -ScriptBlock $zettaCompletions

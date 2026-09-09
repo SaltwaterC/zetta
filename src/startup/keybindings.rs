@@ -813,25 +813,31 @@ fn native_macos_menus(
     // Keep Window separate from the first, application-owned menu and preserve
     // the standard Minimize/Zoom/separator shape that AppKit augments with its
     // native Move & Resize commands.
+    let mut application_items = vec![
+        MenuItem::action("New Tab", NewTab),
+        MenuItem::action("New Window", NewWindow),
+        MenuItem::separator(),
+        MenuItem::action("Command Palette", ToggleCommandPalette),
+        MenuItem::action("Set as Default Terminal", SetDefaultTerminal)
+            .checked(crate::default_terminal::is_default_terminal()),
+        MenuItem::action("Open Settings", ToggleSettings),
+        MenuItem::action("Open Themes", OpenThemes),
+        MenuItem::action("Open Keymap", OpenKeymap),
+        MenuItem::action("Open Templates", OpenTemplates),
+        MenuItem::action("Open Projects", OpenProjects),
+        MenuItem::separator(),
+        MenuItem::action("Close Tab", CloseTab),
+        MenuItem::action("Close Window", CloseWindow),
+        MenuItem::action("Close All Windows", CloseAllWindows),
+    ];
+    #[cfg(feature = "zmux")]
+    application_items.insert(
+        9,
+        MenuItem::action("Open Remote Session", OpenRemoteSession),
+    );
+
     [
-        Menu::new("Zetta").items([
-            MenuItem::action("New Tab", NewTab),
-            MenuItem::action("New Window", NewWindow),
-            MenuItem::separator(),
-            MenuItem::action("Command Palette", ToggleCommandPalette),
-            MenuItem::action("Set as Default Terminal", SetDefaultTerminal)
-                .checked(crate::default_terminal::is_default_terminal()),
-            MenuItem::action("Open Settings", ToggleSettings),
-            MenuItem::action("Open Themes", OpenThemes),
-            MenuItem::action("Open Keymap", OpenKeymap),
-            MenuItem::action("Open Templates", OpenTemplates),
-            MenuItem::action("Open Projects", OpenProjects),
-            MenuItem::action("Open Remote Session", OpenRemoteSession),
-            MenuItem::separator(),
-            MenuItem::action("Close Tab", CloseTab),
-            MenuItem::action("Close Window", CloseWindow),
-            MenuItem::action("Close All Windows", CloseAllWindows),
-        ]),
+        Menu::new("Zetta").items(application_items),
         profile_menu,
         Menu::new("Window").items([
             MenuItem::action("Minimize", MinimizeWindow),

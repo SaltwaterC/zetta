@@ -56,6 +56,7 @@ pub(crate) enum StartupMode {
     /// `zmux` binary cannot accept different arguments. Startup supplies the
     /// effective identity as a default for the commands that can need one; an
     /// explicit `-i/--identity` adds to it rather than replacing it.
+    #[cfg(feature = "zmux")]
     Mux(Vec<OsString>),
     SetTabIcon {
         icon: Option<IconName>,
@@ -141,7 +142,7 @@ impl StartupArgs {
             split: None,
             replace_pane: false,
             theme_override: None,
-            no_mux: false,
+            no_mux: !cfg!(feature = "zmux"),
             mode,
             profile_report: None,
             profile_duration: None,
@@ -231,7 +232,10 @@ fn parse_subcommand(arguments: &[OsString]) -> Result<Option<StartupArgs>> {
         "attention" => parse_attention_subcommand(rest)?,
         "benchmark" => parse_benchmark_subcommand(rest)?,
         "terminal-size" => parse_terminal_size_subcommand(rest)?,
+        #[cfg(feature = "zmux")]
         "mux" => StartupArgs::for_mode(StartupMode::Mux(rest.to_vec())),
+        #[cfg(not(feature = "zmux"))]
+        "mux" => anyhow::bail!("zmux support is disabled in this build"),
         "edit" => parse_edit_subcommand(rest)?,
         "vi" => StartupArgs::for_mode(StartupMode::Vi(
             rest.iter()
@@ -265,7 +269,14 @@ fn parse_application_args(arguments: Vec<OsString>) -> Result<StartupArgs> {
     let mut split = None;
     let mut replace_pane = false;
     let mut theme_override = None;
+    #[cfg(feature = "zmux")]
     let mut no_mux = false;
+    #[cfg(not(feature = "zmux"))]
+    let no_mux = true;
+    #[cfg(feature = "zmux")]
+    let mut explicit_no_mux = false;
+    #[cfg(not(feature = "zmux"))]
+    let explicit_no_mux = false;
     #[cfg(windows)]
     let mut mode = StartupMode::Application;
     #[cfg(not(windows))]
@@ -316,9 +327,11 @@ fn parse_application_args(arguments: Vec<OsString>) -> Result<StartupArgs> {
                         .into_owned(),
                 );
             }
+            #[cfg(feature = "zmux")]
             "--no-mux" | "-n" => {
                 anyhow::ensure!(!no_mux, "--no-mux may only be specified once");
                 no_mux = true;
+                explicit_no_mux = true;
             }
             "--new-window" | "-w" => {
                 anyhow::ensure!(
@@ -409,7 +422,7 @@ fn parse_application_args(arguments: Vec<OsString>) -> Result<StartupArgs> {
         "--theme requires --profile"
     );
     anyhow::ensure!(
-        !no_mux || matches!(mode, StartupMode::Application | StartupMode::Command(_)),
+        !explicit_no_mux || matches!(mode, StartupMode::Application | StartupMode::Command(_)),
         "--no-mux cannot be combined with another startup mode"
     );
     if mode == StartupMode::NewWindow {
@@ -433,7 +446,10 @@ fn parse_application_args(arguments: Vec<OsString>) -> Result<StartupArgs> {
             theme_override.is_none(),
             "--new-window cannot be combined with --theme"
         );
-        anyhow::ensure!(!no_mux, "--new-window cannot be combined with --no-mux");
+        anyhow::ensure!(
+            !explicit_no_mux,
+            "--new-window cannot be combined with --no-mux"
+        );
     }
     Ok(StartupArgs {
         config_path: config,
@@ -511,7 +527,9 @@ fn profile_subcommand_index(arguments: &[OsString]) -> Option<usize> {
             | "--theme" | "-t" => {
                 index = index.checked_add(2)?;
             }
-            "--replace-pane" | "-r" | "--no-mux" | "-n" => index += 1,
+            "--replace-pane" | "-r" => index += 1,
+            #[cfg(feature = "zmux")]
+            "--no-mux" | "-n" => index += 1,
             "--command" | "-e" => return None,
             "--help" | "-h" | "--version" | "-v" => index += 1,
             "profile" => return Some(index),

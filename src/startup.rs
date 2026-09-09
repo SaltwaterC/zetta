@@ -211,6 +211,7 @@ fn dispatch_startup_mode(args: &StartupArgs) -> Option<Result<()>> {
         StartupMode::ListThemes => cli_modes::list_themes(),
         StartupMode::ListPaneSplits => cli_modes::list_pane_splits(),
         StartupMode::SetPaneOverlay(request) => cli_modes::set_pane_overlay(request.clone()),
+        #[cfg(feature = "zmux")]
         StartupMode::Mux(arguments) => {
             cli_modes::run_mux_command(arguments, args.config_path.clone())
         }
@@ -654,6 +655,7 @@ fn initialize_process_state(
     });
     start_configuration_watcher(cx);
     silent_mode::start_observer(cx);
+    #[cfg(feature = "zmux")]
     if !launch.no_mux {
         start_multiplexer_session_watcher(cx);
     }

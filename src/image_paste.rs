@@ -7,14 +7,15 @@ use gpui::{Image, ImageFormat};
 
 const MAX_IMAGE_DIMENSION: u32 = 16_384;
 const MAX_DECODED_IMAGE_BYTES: u64 = 256 * 1024 * 1024;
+const MAX_IMAGE_BYTES: usize = 64 * 1024 * 1024;
 
 /// Converts a supported clipboard raster image to the bounded PNG payload used
 /// by both the local SSH fallback and the session multiplexer.
 pub(crate) fn normalize_image(image: &Image) -> Result<Vec<u8>> {
     anyhow::ensure!(
-        !image.bytes.is_empty() && image.bytes.len() <= zmux::messages::MAX_IMAGE_BYTES,
+        !image.bytes.is_empty() && image.bytes.len() <= MAX_IMAGE_BYTES,
         "clipboard image is empty or larger than {} bytes",
-        zmux::messages::MAX_IMAGE_BYTES
+        MAX_IMAGE_BYTES
     );
     let Some(format) = image_format(image.format) else {
         bail!(
@@ -34,9 +35,9 @@ pub(crate) fn normalize_image(image: &Image) -> Result<Vec<u8>> {
         .write_to(&mut Cursor::new(&mut bytes), image::ImageFormat::Png)
         .context("encoding clipboard image as PNG")?;
     anyhow::ensure!(
-        !bytes.is_empty() && bytes.len() <= zmux::messages::MAX_IMAGE_BYTES,
+        !bytes.is_empty() && bytes.len() <= MAX_IMAGE_BYTES,
         "normalized clipboard image is larger than {} bytes",
-        zmux::messages::MAX_IMAGE_BYTES
+        MAX_IMAGE_BYTES
     );
     Ok(bytes)
 }

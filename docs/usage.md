@@ -1,5 +1,10 @@
 # Using Zetta
 
+The default build includes the `zmux` session multiplexer. A build without
+the Cargo `zmux` feature keeps background sessions in the owning Zetta
+process, so local PTYs are the only session backend and `-n`/`--no-mux` is not
+an available option.
+
 ## Terminal size
 
 Run `zetta terminal-size` to print the current terminal width in columns and
