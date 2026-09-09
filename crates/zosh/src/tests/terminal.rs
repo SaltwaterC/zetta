@@ -53,3 +53,25 @@ fn unusable_window_dimensions_use_moshs_fallback() {
     assert_eq!(usable_size((0, 24)), (80, 24));
     assert_eq!(usable_size((120, 40)), (120, 40));
 }
+
+#[test]
+fn color_capability_prefers_truecolor_and_keeps_term_fallbacks() {
+    assert_eq!(
+        color_count_from_environment(Some("xterm-256color"), None),
+        256
+    );
+    assert_eq!(color_count_from_environment(Some("xterm-color"), None), 8);
+    assert_eq!(color_count_from_environment(Some("dumb"), None), 0);
+    assert_eq!(
+        color_count_from_environment(Some("xterm-256color"), Some("truecolor")),
+        1 << 15
+    );
+    assert_eq!(
+        color_count_from_environment(Some("xterm"), Some("24bit")),
+        1 << 15
+    );
+    assert_eq!(
+        color_count_from_environment(Some("xterm-256color"), Some("ansi")),
+        256
+    );
+}

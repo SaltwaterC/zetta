@@ -71,8 +71,8 @@ assert_path_once() {
 make_tool() {
     tool_directory=$1
     mkdir -p "$tool_directory"
-    printf '#!/bin/sh\nexit 0\n' > "$tool_directory/mosh-server"
-    chmod 755 "$tool_directory/mosh-server"
+    printf '#!/bin/sh\nexit 0\n' > "$tool_directory/zosh-server"
+    chmod 755 "$tool_directory/zosh-server"
 }
 
 install_legacy_export() {
@@ -115,9 +115,9 @@ test_zsh() {
         '# Added by Zetta to make the installed CLI available.' \
         'legacy zsh PATH marker was not migrated'
     zsh_result=$(env -i HOME="$zsh_home" ZDOTDIR="$zsh_directory" \
-        PATH=/usr/bin:/bin zsh -c 'command -v mosh-server')
-    assert_path_result "$zsh_result" "$zsh_bin/mosh-server" \
-        'zsh noninteractive commands cannot find mosh-server'
+        PATH=/usr/bin:/bin zsh -c 'command -v zosh-server')
+    assert_path_result "$zsh_result" "$zsh_bin/zosh-server" \
+        'zsh noninteractive commands cannot find zosh-server'
 
     zshenv_before=$(cksum "$zshenv_target")
     zshrc_before=$(cksum "$zsh_home/.zshrc")
@@ -181,9 +181,9 @@ test_bash() {
     assert_path_once "$bash_login_path" "$bash_bin" \
         'Bash login startup did not add exactly one installed PATH entry'
     bash_command=$(env -i HOME="$bash_home" PATH=/usr/bin:/bin \
-        BASH_ENV="$bash_home/.bashrc" bash -c 'command -v mosh-server')
-    assert_path_result "$bash_command" "$bash_bin/mosh-server" \
-        'BASH_ENV commands cannot find mosh-server'
+        BASH_ENV="$bash_home/.bashrc" bash -c 'command -v zosh-server')
+    assert_path_result "$bash_command" "$bash_bin/zosh-server" \
+        'BASH_ENV commands cannot find zosh-server'
 
     bashrc_before=$(cksum "$bashrc_target")
     bash_profile_before=$(cksum "$bash_home/.bash_profile")
@@ -225,9 +225,9 @@ test_fish() {
     assert_file_lacks_text "$fish_config_target" 'fish_add_path -m' \
         'legacy fish PATH command was not migrated'
     fish_command=$(env -i HOME="$fish_home" PATH=/usr/bin:/bin \
-        fish -c 'command -v mosh-server')
-    assert_path_result "$fish_command" "$fish_bin/mosh-server" \
-        'fish commands cannot find mosh-server'
+        fish -c 'command -v zosh-server')
+    assert_path_result "$fish_command" "$fish_bin/zosh-server" \
+        'fish commands cannot find zosh-server'
 
     fish_config_before=$(cksum "$fish_config_target")
     HOME="$fish_home" SHELL=/usr/bin/fish sh "$installer" "$fish_bin" >/dev/null
@@ -252,9 +252,9 @@ test_posix_login() {
 
     HOME="$posix_home" SHELL=/bin/other-posix sh "$installer" "$posix_bin"
     posix_command=$(env -i HOME="$posix_home" PATH=/usr/bin:/bin \
-        sh -l -c 'command -v mosh-server')
-    assert_path_result "$posix_command" "$posix_bin/mosh-server" \
-        'fallback POSIX login shell cannot find mosh-server'
+        sh -l -c 'command -v zosh-server')
+    assert_path_result "$posix_command" "$posix_bin/zosh-server" \
+        'fallback POSIX login shell cannot find zosh-server'
     assert_file_contains "$posix_home/.profile" '# ZETTA MANAGED PATH BEGIN' \
         'fallback POSIX profile was not updated'
 

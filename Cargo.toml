@@ -44,9 +44,9 @@ tftp-client = []
 notifications = ["dep:notify-rust", "dep:cpal", "dep:mac-usernotifications", "dep:ashpd"]
 clipboard = ["dep:arboard"]
 worktree = ["dep:zwt", "zwt/recursive-submodules"]
-mosh = ["mosh-client", "mosh-server"]
+mosh = ["mosh-client", "zosh-server"]
 mosh-client = ["dep:zosh"]
-mosh-server = ["dep:flate2", "dep:moshcatty", "dep:portable-pty", "dep:vt100"]
+zosh-server = ["dep:flate2", "dep:moshcatty", "dep:portable-pty", "dep:vt100"]
 
 [[bin]]
 name = "zetta-gui"
@@ -76,9 +76,9 @@ path = "src/bin/zosh.rs"
 required-features = ["mosh-client"]
 
 [[bin]]
-name = "mosh-server"
+name = "zosh-server"
 path = "crates/zosh/server/src/main.rs"
-required-features = ["mosh-server"]
+required-features = ["zosh-server"]
 
 [dependencies]
 anyhow = "1"

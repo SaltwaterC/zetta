@@ -179,7 +179,7 @@ MAC_CLI_PATH := $(MAC_CLI_DIR)/zetta
 MAC_ZMUX_CLI_PATH := $(MAC_CLI_DIR)/zmux
 MAC_ZWT_CLI_PATH := $(MAC_CLI_DIR)/zwt
 MAC_ZOSH_CLI_PATH := $(MAC_CLI_DIR)/zosh
-MAC_MOSH_SERVER_PATH := $(MAC_CLI_DIR)/mosh-server
+MAC_ZOSH_SERVER_PATH := $(MAC_CLI_DIR)/zosh-server
 LINUX_USER_INSTALL := $(if $(and $(filter Linux,$(UNAME_S)),$(IS_ROOT)),,1)
 LINUX_USER_DATA_DIR := $(DESTDIR)$(HOME)/.local/share
 LINUX_USER_BIN_DIR := $(DESTDIR)$(HOME)/.local/bin
@@ -189,7 +189,7 @@ LINUX_USER_ZWT_PATH := $(LINUX_USER_BIN_DIR)/zwt
 LINUX_USER_ZOSH_PATH := $(LINUX_USER_BIN_DIR)/zosh
 
 WINDOWS_ZWT_ARGS := $(if $(call tool_enabled,$(WORKTREE)), -SourceZwtBinary "$(BUILD_TARGET_DIR)/zwt.exe",)
-WINDOWS_MOSH_ARGS := $(if $(call tool_enabled,$(MOSH)), -SourceZoshBinary "$(BUILD_TARGET_DIR)/zosh.exe" -SourceMoshServerBinary "$(BUILD_TARGET_DIR)/mosh-server.exe",)
+WINDOWS_MOSH_ARGS := $(if $(call tool_enabled,$(MOSH)), -SourceZoshBinary "$(BUILD_TARGET_DIR)/zosh.exe" -SourceZoshServerBinary "$(BUILD_TARGET_DIR)/zosh-server.exe",)
 
 .PHONY: all build fmt test lint check-platforms check-features \
 	check-linux check-windows check-macos \
@@ -497,10 +497,12 @@ install-binary:
 	$(INSTALL) -m 755 "$(BUILD_TARGET_DIR)/zmux" "$(MAC_BUNDLE)/Contents/MacOS/zmux"
 	if [ -n "$(call tool_enabled,$(MOSH))" ]; then \
 		$(INSTALL) -m 755 "$(BUILD_TARGET_DIR)/zosh" "$(MAC_BUNDLE)/Contents/MacOS/zosh"; \
-		$(INSTALL) -m 755 "$(BUILD_TARGET_DIR)/mosh-server" "$(MAC_MOSH_SERVER_PATH)"; \
+		$(INSTALL) -m 755 "$(BUILD_TARGET_DIR)/zosh-server" "$(MAC_ZOSH_SERVER_PATH)"; \
+		$(RM) "$(MAC_CLI_DIR)/mosh-server"; \
 	else \
 		$(RM) "$(MAC_BUNDLE)/Contents/MacOS/zosh"; \
-		$(RM) "$(MAC_MOSH_SERVER_PATH)"; \
+		$(RM) "$(MAC_ZOSH_SERVER_PATH)"; \
+		$(RM) "$(MAC_CLI_DIR)/mosh-server"; \
 	fi
 	if [ -n "$(call tool_enabled,$(WORKTREE))" ]; then \
 		$(INSTALL) -m 755 "$(BUILD_TARGET_DIR)/zwt" "$(MAC_BUNDLE)/Contents/MacOS/zwt"; \
@@ -559,7 +561,8 @@ uninstall-binary:
 	$(RM) "$(MAC_ZMUX_CLI_PATH)"
 	$(RM) "$(MAC_ZWT_CLI_PATH)"
 	$(RM) "$(MAC_ZOSH_CLI_PATH)"
-	$(RM) "$(MAC_MOSH_SERVER_PATH)"
+	$(RM) "$(MAC_ZOSH_SERVER_PATH)"
+	$(RM) "$(MAC_CLI_DIR)/mosh-server"
 	$(RM) "$(MAC_BUNDLE)/Contents/MacOS/zetta"
 	$(RM) "$(MAC_BUNDLE)/Contents/MacOS/zmux"
 	$(RM) "$(MAC_BUNDLE)/Contents/MacOS/zosh"
@@ -596,9 +599,11 @@ install-binary:
 	$(INSTALL) -Dm755 "$(BUILD_TARGET_DIR)/zmux" $(BINDIR)/zmux
 ifneq ($(call tool_enabled,$(MOSH)),)
 	$(INSTALL) -Dm755 "$(BUILD_TARGET_DIR)/zosh" $(BINDIR)/zosh
-	$(INSTALL) -Dm755 "$(BUILD_TARGET_DIR)/mosh-server" $(BINDIR)/mosh-server
+	$(INSTALL) -Dm755 "$(BUILD_TARGET_DIR)/zosh-server" $(BINDIR)/zosh-server
+	$(RM) $(BINDIR)/mosh-server
 else
 	$(RM) $(BINDIR)/zosh
+	$(RM) $(BINDIR)/zosh-server
 	$(RM) $(BINDIR)/mosh-server
 endif
 ifneq ($(call tool_enabled,$(WORKTREE)),)
@@ -684,6 +689,7 @@ uninstall-binary:
 	$(RM) $(BINDIR)/zetta
 	$(RM) $(BINDIR)/zmux
 	$(RM) $(BINDIR)/zosh
+	$(RM) $(BINDIR)/zosh-server
 	$(RM) $(BINDIR)/mosh-server
 	$(RM) $(BINDIR)/zwt
 ifneq ($(LINUX_USER_INSTALL),)

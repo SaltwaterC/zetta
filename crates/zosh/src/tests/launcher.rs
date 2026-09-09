@@ -35,6 +35,7 @@ fn launcher_parser_accepts_the_stock_option_surface() {
     .unwrap();
     assert_eq!(command.client.as_deref(), Some("/opt/mosh-client"));
     assert_eq!(command.server, "/opt/mosh-server");
+    assert!(command.server_explicit);
     assert_eq!(command.prediction, PredictionMode::Experimental);
     assert!(command.predict_overwrite);
     assert_eq!(command.family, AddressFamily::PreferInet6);
@@ -184,7 +185,7 @@ fn bootstrap_parser_rejects_malformed_connect() {
 }
 
 #[test]
-fn fallback_only_matches_unsupported_mosh_server() {
+fn fallback_only_matches_unsupported_server_output() {
     assert!(is_unsupported_server_output(
         "bash: mosh-server: command not found"
     ));
@@ -314,6 +315,29 @@ fn ssh_bootstrap_preserves_target_and_remote_command() {
     assert!(remote.contains("MOSH SSH_CONNECTION"));
     assert!(remote.contains("'zsh' '-lc'"));
     assert!(remote.contains("printf"));
+}
+
+#[test]
+fn default_remote_server_prefers_zosh_server_then_falls_back_to_stock_mosh() {
+    let command = MoshCommand::default();
+    let remote = remote_server_command(&command, 256).unwrap();
+
+    assert!(remote.contains("if command -v zosh-server >/dev/null 2>&1"));
+    let zosh = remote.find("'zosh-server' 'new'").expect("zosh invocation");
+    let stock = remote
+        .find("'mosh-server' 'new'")
+        .expect("stock invocation");
+    assert!(zosh < stock, "zosh-server must be the first candidate");
+}
+
+#[test]
+fn an_explicit_server_command_is_not_replaced_by_default_selection() {
+    let command = parse_args(args(&["--server=/opt/mosh-server", "host"])).unwrap();
+    let remote = remote_server_command(&command, 256).unwrap();
+
+    assert!(!remote.contains("command -v zosh-server"));
+    assert!(remote.starts_with("'/opt/mosh-server' 'new' '-c' '256'"));
+    assert!(remote.contains("'-s'"));
 }
 
 #[test]

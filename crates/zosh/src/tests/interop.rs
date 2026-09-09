@@ -47,7 +47,7 @@ fn a_remote_shell_clear_reaches_the_terminal_without_a_key_binding() {
     pump_until(&mut session, |session, _| session.finished());
 }
 
-// Point ZOSH_TEST_SERVER at either the bundled `mosh-server` or a stock
+// Point ZOSH_TEST_SERVER at either the bundled `zosh-server` or a stock
 // one: the whole claim of `PROTOCOL.md` is that both answer a keep-alive,
 // so this test is meant to be run against each in turn.
 #[test]
@@ -91,6 +91,44 @@ fn an_idle_session_with_keep_alive_is_answered_several_times_a_second() {
         session.screen_text()
     );
 
+    session.shutdown();
+    pump_until(&mut session, |session, _| session.finished());
+}
+
+// The command emits both supported query spellings. The normal Mosh client
+// path observes the decoded host events here; the terminal frontend's byte
+// proxy is covered by the focused client tests because this test has no real
+// outer terminal to answer the queries.
+#[test]
+#[ignore = "requires ZOSH_TEST_SERVER pointing at the bundled Mosh server"]
+fn bundled_server_forwards_osc_color_queries() {
+    let mut session = connect_test_session(&[
+        "new",
+        "-i",
+        "127.0.0.1",
+        "--",
+        "/bin/sh",
+        "-c",
+        "printf '\\033]10;?\\007\\033]11;?\\033\\\\'; printf READY",
+    ]);
+    session.send_resize(80, 24);
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut queries = Vec::new();
+    while Instant::now() < deadline && queries.len() < 2 {
+        for event in session.pump_ready().unwrap() {
+            if let mosh_rs::HostEvent::TerminalQuery { bytes, .. } = event {
+                queries.push(bytes);
+            }
+        }
+        let _ = session.render();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    assert_eq!(
+        queries,
+        vec![b"\x1b]10;?\x07".to_vec(), b"\x1b]11;?\x1b\\".to_vec(),]
+    );
     session.shutdown();
     pump_until(&mut session, |session, _| session.finished());
 }

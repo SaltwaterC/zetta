@@ -790,7 +790,7 @@ function __zetta_ssh_targets
 end
 
 # Whether a Mosh host positional has already been given. Everything after the
-# host is sent to the mosh-server, so no further candidates may be offered
+# host is sent to the Mosh server, so no further candidates may be offered
 # once it is on the command line.
 function __zetta_mosh_host_given
     set -l words (commandline -opc)
@@ -914,7 +914,7 @@ function __zetta_long_options
         case mosh
             printf '%s\t%s\n' \
                 --client 'Use a specific local Mosh client' \
-                --server 'Use a specific remote mosh-server' \
+                --server 'Use a specific remote Mosh server' \
                 --predict 'Prediction mode' \
                 -o 'Allow predictive overwrites' \
                 --predict-overwrite 'Allow predictive overwrites' \
@@ -1169,7 +1169,7 @@ complete -c zetta -s i -r -a 'auto zetta bash zsh fish' -n '__zetta_has_profile_
 complete -c zetta -s r -n '__zetta_has_profile_subcommand; and __zetta_profile_is icon; and __zetta_short_option -r'
 complete -c zetta -n '__zetta_at_subcommand init' -a 'bash fish powershell pwsh zsh'
 complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_given' -l client -r -d 'Use a specific local Mosh client'
-complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_given' -l server -r -d 'Use a specific remote mosh-server'
+complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_given' -l server -r -d 'Use a specific remote Mosh server'
 complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_given' -l predict -r -a 'adaptive always never experimental'
 complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_given' -s o -d 'Allow predictive overwrites'
 complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_given' -l predict-overwrite -d 'Allow predictive overwrites'

@@ -6,12 +6,13 @@
 //! (`old_num -> new_num`) as well as its UserStream diff.  Exposing that here
 //! prevents the PTY layer from replaying a cumulative/retransmitted UserStream.
 
+use crate::terminal_state::TerminalQuery;
 use anyhow::{Result, anyhow};
 use flate2::read::ZlibDecoder;
 use moshcatty::Ocb;
 use moshcatty::crypto::{DIR_TO_CLIENT, DIR_TO_SERVER};
 use moshcatty::fragment::{Assembler, Fragment, MAX_INSTRUCTION_BYTES};
-use moshcatty::pb::TransportInstruction;
+use moshcatty::pb::{HostInstruction, TransportInstruction};
 use moshcatty::transport::Transport;
 use std::io::Read;
 use std::time::Instant;
@@ -33,6 +34,49 @@ pub struct ReceiveOutcome {
     pub authenticated: bool,
     /// Present only when SSP accepted a complete, non-duplicate remote state.
     pub state: Option<ReceivedState>,
+}
+
+/// Encode the standard host instructions together with zosh's optional
+/// terminal-query extension. MoshCatty's host protobuf intentionally only
+/// knows stock fields, so extension instructions are appended as ordinary
+/// repeated `HostMessage.instruction` fields. Stock clients skip field 20.
+pub(crate) fn encode_host_message(
+    instructions: &[HostInstruction],
+    queries: &[TerminalQuery],
+) -> Vec<u8> {
+    let mut message = HostInstruction::encode_message(instructions);
+    for query in queries {
+        let mut query_message = Vec::new();
+        append_tag_varint(&mut query_message, 1, query.id);
+        append_tag_bytes(&mut query_message, 2, &query.bytes);
+
+        let mut instruction = Vec::new();
+        append_tag_bytes(&mut instruction, 20, &query_message);
+        append_tag_bytes(&mut message, 1, &instruction);
+    }
+    message
+}
+
+const WIRE_VARINT: u64 = 0;
+const WIRE_BYTES: u64 = 2;
+
+fn append_tag_varint(buffer: &mut Vec<u8>, field: u64, value: u64) {
+    append_varint(buffer, (field << 3) | WIRE_VARINT);
+    append_varint(buffer, value);
+}
+
+fn append_tag_bytes(buffer: &mut Vec<u8>, field: u64, value: &[u8]) {
+    append_varint(buffer, (field << 3) | WIRE_BYTES);
+    append_varint(buffer, value.len() as u64);
+    buffer.extend_from_slice(value);
+}
+
+fn append_varint(buffer: &mut Vec<u8>, mut value: u64) {
+    while value >= 0x80 {
+        buffer.push((value as u8) | 0x80);
+        value >>= 7;
+    }
+    buffer.push(value as u8);
 }
 
 /// Stock-protocol server transport.  MoshCatty supplies the protocol-v2 OCB,
@@ -238,5 +282,30 @@ mod tests {
         assert_eq!(state.old_num, 7);
         assert_eq!(state.new_num, 11);
         assert_eq!(state.diff, b"user-stream-diff");
+    }
+
+    #[test]
+    fn terminal_query_extension_is_ignored_by_stock_host_decoder() {
+        let encoded = encode_host_message(
+            &[],
+            &[TerminalQuery {
+                id: 7,
+                bytes: b"\x1b]10;?\x07".to_vec(),
+            }],
+        );
+
+        assert_eq!(
+            encoded,
+            vec![
+                0x0A, 0x0E, 0xA2, 0x01, 0x0B, 0x08, 0x07, 0x12, 0x07, 0x1B, 0x5D, 0x31, 0x30, 0x3B,
+                0x3F, 0x07,
+            ]
+        );
+        let stock = HostInstruction::decode_message(&encoded).unwrap();
+        assert_eq!(stock.len(), 1);
+        assert!(stock[0].hoststring.is_empty());
+        assert_eq!(stock[0].width, 0);
+        assert_eq!(stock[0].height, 0);
+        assert_eq!(stock[0].echo_ack_num, -1);
     }
 }

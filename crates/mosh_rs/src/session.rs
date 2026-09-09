@@ -7,6 +7,7 @@
 //! bytes, so the same session drives a real PTY, a test, or an
 //! embedding application.
 
+use std::collections::HashSet;
 use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
 use std::time::{Duration, Instant};
 
@@ -155,6 +156,9 @@ pub struct MoshSession<S: Screen> {
     last_roundtrip_success: u64,
     /// Set once the peer's shutdown state has been seen.
     peer_shut_down: bool,
+    /// Query IDs already handed to the outer terminal. Host states are
+    /// cumulative, so the same query can arrive in several accepted states.
+    seen_terminal_queries: HashSet<u64>,
 }
 
 impl<S: Screen> MoshSession<S> {
@@ -187,6 +191,7 @@ impl<S: Screen> MoshSession<S> {
             prediction: PredictionEngine::new(),
             last_roundtrip_success: 0,
             peer_shut_down: false,
+            seen_terminal_queries: HashSet::new(),
         })
     }
 
@@ -220,6 +225,13 @@ impl<S: Screen> MoshSession<S> {
             self.prediction.new_user_bytes(bytes, screen, now);
         }
         self.sender.state_mut().push_bytes(bytes);
+    }
+
+    /// Queue a response returned by the local terminal for a forwarded query.
+    /// Responses bypass prediction and are still part of the cumulative
+    /// UserStream, so a retransmitted state cannot write one twice remotely.
+    pub fn send_terminal_response(&mut self, bytes: &[u8]) {
+        self.sender.state_mut().push_terminal_response(bytes);
     }
 
     /// What to prepend to a window title before passing it on. Empty
@@ -684,11 +696,12 @@ impl<S: Screen> MoshSession<S> {
                 self.sender
                     .set_ack_num(self.receiver.latest(), has_data, now);
             }
-            let events = if has_data {
+            let mut events = if has_data {
                 parse_host_diff(&diff)?
             } else {
                 Vec::new()
             };
+            self.deduplicate_terminal_queries(&mut events);
 
             // EVERY state gets a screen, including one whose diff
             // changed nothing on it: the server is free to compute
@@ -718,6 +731,7 @@ impl<S: Screen> MoshSession<S> {
                     HostEvent::EchoAck(num) => {
                         self.prediction.set_local_frame_late_acked(*num);
                     }
+                    HostEvent::TerminalQuery { .. } => {}
                 }
             }
             // The diff belongs to the state it was computed FROM,
@@ -729,6 +743,13 @@ impl<S: Screen> MoshSession<S> {
             }
             Ok(events)
         }
+    }
+
+    fn deduplicate_terminal_queries(&mut self, events: &mut Vec<HostEvent>) {
+        events.retain(|event| match event {
+            HostEvent::TerminalQuery { id, .. } => self.seen_terminal_queries.insert(*id),
+            _ => true,
+        });
     }
 }
 
@@ -874,6 +895,34 @@ mod tests {
         let (cells, cursor) = session.compose(&[]);
         assert!(cells.is_empty());
         assert_eq!(cursor, OverlayCursor::Unchanged);
+    }
+
+    #[test]
+    fn retransmitted_terminal_query_ids_are_suppressed_without_assuming_order() {
+        let mut session = offline_session();
+        let mut events = vec![
+            HostEvent::TerminalQuery {
+                id: 2,
+                bytes: b"two".to_vec(),
+            },
+            HostEvent::TerminalQuery {
+                id: 1,
+                bytes: b"one".to_vec(),
+            },
+            HostEvent::TerminalQuery {
+                id: 2,
+                bytes: b"two".to_vec(),
+            },
+        ];
+        session.deduplicate_terminal_queries(&mut events);
+        assert_eq!(events.len(), 2);
+
+        let mut retransmission = vec![HostEvent::TerminalQuery {
+            id: 1,
+            bytes: b"one".to_vec(),
+        }];
+        session.deduplicate_terminal_queries(&mut retransmission);
+        assert!(retransmission.is_empty());
     }
 
     #[test]

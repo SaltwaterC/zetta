@@ -217,7 +217,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "mosh-server-rs"
+name = "zosh-server-rs"
 version = "0.1.0"
 dependencies = [
  "anyhow",

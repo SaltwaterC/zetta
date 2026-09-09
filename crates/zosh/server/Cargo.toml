@@ -1,14 +1,14 @@
 [package]
-name = "mosh-server-rs"
+name = "zosh-server-rs"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.95"
-description = "Cross-platform Rust mosh-server implementation for Linux, macOS, and Windows"
+description = "Cross-platform Rust zosh-server implementation for Linux, macOS, and Windows"
 license = "GPL-3.0-or-later"
 publish = false
 
 [[bin]]
-name = "mosh-server"
+name = "zosh-server"
 path = "src/main.rs"
 
 [dependencies]

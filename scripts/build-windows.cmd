@@ -26,9 +26,9 @@ if /i "%~1"=="false" exit /b 0
 if /i "%~1"=="no" exit /b 0
 if /i "%~1"=="off" exit /b 0
 set "BINARIES=!BINARIES! --bin zosh"
-set "BINARIES=!BINARIES! --bin mosh-server"
+set "BINARIES=!BINARIES! --bin zosh-server"
 set "VERIFY_ARGS=!VERIFY_ARGS! -ZoshBinaryPath !TARGET_DIR!\zosh.exe"
-set "VERIFY_ARGS=!VERIFY_ARGS! -MoshServerBinaryPath !TARGET_DIR!\mosh-server.exe"
+set "VERIFY_ARGS=!VERIFY_ARGS! -ZoshServerBinaryPath !TARGET_DIR!\zosh-server.exe"
 exit /b 0
 
 :main

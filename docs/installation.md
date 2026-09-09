@@ -24,7 +24,7 @@ Makefile equivalent of Cargo's `--release` flag.
 
 The default build includes the standalone `zwt` Git worktree command and the
 `zetta wt` compatibility route, plus the bundled `zosh` Mosh client and
-`mosh-server`. Set `WORKTREE=0` on both build and install commands to omit the
+`zosh-server`. Set `WORKTREE=0` on both build and install commands to omit the
 worktree command, and `MOSH=0` to omit the bundled Mosh client and server
 executables and the `zetta mosh` compatibility route.
 
@@ -144,7 +144,7 @@ make install
 
 This installs `~/Applications/Zetta.app`, including the Zetta icon and the
 development binaries, and creates `~/.local/bin/zetta`, `~/.local/bin/zmux`,
-`~/.local/bin/zosh`, `~/.local/bin/mosh-server`, and `~/.local/bin/zwt` as
+`~/.local/bin/zosh`, `~/.local/bin/zosh-server`, and `~/.local/bin/zwt` as
 command-line launchers or binaries for the bundled tools.
 It also adds `~/.local/bin` to the installing user's shell startup file so new
 shells can invoke them directly. See [user-local shell PATH setup](#user-local-shell-path-setup)
@@ -157,7 +157,7 @@ MAC_APPLICATIONS_DIR=/Applications`.
 
 ## Windows
 
-The Windows build includes zosh.exe and mosh-server.exe beside the Zetta and
+The Windows build includes zosh.exe and zosh-server.exe beside the Zetta and
 zmux executables. The installer copies them into the application directory so
 zetta mosh can find the standalone Mosh client and the local Mosh server can be
 run directly.
@@ -178,7 +178,7 @@ The build produces the following runtime files in `target\debug`:
 - `zetta-gui.exe`, the no-console launcher used by the Start Menu shortcut
 - `zmux.exe`, the standalone background-session multiplexer
 - `zosh.exe`, the bundled standalone Mosh client
-- `mosh-server.exe`, the bundled Rust Mosh server
+- `zosh-server.exe`, the bundled Rust Mosh server
 - `zwt.exe`, the standalone Git worktree executable
 - `conpty.dll`
 - `OpenConsole.exe`
@@ -199,7 +199,7 @@ This copies the runtime to `%LOCALAPPDATA%\Programs\Zetta`, adds that directory
 to the per-user Windows `PATH`, and creates a Start Menu shortcut. The PATH
 change is inherited by new processes, so open a new console (or restart a
 process that was already running) before invoking `zetta`, `zmux`, `zosh`,
-`mosh-server`, or `zwt`. The shortcut launches `zetta-gui.exe`, which starts
+`zosh-server`, or `zwt`. The shortcut launches `zetta-gui.exe`, which starts
 the console-native executable without opening an extra console window.
 
 Zetta can be reinstalled while it is running. Windows keeps the previous
@@ -229,11 +229,12 @@ Additional installation targets are:
 
 ## Linux desktop integration
 
-Linux installs zosh and mosh-server beside zetta and zmux, and also creates a
+Linux installs zosh and zosh-server beside zetta and zmux, and also creates a
 user-local zosh symlink when using the user-local install. The standalone Mosh
 client is therefore available directly as zosh and is also resolved
-automatically by zetta mosh; the server is available as mosh-server for local
-sessions and for copying to remote hosts.
+automatically by zetta mosh; the server is available as zosh-server for local
+sessions and for copying to remote hosts. On a remote host, zetta mosh tries
+zosh-server before falling back to stock mosh-server.
 
 Zetta uses `Zetta` as its Wayland application ID and X11 `WM_CLASS`. Build and
 install the development binary, desktop entry, and icons for the current user with:

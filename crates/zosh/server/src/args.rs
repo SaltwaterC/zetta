@@ -49,7 +49,7 @@ pub enum ParseOutcome {
 
 pub fn parse(raw: Vec<OsString>) -> Result<ParseOutcome> {
     // Hidden lifecycle flags are recognized only before the command separator.
-    // Strip them before applying stock mosh-server's "new" argument semantics.
+    // Strip them before applying the bundled zosh-server's "new" argument semantics.
     let mut filtered = Vec::with_capacity(raw.len());
     let mut foreground = false;
     let mut internal_child = false;
@@ -86,7 +86,7 @@ pub fn parse(raw: Vec<OsString>) -> Result<ParseOutcome> {
         i += 1;
     }
 
-    // Stock mosh-server historically accepts a no-option legacy invocation.
+    // The bundled server historically accepts a no-option legacy invocation.
     // This implementation intentionally treats an invocation without "new" as
     // the default server unless explicit --help/--version is requested.
     if !option_mode {
@@ -100,7 +100,7 @@ pub fn parse(raw: Vec<OsString>) -> Result<ParseOutcome> {
             return Ok(ParseOutcome::Version);
         }
         bail!(
-            "options require 'new' as the first non-internal argument; try 'mosh-server new --help'"
+            "options require 'new' as the first non-internal argument; try 'zosh-server new --help'"
         );
     }
 
@@ -215,8 +215,8 @@ pub fn parse_ssh_server_ip(value: &str) -> Result<IpAddr> {
 }
 
 pub fn usage() -> &'static str {
-    "Usage: mosh-server [--foreground]\n\
-     mosh-server new [-s] [-v] [-i LOCALADDR] [-p PORT[:PORT2]] [-c COLORS] \
+    "Usage: zosh-server [--foreground]\n\
+     zosh-server new [-s] [-v] [-i LOCALADDR] [-p PORT[:PORT2]] [-c COLORS] \
 [-l NAME=VALUE] [-- COMMAND...]\n\n\
 Options:\n\
   -s              Bind to the server address from SSH_CONNECTION\n\

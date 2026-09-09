@@ -17,7 +17,7 @@ fn main() -> Result<()> {
         }
         args::ParseOutcome::Version => {
             println!(
-                "mosh-server-rs {} (Mosh protocol 2)",
+                "zosh-server-rs {} (Mosh protocol 2)",
                 env!("CARGO_PKG_VERSION")
             );
             Ok(())

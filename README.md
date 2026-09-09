@@ -56,10 +56,11 @@ for active development.
 ## Quick start
 
 The build also produces zosh, Zetta's standalone cross-platform Mosh client,
-and the bundled Rust `mosh-server`. Run either zosh USER@HOST or zetta mosh
+and the bundled Rust `zosh-server`. Run either zosh USER@HOST or zetta mosh
 USER@HOST for interactive remote shells; zetta mosh is a transparent proxy to
-zosh. The launcher starts mosh-server through SSH and falls back to plain SSH
-only when the remote mosh-server is clearly missing or unsupported. Native
+zosh. The launcher prefers `zosh-server` through SSH, falls back to the stock
+`mosh-server` when it is unavailable, and uses plain SSH only when neither
+remote server is clearly usable. Native
 background sessions and zmux remote transport remain SSH because they need
 framed session streams.
 

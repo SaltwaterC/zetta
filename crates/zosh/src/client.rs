@@ -1,6 +1,7 @@
 //! Mosh session loop driven by crossterm.
 
 use std::{
+    collections::VecDeque,
     ffi::OsString,
     io::{self, Read as _, Write},
     sync::{
@@ -30,6 +31,204 @@ use crate::{
 
 const IDLE_WAIT_MS: u64 = 100;
 type ClientSession = MoshSession<DisplayScreen>;
+
+const MAX_TERMINAL_QUERY_SEQUENCE: usize = 4096;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ColorQueryKind {
+    Foreground,
+    Background,
+}
+
+#[derive(Default)]
+struct TerminalQueryProxy {
+    pending: VecDeque<ColorQueryKind>,
+    state: TerminalQueryInputState,
+    sequence: Vec<u8>,
+}
+
+#[derive(Default)]
+enum TerminalQueryInputState {
+    #[default]
+    Ground,
+    Escape,
+    Osc,
+    OscEscape,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ProxiedInput {
+    User(Vec<u8>),
+    TerminalResponse(Vec<u8>),
+}
+
+impl TerminalQueryProxy {
+    fn register_query(&mut self, query: &[u8]) {
+        if let Some(kind) = terminal_color_query_kind(query) {
+            self.pending.push_back(kind);
+        }
+    }
+
+    fn filter(&mut self, bytes: &[u8]) -> Vec<ProxiedInput> {
+        let mut output = Vec::new();
+        for &byte in bytes {
+            self.step(byte, &mut output);
+        }
+        output
+    }
+
+    fn finish(&mut self) -> Vec<ProxiedInput> {
+        let mut output = Vec::new();
+        if !self.sequence.is_empty() {
+            let sequence = std::mem::take(&mut self.sequence);
+            push_user(&mut output, &sequence);
+        }
+        self.state = TerminalQueryInputState::Ground;
+        output
+    }
+
+    fn step(&mut self, byte: u8, output: &mut Vec<ProxiedInput>) {
+        match self.state {
+            TerminalQueryInputState::Ground => {
+                if byte == 0x1b {
+                    self.start(TerminalQueryInputState::Escape, byte);
+                } else {
+                    push_user_byte(output, byte);
+                }
+            }
+            TerminalQueryInputState::Escape => match byte {
+                b']' => {
+                    self.push_sequence_byte(byte, output);
+                    self.state = TerminalQueryInputState::Osc;
+                }
+                _ => {
+                    let sequence = std::mem::take(&mut self.sequence);
+                    push_user(output, &sequence);
+                    self.state = TerminalQueryInputState::Ground;
+                    self.step(byte, output);
+                }
+            },
+            TerminalQueryInputState::Osc => match byte {
+                0x07 => {
+                    if self.push_sequence_byte(byte, output) {
+                        self.finish_sequence(output);
+                    }
+                }
+                0x18 | 0x1a => {
+                    let sequence = std::mem::take(&mut self.sequence);
+                    push_user(output, &sequence);
+                    self.state = TerminalQueryInputState::Ground;
+                }
+                0x1b => {
+                    if self.push_sequence_byte(byte, output) {
+                        self.state = TerminalQueryInputState::OscEscape;
+                    }
+                }
+                _ => {
+                    self.push_sequence_byte(byte, output);
+                }
+            },
+            TerminalQueryInputState::OscEscape => {
+                if !self.push_sequence_byte(byte, output) {
+                    return;
+                }
+                if byte == b'\\' {
+                    self.finish_sequence(output);
+                } else if byte == b']' {
+                    self.start_osc();
+                } else {
+                    self.state = TerminalQueryInputState::Osc;
+                }
+            }
+        }
+    }
+
+    fn push_sequence_byte(&mut self, byte: u8, output: &mut Vec<ProxiedInput>) -> bool {
+        if self.sequence.len() >= MAX_TERMINAL_QUERY_SEQUENCE {
+            let sequence = std::mem::take(&mut self.sequence);
+            push_user(output, &sequence);
+            self.state = TerminalQueryInputState::Ground;
+            self.step(byte, output);
+            return false;
+        }
+        self.sequence.push(byte);
+        true
+    }
+
+    fn finish_sequence(&mut self, output: &mut Vec<ProxiedInput>) {
+        let sequence = std::mem::take(&mut self.sequence);
+        self.state = TerminalQueryInputState::Ground;
+        let response_kind = terminal_color_response_kind(&sequence);
+        let matching_query =
+            response_kind.and_then(|kind| self.pending.iter().position(|pending| *pending == kind));
+        if let Some(query_index) = matching_query {
+            self.pending.remove(query_index);
+            output.push(ProxiedInput::TerminalResponse(sequence));
+        } else {
+            push_user(output, &sequence);
+        }
+    }
+
+    fn start(&mut self, state: TerminalQueryInputState, byte: u8) {
+        self.sequence.clear();
+        self.sequence.push(byte);
+        self.state = state;
+    }
+
+    fn start_osc(&mut self) {
+        self.sequence.clear();
+        self.sequence.extend_from_slice(b"\x1b]");
+        self.state = TerminalQueryInputState::Osc;
+    }
+}
+
+fn push_user(output: &mut Vec<ProxiedInput>, bytes: &[u8]) {
+    if bytes.is_empty() {
+        return;
+    }
+    match output.last_mut() {
+        Some(ProxiedInput::User(existing)) => existing.extend_from_slice(bytes),
+        _ => output.push(ProxiedInput::User(bytes.to_vec())),
+    }
+}
+
+fn push_user_byte(output: &mut Vec<ProxiedInput>, byte: u8) {
+    match output.last_mut() {
+        Some(ProxiedInput::User(existing)) => existing.push(byte),
+        _ => output.push(ProxiedInput::User(vec![byte])),
+    }
+}
+
+fn terminal_color_query_kind(sequence: &[u8]) -> Option<ColorQueryKind> {
+    let (kind, value) = terminal_color_osc(sequence)?;
+    (value == b"?").then_some(kind)
+}
+
+fn terminal_color_response_kind(sequence: &[u8]) -> Option<ColorQueryKind> {
+    let (kind, value) = terminal_color_osc(sequence)?;
+    (!value.is_empty() && value != b"?").then_some(kind)
+}
+
+fn terminal_color_osc(sequence: &[u8]) -> Option<(ColorQueryKind, &[u8])> {
+    if !sequence.starts_with(b"\x1b]") {
+        return None;
+    }
+    let payload_end = if sequence.ends_with(b"\x07") {
+        sequence.len().checked_sub(1)?
+    } else if sequence.ends_with(b"\x1b\\") {
+        sequence.len().checked_sub(2)?
+    } else {
+        return None;
+    };
+    let payload = sequence.get(2..payload_end)?;
+    let separator = payload.iter().position(|byte| *byte == b';')?;
+    let kind = match &payload[..separator] {
+        b"10" => ColorQueryKind::Foreground,
+        b"11" => ColorQueryKind::Background,
+        _ => return None,
+    };
+    Some((kind, &payload[separator + 1..]))
+}
 
 /// Bounds on `--keep-alive=MS`.
 ///
@@ -323,6 +522,7 @@ fn session_loop(
     let started = Instant::now();
     let mut notifier = Notifier::new(escape.name().as_deref());
     let mut stdout = io::stdout();
+    let mut query_proxy = TerminalQueryProxy::default();
     let mut pending_resize = None;
     loop {
         if signals
@@ -367,8 +567,11 @@ fn session_loop(
                     .context("reading terminal input")?;
                 if read == 0 {
                     input_closed = true;
+                    let _ = apply_proxied_input(session, &mut escape_state, query_proxy.finish());
                 } else {
-                    if let Some(action) = apply_input(session, &mut escape_state, &input[..read]) {
+                    if let Some(action) =
+                        apply_input(session, &mut escape_state, &mut query_proxy, &input[..read])
+                    {
                         let columns = size.0;
                         let mut context = ActionContext {
                             session,
@@ -414,7 +617,9 @@ fn session_loop(
             if !input_closed {
                 match receiver.recv_timeout(Duration::from_millis(wait.max(1))) {
                     Ok(bytes) if !bytes.is_empty() => {
-                        if let Some(action) = apply_input(session, &mut escape_state, &bytes) {
+                        if let Some(action) =
+                            apply_input(session, &mut escape_state, &mut query_proxy, &bytes)
+                        {
                             let columns = size.0;
                             let mut context = ActionContext {
                                 session,
@@ -433,6 +638,8 @@ fn session_loop(
                     }
                     Ok(_) | Err(mpsc::RecvTimeoutError::Disconnected) => {
                         input_closed = true;
+                        let _ =
+                            apply_proxied_input(session, &mut escape_state, query_proxy.finish());
                     }
                     Err(mpsc::RecvTimeoutError::Timeout) => {}
                 }
@@ -442,6 +649,8 @@ fn session_loop(
         }
 
         let events = session.pump_ready().context("pumping the Mosh session")?;
+        forward_terminal_queries(&events, &mut query_proxy, &mut stdout)
+            .context("forwarding a terminal query")?;
         let server_size = (session.displayed().cols(), session.displayed().rows());
         let resize_ready = pending_resize.is_some_and(|expected| expected == server_size);
         let server_reported_resize = events_contain_resize(&events);
@@ -554,13 +763,52 @@ fn wait_for_input_or_network(
 fn apply_input(
     session: &mut ClientSession,
     escape: &mut EscapeState,
+    query_proxy: &mut TerminalQueryProxy,
     bytes: &[u8],
 ) -> Option<EscapeAction> {
-    let (send, action) = process_input_bytes(escape, bytes);
-    if !send.is_empty() {
-        session.send_input(&send);
+    apply_proxied_input(session, escape, query_proxy.filter(bytes))
+}
+
+fn apply_proxied_input(
+    session: &mut ClientSession,
+    escape: &mut EscapeState,
+    inputs: Vec<ProxiedInput>,
+) -> Option<EscapeAction> {
+    let mut action = None;
+    for input in inputs {
+        match input {
+            ProxiedInput::User(bytes) => {
+                let (send, candidate) = process_input_bytes(escape, &bytes);
+                if !send.is_empty() {
+                    session.send_input(&send);
+                }
+                if action.is_none() {
+                    action = candidate;
+                }
+            }
+            ProxiedInput::TerminalResponse(bytes) => session.send_terminal_response(&bytes),
+        }
     }
     action
+}
+
+fn forward_terminal_queries<W: Write>(
+    events: &[HostEvent],
+    query_proxy: &mut TerminalQueryProxy,
+    stdout: &mut W,
+) -> io::Result<()> {
+    let mut forwarded = false;
+    for event in events {
+        if let HostEvent::TerminalQuery { bytes, .. } = event {
+            query_proxy.register_query(bytes);
+            stdout.write_all(bytes)?;
+            forwarded = true;
+        }
+    }
+    if forwarded {
+        stdout.flush()?;
+    }
+    Ok(())
 }
 
 fn process_input_bytes(escape: &mut EscapeState, bytes: &[u8]) -> (Vec<u8>, Option<EscapeAction>) {

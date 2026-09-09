@@ -65,7 +65,7 @@ function Invoke-Installer([string]$Action = "InstallBinary") {
         "-SourceMuxBinary", (Join-Path $sourceDirectory "zmux.exe"),
         "-SourcePtyBinary", (Join-Path $sourceDirectory "zmux-pty.exe"),
         "-SourceZoshBinary", (Join-Path $sourceDirectory "zosh.exe"),
-        "-SourceMoshServerBinary", (Join-Path $sourceDirectory "mosh-server.exe"),
+        "-SourceZoshServerBinary", (Join-Path $sourceDirectory "zosh-server.exe"),
         "-InstallDirectory", $installDirectory
     )
     $output = @(& powershell.exe @arguments 2>&1)
@@ -87,7 +87,7 @@ function Set-SourceGeneration([string]$Generation) {
     Write-TestFile (Join-Path $sourceDirectory "zmux.exe") "mux-$Generation"
     Write-TestFile (Join-Path $sourceDirectory "zmux-pty.exe") "pty-$Generation"
     Write-TestFile (Join-Path $sourceDirectory "zosh.exe") "zosh-$Generation"
-    Write-TestFile (Join-Path $sourceDirectory "mosh-server.exe") "mosh-server-$Generation"
+    Write-TestFile (Join-Path $sourceDirectory "zosh-server.exe") "zosh-server-$Generation"
     Write-TestFile (Join-Path $sourceDirectory "conpty.dll") "conpty-$Generation"
     Write-TestFile (Join-Path $sourceDirectory "OpenConsole.exe") "console-$Generation"
 }
@@ -120,11 +120,14 @@ try {
         "User"
     )
     Set-SourceGeneration "first"
+    New-Item -ItemType Directory -Force -Path $installDirectory | Out-Null
+    Write-TestFile (Join-Path $installDirectory "mosh-server.exe") "legacy-mosh-server"
 
     Assert-InstallerSucceeded (Invoke-Installer) "initial install failed"
     Assert-FileContents $installedPty "pty-first" "initial helper was not installed"
     Assert-FileContents (Join-Path $installDirectory "zosh.exe") "zosh-first" "zosh was not installed"
-    Assert-FileContents (Join-Path $installDirectory "mosh-server.exe") "mosh-server-first" "mosh-server was not installed"
+    Assert-FileContents (Join-Path $installDirectory "zosh-server.exe") "zosh-server-first" "zosh-server was not installed"
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $installDirectory "mosh-server.exe"))) "initial install left legacy mosh-server"
     Assert-FileContents $installedPtyVersion "1" "initial helper marker is wrong"
     Assert-UserPathEntries ($unrelatedUserPathEntries + $installDirectory) "initial install disturbed or omitted user PATH entries"
     Assert-UserPathContainsOnce $installDirectory "initial install did not add its executable directory to the user PATH"
@@ -230,7 +233,8 @@ try {
         $_.Equals($installDirectory, [StringComparison]::OrdinalIgnoreCase)
     })) "uninstall left the installed directory in the user PATH"
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $installDirectory "zosh.exe"))) "uninstall left zosh"
-    Assert-True (-not (Test-Path -LiteralPath (Join-Path $installDirectory "mosh-server.exe"))) "uninstall left mosh-server"
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $installDirectory "zosh-server.exe"))) "uninstall left zosh-server"
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $installDirectory "mosh-server.exe"))) "uninstall left legacy mosh-server"
     Assert-True (-not (Test-Path -LiteralPath $installedPtyVersion)) "uninstall left the helper marker"
     Write-Host "Windows installer tests passed."
 } finally {

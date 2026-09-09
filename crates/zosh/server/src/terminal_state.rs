@@ -6,6 +6,7 @@ const CLEAR_SCROLLBACK_MARKER_PREFIX: &[u8] = b"\x1b]777;zosh-clear-scrollback;"
 struct TerminalSnapshot {
     screen: vt100::Screen,
     scrollback_clear_count: u64,
+    query_count: usize,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -203,6 +204,17 @@ pub struct TerminalState {
     base_scrollback_clear_count: u64,
     snapshots: BTreeMap<u64, TerminalSnapshot>,
     max_snapshots: usize,
+    pending_queries: Vec<TerminalQuery>,
+    next_query_id: u64,
+}
+
+/// One OSC 10/11 query that must be answered by the terminal outside the
+/// server's PTY. Queries remain attached to cumulative terminal states until
+/// the client acknowledges them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TerminalQuery {
+    pub id: u64,
+    pub bytes: Vec<u8>,
 }
 
 impl TerminalState {
@@ -218,6 +230,8 @@ impl TerminalState {
             base_scrollback_clear_count: 0,
             snapshots: BTreeMap::new(),
             max_snapshots: 64,
+            pending_queries: Vec::new(),
+            next_query_id: 1,
         }
     }
 
@@ -238,6 +252,22 @@ impl TerminalState {
 
     pub fn cursor_position(&self) -> (u16, u16) {
         self.parser.screen().cursor_position()
+    }
+
+    /// Record a query found in PTY output and assign it the next session-local
+    /// ID. It is emitted in every cumulative state until that state is acked.
+    pub fn add_query(&mut self, bytes: Vec<u8>) -> u64 {
+        let id = self.next_query_id;
+        self.next_query_id = id
+            .checked_add(1)
+            .expect("terminal query ID space exhausted");
+        self.pending_queries.push(TerminalQuery { id, bytes });
+        id
+    }
+
+    /// Queries not yet covered by the client's acknowledged terminal state.
+    pub fn queries_from_ack(&self) -> &[TerminalQuery] {
+        &self.pending_queries
     }
 
     /// Produce a cumulative terminal-state transform from the screen associated
@@ -273,6 +303,7 @@ impl TerminalState {
             TerminalSnapshot {
                 screen: self.parser.screen().clone(),
                 scrollback_clear_count: self.scrollback_clear_count,
+                query_count: self.pending_queries.len(),
             },
         );
         while self.snapshots.len() > self.max_snapshots {
@@ -291,9 +322,23 @@ impl TerminalState {
             return;
         }
 
+        let acknowledged_query_count = self
+            .snapshots
+            .range(..=ack_num)
+            .next_back()
+            .map_or(0, |(_, snapshot)| snapshot.query_count);
         if let Some((_, snapshot)) = self.snapshots.range(..=ack_num).next_back() {
             self.base_screen = snapshot.screen.clone();
             self.base_scrollback_clear_count = snapshot.scrollback_clear_count;
+        }
+        if acknowledged_query_count > 0 {
+            let query_count = acknowledged_query_count.min(self.pending_queries.len());
+            self.pending_queries.drain(..query_count);
+            for snapshot in self.snapshots.values_mut() {
+                snapshot.query_count = snapshot
+                    .query_count
+                    .saturating_sub(acknowledged_query_count);
+            }
         }
         self.base_num = ack_num;
         self.snapshots.retain(|num, _| *num > ack_num);
@@ -319,57 +364,207 @@ fn scrollback_clear_marker(generation: u64) -> Vec<u8> {
 /// state rather than writing replies back to the child, so Mosh must provide the
 /// host-side answers.
 pub struct QueryResponder {
-    tail: Vec<u8>,
+    scanner: QueryScanner,
+    terminal_queries: Vec<Vec<u8>>,
 }
 
 impl QueryResponder {
     pub fn new() -> Self {
-        Self { tail: Vec::new() }
+        Self {
+            scanner: QueryScanner::default(),
+            terminal_queries: Vec::new(),
+        }
     }
 
     /// Return reply byte strings for query sequences that became complete in
-    /// this chunk. Keeping a short tail handles escape sequences split across
-    /// PTY reads without replying twice to a sequence wholly in the old tail.
+    /// this chunk. The scanner itself retains an incomplete sequence across
+    /// PTY reads without replying twice to a sequence.
     pub fn feed(&mut self, data: &[u8], cursor: (u16, u16), size: (u16, u16)) -> Vec<Vec<u8>> {
-        let old_len = self.tail.len();
-        let mut combined = Vec::with_capacity(old_len + data.len());
-        combined.extend_from_slice(&self.tail);
-        combined.extend_from_slice(data);
+        let result = self.scanner.feed(data, cursor, size);
+        self.terminal_queries.extend(result.terminal_queries);
+        result.replies
+    }
 
-        let mut replies = Vec::new();
-        let patterns: &[(&[u8], QueryKind)] = &[
-            (b"\x1b[5n", QueryKind::Status),
-            (b"\x1b[6n", QueryKind::Cursor),
-            (b"\x1b[?6n", QueryKind::DecCursor),
-            (b"\x1b[c", QueryKind::PrimaryDa),
-            (b"\x1b[0c", QueryKind::PrimaryDa),
-            (b"\x1b[>c", QueryKind::SecondaryDa),
-            (b"\x1b[>0c", QueryKind::SecondaryDa),
-            (b"\x1b[18t", QueryKind::TextArea),
-        ];
+    /// Take OSC 10/11 queries detected since the previous call.
+    pub fn take_terminal_queries(&mut self) -> Vec<Vec<u8>> {
+        std::mem::take(&mut self.terminal_queries)
+    }
+}
 
-        for &(pattern, kind) in patterns {
-            let mut start = 0usize;
-            while start + pattern.len() <= combined.len() {
-                let Some(relative) = find_bytes(&combined[start..], pattern) else {
-                    break;
-                };
-                let at = start + relative;
-                let end = at + pattern.len();
-                // Only a query that crosses into newly received data is new.
-                if end > old_len {
-                    replies.push(kind.reply(cursor, size));
+#[derive(Default)]
+struct QueryScanner {
+    state: QueryScannerState,
+    sequence: Vec<u8>,
+}
+
+#[derive(Default)]
+enum QueryScannerState {
+    #[default]
+    Ground,
+    Escape,
+    Csi,
+    Osc,
+    OscEscape,
+}
+
+struct QueryScanResult {
+    replies: Vec<Vec<u8>>,
+    terminal_queries: Vec<Vec<u8>>,
+}
+
+const MAX_QUERY_SEQUENCE: usize = 4096;
+
+impl QueryScanner {
+    fn feed(&mut self, data: &[u8], cursor: (u16, u16), size: (u16, u16)) -> QueryScanResult {
+        let mut result = QueryScanResult {
+            replies: Vec::new(),
+            terminal_queries: Vec::new(),
+        };
+        for &byte in data {
+            self.step(byte, cursor, size, &mut result);
+        }
+        result
+    }
+
+    fn step(
+        &mut self,
+        byte: u8,
+        cursor: (u16, u16),
+        size: (u16, u16),
+        result: &mut QueryScanResult,
+    ) {
+        match self.state {
+            QueryScannerState::Ground => {
+                if byte == 0x1b {
+                    self.start(QueryScannerState::Escape, byte);
                 }
-                start = at + 1;
+            }
+            QueryScannerState::Escape => match byte {
+                b'[' => {
+                    self.push(byte);
+                    self.state = QueryScannerState::Csi;
+                }
+                b']' => {
+                    self.push(byte);
+                    self.state = QueryScannerState::Osc;
+                }
+                0x1b => self.start(QueryScannerState::Escape, byte),
+                _ => self.reset(),
+            },
+            QueryScannerState::Csi => {
+                if byte == 0x1b {
+                    self.start(QueryScannerState::Escape, byte);
+                } else if matches!(byte, 0x18 | 0x1a) {
+                    self.reset();
+                } else if self.push(byte) && (0x40..=0x7e).contains(&byte) {
+                    self.finish_csi(cursor, size, result);
+                }
+            }
+            QueryScannerState::Osc => match byte {
+                0x07 => {
+                    if self.push(byte) {
+                        self.finish_osc(result);
+                    }
+                }
+                0x18 | 0x1a => self.reset(),
+                0x1b => {
+                    if self.push(byte) {
+                        self.state = QueryScannerState::OscEscape;
+                    }
+                }
+                _ => {
+                    self.push(byte);
+                }
+            },
+            QueryScannerState::OscEscape => {
+                if !self.push(byte) {
+                    return;
+                }
+                if byte == b'\\' {
+                    self.finish_osc(result);
+                } else if byte == b']' {
+                    self.start_osc();
+                } else {
+                    self.state = QueryScannerState::Osc;
+                }
             }
         }
-
-        const KEEP: usize = 32;
-        let keep_from = combined.len().saturating_sub(KEEP);
-        self.tail.clear();
-        self.tail.extend_from_slice(&combined[keep_from..]);
-        replies
     }
+
+    fn finish_csi(&mut self, cursor: (u16, u16), size: (u16, u16), result: &mut QueryScanResult) {
+        if let Some(kind) = csi_query_kind(&self.sequence) {
+            result.replies.push(kind.reply(cursor, size));
+        }
+        self.reset();
+    }
+
+    fn finish_osc(&mut self, result: &mut QueryScanResult) {
+        if is_terminal_color_query(&self.sequence) {
+            result
+                .terminal_queries
+                .push(std::mem::take(&mut self.sequence));
+        } else {
+            self.sequence.clear();
+        }
+        self.state = QueryScannerState::Ground;
+    }
+
+    fn start(&mut self, state: QueryScannerState, byte: u8) {
+        self.sequence.clear();
+        self.sequence.push(byte);
+        self.state = state;
+    }
+
+    fn start_osc(&mut self) {
+        self.sequence.clear();
+        self.sequence.extend_from_slice(b"\x1b]");
+        self.state = QueryScannerState::Osc;
+    }
+
+    fn push(&mut self, byte: u8) -> bool {
+        if self.sequence.len() >= MAX_QUERY_SEQUENCE {
+            self.reset();
+            return false;
+        }
+        self.sequence.push(byte);
+        true
+    }
+
+    fn reset(&mut self) {
+        self.sequence.clear();
+        self.state = QueryScannerState::Ground;
+    }
+}
+
+fn csi_query_kind(sequence: &[u8]) -> Option<QueryKind> {
+    match sequence {
+        b"\x1b[5n" => Some(QueryKind::Status),
+        b"\x1b[6n" => Some(QueryKind::Cursor),
+        b"\x1b[?6n" => Some(QueryKind::DecCursor),
+        b"\x1b[c" | b"\x1b[0c" => Some(QueryKind::PrimaryDa),
+        b"\x1b[>c" | b"\x1b[>0c" => Some(QueryKind::SecondaryDa),
+        b"\x1b[18t" => Some(QueryKind::TextArea),
+        _ => None,
+    }
+}
+
+fn is_terminal_color_query(sequence: &[u8]) -> bool {
+    let Some(payload) = osc_payload(sequence) else {
+        return false;
+    };
+    payload == b"10;?" || payload == b"11;?"
+}
+
+fn osc_payload(sequence: &[u8]) -> Option<&[u8]> {
+    let prefix_len = sequence.starts_with(b"\x1b]").then_some(2)?;
+    let payload_end = if sequence.ends_with(b"\x07") {
+        sequence.len() - 1
+    } else if sequence.ends_with(b"\x1b\\") {
+        sequence.len() - 2
+    } else {
+        return None;
+    };
+    (payload_end >= prefix_len).then_some(&sequence[prefix_len..payload_end])
 }
 
 #[derive(Clone, Copy)]
@@ -399,15 +594,6 @@ impl QueryKind {
             QueryKind::TextArea => format!("\x1b[8;{};{}t", size.0, size.1).into_bytes(),
         }
     }
-}
-
-fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    if needle.is_empty() {
-        return Some(0);
-    }
-    haystack
-        .windows(needle.len())
-        .position(|window| window == needle)
 }
 
 #[cfg(test)]
@@ -441,6 +627,91 @@ mod tests {
             responder.feed(b"6n", (2, 3), (24, 80)),
             vec![b"\x1b[3;4R".to_vec()]
         );
+    }
+
+    #[test]
+    fn osc_color_queries_forward_with_bel_and_st_terminators() {
+        let mut responder = QueryResponder::new();
+        assert!(responder.feed(b"\x1b]10;?", (0, 0), (24, 80)).is_empty());
+        assert!(responder.take_terminal_queries().is_empty());
+        assert!(responder.feed(b"\x07", (0, 0), (24, 80)).is_empty());
+        assert_eq!(
+            responder.take_terminal_queries(),
+            vec![b"\x1b]10;?\x07".to_vec()]
+        );
+
+        assert!(
+            responder
+                .feed(b"\x1b]11;?\x1b", (0, 0), (24, 80))
+                .is_empty()
+        );
+        assert_eq!(
+            responder.feed(b"\\", (0, 0), (24, 80)),
+            Vec::<Vec<u8>>::new()
+        );
+        assert_eq!(
+            responder.take_terminal_queries(),
+            vec![b"\x1b]11;?\x1b\\".to_vec()]
+        );
+    }
+
+    #[test]
+    fn malformed_osc_sequences_do_not_become_color_queries() {
+        let mut responder = QueryResponder::new();
+        responder.feed(
+            b"\x1b]10;not-a-query\x07\x1b]12;?\x07\x1b]10;?\x18\x1b]10;?\x07",
+            (0, 0),
+            (24, 80),
+        );
+        assert_eq!(
+            responder.take_terminal_queries(),
+            vec![b"\x1b]10;?\x07".to_vec()]
+        );
+    }
+
+    #[test]
+    fn ordinary_csi_queries_keep_their_local_replies() {
+        let mut responder = QueryResponder::new();
+        assert_eq!(
+            responder.feed(b"\x1b[6n\x1b[5n", (2, 3), (24, 80)),
+            vec![b"\x1b[3;4R".to_vec(), b"\x1b[0n".to_vec()]
+        );
+        assert!(responder.take_terminal_queries().is_empty());
+    }
+
+    #[test]
+    fn terminal_queries_follow_snapshots_and_acknowledgements() {
+        let mut terminal = TerminalState::new(24, 80);
+        assert_eq!(terminal.add_query(b"q1".to_vec()), 1);
+        terminal.snapshot_for_state(1);
+        assert_eq!(terminal.add_query(b"q2".to_vec()), 2);
+        terminal.snapshot_for_state(2);
+        assert_eq!(
+            terminal.queries_from_ack(),
+            &[
+                TerminalQuery {
+                    id: 1,
+                    bytes: b"q1".to_vec(),
+                },
+                TerminalQuery {
+                    id: 2,
+                    bytes: b"q2".to_vec(),
+                },
+            ]
+        );
+
+        // A retransmitted state still sees both IDs before the ACK. Once
+        // state 1 is acknowledged, only the newer query remains to repeat.
+        terminal.acknowledge(1);
+        assert_eq!(
+            terminal.queries_from_ack(),
+            &[TerminalQuery {
+                id: 2,
+                bytes: b"q2".to_vec(),
+            }]
+        );
+        terminal.acknowledge(2);
+        assert!(terminal.queries_from_ack().is_empty());
     }
 
     #[test]

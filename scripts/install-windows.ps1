@@ -14,11 +14,11 @@ param(
     [string]$SourceMuxBinary,
     [string]$SourcePtyBinary,
     [string]$SourceZoshBinary,
-    [string]$SourceMoshServerBinary,
+    [string]$SourceZoshServerBinary,
     [string]$SourceZwtBinary,
     [switch]$WorktreeEnabled,
     [switch]$ZoshEnabled,
-    [switch]$MoshServerEnabled,
+    [switch]$ZoshServerEnabled,
     [string]$InstallDirectory,
     [string]$ShortcutPath
 )
@@ -33,7 +33,7 @@ if (-not $env:APPDATA) {
 }
 
 $zoshSourceProvided = [bool]$SourceZoshBinary
-$moshServerSourceProvided = [bool]$SourceMoshServerBinary
+$zoshServerSourceProvided = [bool]$SourceZoshServerBinary
 
 $repositoryRoot = Split-Path -Parent $PSScriptRoot
 if (-not $SourceBinary) {
@@ -51,8 +51,8 @@ if (-not $SourcePtyBinary) {
 if (-not $SourceZoshBinary) {
     $SourceZoshBinary = Join-Path (Split-Path -Parent $SourceBinary) "zosh.exe"
 }
-if (-not $SourceMoshServerBinary) {
-    $SourceMoshServerBinary = Join-Path (Split-Path -Parent $SourceBinary) "mosh-server.exe"
+if (-not $SourceZoshServerBinary) {
+    $SourceZoshServerBinary = Join-Path (Split-Path -Parent $SourceBinary) "zosh-server.exe"
 }
 if ($SourceZwtBinary) {
     $WorktreeEnabled = $true
@@ -60,8 +60,8 @@ if ($SourceZwtBinary) {
 if ($zoshSourceProvided) {
     $ZoshEnabled = $true
 }
-if ($moshServerSourceProvided) {
-    $MoshServerEnabled = $true
+if ($zoshServerSourceProvided) {
+    $ZoshServerEnabled = $true
 }
 if ($WorktreeEnabled -and -not $SourceZwtBinary) {
     $SourceZwtBinary = Join-Path (Split-Path -Parent $SourceBinary) "zwt.exe"
@@ -78,7 +78,8 @@ $installedGuiBinary = Join-Path $InstallDirectory "zetta-gui.exe"
 $installedMuxBinary = Join-Path $InstallDirectory "zmux.exe"
 $installedPtyBinary = Join-Path $InstallDirectory "zmux-pty.exe"
 $installedZoshBinary = Join-Path $InstallDirectory "zosh.exe"
-$installedMoshServerBinary = Join-Path $InstallDirectory "mosh-server.exe"
+$installedZoshServerBinary = Join-Path $InstallDirectory "zosh-server.exe"
+$legacyMoshServerBinary = Join-Path $InstallDirectory "mosh-server.exe"
 $installedZwtBinary = Join-Path $InstallDirectory "zwt.exe"
 $runtimeFileNames = @("conpty.dll", "OpenConsole.exe")
 $sourceDirectory = Split-Path -Parent $SourceBinary
@@ -107,8 +108,8 @@ function Get-InstallFiles {
     if ($ZoshEnabled) {
         $files += [pscustomobject]@{ Source = $SourceZoshBinary; Destination = $installedZoshBinary }
     }
-    if ($MoshServerEnabled) {
-        $files += [pscustomobject]@{ Source = $SourceMoshServerBinary; Destination = $installedMoshServerBinary }
+    if ($ZoshServerEnabled) {
+        $files += [pscustomobject]@{ Source = $SourceZoshServerBinary; Destination = $installedZoshServerBinary }
     }
     if ($WorktreeEnabled) {
         $files += [pscustomobject]@{ Source = $SourceZwtBinary; Destination = $installedZwtBinary }
@@ -166,21 +167,41 @@ function Remove-DisabledZoshFiles {
     }
 }
 
-function Remove-DisabledMoshServerFiles {
-    if ($MoshServerEnabled) {
+function Remove-DisabledZoshServerFiles {
+    if ($ZoshServerEnabled) {
         return
     }
     foreach ($path in @(
-        $installedMoshServerBinary,
-        (Get-VersionedPath $installedMoshServerBinary "new"),
-        (Get-VersionedPath $installedMoshServerBinary "old")
+        $installedZoshServerBinary,
+        (Get-VersionedPath $installedZoshServerBinary "new"),
+        (Get-VersionedPath $installedZoshServerBinary "old")
     )) {
         if (Test-Path -LiteralPath $path) {
             try {
                 Remove-Item -LiteralPath $path -Force
                 Write-Host "Removed $path"
             } catch {
-                Write-Warning "Could not remove disabled Mosh server executable ${path}: $_"
+                Write-Warning "Could not remove disabled zosh-server executable ${path}: $_"
+            }
+        }
+    }
+}
+
+function Remove-LegacyMoshServerFiles {
+    foreach ($path in @(
+        $legacyMoshServerBinary,
+        (Get-VersionedPath $legacyMoshServerBinary "new"),
+        (Get-VersionedPath $legacyMoshServerBinary "old")
+    )) {
+        if (Test-Path -LiteralPath $path) {
+            try {
+                Remove-Item -LiteralPath $path -Force
+                Write-Host "Removed legacy $path"
+            } catch {
+                # A detached legacy server may still have this image open.
+                # Keep the install moving; the renamed server is independent
+                # and a later uninstall can clean up the old image.
+                Write-Warning "Could not remove legacy Mosh server executable ${path}: $_"
             }
         }
     }
@@ -323,7 +344,8 @@ function Install-Binary {
     }
     Remove-DisabledWorktreeFiles
     Remove-DisabledZoshFiles
-    Remove-DisabledMoshServerFiles
+    Remove-DisabledZoshServerFiles
+    Remove-LegacyMoshServerFiles
 
     if (-not $replacePty -and (Test-InstallFilesCurrent $installFiles)) {
         Ensure-PtyVersionMarker $sourcePtyVersion
@@ -499,9 +521,10 @@ function Uninstall-Binary {
     if (-not $ZoshEnabled) {
         $filesToRemove += [pscustomobject]@{ Source = $null; Destination = $installedZoshBinary }
     }
-    if (-not $MoshServerEnabled) {
-        $filesToRemove += [pscustomobject]@{ Source = $null; Destination = $installedMoshServerBinary }
+    if (-not $ZoshServerEnabled) {
+        $filesToRemove += [pscustomobject]@{ Source = $null; Destination = $installedZoshServerBinary }
     }
+    $filesToRemove += [pscustomobject]@{ Source = $null; Destination = $legacyMoshServerBinary }
     foreach ($file in $filesToRemove) {
         foreach ($installedFile in @(
             $file.Destination,

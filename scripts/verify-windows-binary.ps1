@@ -9,7 +9,7 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$PtyBinaryPath,
     [string]$ZoshBinaryPath,
-    [string]$MoshServerBinaryPath,
+    [string]$ZoshServerBinaryPath,
     [string]$WorktreeBinaryPath
 )
 
@@ -66,9 +66,9 @@ $zoshBinary = $null
 if ($ZoshBinaryPath) {
     $zoshBinary = (Resolve-Path -LiteralPath $ZoshBinaryPath).Path
 }
-$moshServerBinary = $null
-if ($MoshServerBinaryPath) {
-    $moshServerBinary = (Resolve-Path -LiteralPath $MoshServerBinaryPath).Path
+$zoshServerBinary = $null
+if ($ZoshServerBinaryPath) {
+    $zoshServerBinary = (Resolve-Path -LiteralPath $ZoshServerBinaryPath).Path
 }
 $worktreeBinary = $null
 if ($WorktreeBinaryPath) {
@@ -82,9 +82,9 @@ $actualZoshSubsystem = $null
 if ($zoshBinary) {
     $actualZoshSubsystem = Get-PeSubsystem $zoshBinary
 }
-$actualMoshServerSubsystem = $null
-if ($moshServerBinary) {
-    $actualMoshServerSubsystem = Get-PeSubsystem $moshServerBinary
+$actualZoshServerSubsystem = $null
+if ($zoshServerBinary) {
+    $actualZoshServerSubsystem = Get-PeSubsystem $zoshServerBinary
 }
 if ($actualConsoleSubsystem -ne $consoleSubsystem) {
     throw "$consoleBinary uses PE subsystem $actualConsoleSubsystem; expected console subsystem $consoleSubsystem"
@@ -101,8 +101,8 @@ if ($actualPtySubsystem -ne $consoleSubsystem) {
 if ($zoshBinary -and ($actualZoshSubsystem -ne $consoleSubsystem)) {
     throw "$zoshBinary uses PE subsystem $actualZoshSubsystem; expected console subsystem $consoleSubsystem"
 }
-if ($moshServerBinary -and ($actualMoshServerSubsystem -ne $consoleSubsystem)) {
-    throw "$moshServerBinary uses PE subsystem $actualMoshServerSubsystem; expected console subsystem $consoleSubsystem"
+if ($zoshServerBinary -and ($actualZoshServerSubsystem -ne $consoleSubsystem)) {
+    throw "$zoshServerBinary uses PE subsystem $actualZoshServerSubsystem; expected console subsystem $consoleSubsystem"
 }
 if ($worktreeBinary) {
     $actualWorktreeSubsystem = Get-PeSubsystem $worktreeBinary
@@ -140,11 +140,11 @@ if ($zoshBinary) {
         throw "$zoshBinary --version failed its CLI smoke test"
     }
 }
-$moshServerVersion = $null
-if ($moshServerBinary) {
-    $moshServerVersion = ((& $moshServerBinary --version | Out-String).Trim() -replace "`r", "")
-    if ($LASTEXITCODE -ne 0 -or $moshServerVersion -notmatch '^mosh-server-rs \S+ \(Mosh protocol 2\)$') {
-        throw "$moshServerBinary --version failed its CLI smoke test"
+$zoshServerVersion = $null
+if ($zoshServerBinary) {
+    $zoshServerVersion = ((& $zoshServerBinary --version | Out-String).Trim() -replace "`r", "")
+    if ($LASTEXITCODE -ne 0 -or $zoshServerVersion -notmatch '^zosh-server-rs \S+ \(Mosh protocol 2\)$') {
+        throw "$zoshServerBinary --version failed its CLI smoke test"
     }
 }
 $worktreeHelp = $null
@@ -162,8 +162,8 @@ Write-Host "Verified Windows pseudoconsole host: $ptyBinary"
 if ($zoshBinary) {
     Write-Host "Verified Zetta Mosh endpoint executable: $zoshBinary ($zoshVersion)"
 }
-if ($moshServerBinary) {
-    Write-Host "Verified Zetta Mosh server executable: $moshServerBinary ($moshServerVersion)"
+if ($zoshServerBinary) {
+    Write-Host "Verified Zetta Mosh server executable: $zoshServerBinary ($zoshServerVersion)"
 }
 if ($worktreeBinary) {
     Write-Host "Verified standalone worktree executable: $worktreeBinary"

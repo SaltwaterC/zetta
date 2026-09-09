@@ -1,7 +1,7 @@
 //! `zosh`, Zetta's standalone cross-platform Mosh client.
 //!
 //! The crate owns both halves of the Mosh launcher contract: it bootstraps a
-//! remote `mosh-server` over SSH and speaks the Mosh State Synchronization
+//! remote Mosh server over SSH and speaks the Mosh State Synchronization
 //! Protocol over UDP with its bundled terminal frontend.
 
 mod client;

@@ -2,7 +2,7 @@
 
 Zosh can honor a remote shell's standard `CSI 3 J` (erase saved lines) request
 when the remote Mosh server preserves it. This directory contains the Rust
-`mosh-server-rs` implementation used by the bundled `mosh-server` binary and
+`zosh-server-rs` implementation used by the bundled `zosh-server` binary and
 the patch for building the upstream C++ server. The shell widget and its
 bindings do not need to change. An ordinary screen redraw does not erase saved
 lines.
@@ -20,11 +20,11 @@ target. Build it from this directory when preparing a server for a remote host:
 cargo build --release --locked
 ```
 
-The resulting `target/release/mosh-server` can be copied to the remote host
+The resulting `target/release/zosh-server` can be copied to the remote host
 and selected from the local machine:
 
 ```sh
-zosh --server=/absolute/path/to/mosh-server pi
+zosh --server=/absolute/path/to/zosh-server pi
 ```
 
 It implements Mosh protocol v2 and detects `CSI 3 J` in PTY output. The server
@@ -119,7 +119,7 @@ directory. The file must not already exist; on Unix it is created with mode
 0600. For example, from the client:
 
 ```sh
-zosh --server='env MOSH_SERVER_TIMING_LOG=/tmp/zosh-timing-1.log /absolute/path/to/mosh-server' mac-host
+zosh --server='env MOSH_SERVER_TIMING_LOG=/tmp/zosh-timing-1.log /absolute/path/to/zosh-server' mac-host
 ```
 
 The reference `mosh` wrapper accepts the same `--server` value. Rebuild the
@@ -168,7 +168,7 @@ normal shutdown allows up to 250 ms to drain them.
 With a patched server built on the test machine, run from `crates/zosh`:
 
 ```sh
-ZOSH_TEST_SERVER=/absolute/path/to/mosh-server cargo test --locked a_remote_shell_clear -- --ignored
+ZOSH_TEST_SERVER=/absolute/path/to/zosh-server cargo test --locked a_remote_shell_clear -- --ignored
 ```
 
 This starts a temporary loopback session and runs a shell fixture. It checks

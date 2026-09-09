@@ -138,12 +138,13 @@ always use that normal launch path.
 
 Use zosh USER@HOST for an interactive remote shell, or use zetta mosh
 USER@HOST as its transparent proxy. The full Mosh launcher starts
-mosh-server through SSH, preserves SSH configuration aliases and command
-arguments, and then runs the bundled terminal endpoint over UDP. Prediction,
-address-family, port, bind, SSH, and terminal-initialization options are
-available from either command's --help. If the remote host clearly lacks a
-usable mosh-server, the launcher falls back to plain SSH; authentication,
-transport, UDP, and protocol failures remain errors.
+`zosh-server` through SSH when it is available, otherwise falls back to stock
+`mosh-server`, preserves SSH configuration aliases and command arguments, and
+then runs the bundled terminal endpoint over UDP. Prediction, address-family,
+port, bind, SSH, and terminal-initialization options are available from either
+command's --help. If the remote host clearly lacks a usable Mosh server, the
+launcher falls back to plain SSH; authentication, transport, UDP, and protocol
+failures remain errors.
 
 Zosh intentionally defaults to `--no-init`, which is a deliberate difference
 from stock `mosh`: the session stays on the current screen and preserves its
@@ -157,7 +158,7 @@ terminal's saved lines and redraws the current screen; ordinary redraws retain
 scrollback. This deliberately extends upstream Mosh. The unmodified server
 discards the request, so both the local client and remote server must support
 the extension. See the linked instructions to build the server and select it
-with `--server=/absolute/remote/path/to/mosh-server`.
+with `--server=/absolute/path/to/zosh-server`.
 
 The native background-session and zmux remote-session commands continue to use
 SSH because Mosh carries terminal state rather than the framed streams needed

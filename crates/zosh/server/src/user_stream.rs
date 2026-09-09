@@ -7,13 +7,16 @@
 
 use crate::protocol::ReceivedState;
 use anyhow::{Context, Result, anyhow, bail};
-use moshcatty::pb::UserInstruction;
 use std::collections::BTreeMap;
+
+#[cfg(test)]
+use moshcatty::pb::UserInstruction;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UserEvent {
     Byte(u8),
     Resize { cols: u16, rows: u16 },
+    TerminalResponse(Vec<u8>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -177,6 +180,8 @@ impl UserStreamTracker {
 const INSTRUCTION_FIELD: u64 = 1;
 /// Zosh's keep-alive on `ClientBuffers.Instruction`; see `PROTOCOL.md`.
 const KEEP_ALIVE_FIELD: u64 = 20;
+/// Zosh's terminal response on `ClientBuffers.Instruction`.
+const TERMINAL_RESPONSE_FIELD: u64 = 21;
 const WIRE_VARINT: u64 = 0;
 const WIRE_FIXED64: u64 = 1;
 const WIRE_BYTES: u64 = 2;
@@ -185,15 +190,14 @@ const WIRE_FIXED32: u64 = 5;
 /// The keep-alive interval a UserStream diff announces, if it carries a
 /// keep-alive at all.
 ///
-/// This is a second pass over the same bytes rather than a change to
-/// `decode_events`, because `moshcatty`'s decoder discards the fields it
-/// does not know and remains the authority on keystroke/resize
-/// precedence.  It costs almost nothing: the walk skips a length-delimited
-/// field by its length, so it is linear in the number of protobuf fields
-/// and not in the size of a paste, and it allocates nothing.
+/// This remains a small second pass over the same bytes. It skips
+/// length-delimited fields by their length, so it is linear in the number of
+/// protobuf fields and not in the size of a paste. The strict event decoder
+/// below handles the fields moshcatty does not know while preserving its
+/// keystroke/resize precedence.
 ///
 /// A byte it cannot read is reported as "no keep-alive" rather than as an
-/// error.  `decode_events` runs over the same diff and is what rejects a
+/// error. `decode_events` runs over the same diff and is what rejects a
 /// malformed UserMessage properly.
 fn keep_alive_interval(diff: &[u8]) -> Option<u32> {
     let mut rest = diff;
@@ -277,25 +281,143 @@ fn decode_events(diff: &[u8]) -> Result<Vec<UserEvent>> {
         return Ok(Vec::new());
     }
 
-    let instructions = UserInstruction::decode_message(diff)
-        .map_err(|error| anyhow!("malformed UserMessage: {error}"))?;
     let mut events = Vec::new();
 
-    for instruction in instructions {
-        // Stock UserStream::apply_string uses `if keystroke ... else if resize`.
-        // Preserve that precedence for a malformed instruction carrying both.
-        if !instruction.keys.is_empty() {
-            events.extend(instruction.keys.into_iter().map(UserEvent::Byte));
-        } else if instruction.width > 0 && instruction.height > 0 {
-            let cols = u16::try_from(instruction.width)
-                .map_err(|_| anyhow!("invalid terminal width {}", instruction.width))?;
-            let rows = u16::try_from(instruction.height)
-                .map_err(|_| anyhow!("invalid terminal height {}", instruction.height))?;
+    let mut rest = diff;
+    while !rest.is_empty() {
+        let (field, wire) = read_tag_strict(&mut rest)?;
+        if (field, wire) != (INSTRUCTION_FIELD, WIRE_BYTES) {
+            skip_field_strict(&mut rest, wire)?;
+            continue;
+        }
+
+        let instruction = read_bytes_strict(&mut rest)?;
+        let decoded = decode_instruction(instruction)?;
+        // Stock UserStream::apply_string uses `if keystroke ... else if
+        // resize`. Preserve that precedence for a malformed instruction
+        // carrying both, then apply the zosh response extension as its own
+        // event so an unusual combined instruction remains ordered.
+        if !decoded.keys.is_empty() {
+            events.extend(decoded.keys.into_iter().map(UserEvent::Byte));
+        } else if decoded.width > 0 && decoded.height > 0 {
+            let cols = u16::try_from(decoded.width)
+                .map_err(|_| anyhow!("invalid terminal width {}", decoded.width))?;
+            let rows = u16::try_from(decoded.height)
+                .map_err(|_| anyhow!("invalid terminal height {}", decoded.height))?;
             events.push(UserEvent::Resize { cols, rows });
+        }
+        if let Some(response) = decoded.terminal_response
+            && !response.is_empty()
+        {
+            events.push(UserEvent::TerminalResponse(response));
         }
     }
 
     Ok(events)
+}
+
+#[derive(Default)]
+struct DecodedInstruction {
+    keys: Vec<u8>,
+    width: i32,
+    height: i32,
+    terminal_response: Option<Vec<u8>>,
+}
+
+fn decode_instruction(mut rest: &[u8]) -> Result<DecodedInstruction> {
+    let mut decoded = DecodedInstruction::default();
+    while !rest.is_empty() {
+        let (field, wire) = read_tag_strict(&mut rest)?;
+        match (field, wire) {
+            (2, WIRE_BYTES) => decode_keystroke(&mut rest, &mut decoded.keys)?,
+            (3, WIRE_BYTES) => decode_resize(&mut rest, &mut decoded.width, &mut decoded.height)?,
+            (TERMINAL_RESPONSE_FIELD, WIRE_BYTES) => {
+                decoded.terminal_response = Some(read_bytes_strict(&mut rest)?.to_vec());
+            }
+            _ => skip_field_strict(&mut rest, wire)?,
+        }
+    }
+    Ok(decoded)
+}
+
+fn decode_keystroke(rest: &mut &[u8], keys: &mut Vec<u8>) -> Result<()> {
+    let mut nested = read_bytes_strict(rest)?;
+    while !nested.is_empty() {
+        let (field, wire) = read_tag_strict(&mut nested)?;
+        if (field, wire) == (4, WIRE_BYTES) {
+            keys.extend_from_slice(read_bytes_strict(&mut nested)?);
+        } else {
+            skip_field_strict(&mut nested, wire)?;
+        }
+    }
+    Ok(())
+}
+
+fn decode_resize(rest: &mut &[u8], width: &mut i32, height: &mut i32) -> Result<()> {
+    let mut nested = read_bytes_strict(rest)?;
+    while !nested.is_empty() {
+        let (field, wire) = read_tag_strict(&mut nested)?;
+        match (field, wire) {
+            (5, WIRE_VARINT) => *width = read_varint_strict(&mut nested)? as i32,
+            (6, WIRE_VARINT) => *height = read_varint_strict(&mut nested)? as i32,
+            _ => skip_field_strict(&mut nested, wire)?,
+        }
+    }
+    Ok(())
+}
+
+fn read_varint_strict(rest: &mut &[u8]) -> Result<u64> {
+    let mut value = 0_u64;
+    for (index, &byte) in rest.iter().enumerate().take(10) {
+        let bits = u64::from(byte & 0x7f);
+        if index == 9 && bits > 1 {
+            bail!("protobuf varint overflows u64");
+        }
+        value |= bits << (index * 7);
+        if byte & 0x80 == 0 {
+            *rest = &rest[index + 1..];
+            return Ok(value);
+        }
+    }
+    bail!("truncated or oversized protobuf varint")
+}
+
+fn read_tag_strict(rest: &mut &[u8]) -> Result<(u64, u64)> {
+    let tag = read_varint_strict(rest)?;
+    Ok((tag >> 3, tag & 0x7))
+}
+
+fn read_bytes_strict<'a>(rest: &mut &'a [u8]) -> Result<&'a [u8]> {
+    let length = usize::try_from(read_varint_strict(rest)?)
+        .context("protobuf length does not fit in usize")?;
+    let (head, tail) = rest
+        .split_at_checked(length)
+        .ok_or_else(|| anyhow!("truncated protobuf bytes field"))?;
+    *rest = tail;
+    Ok(head)
+}
+
+fn skip_field_strict(rest: &mut &[u8], wire: u64) -> Result<()> {
+    match wire {
+        WIRE_VARINT => {
+            read_varint_strict(rest)?;
+        }
+        WIRE_FIXED64 => advance_strict(rest, 8)?,
+        WIRE_BYTES => {
+            read_bytes_strict(rest)?;
+        }
+        WIRE_FIXED32 => advance_strict(rest, 4)?,
+        _ => bail!("unsupported protobuf wire type {wire}"),
+    }
+    Ok(())
+}
+
+fn advance_strict(rest: &mut &[u8], count: usize) -> Result<()> {
+    let (_, tail) = rest
+        .split_at_checked(count)
+        .ok_or_else(|| anyhow!("truncated protobuf fixed-width field"))?;
+    *rest = tail;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -477,6 +599,51 @@ mod tests {
         assert_eq!(keep_alive_interval(&diff), None);
         diff.extend_from_slice(&keep_alive(100));
         assert_eq!(keep_alive_interval(&diff), Some(100));
+    }
+
+    fn terminal_response(bytes: &[u8]) -> Vec<u8> {
+        let mut instruction = vec![0xAA, 0x01, bytes.len() as u8];
+        instruction.extend_from_slice(bytes);
+        let mut message = vec![0x0A, instruction.len() as u8];
+        message.extend_from_slice(&instruction);
+        message
+    }
+
+    #[test]
+    fn stock_user_decoder_skips_terminal_response_extension() {
+        let decoded = UserInstruction::decode_message(&terminal_response(b"response")).unwrap();
+        assert_eq!(decoded, vec![UserInstruction::default()]);
+    }
+
+    #[test]
+    fn terminal_responses_are_counted_and_replayed_in_stream_order() {
+        let mut tracker = UserStreamTracker::new();
+        let first = state(
+            0,
+            1,
+            0,
+            message(&[UserInstruction::keystroke(b"a".to_vec())]),
+        );
+        assert_eq!(
+            tracker.accept(&first).unwrap().events,
+            vec![UserEvent::Byte(b'a')]
+        );
+
+        // This newer state is cumulative from state 0. The already committed
+        // key is skipped, while the response remains the next event.
+        let mut diff = message(&[UserInstruction::keystroke(b"a".to_vec())]);
+        diff.extend_from_slice(&terminal_response(b"\x1b]10;rgb:aaaa/bbbb/cccc\x07"));
+        let accepted = tracker.accept(&state(0, 2, 0, diff.clone())).unwrap();
+        assert_eq!(
+            accepted.events,
+            vec![UserEvent::TerminalResponse(
+                b"\x1b]10;rgb:aaaa/bbbb/cccc\x07".to_vec()
+            )]
+        );
+        assert_eq!(tracker.committed_events, 2);
+
+        let replay = tracker.accept(&state(0, 2, 0, diff)).unwrap();
+        assert!(replay.events.is_empty());
     }
 
     #[test]

@@ -22,7 +22,7 @@ SSH targets from the existing SSH configuration helper; zosh completion
 offers the full Mosh option surface and SSH targets as well. The SSH targets
 are offered first, together with the option surface, on the host prompt;
 once a host has been typed, nothing further is completed, because everything
-after it is sent to the mosh-server as its remote command.
+after it is sent to the Mosh server as its remote command.
 
 The `zetta` function uses the executable that owns the current terminal for
 commands that need to reach its running process: plain launches,

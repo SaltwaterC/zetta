@@ -1,13 +1,13 @@
-# The zosh keep-alive extension
+# The zosh protocol extensions
 
-Zosh speaks stock Mosh protocol v2. This document specifies the one
-addition it makes to that wire, what each half of zosh does with it, and
+Zosh speaks stock Mosh protocol v2. This document specifies the optional
+additions it makes to that wire, what each half of zosh does with them, and
 why every existing Mosh implementation keeps working either way.
 
 It is implemented in three places: `crates/mosh_rs` (the client's
-`UserStream` event and the timer that mints it), `crates/zosh/src`
-(the `-k/--keep-alive` command line), and `crates/zosh/server/src`
-(recognising one and answering it promptly).
+`UserStream` and host-event extensions), `crates/zosh/src` (the terminal
+frontend and the `-k/--keep-alive` command line), and `crates/zosh/server/src`
+(recognising the extensions and answering them promptly).
 
 ## The problem
 
@@ -37,7 +37,9 @@ extend ClientBuffers.Instruction {
 **Field 20 is reserved for zosh.** It is unused by `userinput.proto`
 (which uses 2 and 3 at the instruction level, and 4, 5 and 6 inside the
 nested `Keystroke` and `ResizeMessage`) and by `hostinput.proto` (2, 3
-and 7).
+and 7). The client and host directions have separate instruction messages,
+so the host-direction field 20 used for terminal queries does not collide with
+the client-direction keep-alive.
 
 It is a bare varint rather than a nested message so the whole instruction
 costs five or six bytes inside a `UserMessage`:
@@ -56,6 +58,51 @@ A keep-alive is always its own instruction. It never shares one with a
 keystroke or a resize, so a peer that ignores field 20 sees an
 instruction with nothing in it and the keystroke runs either side of it
 are unaffected.
+
+### Terminal color queries
+
+The bundled server's terminal emulator cannot know the palette of the
+terminal outside the Mosh client. When a remote program asks for the
+foreground or background color with OSC 10/11, zosh forwards that query to
+the local terminal instead of consuming it.
+
+The server-to-client extension is a message on field 20 of
+`HostBuffers.Instruction`:
+
+```proto
+message ZoshTerminalQuery {
+  optional uint64 id = 1;
+  optional bytes bytes = 2;
+}
+
+extend HostBuffers.Instruction {
+  optional ZoshTerminalQuery zosh_terminal_query = 20;
+}
+```
+
+`bytes` is the complete query, including `ESC ] 10 ; ?` or `ESC ] 11 ; ?`
+and either BEL or the string terminator `ESC \`. The server assigns IDs
+monotonically and keeps each query in its cumulative terminal-state snapshots
+until the client acknowledges the state. That makes retransmission safe even
+when a query was the only thing that changed.
+
+The client writes the query bytes to its stdout and waits for the matching
+OSC 10/11 response from the local terminal. It removes that response from
+stdin before keyboard handling and sends it back as field 21 of a standalone
+`ClientBuffers.Instruction`:
+
+```proto
+extend ClientBuffers.Instruction {
+  optional bytes zosh_terminal_response = 21;
+}
+```
+
+Responses are cumulative UserStream events, so the server writes them to the
+remote PTY in order and does not replay them when a state is retransmitted.
+Only the zosh client/server pair implements this proxy. A stock Mosh client
+skips host field 20, and a stock Mosh server skips client field 21; neither
+peer gains color-query forwarding, but ordinary terminal output and keyboard
+input remain compatible.
 
 ## Semantics
 
@@ -161,9 +208,11 @@ since its last send). See "Proving it" below.
 
 | Client | Server | Behaviour |
 | --- | --- | --- |
-| `zosh -k` | zosh `mosh-server` | Recognised; answered on the same loop pass, **and** the server holds up its own half on the same interval. |
+| `zosh -k` | zosh `zosh-server` | Recognised; answered on the same loop pass, **and** the server holds up its own half on the same interval. |
 | `zosh -k` | reference `mosh-server` | Field ignored; answered within 100 ms by SSP's delayed-ack path, but only ever in reply. |
-| `zosh` without `-k`, or stock `mosh-client` | zosh `mosh-server` | No keep-alives; the server behaves exactly as before. |
+| `zosh` without `-k`, or stock `mosh-client` | zosh `zosh-server` | No keep-alives; the server behaves exactly as before. |
+| zosh client | zosh `zosh-server` | OSC 10/11 color queries are forwarded to the local terminal and their responses are written to the remote PTY. |
+| zosh client | stock `mosh-server` | The host query extension is ignored; ordinary terminal traffic remains compatible. |
 | stock `mosh-client` | reference `mosh-server` | Untouched. |
 
 ## Cost
@@ -193,7 +242,7 @@ The server's timing instrumentation is the way to confirm a real link,
 and it needs no privileges. Start the session with the log enabled:
 
 ```sh
-zosh -k --server="env MOSH_SERVER_TIMING_LOG=\$HOME/zosh-timing.log mosh-server" user@host
+zosh -k --server="env MOSH_SERVER_TIMING_LOG=\$HOME/zosh-timing.log zosh-server" user@host
 ```
 
 Then, on the server, the gaps between arriving keep-alives in

@@ -51,8 +51,8 @@ pub struct ResizeMessage {
     pub height: Option<i32>,
 }
 
-/// One user instruction. In the `.proto` these two are extensions of
-/// an empty message; on the wire they are just fields 2 and 3.
+/// One user instruction. In the `.proto` these fields are extensions of
+/// an empty message; on the wire they are just fields 2, 3, 20 and 21.
 ///
 /// Field 20 is not mosh's. It is Zetta's keep-alive extension, and it
 /// is deliberately a bare varint rather than a nested message so the
@@ -61,6 +61,10 @@ pub struct ResizeMessage {
 /// implementation that does not know the number parses it into its
 /// unknown-field set and its `if keystroke / else if resize` chain
 /// ignores it. `../../zosh/PROTOCOL.md` is the specification.
+///
+/// Field 21 carries a response to a terminal query forwarded by a zosh
+/// server. It is kept as a separate instruction so stock Mosh continues to
+/// ignore it and so the server can write responses to its PTY in order.
 #[derive(Clone, PartialEq, Eq, prost::Message)]
 pub struct UserInstruction {
     #[prost(message, optional, tag = "2")]
@@ -73,6 +77,8 @@ pub struct UserInstruction {
     /// interval, which a client-driven keep-alive alone cannot do.
     #[prost(uint32, optional, tag = "20")]
     pub zosh_keepalive_ms: Option<u32>,
+    #[prost(bytes = "vec", optional, tag = "21")]
+    pub terminal_response: Option<Vec<u8>>,
 }
 
 #[derive(Clone, PartialEq, Eq, prost::Message)]
@@ -98,7 +104,7 @@ impl UserMessage {
 }
 
 /// One thing the user did.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UserEvent {
     /// A single byte of input. mosh keeps input byte-by-byte and
     /// coalesces only when serializing, so a diff can start anywhere.
@@ -118,6 +124,10 @@ pub enum UserEvent {
     /// then hold up its own half on the same interval instead of only
     /// ever replying; see `zosh`'s `PROTOCOL.md`.
     KeepAlive(u32),
+    /// A response returned by the local terminal to a query the server
+    /// forwarded. It is not keyboard input, but it is part of the cumulative
+    /// UserStream so retransmitted states cannot write it twice to the PTY.
+    TerminalResponse(Vec<u8>),
 }
 
 /// The client's state: everything the user has done, in order.
@@ -152,6 +162,14 @@ impl UserStream {
     /// [`UserEvent::KeepAlive`].
     pub fn push_keep_alive(&mut self, interval_ms: u32) {
         self.events.push(UserEvent::KeepAlive(interval_ms));
+    }
+
+    /// Append bytes returned by the local terminal for a forwarded query.
+    pub fn push_terminal_response(&mut self, bytes: &[u8]) {
+        if !bytes.is_empty() {
+            self.events
+                .push(UserEvent::TerminalResponse(bytes.to_vec()));
+        }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -200,6 +218,7 @@ impl UserStream {
                             }),
                             resize: None,
                             zosh_keepalive_ms: None,
+                            terminal_response: None,
                         }),
                     }
                 }
@@ -211,6 +230,7 @@ impl UserStream {
                             height: Some(*height),
                         }),
                         zosh_keepalive_ms: None,
+                        terminal_response: None,
                     });
                 }
                 // Its own instruction, like a resize: a keep-alive
@@ -222,6 +242,15 @@ impl UserStream {
                         keystroke: None,
                         resize: None,
                         zosh_keepalive_ms: Some(*interval_ms),
+                        terminal_response: None,
+                    });
+                }
+                UserEvent::TerminalResponse(bytes) => {
+                    msg.instruction.push(UserInstruction {
+                        keystroke: None,
+                        resize: None,
+                        zosh_keepalive_ms: None,
+                        terminal_response: Some(bytes.clone()),
                     });
                 }
             }
@@ -252,6 +281,9 @@ impl UserStream {
             }
             if let Some(interval_ms) = inst.zosh_keepalive_ms {
                 self.push_keep_alive(interval_ms);
+            }
+            if let Some(response) = inst.terminal_response {
+                self.push_terminal_response(&response);
             }
         }
         Ok(())
@@ -290,6 +322,17 @@ pub struct EchoAck {
     pub echo_ack_num: Option<u64>,
 }
 
+/// A terminal query forwarded by a zosh server. The query ID is local to the
+/// server session and lets the client suppress the same query when a
+/// cumulative host state is retransmitted.
+#[derive(Clone, PartialEq, Eq, prost::Message)]
+pub struct TerminalQuery {
+    #[prost(uint64, optional, tag = "1")]
+    pub id: Option<u64>,
+    #[prost(bytes = "vec", optional, tag = "2")]
+    pub bytes: Option<Vec<u8>>,
+}
+
 #[derive(Clone, PartialEq, Eq, prost::Message)]
 pub struct HostInstruction {
     #[prost(message, optional, tag = "2")]
@@ -298,6 +341,8 @@ pub struct HostInstruction {
     pub resize: Option<ResizeMessage>,
     #[prost(message, optional, tag = "7")]
     pub echoack: Option<EchoAck>,
+    #[prost(message, optional, tag = "20")]
+    pub terminal_query: Option<TerminalQuery>,
 }
 
 #[derive(Clone, PartialEq, Eq, prost::Message)]
@@ -317,6 +362,10 @@ pub enum HostEvent {
         height: i32,
     },
     EchoAck(u64),
+    TerminalQuery {
+        id: u64,
+        bytes: Vec<u8>,
+    },
 }
 
 /// Decode a host diff into the events it carries.
@@ -339,6 +388,12 @@ pub fn parse_host_diff(diff: &[u8]) -> Result<Vec<HostEvent>> {
             && !bytes.is_empty()
         {
             out.push(HostEvent::Bytes(bytes));
+        }
+        if let Some(query) = inst.terminal_query
+            && let (Some(id), Some(bytes)) = (query.id, query.bytes)
+            && !bytes.is_empty()
+        {
+            out.push(HostEvent::TerminalQuery { id, bytes });
         }
     }
     Ok(out)
@@ -449,6 +504,27 @@ mod tests {
     }
 
     #[test]
+    fn a_terminal_response_is_a_standalone_field_twenty_one_instruction() {
+        let mut stream = UserStream::new();
+        stream.push_bytes(b"a");
+        stream.push_terminal_response(b"\x1b]10;rgb:aaaa/bbbb/cccc\x07");
+        stream.push_bytes(b"b");
+
+        let diff = stream.init_diff();
+        let msg = UserMessage::decode(diff.as_slice()).unwrap();
+        assert_eq!(msg.instruction.len(), 3);
+        assert_eq!(
+            msg.instruction[1].terminal_response.as_deref(),
+            Some(b"\x1b]10;rgb:aaaa/bbbb/cccc\x07".as_slice())
+        );
+        assert!(msg.instruction[1].keystroke.is_none());
+
+        let mut rebuilt = UserStream::new();
+        rebuilt.apply_string(&diff).unwrap();
+        assert_eq!(rebuilt, stream);
+    }
+
+    #[test]
     fn a_state_that_is_not_a_prefix_has_no_diff() {
         let mut a = UserStream::new();
         a.push_bytes(b"abc");
@@ -499,6 +575,7 @@ mod tests {
                     echoack: Some(EchoAck {
                         echo_ack_num: Some(7),
                     }),
+                    terminal_query: None,
                 },
                 HostInstruction {
                     hostbytes: Some(HostBytes {
@@ -509,6 +586,7 @@ mod tests {
                         height: Some(30),
                     }),
                     echoack: None,
+                    terminal_query: None,
                 },
             ],
         };
@@ -537,8 +615,32 @@ mod tests {
                 }),
                 resize: None,
                 echoack: None,
+                terminal_query: None,
             }],
         };
         assert!(parse_host_diff(&msg.encode_to_vec()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_terminal_query_decodes_with_its_id_and_bytes() {
+        let msg = HostMessage {
+            instruction: vec![HostInstruction {
+                hostbytes: None,
+                resize: None,
+                echoack: None,
+                terminal_query: Some(TerminalQuery {
+                    id: Some(42),
+                    bytes: Some(b"\x1b]11;?\x1b\\".to_vec()),
+                }),
+            }],
+        };
+
+        assert_eq!(
+            parse_host_diff(&msg.encode_to_vec()).unwrap(),
+            vec![HostEvent::TerminalQuery {
+                id: 42,
+                bytes: b"\x1b]11;?\x1b\\".to_vec(),
+            }]
+        );
     }
 }

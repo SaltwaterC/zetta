@@ -24,7 +24,8 @@ use crate::{
     terminal,
 };
 
-const DEFAULT_SERVER: &str = "mosh-server";
+const DEFAULT_SERVER: &str = "zosh-server";
+const STOCK_SERVER: &str = "mosh-server";
 const DEFAULT_SSH: &str = "ssh";
 const LOCALE_VARIABLES: [&str; 15] = [
     "LANG",
@@ -135,6 +136,7 @@ struct ProxyRequest {
 struct MoshCommand {
     client: Option<String>,
     server: String,
+    server_explicit: bool,
     prediction: PredictionMode,
     prediction_explicit: bool,
     predict_overwrite: bool,
@@ -164,6 +166,7 @@ impl Default for MoshCommand {
         Self {
             client: None,
             server: DEFAULT_SERVER.to_owned(),
+            server_explicit: false,
             prediction: PredictionMode::default(),
             prediction_explicit: false,
             predict_overwrite: false,
@@ -530,7 +533,7 @@ fn finish_ssh_bootstrap(
         let _ = reader.join();
     }
     if !status.success() {
-        if is_unsupported_server_output_for(&combined, &command.server) {
+        if unsupported_server_output_for_command(&combined, command) {
             return Ok(BootstrapResult::UnsupportedServer {
                 output: combined,
                 status: status.code(),
@@ -685,7 +688,7 @@ fn client_color_count(client: &Path) -> u16 {
 }
 
 fn run_plain_ssh(command: &MoshCommand, target: &str, bootstrap_status: Option<i32>) -> Result<()> {
-    eprintln!("zosh: remote mosh-server is unavailable; falling back to SSH");
+    eprintln!("zosh: no usable remote Mosh server; falling back to SSH");
     let (program, mut arguments) = ssh_base_command(command);
     arguments.push(target.to_owned());
     if !command.remote_command.is_empty() {
@@ -830,7 +833,7 @@ fn ssh_bootstrap_command_with_colors(
 }
 
 fn remote_server_command(command: &MoshCommand, colors: u16) -> Result<String> {
-    let server = shell_quote_words(&server_arguments_with_colors(command, colors)?);
+    let server = remote_server_invocation(command, colors)?;
     if command.remote_ip == RemoteIpMode::Remote {
         let marker = shell_quote(
             "[ -n \"$SSH_CONNECTION\" ] && printf '\\nMOSH SSH_CONNECTION %s\\n' \"$SSH_CONNECTION\"",
@@ -839,6 +842,25 @@ fn remote_server_command(command: &MoshCommand, colors: u16) -> Result<String> {
     } else {
         Ok(server)
     }
+}
+
+fn remote_server_invocation(command: &MoshCommand, colors: u16) -> Result<String> {
+    if !command.server_explicit && command.server == DEFAULT_SERVER {
+        let zosh = server_invocation_for(command, DEFAULT_SERVER, colors);
+        let stock = server_invocation_for(command, STOCK_SERVER, colors);
+        return Ok(format!(
+            "if command -v {DEFAULT_SERVER} >/dev/null 2>&1; then {zosh}; else {stock}; fi"
+        ));
+    }
+    Ok(shell_quote_words(&server_arguments_with_colors(
+        command, colors,
+    )?))
+}
+
+fn server_invocation_for(command: &MoshCommand, server: &str, colors: u16) -> String {
+    let mut arguments = vec![server.to_owned()];
+    arguments.extend(server_options_with_colors(command, colors));
+    shell_quote_words(&arguments)
 }
 
 fn proxy_command(command: &MoshCommand) -> String {
@@ -1170,6 +1192,7 @@ fn parse_attached_value(
         "--server" => set_once(&mut seen.server, "--server", || {
             parse_server_command(value)?;
             command.server = value.to_owned();
+            command.server_explicit = true;
             Ok(())
         }),
         "--predict" => set_prediction(command, seen, parse_prediction(value)?),
@@ -1385,6 +1408,15 @@ fn valid_mosh_key(value: &str) -> bool {
 #[cfg(test)]
 pub(crate) fn is_unsupported_server_output(output: &str) -> bool {
     is_unsupported_server_output_for(output, DEFAULT_SERVER)
+        || is_unsupported_server_output_for(output, STOCK_SERVER)
+}
+
+fn unsupported_server_output_for_command(output: &str, command: &MoshCommand) -> bool {
+    if !command.server_explicit && command.server == DEFAULT_SERVER {
+        return is_unsupported_server_output_for(output, DEFAULT_SERVER)
+            || is_unsupported_server_output_for(output, STOCK_SERVER);
+    }
+    is_unsupported_server_output_for(output, &command.server)
 }
 
 fn is_unsupported_server_output_for(output: &str, server: &str) -> bool {
@@ -1441,7 +1473,7 @@ pub(crate) fn help_text() -> &'static str {
         --client=PATH        mosh client on local machine
                                 (default: bundled zosh endpoint)
         --server=COMMAND     mosh server on remote machine
-                                (default: "mosh-server")
+                                (default: "zosh-server", then "mosh-server")
 
         --predict=adaptive      local echo for slower links [default]
 -a      --predict=always        use local echo even on fast links
@@ -1478,7 +1510,7 @@ pub(crate) fn help_text() -> &'static str {
         --init                  initialize the local terminal
         --no-init               do not send terminal initialization string [default]
 
-        --local                 run mosh-server locally without using ssh
+        --local                 run zosh-server locally without using ssh
 
         --experimental-remote-ip=(local|remote|proxy)  select the method for
                              discovering the remote IP address to use for mosh

@@ -1,6 +1,6 @@
 use crate::args::Config;
 use crate::lifecycle;
-use crate::protocol::ServerTransport;
+use crate::protocol::{ServerTransport, encode_host_message};
 use crate::terminal_state::{QueryResponder, TerminalState};
 use crate::timing;
 use crate::user_stream::{UserEvent, UserStreamTracker};
@@ -71,7 +71,7 @@ pub fn run(mut cfg: Config) -> Result<()> {
 
     if cfg.verbose > 0 {
         eprintln!(
-            "mosh-server-rs: UDP {}, protocol 2, PTY backend native",
+            "zosh-server-rs: UDP {}, protocol 2, PTY backend native",
             socket.local_addr().context("reading bound UDP address")?
         );
     }
@@ -238,7 +238,7 @@ fn serve_session(cfg: Config, socket: UdpSocket, mut transport: ServerTransport)
         if associated {
             if network_timeout.is_some_and(|timeout| transport.last_recv().elapsed() >= timeout) {
                 if cfg.verbose > 0 {
-                    eprintln!("mosh-server-rs: network timeout expired");
+                    eprintln!("zosh-server-rs: network timeout expired");
                 }
                 let _ = child.kill();
                 break;
@@ -408,7 +408,7 @@ fn send_updates(
                             std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
                         )
                     {
-                        eprintln!("mosh-server-rs: UDP send failed: {error}");
+                        eprintln!("zosh-server-rs: UDP send failed: {error}");
                     }
                 }
             }
@@ -440,8 +440,12 @@ fn drain_pty_events(
             Ok(PtyEvent::Output(bytes)) => {
                 timing::record("pty_output_apply", bytes.len() as u64, 0);
                 terminal.process(&bytes);
+                let replies = responder.feed(&bytes, terminal.cursor_position(), terminal.size());
+                for query in responder.take_terminal_queries() {
+                    terminal.add_query(query);
+                }
                 progress.dirty = true;
-                for reply in responder.feed(&bytes, terminal.cursor_position(), terminal.size()) {
+                for reply in replies {
                     queue_pty_write(writes, reply)?;
                 }
             }
@@ -453,7 +457,7 @@ fn drain_pty_events(
             }
             Ok(PtyEvent::Error(error)) => {
                 if verbose {
-                    eprintln!("mosh-server-rs: PTY I/O ended: {error}");
+                    eprintln!("zosh-server-rs: PTY I/O ended: {error}");
                 }
                 progress.ended = true;
                 progress.budget_exhausted = false;
@@ -505,9 +509,9 @@ fn host_update(terminal: &TerminalState, confirmed_echo: u64) -> Option<Vec<u8>>
             echo_ack_num: -1,
         });
     }
-    let update = (!instructions.is_empty()).then(|| HostInstruction::encode_message(&instructions));
+    let update = encode_host_message(&instructions, terminal.queries_from_ack());
     timing::slow("host_diff_slow", phase);
-    update
+    (!update.is_empty()).then_some(update)
 }
 
 fn apply_user_events(
@@ -555,6 +559,13 @@ fn apply_user_events(
                     .context("resizing PTY/ConPTY")?;
                 terminal.resize(rows, cols);
                 *dirty = true;
+            }
+            UserEvent::TerminalResponse(bytes) => {
+                // A response is a PTY byte stream event, not keyboard input;
+                // flush preceding keys so the remote process sees the exact
+                // UserStream order and do not attach an echo acknowledgement.
+                flush_keys(&mut keys)?;
+                queue_pty_write(pty_write_tx, bytes)?;
             }
         }
     }

@@ -15,7 +15,7 @@ use std::{
 use anyhow::{Context as _, Result};
 use task::ShellKind;
 
-const DEFAULT_SERVER: &str = "mosh-server";
+const DEFAULT_SERVER: &str = "zosh-server";
 const DEFAULT_SSH: &str = "ssh";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

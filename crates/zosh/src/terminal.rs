@@ -221,7 +221,19 @@ fn usable_size((columns, rows): (u16, u16)) -> (u16, u16) {
 
 /// Return the terminal color count used by the Mosh bootstrap.
 pub fn color_count() -> u16 {
-    match std::env::var("TERM").ok().as_deref() {
+    let term = std::env::var("TERM").ok();
+    let colorterm = std::env::var("COLORTERM").ok();
+    color_count_from_environment(term.as_deref(), colorterm.as_deref())
+}
+
+fn color_count_from_environment(term: Option<&str>, colorterm: Option<&str>) -> u16 {
+    if colorterm.is_some_and(|value| {
+        value.eq_ignore_ascii_case("truecolor") || value.eq_ignore_ascii_case("24bit")
+    }) {
+        return 1 << 15;
+    }
+
+    match term {
         Some(value) if value.contains("256") => 256,
         Some(value) if value.contains("color") => 8,
         _ => 0,

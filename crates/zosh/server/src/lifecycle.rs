@@ -76,7 +76,7 @@ pub fn windows_parent_bootstrap(raw_args: &[OsString]) -> Result<bool> {
     const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
     const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
 
-    let exe = std::env::current_exe().context("locating current mosh-server executable")?;
+    let exe = std::env::current_exe().context("locating current zosh-server executable")?;
 
     let spawn = |flags: u32| -> std::io::Result<std::process::Child> {
         let mut cmd = Command::new(&exe);
@@ -97,7 +97,7 @@ pub fn windows_parent_bootstrap(raw_args: &[OsString]) -> Result<bool> {
         match spawn(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB) {
             Ok(child) => child,
             Err(_) => spawn(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)
-                .context("spawning detached Windows mosh-server child")?,
+                .context("spawning detached Windows zosh-server child")?,
         };
 
     let stdout = child
@@ -111,7 +111,7 @@ pub fn windows_parent_bootstrap(raw_args: &[OsString]) -> Result<bool> {
         .context("reading MOSH CONNECT from detached child")?;
     if n == 0 || !line.starts_with("MOSH CONNECT ") {
         let _ = child.kill();
-        bail!("detached mosh-server child exited before emitting MOSH CONNECT");
+        bail!("detached zosh-server child exited before emitting MOSH CONNECT");
     }
 
     print!("{line}");
