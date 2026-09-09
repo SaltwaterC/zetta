@@ -832,7 +832,7 @@ fn native_macos_menus(
     ];
     #[cfg(feature = "zmux")]
     application_items.insert(
-        9,
+        10,
         MenuItem::action("Open Remote Session", OpenRemoteSession),
     );
 
