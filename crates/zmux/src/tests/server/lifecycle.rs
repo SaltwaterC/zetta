@@ -15,6 +15,7 @@ fn session_owned_by(owner: u32, protected: bool) -> Session {
             key_envelope: None,
         },
         state: serde_json::Value::Null,
+        shared_state: None,
         authentication: protected.then(|| SessionAuthentication::create("correct horse").unwrap()),
         key_envelope: None,
         failed_authentications: 0,

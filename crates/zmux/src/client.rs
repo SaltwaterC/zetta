@@ -6,10 +6,11 @@
 //! anything.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     io,
     path::PathBuf,
     process::{Command, Stdio},
+    sync::atomic::{AtomicU64, Ordering},
     sync::{Arc, Mutex},
     thread,
     time::{Duration, Instant},
@@ -32,7 +33,9 @@ type Descriptors = Vec<()>;
 use crate::{
     messages::{
         DetachRequest, Envelope, Event, MAX_IMAGE_BYTES, PROTOCOL_VERSION, PaneSnapshot,
-        PaneStateReport, Request, Response, SpawnRequest,
+        PaneStateReport, Request, Response, SessionRevision, SharedOperationId,
+        SharedSessionOperation, SharedSessionOperationRequest, SharedSessionState,
+        SharedSpawnRequest, SpawnRequest,
     },
     paths::session_catalog_dir,
     protocol::{BackgroundSessionSummary, RestorableSessionRecord},
@@ -90,6 +93,7 @@ pub struct Client {
     /// subscription reconciliation. It is shared by request clones and is
     /// zeroized when the logical client is dropped.
     session_secret: Arc<Mutex<Option<SessionSecret>>>,
+    operation_counter: Arc<AtomicU64>,
 }
 
 /// The result of applying a retention policy to a daemon.
@@ -167,7 +171,7 @@ pub struct SharedPane {
     session_id: u64,
     pane_id: u64,
     pub child_pid: u32,
-    connection: Mutex<Connection>,
+    connection: Arc<Mutex<Connection>>,
     /// The sizes the multiplexer arbitrated, recorded by the reader as
     /// [`Event::Size`] arrives. The holder of the pane applies the latest
     /// each time it is woken.
@@ -176,6 +180,7 @@ pub struct SharedPane {
     /// can wait for one instead of asking on a timer. Bounded at one: a pending
     /// signal already means "there are sizes to take".
     size_signal: (async_channel::Sender<()>, async_channel::Receiver<()>),
+    reconnect_replay: Arc<Mutex<VecDeque<u8>>>,
     /// Output produced while the pane was detached or shared, to be replayed
     /// into a fresh terminal before it is shown.
     pub replay: Vec<u8>,
@@ -193,7 +198,10 @@ impl SharedPane {
     /// Sends this client's input, to be written to the pane by the
     /// multiplexer.
     pub fn send_input(&self, bytes: &[u8]) -> Result<()> {
-        let mut connection = self.connection.lock().unwrap();
+        let mut connection = self
+            .connection
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         connection.send(&Request::Input {
             length: bytes.len(),
         })?;
@@ -203,7 +211,10 @@ impl SharedPane {
     /// Reports this client's size, so the multiplexer can keep every shared
     /// client at the smallest of them.
     pub fn send_resize(&self, columns: u16, lines: u16) -> Result<()> {
-        let mut connection = self.connection.lock().unwrap();
+        let mut connection = self
+            .connection
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         connection.send(&Request::Resize {
             session_id: self.session_id,
             pane_id: self.pane_id,
@@ -226,9 +237,7 @@ impl SharedPane {
         let connection = self
             .connection
             .lock()
-            .unwrap()
-            .try_clone()
-            .expect("cloning the shared connection");
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         #[cfg(unix)]
         {
             connection
@@ -244,18 +253,63 @@ impl SharedPane {
                 .ok();
         }
         SharedReader {
-            connection,
+            connection: self.connection.clone(),
             pending: Vec::new(),
             offset: 0,
             sizes: self.sizes.clone(),
             size_signal: self.size_signal.0.clone(),
+            reconnect_replay: self.reconnect_replay.clone(),
         }
+    }
+
+    /// Replaces a failed relay while the terminal's reader remains alive. The
+    /// replacement's retained replay is queued ahead of its live frames.
+    pub fn replace_connection_from(&self, replacement: &SharedPane) -> Result<()> {
+        let connection = replacement
+            .connection
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .try_clone()?;
+        #[cfg(unix)]
+        connection
+            .stream()
+            .set_read_timeout(Some(SHARED_READ_TIMEOUT))
+            .ok();
+        #[cfg(windows)]
+        connection
+            .stream()
+            .set_read_timeout(Some(SHARED_READ_TIMEOUT))
+            .ok();
+        *self
+            .connection
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = connection;
+        self.reconnect_replay
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .extend(replacement.replay.iter().copied());
+        self.sizes
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .extend(
+                replacement
+                    .sizes
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .drain(..),
+            );
+        let _ = self.size_signal.0.try_send(());
+        Ok(())
     }
 
     /// The sizes the multiplexer arbitrated since the last call, oldest
     /// first.
     pub fn take_sizes(&self) -> Vec<(u16, u16)> {
-        self.sizes.lock().unwrap().drain(..).collect()
+        self.sizes
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .drain(..)
+            .collect()
     }
 
     /// Resolves once the reader has recorded a size.
@@ -264,6 +318,25 @@ impl SharedPane {
     /// that often for every shared pane, almost always to find nothing.
     pub fn size_arrived(&self) -> async_channel::Receiver<()> {
         self.size_signal.1.clone()
+    }
+
+    fn from_connection(
+        session_id: u64,
+        pane_id: u64,
+        child_pid: u32,
+        connection: Connection,
+        replay: Vec<u8>,
+    ) -> Self {
+        Self {
+            session_id,
+            pane_id,
+            child_pid,
+            connection: Arc::new(Mutex::new(connection)),
+            sizes: Arc::new(Mutex::new(Vec::new())),
+            size_signal: async_channel::bounded(1),
+            reconnect_replay: Arc::new(Mutex::new(VecDeque::new())),
+            replay,
+        }
     }
 }
 
@@ -277,15 +350,28 @@ const SHARED_READ_TIMEOUT: Duration = Duration::from_millis(500);
 /// frames become plain bytes, [`Event::Size`] frames are recorded for the
 /// pane's holder to apply, and a dead multiplexer surfaces as an I/O error.
 pub struct SharedReader {
-    connection: Connection,
+    connection: Arc<Mutex<Connection>>,
     pending: Vec<u8>,
     offset: usize,
     sizes: Arc<Mutex<Vec<(u16, u16)>>>,
     size_signal: async_channel::Sender<()>,
+    reconnect_replay: Arc<Mutex<VecDeque<u8>>>,
 }
 
 impl io::Read for SharedReader {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        let mut replay = self
+            .reconnect_replay
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !replay.is_empty() {
+            let count = replay.len().min(buffer.len());
+            for (destination, byte) in buffer[..count].iter_mut().zip(replay.drain(..count)) {
+                *destination = byte;
+            }
+            return Ok(count);
+        }
+        drop(replay);
         if self.offset < self.pending.len() {
             let available = self.pending.len() - self.offset;
             let count = available.min(buffer.len());
@@ -298,35 +384,41 @@ impl io::Read for SharedReader {
             return Ok(count);
         }
         loop {
-            match self.connection.receive::<Event>() {
+            let mut connection = self
+                .connection
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            match connection.receive::<Event>() {
                 Ok((Event::Output { length, .. }, _)) => {
-                    let bytes = self
-                        .connection
-                        .read_exact(length)
-                        .map_err(io::Error::other)?;
+                    let bytes = connection.read_exact(length).map_err(io::Error::other)?;
                     let count = bytes.len().min(buffer.len());
                     buffer[..count].copy_from_slice(&bytes[..count]);
                     self.pending = bytes[count..].to_vec();
                     return Ok(count);
                 }
                 Ok((Event::Size { columns, lines, .. }, _)) => {
-                    self.sizes.lock().unwrap().push((columns, lines));
+                    self.sizes
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .push((columns, lines));
                     // Full means a signal is already pending, which says the
                     // same thing.
                     let _ = self.size_signal.try_send(());
                 }
+                Ok((Event::SharedClosed { .. }, _)) => return Ok(0),
                 Ok(_) => {}
                 Err(error) if is_would_block(&error) => {
                     return Err(io::Error::from(io::ErrorKind::WouldBlock));
                 }
-                // An ordinary end of stream, not a failure. The multiplexer closes
-                // its end when a pane is handed back, and reporting that as an
-                // error made the byte-stream worker print one into the terminal —
-                // which shifted a full-screen program's display by the lines it
-                // took and left the message on screen for good.
-                Err(error) if is_closed(&error) => return Ok(0),
-                Err(error) => return Err(io::Error::other(error)),
+                // A relay failure is recoverable. The owning shared pane swaps
+                // this connection after the subscription announces it, so keep
+                // the byte-stream worker alive across that short gap.
+                Err(error) if is_closed(&error) => {
+                    return Err(io::Error::from(io::ErrorKind::WouldBlock));
+                }
+                Err(_) => return Err(io::Error::from(io::ErrorKind::WouldBlock)),
             }
+            drop(connection);
         }
     }
 }
@@ -735,6 +827,7 @@ impl Client {
             client_id: ClientId::random()?,
             stream_only: false,
             session_secret: Arc::new(Mutex::new(None)),
+            operation_counter: Arc::new(AtomicU64::new(1)),
         }))
     }
 
@@ -751,6 +844,7 @@ impl Client {
             stream_only: true,
             remote: Some(remote),
             session_secret: Arc::new(Mutex::new(None)),
+            operation_counter: Arc::new(AtomicU64::new(1)),
         })
     }
 
@@ -770,6 +864,7 @@ impl Client {
             stream_only: true,
             remote: Some(remote),
             session_secret: Arc::new(Mutex::new(None)),
+            operation_counter: Arc::new(AtomicU64::new(1)),
         })
     }
 
@@ -808,6 +903,7 @@ impl Client {
             client_id: self.client_id.clone(),
             stream_only: self.stream_only,
             session_secret: self.session_secret.clone(),
+            operation_counter: self.operation_counter.clone(),
         }
     }
 
@@ -899,19 +995,9 @@ impl Client {
                 } => {
                     let replay = connection.read_exact(replay_length)?;
                     Ok(AttachOutcome::SharedAttached {
-                        pane: SharedPane {
-                            session_id,
-                            pane_id,
-                            child_pid,
-                            connection: Mutex::new(connection),
-                            // The dimensions in `SharedAttached` describe the
-                            // pane's current effective size, not this client's
-                            // laid-out window. It must report its first real
-                            // layout before it participates in arbitration.
-                            sizes: Arc::new(Mutex::new(Vec::new())),
-                            size_signal: async_channel::bounded(1),
-                            replay,
-                        },
+                        pane: SharedPane::from_connection(
+                            session_id, pane_id, child_pid, connection, replay,
+                        ),
                         state,
                         summary: *summary,
                     })
@@ -1303,6 +1389,123 @@ impl Client {
         }
     }
 
+    /// Allocates an operation ID that remains unique across request retries and
+    /// subscription reconnects for this logical client.
+    pub fn next_shared_operation_id(&self) -> SharedOperationId {
+        SharedOperationId::new(
+            self.client_id.clone(),
+            self.operation_counter.fetch_add(1, Ordering::Relaxed),
+        )
+    }
+
+    /// Fetches the daemon's complete shared-session snapshot.
+    pub fn shared_snapshot(&self, session_id: u64) -> Result<SharedSessionState> {
+        let secret = self.session_secret();
+        let mut connection =
+            self.open_with_session_secret(Request::SharedSnapshot { session_id }, secret.as_ref())?;
+        match Self::receive(&mut connection)?.0 {
+            Response::SharedSnapshot { state } => Ok(state),
+            Response::AuthenticationRequired => {
+                anyhow::bail!("the shared session requires an authentication secret")
+            }
+            Response::AuthenticationFailed => anyhow::bail!("shared session authentication failed"),
+            Response::Error { message } => anyhow::bail!("{message}"),
+            other => anyhow::bail!("unexpected response to shared snapshot: {other:?}"),
+        }
+    }
+
+    /// Leaves a shared session without changing any daemon-owned pane. This is
+    /// the orderly form of closing a remote tab; dropping the pane streams is
+    /// still the fallback when a window disappears abruptly.
+    pub fn leave_shared(&self, session_id: u64) -> Result<()> {
+        let secret = self.session_secret();
+        let mut connection =
+            self.open_with_session_secret(Request::LeaveShared { session_id }, secret.as_ref())?;
+        match Self::receive(&mut connection)?.0 {
+            Response::Ok => Ok(()),
+            Response::AuthenticationRequired => {
+                anyhow::bail!("the shared session requires an authentication secret")
+            }
+            Response::AuthenticationFailed => anyhow::bail!("shared session authentication failed"),
+            Response::Error { message } => anyhow::bail!("{message}"),
+            other => anyhow::bail!("unexpected response to leaving shared session: {other:?}"),
+        }
+    }
+
+    /// Applies a mutation only when `base_revision` is still authoritative.
+    /// A conflict is returned as data so callers can reconcile the complete
+    /// snapshot without accidentally rebasing a local edit.
+    pub fn apply_shared(
+        &self,
+        session_id: u64,
+        base_revision: SessionRevision,
+        operation: SharedSessionOperation,
+    ) -> Result<SharedOperationResult> {
+        let request = SharedSessionOperationRequest {
+            session_id,
+            base_revision,
+            operation_id: self.next_shared_operation_id(),
+            operation,
+        };
+        self.apply_shared_with_request(request)
+    }
+
+    pub fn apply_shared_with_request(
+        &self,
+        request: SharedSessionOperationRequest,
+    ) -> Result<SharedOperationResult> {
+        let secret = self.session_secret();
+        let mut connection =
+            self.open_with_session_secret(Request::ApplyShared(request), secret.as_ref())?;
+        match Self::receive(&mut connection)?.0 {
+            Response::SharedOperationApplied { state } => Ok(SharedOperationResult::Applied(state)),
+            Response::SharedConflict { state } => Ok(SharedOperationResult::Conflict(state)),
+            Response::AuthenticationRequired => {
+                anyhow::bail!("the shared session requires an authentication secret")
+            }
+            Response::AuthenticationFailed => anyhow::bail!("shared session authentication failed"),
+            Response::Error { message } => anyhow::bail!("{message}"),
+            other => anyhow::bail!("unexpected response to shared operation: {other:?}"),
+        }
+    }
+
+    /// Spawns a daemon-owned pane and keeps its shared byte stream open for the
+    /// terminal. This is the remote equivalent of [`Self::spawn`].
+    pub fn spawn_shared(&self, request: SharedSpawnRequest) -> Result<SharedSpawnedPane> {
+        let secret = self.session_secret();
+        let mut connection =
+            self.open_with_session_secret(Request::SpawnShared(request.clone()), secret.as_ref())?;
+        let (response, _) = Self::receive(&mut connection)?;
+        match response {
+            Response::SharedSpawned {
+                session_id,
+                pane_id,
+                child_pid,
+                replay_length,
+                shared_state,
+                ..
+            } => {
+                let replay = connection.read_exact(replay_length)?;
+                Ok(SharedSpawnedPane {
+                    pane: SharedPane::from_connection(
+                        session_id, pane_id, child_pid, connection, replay,
+                    ),
+                    state: shared_state,
+                })
+            }
+            Response::SharedConflict { state } => anyhow::bail!(
+                "shared spawn conflicted at revision {}; refresh the session snapshot",
+                state.revision.0
+            ),
+            Response::AuthenticationRequired => {
+                anyhow::bail!("the shared session requires an authentication secret")
+            }
+            Response::AuthenticationFailed => anyhow::bail!("shared session authentication failed"),
+            Response::Error { message } => anyhow::bail!("{message}"),
+            other => anyhow::bail!("unexpected response to shared spawn: {other:?}"),
+        }
+    }
+
     /// Starts a process under the multiplexer and takes its terminal.
     pub fn spawn(&self, request: SpawnRequest) -> Result<AttachedPane> {
         let mut connection = self.open(Request::Spawn(request))?;
@@ -1588,10 +1791,11 @@ impl Client {
             _ => None,
         };
         let secret = secret.or(recovered.as_ref());
-        let request = Request::Resume(ResumeRequest {
+        let request = Request::Resume(Box::new(ResumeRequest {
             record_id: persisted.id,
             summary: persisted.summary.clone(),
             state: persisted.state.clone(),
+            shared_state: persisted.shared_state.clone(),
             verifier: persisted.verifier.clone(),
             key_envelope: persisted.key_envelope.clone(),
             failed_authentications: persisted.failed_authentications,
@@ -1607,7 +1811,7 @@ impl Client {
                     length: snapshot.bytes.len(),
                 })
                 .collect(),
-        });
+        }));
         let mut connection = self.open_attested(request, std::process::id())?;
         for snapshot in &persisted.snapshots {
             connection.write_all(&snapshot.bytes)?;
@@ -1910,10 +2114,12 @@ impl Client {
         let exits = Arc::new(ExitReporters::default());
         let revokes = Arc::new(PaneSignals::default());
         let grants = Arc::new(PaneSignals::default());
+        let shared = Arc::new(SharedSessionReports::default());
         let subscription = Subscription {
             exits,
             revokes,
             grants,
+            shared,
         };
         let dispatch = subscription.clone();
         let client = self.reconnect_client();
@@ -1977,6 +2183,81 @@ pub struct Subscription {
     pub exits: Arc<ExitReporters>,
     pub revokes: Arc<PaneSignals>,
     pub grants: Arc<PaneSignals>,
+    pub shared: Arc<SharedSessionReports>,
+}
+
+#[derive(Clone, Debug)]
+pub enum SharedSessionEvent {
+    Updated(SharedSessionState),
+    PaneAdded {
+        session_id: u64,
+        pane_id: u64,
+        child_pid: u32,
+        state: SharedSessionState,
+    },
+    PaneRemoved {
+        session_id: u64,
+        pane_id: u64,
+        state: SharedSessionState,
+    },
+    StreamFailed {
+        session_id: u64,
+        pane_id: u64,
+    },
+}
+
+/// Broadcasts canonical shared-session snapshots to the coordinator that owns
+/// a remote tab. Keeping this registry beside the existing exit/revoke
+/// registries means subscription reconnects can repair state without making
+/// the render path open a socket.
+#[derive(Default)]
+pub struct SharedSessionReports {
+    receivers: Mutex<HashMap<u64, Vec<async_channel::Sender<SharedSessionEvent>>>>,
+}
+
+impl SharedSessionReports {
+    pub fn register(&self, session_id: u64) -> async_channel::Receiver<SharedSessionEvent> {
+        let (sender, receiver) = async_channel::unbounded();
+        self.receivers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .entry(session_id)
+            .or_default()
+            .push(sender);
+        receiver
+    }
+
+    pub fn forget(&self, session_id: u64) {
+        self.receivers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&session_id);
+    }
+
+    fn registered(&self) -> Vec<u64> {
+        self.receivers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .keys()
+            .copied()
+            .collect()
+    }
+
+    fn report(&self, event: SharedSessionEvent) {
+        let mut receivers = self
+            .receivers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let session_id = match &event {
+            SharedSessionEvent::Updated(state)
+            | SharedSessionEvent::PaneAdded { state, .. }
+            | SharedSessionEvent::PaneRemoved { state, .. } => state.session_id,
+            SharedSessionEvent::StreamFailed { session_id, .. } => *session_id,
+        };
+        if let Some(subscribers) = receivers.get_mut(&session_id) {
+            subscribers.retain(|subscriber| subscriber.try_send(event.clone()).is_ok());
+        }
+    }
 }
 
 /// How long a lost subscription is retried before the panes it served are told
@@ -2011,6 +2292,7 @@ fn subscription_loop(client: Client, first: Connection, subscription: Subscripti
         exits: reporters,
         revokes,
         grants,
+        shared,
     } = subscription;
     let mut connection = first;
     loop {
@@ -2033,6 +2315,45 @@ fn subscription_loop(client: Client, first: Connection, subscription: Subscripti
                 // either way — but knowing it was announced turns a warning
                 // into an informational log.
                 Ok((Event::Replacing, _)) => announced = true,
+                Ok((Event::SharedSessionUpdated { state }, _)) => {
+                    shared.report(SharedSessionEvent::Updated(state))
+                }
+                Ok((
+                    Event::SharedPaneAdded {
+                        session_id,
+                        pane_id,
+                        child_pid,
+                        state,
+                    },
+                    _,
+                )) => shared.report(SharedSessionEvent::PaneAdded {
+                    session_id,
+                    pane_id,
+                    child_pid,
+                    state,
+                }),
+                Ok((
+                    Event::SharedPaneRemoved {
+                        session_id,
+                        pane_id,
+                        state,
+                    },
+                    _,
+                )) => shared.report(SharedSessionEvent::PaneRemoved {
+                    session_id,
+                    pane_id,
+                    state,
+                }),
+                Ok((
+                    Event::SharedStreamFailed {
+                        session_id,
+                        pane_id,
+                    },
+                    _,
+                )) => shared.report(SharedSessionEvent::StreamFailed {
+                    session_id,
+                    pane_id,
+                }),
                 Ok(_) => {}
                 Err(_) => break,
             }
@@ -2042,7 +2363,7 @@ fn subscription_loop(client: Client, first: Connection, subscription: Subscripti
         } else {
             log::warn!("lost the multiplexer's event stream; trying to re-establish it");
         }
-        match resubscribe(&client, &reporters, &revokes, &grants) {
+        match resubscribe(&client, &reporters, &revokes, &grants, &shared) {
             Some(Resubscribed::Connection(next)) => connection = next,
             // Nobody is left to tell. Reporting a disconnect here would be
             // writing into registries that no longer have an owner.
@@ -2080,10 +2401,12 @@ fn subscription_is_abandoned(
     reporters: &Arc<ExitReporters>,
     revokes: &Arc<PaneSignals>,
     grants: &Arc<PaneSignals>,
+    shared: &Arc<SharedSessionReports>,
 ) -> bool {
     Arc::strong_count(reporters) == 1
         && Arc::strong_count(revokes) == 1
         && Arc::strong_count(grants) == 1
+        && Arc::strong_count(shared) == 1
 }
 
 /// Re-establishes the event stream, then reports whatever was missed.
@@ -2092,11 +2415,12 @@ fn resubscribe(
     reporters: &Arc<ExitReporters>,
     revokes: &Arc<PaneSignals>,
     grants: &Arc<PaneSignals>,
+    shared: &Arc<SharedSessionReports>,
 ) -> Option<Resubscribed> {
     let deadline = Instant::now() + RESUBSCRIBE_GRACE;
     let mut delay = RESUBSCRIBE_FIRST_DELAY;
     loop {
-        if subscription_is_abandoned(reporters, revokes, grants) {
+        if subscription_is_abandoned(reporters, revokes, grants, shared) {
             return Some(Resubscribed::Abandoned);
         }
         if let Ok(connection) = client.open_ready(Request::Subscribe) {
@@ -2106,6 +2430,7 @@ fn resubscribe(
             // a reconcile and a subscribe would fall down the same gap this is
             // closing.
             reconcile_missed_exits(client, reporters);
+            reconcile_shared_snapshots(client, shared);
             return Some(Resubscribed::Connection(connection));
         }
         if Instant::now() >= deadline {
@@ -2137,6 +2462,17 @@ fn reconcile_missed_exits(client: &Client, reporters: &Arc<ExitReporters>) {
     }
 }
 
+fn reconcile_shared_snapshots(client: &Client, shared: &Arc<SharedSessionReports>) {
+    for session_id in shared.registered() {
+        match client.shared_snapshot(session_id) {
+            Ok(state) => shared.report(SharedSessionEvent::Updated(state)),
+            Err(error) => log::debug!(
+                "could not reconcile shared session {session_id} after reconnect: {error:#}"
+            ),
+        }
+    }
+}
+
 pub enum AttachOutcome {
     Attached {
         pane: AttachedPane,
@@ -2151,6 +2487,17 @@ pub enum AttachOutcome {
     },
     AuthenticationRequired,
     AuthenticationFailed,
+}
+
+pub struct SharedSpawnedPane {
+    pub pane: SharedPane,
+    pub state: SharedSessionState,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum SharedOperationResult {
+    Applied(SharedSessionState),
+    Conflict(SharedSessionState),
 }
 
 /// How a pane's exit is reported once the multiplexer says it ended.

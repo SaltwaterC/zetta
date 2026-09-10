@@ -193,10 +193,14 @@ impl Zetta {
         icon: Option<IconName>,
         cx: &mut Context<Self>,
     ) -> bool {
+        let tab_id = self.tabs.get(self.active_tab).map(|tab| tab.id);
         let Some(tab) = self.tabs.get_mut(self.active_tab) else {
             return false;
         };
         tab.set_icon_override(icon);
+        if let Some(tab_id) = tab_id {
+            self.sync_shared_tab_state(tab_id, cx);
+        }
         cx.notify();
         true
     }
@@ -205,6 +209,9 @@ impl Zetta {
         let reset = self.reset_active_project_tab_icon();
         if !reset {
             return false;
+        }
+        if let Some(tab_id) = self.tabs.get(self.active_tab).map(|tab| tab.id) {
+            self.sync_shared_tab_state(tab_id, cx);
         }
         cx.notify();
         true
@@ -330,8 +337,10 @@ impl Zetta {
         let Some(picker) = self.tab_icon_picker.as_ref() else {
             return;
         };
+        let mut shared_tab_id = None;
         match picker.target {
             TabIconPickerTarget::Tab(tab_index) => {
+                shared_tab_id = self.tabs.get(tab_index).map(|tab| tab.id);
                 if let Some(tab) = self.tabs.get_mut(tab_index) {
                     tab.set_icon_override(icon);
                 }
@@ -360,6 +369,9 @@ impl Zetta {
             }
         }
         self.dismiss_tab_icon_picker(window, cx);
+        if let Some(tab_id) = shared_tab_id {
+            self.sync_shared_tab_state(tab_id, cx);
+        }
     }
 
     pub(crate) fn tab_icon_picker_key_down(

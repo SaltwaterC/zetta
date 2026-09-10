@@ -299,6 +299,11 @@ struct Session {
     id: u64,
     summary: BackgroundSessionSummary,
     state: serde_json::Value,
+    /// Canonical collaboration state when this session is offered for live
+    /// multi-client editing. Kept separate from the application's opaque tab
+    /// state so a revision and operation id survive without changing that
+    /// payload's schema.
+    shared_state: Option<crate::messages::SharedSessionState>,
     authentication: Option<SessionAuthentication>,
     /// The sealed session key that goes with `authentication`, when the secret
     /// was generated rather than typed. Held beside the verifier and published
@@ -907,6 +912,7 @@ fn persisted_live_session(session: &Session) -> PersistedSession {
         updated_at: unix_now(),
         summary: session.summary.clone(),
         state: session.state.clone(),
+        shared_state: session.shared_state.clone(),
         verifier: session
             .authentication
             .as_ref()
@@ -975,6 +981,29 @@ fn unix_now() -> u64 {
 fn broadcast(daemon: &Arc<Daemon>, event: &Event) {
     let mut subscribers = daemon.subscribers.lock().unwrap();
     subscribers.retain(|_, subscriber| subscriber.connection.send(event).is_ok());
+}
+
+/// Broadcasts an event to every subscribed client except the one whose request
+/// already carries the result. Excluding the requester is important for shared
+/// pane creation: its request connection is already the data plane, so handling
+/// the pane-added event as well would attach a duplicate local pane.
+pub(super) fn broadcast_except(daemon: &Arc<Daemon>, event: &Event, excluded: &ClientId) {
+    let mut subscribers = daemon.subscribers.lock().unwrap();
+    subscribers.retain(|client_id, subscriber| {
+        client_id == excluded || subscriber.connection.send(event).is_ok()
+    });
+}
+
+/// Sends a shared-stream failure only to the viewer whose data connection
+/// failed. Other viewers keep their relays and must not reconnect or lose their
+/// byte ordering merely because one socket disappeared.
+pub(super) fn broadcast_to(daemon: &Arc<Daemon>, event: &Event, target: &ClientId) {
+    let mut subscribers = daemon.subscribers.lock().unwrap();
+    if let Some(subscriber) = subscribers.get_mut(target)
+        && subscriber.connection.send(event).is_err()
+    {
+        subscribers.remove(target);
+    }
 }
 
 fn window_size(size: TerminalSize) -> WindowSize {

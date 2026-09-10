@@ -215,10 +215,10 @@ impl Zetta {
         // Covers every scope below; over-bumping costs one extra query, while
         // under-bumping leaves an open `zetta vi` on stale colours.
         crate::process_control::bump_pane_theme_revision();
+        let Some(tab_id) = self.tabs.get(self.active_tab).map(|tab| tab.id) else {
+            return false;
+        };
         if scope == ThemeScope::Tab {
-            let Some(tab_id) = self.tabs.get(self.active_tab).map(|tab| tab.id) else {
-                return false;
-            };
             if let Some(name) = theme_name.as_deref()
                 && ThemeRegistry::global(cx).get(name).is_err()
             {
@@ -227,6 +227,7 @@ impl Zetta {
             self.tabs[self.active_tab].theme_override = theme_name;
             self.refresh_terminal_themes_in_tab(tab_id, cx);
             cx.notify();
+            self.sync_shared_tab_state(tab_id, cx);
             return true;
         }
 
@@ -303,6 +304,7 @@ impl Zetta {
             }
         };
         view.update(cx, |view, cx| view.set_theme(theme, cx));
+        self.sync_shared_tab_state(tab_id, cx);
         cx.notify();
         true
     }

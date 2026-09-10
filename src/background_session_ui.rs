@@ -15,6 +15,8 @@
 
 use super::*;
 #[cfg(feature = "zmux")]
+pub(crate) mod collaboration;
+#[cfg(feature = "zmux")]
 use crate::mux::{MuxPaneIds, SharedPaneEntry};
 use crate::project::resolve_registered_project_config_root;
 use crate::rename::resolve_tab_title;
@@ -364,14 +366,14 @@ const SNAPSHOT_LINES: usize = 2_000;
 
 mod detach;
 #[cfg(feature = "zmux")]
-mod image_paste;
+pub(crate) mod image_paste;
 #[cfg(feature = "zmux")]
 mod multiplexer;
 mod observers;
 mod reconnect;
 mod restore;
 #[cfg(feature = "zmux")]
-mod shared_panes;
+pub(crate) mod shared_panes;
 
 #[cfg(feature = "zmux")]
 pub(crate) use multiplexer::AttachOutcomeSummary;
@@ -390,7 +392,7 @@ pub(crate) enum AttachOutcomeSummary {
 
 #[cfg(not(feature = "zmux"))]
 impl Zetta {
-    pub(crate) fn drop_shared_pane(&mut self, _: u64) {}
+    pub(crate) fn drop_shared_pane(&mut self, _: u64, _: &mut Context<Self>) {}
 
     pub(super) fn hand_session_to_multiplexer(
         &mut self,

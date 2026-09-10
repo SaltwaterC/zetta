@@ -219,22 +219,6 @@ fn resize_window(window: &mut Window, resize: WindowResize, cx: &App) -> bool {
     true
 }
 
-/// Returns the outer-window delta needed to change a pane by the requested
-/// number of cells while leaving its layout fraction untouched.
-#[cfg(feature = "zmux")]
-fn shared_resize_window_delta(
-    region_fraction: f32,
-    requested_cells: usize,
-    current_cells: usize,
-    cell_size: Pixels,
-) -> f32 {
-    if requested_cells == current_cells || region_fraction <= f32::EPSILON {
-        return 0.;
-    }
-    (requested_cells as isize - current_cells as isize) as f32 * f32::from(cell_size)
-        / region_fraction
-}
-
 impl Zetta {
     pub(crate) fn toggle_pane_resize_mode(
         &mut self,
@@ -340,9 +324,11 @@ impl Zetta {
         if !tab.layout.move_pane(tab.active_pane, direction) {
             return;
         }
+        let tab_id = tab.id;
         for terminal in tab.panes.iter().flat_map(TerminalPane::all_terminals) {
             terminal.update(cx, |terminal, _| terminal.truncate_on_next_resize());
         }
+        self.sync_shared_tab_state(tab_id, cx);
         cx.notify();
     }
 
@@ -371,6 +357,7 @@ impl Zetta {
         for terminal in tab.panes.iter().flat_map(TerminalPane::all_terminals) {
             terminal.update(cx, |terminal, _| terminal.truncate_on_next_resize());
         }
+        self.sync_shared_tab_state(target.tab_id, cx);
         cx.notify();
     }
 
@@ -576,6 +563,7 @@ impl Zetta {
             {
                 terminal.update(cx, |terminal, _| terminal.truncate_on_next_resize());
             }
+            self.sync_shared_tab_state(gutter.tab_id, cx);
             cx.notify();
         }
     }
@@ -705,75 +693,7 @@ impl Zetta {
                     terminal.update(cx, |terminal, _| terminal.truncate_on_next_resize());
                 }
             }
-            cx.notify();
-        }
-    }
-
-    /// Synchronizes a shared pane by resizing the outer window only. A shared
-    /// client is a viewer of the daemon's already-arbitrated size; changing a
-    /// split boundary here would make the same window report a different pane
-    /// size again and start a resize fight.
-    #[cfg(feature = "zmux")]
-    pub(crate) fn resize_shared_pane_to(
-        &mut self,
-        tab_id: u64,
-        pane_id: u64,
-        columns: Option<usize>,
-        rows: Option<usize>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(tab_index) = self.tabs.iter().position(|tab| tab.id == tab_id) else {
-            return;
-        };
-        let Some(bounds) = self.tabs[tab_index]
-            .pane(pane_id)
-            .and_then(TerminalPane::selected_terminal)
-            .map(|terminal| terminal.read(cx).last_content().terminal_bounds)
-        else {
-            return;
-        };
-        let Some(region) = self.tabs[tab_index].visible_layout().and_then(|layout| {
-            layout
-                .regions()
-                .into_iter()
-                .find(|region| region.id == pane_id)
-        }) else {
-            return;
-        };
-
-        let mut window_resize = WindowResize::default();
-        if let Some(columns) = columns {
-            let region_fraction = region.right - region.left;
-            window_resize.add(
-                SplitAxis::Vertical,
-                shared_resize_window_delta(
-                    region_fraction,
-                    columns.max(MINIMUM_PANE_COLUMNS),
-                    bounds.num_columns(),
-                    bounds.cell_width(),
-                ),
-            );
-        }
-        if let Some(rows) = rows {
-            let region_fraction = region.bottom - region.top;
-            window_resize.add(
-                SplitAxis::Horizontal,
-                shared_resize_window_delta(
-                    region_fraction,
-                    rows.max(MINIMUM_PANE_ROWS),
-                    bounds.num_lines(),
-                    bounds.line_height(),
-                ),
-            );
-        }
-
-        if resize_window(window, window_resize, cx) {
-            if let Some(tab) = self.tabs.get(tab_index) {
-                for terminal in tab.panes.iter().flat_map(TerminalPane::all_terminals) {
-                    terminal.update(cx, |terminal, _| terminal.truncate_on_next_resize());
-                }
-            }
+            self.sync_shared_tab_state(tab_id, cx);
             cx.notify();
         }
     }

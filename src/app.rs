@@ -11,6 +11,8 @@
 //! - `attention.rs` — routing an attention ID to the tab that owns it.
 
 use super::*;
+#[cfg(feature = "zmux")]
+use crate::background_session_ui::collaboration::SharedSessionCoordinator;
 use crate::command_panes::{PaneCommand, quote_pane_command_for_shell};
 use crate::configuration_reload::ConfigurationReloadFeedback;
 use crate::process_control::ReplacePaneRequest;
@@ -477,6 +479,10 @@ pub(crate) struct Zetta {
     /// shared connection and the sizes that arrive on it live here.
     #[cfg(feature = "zmux")]
     pub(crate) shared_panes: HashMap<u64, crate::mux::SharedPaneEntry>,
+    /// Canonical shared-session revisions and the stable mux-id/local-id
+    /// mappings used to apply subscription snapshots safely.
+    #[cfg(feature = "zmux")]
+    pub(crate) shared_collaboration: SharedSessionCoordinator,
     pub(crate) background_observed_panes: HashSet<u64>,
     pub(crate) background_process_refresh_running: bool,
     pub(crate) background_session_picker_entries: Vec<(u64, String, String)>,
@@ -643,6 +649,23 @@ impl Zetta {
     }
 
     pub(crate) fn prepare_for_background_window_close(&mut self, cx: &mut Context<Self>) {
+        let remote_tabs = self
+            .tabs
+            .iter()
+            .filter(|tab| self.mux_panes.is_remote_tab(tab.id))
+            .map(|tab| {
+                (
+                    tab.id,
+                    tab.panes.iter().map(|pane| pane.id).collect::<Vec<_>>(),
+                )
+            })
+            .collect::<Vec<_>>();
+        for (tab_id, pane_ids) in remote_tabs {
+            self.leave_shared_tab(tab_id, cx);
+            for pane_id in pane_ids {
+                self.drop_shared_pane(pane_id, cx);
+            }
+        }
         let tabs = std::mem::take(&mut self.tabs);
         let mut preserved_any = false;
         for tab in tabs {
@@ -877,6 +900,8 @@ impl Zetta {
             mux_panes: MuxPanes,
             #[cfg(feature = "zmux")]
             shared_panes: HashMap::new(),
+            #[cfg(feature = "zmux")]
+            shared_collaboration: SharedSessionCoordinator::default(),
             background_observed_panes: HashSet::new(),
             background_process_refresh_running: false,
             background_session_picker_entries: Vec::new(),

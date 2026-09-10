@@ -34,7 +34,7 @@ use serde::{Deserialize, Serialize};
 /// Bumped whenever [`Handover`] changes shape. The replacement refuses a
 /// version it does not know rather than guessing at the layout of a session it
 /// is about to take responsibility for.
-pub const HANDOVER_VERSION: u32 = 7;
+pub const HANDOVER_VERSION: u32 = 8;
 
 /// Everything the next image needs to carry on.
 ///
@@ -59,6 +59,10 @@ pub struct SessionHandover {
     pub id: u64,
     pub summary: crate::protocol::BackgroundSessionSummary,
     pub state: serde_json::Value,
+    /// Canonical collaboration state, if this session was shared. Optional so
+    /// a handover from before collaboration can still be upgraded safely.
+    #[serde(default)]
+    pub shared_state: Option<crate::messages::SharedSessionState>,
     /// Whether the user asked for this session to outlive its window.
     pub keep: bool,
     /// Whether the user asked for this session to be joinable while a window is

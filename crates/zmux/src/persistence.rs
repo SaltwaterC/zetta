@@ -159,6 +159,10 @@ pub struct PersistedSession {
     pub updated_at: u64,
     pub summary: BackgroundSessionSummary,
     pub state: serde_json::Value,
+    /// The revisioned collaboration envelope, when a live shared session was
+    /// persisted. Older records simply have no collaboration state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shared_state: Option<crate::messages::SharedSessionState>,
     pub verifier: Option<String>,
     /// The sealed session key that goes with `verifier`, when the secret was
     /// generated rather than typed. See
@@ -198,6 +202,8 @@ struct PersistedSessionMetadata {
     updated_at: u64,
     summary: BackgroundSessionSummary,
     state: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    shared_state: Option<crate::messages::SharedSessionState>,
     verifier: Option<String>,
     /// As [`PersistedSession::key_envelope`]. Defaulted so a record written
     /// before automatic protection existed still loads.
@@ -282,6 +288,7 @@ fn load_session_from_persistence_directory(
             }),
         summary: metadata.summary,
         state: metadata.state,
+        shared_state: metadata.shared_state,
         verifier: metadata.verifier,
         key_envelope: metadata.key_envelope,
         failed_authentications: authentication
@@ -610,6 +617,7 @@ impl PersistenceStore {
             updated_at: session.updated_at,
             summary: session.summary.clone(),
             state: session.state.clone(),
+            shared_state: session.shared_state.clone(),
             verifier: session.verifier.clone(),
             key_envelope: session.key_envelope.clone(),
             failed_authentications: session.failed_authentications,

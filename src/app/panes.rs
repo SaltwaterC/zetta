@@ -15,6 +15,19 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let globally_close_shared_pane = self.mux_panes.is_remote_tab(tab_id)
+            && self
+                .tabs
+                .iter()
+                .find(|tab| tab.id == tab_id)
+                .is_some_and(|tab| tab.panes.len() > 1);
+        if globally_close_shared_pane {
+            // Remove it locally first so the follow-up canonical state can no
+            // longer serialize the pane that the daemon is about to terminate.
+            self.close_pane_with_policy(tab_id, pane_id, true, window, cx);
+            self.request_shared_pane_close(tab_id, pane_id, cx);
+            return;
+        }
         self.close_pane_with_policy(tab_id, pane_id, true, window, cx);
     }
 
@@ -204,7 +217,7 @@ impl Zetta {
         };
         self.projects.forget_pane(pane_id);
         self.forget_pane_controls([pane_id]);
-        self.drop_shared_pane(pane_id);
+        self.drop_shared_pane(pane_id, cx);
         self.release_mux_pane(tab_id, pane_id, cx);
         self.retain_open_visible_terminals();
         let Some(layout) = layout else {
@@ -568,12 +581,14 @@ impl Zetta {
         let Some(tab) = self.tabs.get_mut(self.active_tab) else {
             return;
         };
+        let tab_id = tab.id;
         if !tab.layout.rotate_pane(tab.active_pane, direction) {
             return;
         }
         for terminal in tab.panes.iter().flat_map(TerminalPane::all_terminals) {
             terminal.update(cx, |terminal, _| terminal.truncate_on_next_resize());
         }
+        self.sync_shared_tab_state(tab_id, cx);
         cx.notify();
     }
 }
@@ -609,6 +624,7 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let tab_id = self.tabs.get(self.active_tab).map(|tab| tab.id);
         if let Some(tab) = self.tabs.get_mut(self.active_tab) {
             tab.broadcast_input = !tab.broadcast_input;
             let enabled = tab.broadcast_input;
@@ -620,6 +636,9 @@ impl Zetta {
             for view in views {
                 view.update(cx, |view, _| view.set_emit_input_events(enabled));
             }
+        }
+        if let Some(tab_id) = tab_id {
+            self.sync_shared_tab_state(tab_id, cx);
         }
         self.focus_active(window, cx);
         cx.notify();
@@ -634,6 +653,7 @@ impl Zetta {
         let Some(tab) = self.tabs.get_mut(self.active_tab) else {
             return;
         };
+        let tab_id = tab.id;
         if tab.maximized_pane.is_some() {
             return;
         }
@@ -644,5 +664,6 @@ impl Zetta {
         };
         tab.activate_pane(pane_id);
         self.focus_active(window, cx);
+        self.sync_shared_tab_state(tab_id, cx);
     }
 }

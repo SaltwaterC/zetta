@@ -56,6 +56,7 @@ impl Zetta {
         color: Option<gpui::Hsla>,
         cx: &mut Context<Self>,
     ) -> bool {
+        let tab_id = self.tabs.get(self.active_tab).map(|tab| tab.id);
         let Some(tab) = self.tabs.get_mut(self.active_tab) else {
             return false;
         };
@@ -68,6 +69,9 @@ impl Zetta {
         pane.overlay_opacity = opacity;
         pane.overlay_color = color;
         cx.notify();
+        if let Some(tab_id) = tab_id {
+            self.sync_shared_tab_state(tab_id, cx);
+        }
         true
     }
 
@@ -124,6 +128,7 @@ impl Zetta {
     /// Copies the picker's current font size, colour, and opacity to its
     /// pane, previewing the selection live without committing the picker.
     fn preview_overlay_style(&mut self, cx: &mut Context<Self>) {
+        let tab_id = self.tabs.get(self.active_tab).map(|tab| tab.id);
         let Some(tab) = self.tabs.get_mut(self.active_tab) else {
             return;
         };
@@ -138,6 +143,9 @@ impl Zetta {
             pane.overlay_font_size = Some(font_size);
             pane.overlay_color = Some(color);
             pane.overlay_opacity = Some(opacity);
+        }
+        if let Some(tab_id) = tab_id {
+            self.sync_shared_tab_state(tab_id, cx);
         }
         cx.notify();
     }
@@ -421,18 +429,24 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(tab) = self.tabs.get_mut(self.active_tab) else {
+        let Some(tab_id) = self.tabs.get(self.active_tab).map(|tab| tab.id) else {
             return;
         };
-        let Some(picker) = tab.overlay_style_picker.take() else {
-            return;
-        };
-        if let Some(pane) = tab.pane_mut(picker.pane_id) {
-            pane.overlay_font_size = Some(picker.font_size);
-            pane.overlay_color = Some(picker.color());
-            pane.overlay_opacity = Some(picker.opacity_percent as f32 / 100.);
+        {
+            let Some(tab) = self.tabs.get_mut(self.active_tab) else {
+                return;
+            };
+            let Some(picker) = tab.overlay_style_picker.take() else {
+                return;
+            };
+            if let Some(pane) = tab.pane_mut(picker.pane_id) {
+                pane.overlay_font_size = Some(picker.font_size);
+                pane.overlay_color = Some(picker.color());
+                pane.overlay_opacity = Some(picker.opacity_percent as f32 / 100.);
+            }
         }
         self.focus_active(window, cx);
+        self.sync_shared_tab_state(tab_id, cx);
     }
 
     /// Closes the overlay-style selector and restores the pane's font size,
@@ -442,18 +456,24 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(tab) = self.tabs.get_mut(self.active_tab) else {
+        let Some(tab_id) = self.tabs.get(self.active_tab).map(|tab| tab.id) else {
             return;
         };
-        let Some(picker) = tab.overlay_style_picker.take() else {
-            return;
-        };
-        if let Some(pane) = tab.pane_mut(picker.pane_id) {
-            pane.overlay_font_size = picker.original_font_size;
-            pane.overlay_color = picker.original_color;
-            pane.overlay_opacity = picker.original_opacity;
+        {
+            let Some(tab) = self.tabs.get_mut(self.active_tab) else {
+                return;
+            };
+            let Some(picker) = tab.overlay_style_picker.take() else {
+                return;
+            };
+            if let Some(pane) = tab.pane_mut(picker.pane_id) {
+                pane.overlay_font_size = picker.original_font_size;
+                pane.overlay_color = picker.original_color;
+                pane.overlay_opacity = picker.original_opacity;
+            }
         }
         self.focus_active(window, cx);
+        self.sync_shared_tab_state(tab_id, cx);
     }
 
     /// Applies the overlay's text and proceeds straight to the live style
@@ -472,6 +492,9 @@ impl Zetta {
                 pane.overlay_text = text;
             }
             tab.overlay_buffer = None;
+        }
+        if let Some(tab_id) = self.tabs.get(self.active_tab).map(|tab| tab.id) {
+            self.sync_shared_tab_state(tab_id, cx);
         }
         if has_text {
             self.begin_overlay_style_picker(pane_id, window, cx);

@@ -108,6 +108,7 @@ fn store_session(directory: &Path, recipient: &str) {
                 key_envelope: None,
             },
             state: serde_json::json!({"cwd": "/interop"}),
+            shared_state: None,
             verifier: None,
             key_envelope: None,
             failed_authentications: 0,

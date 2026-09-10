@@ -1553,6 +1553,25 @@ fn normalize_terminal_bounds(mut bounds: TerminalBounds) -> TerminalBounds {
     bounds
 }
 
+/// Limit the grid presented by a shared pane without changing the size of the
+/// pane that contains it. The caller still lays out the terminal at its local
+/// size; the effective bounds only decide how many cells the emulator owns.
+fn effective_terminal_bounds(
+    local_bounds: TerminalBounds,
+    shared_viewport: Option<(usize, usize)>,
+) -> TerminalBounds {
+    let Some((max_columns, max_lines)) = shared_viewport else {
+        return local_bounds;
+    };
+
+    let columns = local_bounds.num_columns().min(max_columns.max(1));
+    let lines = local_bounds.num_lines().min(max_lines.max(1));
+    let mut effective_bounds = local_bounds;
+    effective_bounds.bounds.size.width = local_bounds.cell_width * columns as f32;
+    effective_bounds.bounds.size.height = local_bounds.line_height * lines as f32;
+    effective_bounds
+}
+
 #[derive(Error, Debug)]
 pub struct TerminalError {
     pub directory: Option<PathBuf>,
@@ -2095,6 +2114,9 @@ impl TerminalBuilder {
             content_dirty: true,
             content_revision: 0,
             reflow_on_next_resize: true,
+
+            local_terminal_bounds: terminal_bounds,
+            shared_viewport: None,
 
             selection_head: None,
             breadcrumb_text: String::new(),
@@ -2856,6 +2878,9 @@ impl TerminalBuilder {
                 content_revision: 0,
                 reflow_on_next_resize: true,
 
+                local_terminal_bounds: normalize_terminal_bounds(TerminalBounds::default()),
+                shared_viewport: None,
+
                 selection_head: None,
                 breadcrumb_text: String::new(),
                 scroll_px: px(0.),
@@ -3132,6 +3157,12 @@ pub struct Terminal {
     content_dirty: bool,
     content_revision: u64,
     reflow_on_next_resize: bool,
+    /// The pane size measured in this window. A shared pane reports this to
+    /// the daemon even when its effective grid is smaller than the pane.
+    local_terminal_bounds: TerminalBounds,
+    /// The daemon's common grid limit, when this terminal is viewing a shared
+    /// session. It never changes the containing window's layout.
+    shared_viewport: Option<(usize, usize)>,
     pub selection_head: Option<Point>,
 
     pub breadcrumb_text: String,
@@ -3874,6 +3905,17 @@ impl Terminal {
         &self.last_content
     }
 
+    /// Bounds measured from this window's pane layout, before a shared-session
+    /// viewport limit is applied.
+    pub fn local_terminal_bounds(&self) -> TerminalBounds {
+        self.local_terminal_bounds
+    }
+
+    /// The common grid limit supplied by the shared-session daemon, if any.
+    pub fn shared_viewport(&self) -> Option<(usize, usize)> {
+        self.shared_viewport
+    }
+
     /// Whether the terminal has received a real pane layout.
     ///
     /// PTYs start with placeholder content bounds until their first resize;
@@ -4049,10 +4091,44 @@ impl Terminal {
 
     ///Resize the terminal and the PTY.
     pub fn set_size(&mut self, new_bounds: TerminalBounds) {
-        let new_bounds = normalize_terminal_bounds(new_bounds);
+        self.local_terminal_bounds = normalize_terminal_bounds(new_bounds);
+        let new_bounds =
+            effective_terminal_bounds(self.local_terminal_bounds, self.shared_viewport);
         let old_bounds = self.last_content.terminal_bounds;
         self.last_content.terminal_bounds = new_bounds;
 
+        self.queue_effective_resize(old_bounds, new_bounds);
+    }
+
+    /// Applies a daemon-owned grid limit. This changes the emulator's grid,
+    /// never the GPUI bounds of the pane, so a larger viewer keeps its spare
+    /// rows and columns blank.
+    pub fn set_shared_viewport(&mut self, columns: usize, lines: usize) {
+        let viewport = (columns.max(1), lines.max(1));
+        if self.shared_viewport == Some(viewport) {
+            return;
+        }
+        self.shared_viewport = Some(viewport);
+        let old_bounds = self.last_content.terminal_bounds;
+        let new_bounds = effective_terminal_bounds(self.local_terminal_bounds, Some(viewport));
+        self.last_content.terminal_bounds = new_bounds;
+        self.queue_effective_resize(old_bounds, new_bounds);
+    }
+
+    /// Removes the shared grid limit when a pane is handed back to its local
+    /// PTY owner.
+    pub fn clear_shared_viewport(&mut self) {
+        if self.shared_viewport.is_none() {
+            return;
+        }
+        self.shared_viewport = None;
+        let old_bounds = self.last_content.terminal_bounds;
+        let new_bounds = self.local_terminal_bounds;
+        self.last_content.terminal_bounds = new_bounds;
+        self.queue_effective_resize(old_bounds, new_bounds);
+    }
+
+    fn queue_effective_resize(&mut self, old_bounds: TerminalBounds, new_bounds: TerminalBounds) {
         // Avoid spamming PTY resizes on pixel-level size changes (e.g. while dragging edges),
         // since those can generate excessive SIGWINCH/reflows and cause visible flicker.
         let requires_resize = old_bounds.num_lines() != new_bounds.num_lines()
@@ -5812,6 +5888,9 @@ impl Terminal {
         writer: Box<dyn Write + Send>,
     ) -> Result<()> {
         self.stop_pty_loop()?;
+        if let Some(mut stream) = self.byte_stream.take() {
+            stream.drain_and_stop(BYTE_STREAM_DRAIN_TIMEOUT);
+        }
         self.byte_stream = Some(spawn_byte_stream(
             reader,
             writer,
@@ -5820,6 +5899,15 @@ impl Terminal {
             self.wakeup_gate.clone(),
         ));
         Ok(())
+    }
+
+    /// Stops a shared byte stream before its pane is removed from the window's
+    /// registry. The stream owns both reader and writer workers; dropping this
+    /// handle is therefore the explicit leave operation for a viewer.
+    pub fn stop_byte_stream(&mut self) {
+        if let Some(mut stream) = self.byte_stream.take() {
+            stream.stop();
+        }
     }
 
     /// Replaces this terminal's byte stream with a pty it now owns.
@@ -5848,6 +5936,7 @@ impl Terminal {
             handover.replay.is_empty(),
             "a pty handed back to its viewer must carry no replay: the viewer already has it"
         );
+        self.clear_shared_viewport();
         let control = handover.control.clone();
         // Everything the relay had already read, into the grid, before the pty can
         // add to it.
@@ -10518,6 +10607,56 @@ mod tests {
             terminal.events.back(),
             Some(InternalEvent::Resize { .. })
         ));
+    }
+
+    #[gpui::test]
+    async fn shared_viewport_clamps_grid_without_changing_local_bounds(cx: &mut TestAppContext) {
+        let builder = cx.update(|cx| {
+            TerminalBuilder::new_display_only(
+                SettingsCursorShape::Block,
+                AlternateScroll::On,
+                None,
+                0,
+                cx.background_executor(),
+                PathStyle::local(),
+            )
+        });
+        let mut terminal = builder.terminal;
+        let local_bounds = TerminalBounds {
+            cell_width: Pixels::from(10.),
+            line_height: Pixels::from(10.),
+            bounds: bounds(
+                GpuiPoint::default(),
+                size(Pixels::from(800.), Pixels::from(240.)),
+            ),
+        };
+
+        terminal.set_size(local_bounds);
+        terminal.set_shared_viewport(80, 23);
+        assert_eq!(terminal.local_terminal_bounds(), local_bounds);
+        assert_eq!(terminal.shared_viewport(), Some((80, 23)));
+        assert_eq!(
+            (
+                terminal.last_content().terminal_bounds.num_columns(),
+                terminal.last_content().terminal_bounds.num_lines(),
+            ),
+            (80, 23)
+        );
+
+        // A larger common grid never grows this viewer beyond its own layout.
+        terminal.set_shared_viewport(100, 30);
+        assert_eq!(terminal.local_terminal_bounds(), local_bounds);
+        assert_eq!(
+            (
+                terminal.last_content().terminal_bounds.num_columns(),
+                terminal.last_content().terminal_bounds.num_lines(),
+            ),
+            (80, 24)
+        );
+
+        terminal.clear_shared_viewport();
+        assert_eq!(terminal.shared_viewport(), None);
+        assert_eq!(terminal.last_content().terminal_bounds, local_bounds);
     }
 
     #[gpui::test]

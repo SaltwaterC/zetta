@@ -401,9 +401,10 @@ fn a_shared_reader_keeps_coalesced_replay_events_and_full_duplex_input() {
         session_id: 1,
         pane_id: 2,
         child_pid: 3,
-        connection: Mutex::new(connection),
+        connection: Arc::new(Mutex::new(connection)),
         sizes: Arc::new(Mutex::new(Vec::new())),
         size_signal: async_channel::bounded(1),
+        reconnect_replay: Arc::new(Mutex::new(std::collections::VecDeque::new())),
         replay: replay.to_vec(),
     };
     let mut reader = shared.reader();

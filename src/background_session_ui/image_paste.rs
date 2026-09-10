@@ -10,14 +10,14 @@ use terminal::{ImagePasteHandler, ImagePasteResult};
 
 use crate::{image_paste::normalize_image, mux::MuxRuntime};
 
-pub(super) struct RemoteImagePasteHandler {
+pub(crate) struct RemoteImagePasteHandler {
     runtime: MuxRuntime,
     session_id: u64,
     pane_id: u64,
 }
 
 impl RemoteImagePasteHandler {
-    pub(super) fn new(runtime: &MuxRuntime, session_id: u64, pane_id: u64) -> Self {
+    pub(crate) fn new(runtime: &MuxRuntime, session_id: u64, pane_id: u64) -> Self {
         Self {
             runtime: runtime.clone(),
             session_id,

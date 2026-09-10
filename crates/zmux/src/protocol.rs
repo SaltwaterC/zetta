@@ -17,6 +17,11 @@ use serde::{Deserialize, Serialize};
 /// multiplexer: same directory, same `zetta-PROCESS-GENERATION.json` name.
 pub const CATALOG_VERSION: u32 = 1;
 
+/// Split ratios in the background-session schema use the same thousandths
+/// scale as Zetta's live pane tree. Keeping the default here lets older
+/// persisted summaries decode while newer shared snapshots retain resizing.
+pub const DEFAULT_BACKGROUND_PANE_SPLIT_RATIO: u16 = 500;
+
 /// A disk-retained session record before its encrypted payload has been
 /// opened. These fields are deliberately opaque: titles, commands, working
 /// directories, layout, and protected-session details stay inside the age
@@ -124,9 +129,15 @@ pub enum BackgroundPaneLayout {
     },
     Split {
         axis: String,
+        #[serde(default = "default_background_pane_split_ratio")]
+        first_ratio: u16,
         first: Box<BackgroundPaneLayout>,
         second: Box<BackgroundPaneLayout>,
     },
+}
+
+fn default_background_pane_split_ratio() -> u16 {
+    DEFAULT_BACKGROUND_PANE_SPLIT_RATIO
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

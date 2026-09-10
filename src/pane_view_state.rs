@@ -18,9 +18,11 @@ impl Zetta {
         let Some(tab) = self.tabs.get_mut(self.active_tab) else {
             return;
         };
+        let tab_id = tab.id;
         if tab.toggle_maximize(pane_id) {
             self.truncate_active_tab_terminals(cx);
             self.focus_active(window, cx);
+            self.sync_shared_tab_state(tab_id, cx);
             cx.notify();
         }
     }
@@ -46,9 +48,11 @@ impl Zetta {
         let Some(tab) = self.tabs.get_mut(self.active_tab) else {
             return;
         };
+        let tab_id = tab.id;
         if tab.minimize(pane_id) {
             self.truncate_active_tab_terminals(cx);
             self.focus_active(window, cx);
+            self.sync_shared_tab_state(tab_id, cx);
             cx.notify();
         }
     }
@@ -74,9 +78,11 @@ impl Zetta {
         let Some(tab) = self.tabs.get_mut(self.active_tab) else {
             return;
         };
+        let tab_id = tab.id;
         if tab.restore_minimized(pane_id) {
             self.truncate_active_tab_terminals(cx);
             self.focus_active(window, cx);
+            self.sync_shared_tab_state(tab_id, cx);
             cx.notify();
         }
     }
@@ -90,9 +96,11 @@ impl Zetta {
         let Some(tab) = self.tabs.get_mut(self.active_tab) else {
             return;
         };
+        let tab_id = tab.id;
         if tab.restore_last_minimized() {
             self.truncate_active_tab_terminals(cx);
             self.focus_active(window, cx);
+            self.sync_shared_tab_state(tab_id, cx);
             cx.notify();
         }
     }
@@ -108,6 +116,9 @@ impl Zetta {
             .get_mut(self.active_tab)
             .is_some_and(Tab::select_previous_minimized);
         if selected {
+            if let Some(tab_id) = self.tabs.get(self.active_tab).map(|tab| tab.id) {
+                self.sync_shared_tab_state(tab_id, cx);
+            }
             cx.notify();
         }
     }
@@ -123,6 +134,9 @@ impl Zetta {
             .get_mut(self.active_tab)
             .is_some_and(Tab::select_next_minimized);
         if selected {
+            if let Some(tab_id) = self.tabs.get(self.active_tab).map(|tab| tab.id) {
+                self.sync_shared_tab_state(tab_id, cx);
+            }
             cx.notify();
         }
     }

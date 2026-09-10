@@ -74,15 +74,16 @@ pub(crate) fn background_pane_layout(layout: &PaneLayout) -> BackgroundPaneLayou
         PaneLayout::Pane(pane_id) => BackgroundPaneLayout::Pane { pane_id: *pane_id },
         PaneLayout::Split {
             axis,
+            first_ratio,
             first,
             second,
-            ..
         } => BackgroundPaneLayout::Split {
             axis: match axis {
                 SplitAxis::Horizontal => "horizontal",
                 SplitAxis::Vertical => "vertical",
             }
             .to_owned(),
+            first_ratio: *first_ratio,
             first: Box::new(background_pane_layout(first)),
             second: Box::new(background_pane_layout(second)),
         },

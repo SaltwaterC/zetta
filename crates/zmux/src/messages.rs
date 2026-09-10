@@ -10,11 +10,16 @@ use std::{collections::HashMap, path::PathBuf};
 use alacritty_terminal::tty::ConsolePalette;
 use serde::{Deserialize, Serialize};
 
-use crate::protocol::{BackgroundSessionSummary, RestorableSessionRecord};
+use crate::protocol::{BackgroundPaneLayout, BackgroundSessionSummary, RestorableSessionRecord};
 
 /// The wire format, and what a client and a multiplexer compare before they
 /// trust each other to understand one another.
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
+
+/// Version of the durable collaboration envelope. This is independent from
+/// [`PROTOCOL_VERSION`]: a daemon upgrade may keep a session state produced by
+/// an older binary even when the live wire protocol has moved on.
+pub const SHARED_SESSION_STATE_VERSION: u32 = 1;
 
 /// Maximum encoded image size accepted by the image-paste request.
 pub const MAX_IMAGE_BYTES: usize = 64 * 1024 * 1024;
@@ -67,7 +72,7 @@ pub struct Envelope {
 /// the same peer process for every forwarded connection. A random ID gives
 /// shared-client routing and upgrade handover an unambiguous key without
 /// changing local PID ownership and liveness semantics.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ClientId(String);
 
@@ -85,6 +90,290 @@ impl ClientId {
     }
 }
 
+/// The monotonically increasing version of a daemon-owned shared session.
+///
+/// This is deliberately a newtype rather than a bare integer at call sites:
+/// mixing a session revision with a pane or process ID made it too easy for a
+/// client to submit an edit against the wrong snapshot.
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
+#[serde(transparent)]
+pub struct SessionRevision(pub u64);
+
+impl SessionRevision {
+    pub const INITIAL: Self = Self(0);
+
+    pub fn next(self) -> Self {
+        Self(self.0.saturating_add(1))
+    }
+}
+
+/// An idempotency key for one client-issued shared-session mutation.
+///
+/// The client identity survives reconnects; the sequence is local to that
+/// identity. Together they let a retry be recognized without treating a
+/// second delivery as a second split, close, or rename.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SharedOperationId {
+    pub client_id: ClientId,
+    pub sequence: u64,
+}
+
+impl SharedOperationId {
+    pub fn new(client_id: ClientId, sequence: u64) -> Self {
+        Self {
+            client_id,
+            sequence,
+        }
+    }
+}
+
+/// The daemon's complete, canonical collaboration state for one session.
+///
+/// Pane IDs in `summary` are multiplexer IDs, never a Zetta window's local
+/// entity IDs. `state` remains an opaque versioned tab payload: the daemon
+/// persists and broadcasts it, while each Zetta process interprets it locally.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SharedSessionState {
+    pub version: u32,
+    pub session_id: u64,
+    pub revision: SessionRevision,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_operation_id: Option<SharedOperationId>,
+    pub summary: BackgroundSessionSummary,
+    pub state: serde_json::Value,
+}
+
+impl SharedSessionState {
+    pub fn new(
+        session_id: u64,
+        summary: BackgroundSessionSummary,
+        state: serde_json::Value,
+    ) -> Self {
+        Self {
+            version: SHARED_SESSION_STATE_VERSION,
+            session_id,
+            revision: SessionRevision::INITIAL,
+            last_operation_id: None,
+            summary,
+            state,
+        }
+    }
+
+    pub fn pane_ids(&self) -> impl Iterator<Item = u64> + '_ {
+        self.summary.panes.iter().map(|pane| pane.id)
+    }
+
+    pub fn contains_pane(&self, pane_id: u64) -> bool {
+        self.summary.panes.iter().any(|pane| pane.id == pane_id)
+    }
+
+    pub fn validate_operation(&self, operation: &SharedSessionOperation) -> anyhow::Result<()> {
+        match operation {
+            SharedSessionOperation::ReplaceTab { summary, .. } => {
+                anyhow::ensure!(
+                    summary.id == self.session_id,
+                    "shared operation targets session {}, expected {}",
+                    summary.id,
+                    self.session_id
+                );
+                validate_summary_panes(summary)?;
+            }
+            SharedSessionOperation::SetLayout { layout } => {
+                validate_layout_panes(layout, |pane_id| self.contains_pane(pane_id))?;
+            }
+            SharedSessionOperation::SetFocus { pane_id } => {
+                anyhow::ensure!(
+                    self.contains_pane(*pane_id),
+                    "shared operation targets missing pane {pane_id}"
+                );
+            }
+            SharedSessionOperation::SetTabState { .. } => {}
+            SharedSessionOperation::SetPaneMetadata { pane_id, .. } => {
+                anyhow::ensure!(
+                    self.contains_pane(*pane_id),
+                    "shared operation targets missing pane {pane_id}"
+                );
+            }
+            SharedSessionOperation::ClosePane { pane_id } => {
+                anyhow::ensure!(
+                    self.contains_pane(*pane_id),
+                    "shared operation targets missing pane {pane_id}"
+                );
+                anyhow::ensure!(
+                    self.summary.panes.len() > 1,
+                    "the last shared pane cannot be closed without closing the session"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Applies an already-authorized operation and advances the revision.
+    pub fn apply_operation(
+        &mut self,
+        operation_id: SharedOperationId,
+        operation: &SharedSessionOperation,
+    ) -> anyhow::Result<()> {
+        self.validate_operation(operation)?;
+        match operation {
+            SharedSessionOperation::ReplaceTab { summary, state } => {
+                self.summary = summary.clone();
+                self.state = state.clone();
+            }
+            SharedSessionOperation::SetLayout { layout } => {
+                self.summary.layout = layout.clone();
+            }
+            SharedSessionOperation::SetFocus { pane_id } => {
+                self.summary.active_pane = *pane_id;
+            }
+            SharedSessionOperation::SetTabState { state } => {
+                self.state = state.clone();
+            }
+            SharedSessionOperation::SetPaneMetadata { pane_id, metadata } => {
+                let pane = self
+                    .summary
+                    .panes
+                    .iter_mut()
+                    .find(|pane| pane.id == *pane_id)
+                    .expect("validate_operation checked the pane");
+                pane.label = metadata.label.clone();
+                pane.profile = metadata.profile.clone();
+                pane.configured_command = metadata.configured_command.clone();
+                pane.application = metadata.application.clone();
+                pane.foreground_command = metadata.foreground_command.clone();
+                pane.terminal_title = metadata.terminal_title.clone();
+                pane.working_directory = metadata.working_directory.clone();
+            }
+            SharedSessionOperation::ClosePane { pane_id } => {
+                self.summary.panes.retain(|pane| pane.id != *pane_id);
+                self.summary.layout = remove_pane_from_layout(&self.summary.layout, *pane_id)
+                    .expect("a multi-pane layout remains valid after one pane is removed");
+                if self.summary.active_pane == *pane_id {
+                    self.summary.active_pane = self.summary.panes[0].id;
+                }
+            }
+        }
+        self.revision = self.revision.next();
+        self.last_operation_id = Some(operation_id);
+        Ok(())
+    }
+}
+
+/// A mutation against the canonical shared tab. Spawn is kept separate because
+/// creating a pane also creates a daemon-owned PTY and a shared data plane.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "operation", rename_all = "snake_case")]
+pub enum SharedSessionOperation {
+    ReplaceTab {
+        summary: BackgroundSessionSummary,
+        state: serde_json::Value,
+    },
+    SetLayout {
+        layout: BackgroundPaneLayout,
+    },
+    SetFocus {
+        pane_id: u64,
+    },
+    SetTabState {
+        state: serde_json::Value,
+    },
+    SetPaneMetadata {
+        pane_id: u64,
+        metadata: crate::protocol::BackgroundPaneSummary,
+    },
+    ClosePane {
+        pane_id: u64,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SharedSessionOperationRequest {
+    pub session_id: u64,
+    pub base_revision: SessionRevision,
+    pub operation_id: SharedOperationId,
+    pub operation: SharedSessionOperation,
+}
+
+/// The request body used to create a daemon-owned shared pane. It is separate
+/// from [`SpawnRequest`] so a caller cannot accidentally ask the daemon to
+/// return a descriptor for a remote/shared pane.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SharedSpawnRequest {
+    pub session_id: u64,
+    pub base_revision: SessionRevision,
+    pub operation_id: SharedOperationId,
+    pub program: Option<String>,
+    pub args: Vec<String>,
+    pub env: HashMap<String, String>,
+    pub working_directory: Option<PathBuf>,
+    pub size: TerminalSize,
+    pub console_palette: ConsolePalette,
+}
+
+fn validate_summary_panes(summary: &BackgroundSessionSummary) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        summary.panes.iter().all(|pane| pane.id != 0),
+        "shared pane IDs must be positive multiplexer IDs"
+    );
+    validate_layout_panes(&summary.layout, |pane_id| {
+        summary.panes.iter().any(|pane| pane.id == pane_id)
+    })
+}
+
+fn validate_layout_panes(
+    layout: &BackgroundPaneLayout,
+    contains: impl Fn(u64) -> bool + Copy,
+) -> anyhow::Result<()> {
+    match layout {
+        BackgroundPaneLayout::Pane { pane_id } => {
+            anyhow::ensure!(
+                contains(*pane_id),
+                "shared layout references missing pane {pane_id}"
+            );
+            Ok(())
+        }
+        BackgroundPaneLayout::Split { first, second, .. } => {
+            validate_layout_panes(first, contains)?;
+            validate_layout_panes(second, contains)
+        }
+    }
+}
+
+fn remove_pane_from_layout(
+    layout: &BackgroundPaneLayout,
+    pane_id: u64,
+) -> Option<BackgroundPaneLayout> {
+    match layout {
+        BackgroundPaneLayout::Pane { pane_id: id } if *id == pane_id => None,
+        BackgroundPaneLayout::Pane { .. } => Some(layout.clone()),
+        BackgroundPaneLayout::Split {
+            first,
+            second,
+            axis,
+            first_ratio,
+        } => {
+            let first = remove_pane_from_layout(first, pane_id);
+            let second = remove_pane_from_layout(second, pane_id);
+            match (first, second) {
+                (Some(first), Some(second)) => Some(BackgroundPaneLayout::Split {
+                    axis: axis.clone(),
+                    first_ratio: *first_ratio,
+                    first: Box::new(first),
+                    second: Box::new(second),
+                }),
+                (Some(remaining), None) | (None, Some(remaining)) => Some(remaining),
+                (None, None) => None,
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "request", rename_all = "snake_case")]
 pub enum Request {
@@ -92,6 +381,9 @@ pub enum Request {
     Ping,
     /// Starts a process under the multiplexer and hands its terminal back.
     Spawn(SpawnRequest),
+    /// Creates a pane owned by the daemon and attaches the caller through the
+    /// shared byte-stream path. No descriptor is ever returned.
+    SpawnShared(SharedSpawnRequest),
     /// Takes over a pane's terminal from the multiplexer.
     ///
     /// `pane_id` is absent for the session's first pane, which is how an
@@ -163,7 +455,7 @@ pub enum Request {
     /// The daemon receives state and authentication metadata, never an age
     /// identity or a private key. The raw snapshots described by the request
     /// follow the JSON frame on the same connection.
-    Resume(ResumeRequest),
+    Resume(Box<ResumeRequest>),
     /// Takes a shared pane's terminal back, in answer to [`Event::Grant`].
     ///
     /// The reverse of the revoke handover. Only the pane's single remaining
@@ -255,6 +547,13 @@ pub enum Request {
     /// whose process ended during the gap would wait for a notification that
     /// has already been and gone.
     PaneStates { pane_ids: Vec<u64> },
+    /// Applies one collaboration mutation against an exact canonical revision.
+    ApplyShared(SharedSessionOperationRequest),
+    /// Creates or retrieves the complete canonical collaboration state.
+    SharedSnapshot { session_id: u64 },
+    /// Explicitly leaves a shared session without changing its daemon-owned
+    /// panes. Closing a remote tab uses this rather than `ClosePane`.
+    LeaveShared { session_id: u64 },
     /// Releases a pane whose window closed while its process was still running.
     ///
     /// Dropping the client's descriptor is not enough to tell the multiplexer
@@ -326,6 +625,11 @@ pub struct ResumeRequest {
     pub record_id: u64,
     pub summary: BackgroundSessionSummary,
     pub state: serde_json::Value,
+    /// The daemon-owned collaboration envelope, when the restored record was
+    /// shared. Keeping it in the resume request preserves the canonical
+    /// revision instead of silently starting a new collaboration history.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shared_state: Option<SharedSessionState>,
     pub verifier: Option<String>,
     /// As [`DetachRequest::key_envelope`], read back out of the record the
     /// client has just decrypted.
@@ -455,6 +759,26 @@ pub enum Response {
         columns: u16,
         lines: u16,
     },
+    /// A shared spawn has the same replay/data-plane framing as an attach, but
+    /// also returns the new canonical session snapshot.
+    SharedSpawned {
+        session_id: u64,
+        pane_id: u64,
+        child_pid: u32,
+        replay_length: usize,
+        state: serde_json::Value,
+        summary: Box<BackgroundSessionSummary>,
+        shared_state: SharedSessionState,
+    },
+    SharedOperationApplied {
+        state: SharedSessionState,
+    },
+    SharedSnapshot {
+        state: SharedSessionState,
+    },
+    SharedConflict {
+        state: SharedSessionState,
+    },
     Detached,
     Resumed {
         session_id: u64,
@@ -559,6 +883,33 @@ pub enum Event {
         columns: u16,
         lines: u16,
     },
+    /// Complete canonical state after a successful shared mutation. Sending a
+    /// snapshot rather than a delta makes reconnect and event-gap recovery
+    /// deterministic.
+    SharedSessionUpdated { state: SharedSessionState },
+    /// A new daemon-owned pane was added to a shared session. The pane's data
+    /// connection is deliberately opened by each viewer after receiving this
+    /// event, so the subscription never has to carry raw replay bytes.
+    SharedPaneAdded {
+        session_id: u64,
+        pane_id: u64,
+        child_pid: u32,
+        state: SharedSessionState,
+    },
+    /// A pane was removed globally from a shared session. The accompanying
+    /// snapshot is authoritative for layout and focus.
+    SharedPaneRemoved {
+        session_id: u64,
+        pane_id: u64,
+        state: SharedSessionState,
+    },
+    /// A shared data connection failed. This is recoverable; the client should
+    /// replace the stream after asking for the authoritative snapshot.
+    SharedStreamFailed { session_id: u64, pane_id: u64 },
+    /// The shared data connection was retired cleanly after its final queued
+    /// output. This is the handover/leave signal; unlike a relay failure it is
+    /// an ordinary end of stream and must not trigger reconnect machinery.
+    SharedClosed { session_id: u64, pane_id: u64 },
 }
 
 #[cfg(test)]

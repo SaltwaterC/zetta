@@ -24,7 +24,7 @@
 
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, atomic::AtomicU64},
 };
 
 use std::time::{Duration, Instant};
@@ -36,8 +36,11 @@ use terminal::{ConsolePalette, PtyControl, PtyHandover, PtyProvider, PtySpawnReq
 use zmux::persistence::PersistenceOptions;
 use zmux::{
     auth::SessionSecret,
-    client::{Client, ExitReporters, PaneSignals},
-    messages::{SpawnRequest, TerminalSize},
+    client::{Client, ExitReporters, PaneSignals, SharedSpawnedPane},
+    messages::{
+        SessionRevision, SharedSessionOperation, SharedSessionOperationRequest, SharedSpawnRequest,
+        SpawnRequest, TerminalSize,
+    },
     retention::Retention,
 };
 
@@ -80,6 +83,7 @@ pub(crate) struct MuxRuntime {
     reporters: Arc<ExitReporters>,
     revoke_reporters: Arc<PaneSignals>,
     grant_reporters: Arc<PaneSignals>,
+    shared_reports: Arc<zmux::client::SharedSessionReports>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -119,6 +123,7 @@ impl MuxRuntime {
             reporters: subscription.exits,
             revoke_reporters: subscription.revokes,
             grant_reporters: subscription.grants,
+            shared_reports: subscription.shared,
         })
     }
 
@@ -151,6 +156,7 @@ impl MuxRuntime {
             reporters: subscription.exits,
             revoke_reporters: subscription.revokes,
             grant_reporters: subscription.grants,
+            shared_reports: subscription.shared,
         })
     }
 
@@ -170,6 +176,7 @@ impl MuxRuntime {
             reporters: subscription.exits,
             revoke_reporters: subscription.revokes,
             grant_reporters: subscription.grants,
+            shared_reports: subscription.shared,
         })
     }
 
@@ -201,6 +208,7 @@ impl MuxRuntime {
             reporters: subscription.exits,
             revoke_reporters: subscription.revokes,
             grant_reporters: subscription.grants,
+            shared_reports: subscription.shared,
         })
     }
 
@@ -321,6 +329,10 @@ impl MuxRuntime {
         &self.grant_reporters
     }
 
+    pub(crate) fn shared_reports(&self) -> &Arc<zmux::client::SharedSessionReports> {
+        &self.shared_reports
+    }
+
     /// A provider for one pane of `session`.
     ///
     /// Per pane rather than per tab because the caller needs to know which
@@ -396,6 +408,45 @@ impl MuxPtyProvider {
 
     pub(crate) fn runtime(&self) -> &MuxRuntime {
         &self.runtime
+    }
+
+    pub(crate) fn spawn_shared(
+        &self,
+        request: PtySpawnRequest,
+        base_revision: SessionRevision,
+    ) -> Result<SharedSpawnedPane> {
+        let pane = self.runtime.client.spawn_shared(SharedSpawnRequest {
+            session_id: self
+                .session
+                .id()
+                .context("shared pane has no multiplexer session")?,
+            base_revision,
+            operation_id: self.runtime.client.next_shared_operation_id(),
+            program: request.program,
+            args: request.args,
+            env: request.env.into_iter().collect(),
+            working_directory: request.working_directory,
+            size: TerminalSize {
+                columns: 80,
+                lines: 24,
+                cell_width: 0,
+                cell_height: 0,
+            },
+            console_palette: request.console_palette,
+        })?;
+        self.session.set_id(pane.pane.session_id());
+        *self
+            .opened
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(OpenedPane {
+            session_id: pane.pane.session_id(),
+            pane_id: pane.pane.pane_id(),
+        });
+        Ok(pane)
+    }
+
+    pub(crate) fn session_id(&self) -> Option<u64> {
+        self.session.id()
     }
 }
 
@@ -569,6 +620,7 @@ pub(crate) fn attached_pane_handover_with_secret(
 #[derive(Default)]
 pub(crate) struct MuxPanes {
     panes: HashMap<u64, u64>,
+    reverse_panes: HashMap<u64, u64>,
     sessions: HashMap<u64, MuxSession>,
     runtimes: HashMap<u64, MuxRuntime>,
 }
@@ -598,6 +650,7 @@ pub(crate) struct SharedPaneEntry {
     pub(crate) pane: Arc<zmux::client::SharedPane>,
     pub(crate) mux_pane_id: u64,
     pub(crate) runtime: MuxRuntime,
+    pub(crate) size_report_generation: Arc<AtomicU64>,
 }
 
 impl MuxPanes {
@@ -652,7 +705,12 @@ impl MuxPanes {
     }
 
     pub(crate) fn record(&mut self, pane_id: u64, mux_pane_id: u64) {
-        self.panes.insert(pane_id, mux_pane_id);
+        if let Some(previous) = self.panes.insert(pane_id, mux_pane_id) {
+            self.reverse_panes.remove(&previous);
+        }
+        if let Some(previous) = self.reverse_panes.insert(mux_pane_id, pane_id) {
+            self.panes.remove(&previous);
+        }
     }
 
     pub(crate) fn mux_pane_id(&self, pane_id: u64) -> Option<u64> {
@@ -664,7 +722,9 @@ impl MuxPanes {
     }
 
     pub(crate) fn forget_pane(&mut self, pane_id: u64) {
-        self.panes.remove(&pane_id);
+        if let Some(mux_pane_id) = self.panes.remove(&pane_id) {
+            self.reverse_panes.remove(&mux_pane_id);
+        }
     }
 
     pub(crate) fn forget_tab(&mut self, tab_id: u64) {
@@ -879,9 +939,6 @@ impl crate::Zetta {
         if self.no_mux {
             return Ok(None);
         }
-        if self.mux_panes.is_remote_tab(tab_id) {
-            anyhow::bail!("remote sessions cannot spawn additional panes");
-        }
         if self.mux.is_none() {
             if let Some((failed_at, message)) = self.mux_connect_failure.as_ref()
                 && failed_at.elapsed() < MUX_CONNECT_RETRY_BACKOFF
@@ -1028,6 +1085,120 @@ impl crate::Zetta {
         cx.background_spawn(async move {
             if let Err(error) = runtime.client().close_pane(session_id, mux_pane_id) {
                 log::debug!("could not release pane {mux_pane_id} to the multiplexer: {error:#}");
+            }
+        })
+        .detach();
+    }
+
+    /// Requests a global close for a pane in a remote shared session. The local
+    /// pane has already been removed; after the daemon commits the global
+    /// removal, publish one clean durable tab blob so it cannot retain the
+    /// closed pane in its opaque state.
+    pub(crate) fn request_shared_pane_close(
+        &mut self,
+        tab_id: u64,
+        pane_id: u64,
+        cx: &mut gpui::App,
+    ) {
+        let Some(runtime) = self.mux_panes.runtime_for_tab(tab_id) else {
+            return;
+        };
+        if !runtime.is_remote() {
+            return;
+        }
+        let Some(session_id) = self.mux_panes.session_id(tab_id) else {
+            return;
+        };
+        let Some(mux_pane_id) = self
+            .shared_collaboration
+            .mux_pane_id(session_id, pane_id)
+            .or_else(|| self.mux_panes.mux_pane_id(pane_id))
+        else {
+            return;
+        };
+        let base_revision = self
+            .shared_collaboration
+            .state(session_id)
+            .map(|state| state.revision);
+        let replacement = self
+            .shared_tab_state_request(tab_id, session_id, cx)
+            .and_then(|(_, request)| match request.operation {
+                SharedSessionOperation::ReplaceTab { summary, state } => Some((summary, state)),
+                _ => None,
+            });
+        let client = runtime.client().clone();
+        cx.background_spawn(async move {
+            let base_revision = match base_revision {
+                Some(revision) => revision,
+                None => match client.shared_snapshot(session_id) {
+                    Ok(state) => state.revision,
+                    Err(error) => {
+                        log::debug!(
+                            "could not read shared session {session_id} before closing pane {mux_pane_id}: {error:#}"
+                        );
+                        return;
+                    }
+                },
+            };
+            let request = SharedSessionOperationRequest {
+                session_id,
+                base_revision,
+                operation_id: client.next_shared_operation_id(),
+                operation: SharedSessionOperation::ClosePane {
+                    pane_id: mux_pane_id,
+                },
+            };
+            match client.apply_shared_with_request(request) {
+                Ok(zmux::client::SharedOperationResult::Applied(state)) => {
+                    if let Some((summary, tab_state)) = replacement {
+                        let request = SharedSessionOperationRequest {
+                            session_id,
+                            base_revision: state.revision,
+                            operation_id: client.next_shared_operation_id(),
+                            operation: SharedSessionOperation::ReplaceTab {
+                                summary,
+                                state: tab_state,
+                            },
+                        };
+                        if let Err(error) = client.apply_shared_with_request(request) {
+                            log::debug!(
+                                "could not publish shared tab state after closing pane {mux_pane_id}: {error:#}"
+                            );
+                        }
+                    }
+                }
+                Ok(zmux::client::SharedOperationResult::Conflict(state)) => log::debug!(
+                    "closing shared pane {mux_pane_id} conflicted at revision {}; waiting for canonical snapshot",
+                    state.revision.0
+                ),
+                Err(error) => log::debug!(
+                    "could not globally close shared pane {mux_pane_id}: {error:#}"
+                ),
+            }
+        })
+        .detach();
+    }
+
+    /// Leaves a remote tab without handing any of its panes to the daemon as
+    /// an exclusive local/background session. The shared data streams are
+    /// still dropped by the tab close path; this acknowledgement handles the
+    /// orderly window-shutdown case and keeps the daemon's viewer set exact.
+    pub(crate) fn leave_shared_tab(&mut self, tab_id: u64, cx: &mut gpui::App) {
+        let Some(runtime) = self.mux_panes.runtime_for_tab(tab_id) else {
+            return;
+        };
+        if !runtime.is_remote() {
+            return;
+        }
+        let Some(session_id) = self.mux_panes.session_id(tab_id) else {
+            return;
+        };
+        self.shared_collaboration.forget(session_id);
+        runtime.shared_reports().forget(session_id);
+        let client = runtime.client().clone();
+        cx.background_spawn(async move {
+            if let Err(error) = client.leave_shared(session_id) {
+                log::debug!("could not leave remote shared session {session_id}: {error:#}");
             }
         })
         .detach();

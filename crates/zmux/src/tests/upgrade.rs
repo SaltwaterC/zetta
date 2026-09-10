@@ -43,6 +43,7 @@ fn handover() -> Handover {
                 "tab": 1,
                 "panes": [{"id": 2, "theme_override": "Dracula"}]
             }),
+            shared_state: None,
             keep: true,
             offered: true,
             owner: None,

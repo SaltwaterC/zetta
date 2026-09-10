@@ -222,6 +222,15 @@ impl Zetta {
             }
         };
         runtime.set_session_secret(secret.as_ref());
+        let canonical_shared_state = runtime
+            .is_remote()
+            .then(|| runtime.client().shared_snapshot(session_id))
+            .transpose()?;
+        let (state, summary) = canonical_shared_state
+            .as_ref()
+            .map_or((state, summary), |state| {
+                (state.state.clone(), state.summary.clone())
+            });
 
         // A session the multiplexer holds but that has never been detached or
         // shared has published no layout, so there is nothing to rebuild a tab
@@ -318,6 +327,14 @@ impl Zetta {
             .into_iter()
             .filter_map(|(pane_id, kind)| Some((pane_ids.get(&pane_id).copied()?, kind)))
             .collect::<Vec<_>>();
+        if let Some(shared_state) = canonical_shared_state {
+            let mappings = state
+                .panes
+                .iter()
+                .filter_map(|pane| Some((pane.mux_pane_id?, *pane_ids.get(&pane.id)?)));
+            self.shared_collaboration
+                .bind(session_id, tab_id, shared_state, mappings)?;
+        }
         self.bind_restored_projects(&tab, &restored_metadata);
 
         self.build_attached_panes(
@@ -342,6 +359,9 @@ impl Zetta {
             .collect::<Vec<_>>();
         for (pane_id, view) in views {
             self.connect_terminal_view(tab_id, pane_id, view, window, cx);
+        }
+        if runtime.is_remote() {
+            self.watch_shared_session(session_id, runtime, window, cx);
         }
         self.focus_active(window, cx);
         cx.notify();
@@ -386,7 +406,7 @@ impl Zetta {
         reason = "takes the tab by mutable borrow, so the rest cannot join it in \
                   a bundle without borrowing the same tab twice"
     )]
-    fn build_attached_panes(
+    pub(super) fn build_attached_panes(
         &mut self,
         tab: &mut Tab,
         session_id: u64,

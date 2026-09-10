@@ -98,12 +98,20 @@ pub(super) fn serve(daemon: &Arc<Daemon>, stream: Stream, token: &str) -> Result
             let response = spawn(
                 daemon,
                 request,
-                envelope.client_process_id,
-                peer_process_id,
-                &mut connection,
+                SpawnContext {
+                    client_process_id: envelope.client_process_id,
+                    peer_process_id,
+                    client_id,
+                    session_secret: session_secret.as_deref(),
+                    shared_request: None,
+                    connection: &mut connection,
+                },
             );
             match response {
-                Ok(()) => Ok(()),
+                Ok(SpawnOutcome::Complete) => Ok(()),
+                Ok(SpawnOutcome::SharedConflict(state)) => {
+                    connection.send(&Response::SharedConflict { state: *state })
+                }
                 Err(error) => {
                     let _ = connection.send(&Response::Error {
                         message: format!("{error:#}"),
@@ -112,6 +120,60 @@ pub(super) fn serve(daemon: &Arc<Daemon>, stream: Stream, token: &str) -> Result
                 }
             }
         }
+        Request::SpawnShared(shared_request) => {
+            let request = SpawnRequest {
+                session_id: Some(shared_request.session_id),
+                client_process_id: envelope.client_process_id,
+                program: shared_request.program.clone(),
+                args: shared_request.args.clone(),
+                env: shared_request.env.clone(),
+                working_directory: shared_request.working_directory.clone(),
+                size: shared_request.size,
+                console_palette: shared_request.console_palette,
+            };
+            match spawn(
+                daemon,
+                request,
+                SpawnContext {
+                    client_process_id: envelope.client_process_id,
+                    peer_process_id,
+                    client_id,
+                    session_secret: session_secret.as_deref(),
+                    shared_request: Some(shared_request),
+                    connection: &mut connection,
+                },
+            ) {
+                Ok(SpawnOutcome::Complete) => Ok(()),
+                Ok(SpawnOutcome::SharedConflict(state)) => {
+                    connection.send(&Response::SharedConflict { state: *state })
+                }
+                Err(error) => connection.send(&Response::Error {
+                    message: format!("{error:#}"),
+                }),
+            }
+        }
+        Request::ApplyShared(request) => apply_shared(
+            daemon,
+            request,
+            peer_process_id,
+            session_secret.as_deref(),
+            &mut connection,
+        ),
+        Request::SharedSnapshot { session_id } => shared_snapshot(
+            daemon,
+            session_id,
+            peer_process_id,
+            session_secret.as_deref(),
+            &mut connection,
+        ),
+        Request::LeaveShared { session_id } => leave_shared(
+            daemon,
+            session_id,
+            envelope.client_id,
+            peer_process_id,
+            session_secret.as_deref(),
+            &mut connection,
+        ),
         Request::Attach {
             session_id,
             pane_id,
@@ -209,7 +271,7 @@ pub(super) fn serve(daemon: &Arc<Daemon>, stream: Stream, token: &str) -> Result
             }
             match resume(
                 daemon,
-                request,
+                *request,
                 envelope.client_process_id,
                 peer_process_id,
                 &mut connection,

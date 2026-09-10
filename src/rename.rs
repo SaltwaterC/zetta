@@ -104,6 +104,7 @@ impl Zetta {
                 for pane_id in pane_ids {
                     self.schedule_worktree_detection_for_pane(tab_id, pane_id, cx);
                 }
+                self.sync_shared_tab_state(tab_id, cx);
             }
             cx.notify();
             if found_in_background {
@@ -123,6 +124,14 @@ impl Zetta {
             && set_worktree_name_on_tabs(self.background_sessions.iter_unprotected_mut(), &request);
         let found = found_in_visible || found_in_background;
         if found {
+            if let Some(tab_id) = self
+                .tabs
+                .iter()
+                .find(|tab| tab.attention_id == request.attention_id)
+                .map(|tab| tab.id)
+            {
+                self.sync_shared_tab_state(tab_id, cx);
+            }
             cx.notify();
             if found_in_background {
                 self.publish_background_session_catalog(cx);

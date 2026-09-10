@@ -583,7 +583,7 @@ impl Zetta {
             .map(|pane| pane.id)
             .collect::<Vec<_>>();
         for pane_id in pane_ids {
-            self.drop_shared_pane(pane_id);
+            self.drop_shared_pane(pane_id, cx);
         }
         let tab = self.tabs.remove(index);
         if index < self.active_tab {

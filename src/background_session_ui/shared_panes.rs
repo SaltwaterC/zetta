@@ -6,11 +6,16 @@
 //! registry, the size reporting, and the grant/revoke handovers here.
 
 use super::*;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 
 /// How often a shared pane's task checks for arbitrated sizes. The
 /// multiplexer's size events are rare and arrive with output, so this is a
 /// wake-up check, not a poll that races anything.
 const SHARED_SIZE_POLL_INTERVAL: Duration = Duration::from_millis(500);
+const SHARED_SIZE_REPORT_DEBOUNCE: Duration = Duration::from_millis(100);
 
 /// A reader that yields a replay prefix before the live stream, for a
 /// terminal built around a shared pane whose retained output the multiplexer
@@ -34,8 +39,8 @@ impl std::io::Read for ReplayReader {
 
 /// A writer that sends a shared pane's input to the multiplexer, so every
 /// shared client's input is attributed to the client that typed it.
-pub(super) struct SharedPaneWriter {
-    pub(super) pane: Arc<zmux::client::SharedPane>,
+pub(crate) struct SharedPaneWriter {
+    pub(crate) pane: Arc<zmux::client::SharedPane>,
 }
 
 impl std::io::Write for SharedPaneWriter {
@@ -71,7 +76,7 @@ impl Zetta {
     /// Records a shared pane and starts the task that keeps it in step with
     /// the multiplexer: applying arbitrated sizes and routing the pane's
     /// exit report to its terminal.
-    pub(super) fn register_shared_pane(
+    pub(crate) fn register_shared_pane(
         &mut self,
         ids: MuxPaneIds,
         pane: &Arc<zmux::client::SharedPane>,
@@ -89,6 +94,7 @@ impl Zetta {
                 pane: pane.clone(),
                 mux_pane_id: ids.mux_pane_id,
                 runtime: runtime.clone(),
+                size_report_generation: Arc::new(AtomicU64::new(0)),
             },
         );
         if !runtime.is_remote() {
@@ -119,8 +125,8 @@ impl Zetta {
             loop {
                 if let Some(size) = pending_size.take() {
                     let applied = this
-                        .update_in(cx, |this, window, cx| {
-                            this.apply_shared_pane_size(tab_id, pane_id, size, window, cx)
+                        .update_in(cx, |this, _window, cx| {
+                            this.apply_shared_pane_size(tab_id, pane_id, size, cx)
                         })
                         .unwrap_or(true);
                     if !applied {
@@ -161,14 +167,14 @@ impl Zetta {
     }
 
     /// Applies the size the multiplexer arbitrated for a shared pane without
-    /// moving its split boundaries. Shared panes synchronize the outer window;
-    /// interactive pane resizing remains the operation that changes layout.
+    /// moving its split boundaries. Shared panes synchronize the terminal's
+    /// effective common grid; interactive pane resizing remains the operation
+    /// that changes layout.
     fn apply_shared_pane_size(
         &mut self,
         tab_id: u64,
         pane_id: u64,
         (columns, lines): (u16, u16),
-        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
         let terminal = self
@@ -177,7 +183,7 @@ impl Zetta {
             .find(|tab| tab.id == tab_id)
             .and_then(|tab| tab.pane(pane_id))
             .and_then(TerminalPane::selected_terminal);
-        let (size_initialized, bounds) = terminal.map_or((false, None), |terminal| {
+        let (size_initialized, bounds) = terminal.as_ref().map_or((false, None), |terminal| {
             let terminal = terminal.read(cx);
             (
                 terminal.is_size_initialized(),
@@ -188,14 +194,11 @@ impl Zetta {
             SharedSizeAction::WaitForLayout => false,
             SharedSizeAction::AlreadyMatches => true,
             SharedSizeAction::Resize => {
-                self.resize_shared_pane_to(
-                    tab_id,
-                    pane_id,
-                    Some(columns as usize),
-                    Some(lines as usize),
-                    window,
-                    cx,
-                );
+                if let Some(terminal) = terminal {
+                    terminal.update(cx, |terminal, _| {
+                        terminal.set_shared_viewport(columns as usize, lines as usize);
+                    });
+                }
                 true
             }
         }
@@ -213,6 +216,15 @@ impl Zetta {
         report: zmux::client::PaneExitReport,
         cx: &mut Context<Self>,
     ) {
+        let terminal = self
+            .tabs
+            .iter()
+            .find(|tab| tab.id == tab_id)
+            .and_then(|tab| tab.pane(pane_id))
+            .and_then(|pane| pane.terminal.clone());
+        if let Some(terminal) = terminal.as_ref() {
+            terminal.update(cx, |terminal, _| terminal.stop_byte_stream());
+        }
         let entry = self.shared_panes.remove(&pane_id);
         let (mux_pane_id, runtime) = entry.as_ref().map_or((None, None), |entry| {
             (Some(entry.mux_pane_id), Some(entry.runtime.clone()))
@@ -222,13 +234,7 @@ impl Zetta {
         {
             runtime.reporters().forget_shared(mux_pane_id);
         }
-        let Some(terminal) = self
-            .tabs
-            .iter()
-            .find(|tab| tab.id == tab_id)
-            .and_then(|tab| tab.pane(pane_id))
-            .and_then(|pane| pane.terminal.clone())
-        else {
+        let Some(terminal) = terminal else {
             return;
         };
         if report.disconnected {
@@ -261,7 +267,7 @@ impl Zetta {
             return;
         };
         let terminal = terminal.read(cx);
-        let bounds = terminal.last_content().terminal_bounds;
+        let bounds = terminal.local_terminal_bounds();
         let Some((columns, lines)) = shared_size_to_report(terminal.is_size_initialized(), bounds)
         else {
             // Not laid out yet, so this viewer has no size to arbitrate against.
@@ -279,7 +285,14 @@ impl Zetta {
     /// The pane itself stays alive on the multiplexer — dropping the shared
     /// connection only removes this client from the shared set, which is
     /// exactly what closing the window's view of it means.
-    pub(crate) fn drop_shared_pane(&mut self, pane_id: u64) {
+    pub(crate) fn drop_shared_pane(&mut self, pane_id: u64, cx: &mut Context<Self>) {
+        if let Some(terminal) = self
+            .tabs
+            .iter()
+            .find_map(|tab| tab.pane(pane_id).and_then(|pane| pane.terminal.clone()))
+        {
+            terminal.update(cx, |terminal, _| terminal.stop_byte_stream());
+        }
         let Some(entry) = self.shared_panes.remove(&pane_id) else {
             return;
         };
@@ -420,7 +433,7 @@ impl Zetta {
         // The shared bookkeeping goes, and with it the shared connection: this
         // window no longer reads a relay. Done after the conversion, so a failure
         // above leaves the pane as it was.
-        self.drop_shared_pane(ids.pane_id);
+        self.drop_shared_pane(ids.pane_id, cx);
         // Exits now arrive through the pty's own child-event channel again, and a
         // pane holding the descriptor has to be able to answer a future revoke.
         runtime.reporters().register(ids.mux_pane_id, child_events);
@@ -578,13 +591,44 @@ impl Zetta {
         cx: &mut Context<Self>,
     ) {
         watch_grid_size(terminal, window, cx, move |this, terminal, cx| {
-            this.report_shared_pane_size(pane_id, terminal, cx);
+            this.schedule_shared_pane_size_report(pane_id, terminal.clone(), cx);
         });
         // The size the pane is at right now, which no later event will repeat:
         // a pane that is already laid out emits `GridSizeChanged` only when it
         // next changes, so without this the daemon would arbitrate against the
         // handover size until the user happened to resize something.
-        self.report_shared_pane_size(pane_id, terminal, cx);
+        self.schedule_shared_pane_size_report(pane_id, terminal.clone(), cx);
+    }
+
+    /// Coalesces layout churn before sending it to the daemon. Pointer-based
+    /// pane resizing can produce several grid notifications in one gesture;
+    /// only the size that remains after the short debounce is authoritative.
+    fn schedule_shared_pane_size_report(
+        &mut self,
+        pane_id: u64,
+        terminal: Entity<Terminal>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(generation) = self
+            .shared_panes
+            .get(&pane_id)
+            .map(|entry| entry.size_report_generation.clone())
+        else {
+            return;
+        };
+        let expected = generation.fetch_add(1, Ordering::AcqRel).wrapping_add(1);
+        let executor = cx.background_executor().clone();
+        cx.spawn(async move |this, cx| {
+            executor.timer(SHARED_SIZE_REPORT_DEBOUNCE).await;
+            if generation.load(Ordering::Acquire) != expected {
+                return;
+            }
+            this.update(cx, |this, cx| {
+                this.report_shared_pane_size(pane_id, &terminal, cx);
+            })
+            .ok();
+        })
+        .detach();
     }
 }
 

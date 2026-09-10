@@ -345,6 +345,7 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let tab_id = self.tabs.get(self.active_tab).map(|tab| tab.id);
         let Some(tab) = self.tabs.get_mut(self.active_tab) else {
             return;
         };
@@ -361,6 +362,7 @@ impl Zetta {
                 return;
             }
         }
+        let mut committed = false;
         match event.keystroke.key.as_str() {
             "enter" => {
                 let title = buffer.text.trim().to_owned();
@@ -373,6 +375,7 @@ impl Zetta {
                     set_tab_title(tab, title);
                 }
                 tab.rename_buffer = None;
+                committed = true;
                 self.focus_active(window, cx);
             }
             "escape" => {
@@ -385,6 +388,9 @@ impl Zetta {
                     cx.notify();
                 }
             }
+        }
+        if committed && let Some(tab_id) = tab_id {
+            self.sync_shared_tab_state(tab_id, cx);
         }
         cx.stop_propagation();
     }

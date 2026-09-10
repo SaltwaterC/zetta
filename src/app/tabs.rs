@@ -334,17 +334,28 @@ impl Zetta {
             return;
         }
         let tab_id = self.tabs[index].id;
+        let remote_shared_tab = self.mux_panes.is_remote_tab(tab_id);
+        if remote_shared_tab {
+            // Closing a remote tab is a viewer leave. In particular, do not let
+            // the shared-tab fallback below turn it into hand_session_to_multiplexer,
+            // which would attempt to create a local background owner.
+            self.leave_shared_tab(tab_id, cx);
+        }
         self.cancel_tab_search_for_tab(tab_id, cx);
         let has_failed_pane = self.tabs[index]
             .panes
             .iter()
             .any(|pane| pane.exit.is_some());
-        let background_authentication = background_authentication_for_close(
-            &self.tabs[index].close_policy,
-            self.tabs[index].shared,
-            background_if_pinned,
-            has_failed_pane,
-        );
+        let background_authentication = (!remote_shared_tab)
+            .then(|| {
+                background_authentication_for_close(
+                    &self.tabs[index].close_policy,
+                    self.tabs[index].shared,
+                    background_if_pinned,
+                    has_failed_pane,
+                )
+            })
+            .flatten();
         if let Some(authentication) = background_authentication {
             self.move_tab_to_background(index, authentication, cx);
             if self.tabs.is_empty() {
@@ -375,7 +386,7 @@ impl Zetta {
             }
         }
         for pane_id in &closed_pane_ids {
-            self.drop_shared_pane(*pane_id);
+            self.drop_shared_pane(*pane_id, cx);
             self.release_mux_pane(tab_id, *pane_id, cx);
         }
         self.mux_panes.forget_tab(tab_id);
@@ -460,12 +471,16 @@ impl Zetta {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let tab_id = self.tabs.get(self.active_tab).map(|tab| tab.id);
         let Some(insertion_index) = toggle_tab_pinning_in_order(&mut self.tabs, self.active_tab)
         else {
             return;
         };
         self.active_tab = insertion_index;
         self.tab_overflow_selection_side = None;
+        if let Some(tab_id) = tab_id {
+            self.sync_shared_tab_state(tab_id, cx);
+        }
         cx.notify();
     }
 }

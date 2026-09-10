@@ -109,6 +109,7 @@ pub(super) fn prepare_upgrade(daemon: &Arc<Daemon>) -> Result<(PathBuf, std::fs:
                     id: session.id,
                     summary: session.summary.clone(),
                     state: session.state.clone(),
+                    shared_state: session.shared_state.clone(),
                     keep: session.keep,
                     offered: session.offered,
                     owner: session.owner,
@@ -230,6 +231,7 @@ pub(super) fn prepare_upgrade(daemon: &Arc<Daemon>) -> Result<(PathBuf, PathBuf,
                 id: session.id,
                 summary: session.summary.clone(),
                 state: session.state.clone(),
+                shared_state: session.shared_state.clone(),
                 keep: session.keep,
                 offered: session.offered,
                 owner: session.owner,
@@ -426,6 +428,7 @@ pub(super) fn adopt_handover(
             id: session.id,
             summary,
             state: session.state,
+            shared_state: session.shared_state,
             authentication: session
                 .verifier
                 .map(SessionAuthentication::from_verifier)
@@ -528,6 +531,7 @@ pub(super) fn adopt_handover(
             id: session.id,
             summary,
             state: session.state,
+            shared_state: session.shared_state,
             authentication: session
                 .verifier
                 .map(SessionAuthentication::from_verifier)

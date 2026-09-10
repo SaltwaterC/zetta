@@ -52,22 +52,14 @@ fn pane_resize_arrows_follow_the_active_pane_edge() {
 
 #[cfg(feature = "zmux")]
 #[test]
-fn shared_resize_uses_the_outer_window_and_preserves_a_split_ratio() {
+fn shared_resize_preserves_a_split_ratio_until_interactive_resize() {
     let layout = PaneLayout::Split {
         axis: SplitAxis::Vertical,
         first_ratio: 700,
         first: Box::new(PaneLayout::Pane(1)),
         second: Box::new(PaneLayout::Pane(2)),
     };
-    let region = layout
-        .regions()
-        .into_iter()
-        .find(|region| region.id == 1)
-        .unwrap();
     let before = layout.clone();
-    let window_delta = shared_resize_window_delta(region.right - region.left, 100, 80, px(8.));
-
-    assert!((window_delta - 228.57143).abs() < 0.001);
     assert_eq!(
         layout, before,
         "shared synchronization must not edit splits"

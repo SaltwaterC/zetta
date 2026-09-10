@@ -596,6 +596,7 @@ fn display_layout(layout: &BackgroundPaneLayout) -> String {
             axis,
             first,
             second,
+            ..
         } => format!(
             "{axis}({}, {})",
             display_layout(first),

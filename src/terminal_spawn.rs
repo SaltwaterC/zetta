@@ -1,4 +1,6 @@
 use super::*;
+#[cfg(feature = "zmux")]
+use crate::mux::MuxPaneIds;
 use crate::worktree_detection::terminal_event_requires_worktree_detection;
 
 /// Returns the shell command used to load this process's shell integration
@@ -95,9 +97,32 @@ struct SpawnedTerminal {
     /// Only set while restoring: the directory the stored session was in.
     restored_working_directory: Option<PathBuf>,
     mux_provider: Option<Arc<crate::mux::MuxPtyProvider>>,
+    shared_pane: Option<Arc<zmux::client::SharedPane>>,
+    shared_runtime: Option<crate::mux::MuxRuntime>,
+    shared_state: Option<zmux::messages::SharedSessionState>,
     shell_integration_startup_command: Option<Vec<u8>>,
     tracked_multi_command_launch: bool,
-    image_paste_handler: Arc<crate::ssh_image_paste::SshImagePasteHandler>,
+    image_paste_handler: Option<Arc<dyn terminal::ImagePasteHandler>>,
+}
+
+struct SharedTerminalLaunch {
+    tab_id: u64,
+    pane_id: u64,
+    attention_id: u64,
+    pane_routing_id: u64,
+    terminal_theme: Option<Arc<Theme>>,
+    provider: Arc<crate::mux::MuxPtyProvider>,
+    shell: Shell,
+    environment: HashMap<String, String>,
+    working_directory: Option<PathBuf>,
+    title: String,
+    cursor_shape: terminal::terminal_settings::CursorShape,
+    alternate_scroll: terminal::terminal_settings::AlternateScroll,
+    max_scroll_history_lines: Option<usize>,
+    shell_integration_startup_command: Option<Vec<u8>>,
+    tracked_multi_command_launch: bool,
+    base_revision: zmux::messages::SessionRevision,
+    console_palette: terminal::ConsolePalette,
 }
 
 /// Everything one interactive-terminal spawn needs. The tab, the pane and the
@@ -726,6 +751,56 @@ impl Zetta {
             };
         let initial_console_palette =
             (!is_wsl).then(|| terminal::console_palette_for_theme(effective_theme.as_ref()));
+        if let Some(provider) = mux_provider
+            .as_ref()
+            .filter(|provider| provider.runtime().is_remote())
+        {
+            let Some(session_id) = provider.session_id() else {
+                self.report_pane_spawn_error(
+                    tab_id,
+                    pane_id,
+                    "Could not identify the remote shared session".to_owned(),
+                    cx,
+                );
+                return;
+            };
+            let base_revision = self
+                .shared_collaboration
+                .state(session_id)
+                .map_or(zmux::messages::SessionRevision::INITIAL, |state| {
+                    state.revision
+                });
+            let title = self
+                .tabs
+                .iter()
+                .find(|tab| tab.id == tab_id)
+                .and_then(|tab| tab.process_title.clone())
+                .unwrap_or_else(|| profile.name.clone());
+            self.spawn_shared_terminal(
+                SharedTerminalLaunch {
+                    tab_id,
+                    pane_id,
+                    attention_id,
+                    pane_routing_id,
+                    terminal_theme,
+                    provider: provider.clone(),
+                    shell,
+                    environment,
+                    working_directory,
+                    title,
+                    cursor_shape: settings.cursor_shape,
+                    alternate_scroll: settings.alternate_scroll,
+                    max_scroll_history_lines: settings.max_scroll_history_lines,
+                    shell_integration_startup_command,
+                    tracked_multi_command_launch,
+                    base_revision,
+                    console_palette: initial_console_palette.unwrap_or_default(),
+                },
+                window,
+                cx,
+            );
+            return;
+        }
         let image_paste_handler = Arc::new(crate::ssh_image_paste::SshImagePasteHandler::new(
             shell.clone(),
             environment.clone(),
@@ -749,7 +824,7 @@ impl Zetta {
             working_directory,
             None,
             shell,
-            environment,
+            environment.into_iter().collect(),
             settings.cursor_shape,
             settings.alternate_scroll,
             settings.max_scroll_history_lines,
@@ -776,9 +851,12 @@ impl Zetta {
             restore_options,
             restored_working_directory,
             mux_provider,
+            shared_pane: None,
+            shared_runtime: None,
+            shared_state: None,
             shell_integration_startup_command,
             tracked_multi_command_launch,
-            image_paste_handler,
+            image_paste_handler: Some(image_paste_handler),
         };
         window
             .spawn(cx, async move |cx| match builder.await {
@@ -797,6 +875,119 @@ impl Zetta {
                 Err(error) => {
                     this.update_in(cx, |this, window, cx| {
                         this.report_terminal_spawn_failure(&spawned, &error, window, cx);
+                    })
+                    .ok();
+                }
+            })
+            .detach();
+    }
+
+    fn spawn_shared_terminal(
+        &mut self,
+        launch: SharedTerminalLaunch,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let SharedTerminalLaunch {
+            tab_id,
+            pane_id,
+            attention_id,
+            pane_routing_id,
+            terminal_theme,
+            provider,
+            shell,
+            environment,
+            working_directory,
+            title,
+            cursor_shape,
+            alternate_scroll,
+            max_scroll_history_lines,
+            shell_integration_startup_command,
+            tracked_multi_command_launch,
+            base_revision,
+            console_palette,
+        } = launch;
+        let executor = cx.background_executor().clone();
+        let terminal_executor = executor.clone();
+        let build = executor.spawn(async move {
+            let (program, args) = shell.program_and_args();
+            let spawned = provider.spawn_shared(
+                terminal::PtySpawnRequest {
+                    program: Some(program),
+                    args: args.to_vec(),
+                    env: environment.into_iter().collect(),
+                    working_directory: working_directory.clone(),
+                    console_palette,
+                },
+                base_revision,
+            )?;
+            let pane = Arc::new(spawned.pane);
+            let runtime = provider.runtime().clone();
+            let builder = TerminalBuilder::new_byte_stream(
+                Box::new(pane.reader()),
+                Box::new(
+                    crate::background_session_ui::shared_panes::SharedPaneWriter {
+                        pane: pane.clone(),
+                    },
+                ),
+                title,
+                cursor_shape,
+                alternate_scroll,
+                max_scroll_history_lines,
+                0,
+                &terminal_executor,
+                PathStyle::local(),
+            )
+            .with_working_directory(working_directory)
+            .with_replay(pane.replay.clone())
+            .with_pty_control(crate::mux::mux_pty_control_with_secret(
+                runtime.client().clone(),
+                pane.session_id(),
+                pane.pane_id(),
+                runtime.session_secret(),
+            ))
+            .with_image_paste_handler(Arc::new(
+                crate::background_session_ui::image_paste::RemoteImagePasteHandler::new(
+                    &runtime,
+                    pane.session_id(),
+                    pane.pane_id(),
+                ),
+            ));
+            Ok::<_, anyhow::Error>((
+                builder,
+                SpawnedTerminal {
+                    tab_id,
+                    pane_id,
+                    attention_id,
+                    pane_routing_id,
+                    terminal_theme,
+                    restore_options: None,
+                    restored_working_directory: None,
+                    mux_provider: None,
+                    shared_pane: Some(pane),
+                    shared_runtime: Some(runtime),
+                    shared_state: Some(spawned.state),
+                    shell_integration_startup_command,
+                    tracked_multi_command_launch,
+                    image_paste_handler: None,
+                },
+            ))
+        });
+        let this = cx.entity().downgrade();
+        window
+            .spawn(cx, async move |cx| match build.await {
+                Ok((builder, spawned)) => {
+                    this.update_in(cx, |this, window, cx| {
+                        this.finish_terminal_spawn(builder, spawned, window, cx);
+                    })
+                    .ok();
+                }
+                Err(error) => {
+                    this.update_in(cx, |this, window, cx| {
+                        this.report_pane_spawn_error(tab_id, pane_id, format!("{error:#}"), cx);
+                        if tracked_multi_command_launch {
+                            this.finish_multi_command_launch(window, cx);
+                        }
                     })
                     .ok();
                 }
@@ -882,10 +1073,34 @@ impl Zetta {
             shell_integration_startup_command,
             tracked_multi_command_launch,
             mux_provider,
+            shared_pane,
+            shared_runtime,
+            shared_state,
             image_paste_handler,
             ..
         } = spawned;
-        builder = builder.with_image_paste_handler(image_paste_handler);
+        if let Some(image_paste_handler) = image_paste_handler {
+            builder = builder.with_image_paste_handler(image_paste_handler);
+        }
+        if let (Some(shared_pane), Some(runtime)) = (&shared_pane, &shared_runtime) {
+            let mux_pane_id = shared_pane.pane_id();
+            self.mux_panes.adopt_session_with_runtime(
+                tab_id,
+                shared_pane.session_id(),
+                runtime.clone(),
+            );
+            self.mux_panes.record(pane_id, mux_pane_id);
+            self.shared_collaboration
+                .record_pane(shared_pane.session_id(), mux_pane_id, pane_id);
+            if let Some(state) = shared_state {
+                let _ = self.shared_collaboration.accept_pane_added(
+                    shared_pane.session_id(),
+                    state,
+                    mux_pane_id,
+                    pane_id,
+                );
+            }
+        }
         let this = self;
         this.adopt_mux_pane(
             tab_id,
@@ -962,6 +1177,27 @@ impl Zetta {
                 if tab_index.is_none() {
                     this.mux_panes.forget_tab(tab_id);
                 }
+            }
+        }
+        if let (Some(shared_pane), Some(runtime)) = (&shared_pane, &shared_runtime) {
+            this.register_shared_pane(
+                MuxPaneIds {
+                    tab_id,
+                    pane_id,
+                    session_id: shared_pane.session_id(),
+                    mux_pane_id: shared_pane.pane_id(),
+                },
+                shared_pane,
+                runtime,
+                window,
+                cx,
+            );
+            if runtime.is_remote() {
+                // The spawn response can only carry the previous opaque tab
+                // state. Once this pane has a local id and a stable mux id,
+                // publish the complete tab so every viewer gets its profile,
+                // labels and durable layout metadata.
+                this.sync_shared_tab_state(tab_id, cx);
             }
         }
         this.schedule_worktree_detection_for_pane(tab_id, pane_id, cx);

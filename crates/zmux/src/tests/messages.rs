@@ -1,6 +1,52 @@
 use super::*;
 use std::{collections::HashMap, path::PathBuf};
 
+use crate::protocol::{BackgroundPaneState, BackgroundPaneSummary};
+
+fn shared_summary() -> BackgroundSessionSummary {
+    BackgroundSessionSummary {
+        id: 4,
+        title: "shared".to_owned(),
+        authentication_required: false,
+        active_pane: 10,
+        layout: BackgroundPaneLayout::Split {
+            axis: "horizontal".to_owned(),
+            first_ratio: crate::protocol::DEFAULT_BACKGROUND_PANE_SPLIT_RATIO,
+            first: Box::new(BackgroundPaneLayout::Pane { pane_id: 10 }),
+            second: Box::new(BackgroundPaneLayout::Pane { pane_id: 11 }),
+        },
+        panes: vec![
+            BackgroundPaneSummary {
+                id: 10,
+                label: "one".to_owned(),
+                profile: "shell".to_owned(),
+                configured_command: String::new(),
+                application: "sh".to_owned(),
+                foreground_command: None,
+                terminal_title: None,
+                working_directory: None,
+                state: BackgroundPaneState::Running,
+                exit: None,
+            },
+            BackgroundPaneSummary {
+                id: 11,
+                label: "two".to_owned(),
+                profile: "shell".to_owned(),
+                configured_command: String::new(),
+                application: "sh".to_owned(),
+                foreground_command: None,
+                terminal_title: None,
+                working_directory: None,
+                state: BackgroundPaneState::Running,
+                exit: None,
+            },
+        ],
+        held: false,
+        scoped_to: None,
+        key_envelope: None,
+    }
+}
+
 #[test]
 fn requests_are_tagged_by_name_on_the_wire() {
     // The tag is the wire contract between a client and a daemon that may be
@@ -166,4 +212,47 @@ fn a_pane_exit_carries_the_raw_status_and_input_attribution() {
         }
         other => panic!("expected a pane exit, got {other:?}"),
     }
+}
+
+#[test]
+fn shared_state_rejects_stale_layout_references_and_removes_a_pane() {
+    let mut state = SharedSessionState::new(4, shared_summary(), serde_json::json!({"tab": true}));
+    let operation_id = SharedOperationId::new(ClientId::new("client"), 1);
+    state
+        .apply_operation(
+            operation_id.clone(),
+            &SharedSessionOperation::ClosePane { pane_id: 11 },
+        )
+        .unwrap();
+
+    assert_eq!(state.revision, SessionRevision(1));
+    assert_eq!(state.last_operation_id, Some(operation_id));
+    assert_eq!(state.summary.active_pane, 10);
+    assert_eq!(state.summary.panes.len(), 1);
+    assert!(matches!(
+        state.summary.layout,
+        BackgroundPaneLayout::Pane { pane_id: 10 }
+    ));
+
+    let invalid = SharedSessionOperation::SetFocus { pane_id: 99 };
+    assert!(state.validate_operation(&invalid).is_err());
+}
+
+#[test]
+fn shared_messages_round_trip_revision_and_operation_id() {
+    let request = Request::ApplyShared(SharedSessionOperationRequest {
+        session_id: 4,
+        base_revision: SessionRevision(8),
+        operation_id: SharedOperationId::new(ClientId::new("client"), 12),
+        operation: SharedSessionOperation::SetFocus { pane_id: 10 },
+    });
+    let parsed: Request = serde_json::from_value(serde_json::to_value(request).unwrap()).unwrap();
+    assert!(matches!(
+        parsed,
+        Request::ApplyShared(SharedSessionOperationRequest {
+            base_revision: SessionRevision(8),
+            operation_id: SharedOperationId { sequence: 12, .. },
+            ..
+        })
+    ));
 }

@@ -155,6 +155,7 @@ pub(super) fn attach(
             state,
             summary,
             connection,
+            None,
         );
     }
     if !stream_only
@@ -184,6 +185,7 @@ pub(super) fn attach(
             state,
             summary,
             connection,
+            None,
         );
     }
 
@@ -286,6 +288,7 @@ pub(super) fn attach(
                     state,
                     summary,
                     connection,
+                    None,
                 );
             }
             Attachment::None => {
@@ -303,6 +306,7 @@ pub(super) fn attach(
                         state,
                         summary,
                         connection,
+                        None,
                     );
                 }
                 return attach_exclusive(
@@ -489,6 +493,7 @@ pub(super) fn attach_shared(
     state: serde_json::Value,
     summary: Box<BackgroundSessionSummary>,
     connection: &mut Connection,
+    spawned_state: Option<crate::messages::SharedSessionState>,
 ) -> Result<()> {
     let Some(session) = sessions.iter_mut().find(|session| session.id == session_id) else {
         return connection.send(&Response::Error {
@@ -512,7 +517,7 @@ pub(super) fn attach_shared(
     // The relay is a queue and its own thread, not a write from wherever the
     // output was read: the reader holds the sessions lock, and a socket write
     // under that lock is a viewer's stall becoming everybody's.
-    let relay = spawn_relay(connection, client_process_id)?;
+    let relay = spawn_relay(connection, session_id, pane_id, client_process_id)?;
     let Attachment::Shared(clients) = &mut pane.attachment else {
         unreachable!("the attachment was just checked to be shared");
     };
@@ -547,15 +552,27 @@ pub(super) fn attach_shared(
         None => pane.retained.snapshot(),
     };
     let child_pid = pane.pty.child_pid();
-    connection.send(&Response::SharedAttached {
-        pane_id,
-        child_pid,
-        replay_length: replay.len(),
-        state,
-        summary,
-        columns,
-        lines,
-    })?;
+    let response = match spawned_state {
+        Some(shared_state) => Response::SharedSpawned {
+            session_id,
+            pane_id,
+            child_pid,
+            replay_length: replay.len(),
+            state,
+            summary,
+            shared_state,
+        },
+        None => Response::SharedAttached {
+            pane_id,
+            child_pid,
+            replay_length: replay.len(),
+            state,
+            summary,
+            columns,
+            lines,
+        },
+    };
+    connection.send(&response)?;
     if !replay.is_empty() {
         connection.write_all(&replay)?;
     }
@@ -574,6 +591,20 @@ pub(super) fn attach_shared(
         connection,
     );
     remove_shared_client(daemon, session_id, pane_id, &client_id);
+    if let Err(error) = &result {
+        log::debug!(
+            "shared stream for session {session_id} pane {pane_id} failed for client {}: {error:#}",
+            client_id.as_str()
+        );
+        crate::server::broadcast_to(
+            daemon,
+            &Event::SharedStreamFailed {
+                session_id,
+                pane_id,
+            },
+            &client_id,
+        );
+    }
     result
 }
 
@@ -622,7 +653,12 @@ pub(super) const RELAY_STALL_TIMEOUT: Duration = Duration::from_secs(30);
 ///
 /// The thread owns a clone of the client's connection, so the serve loop keeps
 /// reading input on the original while output goes out on the clone.
-pub(super) fn spawn_relay(connection: &Connection, client_process_id: u32) -> Result<Relay> {
+pub(super) fn spawn_relay(
+    connection: &Connection,
+    session_id: u64,
+    pane_id: u64,
+    client_process_id: u32,
+) -> Result<Relay> {
     let writer = connection.try_clone()?;
     #[cfg(unix)]
     {
@@ -639,7 +675,16 @@ pub(super) fn spawn_relay(connection: &Connection, client_process_id: u32) -> Re
     let (loop_queued, loop_written) = (queued.clone(), written.clone());
     std::thread::Builder::new()
         .name("zmux relay".to_owned())
-        .spawn(move || relay_loop(writer, frames, loop_queued, loop_written))
+        .spawn(move || {
+            relay_loop(
+                writer,
+                frames,
+                loop_queued,
+                loop_written,
+                session_id,
+                pane_id,
+            )
+        })
         .with_context(|| format!("starting the relay for client {client_process_id}"))?;
     Ok(Relay {
         frames: sender,
@@ -660,7 +705,10 @@ pub(super) fn relay_loop(
     frames: async_channel::Receiver<Arc<[u8]>>,
     queued: Arc<AtomicUsize>,
     written: Arc<AtomicUsize>,
+    session_id: u64,
+    pane_id: u64,
 ) {
+    let mut failed = false;
     while let Ok(frame) = frames.recv_blocking() {
         let result = writer.write_all(&frame);
         queued.fetch_sub(frame.len(), Ordering::Relaxed);
@@ -669,6 +717,7 @@ pub(super) fn relay_loop(
         }
         if let Err(error) = result {
             log::debug!("a shared client stopped accepting output: {error:#}");
+            failed = true;
             break;
         }
     }
@@ -680,7 +729,24 @@ pub(super) fn relay_loop(
     // arrive. Returning early on a write error skipped this, which is how a viewer
     // the daemon had given up on was left with a half-drawn screen, no message and
     // no end of stream — a pane frozen with nothing to say why.
-    let _ = writer.stream().shutdown(std::net::Shutdown::Write);
+    if failed {
+        // The serve loop owns another clone of this socket; closing only the
+        // write half would leave it blocked forever waiting for a request, so
+        // it could never remove the failed viewer or announce the recoverable
+        // stream event on the subscription.
+        let _ = writer.stream().shutdown(std::net::Shutdown::Both);
+    } else {
+        // A normal retirement has to be distinguishable from a broken relay.
+        // The marker follows every queued output, so the reader can finish
+        // cleanly while the daemon still reserves WouldBlock for recovery.
+        if let Err(error) = writer.send(&Event::SharedClosed {
+            session_id,
+            pane_id,
+        }) {
+            log::debug!("could not mark a shared relay closed: {error:#}");
+        }
+        let _ = writer.stream().shutdown(std::net::Shutdown::Write);
+    }
 }
 
 /// Serves one client's shared connection: its input is written to the pane

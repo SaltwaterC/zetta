@@ -250,7 +250,7 @@ impl LayoutState {
         }
     }
 
-    fn into_layout(self) -> PaneLayout {
+    pub(crate) fn into_layout(self) -> PaneLayout {
         match self {
             Self::Pane { pane_id } => PaneLayout::Pane(pane_id),
             Self::Split {
