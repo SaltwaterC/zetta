@@ -8,6 +8,33 @@
 
 use super::*;
 
+/// Completes a process-control request exactly once, including when the GPUI
+/// task is cancelled because its window disappears. A cancelled attach cannot
+/// report a useful domain result, but the CLI caller must still be released.
+struct ReconnectCompletion {
+    sender: Option<std::sync::mpsc::Sender<ReconnectSessionResult>>,
+}
+
+impl ReconnectCompletion {
+    fn new(sender: std::sync::mpsc::Sender<ReconnectSessionResult>) -> Self {
+        Self {
+            sender: Some(sender),
+        }
+    }
+
+    fn send(&mut self, result: ReconnectSessionResult) {
+        if let Some(sender) = self.sender.take() {
+            let _ = sender.send(result);
+        }
+    }
+}
+
+impl Drop for ReconnectCompletion {
+    fn drop(&mut self) {
+        self.send(ReconnectSessionResult::Rejected);
+    }
+}
+
 impl Zetta {
     pub(crate) fn reconnect_background_session(
         &mut self,
@@ -472,13 +499,14 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let mut completion = ReconnectCompletion::new(completion);
         let result = self.resume_disk_session(session_id, secret, Some(identities), window, cx);
         if result == ReconnectSessionResult::Rejected
             && let Some(error) = self.pane_output_error.take()
         {
             self.show_notice(error, cx);
         }
-        let _ = completion.send(result);
+        completion.send(result);
     }
 
     pub(crate) fn reconnect_session_from_cli(
@@ -490,6 +518,7 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let mut completion = ReconnectCompletion::new(completion);
         // A session the multiplexer holds is not this process's to look up:
         // its verifier lives in the multiplexer, which checks the secret
         // itself as part of the attach.
@@ -507,7 +536,7 @@ impl Zetta {
                     ReconnectSessionResult::Rejected
                 }
             };
-            let _ = completion.send(result);
+            completion.send(result);
             return;
         }
         let verifier = self.process_background_session_authentication(runner_id, session_id, cx);
@@ -517,17 +546,17 @@ impl Zetta {
             } else {
                 ReconnectSessionResult::AuthenticationFailed
             };
-            let _ = completion.send(result);
+            completion.send(result);
             return;
         }
         let Some(secret) = secret else {
-            let _ = completion.send(ReconnectSessionResult::AuthenticationFailed);
+            completion.send(ReconnectSessionResult::AuthenticationFailed);
             return;
         };
         // Refused attempts report the same status as wrong ones, so the backoff
         // window cannot be probed to learn whether a guess was even evaluated.
         if self.process_authentication_is_refused(runner_id, session_id, cx) {
-            let _ = completion.send(ReconnectSessionResult::AuthenticationFailed);
+            completion.send(ReconnectSessionResult::AuthenticationFailed);
             return;
         }
         let generation = self.session_authentication_generation;
@@ -560,11 +589,84 @@ impl Zetta {
                     )
                 })
                 .unwrap_or(ReconnectSessionResult::Rejected);
-            let _ = completion.send(result);
+            completion.send(result);
         })
         .detach();
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the CLI request's five fields plus the GPUI window and context"
+    )]
+    #[cfg(feature = "zmux")]
+    pub(crate) fn open_remote_session_from_cli(
+        &mut self,
+        target: String,
+        port: Option<u16>,
+        session_id: u64,
+        secret: Option<SessionSecret>,
+        completion: std::sync::mpsc::Sender<ReconnectSessionResult>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let target = zmux::remote::RemoteTarget::new(target).with_port(port);
+        let operation_generation = self.next_remote_session_operation_generation();
+        let mut completion = ReconnectCompletion::new(completion);
+        cx.spawn_in(window, async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    load_remote_attach(target, session_id, secret)
+                })
+                .await;
+            let result = this
+                .update_in(cx, |this, window, cx| {
+                    if !this.remote_session_operation_is_current(operation_generation) {
+                        return ReconnectSessionResult::Rejected;
+                    }
+                    match result {
+                        Ok(RemoteAttachOutcome::Attached(data)) => {
+                            match this.finish_remote_multiplexer_session(*data, window, cx) {
+                                Ok(AttachOutcomeSummary::Attached) => {
+                                    this.remote_session_target = None;
+                                    ReconnectSessionResult::Reconnected
+                                }
+                                Ok(AttachOutcomeSummary::AuthenticationRequired)
+                                | Ok(AttachOutcomeSummary::AuthenticationFailed) => {
+                                    ReconnectSessionResult::AuthenticationFailed
+                                }
+                                Err(error) => {
+                                    this.show_notice(
+                                        format!(
+                                            "Could not attach the remote session {session_id}: {error:#}"
+                                        ),
+                                        cx,
+                                    );
+                                    ReconnectSessionResult::Rejected
+                                }
+                            }
+                        }
+                        Ok(RemoteAttachOutcome::AuthenticationRequired)
+                        | Ok(RemoteAttachOutcome::AuthenticationFailed) => {
+                            ReconnectSessionResult::AuthenticationFailed
+                        }
+                        Err(error) => {
+                            this.show_notice(
+                                format!(
+                                    "Could not attach the remote session {session_id}: {error:#}"
+                                ),
+                                cx,
+                            );
+                            ReconnectSessionResult::Rejected
+                        }
+                    }
+                })
+                .unwrap_or(ReconnectSessionResult::Rejected);
+            completion.send(result);
+        })
+        .detach();
+    }
+
+    #[cfg(not(feature = "zmux"))]
     #[expect(
         clippy::too_many_arguments,
         reason = "the CLI request's five fields plus the GPUI window and context"
@@ -579,29 +681,8 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let result = {
-            let target = zmux::remote::RemoteTarget::new(target).with_port(port);
-            match self.attach_remote_multiplexer_session(target, session_id, secret, window, cx) {
-                Ok(AttachOutcomeSummary::Attached) => ReconnectSessionResult::Reconnected,
-                Ok(AttachOutcomeSummary::AuthenticationRequired)
-                | Ok(AttachOutcomeSummary::AuthenticationFailed) => {
-                    ReconnectSessionResult::AuthenticationFailed
-                }
-                Err(error) => {
-                    self.pane_output_error = Some(format!(
-                        "Could not attach the remote session {session_id}: {error:#}"
-                    ));
-                    cx.notify();
-                    ReconnectSessionResult::Rejected
-                }
-            }
-        };
-        if result == ReconnectSessionResult::Rejected
-            && let Some(error) = self.pane_output_error.take()
-        {
-            self.show_notice(error, cx);
-        }
-        let _ = completion.send(result);
+        let _ = (target, port, session_id, secret, window, cx);
+        let _ = completion.send(ReconnectSessionResult::Rejected);
     }
 
     pub(crate) fn background_session_authentication(
@@ -759,3 +840,7 @@ impl Zetta {
         ReconnectSessionResult::SessionNotFound
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/background_session_ui/reconnect.rs"]
+mod tests;

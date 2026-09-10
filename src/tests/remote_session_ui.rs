@@ -84,6 +84,23 @@ fn picker_with_suggestions(target: &str) -> RemoteSessionPicker {
     }
 }
 
+fn remote_session_summary(
+    id: u64,
+    authentication_required: bool,
+) -> zmux::protocol::BackgroundSessionSummary {
+    zmux::protocol::BackgroundSessionSummary {
+        id,
+        title: format!("Session {id}"),
+        authentication_required,
+        active_pane: 1,
+        layout: zmux::protocol::BackgroundPaneLayout::Pane { pane_id: 1 },
+        panes: Vec::new(),
+        held: false,
+        scoped_to: None,
+        key_envelope: None,
+    }
+}
+
 #[test]
 fn remote_picker_starts_on_the_target_field() {
     let picker = RemoteSessionPicker::default();
@@ -94,6 +111,20 @@ fn remote_picker_starts_on_the_target_field() {
     assert!(picker.sessions.is_empty());
     assert!(!picker.loading);
     assert!(picker.suggestion_navigation.is_none());
+}
+
+#[test]
+fn invalidating_picker_results_clears_a_pending_attach() {
+    let mut picker = RemoteSessionPicker {
+        attach_generation: Some(9),
+        loading: true,
+        ..Default::default()
+    };
+
+    picker.invalidate_results();
+
+    assert_eq!(picker.attach_generation, None);
+    assert!(!picker.loading);
 }
 
 #[gpui::test]
@@ -185,6 +216,64 @@ fn remote_picker_capture_escape_dismisses_error_and_ignores_stale_results(cx: &m
         "a result for a dismissed picker must not restore its focus"
     );
     assert!(zetta.update(cx, |zetta, _| zetta.remote_session_picker.is_none()));
+}
+
+#[gpui::test]
+fn a_dismissed_remote_attach_cannot_fill_a_reopened_picker(cx: &mut TestAppContext) {
+    cx.update(|cx| theme_settings::init(theme::LoadThemes::JustBase, cx));
+    let (harness, cx) = cx.add_window_view(move |window, cx| {
+        let mut config = Config::defaults(None, None);
+        config.profiles.clear();
+        let zetta = cx.new(|cx| {
+            Zetta::new(
+                config,
+                None,
+                ZettaLaunchOptions {
+                    no_mux: true,
+                    ..Default::default()
+                },
+                window,
+                cx,
+            )
+        });
+        RemoteSessionEscapeHarness {
+            picker_focus: zetta.read(cx).remote_session_focus.clone(),
+            child_focus: cx.focus_handle(),
+            zetta,
+            bubble_seen: Rc::new(Cell::new(false)),
+        }
+    });
+    let zetta = harness.update(cx, |harness, _| harness.zetta.clone());
+
+    let reopened_picker_survives = zetta.update_in(cx, |zetta, window, cx| {
+        let old_generation = zetta.next_remote_session_operation_generation();
+        zetta.remote_session_picker = Some(RemoteSessionPicker {
+            target: TextField::new("old-host"),
+            sessions: vec![remote_session_summary(7, true)],
+            attach_generation: Some(old_generation),
+            loading: true,
+            ..Default::default()
+        });
+        assert!(
+            zetta
+                .remote_session_picker
+                .as_ref()
+                .is_some_and(|picker| picker.loading)
+        );
+
+        zetta.dismiss_remote_session_picker(window, cx);
+        zetta.open_remote_session(&OpenRemoteSession, window, cx);
+        zetta.apply_remote_attach_result(
+            old_generation,
+            zmux::remote::RemoteTarget::new("old-host"),
+            remote_session_summary(7, true),
+            Ok(RemoteAttachOutcome::AuthenticationRequired),
+            window,
+            cx,
+        );
+        zetta.remote_session_picker.is_some() && zetta.session_authentication.is_none()
+    });
+    assert!(reopened_picker_survives);
 }
 
 #[test]

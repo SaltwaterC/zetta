@@ -6,7 +6,7 @@
 //! mux connection is then handed to the ordinary shared-pane attach path.
 
 use super::*;
-use crate::background_session_ui::AttachOutcomeSummary;
+use crate::background_session_ui::{RemoteAttachOutcome, load_remote_attach};
 
 const REMOTE_SESSION_SUGGESTION_VIEWPORT_ROWS: usize = 6;
 const REMOTE_SESSION_SUGGESTION_VIEWPORT_HEIGHT: gpui::Rems =
@@ -38,6 +38,7 @@ pub(crate) struct RemoteSessionPicker {
     pub(crate) suggestion_scroll: UniformListScrollHandle,
     pub(crate) scroll: UniformListScrollHandle,
     pub(crate) generation: u64,
+    pub(crate) attach_generation: Option<u64>,
     pub(crate) task: Option<Task<()>>,
 }
 
@@ -56,6 +57,7 @@ impl Default for RemoteSessionPicker {
             suggestion_scroll: UniformListScrollHandle::new(),
             scroll: UniformListScrollHandle::new(),
             generation: 0,
+            attach_generation: None,
             task: None,
         }
     }
@@ -68,6 +70,7 @@ mod tests;
 impl RemoteSessionPicker {
     fn invalidate_results(&mut self) {
         self.generation = self.generation.wrapping_add(1);
+        self.attach_generation = None;
         self.task.take();
         self.sessions.clear();
         self.selected = 0;
@@ -129,12 +132,23 @@ impl RemoteSessionPicker {
 }
 
 impl Zetta {
+    pub(crate) fn next_remote_session_operation_generation(&mut self) -> u64 {
+        self.remote_session_operation_generation =
+            self.remote_session_operation_generation.wrapping_add(1);
+        self.remote_session_operation_generation
+    }
+
+    pub(crate) fn remote_session_operation_is_current(&self, generation: u64) -> bool {
+        self.remote_session_operation_generation == generation
+    }
+
     pub(crate) fn open_remote_session(
         &mut self,
         _: &OpenRemoteSession,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let operation_generation = self.next_remote_session_operation_generation();
         self.command_palette = None;
         self.multi_command = None;
         self.tab_search = None;
@@ -145,6 +159,7 @@ impl Zetta {
         }
         let picker = RemoteSessionPicker {
             suggestions: crate::multi_command::ssh_config_host_suggestions(),
+            generation: operation_generation,
             ..Default::default()
         };
         self.remote_session_picker = Some(picker);
@@ -161,6 +176,7 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.next_remote_session_operation_generation();
         self.remote_session_picker = None;
         self.remote_session_target = None;
         #[cfg(feature = "session-persistence")]
@@ -207,11 +223,12 @@ impl Zetta {
                 return;
             }
         };
+        let operation_generation = self.next_remote_session_operation_generation();
         let picker = self
             .remote_session_picker
             .as_mut()
             .expect("the remote session picker was checked above");
-        picker.generation = picker.generation.wrapping_add(1);
+        picker.generation = operation_generation;
         picker.task.take();
         picker.sessions.clear();
         picker.selected = 0;
@@ -268,6 +285,9 @@ impl Zetta {
         let Some(picker) = self.remote_session_picker.as_ref() else {
             return;
         };
+        if picker.loading {
+            return;
+        }
         let Some(summary) = picker.sessions.get(index).cloned() else {
             return;
         };
@@ -282,31 +302,126 @@ impl Zetta {
                 return;
             }
         };
-        self.remote_session_picker = None;
-        if summary.authentication_required {
-            #[cfg(feature = "session-persistence")]
-            if let Some(envelope) = summary.key_envelope.clone() {
-                self.prompt_to_unlock_remote_session(target, summary.id, envelope, window, cx);
-            } else {
-                self.prompt_to_attach_remote_session(target, summary.id, window, cx);
-            }
-            #[cfg(not(feature = "session-persistence"))]
-            self.prompt_to_attach_remote_session(target, summary.id, window, cx);
+        let operation_generation = self.next_remote_session_operation_generation();
+        let picker = self
+            .remote_session_picker
+            .as_mut()
+            .expect("the remote session picker was checked above");
+        picker.attach_generation = Some(operation_generation);
+        picker.loading = true;
+        picker.error = None;
+        let background_target = target.clone();
+        let task = cx.spawn_in(window, async move |this, cx| {
+            let result = cx
+                .background_spawn(
+                    async move { load_remote_attach(background_target, summary.id, None) },
+                )
+                .await;
+            this.update_in(cx, |this, window, cx| {
+                this.apply_remote_attach_result(
+                    operation_generation,
+                    target,
+                    summary,
+                    result,
+                    window,
+                    cx,
+                );
+            })
+            .ok();
+        });
+        picker.task.take();
+        picker.task = Some(task);
+        cx.notify();
+    }
+
+    fn apply_remote_attach_result(
+        &mut self,
+        operation_generation: u64,
+        target: zmux::remote::RemoteTarget,
+        summary: zmux::protocol::BackgroundSessionSummary,
+        result: anyhow::Result<RemoteAttachOutcome>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let is_current = self.remote_session_operation_is_current(operation_generation)
+            && self
+                .remote_session_picker
+                .as_ref()
+                .is_some_and(|picker| picker.attach_generation == Some(operation_generation));
+        if !is_current {
             return;
         }
-        match self.attach_remote_multiplexer_session(target, summary.id, None, window, cx) {
-            Ok(AttachOutcomeSummary::Attached) => {}
-            Ok(AttachOutcomeSummary::AuthenticationRequired)
-            | Ok(AttachOutcomeSummary::AuthenticationFailed) => self.show_notice(
-                format!("Remote session {} requires authentication.", summary.id),
-                cx,
-            ),
-            Err(error) => self.show_notice(
-                format!("Could not attach remote session {}: {error:#}", summary.id),
-                cx,
-            ),
+        if let Some(picker) = self.remote_session_picker.as_mut() {
+            picker.loading = false;
+            picker.task = None;
         }
-        self.focus_active(window, cx);
+        match result {
+            Ok(RemoteAttachOutcome::Attached(data)) => {
+                match self.finish_remote_multiplexer_session(*data, window, cx) {
+                    Ok(crate::background_session_ui::AttachOutcomeSummary::Attached) => {
+                        self.remote_session_picker = None;
+                        self.remote_session_target = None;
+                        self.focus_active(window, cx);
+                    }
+                    Ok(
+                        crate::background_session_ui::AttachOutcomeSummary::AuthenticationRequired,
+                    )
+                    | Ok(
+                        crate::background_session_ui::AttachOutcomeSummary::AuthenticationFailed,
+                    ) => {
+                        if let Some(picker) = self.remote_session_picker.as_mut() {
+                            picker.error = Some(
+                                "The remote session was attached but could not be shown here."
+                                    .to_owned(),
+                            );
+                        }
+                        self.remote_session_focus.focus(window, cx);
+                    }
+                    Err(error) => {
+                        if let Some(picker) = self.remote_session_picker.as_mut() {
+                            picker.error = Some(format!(
+                                "Could not show remote session {}: {error:#}",
+                                summary.id
+                            ));
+                        }
+                        self.remote_session_focus.focus(window, cx);
+                    }
+                }
+            }
+            Ok(RemoteAttachOutcome::AuthenticationRequired)
+            | Ok(RemoteAttachOutcome::AuthenticationFailed)
+                if summary.authentication_required =>
+            {
+                self.remote_session_picker = None;
+                #[cfg(feature = "session-persistence")]
+                if let Some(envelope) = summary.key_envelope.clone() {
+                    self.prompt_to_unlock_remote_session(target, summary.id, envelope, window, cx);
+                } else {
+                    self.prompt_to_attach_remote_session(target, summary.id, window, cx);
+                }
+                #[cfg(not(feature = "session-persistence"))]
+                self.prompt_to_attach_remote_session(target, summary.id, window, cx);
+            }
+            Ok(RemoteAttachOutcome::AuthenticationRequired) => {
+                self.remote_session_picker = None;
+                self.prompt_to_attach_remote_session(target, summary.id, window, cx);
+            }
+            Ok(RemoteAttachOutcome::AuthenticationFailed) => {
+                if let Some(picker) = self.remote_session_picker.as_mut() {
+                    picker.error = Some("Authentication failed.".to_owned());
+                }
+                self.remote_session_focus.focus(window, cx);
+            }
+            Err(error) => {
+                if let Some(picker) = self.remote_session_picker.as_mut() {
+                    picker.error = Some(format!(
+                        "Could not attach remote session {}: {error:#}",
+                        summary.id
+                    ));
+                }
+                self.remote_session_focus.focus(window, cx);
+            }
+        }
         cx.notify();
     }
 

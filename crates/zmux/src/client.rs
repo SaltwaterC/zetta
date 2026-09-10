@@ -164,14 +164,14 @@ pub struct AttachedPane {
 ///
 /// No descriptor changes hands: the connection stays open and is the pane's
 /// data plane — output and size events arrive on it, and input and size
-/// reports go back over it. The connection is shared with the reader handed
-/// to the terminal's byte-stream worker, so writes and reads run on different
-/// threads and a clone of the stream serves each side.
+/// reports go back over it. The writer is shared with the terminal's
+/// byte-stream worker only at the stream level: the reader owns its cloned
+/// connection, so an idle read never holds up input or resize reports.
 pub struct SharedPane {
     session_id: u64,
     pane_id: u64,
     pub child_pid: u32,
-    connection: Arc<Mutex<Connection>>,
+    writer: Arc<Mutex<Connection>>,
     /// The sizes the multiplexer arbitrated, recorded by the reader as
     /// [`Event::Size`] arrives. The holder of the pane applies the latest
     /// each time it is woken.
@@ -180,7 +180,11 @@ pub struct SharedPane {
     /// can wait for one instead of asking on a timer. Bounded at one: a pending
     /// signal already means "there are sizes to take".
     size_signal: (async_channel::Sender<()>, async_channel::Receiver<()>),
-    reconnect_replay: Arc<Mutex<VecDeque<u8>>>,
+    /// Replacements are handed to the reader after the current connection has
+    /// reported a transport failure. The queue lock is held only while moving
+    /// a ready connection between the pane and its reader; no network read is
+    /// performed while it is held.
+    reader_handoffs: Arc<Mutex<VecDeque<SharedReaderHandoff>>>,
     /// Output produced while the pane was detached or shared, to be replayed
     /// into a fresh terminal before it is shown.
     pub replay: Vec<u8>,
@@ -199,7 +203,7 @@ impl SharedPane {
     /// multiplexer.
     pub fn send_input(&self, bytes: &[u8]) -> Result<()> {
         let mut connection = self
-            .connection
+            .writer
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         connection.send(&Request::Input {
@@ -212,7 +216,7 @@ impl SharedPane {
     /// client at the smallest of them.
     pub fn send_resize(&self, columns: u16, lines: u16) -> Result<()> {
         let mut connection = self
-            .connection
+            .writer
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         connection.send(&Request::Resize {
@@ -234,71 +238,64 @@ impl SharedPane {
     /// error — that is also what lets a dropped terminal's worker thread
     /// notice it was asked to stop.
     pub fn reader(&self) -> SharedReader {
-        let connection = self
-            .connection
+        let cloned = self
+            .writer
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        #[cfg(unix)]
-        {
-            connection
-                .stream()
-                .set_read_timeout(Some(SHARED_READ_TIMEOUT))
-                .ok();
-        }
-        #[cfg(windows)]
-        {
-            connection
-                .stream()
-                .set_read_timeout(Some(SHARED_READ_TIMEOUT))
-                .ok();
-        }
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .try_clone();
+        let (connection, initialization_error) = match cloned {
+            Ok(connection) => match connection.set_read_timeout(Some(SHARED_READ_TIMEOUT)) {
+                Ok(()) => (Some(connection), None),
+                Err(error) => (None, Some(io::Error::other(error))),
+            },
+            Err(error) => (None, Some(io::Error::other(error))),
+        };
         SharedReader {
-            connection: self.connection.clone(),
+            connection,
+            initialization_error,
             pending: Vec::new(),
             offset: 0,
             sizes: self.sizes.clone(),
             size_signal: self.size_signal.0.clone(),
-            reconnect_replay: self.reconnect_replay.clone(),
+            reader_handoffs: self.reader_handoffs.clone(),
+            reconnect_replay: VecDeque::new(),
         }
     }
 
     /// Replaces a failed relay while the terminal's reader remains alive. The
     /// replacement's retained replay is queued ahead of its live frames.
     pub fn replace_connection_from(&self, replacement: &SharedPane) -> Result<()> {
-        let connection = replacement
-            .connection
+        let replacement_writer = replacement
+            .writer
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .try_clone()?;
-        #[cfg(unix)]
-        connection
-            .stream()
-            .set_read_timeout(Some(SHARED_READ_TIMEOUT))
-            .ok();
-        #[cfg(windows)]
-        connection
-            .stream()
-            .set_read_timeout(Some(SHARED_READ_TIMEOUT))
-            .ok();
+        let reader_connection = replacement_writer.try_clone()?;
+        reader_connection.set_read_timeout(Some(SHARED_READ_TIMEOUT))?;
         *self
-            .connection
+            .writer
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = connection;
-        self.reconnect_replay
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .extend(replacement.replay.iter().copied());
-        self.sizes
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = replacement_writer;
+        self.reader_handoffs
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .extend(
-                replacement
-                    .sizes
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .drain(..),
-            );
-        let _ = self.size_signal.0.try_send(());
+            .push_back(SharedReaderHandoff {
+                connection: reader_connection,
+                replay: replacement.replay.clone(),
+            });
+        let replacement_sizes = replacement
+            .sizes
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .drain(..)
+            .collect::<Vec<_>>();
+        if !replacement_sizes.is_empty() {
+            self.sizes
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .extend(replacement_sizes);
+            let _ = self.size_signal.0.try_send(());
+        }
         Ok(())
     }
 
@@ -331,10 +328,10 @@ impl SharedPane {
             session_id,
             pane_id,
             child_pid,
-            connection: Arc::new(Mutex::new(connection)),
+            writer: Arc::new(Mutex::new(connection)),
             sizes: Arc::new(Mutex::new(Vec::new())),
             size_signal: async_channel::bounded(1),
-            reconnect_replay: Arc::new(Mutex::new(VecDeque::new())),
+            reader_handoffs: Arc::new(Mutex::new(VecDeque::new())),
             replay,
         }
     }
@@ -350,47 +347,68 @@ const SHARED_READ_TIMEOUT: Duration = Duration::from_millis(500);
 /// frames become plain bytes, [`Event::Size`] frames are recorded for the
 /// pane's holder to apply, and a dead multiplexer surfaces as an I/O error.
 pub struct SharedReader {
-    connection: Arc<Mutex<Connection>>,
+    connection: Option<Connection>,
+    initialization_error: Option<io::Error>,
     pending: Vec<u8>,
     offset: usize,
     sizes: Arc<Mutex<Vec<(u16, u16)>>>,
     size_signal: async_channel::Sender<()>,
-    reconnect_replay: Arc<Mutex<VecDeque<u8>>>,
+    reader_handoffs: Arc<Mutex<VecDeque<SharedReaderHandoff>>>,
+    reconnect_replay: VecDeque<u8>,
+}
+
+struct SharedReaderHandoff {
+    connection: Connection,
+    replay: Vec<u8>,
 }
 
 impl io::Read for SharedReader {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
-        let mut replay = self
-            .reconnect_replay
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if !replay.is_empty() {
-            let count = replay.len().min(buffer.len());
-            for (destination, byte) in buffer[..count].iter_mut().zip(replay.drain(..count)) {
-                *destination = byte;
-            }
-            return Ok(count);
+        if buffer.is_empty() {
+            return Ok(0);
         }
-        drop(replay);
-        if self.offset < self.pending.len() {
-            let available = self.pending.len() - self.offset;
-            let count = available.min(buffer.len());
-            buffer[..count].copy_from_slice(&self.pending[self.offset..self.offset + count]);
-            self.offset += count;
-            if self.offset == self.pending.len() {
-                self.pending.clear();
-                self.offset = 0;
-            }
-            return Ok(count);
+        if let Some(error) = self.initialization_error.take() {
+            return Err(error);
         }
         loop {
-            let mut connection = self
-                .connection
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if self.offset < self.pending.len() {
+                let available = self.pending.len() - self.offset;
+                let count = available.min(buffer.len());
+                buffer[..count].copy_from_slice(&self.pending[self.offset..self.offset + count]);
+                self.offset += count;
+                if self.offset == self.pending.len() {
+                    self.pending.clear();
+                    self.offset = 0;
+                }
+                return Ok(count);
+            }
+            let count = self.reconnect_replay.len().min(buffer.len());
+            if count != 0 {
+                for (destination, byte) in buffer[..count]
+                    .iter_mut()
+                    .zip(self.reconnect_replay.drain(..count))
+                {
+                    *destination = byte;
+                }
+                return Ok(count);
+            }
+            let Some(connection) = self.connection.as_mut() else {
+                return Err(io::Error::from(io::ErrorKind::NotConnected));
+            };
             match connection.receive::<Event>() {
                 Ok((Event::Output { length, .. }, _)) => {
-                    let bytes = connection.read_exact(length).map_err(io::Error::other)?;
+                    let bytes = match connection.read_exact(length) {
+                        Ok(bytes) => bytes,
+                        Err(error) => {
+                            if self.install_next_handoff() {
+                                continue;
+                            }
+                            if is_would_block(&error) || is_closed(&error) {
+                                return Err(io::Error::from(io::ErrorKind::WouldBlock));
+                            }
+                            return Err(io::Error::from(io::ErrorKind::WouldBlock));
+                        }
+                    };
                     let count = bytes.len().min(buffer.len());
                     buffer[..count].copy_from_slice(&bytes[..count]);
                     self.pending = bytes[count..].to_vec();
@@ -407,19 +425,39 @@ impl io::Read for SharedReader {
                 }
                 Ok((Event::SharedClosed { .. }, _)) => return Ok(0),
                 Ok(_) => {}
-                Err(error) if is_would_block(&error) => {
+                Err(error) => {
+                    // A relay failure is recoverable. Install a replacement
+                    // without taking a lock around the next network read.
+                    if self.install_next_handoff() {
+                        continue;
+                    }
+                    if is_would_block(&error) || is_closed(&error) {
+                        return Err(io::Error::from(io::ErrorKind::WouldBlock));
+                    }
                     return Err(io::Error::from(io::ErrorKind::WouldBlock));
                 }
-                // A relay failure is recoverable. The owning shared pane swaps
-                // this connection after the subscription announces it, so keep
-                // the byte-stream worker alive across that short gap.
-                Err(error) if is_closed(&error) => {
-                    return Err(io::Error::from(io::ErrorKind::WouldBlock));
-                }
-                Err(_) => return Err(io::Error::from(io::ErrorKind::WouldBlock)),
             }
-            drop(connection);
         }
+    }
+}
+
+impl SharedReader {
+    /// Installs one replacement after the current connection has stopped
+    /// producing frames. This is intentionally a short queue operation: the
+    /// replacement's `receive`/`read_exact` calls happen after the lock is
+    /// released, on the reader's worker thread.
+    fn install_next_handoff(&mut self) -> bool {
+        let handoff = self
+            .reader_handoffs
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .pop_front();
+        let Some(handoff) = handoff else {
+            return false;
+        };
+        self.connection = Some(handoff.connection);
+        self.reconnect_replay.extend(handoff.replay);
+        true
     }
 }
 
@@ -868,6 +906,22 @@ impl Client {
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn from_remote_transport_for_test(
+        remote: Arc<RemoteTransport>,
+        endpoint: Endpoint,
+    ) -> Self {
+        Self {
+            endpoint: Mutex::new(endpoint),
+            directory: PathBuf::new(),
+            client_id: ClientId::new("test-client"),
+            stream_only: true,
+            remote: Some(remote),
+            session_secret: Arc::new(Mutex::new(None)),
+            operation_counter: Arc::new(AtomicU64::new(1)),
+        }
+    }
+
     pub fn is_remote(&self) -> bool {
         self.remote.is_some()
     }
@@ -1200,6 +1254,15 @@ impl Client {
     }
 
     fn ping_until_ready(&self, deadline: Instant) -> Result<()> {
+        // `RemoteTransport::connect` already probes the forwarded daemon before
+        // returning a request stream. Running this separate ping as well would
+        // open two probe connections for every remote request and makes the
+        // remote attach path needlessly slow. Keep the local retry loop, where
+        // the endpoint socket itself is the readiness signal, but let the
+        // transport's probe be the remote one.
+        if self.remote.is_some() {
+            return Ok(());
+        }
         loop {
             let endpoint = self.endpoint_snapshot();
             match self.ping_with_endpoint(&endpoint) {

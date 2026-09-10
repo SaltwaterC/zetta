@@ -602,10 +602,14 @@ impl Zetta {
         let Some(tab_id) = self.shared_collaboration.tab_id(session_id) else {
             return false;
         };
-        let Some(entry) = self.shared_panes.get(&local_pane_id) else {
+        let Some(pane) = self
+            .shared_panes
+            .get(&local_pane_id)
+            .map(|entry| entry.pane.clone())
+        else {
             return false;
         };
-        if let Err(error) = entry.pane.replace_connection_from(&replacement) {
+        if let Err(error) = pane.replace_connection_from(&replacement) {
             log::debug!(
                 "could not replace shared stream for session {session_id} pane {mux_pane_id}: {error:#}"
             );
@@ -618,13 +622,7 @@ impl Zetta {
             .and_then(|tab| tab.pane(local_pane_id))
             .and_then(|pane| pane.terminal.clone())
         {
-            let terminal = terminal.read(cx);
-            if let Some((columns, lines)) = super::shared_size_to_report(
-                terminal.is_size_initialized(),
-                terminal.local_terminal_bounds(),
-            ) {
-                let _ = entry.pane.send_resize(columns, lines);
-            }
+            self.schedule_shared_pane_size_report(local_pane_id, terminal, cx);
         }
         true
     }

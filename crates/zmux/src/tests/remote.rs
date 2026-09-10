@@ -209,6 +209,88 @@ fn mux_probe_uses_a_different_connection_than_the_real_request() {
     server.join().unwrap();
 }
 
+#[cfg(unix)]
+#[test]
+fn remote_attach_uses_the_transport_probe_as_its_only_readiness_check() {
+    use std::{
+        os::unix::net::UnixListener,
+        process::{Command, Stdio},
+        sync::Arc,
+        thread,
+    };
+
+    let directory = tempfile::tempdir().unwrap();
+    let socket_path = directory.path().join("forward.sock");
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    let endpoint = crate::transport::Endpoint {
+        version: crate::transport::ENDPOINT_VERSION,
+        protocol_version: crate::messages::PROTOCOL_VERSION,
+        process_id: 4242,
+        socket_path: socket_path.clone(),
+        token: "test-token".to_owned(),
+    };
+    let child = Command::new("sh")
+        .args(["-c", "sleep 60"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let transport = RemoteTransport {
+        target: RemoteTarget::new("test"),
+        ssh_program: "ssh".into(),
+        state: std::sync::Mutex::new(RemoteState {
+            forward: Some(ForwardState {
+                child,
+                directory,
+                local_socket: socket_path,
+                endpoint: endpoint.clone(),
+            }),
+        }),
+    };
+    let server = thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        let mut probe = Connection::new(stream);
+        let (request, _) = probe.receive::<Envelope>().unwrap();
+        assert!(matches!(request.request, Request::Ping));
+        probe.send(&Response::Ok).unwrap();
+
+        let (stream, _) = listener.accept().unwrap();
+        let mut request = Connection::new(stream);
+        let (envelope, _) = request.receive::<Envelope>().unwrap();
+        assert!(matches!(envelope.request, Request::Attach { .. }));
+        request
+            .send(&Response::SharedAttached {
+                pane_id: 2,
+                child_pid: 3,
+                replay_length: 0,
+                state: serde_json::Value::Null,
+                summary: Box::new(crate::protocol::BackgroundSessionSummary {
+                    id: 1,
+                    title: "remote".to_owned(),
+                    authentication_required: false,
+                    active_pane: 2,
+                    layout: crate::protocol::BackgroundPaneLayout::Pane { pane_id: 2 },
+                    panes: Vec::new(),
+                    held: false,
+                    scoped_to: None,
+                    key_envelope: None,
+                }),
+                columns: 80,
+                lines: 24,
+            })
+            .unwrap();
+    });
+
+    let client =
+        crate::client::Client::from_remote_transport_for_test(Arc::new(transport), endpoint);
+    assert!(matches!(
+        client.attach_with_secret(1, None, None).unwrap(),
+        crate::client::AttachOutcome::SharedAttached { .. }
+    ));
+    server.join().unwrap();
+}
+
 #[test]
 fn client_ids_are_random_and_serializable() {
     let first = crate::messages::ClientId::random().unwrap();

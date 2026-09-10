@@ -263,7 +263,11 @@ impl Zetta {
         terminal: &Entity<Terminal>,
         cx: &mut Context<Self>,
     ) {
-        let Some(entry) = self.shared_panes.get(&pane_id) else {
+        let Some(pane) = self
+            .shared_panes
+            .get(&pane_id)
+            .map(|entry| entry.pane.clone())
+        else {
             return;
         };
         let terminal = terminal.read(cx);
@@ -274,9 +278,12 @@ impl Zetta {
             // The first layout emits `GridSizeChanged`, which reports it then.
             return;
         };
-        if let Err(error) = entry.pane.send_resize(columns, lines) {
-            log::debug!("could not report the shared pane's size: {error:#}");
-        }
+        cx.background_spawn(async move {
+            if let Err(error) = pane.send_resize(columns, lines) {
+                log::debug!("could not report the shared pane's size: {error:#}");
+            }
+        })
+        .detach();
     }
 
     /// Drops a shared pane: its terminal is going away, so the shared
@@ -603,7 +610,7 @@ impl Zetta {
     /// Coalesces layout churn before sending it to the daemon. Pointer-based
     /// pane resizing can produce several grid notifications in one gesture;
     /// only the size that remains after the short debounce is authoritative.
-    fn schedule_shared_pane_size_report(
+    pub(super) fn schedule_shared_pane_size_report(
         &mut self,
         pane_id: u64,
         terminal: Entity<Terminal>,

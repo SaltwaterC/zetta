@@ -10,6 +10,117 @@ use super::image_paste::RemoteImagePasteHandler;
 use super::shared_panes::SharedPaneWriter;
 use crate::ssh_image_paste::SshImagePasteHandler;
 
+/// The result of the remote data phase. Authentication outcomes contain no
+/// partially attached pane, while a successful result owns every stream needed
+/// by the foreground tab-building phase.
+pub(crate) enum RemoteAttachOutcome {
+    Attached(Box<RemoteAttachData>),
+    AuthenticationRequired,
+    AuthenticationFailed,
+}
+
+pub(crate) struct RemoteAttachData {
+    session_id: u64,
+    state: crate::session_state::TabState,
+    summary: BackgroundSessionSummary,
+    first: AttachedPaneKind,
+    additional: Vec<(u64, AttachedPaneKind)>,
+    canonical_shared_state: Option<zmux::messages::SharedSessionState>,
+    runtime: MuxRuntime,
+}
+
+/// Performs all remote I/O needed before a tab can be built. This function is
+/// deliberately free of GPUI state so callers can run it on the background
+/// executor, including the SSH endpoint lookup and every pane attach.
+pub(crate) fn load_remote_attach(
+    target: zmux::remote::RemoteTarget,
+    session_id: u64,
+    secret: Option<SessionSecret>,
+) -> anyhow::Result<RemoteAttachOutcome> {
+    let runtime = MuxRuntime::connect_remote(target)?;
+    load_attached_session_data(&runtime, session_id, secret.as_ref())
+}
+
+fn load_attached_session_data(
+    runtime: &MuxRuntime,
+    session_id: u64,
+    secret: Option<&SessionSecret>,
+) -> anyhow::Result<RemoteAttachOutcome> {
+    let first = runtime
+        .client()
+        .attach_with_secret(session_id, None, secret)?;
+    let (first, state, summary) = match first {
+        zmux::client::AttachOutcome::Attached {
+            pane,
+            state,
+            summary,
+        } => (AttachedPaneKind::Exclusive(pane), state, summary),
+        zmux::client::AttachOutcome::SharedAttached {
+            pane,
+            state,
+            summary,
+        } => (AttachedPaneKind::Shared(pane), state, summary),
+        zmux::client::AttachOutcome::AuthenticationRequired => {
+            return Ok(RemoteAttachOutcome::AuthenticationRequired);
+        }
+        zmux::client::AttachOutcome::AuthenticationFailed => {
+            return Ok(RemoteAttachOutcome::AuthenticationFailed);
+        }
+    };
+    runtime.set_session_secret(secret);
+    let canonical_shared_state = runtime
+        .is_remote()
+        .then(|| runtime.client().shared_snapshot(session_id))
+        .transpose()?;
+    let (state, summary) = canonical_shared_state
+        .as_ref()
+        .map_or((state, summary), |state| {
+            (state.state.clone(), state.summary.clone())
+        });
+    anyhow::ensure!(
+        !state.is_null(),
+        "session {session_id} has not published a layout, so it cannot be attached; share or \
+         detach it from the window showing it first"
+    );
+    let state: crate::session_state::TabState =
+        serde_json::from_value(state).context("reading the session's tab state")?;
+    let first_pane = state
+        .panes
+        .iter()
+        .find(|candidate| candidate.mux_pane_id == Some(first.pane_id()))
+        .map_or(state.panes[0].id, |candidate| candidate.id);
+    let mut additional = Vec::new();
+    for pane_state in state.panes.iter().filter(|pane| pane.id != first_pane) {
+        let Some(mux_pane_id) = pane_state.mux_pane_id else {
+            continue;
+        };
+        match runtime
+            .client()
+            .attach_with_secret(session_id, Some(mux_pane_id), secret)?
+        {
+            zmux::client::AttachOutcome::Attached { pane, .. } => {
+                additional.push((pane_state.id, AttachedPaneKind::Exclusive(pane)));
+            }
+            zmux::client::AttachOutcome::SharedAttached { pane, .. } => {
+                additional.push((pane_state.id, AttachedPaneKind::Shared(pane)));
+            }
+            // The session authenticated a moment ago, so this can only mean
+            // it was taken in between. Show what was attached rather than
+            // dropping the whole tab.
+            _ => break,
+        }
+    }
+    Ok(RemoteAttachOutcome::Attached(Box::new(RemoteAttachData {
+        session_id,
+        state,
+        summary,
+        first,
+        additional,
+        canonical_shared_state,
+        runtime: runtime.clone(),
+    })))
+}
+
 impl Zetta {
     /// Gives a detached tab to the multiplexer to hold.
     ///
@@ -177,18 +288,6 @@ impl Zetta {
         self.attach_multiplexer_session_with_runtime(session_id, secret, runtime, window, cx)
     }
 
-    pub(crate) fn attach_remote_multiplexer_session(
-        &mut self,
-        target: zmux::remote::RemoteTarget,
-        session_id: u64,
-        secret: Option<SessionSecret>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> anyhow::Result<AttachOutcomeSummary> {
-        let runtime = MuxRuntime::connect_remote(target)?;
-        self.attach_multiplexer_session_with_runtime(session_id, secret, runtime, window, cx)
-    }
-
     fn attach_multiplexer_session_with_runtime(
         &mut self,
         session_id: u64,
@@ -197,54 +296,48 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> anyhow::Result<AttachOutcomeSummary> {
-        // Starts from the session: which panes it has is part of what a
-        // protected session's secret protects, so the multiplexer resolves the
-        // first pane itself once the secret has been checked.
-        let first = runtime
-            .client()
-            .attach_with_secret(session_id, None, secret.as_ref())?;
-        let (pane, state, summary) = match first {
-            zmux::client::AttachOutcome::Attached {
-                pane,
-                state,
-                summary,
-            } => (AttachedPaneKind::Exclusive(pane), state, summary),
-            zmux::client::AttachOutcome::SharedAttached {
-                pane,
-                state,
-                summary,
-            } => (AttachedPaneKind::Shared(pane), state, summary),
-            zmux::client::AttachOutcome::AuthenticationRequired => {
-                return Ok(AttachOutcomeSummary::AuthenticationRequired);
+        match load_attached_session_data(&runtime, session_id, secret.as_ref())? {
+            RemoteAttachOutcome::Attached(data) => {
+                self.finish_attached_multiplexer_session(*data, window, cx)
             }
-            zmux::client::AttachOutcome::AuthenticationFailed => {
-                return Ok(AttachOutcomeSummary::AuthenticationFailed);
+            RemoteAttachOutcome::AuthenticationRequired => {
+                Ok(AttachOutcomeSummary::AuthenticationRequired)
             }
-        };
-        runtime.set_session_secret(secret.as_ref());
-        let canonical_shared_state = runtime
-            .is_remote()
-            .then(|| runtime.client().shared_snapshot(session_id))
-            .transpose()?;
-        let (state, summary) = canonical_shared_state
-            .as_ref()
-            .map_or((state, summary), |state| {
-                (state.state.clone(), state.summary.clone())
-            });
+            RemoteAttachOutcome::AuthenticationFailed => {
+                Ok(AttachOutcomeSummary::AuthenticationFailed)
+            }
+        }
+    }
 
-        // A session the multiplexer holds but that has never been detached or
-        // shared has published no layout, so there is nothing to rebuild a tab
-        // from. Reachable by asking for a session by id, and worth saying
-        // plainly: the raw serde error for this is "invalid type: null,
-        // expected struct TabState", which describes the symptom and not the
-        // cause.
-        anyhow::ensure!(
-            !state.is_null(),
-            "session {session_id} has not published a layout, so it cannot be attached; share or \
-             detach it from the window showing it first"
-        );
-        let mut state: crate::session_state::TabState =
-            serde_json::from_value(state).context("reading the session's tab state")?;
+    /// Builds the foreground tab after [`load_remote_attach`] has completed.
+    ///
+    /// The data object owns every descriptor and stream the background phase
+    /// opened, so this method only touches GPUI state and never waits on SSH or
+    /// the remote multiplexer.
+    pub(crate) fn finish_remote_multiplexer_session(
+        &mut self,
+        data: RemoteAttachData,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> anyhow::Result<AttachOutcomeSummary> {
+        self.finish_attached_multiplexer_session(data, window, cx)
+    }
+
+    fn finish_attached_multiplexer_session(
+        &mut self,
+        data: RemoteAttachData,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> anyhow::Result<AttachOutcomeSummary> {
+        let RemoteAttachData {
+            session_id,
+            mut state,
+            summary,
+            first: pane,
+            additional,
+            canonical_shared_state,
+            runtime,
+        } = data;
         if pane_theme_source_is_stale(
             state.pane_theme_source,
             std::process::id(),
@@ -288,27 +381,7 @@ impl Zetta {
             .find(|candidate| candidate.mux_pane_id == Some(pane.pane_id()))
             .map_or(state.panes[0].id, |candidate| candidate.id);
         let mut attached = vec![(first_pane, pane)];
-        for pane_state in state.panes.iter().filter(|pane| pane.id != first_pane) {
-            let Some(mux_pane_id) = pane_state.mux_pane_id else {
-                continue;
-            };
-            match runtime.client().attach_with_secret(
-                session_id,
-                Some(mux_pane_id),
-                secret.as_ref(),
-            )? {
-                zmux::client::AttachOutcome::Attached { pane, .. } => {
-                    attached.push((pane_state.id, AttachedPaneKind::Exclusive(pane)));
-                }
-                zmux::client::AttachOutcome::SharedAttached { pane, .. } => {
-                    attached.push((pane_state.id, AttachedPaneKind::Shared(pane)));
-                }
-                // The session authenticated a moment ago, so this can only mean
-                // it was taken in between. Show what was attached rather than
-                // dropping the whole tab.
-                _ => break,
-            }
-        }
+        attached.extend(additional);
 
         // The tab arrives carrying the pane ids of the window that published it,
         // and every window-scoped registry here is keyed by pane id alone:

@@ -1,9 +1,9 @@
 use super::*;
-#[cfg(feature = "zmux")]
-use crate::background_session_ui::AttachOutcomeSummary;
 #[cfg(feature = "session-persistence")]
 use crate::background_session_ui::DiskResumeIdentities;
 use crate::background_session_ui::ProtectedSessionAction;
+#[cfg(feature = "zmux")]
+use crate::background_session_ui::{AttachOutcomeSummary, RemoteAttachOutcome, load_remote_attach};
 use zeroize::{Zeroize as _, Zeroizing};
 
 #[cfg_attr(not(feature = "session-persistence"), allow(dead_code))]
@@ -252,6 +252,7 @@ impl Zetta {
         cx: &mut Context<Self>,
     ) {
         let generation = self.session_authentication_generation;
+        let operation_generation = self.next_remote_session_operation_generation();
         if let Some(prompt) = self.session_authentication.as_mut() {
             prompt.working = true;
             prompt.error = None;
@@ -259,39 +260,47 @@ impl Zetta {
             prompt.secret = TextField::default();
         }
         cx.spawn_in(window, async move |this, cx| {
-            let recovered = cx
-                .background_spawn(async move { auto_protect.open(&envelope, passphrase) })
+            let result = cx
+                .background_spawn(async move {
+                    let secret = auto_protect.open(&envelope, passphrase)?;
+                    load_remote_attach(target, session_id, Some(secret))
+                })
                 .await;
             this.update_in(cx, |this, window, cx| {
-                if this.session_authentication_generation != generation {
+                if this.session_authentication_generation != generation
+                    || !this.remote_session_operation_is_current(operation_generation)
+                {
                     return;
                 }
-                match recovered {
-                    Ok(secret) => match this.attach_remote_multiplexer_session(
-                        target,
-                        session_id,
-                        Some(secret),
-                        window,
-                        cx,
-                    ) {
-                        Ok(AttachOutcomeSummary::Attached) => {
-                            this.session_authentication = None;
-                            this.remote_session_target = None;
-                            this.remote_session_key_envelope = None;
-                            this.focus_active(window, cx);
-                        }
-                        Ok(AttachOutcomeSummary::AuthenticationRequired)
-                        | Ok(AttachOutcomeSummary::AuthenticationFailed) => {
-                            this.remote_auto_unlock_failed(
-                                "The remote session rejected its automatically recovered secret.",
+                match result {
+                    Ok(RemoteAttachOutcome::Attached(data)) => {
+                        match this.finish_remote_multiplexer_session(*data, window, cx) {
+                            Ok(AttachOutcomeSummary::Attached) => {
+                                this.session_authentication = None;
+                                this.remote_session_target = None;
+                                this.remote_session_key_envelope = None;
+                                this.focus_active(window, cx);
+                            }
+                            Ok(AttachOutcomeSummary::AuthenticationRequired)
+                            | Ok(AttachOutcomeSummary::AuthenticationFailed) => {
+                                this.remote_auto_unlock_failed(
+                                    "The remote session rejected its automatically recovered secret.",
+                                    cx,
+                                );
+                            }
+                            Err(error) => this.remote_auto_unlock_failed(
+                                &format!("Could not attach the remote session: {error:#}"),
                                 cx,
-                            );
+                            ),
                         }
-                        Err(error) => this.remote_auto_unlock_failed(
-                            &format!("Could not attach the remote session: {error:#}"),
+                    }
+                    Ok(RemoteAttachOutcome::AuthenticationRequired)
+                    | Ok(RemoteAttachOutcome::AuthenticationFailed) => {
+                        this.remote_auto_unlock_failed(
+                            "The remote session rejected its automatically recovered secret.",
                             cx,
-                        ),
-                    },
+                        );
+                    }
                     Err(error) => this.remote_auto_unlock_failed(
                         &format!(
                             "Could not open the remote session with your age identity: {error:#}"
@@ -578,6 +587,8 @@ impl Zetta {
                 Some(SessionAuthenticationPromptMode::UnlockRemoteSealedSession { .. }),
             );
         if remote_attach {
+            #[cfg(feature = "zmux")]
+            self.next_remote_session_operation_generation();
             self.remote_session_target = None;
             #[cfg(feature = "session-persistence")]
             {
@@ -837,35 +848,73 @@ impl Zetta {
                     cx.notify();
                     return true;
                 };
-                let result = match self.attach_remote_multiplexer_session(
-                    target,
-                    session_id,
-                    Some(SessionSecret::from_zeroizing(secret.clone())),
-                    window,
-                    cx,
-                ) {
-                    Ok(AttachOutcomeSummary::Attached) => {
-                        self.session_authentication = None;
-                        self.remote_session_target = None;
+                let generation = self.session_authentication_generation;
+                let operation_generation = self.next_remote_session_operation_generation();
+                let secret = SessionSecret::from_zeroizing(secret.clone());
+                cx.spawn_in(window, async move |this, cx| {
+                    let result = cx
+                        .background_spawn(async move {
+                            load_remote_attach(target, session_id, Some(secret))
+                        })
+                        .await;
+                    this.update_in(cx, |this, window, cx| {
+                        if this.session_authentication_generation != generation
+                            || !this.remote_session_operation_is_current(operation_generation)
+                        {
+                            return;
+                        }
+                        match result {
+                            Ok(RemoteAttachOutcome::Attached(data)) => {
+                                match this.finish_remote_multiplexer_session(*data, window, cx) {
+                                    Ok(AttachOutcomeSummary::Attached) => {
+                                        this.session_authentication = None;
+                                        this.remote_session_target = None;
+                                        this.focus_active(window, cx);
+                                    }
+                                    Ok(AttachOutcomeSummary::AuthenticationRequired)
+                                    | Ok(AttachOutcomeSummary::AuthenticationFailed) => {
+                                        this.remote_attach_authentication_failed(
+                                            "Authentication failed.",
+                                            cx,
+                                        );
+                                    }
+                                    Err(error) => this.remote_attach_authentication_failed(
+                                        &format!("{error:#}"),
+                                        cx,
+                                    ),
+                                }
+                            }
+                            Ok(RemoteAttachOutcome::AuthenticationRequired)
+                            | Ok(RemoteAttachOutcome::AuthenticationFailed) => {
+                                this.remote_attach_authentication_failed(
+                                    "Authentication failed.",
+                                    cx,
+                                );
+                            }
+                            Err(error) => {
+                                this.remote_attach_authentication_failed(&format!("{error:#}"), cx);
+                            }
+                        }
                         cx.notify();
-                        return true;
-                    }
-                    Ok(AttachOutcomeSummary::AuthenticationRequired)
-                    | Ok(AttachOutcomeSummary::AuthenticationFailed) => {
-                        "Authentication failed.".to_owned()
-                    }
-                    Err(error) => format!("{error:#}"),
-                };
-                if let Some(prompt) = self.session_authentication.as_mut() {
-                    prompt.working = false;
-                    prompt.secret = TextField::default();
-                    prompt.error = Some(result);
-                }
+                    })
+                    .ok();
+                })
+                .detach();
                 cx.notify();
                 return true;
             }
             false
         }
+    }
+
+    #[cfg(feature = "zmux")]
+    fn remote_attach_authentication_failed(&mut self, message: &str, cx: &mut Context<Self>) {
+        if let Some(prompt) = self.session_authentication.as_mut() {
+            prompt.working = false;
+            prompt.secret = TextField::default();
+            prompt.error = Some(message.to_owned());
+        }
+        cx.notify();
     }
 
     /// What the verified secret does to the prompt and the session behind it.

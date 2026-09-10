@@ -376,7 +376,7 @@ mod restore;
 pub(crate) mod shared_panes;
 
 #[cfg(feature = "zmux")]
-pub(crate) use multiplexer::AttachOutcomeSummary;
+pub(crate) use multiplexer::{AttachOutcomeSummary, RemoteAttachOutcome, load_remote_attach};
 
 #[cfg(not(feature = "zmux"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -405,17 +405,6 @@ impl Zetta {
 
     pub(crate) fn attach_multiplexer_session(
         &mut self,
-        _: u64,
-        _: Option<SessionSecret>,
-        _: &mut Window,
-        _: &mut Context<Self>,
-    ) -> anyhow::Result<AttachOutcomeSummary> {
-        anyhow::bail!("session multiplexer support is disabled in this build")
-    }
-
-    pub(crate) fn attach_remote_multiplexer_session(
-        &mut self,
-        _: zmux::remote::RemoteTarget,
         _: u64,
         _: Option<SessionSecret>,
         _: &mut Window,

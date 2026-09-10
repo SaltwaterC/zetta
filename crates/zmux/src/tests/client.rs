@@ -401,10 +401,10 @@ fn a_shared_reader_keeps_coalesced_replay_events_and_full_duplex_input() {
         session_id: 1,
         pane_id: 2,
         child_pid: 3,
-        connection: Arc::new(Mutex::new(connection)),
+        writer: Arc::new(Mutex::new(connection)),
         sizes: Arc::new(Mutex::new(Vec::new())),
         size_signal: async_channel::bounded(1),
-        reconnect_replay: Arc::new(Mutex::new(std::collections::VecDeque::new())),
+        reader_handoffs: Arc::new(Mutex::new(std::collections::VecDeque::new())),
         replay: replay.to_vec(),
     };
     let mut reader = shared.reader();
@@ -418,4 +418,101 @@ fn a_shared_reader_keeps_coalesced_replay_events_and_full_duplex_input() {
     let (request, _) = server_connection.receive::<Request>().unwrap();
     assert!(matches!(request, Request::Input { length: 5 }));
     assert_eq!(server_connection.read_exact(5).unwrap(), b"typed");
+}
+
+#[cfg(unix)]
+#[test]
+fn an_idle_shared_reader_does_not_delay_input_writes() {
+    use std::io::Read as _;
+
+    let (server_stream, client_stream) = Stream::pair().unwrap();
+    let shared = SharedPane::from_connection(1, 2, 3, Connection::new(client_stream), Vec::new());
+    let mut reader = shared.reader();
+    let reader_thread = thread::spawn(move || {
+        let mut byte = [0; 1];
+        let started = Instant::now();
+        let result = reader.read(&mut byte);
+        (started.elapsed(), result)
+    });
+
+    // Give the reader time to enter its idle receive. The old implementation
+    // held the writer mutex for the whole 500 ms timeout here.
+    thread::sleep(Duration::from_millis(50));
+    let started = Instant::now();
+    shared.send_input(b"typed").unwrap();
+    assert!(
+        started.elapsed() < SHARED_READ_TIMEOUT / 2,
+        "input was delayed by the idle reader: {:?}",
+        started.elapsed()
+    );
+    shared.send_resize(80, 24).unwrap();
+
+    let mut server = Connection::new(server_stream);
+    let (request, _) = server.receive::<Request>().unwrap();
+    assert!(matches!(request, Request::Input { length: 5 }));
+    assert_eq!(server.read_exact(5).unwrap(), b"typed");
+    let (request, _) = server.receive::<Request>().unwrap();
+    assert!(matches!(
+        request,
+        Request::Resize {
+            session_id: 1,
+            pane_id: 2,
+            columns: 80,
+            lines: 24,
+        }
+    ));
+    drop(server);
+
+    let (_, result) = reader_thread.join().unwrap();
+    assert!(result.is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_shared_reader_replays_a_replacement_before_framed_events_without_duplication() {
+    use std::io::{Read as _, Write as _};
+
+    let (initial_server, initial_client) = Stream::pair().unwrap();
+    let shared = SharedPane::from_connection(1, 2, 3, Connection::new(initial_client), Vec::new());
+    let mut reader = shared.reader();
+    drop(initial_server);
+
+    let (mut replacement_server, replacement_client) = Stream::pair().unwrap();
+    let replacement = SharedPane::from_connection(
+        1,
+        2,
+        3,
+        Connection::new(replacement_client),
+        b"reconnected".to_vec(),
+    );
+    replacement
+        .sizes
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .push((70, 20));
+    shared.replace_connection_from(&replacement).unwrap();
+
+    let output = b"new-output";
+    let mut wire = crate::transport::encode_message(&Event::Size {
+        session_id: 1,
+        pane_id: 2,
+        columns: 72,
+        lines: 22,
+    })
+    .unwrap();
+    wire.extend_from_slice(
+        &crate::transport::encode_message(&Event::Output {
+            pane_id: 2,
+            length: output.len(),
+        })
+        .unwrap(),
+    );
+    wire.extend_from_slice(output);
+    replacement_server.write_all(&wire).unwrap();
+
+    let mut bytes = vec![0; b"reconnected".len() + output.len()];
+    reader.read_exact(&mut bytes).unwrap();
+    assert_eq!(&bytes[..b"reconnected".len()], b"reconnected");
+    assert_eq!(&bytes[b"reconnected".len()..], output);
+    assert_eq!(shared.take_sizes(), vec![(70, 20), (72, 22)]);
 }
