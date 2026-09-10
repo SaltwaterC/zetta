@@ -6,6 +6,7 @@
 //! registry, the size reporting, and the grant/revoke handovers here.
 
 use super::*;
+use std::io;
 use std::sync::{
     Arc,
     atomic::{AtomicU64, Ordering},
@@ -48,11 +49,39 @@ impl std::io::Write for SharedPaneWriter {
         self.pane
             .send_input(buffer)
             .map(|()| buffer.len())
-            .map_err(std::io::Error::other)
+            .map_err(shared_pane_write_error)
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
         Ok(())
+    }
+}
+
+/// A shared stream is replaced in place when its transport reconnects. Keep a
+/// transport failure retryable so the terminal input worker can hold the
+/// prepared command until that replacement is installed.
+fn shared_pane_write_error(error: anyhow::Error) -> io::Error {
+    let retryable = error.chain().any(|cause| {
+        cause.downcast_ref::<io::Error>().is_some_and(|error| {
+            matches!(
+                error.kind(),
+                io::ErrorKind::ConnectionAborted
+                    | io::ErrorKind::ConnectionRefused
+                    | io::ErrorKind::ConnectionReset
+                    | io::ErrorKind::BrokenPipe
+                    | io::ErrorKind::NotFound
+                    | io::ErrorKind::NotConnected
+                    | io::ErrorKind::AddrNotAvailable
+                    | io::ErrorKind::TimedOut
+                    | io::ErrorKind::UnexpectedEof
+                    | io::ErrorKind::WouldBlock
+            )
+        })
+    });
+    if retryable {
+        io::Error::new(io::ErrorKind::WouldBlock, error)
+    } else {
+        io::Error::other(error)
     }
 }
 
@@ -639,7 +668,7 @@ impl Zetta {
     }
 }
 
-/// Calls `on_change` whenever `terminal`'s grid size changes.
+/// Calls `on_change` whenever `terminal`'s effective or local grid size changes.
 ///
 /// The terminal comes from the subscription rather than from a captured handle,
 /// and that is the whole point of this existing. GPUI keeps a subscription in
@@ -660,7 +689,10 @@ pub(crate) fn watch_grid_size<V: 'static>(
         terminal,
         window,
         move |view, terminal, event: &TerminalEvent, _window, cx| {
-            if let TerminalEvent::GridSizeChanged = event {
+            if matches!(
+                event,
+                TerminalEvent::GridSizeChanged | TerminalEvent::LocalGridSizeChanged
+            ) {
                 on_change(view, terminal, cx);
             }
         },

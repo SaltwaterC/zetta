@@ -2949,6 +2949,15 @@ fn shared_clients_are_sized_to_the_smallest_of_them() {
         wait_for_shared_size(&mut second_reader, &second, (80, 24)).last(),
         Some(&(80, 24))
     );
+
+    // Input must remain usable after the shared grid has been shrunk and grown
+    // several times; the size reports and their broadcasts share the same
+    // full-duplex connection as the input.
+    second
+        .send_input(b"after-resizes\n")
+        .expect("sending input after multiple size transitions");
+    read_until_reader(&mut holder_reader, "input:after-resizes");
+    read_until_reader(&mut second_reader, "input:after-resizes");
     reap(second_process);
 }
 

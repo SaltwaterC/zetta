@@ -581,4 +581,15 @@ fn a_shared_reader_replays_a_replacement_before_framed_events_without_duplicatio
     assert_eq!(&bytes[..b"reconnected".len()], b"reconnected");
     assert_eq!(&bytes[b"reconnected".len()..], output);
     assert_eq!(shared.take_sizes(), vec![(70, 20), (72, 22)]);
+
+    // The writer follows the same replacement as the reader. Input queued by
+    // the terminal while the old relay was down must reach the new socket.
+    shared.send_input(b"after-reconnect").unwrap();
+    let mut replacement_connection = Connection::new(replacement_server);
+    let (request, _) = replacement_connection.receive::<Request>().unwrap();
+    assert!(matches!(request, Request::Input { length: 15 }));
+    assert_eq!(
+        replacement_connection.read_exact(15).unwrap(),
+        b"after-reconnect"
+    );
 }

@@ -47,3 +47,57 @@ async fn watching_a_terminals_size_does_not_keep_it_alive(cx: &mut gpui::TestApp
         "the subscription must not be the terminal's last owner"
     );
 }
+
+/// A local resize that remains clamped by the daemon still has to wake the
+/// shared-size reporter, so a later resize of another viewer can grow the
+/// common grid.
+#[gpui::test]
+async fn watching_a_terminals_size_includes_local_capacity_changes(cx: &mut gpui::TestAppContext) {
+    let (watcher, window) = cx.add_window_view(|_, _| SizeWatcher);
+    let terminal = window.new(|cx| {
+        terminal::TerminalBuilder::new_display_only(
+            terminal::terminal_settings::CursorShape::Block,
+            terminal::terminal_settings::AlternateScroll::On,
+            None,
+            0,
+            cx.background_executor(),
+            util::paths::PathStyle::local(),
+        )
+        .subscribe(cx)
+    });
+    let changes = std::rc::Rc::new(std::cell::Cell::new(0));
+    watcher.update_in(window, {
+        let changes = changes.clone();
+        let terminal = terminal.clone();
+        move |_, window, cx| {
+            watch_grid_size(&terminal, window, cx, move |_, _, _| {
+                changes.set(changes.get() + 1);
+            });
+        }
+    });
+
+    let make_bounds = |columns: f32, lines: f32| terminal::TerminalBounds {
+        cell_width: gpui::px(10.),
+        line_height: gpui::px(10.),
+        bounds: gpui::Bounds {
+            origin: gpui::Point::default(),
+            size: gpui::Size {
+                width: gpui::px(columns * 10.),
+                height: gpui::px(lines * 10.),
+            },
+        },
+    };
+    window.update_window_entity(&terminal, |terminal, window, cx| {
+        terminal.set_size(make_bounds(100., 24.));
+        terminal.sync(window, cx);
+        terminal.set_shared_viewport(80, 20);
+        terminal.sync(window, cx);
+    });
+    changes.set(0);
+
+    window.update_window_entity(&terminal, |terminal, window, cx| {
+        terminal.set_size(make_bounds(120., 30.));
+        terminal.sync(window, cx);
+    });
+    assert_eq!(changes.get(), 1);
+}

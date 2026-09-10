@@ -386,6 +386,7 @@ impl TerminalView {
                 // for the chrome outside it, which subscribes separately.
                 Event::ResizeRequested { .. }
                 | Event::GridSizeChanged
+                | Event::LocalGridSizeChanged
                 | Event::TrackingReady
                 | Event::CommandStarted { .. }
                 | Event::CommandFinished { .. } => {}

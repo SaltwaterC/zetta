@@ -763,6 +763,10 @@ pub enum Event {
     /// terminal, which displays the grid size and must not repaint on every
     /// byte written.
     GridSizeChanged,
+    /// The pane's locally measured grid changed. A shared terminal can keep
+    /// showing the daemon's smaller effective grid while its local capacity
+    /// grows, so this is separate from [`Event::GridSizeChanged`].
+    LocalGridSizeChanged,
     SelectionsChanged,
     NewNavigationTarget(Option<MaybeNavigationTarget>),
     Open(MaybeNavigationTarget),
@@ -1205,6 +1209,14 @@ enum InternalEvent {
     Resize {
         bounds: TerminalBounds,
         reflow: bool,
+        /// Whether the local, un-clamped grid changed while this resize was
+        /// being coalesced.
+        local_grid_changed: bool,
+        /// Whether the effective emulator grid needs resizing. A local grid
+        /// change under a shared viewport still needs an event for the size
+        /// reporter, but must not resize the emulator when its effective grid
+        /// is unchanged.
+        effective_resize: bool,
     },
     /// Marks the first layout even when it has the same grid dimensions and
     /// pixels as the constructor's placeholder bounds.
@@ -2116,6 +2128,7 @@ impl TerminalBuilder {
             reflow_on_next_resize: true,
 
             local_terminal_bounds: terminal_bounds,
+            local_grid_size: (terminal_bounds.num_columns(), terminal_bounds.num_lines()),
             shared_viewport: None,
 
             selection_head: None,
@@ -2851,6 +2864,7 @@ impl TerminalBuilder {
             };
 
             let no_task = task.is_none();
+            let local_terminal_bounds = normalize_terminal_bounds(TerminalBounds::default());
             let terminal = Terminal {
                 task,
                 terminal_type,
@@ -2878,7 +2892,11 @@ impl TerminalBuilder {
                 content_revision: 0,
                 reflow_on_next_resize: true,
 
-                local_terminal_bounds: normalize_terminal_bounds(TerminalBounds::default()),
+                local_terminal_bounds,
+                local_grid_size: (
+                    local_terminal_bounds.num_columns(),
+                    local_terminal_bounds.num_lines(),
+                ),
                 shared_viewport: None,
 
                 selection_head: None,
@@ -3160,6 +3178,9 @@ pub struct Terminal {
     /// The pane size measured in this window. A shared pane reports this to
     /// the daemon even when its effective grid is smaller than the pane.
     local_terminal_bounds: TerminalBounds,
+    /// The normalized grid available in this window, independent of a shared
+    /// pane's effective viewport.
+    local_grid_size: (usize, usize),
     /// The daemon's common grid limit, when this terminal is viewing a shared
     /// session. It never changes the containing window's layout.
     shared_viewport: Option<(usize, usize)>,
@@ -3605,6 +3626,8 @@ impl Terminal {
             &InternalEvent::Resize {
                 bounds: new_bounds,
                 reflow,
+                local_grid_changed,
+                effective_resize,
             } => {
                 let new_bounds = normalize_terminal_bounds(new_bounds);
                 trace!("Resizing: new_bounds={new_bounds:?}");
@@ -3619,35 +3642,40 @@ impl Terminal {
                 self.terminal_size_initialized = true;
                 self.size_initialization_queued = false;
 
-                #[cfg(windows)]
-                if let TerminalType::Pty { pty_tx, .. } = &self.terminal_type {
-                    if let Some(control) = &self.pty_control {
-                        control.resize(
-                            new_bounds.num_columns() as u16,
-                            new_bounds.num_lines() as u16,
-                        );
-                    } else if let Some(pty_tx) = pty_tx {
+                if effective_resize {
+                    #[cfg(windows)]
+                    if let TerminalType::Pty { pty_tx, .. } = &self.terminal_type {
+                        if let Some(control) = &self.pty_control {
+                            control.resize(
+                                new_bounds.num_columns() as u16,
+                                new_bounds.num_lines() as u16,
+                            );
+                        } else if let Some(pty_tx) = pty_tx {
+                            pty_tx.resize(new_bounds);
+                        }
+                    }
+                    #[cfg(not(windows))]
+                    if let TerminalType::Pty {
+                        pty_tx: Some(pty_tx),
+                        ..
+                    } = &self.terminal_type
+                    {
                         pty_tx.resize(new_bounds);
                     }
-                }
-                #[cfg(not(windows))]
-                if let TerminalType::Pty {
-                    pty_tx: Some(pty_tx),
-                    ..
-                } = &self.terminal_type
-                {
-                    pty_tx.resize(new_bounds);
-                }
 
-                let reflow =
-                    reflow && synchronous_reflow_is_bounded(term.history_size(), term.columns());
-                resize(term, new_bounds, reflow);
+                    let reflow = reflow
+                        && synchronous_reflow_is_bounded(term.history_size(), term.columns());
+                    resize(term, new_bounds, reflow);
+                }
                 // The grid is now the size the pane actually has, which is the
                 // first moment a restored screen can be written without being
                 // wrapped at the wrong width.
                 self.replay_pending(term);
                 if grid_size_changed || !was_size_initialized {
                     cx.emit(Event::GridSizeChanged);
+                }
+                if local_grid_changed {
+                    cx.emit(Event::LocalGridSizeChanged);
                 }
                 // A reflow rewraps the scrollback, which moves every line the
                 // recorded directories are keyed by.
@@ -4091,13 +4119,17 @@ impl Terminal {
 
     ///Resize the terminal and the PTY.
     pub fn set_size(&mut self, new_bounds: TerminalBounds) {
-        self.local_terminal_bounds = normalize_terminal_bounds(new_bounds);
+        let local_bounds = normalize_terminal_bounds(new_bounds);
+        let local_grid_changed =
+            self.local_grid_size != (local_bounds.num_columns(), local_bounds.num_lines());
+        self.local_terminal_bounds = local_bounds;
+        self.local_grid_size = (local_bounds.num_columns(), local_bounds.num_lines());
         let new_bounds =
             effective_terminal_bounds(self.local_terminal_bounds, self.shared_viewport);
         let old_bounds = self.last_content.terminal_bounds;
         self.last_content.terminal_bounds = new_bounds;
 
-        self.queue_effective_resize(old_bounds, new_bounds);
+        self.queue_effective_resize(old_bounds, new_bounds, local_grid_changed);
     }
 
     /// Applies a daemon-owned grid limit. This changes the emulator's grid,
@@ -4112,7 +4144,7 @@ impl Terminal {
         let old_bounds = self.last_content.terminal_bounds;
         let new_bounds = effective_terminal_bounds(self.local_terminal_bounds, Some(viewport));
         self.last_content.terminal_bounds = new_bounds;
-        self.queue_effective_resize(old_bounds, new_bounds);
+        self.queue_effective_resize(old_bounds, new_bounds, false);
     }
 
     /// Removes the shared grid limit when a pane is handed back to its local
@@ -4125,10 +4157,15 @@ impl Terminal {
         let old_bounds = self.last_content.terminal_bounds;
         let new_bounds = self.local_terminal_bounds;
         self.last_content.terminal_bounds = new_bounds;
-        self.queue_effective_resize(old_bounds, new_bounds);
+        self.queue_effective_resize(old_bounds, new_bounds, false);
     }
 
-    fn queue_effective_resize(&mut self, old_bounds: TerminalBounds, new_bounds: TerminalBounds) {
+    fn queue_effective_resize(
+        &mut self,
+        old_bounds: TerminalBounds,
+        new_bounds: TerminalBounds,
+        local_grid_changed: bool,
+    ) {
         // Avoid spamming PTY resizes on pixel-level size changes (e.g. while dragging edges),
         // since those can generate excessive SIGWINCH/reflows and cause visible flicker.
         let requires_resize = old_bounds.num_lines() != new_bounds.num_lines()
@@ -4136,7 +4173,10 @@ impl Terminal {
             || old_bounds.cell_width != new_bounds.cell_width
             || old_bounds.line_height != new_bounds.line_height;
 
-        if !requires_resize {
+        if !requires_resize && old_bounds == new_bounds {
+            self.reflow_on_next_resize = true;
+        }
+        if !requires_resize && !local_grid_changed {
             // Identical bounds mean this is the layout pass the truncate request
             // was armed for, landing without resizing this grid at all. Callers
             // arm whole sets of terminals speculatively — every pane in a tab
@@ -4147,9 +4187,6 @@ impl Terminal {
             // A sub-cell pixel change is not that layout pass. It is the drag
             // guard above, which exists to be transparent, so it leaves the
             // request alone.
-            if old_bounds == new_bounds {
-                self.reflow_on_next_resize = true;
-            }
             if !self.terminal_size_initialized && !self.size_initialization_queued {
                 self.size_initialization_queued = true;
                 self.events.push_back(InternalEvent::InitializeSize);
@@ -4160,19 +4197,31 @@ impl Terminal {
         if !self.terminal_size_initialized {
             self.size_initialization_queued = true;
         }
-        let reflow = mem::replace(&mut self.reflow_on_next_resize, true);
+        let reflow = if requires_resize {
+            mem::replace(&mut self.reflow_on_next_resize, true)
+        } else {
+            true
+        };
 
         match self.events.back_mut() {
             Some(InternalEvent::Resize {
                 bounds: pending_bounds,
                 reflow: pending_reflow,
+                local_grid_changed: pending_local_grid_changed,
+                effective_resize: pending_effective_resize,
             }) => {
                 *pending_bounds = new_bounds;
-                *pending_reflow &= reflow;
+                if requires_resize {
+                    *pending_reflow &= reflow;
+                }
+                *pending_local_grid_changed |= local_grid_changed;
+                *pending_effective_resize |= requires_resize;
             }
             _ => self.events.push_back(InternalEvent::Resize {
                 bounds: new_bounds,
                 reflow,
+                local_grid_changed,
+                effective_resize: requires_resize,
             }),
         }
     }
@@ -6236,13 +6285,20 @@ enum InputWriter {
 }
 
 impl InputWriter {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
         match self {
-            Self::ByteStream(writer) => writer.write_all(bytes).and_then(|()| writer.flush()),
+            Self::ByteStream(writer) => writer.write(bytes),
             Self::Pty(pty) => {
                 pty.notify(bytes.to_vec());
-                Ok(())
+                Ok(bytes.len())
             }
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            Self::ByteStream(writer) => writer.flush(),
+            Self::Pty(_) => Ok(()),
         }
     }
 }
@@ -6250,6 +6306,8 @@ impl InputWriter {
 /// Serializes ordinary input behind an image transfer. The worker is also the
 /// byte-stream writer, so local PTYs and shared streams have identical ordering
 /// semantics.
+const INPUT_RETRY_BACKOFF: Duration = Duration::from_millis(10);
+
 struct InputWorker {
     input_tx: Option<mpsc::Sender<InputCommand>>,
     stopped: Arc<std::sync::atomic::AtomicBool>,
@@ -6271,10 +6329,28 @@ impl InputWorker {
                 let mut writer = writer;
                 while !writer_stopped.load(Ordering::Acquire) {
                     let Ok(command) = input_rx.recv() else { break };
-                    let result = write_input_command(&mut writer, command, &events_tx);
-                    if let Err(error) = result {
-                        log::warn!("terminal input write failed: {error}");
-                        break;
+                    let Some(bytes) = prepare_input_command(command, &events_tx) else {
+                        continue;
+                    };
+                    let mut prepared = PreparedInput::new(bytes);
+                    while !prepared.is_finished() && !writer_stopped.load(Ordering::Acquire) {
+                        match prepared.write_once(&mut writer) {
+                            Ok(()) => {}
+                            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                                // The shared connection may be between its
+                                // old and replacement sockets. Keep the
+                                // prepared command, including its offset,
+                                // so a retry cannot repeat an image upload
+                                // or bytes already accepted by a partial
+                                // write.
+                                thread::sleep(INPUT_RETRY_BACKOFF);
+                            }
+                            Err(error) => {
+                                log::warn!("terminal input write failed: {error}");
+                                break;
+                            }
+                        }
                     }
                 }
             })
@@ -6303,13 +6379,69 @@ impl InputWorker {
     }
 }
 
+/// The byte command after any asynchronous preparation, such as uploading a
+/// clipboard image, has completed. Keeping the offset here makes a retry safe
+/// even when a writer accepted only part of the command before returning
+/// `WouldBlock`.
+struct PreparedInput {
+    bytes: Vec<u8>,
+    offset: usize,
+    flushed: bool,
+}
+
+impl PreparedInput {
+    fn new(bytes: Vec<u8>) -> Self {
+        Self {
+            bytes,
+            offset: 0,
+            flushed: false,
+        }
+    }
+
+    fn is_finished(&self) -> bool {
+        self.offset == self.bytes.len() && self.flushed
+    }
+
+    fn write_once(&mut self, writer: &mut InputWriter) -> std::io::Result<()> {
+        if self.offset < self.bytes.len() {
+            let written = writer.write(&self.bytes[self.offset..])?;
+            if written == 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WriteZero,
+                    "terminal input writer returned zero bytes",
+                ));
+            }
+            self.offset += written;
+        } else if !self.flushed {
+            writer.flush()?;
+            self.flushed = true;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
 fn write_input_command(
     writer: &mut InputWriter,
     command: InputCommand,
     events_tx: &futures::channel::mpsc::UnboundedSender<PtyEvent>,
 ) -> std::io::Result<()> {
+    let Some(bytes) = prepare_input_command(command, events_tx) else {
+        return Ok(());
+    };
+    let mut prepared = PreparedInput::new(bytes);
+    while !prepared.is_finished() {
+        prepared.write_once(writer)?;
+    }
+    Ok(())
+}
+
+fn prepare_input_command(
+    command: InputCommand,
+    events_tx: &futures::channel::mpsc::UnboundedSender<PtyEvent>,
+) -> Option<Vec<u8>> {
     match command {
-        InputCommand::Bytes(bytes) => writer.write(&bytes),
+        InputCommand::Bytes(bytes) => Some(bytes),
         InputCommand::Image {
             image,
             bracketed_paste,
@@ -6317,19 +6449,15 @@ fn write_input_command(
             foreground_process,
             handler,
         } => match handler.paste_image(&image, foreground_process.as_deref()) {
-            Ok(ImagePasteResult::ResolvedPath(path)) => {
-                writer.write(&paste_bytes(&path, bracketed_paste))
-            }
-            Ok(ImagePasteResult::UseNativeShortcut) => native_shortcut
-                .as_deref()
-                .map_or(Ok(()), |shortcut| writer.write(shortcut)),
+            Ok(ImagePasteResult::ResolvedPath(path)) => Some(paste_bytes(&path, bracketed_paste)),
+            Ok(ImagePasteResult::UseNativeShortcut) => native_shortcut,
             Err(error) => {
                 events_tx
                     .unbounded_send(PtyEvent::Event(TerminalBackendEvent::PasteError(format!(
                         "could not paste image: {error:#}"
                     ))))
                     .ok();
-                Ok(())
+                None
             }
         },
     }
@@ -7657,6 +7785,68 @@ mod tests {
         fn flush(&mut self) -> std::io::Result<()> {
             Ok(())
         }
+    }
+
+    struct TemporarilyBlockedWriter {
+        blocked_writes: Arc<std::sync::atomic::AtomicUsize>,
+        written: Arc<std::sync::Mutex<Vec<u8>>>,
+    }
+
+    impl std::io::Write for TemporarilyBlockedWriter {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            if self
+                .blocked_writes
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
+                    remaining.checked_sub(1)
+                })
+                .is_ok()
+            {
+                return Err(std::io::Error::from(std::io::ErrorKind::WouldBlock));
+            }
+            self.written
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .extend_from_slice(buffer);
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn input_worker_retries_transient_would_block_in_fifo_order() {
+        let blocked_writes = Arc::new(std::sync::atomic::AtomicUsize::new(2));
+        let written = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let writer = InputWriter::ByteStream(Box::new(TemporarilyBlockedWriter {
+            blocked_writes: blocked_writes.clone(),
+            written: written.clone(),
+        }));
+        let stopped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (events_tx, _events_rx) = futures::channel::mpsc::unbounded();
+        let mut worker = InputWorker::new(writer, events_tx, stopped, "terminal-test-input-writer");
+        worker.write(InputCommand::Bytes(b"return".to_vec()));
+        worker.write(InputCommand::Bytes(b"typed".to_vec()));
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while written
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .len()
+            < b"returntyped".len()
+            && Instant::now() < deadline
+        {
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            written
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .as_slice(),
+            b"returntyped"
+        );
+        worker.stop();
     }
 
     #[cfg(unix)]
@@ -10660,6 +10850,85 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn a_shared_viewer_reports_local_capacity_without_changing_its_effective_grid(
+        cx: &mut TestAppContext,
+    ) {
+        let builder = cx.update(|cx| {
+            TerminalBuilder::new_display_only(
+                SettingsCursorShape::Block,
+                AlternateScroll::On,
+                None,
+                0,
+                cx.background_executor(),
+                PathStyle::local(),
+            )
+        });
+        let window = cx.add_empty_window();
+        let terminal = window.new(|cx| builder.subscribe(cx));
+        let grid_size_changes = std::rc::Rc::new(std::cell::Cell::new(0_usize));
+        let local_grid_size_changes = std::rc::Rc::new(std::cell::Cell::new(0_usize));
+        window
+            .update({
+                let grid_size_changes = grid_size_changes.clone();
+                let local_grid_size_changes = local_grid_size_changes.clone();
+                let terminal = terminal.clone();
+                move |_, cx| {
+                    cx.subscribe(&terminal, move |_, event: &Event, _| match event {
+                        Event::GridSizeChanged => {
+                            grid_size_changes.set(grid_size_changes.get() + 1)
+                        }
+                        Event::LocalGridSizeChanged => {
+                            local_grid_size_changes.set(local_grid_size_changes.get() + 1)
+                        }
+                        _ => {}
+                    })
+                }
+            })
+            .detach();
+
+        let make_bounds = |columns: f32, lines: f32| TerminalBounds {
+            cell_width: Pixels::from(10.),
+            line_height: Pixels::from(10.),
+            bounds: bounds(
+                GpuiPoint::default(),
+                size(Pixels::from(columns * 10.), Pixels::from(lines * 10.)),
+            ),
+        };
+        let initial = make_bounds(100., 24.);
+        window.update_window_entity(&terminal, |terminal, window, cx| {
+            terminal.set_size(initial);
+            terminal.sync(window, cx);
+            terminal.set_shared_viewport(80, 20);
+            terminal.sync(window, cx);
+        });
+        grid_size_changes.set(0);
+        local_grid_size_changes.set(0);
+
+        // The daemon's 80x20 viewport still clamps the emulator, but this
+        // viewer now has capacity for 120x30 and must report that fact.
+        let larger = make_bounds(120., 30.);
+        window.update_window_entity(&terminal, |terminal, window, cx| {
+            terminal.set_size(larger);
+            terminal.sync(window, cx);
+        });
+
+        assert_eq!(grid_size_changes.get(), 0);
+        assert_eq!(local_grid_size_changes.get(), 1);
+        let (local_bounds, effective_grid) =
+            window.update_window_entity(&terminal, |terminal, _, _| {
+                (
+                    terminal.local_terminal_bounds(),
+                    (
+                        terminal.last_content().terminal_bounds.num_columns(),
+                        terminal.last_content().terminal_bounds.num_lines(),
+                    ),
+                )
+            });
+        assert_eq!(local_bounds, larger);
+        assert_eq!(effective_grid, (80, 20));
+    }
+
+    #[gpui::test]
     async fn grid_size_changes_are_reported_separately_from_output(cx: &mut TestAppContext) {
         let builder = cx.update(|cx| {
             TerminalBuilder::new_display_only(
@@ -10861,6 +11130,7 @@ mod tests {
             Some(InternalEvent::Resize {
                 bounds,
                 reflow: false,
+                ..
             }) if *bounds == coalesced_resize
         ));
     }
