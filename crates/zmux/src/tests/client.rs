@@ -140,6 +140,72 @@ fn ready_connection_refreshes_a_stale_endpoint_token() {
 
 #[cfg(unix)]
 #[test]
+fn readiness_refreshes_a_changed_endpoint_after_transport_failure() {
+    use std::os::unix::net::UnixListener;
+
+    let directory = tempfile::tempdir().unwrap();
+    let endpoint_path = directory.path().join("zmux.json");
+    let old_socket_path = directory.path().join("old-zmux.sock");
+    let new_socket_path = directory.path().join("new-zmux.sock");
+    let listener = UnixListener::bind(&old_socket_path).unwrap();
+    Endpoint {
+        version: crate::transport::ENDPOINT_VERSION,
+        protocol_version: PROTOCOL_VERSION,
+        process_id: 4242,
+        socket_path: old_socket_path,
+        token: "old-token".to_owned(),
+    }
+    .write(&endpoint_path)
+    .unwrap();
+
+    let server = std::thread::spawn({
+        let endpoint_path = endpoint_path.clone();
+        let new_socket_path = new_socket_path.clone();
+        move || {
+            // The first connection is the liveness check performed while the
+            // client reads the initial endpoint. The second is its readiness
+            // ping, which establishes the client with the old endpoint.
+            let _ = listener.accept().unwrap();
+            let (stream, _) = listener.accept().unwrap();
+            let mut connection = Connection::new(stream);
+            let (envelope, _) = connection.receive::<Envelope>().unwrap();
+            assert!(matches!(envelope.request, Request::Ping));
+            connection.send(&Response::Ok).unwrap();
+
+            // Simulate a daemon restart that publishes a different socket.
+            // The client still has the old endpoint cached when this listener
+            // disappears, so the next readiness check must reread the file.
+            drop(listener);
+            let new_listener = UnixListener::bind(&new_socket_path).unwrap();
+            Endpoint {
+                version: crate::transport::ENDPOINT_VERSION,
+                protocol_version: PROTOCOL_VERSION,
+                process_id: 4243,
+                socket_path: new_socket_path,
+                token: "new-token".to_owned(),
+            }
+            .write(&endpoint_path)
+            .unwrap();
+
+            let (stream, _) = new_listener.accept().unwrap();
+            let mut connection = Connection::new(stream);
+            let (envelope, _) = connection.receive::<Envelope>().unwrap();
+            assert!(matches!(envelope.request, Request::Ping));
+            assert_eq!(envelope.token, "new-token");
+            connection.send(&Response::Ok).unwrap();
+        }
+    });
+
+    let client = Client::connect_ready_at(directory.path()).unwrap().unwrap();
+    client
+        .ping_until_ready(Instant::now() + Duration::from_secs(1))
+        .unwrap();
+    assert_eq!(client.process_id(), 4243);
+    server.join().unwrap();
+}
+
+#[cfg(unix)]
+#[test]
 fn configure_retries_after_a_pre_dispatch_stale_endpoint_token() {
     use std::os::unix::net::UnixListener;
 

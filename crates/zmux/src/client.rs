@@ -826,7 +826,7 @@ impl Client {
     /// reject an identifier belonging to a different catalog in the same
     /// session directory.
     pub fn process_id(&self) -> u32 {
-        self.endpoint.lock().unwrap().process_id
+        self.endpoint_snapshot().process_id
     }
 
     fn connect_endpoint(
@@ -1069,7 +1069,35 @@ impl Client {
     }
 
     fn endpoint_snapshot(&self) -> Endpoint {
-        self.endpoint.lock().unwrap().clone()
+        self.endpoint
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    fn replace_endpoint(&self, endpoint: Endpoint) {
+        *self
+            .endpoint
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = endpoint;
+    }
+
+    /// Refreshes the cached local endpoint when a transport failure finds that
+    /// the daemon has published a replacement socket or token. A missing or
+    /// partially written endpoint is transient during a restart, so leave the
+    /// current value in place and let the retry loop try again.
+    fn refresh_endpoint_if_changed(&self, previous: &Endpoint) -> bool {
+        if self.remote.is_some() {
+            return false;
+        }
+        let Ok(endpoint) = Endpoint::read(&endpoint_path(&self.directory)) else {
+            return false;
+        };
+        if endpoint == *previous {
+            return false;
+        }
+        self.replace_endpoint(endpoint);
+        true
     }
 
     /// Refreshes the cached endpoint after the daemon has rejected a request
@@ -1078,7 +1106,7 @@ impl Client {
     fn refresh_endpoint_after_token(&self, previous: &Endpoint, deadline: Instant) -> Result<()> {
         if let Some(remote) = &self.remote {
             let endpoint = remote.refresh()?;
-            *self.endpoint.lock().unwrap() = endpoint;
+            self.replace_endpoint(endpoint);
             return Ok(());
         }
         let path = endpoint_path(&self.directory);
@@ -1086,7 +1114,7 @@ impl Client {
         loop {
             match Endpoint::read(&path) {
                 Ok(endpoint) if endpoint != *previous => {
-                    *self.endpoint.lock().unwrap() = endpoint;
+                    self.replace_endpoint(endpoint);
                     return Ok(());
                 }
                 Ok(_) => {}
@@ -1204,7 +1232,7 @@ impl Client {
     ) -> Result<Connection> {
         let (endpoint, stream) = if let Some(remote) = &self.remote {
             let (endpoint, stream) = remote.connect()?;
-            *self.endpoint.lock().unwrap() = endpoint.clone();
+            self.replace_endpoint(endpoint.clone());
             (endpoint, stream)
         } else {
             (
@@ -1274,6 +1302,9 @@ impl Client {
                         )?;
                 }
                 Err(error) if is_transport_error(&error) && Instant::now() < deadline => {
+                    if self.refresh_endpoint_if_changed(&endpoint) {
+                        continue;
+                    }
                     thread::sleep(STARTUP_POLL);
                 }
                 Err(error) => return Err(error),
