@@ -503,6 +503,7 @@ pub(crate) struct Zetta {
     pub(crate) session_authentication_focus: gpui::FocusHandle,
     pub(crate) session_authentication: Option<SessionAuthenticationPrompt>,
     pub(crate) session_authentication_generation: u64,
+    #[cfg(feature = "zmux")]
     /// Invalidates remote picker, authentication, and CLI attach completions
     /// when the user dismisses or replaces the operation that started them.
     pub(crate) remote_session_operation_generation: u64,
@@ -919,6 +920,7 @@ impl Zetta {
             session_authentication_focus: cx.focus_handle(),
             session_authentication: None,
             session_authentication_generation: 0,
+            #[cfg(feature = "zmux")]
             remote_session_operation_generation: 0,
             remote_session_focus: cx.focus_handle(),
             remote_session_picker: None,

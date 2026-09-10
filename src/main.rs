@@ -18,20 +18,6 @@ mod zmux {
             pub(crate) destination: String,
             pub(crate) port: Option<u16>,
         }
-
-        impl RemoteTarget {
-            pub(crate) fn new(destination: String) -> Self {
-                Self {
-                    destination,
-                    port: None,
-                }
-            }
-
-            pub(crate) fn with_port(mut self, port: Option<u16>) -> Self {
-                self.port = port;
-                self
-            }
-        }
     }
 }
 mod keymap_file;

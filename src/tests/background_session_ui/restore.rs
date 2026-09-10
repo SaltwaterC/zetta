@@ -45,7 +45,7 @@ fn failed_sessions_show_the_exit_reason_in_the_reconnect_picker() {
         active_pane: 1,
         layout: BackgroundPaneLayout::Split {
             axis: "horizontal".to_owned(),
-            first_ratio: zmux::protocol::DEFAULT_BACKGROUND_PANE_SPLIT_RATIO,
+            first_ratio: crate::pane::DEFAULT_PANE_SPLIT_RATIO,
             first: Box::new(BackgroundPaneLayout::Pane { pane_id: 1 }),
             second: Box::new(BackgroundPaneLayout::Pane { pane_id: 2 }),
         },

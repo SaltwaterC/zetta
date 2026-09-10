@@ -118,6 +118,12 @@ pub(crate) mod protocol {
 
     use serde::{Deserialize, Serialize};
 
+    pub(crate) const DEFAULT_BACKGROUND_PANE_SPLIT_RATIO: u16 = 500;
+
+    fn default_background_pane_split_ratio() -> u16 {
+        DEFAULT_BACKGROUND_PANE_SPLIT_RATIO
+    }
+
     pub(crate) const CATALOG_VERSION: u32 = 1;
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub(crate) struct BackgroundSessionCatalog {
@@ -135,6 +141,8 @@ pub(crate) mod protocol {
         },
         Split {
             axis: String,
+            #[serde(default = "default_background_pane_split_ratio")]
+            first_ratio: u16,
             first: Box<BackgroundPaneLayout>,
             second: Box<BackgroundPaneLayout>,
         },

@@ -97,14 +97,18 @@ struct SpawnedTerminal {
     /// Only set while restoring: the directory the stored session was in.
     restored_working_directory: Option<PathBuf>,
     mux_provider: Option<Arc<crate::mux::MuxPtyProvider>>,
+    #[cfg(feature = "zmux")]
     shared_pane: Option<Arc<zmux::client::SharedPane>>,
+    #[cfg(feature = "zmux")]
     shared_runtime: Option<crate::mux::MuxRuntime>,
+    #[cfg(feature = "zmux")]
     shared_state: Option<zmux::messages::SharedSessionState>,
     shell_integration_startup_command: Option<Vec<u8>>,
     tracked_multi_command_launch: bool,
     image_paste_handler: Option<Arc<dyn terminal::ImagePasteHandler>>,
 }
 
+#[cfg(feature = "zmux")]
 struct SharedTerminalLaunch {
     tab_id: u64,
     pane_id: u64,
@@ -706,7 +710,7 @@ impl Zetta {
         let effective_theme = terminal_theme.clone().unwrap_or_else(|| cx.theme().clone());
         // The `mut` is for the zsh history step below, which is Unix-only.
         #[cfg_attr(windows, allow(unused_mut))]
-        let mut environment = match (TerminalEnvironment {
+        let mut environment: HashMap<String, String> = match (TerminalEnvironment {
             profile: &profile.command,
             overrides: &combined_environment,
             attention_id,
@@ -751,6 +755,7 @@ impl Zetta {
             };
         let initial_console_palette =
             (!is_wsl).then(|| terminal::console_palette_for_theme(effective_theme.as_ref()));
+        #[cfg(feature = "zmux")]
         if let Some(provider) = mux_provider.as_ref().filter(|provider| {
             provider
                 .session_id()
@@ -852,8 +857,11 @@ impl Zetta {
             restore_options,
             restored_working_directory,
             mux_provider,
+            #[cfg(feature = "zmux")]
             shared_pane: None,
+            #[cfg(feature = "zmux")]
             shared_runtime: None,
+            #[cfg(feature = "zmux")]
             shared_state: None,
             shell_integration_startup_command,
             tracked_multi_command_launch,
@@ -883,6 +891,7 @@ impl Zetta {
             .detach();
     }
 
+    #[cfg(feature = "zmux")]
     fn spawn_shared_terminal(
         &mut self,
         launch: SharedTerminalLaunch,
@@ -1083,8 +1092,11 @@ impl Zetta {
             shell_integration_startup_command,
             tracked_multi_command_launch,
             mux_provider,
+            #[cfg(feature = "zmux")]
             shared_pane,
+            #[cfg(feature = "zmux")]
             shared_runtime,
+            #[cfg(feature = "zmux")]
             shared_state,
             image_paste_handler,
             ..
@@ -1092,6 +1104,7 @@ impl Zetta {
         if let Some(image_paste_handler) = image_paste_handler {
             builder = builder.with_image_paste_handler(image_paste_handler);
         }
+        #[cfg(feature = "zmux")]
         if let (Some(shared_pane), Some(runtime)) = (&shared_pane, &shared_runtime) {
             let mux_pane_id = shared_pane.pane_id();
             self.mux_panes.adopt_session_with_runtime(
@@ -1189,6 +1202,7 @@ impl Zetta {
                 }
             }
         }
+        #[cfg(feature = "zmux")]
         if let (Some(shared_pane), Some(runtime)) = (&shared_pane, &shared_runtime) {
             this.register_shared_pane(
                 MuxPaneIds {
