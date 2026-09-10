@@ -652,10 +652,10 @@ impl Zetta {
     }
 
     pub(crate) fn prepare_for_background_window_close(&mut self, cx: &mut Context<Self>) {
-        let remote_tabs = self
+        let shared_tabs = self
             .tabs
             .iter()
-            .filter(|tab| self.mux_panes.is_remote_tab(tab.id))
+            .filter(|tab| tab.shared || self.has_shared_tab_binding(tab.id))
             .map(|tab| {
                 (
                     tab.id,
@@ -663,7 +663,7 @@ impl Zetta {
                 )
             })
             .collect::<Vec<_>>();
-        for (tab_id, pane_ids) in remote_tabs {
+        for (tab_id, pane_ids) in shared_tabs {
             self.leave_shared_tab(tab_id, cx);
             for pane_id in pane_ids {
                 self.drop_shared_pane(pane_id, cx);

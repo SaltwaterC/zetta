@@ -1058,6 +1058,13 @@ impl crate::Zetta {
         let Some(mux_pane_id) = self.mux_panes.mux_pane_id(pane_id) else {
             return;
         };
+        let shared = self
+            .tabs
+            .iter()
+            .find(|tab| tab.id == tab_id)
+            .is_some_and(|tab| tab.shared)
+            || self.has_shared_tab_binding(tab_id)
+            || self.shared_panes.contains_key(&pane_id);
         self.mux_panes.forget_pane(pane_id);
         let Some(runtime) = self
             .mux_panes
@@ -1071,10 +1078,10 @@ impl crate::Zetta {
         // that has already gone.
         runtime.reporters().forget(mux_pane_id);
         runtime.revoke_reporters().forget(mux_pane_id);
-        if runtime.is_remote() {
+        if runtime.is_remote() || shared {
             // Remote panes are always shared byte streams. Dropping the
-            // SharedPane connection is the detach operation; sending a local
-            // ClosePane would terminate the remote user's process.
+            // SharedPane connection is the detach operation; sending a legacy
+            // local ClosePane would terminate a canonical shared pane.
             return;
         }
         let Some(session_id) = self.mux_panes.session_id(tab_id) else {
@@ -1090,7 +1097,7 @@ impl crate::Zetta {
         .detach();
     }
 
-    /// Requests a global close for a pane in a remote shared session. The local
+    /// Requests a global close for a pane in a shared session. The local
     /// pane has already been removed; after the daemon commits the global
     /// removal, publish one clean durable tab blob so it cannot retain the
     /// closed pane in its opaque state.
@@ -1103,9 +1110,6 @@ impl crate::Zetta {
         let Some(runtime) = self.mux_panes.runtime_for_tab(tab_id) else {
             return;
         };
-        if !runtime.is_remote() {
-            return;
-        }
         let Some(session_id) = self.mux_panes.session_id(tab_id) else {
             return;
         };
@@ -1179,7 +1183,7 @@ impl crate::Zetta {
         .detach();
     }
 
-    /// Leaves a remote tab without handing any of its panes to the daemon as
+    /// Leaves a shared tab without handing any of its panes to the daemon as
     /// an exclusive local/background session. The shared data streams are
     /// still dropped by the tab close path; this acknowledgement handles the
     /// orderly window-shutdown case and keeps the daemon's viewer set exact.
@@ -1187,9 +1191,6 @@ impl crate::Zetta {
         let Some(runtime) = self.mux_panes.runtime_for_tab(tab_id) else {
             return;
         };
-        if !runtime.is_remote() {
-            return;
-        }
         let Some(session_id) = self.mux_panes.session_id(tab_id) else {
             return;
         };
@@ -1198,7 +1199,7 @@ impl crate::Zetta {
         let client = runtime.client().clone();
         cx.background_spawn(async move {
             if let Err(error) = client.leave_shared(session_id) {
-                log::debug!("could not leave remote shared session {session_id}: {error:#}");
+                log::debug!("could not leave shared session {session_id}: {error:#}");
             }
         })
         .detach();

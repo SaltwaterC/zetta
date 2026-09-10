@@ -751,15 +751,16 @@ impl Zetta {
             };
         let initial_console_palette =
             (!is_wsl).then(|| terminal::console_palette_for_theme(effective_theme.as_ref()));
-        if let Some(provider) = mux_provider
-            .as_ref()
-            .filter(|provider| provider.runtime().is_remote())
-        {
+        if let Some(provider) = mux_provider.as_ref().filter(|provider| {
+            provider
+                .session_id()
+                .is_some_and(|session_id| self.shared_collaboration.is_bound(session_id))
+        }) {
             let Some(session_id) = provider.session_id() else {
                 self.report_pane_spawn_error(
                     tab_id,
                     pane_id,
-                    "Could not identify the remote shared session".to_owned(),
+                    "Could not identify the shared session".to_owned(),
                     cx,
                 );
                 return;
@@ -910,19 +911,34 @@ impl Zetta {
         let executor = cx.background_executor().clone();
         let terminal_executor = executor.clone();
         let build = executor.spawn(async move {
+            let runtime = provider.runtime().clone();
             let (program, args) = shell.program_and_args();
             let spawned = provider.spawn_shared(
                 terminal::PtySpawnRequest {
                     program: Some(program),
                     args: args.to_vec(),
-                    env: environment.into_iter().collect(),
+                    env: environment.clone().into_iter().collect(),
                     working_directory: working_directory.clone(),
                     console_palette,
                 },
                 base_revision,
             )?;
             let pane = Arc::new(spawned.pane);
-            let runtime = provider.runtime().clone();
+            let image_paste_handler: Arc<dyn terminal::ImagePasteHandler> = if runtime.is_remote() {
+                Arc::new(
+                    crate::background_session_ui::image_paste::RemoteImagePasteHandler::new(
+                        &runtime,
+                        pane.session_id(),
+                        pane.pane_id(),
+                    ),
+                )
+            } else {
+                Arc::new(crate::ssh_image_paste::SshImagePasteHandler::new(
+                    shell,
+                    environment,
+                    working_directory.clone(),
+                ))
+            };
             let builder = TerminalBuilder::new_byte_stream(
                 Box::new(pane.reader()),
                 Box::new(
@@ -946,13 +962,7 @@ impl Zetta {
                 pane.pane_id(),
                 runtime.session_secret(),
             ))
-            .with_image_paste_handler(Arc::new(
-                crate::background_session_ui::image_paste::RemoteImagePasteHandler::new(
-                    &runtime,
-                    pane.session_id(),
-                    pane.pane_id(),
-                ),
-            ));
+            .with_image_paste_handler(image_paste_handler);
             Ok::<_, anyhow::Error>((
                 builder,
                 SpawnedTerminal {
@@ -1192,13 +1202,11 @@ impl Zetta {
                 window,
                 cx,
             );
-            if runtime.is_remote() {
-                // The spawn response can only carry the previous opaque tab
-                // state. Once this pane has a local id and a stable mux id,
-                // publish the complete tab so every viewer gets its profile,
-                // labels and durable layout metadata.
-                this.sync_shared_tab_state(tab_id, cx);
-            }
+            // The spawn response can only carry the previous opaque tab state.
+            // Once this pane has a local id and a stable mux id, publish the
+            // complete tab so every viewer gets its profile, labels and durable
+            // layout metadata.
+            this.sync_shared_tab_state(tab_id, cx);
         }
         this.schedule_worktree_detection_for_pane(tab_id, pane_id, cx);
         this.schedule_project_detection_for_pane(tab_id, pane_id, window, cx);

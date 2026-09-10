@@ -26,8 +26,13 @@ use zmux::persistence::{PersistedSession, PersistedSnapshot, PersistenceStore};
 
 use zmux::{
     client::{AttachOutcome, Client},
-    messages::{ClientId, Envelope, Event, Request, Response, SpawnRequest, TerminalSize},
-    protocol::{BackgroundPaneLayout, BackgroundSessionSummary},
+    messages::{
+        ClientId, Envelope, Event, Request, Response, SessionRevision, SharedSpawnRequest,
+        SpawnRequest, TerminalSize,
+    },
+    protocol::{
+        BackgroundPaneLayout, BackgroundPaneState, BackgroundPaneSummary, BackgroundSessionSummary,
+    },
     retention::Retention,
     transport::{Connection, Stream},
 };
@@ -300,6 +305,21 @@ fn summary(session_id: u64, pane_id: u64) -> BackgroundSessionSummary {
         held: false,
         scoped_to: None,
         key_envelope: None,
+    }
+}
+
+fn pane_summary(pane_id: u64) -> BackgroundPaneSummary {
+    BackgroundPaneSummary {
+        id: pane_id,
+        label: format!("pane-{pane_id}"),
+        profile: String::new(),
+        configured_command: String::new(),
+        application: "/bin/sh".to_owned(),
+        foreground_command: None,
+        terminal_title: None,
+        working_directory: None,
+        state: BackgroundPaneState::Running,
+        exit: None,
     }
 }
 
@@ -1496,7 +1516,6 @@ fn a_client_summary_cannot_rename_a_session() {
     // identifier would have been.
     let mut impostor = summary(pane.session_id, pane.pane_id);
     impostor.id = pane.session_id + 1000;
-    eprintln!("MARKER: before first detach");
     client
         .detach(
             pane.session_id,
@@ -1506,12 +1525,9 @@ fn a_client_summary_cannot_rename_a_session() {
             Vec::new(),
         )
         .unwrap();
-    eprintln!("MARKER: after first detach");
 
     // Listed under the mux session id, not the id the client claimed.
-    eprintln!("MARKER: before list");
     let listed = client.list().unwrap();
-    eprintln!("MARKER: after list");
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].id, pane.session_id);
 
@@ -3199,6 +3215,182 @@ fn a_live_session_is_only_offered_once_its_window_shares_it() {
         "withdrawing an offer must not end the session"
     );
     assert_terminal_echoes(&descriptor, "still-here");
+}
+
+/// Shared spawning uses the same canonical operation path for a local viewer
+/// and a stream-only viewer. The local stream must retain its grant capability,
+/// while both requests must produce an event and an exact revisioned snapshot.
+#[test]
+fn shared_spawns_publish_events_and_preserve_local_grants() {
+    let daemon = TestDaemon::start();
+    let client = daemon.client();
+    let subscription = client.subscribe().unwrap();
+    let grants = subscription.grants.clone();
+    let observer = daemon.client();
+    let observer_subscription = observer.subscribe().unwrap();
+
+    let pane = client
+        .spawn(spawn_request(None, "printf ready; sleep 60"))
+        .unwrap();
+    let descriptor = std::fs::File::from(pane.descriptor);
+    read_until(&descriptor, "ready");
+    let mut offered = summary(pane.session_id, pane.pane_id);
+    offered.panes.push(pane_summary(pane.pane_id));
+    client
+        .share(
+            pane.session_id,
+            offered,
+            serde_json::json!({"shared": true}),
+            Some(&test_verifier()),
+            true,
+        )
+        .unwrap();
+    let events = observer_subscription.shared.register(pane.session_id);
+
+    let local_request = spawn_request(Some(pane.session_id), "printf local; sleep 60");
+    let local = client
+        .spawn_shared(SharedSpawnRequest {
+            session_id: pane.session_id,
+            base_revision: SessionRevision::INITIAL,
+            operation_id: client.next_shared_operation_id(),
+            program: local_request.program,
+            args: local_request.args,
+            env: local_request.env,
+            working_directory: local_request.working_directory,
+            size: local_request.size,
+            console_palette: local_request.console_palette,
+        })
+        .unwrap();
+    let (grant_tx, grant_rx) = async_channel::unbounded();
+    grants.register(local.pane.pane_id(), grant_tx);
+    assert_eq!(local.state.revision, SessionRevision(1));
+    let first_event = recv_timeout(&events, Duration::from_secs(10))
+        .expect("the local shared spawn must be broadcast");
+    let first_pane_id = match first_event {
+        zmux::client::SharedSessionEvent::PaneAdded { pane_id, state, .. } => {
+            assert_eq!(state.revision, SessionRevision(1));
+            pane_id
+        }
+        other => panic!("unexpected first shared spawn event: {other:?}"),
+    };
+    assert_eq!(first_pane_id, local.pane.pane_id());
+
+    let endpoint: zmux::transport::Endpoint =
+        serde_json::from_slice(&std::fs::read(daemon.sessions_dir().join("zmux.json")).unwrap())
+            .unwrap();
+    let stream = Stream::connect(&endpoint.socket_path).unwrap();
+    let mut stream_only = Connection::new(stream);
+    stream_only
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    let stream_request = spawn_request(Some(pane.session_id), "printf remote; sleep 60");
+    stream_only
+        .send(&Envelope {
+            version: zmux::messages::PROTOCOL_VERSION,
+            token: endpoint.token.clone(),
+            client_process_id: std::process::id(),
+            client_id: ClientId::new("stream-only-spawn"),
+            stream_only: true,
+            session_secret: Some(TEST_SECRET.to_owned()),
+            request: Request::SpawnShared(SharedSpawnRequest {
+                session_id: pane.session_id,
+                base_revision: local.state.revision,
+                operation_id: zmux::messages::SharedOperationId::new(
+                    ClientId::new("stream-only-spawn"),
+                    1,
+                ),
+                program: stream_request.program,
+                args: stream_request.args,
+                env: stream_request.env,
+                working_directory: stream_request.working_directory,
+                size: stream_request.size,
+                console_palette: stream_request.console_palette,
+            }),
+        })
+        .unwrap();
+    let (response, _) = stream_only.receive::<Response>().unwrap_or_else(|error| {
+        panic!(
+            "receiving the stream-only spawn response: {error:#}\ndaemon log:\n{}",
+            daemon.log()
+        )
+    });
+    let (stream_pane_id, stream_revision, replay_length) = match response {
+        Response::SharedSpawned {
+            pane_id,
+            replay_length,
+            shared_state,
+            ..
+        } => (pane_id, shared_state.revision, replay_length),
+        other => panic!("unexpected stream-only shared spawn response: {other:?}"),
+    };
+    stream_only.read_exact(replay_length).unwrap();
+    assert_eq!(stream_revision, SessionRevision(2));
+    let second_event = recv_timeout(&events, Duration::from_secs(10))
+        .expect("the stream-only shared spawn must be broadcast");
+    match second_event {
+        zmux::client::SharedSessionEvent::PaneAdded { pane_id, state, .. } => {
+            assert_eq!(pane_id, stream_pane_id);
+            assert_eq!(state.revision, SessionRevision(2));
+        }
+        other => panic!("unexpected second shared spawn event: {other:?}"),
+    }
+    let canonical = client.shared_snapshot(pane.session_id).unwrap();
+    assert_eq!(canonical.revision, SessionRevision(2));
+    assert_eq!(canonical.summary.panes.len(), 3);
+
+    // Put a stream-only viewer on the locally spawned pane as well. Its
+    // departure leaves the local viewer alone, which is the handover that
+    // proves the local SpawnShared request kept stream_only=false.
+    let attach_stream = Stream::connect(&endpoint.socket_path).unwrap();
+    let mut stream_attach = Connection::new(attach_stream);
+    stream_attach
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    stream_attach
+        .send(&Envelope {
+            version: zmux::messages::PROTOCOL_VERSION,
+            token: endpoint.token,
+            client_process_id: std::process::id(),
+            client_id: ClientId::new("stream-only-attach"),
+            stream_only: true,
+            session_secret: Some(TEST_SECRET.to_owned()),
+            request: Request::Attach {
+                session_id: pane.session_id,
+                pane_id: Some(local.pane.pane_id()),
+                secret: Some(TEST_SECRET.to_owned()),
+            },
+        })
+        .unwrap();
+    let (response, _) = stream_attach.receive::<Response>().unwrap();
+    let replay_length = match response {
+        Response::SharedAttached {
+            pane_id,
+            replay_length,
+            ..
+        } => {
+            assert_eq!(pane_id, local.pane.pane_id());
+            replay_length
+        }
+        other => panic!("unexpected stream-only attach response: {other:?}"),
+    };
+    stream_attach.read_exact(replay_length).unwrap();
+
+    // With the stream-only viewer gone, the local shared client must be offered
+    // the descriptor. A hard-coded stream-only spawn flag would suppress this.
+    drop(stream_only);
+    drop(stream_attach);
+    let grant = recv_timeout(&grant_rx, Duration::from_secs(10));
+    assert!(
+        grant.is_some(),
+        "the local shared client must receive a grant"
+    );
+    let attached = client
+        .take_exclusive(pane.session_id, local.pane.pane_id())
+        .unwrap();
+    drop(std::fs::File::from(attached.descriptor));
+    client.kill(pane.session_id).unwrap();
+    drop(local);
+    drop(descriptor);
 }
 
 /// A session that is both kept and shared stays shared when its window hands

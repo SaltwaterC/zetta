@@ -15,12 +15,13 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let globally_close_shared_pane = self.mux_panes.is_remote_tab(tab_id)
-            && self
-                .tabs
+        let globally_close_shared_pane =
+            self.tabs
                 .iter()
                 .find(|tab| tab.id == tab_id)
-                .is_some_and(|tab| tab.panes.len() > 1);
+                .is_some_and(|tab| {
+                    tab.panes.len() > 1 && (tab.shared || self.has_shared_tab_binding(tab_id))
+                });
         if globally_close_shared_pane {
             // Remove it locally first so the follow-up canonical state can no
             // longer serialize the pane that the daemon is about to terminate.

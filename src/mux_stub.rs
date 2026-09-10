@@ -39,6 +39,10 @@ impl MuxPanes {
 }
 
 impl crate::Zetta {
+    pub(crate) fn has_shared_tab_binding(&self, _: u64) -> bool {
+        false
+    }
+
     pub(crate) fn mux_provider_for_tab(
         &mut self,
         _: u64,

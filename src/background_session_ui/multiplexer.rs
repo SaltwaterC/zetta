@@ -68,8 +68,12 @@ fn load_attached_session_data(
         }
     };
     runtime.set_session_secret(secret);
-    let canonical_shared_state = runtime
-        .is_remote()
+    let shared_attachment = matches!(&first, AttachedPaneKind::Shared(_));
+    let shared_state_flag = state
+        .get("shared")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let canonical_shared_state = (shared_attachment || shared_state_flag)
         .then(|| runtime.client().shared_snapshot(session_id))
         .transpose()?;
     let (state, summary) = canonical_shared_state
@@ -400,6 +404,7 @@ impl Zetta {
             .into_iter()
             .filter_map(|(pane_id, kind)| Some((pane_ids.get(&pane_id).copied()?, kind)))
             .collect::<Vec<_>>();
+        let has_canonical_shared_state = canonical_shared_state.is_some();
         if let Some(shared_state) = canonical_shared_state {
             let mappings = state
                 .panes
@@ -433,7 +438,7 @@ impl Zetta {
         for (pane_id, view) in views {
             self.connect_terminal_view(tab_id, pane_id, view, window, cx);
         }
-        if runtime.is_remote() {
+        if has_canonical_shared_state {
             self.watch_shared_session(session_id, runtime, window, cx);
         }
         self.focus_active(window, cx);

@@ -335,6 +335,8 @@ impl Zetta {
         }
         let tab_id = self.tabs[index].id;
         let remote_shared_tab = self.mux_panes.is_remote_tab(tab_id);
+        let shared_tab =
+            remote_shared_tab || self.tabs[index].shared || self.has_shared_tab_binding(tab_id);
         if remote_shared_tab {
             // Closing a remote tab is a viewer leave. In particular, do not let
             // the shared-tab fallback below turn it into hand_session_to_multiplexer,
@@ -357,7 +359,7 @@ impl Zetta {
             })
             .flatten();
         if let Some(authentication) = background_authentication {
-            self.move_tab_to_background(index, authentication, cx);
+            self.move_tab_to_background(index, authentication, window, cx);
             if self.tabs.is_empty() {
                 window.remove_window();
             } else {
@@ -388,6 +390,12 @@ impl Zetta {
         for pane_id in &closed_pane_ids {
             self.drop_shared_pane(*pane_id, cx);
             self.release_mux_pane(tab_id, *pane_id, cx);
+        }
+        if shared_tab && !remote_shared_tab {
+            // Keep the coordinator alive until every local pane has passed
+            // through `release_mux_pane`, which must still suppress the legacy
+            // daemon ClosePane path for canonical shared panes.
+            self.leave_shared_tab(tab_id, cx);
         }
         self.mux_panes.forget_tab(tab_id);
         self.forget_pane_controls(closed_pane_ids);

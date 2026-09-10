@@ -16,6 +16,7 @@ pub(super) struct SpawnContext<'a> {
     pub(super) client_process_id: u32,
     pub(super) peer_process_id: Option<u32>,
     pub(super) client_id: ClientId,
+    pub(super) stream_only: bool,
     pub(super) session_secret: Option<&'a str>,
     pub(super) shared_request: Option<crate::messages::SharedSpawnRequest>,
     pub(super) connection: &'a mut Connection,
@@ -30,6 +31,7 @@ pub(super) fn spawn(
         client_process_id,
         peer_process_id,
         client_id,
+        stream_only,
         session_secret,
         shared_request,
         connection,
@@ -373,6 +375,13 @@ pub(super) fn spawn(
             },
             &client_id,
         );
+        // A shared spawn serves its connection for the lifetime of the pane.
+        // Do not retain the restored-session lease while doing that: a second
+        // shared mutation would otherwise wait forever for this connection to
+        // leave, even though the lease is irrelevant once the live session was
+        // found above.
+        #[cfg(feature = "session-persistence")]
+        drop(restored_guard);
         return attach_shared(
             daemon,
             sessions,
@@ -380,7 +389,7 @@ pub(super) fn spawn(
             pane_id,
             client_process_id,
             client_id,
-            true,
+            stream_only,
             response_state.state.clone(),
             response_summary,
             connection,

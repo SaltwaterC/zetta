@@ -16,6 +16,7 @@ use zmux::protocol::{BackgroundPaneLayout, BackgroundPaneSummary};
 #[derive(Default)]
 pub(crate) struct SharedSessionCoordinator {
     sessions: HashMap<u64, SharedSessionBinding>,
+    next_watch_id: u64,
 }
 
 struct SharedSessionBinding {
@@ -24,6 +25,7 @@ struct SharedSessionBinding {
     mux_to_local: HashMap<u64, u64>,
     local_to_mux: HashMap<u64, u64>,
     sync_generation: u64,
+    watch_id: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -63,6 +65,7 @@ impl SharedSessionCoordinator {
                 mux_to_local,
                 local_to_mux,
                 sync_generation: 0,
+                watch_id: None,
             },
         );
         Ok(())
@@ -74,6 +77,41 @@ impl SharedSessionCoordinator {
 
     pub(crate) fn tab_id(&self, session_id: u64) -> Option<u64> {
         self.sessions.get(&session_id).map(|session| session.tab_id)
+    }
+
+    pub(crate) fn is_bound(&self, session_id: u64) -> bool {
+        self.sessions.contains_key(&session_id)
+    }
+
+    pub(crate) fn begin_watch(&mut self, session_id: u64) -> Option<u64> {
+        if self
+            .sessions
+            .get(&session_id)
+            .is_none_or(|session| session.watch_id.is_some())
+        {
+            return None;
+        }
+        self.next_watch_id = self.next_watch_id.wrapping_add(1);
+        let watch_id = self.next_watch_id;
+        self.sessions
+            .get_mut(&session_id)
+            .expect("shared session was checked above")
+            .watch_id = Some(watch_id);
+        Some(watch_id)
+    }
+
+    pub(crate) fn watch_is_current(&self, session_id: u64, watch_id: u64) -> bool {
+        self.sessions
+            .get(&session_id)
+            .is_some_and(|session| session.watch_id == Some(watch_id))
+    }
+
+    pub(crate) fn end_watch(&mut self, session_id: u64, watch_id: u64) {
+        if let Some(session) = self.sessions.get_mut(&session_id)
+            && session.watch_id == Some(watch_id)
+        {
+            session.watch_id = None;
+        }
     }
 
     pub(crate) fn state(&self, session_id: u64) -> Option<&SharedSessionState> {
@@ -220,8 +258,12 @@ impl SharedSessionCoordinator {
             return Ok(SharedSnapshotDisposition::Stale);
         }
         session.state = state;
-        session.mux_to_local.insert(mux_pane_id, local_pane_id);
-        session.local_to_mux.insert(local_pane_id, mux_pane_id);
+        if let Some(previous_local) = session.mux_to_local.insert(mux_pane_id, local_pane_id) {
+            session.local_to_mux.remove(&previous_local);
+        }
+        if let Some(previous_mux) = session.local_to_mux.insert(local_pane_id, mux_pane_id) {
+            session.mux_to_local.remove(&previous_mux);
+        }
         Ok(SharedSnapshotDisposition::Applied)
     }
 
@@ -247,17 +289,70 @@ impl SharedSessionCoordinator {
 }
 
 impl Zetta {
-    /// Publishes the complete local tab state after a remote shared mutation
+    pub(crate) fn has_shared_tab_binding(&self, tab_id: u64) -> bool {
+        self.mux_panes
+            .session_id(tab_id)
+            .is_some_and(|session_id| self.shared_collaboration.is_bound(session_id))
+    }
+
+    /// Binds a tab that has just been offered to the daemon's authoritative
+    /// snapshot before any shared mutation can be made. The stable pane ids are
+    /// paired with this window's ids once, then every later event uses that
+    /// translation rather than guessing from the order panes happen to have.
+    #[cfg(feature = "zmux")]
+    pub(super) fn bind_shared_session(
+        &mut self,
+        tab_id: u64,
+        runtime: MuxRuntime,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<()> {
+        let session_id = self
+            .mux_panes
+            .session_id(tab_id)
+            .with_context(|| format!("tab {tab_id} has no shared multiplexer session"))?;
+        let state = runtime.client().shared_snapshot(session_id)?;
+        let mappings = self
+            .tabs
+            .iter()
+            .find(|tab| tab.id == tab_id)
+            .into_iter()
+            .flat_map(|tab| tab.panes.iter())
+            .filter_map(|pane| {
+                self.mux_panes
+                    .mux_pane_id(pane.id)
+                    .map(|mux_pane_id| (mux_pane_id, pane.id))
+            })
+            .collect::<Vec<_>>();
+        runtime.shared_reports().forget(session_id);
+        self.shared_collaboration
+            .bind(session_id, tab_id, state, mappings)?;
+        self.watch_shared_session(session_id, runtime, window, cx);
+        Ok(())
+    }
+
+    /// Stops applying shared snapshots while leaving the daemon's pane
+    /// attachments alone. Unsharing deliberately keeps the local shared pane
+    /// alive until the daemon's grant handover converts it back to exclusive.
+    #[cfg(feature = "zmux")]
+    pub(super) fn forget_shared_session(&mut self, tab_id: u64) {
+        let Some(session_id) = self.mux_panes.session_id(tab_id) else {
+            return;
+        };
+        self.shared_collaboration.forget(session_id);
+        if let Some(runtime) = self.mux_panes.runtime_for_tab(tab_id) {
+            runtime.shared_reports().forget(session_id);
+        }
+    }
+
+    /// Publishes the complete local tab state after a shared mutation
     /// has acquired stable multiplexer ids. A whole snapshot keeps rename,
     /// icon/theme, focus, maximize/minimize, and split-ratio changes on the
     /// same revisioned path instead of letting one viewer's local model drift.
     pub(crate) fn sync_shared_tab_state(&mut self, tab_id: u64, cx: &mut Context<Self>) {
-        let Some(runtime) = self.mux_panes.runtime_for_tab(tab_id) else {
+        let Some(_runtime) = self.mux_panes.runtime_for_tab(tab_id) else {
             return;
         };
-        if !runtime.is_remote() {
-            return;
-        }
         let Some(session_id) = self.mux_panes.session_id(tab_id) else {
             return;
         };
@@ -298,7 +393,7 @@ impl Zetta {
                         this.shared_collaboration.record_state(session_id, state);
                     }
                     Err(error) => {
-                        log::debug!("could not publish remote shared tab state: {error:#}");
+                        log::debug!("could not publish shared tab state: {error:#}");
                     }
                 }
             })
@@ -317,9 +412,6 @@ impl Zetta {
         zmux::messages::SharedSessionOperationRequest,
     )> {
         let runtime = self.mux_panes.runtime_for_tab(tab_id)?;
-        if !runtime.is_remote() {
-            return None;
-        }
         let base_revision = self.shared_collaboration.state(session_id)?.revision;
         let tab = self.tabs.iter().find(|tab| tab.id == tab_id)?;
         let protected = tab
@@ -329,7 +421,7 @@ impl Zetta {
             .is_some();
         let mut summary = self.background_session_summary(tab, protected, cx);
         if let Err(error) = remap_summary_to_mux(&mut summary, self.mux_panes.ids()) {
-            log::debug!("could not serialize remote shared tab state: {error:#}");
+            log::debug!("could not serialize shared tab state: {error:#}");
             return None;
         }
         summary.id = session_id;
@@ -339,7 +431,7 @@ impl Zetta {
         )) {
             Ok(state) => state,
             Err(error) => {
-                log::debug!("could not serialize remote shared tab state: {error:#}");
+                log::debug!("could not serialize shared tab state: {error:#}");
                 return None;
             }
         };
@@ -353,7 +445,7 @@ impl Zetta {
         Some((client, request))
     }
 
-    /// Keeps a remote tab subscribed to canonical collaboration snapshots.
+    /// Keeps a shared tab subscribed to canonical collaboration snapshots.
     /// Requests that need a data stream (a pane added by another viewer) are
     /// performed on the background executor; applying the resulting terminal
     /// remains a window operation so local GPUI entities never cross threads.
@@ -364,11 +456,23 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let Some(watch_id) = self.shared_collaboration.begin_watch(session_id) else {
+            return;
+        };
         let receiver = runtime.shared_reports().register(session_id);
         let client = runtime.client().clone();
         let secret = runtime.session_secret();
         cx.spawn_in(window, async move |this, cx| {
             while let Ok(event) = receiver.recv().await {
+                let current = this
+                    .update(cx, |this, _| {
+                        this.shared_collaboration
+                            .watch_is_current(session_id, watch_id)
+                    })
+                    .unwrap_or(false);
+                if !current {
+                    break;
+                }
                 match event {
                     zmux::client::SharedSessionEvent::Updated(state) => {
                         let missing = this
@@ -530,6 +634,10 @@ impl Zetta {
                     }
                 }
             }
+            this.update(cx, |this, _| {
+                this.shared_collaboration.end_watch(session_id, watch_id);
+            })
+            .ok();
         })
         .detach();
     }

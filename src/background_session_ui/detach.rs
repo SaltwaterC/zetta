@@ -296,10 +296,12 @@ impl Zetta {
                     // cross-process reconnect path. The sharing toggle remains
                     // independent: an explicit unshare before close restores
                     // private ownership.
-                    self.set_tab_sharing(tab_id, true, sharing_authentication, cx);
+                    self.set_tab_sharing(tab_id, true, sharing_authentication, window, cx);
                 }
             }
-            ProtectedSessionAction::Share => self.set_tab_sharing(tab_id, true, authentication, cx),
+            ProtectedSessionAction::Share => {
+                self.set_tab_sharing(tab_id, true, authentication, window, cx);
+            }
         }
         // Whichever action ran, the pane gets the keyboard back. Reaching here
         // from the prompt means focus is on an overlay that has just been taken
@@ -348,7 +350,7 @@ impl Zetta {
         if tab.shared {
             // Scoping a session back to this window takes nothing away from
             // anybody but the windows that could join it, so it needs no secret.
-            self.set_tab_sharing(tab_id, false, None, cx);
+            self.set_tab_sharing(tab_id, false, None, window, cx);
             return;
         }
         self.protect_and_then(tab_id, ProtectedSessionAction::Share, window, cx);
@@ -359,14 +361,41 @@ impl Zetta {
         tab_id: u64,
         offered: bool,
         authentication: Option<SessionAuthentication>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        #[cfg(not(feature = "zmux"))]
+        let _ = window;
         let Some(index) = self.tabs.iter().position(|tab| tab.id == tab_id) else {
             return;
         };
+        let previous_shared = self.tabs[index].shared;
+        // The serialized publication must describe the state the daemon is
+        // being asked to enter. Roll it back below if the request is refused.
+        self.tabs[index].shared = offered;
         match self.publish_session_offer(index, offered, authentication, cx) {
             Ok(true) => {
-                self.tabs[index].shared = offered;
+                #[cfg(feature = "zmux")]
+                let setup = if offered {
+                    let runtime = self
+                        .mux_panes
+                        .runtime_for_tab(tab_id)
+                        .or_else(|| self.mux.clone());
+                    runtime.map_or_else(
+                        || Err(anyhow::anyhow!("shared tab has no multiplexer runtime")),
+                        |runtime| self.bind_shared_session(tab_id, runtime, window, cx),
+                    )
+                } else {
+                    self.forget_shared_session(tab_id);
+                    Ok(())
+                };
+                #[cfg(not(feature = "zmux"))]
+                let setup: anyhow::Result<()> = Ok(());
+                if let Err(error) = setup {
+                    self.pane_output_error = Some(format!(
+                        "Could not initialize shared tab collaboration: {error:#}"
+                    ));
+                }
                 self.finish_background_session_change(cx);
                 // Nothing about the tab changes when it is shared, so without
                 // saying so the toggle has no visible effect at all beyond a
@@ -381,6 +410,7 @@ impl Zetta {
                 );
             }
             Ok(false) => {
+                self.tabs[index].shared = previous_shared;
                 self.show_notice(
                     "Sharing requires the session multiplexer; this tab is running with --no-mux.",
                     cx,
@@ -390,9 +420,11 @@ impl Zetta {
             // scopes a session back to one window while one window has it, and it
             // says which. The tab stays shared, which is what the menu then shows.
             Err(error) if !offered => {
+                self.tabs[index].shared = previous_shared;
                 self.show_notice(format!("{error:#}"), cx);
             }
             Err(error) => {
+                self.tabs[index].shared = previous_shared;
                 self.pane_output_error = Some(format!("Could not share this tab: {error:#}"));
             }
         }
@@ -557,7 +589,7 @@ impl Zetta {
         if self.tab_search.is_some() {
             self.dismiss_tab_search(window, cx);
         }
-        self.move_tab_to_background(self.active_tab, authentication, cx);
+        self.move_tab_to_background(self.active_tab, authentication, window, cx);
 
         if self.tabs.is_empty() {
             self.active_tab = 0;
@@ -572,8 +604,11 @@ impl Zetta {
         &mut self,
         index: usize,
         authentication: Option<SessionAuthentication>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let tab_id = self.tabs[index].id;
+        let shared_tab = self.tabs[index].shared || self.has_shared_tab_binding(tab_id);
         // The panes leave this window: their shared connections close with
         // their terminals, so the multiplexer's shared set stops counting on
         // them. The pane itself stays attached to its session on the daemon.
@@ -584,6 +619,9 @@ impl Zetta {
             .collect::<Vec<_>>();
         for pane_id in pane_ids {
             self.drop_shared_pane(pane_id, cx);
+        }
+        if shared_tab {
+            self.leave_shared_tab(tab_id, cx);
         }
         let tab = self.tabs.remove(index);
         if index < self.active_tab {
@@ -599,6 +637,23 @@ impl Zetta {
             let insertion_index = index.min(self.tabs.len());
             self.tabs.insert(insertion_index, tab);
             self.active_tab = insertion_index;
+            #[cfg(feature = "zmux")]
+            if shared_tab {
+                let runtime = self
+                    .mux_panes
+                    .runtime_for_tab(tab_id)
+                    .or_else(|| self.mux.clone());
+                if let Some(runtime) = runtime
+                    && let Err(error) = self.bind_shared_session(tab_id, runtime, window, cx)
+                {
+                    self.pane_output_error = Some(format!(
+                        "Could not restore shared tab collaboration after the failed handoff: \
+                         {error:#}"
+                    ));
+                }
+            }
+            #[cfg(not(feature = "zmux"))]
+            let _ = window;
         }
         self.finish_background_session_change(cx);
     }
