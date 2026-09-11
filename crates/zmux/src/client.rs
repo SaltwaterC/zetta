@@ -35,7 +35,7 @@ use crate::{
         DetachRequest, Envelope, Event, MAX_IMAGE_BYTES, PROTOCOL_VERSION, PaneSnapshot,
         PaneStateReport, Request, Response, SessionRevision, SharedOperationId,
         SharedSessionOperation, SharedSessionOperationRequest, SharedSessionState,
-        SharedSpawnRequest, SpawnRequest,
+        SharedSpawnBatchRequest, SharedSpawnRequest, SpawnRequest,
     },
     paths::session_catalog_dir,
     protocol::{BackgroundSessionSummary, RestorableSessionRecord},
@@ -175,7 +175,7 @@ pub struct SharedPane {
     /// The sizes the multiplexer arbitrated, recorded by the reader as
     /// [`Event::Size`] arrives. The holder of the pane applies the latest
     /// each time it is woken.
-    sizes: Arc<Mutex<Vec<(u16, u16)>>>,
+    sizes: Arc<Mutex<Vec<(SessionRevision, u16, u16)>>>,
     /// Signalled by the reader whenever it records a size, so the pane's holder
     /// can wait for one instead of asking on a timer. Bounded at one: a pending
     /// signal already means "there are sizes to take".
@@ -215,6 +215,15 @@ impl SharedPane {
     /// Reports this client's size, so the multiplexer can keep every shared
     /// client at the smallest of them.
     pub fn send_resize(&self, columns: u16, lines: u16) -> Result<()> {
+        self.send_resize_for_revision(SessionRevision::INITIAL, columns, lines)
+    }
+
+    pub fn send_resize_for_revision(
+        &self,
+        revision: SessionRevision,
+        columns: u16,
+        lines: u16,
+    ) -> Result<()> {
         let mut connection = self
             .writer
             .lock()
@@ -222,6 +231,7 @@ impl SharedPane {
         connection.send(&Request::Resize {
             session_id: self.session_id,
             pane_id: self.pane_id,
+            revision: Some(revision),
             columns,
             lines,
         })
@@ -301,11 +311,18 @@ impl SharedPane {
 
     /// The sizes the multiplexer arbitrated since the last call, oldest
     /// first.
-    pub fn take_sizes(&self) -> Vec<(u16, u16)> {
+    pub fn take_revisioned_sizes(&self) -> Vec<(SessionRevision, u16, u16)> {
         self.sizes
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .drain(..)
+            .collect()
+    }
+
+    pub fn take_sizes(&self) -> Vec<(u16, u16)> {
+        self.take_revisioned_sizes()
+            .into_iter()
+            .map(|(_, columns, lines)| (columns, lines))
             .collect()
     }
 
@@ -351,7 +368,7 @@ pub struct SharedReader {
     initialization_error: Option<io::Error>,
     pending: Vec<u8>,
     offset: usize,
-    sizes: Arc<Mutex<Vec<(u16, u16)>>>,
+    sizes: Arc<Mutex<Vec<(SessionRevision, u16, u16)>>>,
     size_signal: async_channel::Sender<()>,
     reader_handoffs: Arc<Mutex<VecDeque<SharedReaderHandoff>>>,
     reconnect_replay: VecDeque<u8>,
@@ -414,11 +431,19 @@ impl io::Read for SharedReader {
                     self.pending = bytes[count..].to_vec();
                     return Ok(count);
                 }
-                Ok((Event::Size { columns, lines, .. }, _)) => {
+                Ok((
+                    Event::Size {
+                        revision,
+                        columns,
+                        lines,
+                        ..
+                    },
+                    _,
+                )) => {
                     self.sizes
                         .lock()
                         .unwrap_or_else(|poisoned| poisoned.into_inner())
-                        .push((columns, lines));
+                        .push((revision, columns, lines));
                     // Full means a signal is already pending, which says the
                     // same thing.
                     let _ = self.size_signal.try_send(());
@@ -980,7 +1005,7 @@ impl Client {
         // address the other one.
         let mut client = self.reconnect_client();
         client.client_id = ClientId::random()?;
-        client.attach_as_process(session_id, Some(pane_id), secret, client_process_id)
+        client.attach_as_process(session_id, Some(pane_id), secret, client_process_id, false)
     }
 
     fn attach_as_process(
@@ -989,12 +1014,14 @@ impl Client {
         pane_id: Option<u64>,
         secret: Option<String>,
         client_process_id: u32,
+        force_shared: bool,
     ) -> Result<AttachOutcome> {
         let deadline = Instant::now() + STARTUP_TIMEOUT;
         let request = Request::Attach {
             session_id,
             pane_id,
             secret,
+            force_shared,
         };
         loop {
             self.ping_until_ready(deadline)?;
@@ -1336,6 +1363,7 @@ impl Client {
             Request::Resize {
                 session_id,
                 pane_id,
+                revision: None,
                 columns,
                 lines,
             },
@@ -1526,9 +1554,10 @@ impl Client {
         }
     }
 
-    /// Applies a mutation only when `base_revision` is still authoritative.
-    /// A conflict is returned as data so callers can reconcile the complete
-    /// snapshot without accidentally rebasing a local edit.
+    /// Applies a mutation to canonical shared state. Whole-layout operations
+    /// require an exact base revision; operations with stable pane/divider
+    /// targets are rebased by the daemon and return a conflict snapshot when
+    /// that target disappeared.
     pub fn apply_shared(
         &self,
         session_id: u64,
@@ -1600,6 +1629,32 @@ impl Client {
         }
     }
 
+    /// Atomically commits daemon-owned panes, then leaves stream attachment to
+    /// the ordinary shared attach path for both local and remote callers.
+    pub fn spawn_shared_batch(
+        &self,
+        request: SharedSpawnBatchRequest,
+    ) -> Result<SharedBatchResult> {
+        let secret = self.session_secret();
+        let mut connection =
+            self.open_with_session_secret(Request::SpawnSharedBatch(request), secret.as_ref())?;
+        match Self::receive(&mut connection)?.0 {
+            Response::SharedBatchSpawned { mappings, state } => {
+                Ok(SharedBatchResult::Applied(SharedBatchSpawned {
+                    mappings,
+                    state,
+                }))
+            }
+            Response::SharedConflict { state } => Ok(SharedBatchResult::Conflict(state)),
+            Response::AuthenticationRequired => {
+                anyhow::bail!("the shared session requires an authentication secret")
+            }
+            Response::AuthenticationFailed => anyhow::bail!("shared session authentication failed"),
+            Response::Error { message } => anyhow::bail!("{message}"),
+            other => anyhow::bail!("unexpected response to shared batch spawn: {other:?}"),
+        }
+    }
+
     /// Starts a process under the multiplexer and takes its terminal.
     pub fn spawn(&self, request: SpawnRequest) -> Result<AttachedPane> {
         let mut connection = self.open(Request::Spawn(request))?;
@@ -1640,7 +1695,7 @@ impl Client {
         pane_id: Option<u64>,
         secret: Option<String>,
     ) -> Result<AttachOutcome> {
-        self.attach_as_process(session_id, pane_id, secret, std::process::id())
+        self.attach_as_process(session_id, pane_id, secret, std::process::id(), false)
     }
 
     /// Attaches with a secret kept in zeroizing memory by the caller. The
@@ -1656,6 +1711,24 @@ impl Client {
             pane_id,
             secret.map(|secret| secret.expose().to_owned()),
             std::process::id(),
+            false,
+        )
+    }
+
+    /// Joins a pane through the shared relay even when this is a local client.
+    /// This is the second half of a daemon-first shared batch transaction.
+    pub fn attach_shared_with_secret(
+        &self,
+        session_id: u64,
+        pane_id: u64,
+        secret: Option<&SessionSecret>,
+    ) -> Result<AttachOutcome> {
+        self.attach_as_process(
+            session_id,
+            Some(pane_id),
+            secret.map(|secret| secret.expose().to_owned()),
+            std::process::id(),
+            true,
         )
     }
 
@@ -2294,6 +2367,12 @@ pub enum SharedSessionEvent {
         pane_id: u64,
         state: SharedSessionState,
     },
+    PanesChanged {
+        session_id: u64,
+        added: Vec<u64>,
+        removed: Vec<u64>,
+        state: SharedSessionState,
+    },
     StreamFailed {
         session_id: u64,
         pane_id: u64,
@@ -2345,7 +2424,8 @@ impl SharedSessionReports {
         let session_id = match &event {
             SharedSessionEvent::Updated(state)
             | SharedSessionEvent::PaneAdded { state, .. }
-            | SharedSessionEvent::PaneRemoved { state, .. } => state.session_id,
+            | SharedSessionEvent::PaneRemoved { state, .. }
+            | SharedSessionEvent::PanesChanged { state, .. } => state.session_id,
             SharedSessionEvent::StreamFailed { session_id, .. } => *session_id,
         };
         if let Some(subscribers) = receivers.get_mut(&session_id) {
@@ -2436,6 +2516,20 @@ fn subscription_loop(client: Client, first: Connection, subscription: Subscripti
                 )) => shared.report(SharedSessionEvent::PaneRemoved {
                     session_id,
                     pane_id,
+                    state,
+                }),
+                Ok((
+                    Event::SharedPanesChanged {
+                        session_id,
+                        added,
+                        removed,
+                        state,
+                    },
+                    _,
+                )) => shared.report(SharedSessionEvent::PanesChanged {
+                    session_id,
+                    added,
+                    removed,
                     state,
                 }),
                 Ok((
@@ -2586,6 +2680,16 @@ pub enum AttachOutcome {
 pub struct SharedSpawnedPane {
     pub pane: SharedPane,
     pub state: SharedSessionState,
+}
+
+pub struct SharedBatchSpawned {
+    pub mappings: Vec<crate::messages::SharedDraftMapping>,
+    pub state: SharedSessionState,
+}
+
+pub enum SharedBatchResult {
+    Applied(SharedBatchSpawned),
+    Conflict(SharedSessionState),
 }
 
 #[derive(Clone, Debug, PartialEq)]

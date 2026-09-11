@@ -21,6 +21,7 @@ pub(super) fn attach(
     client_process_id: u32,
     client_id: ClientId,
     stream_only: bool,
+    force_shared: bool,
     connection: &mut Connection,
 ) -> Result<()> {
     let mut sessions = daemon.sessions.lock().unwrap();
@@ -140,10 +141,10 @@ pub(super) fn attach(
     // Stream-only clients always join a shared relay. An offered pane may be
     // idle, so initialize the shared attachment here rather than ever letting
     // a remote request fall through to descriptor handover.
-    if stream_only && matches!(pane.attachment, Attachment::None) {
+    if (stream_only || force_shared) && matches!(pane.attachment, Attachment::None) {
         pane.attachment = Attachment::Shared(Vec::new());
     }
-    if stream_only && matches!(pane.attachment, Attachment::Shared(_)) {
+    if (stream_only || force_shared) && matches!(pane.attachment, Attachment::Shared(_)) {
         return attach_shared(
             daemon,
             sessions,
@@ -151,12 +152,19 @@ pub(super) fn attach(
             pane_id,
             client_process_id,
             client_id,
-            true,
+            stream_only,
             state,
             summary,
             connection,
             None,
         );
+    }
+    if force_shared {
+        return connection.send(&Response::Error {
+            message: format!(
+                "session {session_id} pane {pane_id} is not available as a shared stream"
+            ),
+        });
     }
     if !stream_only
         && (matches!(pane.attachment, Attachment::None)
@@ -802,13 +810,27 @@ pub(super) fn serve_shared(
                 // so it finishes any input the terminal could not take yet.
                 wake_drain(daemon);
             }
-            Request::Resize { columns, lines, .. } => {
+            Request::Resize {
+                revision,
+                columns,
+                lines,
+                ..
+            } => {
                 let mut sessions = daemon.sessions.lock().unwrap();
-                let Some(pane) = sessions
-                    .iter_mut()
-                    .find(|session| session.id == session_id)
-                    .and_then(|session| session.panes.iter_mut().find(|pane| pane.id == pane_id))
+                let Some(session) = sessions.iter_mut().find(|session| session.id == session_id)
                 else {
+                    anyhow::bail!("session {session_id} no longer exists");
+                };
+                let current_revision = session
+                    .shared_state
+                    .as_ref()
+                    .map_or(crate::messages::SessionRevision::INITIAL, |state| {
+                        state.revision
+                    });
+                if revision != Some(current_revision) {
+                    continue;
+                }
+                let Some(pane) = session.panes.iter_mut().find(|pane| pane.id == pane_id) else {
                     anyhow::bail!("pane {pane_id} no longer exists");
                 };
                 let reported = if let Attachment::Shared(clients) = &mut pane.attachment {
@@ -834,6 +856,7 @@ pub(super) fn serve_shared(
                         broadcast_size(
                             session_id,
                             pane_id,
+                            current_revision,
                             &mut pane.attachment,
                             pane.handover_waiters,
                             columns,
@@ -1086,6 +1109,12 @@ pub(super) fn remove_shared_client(
     let Some(session) = sessions.iter_mut().find(|session| session.id == session_id) else {
         return;
     };
+    let revision = session
+        .shared_state
+        .as_ref()
+        .map_or(crate::messages::SessionRevision::INITIAL, |state| {
+            state.revision
+        });
     let Some(pane) = session.panes.iter_mut().find(|pane| pane.id == pane_id) else {
         return;
     };
@@ -1105,6 +1134,7 @@ pub(super) fn remove_shared_client(
                 broadcast_size(
                     session_id,
                     pane_id,
+                    revision,
                     &mut pane.attachment,
                     pane.handover_waiters,
                     columns,

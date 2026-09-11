@@ -347,10 +347,9 @@ impl Render for NoticeHarness {
 /// A transient notice must not take layout space away from the terminals.
 ///
 /// A banner in the feedback column does, and for a *shared* pane that reflow is
-/// published: the pane reports its smaller grid, the multiplexer arbitrates every
-/// viewer down to the smallest of them, and the other window is resized to match.
-/// So telling the user their tab could now be joined resized their windows — and
-/// the resize was not undone when the message took itself away again.
+/// published: the pane reports its smaller grid and the multiplexer arbitrates
+/// every viewer down to it. A short-lived message must not change shared terminal
+/// capacity at all.
 #[gpui::test]
 fn a_transient_notice_does_not_take_layout_space(cx: &mut TestAppContext) {
     let body_height = |placement: NoticePlacement, cx: &mut TestAppContext| {

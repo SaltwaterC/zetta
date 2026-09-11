@@ -12,6 +12,348 @@ pub(super) enum SpawnOutcome {
     SharedConflict(Box<crate::messages::SharedSessionState>),
 }
 
+struct ProvisionalSharedPane {
+    pane_id: u64,
+    pty: tty::Pty,
+    #[cfg(windows)]
+    console_id: u64,
+    #[cfg(windows)]
+    child_events: tty::AttachedChildEvents,
+    size: TerminalSize,
+}
+
+fn start_shared_draft(
+    daemon: &Arc<Daemon>,
+    draft: &crate::messages::SharedPaneDraft,
+) -> Result<ProvisionalSharedPane> {
+    #[cfg(unix)]
+    let options = tty::Options {
+        shell: draft
+            .program
+            .clone()
+            .map(|program| tty::Shell::new(program, draft.args.clone())),
+        working_directory: draft.working_directory.clone(),
+        drain_on_exit: true,
+        env: draft.env.clone(),
+        #[cfg(not(windows))]
+        child_signal_mask: None,
+        #[cfg(windows)]
+        escape_args: false,
+    };
+    #[cfg(unix)]
+    let pty = tty::new(&options, window_size(draft.size), 0)
+        .context("starting a shared terminal process")?;
+    #[cfg(unix)]
+    let _child_pid = pty.child_pid();
+    #[cfg(windows)]
+    let (console_id, _child_pid, pty, child_events) = {
+        let (console_id, child_pid, handles) = daemon.pty_host.open(
+            draft.program.clone(),
+            draft.args.clone(),
+            draft.env.clone(),
+            draft.working_directory.clone(),
+            draft.size,
+            draft.console_palette,
+            std::process::id(),
+        )?;
+        let mut handles = crate::transport::claim_duplicated(&handles);
+        if handles.len() != 2 {
+            let _ = daemon.pty_host.close(console_id);
+            anyhow::bail!("the pseudoconsole host did not return two pipe handles");
+        }
+        let conin = handles.remove(1);
+        let conout = handles.remove(0);
+        match tty::attach(conout, conin, child_pid) {
+            Ok((pty, child_events)) => (console_id, child_pid, pty, child_events),
+            Err(error) => {
+                let _ = daemon.pty_host.close(console_id);
+                return Err(error).context("attaching the shared pseudoconsole to the daemon");
+            }
+        }
+    };
+    Ok(ProvisionalSharedPane {
+        pane_id: daemon.next_pane_id.fetch_add(1, Ordering::Relaxed),
+        pty,
+        #[cfg(windows)]
+        console_id,
+        #[cfg(windows)]
+        child_events,
+        size: draft.size,
+    })
+}
+
+fn close_provisional_shared_panes(daemon: &Arc<Daemon>, panes: Vec<ProvisionalSharedPane>) {
+    #[cfg(not(windows))]
+    let _ = daemon;
+    #[cfg(windows)]
+    for pane in &panes {
+        let _ = daemon.pty_host.close(pane.console_id);
+    }
+    drop(panes);
+}
+
+fn resolve_draft_layout(
+    layout: &crate::messages::SharedDraftLayout,
+    mappings: &HashMap<u64, u64>,
+) -> Result<BackgroundPaneLayout> {
+    use crate::messages::SharedDraftLayout;
+    match layout {
+        SharedDraftLayout::Existing { pane_id } => {
+            Ok(BackgroundPaneLayout::Pane { pane_id: *pane_id })
+        }
+        SharedDraftLayout::Draft { draft_id } => Ok(BackgroundPaneLayout::Pane {
+            pane_id: *mappings
+                .get(draft_id)
+                .with_context(|| format!("layout references unknown draft {draft_id}"))?,
+        }),
+        SharedDraftLayout::Split {
+            axis,
+            first_ratio,
+            first,
+            second,
+        } => {
+            anyhow::ensure!(
+                axis == "horizontal" || axis == "vertical",
+                "invalid split axis {axis}"
+            );
+            anyhow::ensure!(
+                *first_ratio > 0
+                    && *first_ratio < crate::protocol::BACKGROUND_PANE_SPLIT_RATIO_SCALE,
+                "invalid split ratio"
+            );
+            Ok(BackgroundPaneLayout::Split {
+                axis: axis.clone(),
+                first_ratio: *first_ratio,
+                first: Box::new(resolve_draft_layout(first, mappings)?),
+                second: Box::new(resolve_draft_layout(second, mappings)?),
+            })
+        }
+    }
+}
+
+fn layout_pane_ids(layout: &BackgroundPaneLayout, ids: &mut Vec<u64>) {
+    match layout {
+        BackgroundPaneLayout::Pane { pane_id } => ids.push(*pane_id),
+        BackgroundPaneLayout::Split { first, second, .. } => {
+            layout_pane_ids(first, ids);
+            layout_pane_ids(second, ids);
+        }
+    }
+}
+
+fn replace_layout_target(
+    layout: &mut BackgroundPaneLayout,
+    target: u64,
+    replacement: BackgroundPaneLayout,
+) -> bool {
+    match layout {
+        BackgroundPaneLayout::Pane { pane_id } if *pane_id == target => {
+            *layout = replacement;
+            true
+        }
+        BackgroundPaneLayout::Pane { .. } => false,
+        BackgroundPaneLayout::Split { first, second, .. } => {
+            if replace_layout_target(first, target, replacement.clone()) {
+                true
+            } else {
+                replace_layout_target(second, target, replacement)
+            }
+        }
+    }
+}
+
+fn clear_shared_size_reports(session: &mut Session) {
+    for pane in &mut session.panes {
+        if let Attachment::Shared(clients) = &mut pane.attachment {
+            for client in clients {
+                client.size = None;
+            }
+        }
+    }
+}
+
+enum SharedBatchCommit {
+    Applied {
+        state: crate::messages::SharedSessionState,
+        removed: Vec<u64>,
+        mappings: Vec<crate::messages::SharedDraftMapping>,
+    },
+    Retry {
+        state: crate::messages::SharedSessionState,
+        mappings: Vec<crate::messages::SharedDraftMapping>,
+    },
+    Conflict(crate::messages::SharedSessionState),
+}
+
+#[derive(Clone, Copy)]
+struct SharedBatchCommitContext<'a> {
+    request: &'a crate::messages::SharedSpawnBatchRequest,
+    mappings: &'a [crate::messages::SharedDraftMapping],
+    mapping_map: &'a HashMap<u64, u64>,
+    replacement: &'a BackgroundPaneLayout,
+    peer_process_id: Option<u32>,
+    session_secret: Option<&'a str>,
+}
+
+fn commit_shared_batch(
+    daemon: &Arc<Daemon>,
+    provisional: &mut Vec<ProvisionalSharedPane>,
+    context: SharedBatchCommitContext<'_>,
+) -> Result<SharedBatchCommit> {
+    use crate::messages::{SharedOperationReceipt, SharedPaneRef};
+    let request = context.request;
+    let mut sessions = daemon
+        .sessions
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let session = sessions
+        .iter_mut()
+        .find(|session| session.id == request.session_id)
+        .with_context(|| format!("session {} does not exist", request.session_id))?;
+    anyhow::ensure!(
+        session_control_authorized(session, context.peer_process_id, context.session_secret),
+        "shared session {} is not authorized for this client",
+        request.session_id
+    );
+    let mut state = session
+        .shared_state
+        .clone()
+        .unwrap_or_else(|| {
+            crate::messages::SharedSessionState::new(
+                session.id,
+                session.summary.clone(),
+                session.state.clone(),
+            )
+        })
+        .migrate()?;
+    if let Some(receipt) = state.receipt(&request.operation_id) {
+        return Ok(SharedBatchCommit::Retry {
+            state: state.clone(),
+            mappings: receipt.draft_mappings.clone(),
+        });
+    }
+    if request.target_pane_id.is_none() && state.revision != request.base_revision {
+        return Ok(SharedBatchCommit::Conflict(state));
+    }
+
+    let old_layout = state.presentation.layout.clone();
+    let mut next_layout = old_layout.clone();
+    if let Some(target) = request.target_pane_id {
+        if !replace_layout_target(&mut next_layout, target, context.replacement.clone()) {
+            return Ok(SharedBatchCommit::Conflict(state));
+        }
+    } else {
+        next_layout = context.replacement.clone();
+    }
+    let mut next_ids = Vec::new();
+    layout_pane_ids(&next_layout, &mut next_ids);
+    let mut unique = next_ids.clone();
+    unique.sort_unstable();
+    unique.dedup();
+    anyhow::ensure!(
+        unique.len() == next_ids.len(),
+        "shared layout contains a pane more than once"
+    );
+    anyhow::ensure!(
+        context
+            .mappings
+            .iter()
+            .all(|mapping| next_ids.contains(&mapping.pane_id)),
+        "every spawned draft must appear exactly once in the replacement layout"
+    );
+    anyhow::ensure!(
+        next_ids.iter().all(|pane_id| {
+            session.panes.iter().any(|pane| pane.id == *pane_id)
+                || context
+                    .mappings
+                    .iter()
+                    .any(|mapping| mapping.pane_id == *pane_id)
+        }),
+        "shared layout references a pane the daemon does not hold"
+    );
+
+    let mut old_ids = Vec::new();
+    layout_pane_ids(&old_layout, &mut old_ids);
+    let removed = old_ids
+        .into_iter()
+        .filter(|pane_id| !next_ids.contains(pane_id))
+        .collect::<Vec<_>>();
+    let next_active_pane = match request.active_pane {
+        Some(SharedPaneRef::Existing { pane_id }) => pane_id,
+        Some(SharedPaneRef::Draft { draft_id }) => *context
+            .mapping_map
+            .get(&draft_id)
+            .with_context(|| format!("active pane references unknown draft {draft_id}"))?,
+        None => state.presentation.active_pane,
+    };
+    anyhow::ensure!(
+        next_ids.contains(&next_active_pane),
+        "active shared pane is not in the layout"
+    );
+    let retention = *daemon
+        .retention
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    for (draft, pane) in request.panes.iter().zip(provisional.drain(..)) {
+        let mut metadata = draft.metadata.clone();
+        metadata.id = pane.pane_id;
+        metadata.state = crate::protocol::BackgroundPaneState::Running;
+        metadata.exit = None;
+        state.summary.panes.push(metadata);
+        session.panes.push(Pane {
+            id: pane.pane_id,
+            pty: pane.pty,
+            #[cfg(windows)]
+            console_id: pane.console_id,
+            #[cfg(windows)]
+            child_events: pane.child_events,
+            attachment: Attachment::Shared(Vec::new()),
+            size: pane.size,
+            retained: retention.new_retained(pane.size.columns, pane.size.lines),
+            handed_over: None,
+            handover_waiters: 0,
+            exited: false,
+            exit_status: None,
+            pending_input: Vec::new(),
+        });
+    }
+    state
+        .summary
+        .panes
+        .retain(|pane| !removed.contains(&pane.id));
+    session.panes.retain(|pane| !removed.contains(&pane.id));
+    state.presentation.layout = next_layout;
+    state.presentation.active_pane = next_active_pane;
+    state
+        .presentation
+        .minimized_panes
+        .retain(|pane_id| !removed.contains(pane_id));
+    if state
+        .presentation
+        .maximized_pane
+        .is_some_and(|pane_id| removed.contains(&pane_id))
+    {
+        state.presentation.maximized_pane = None;
+    }
+    state.summary.layout = state.presentation.layout.clone();
+    state.summary.active_pane = state.presentation.active_pane;
+    state.revision = state.revision.next();
+    state.last_operation_id = Some(request.operation_id.clone());
+    state.record_receipt(SharedOperationReceipt {
+        operation_id: request.operation_id.clone(),
+        draft_mappings: context.mappings.to_vec(),
+    });
+    clear_shared_size_reports(session);
+    session.summary = state.summary.clone();
+    session.state = state.state.clone();
+    session.shared_state = Some(state.clone());
+    Ok(SharedBatchCommit::Applied {
+        state,
+        removed,
+        mappings: context.mappings.to_vec(),
+    })
+}
+
 pub(super) struct SpawnContext<'a> {
     pub(super) client_process_id: u32,
     pub(super) peer_process_id: Option<u32>,
@@ -351,11 +693,16 @@ pub(super) fn spawn(
             second: Box::new(BackgroundPaneLayout::Pane { pane_id }),
         };
         summary.active_pane = pane_id;
-        let operation = crate::messages::SharedSessionOperation::ReplaceTab {
-            summary,
-            state: state.state.clone(),
-        };
-        state.apply_operation(shared_request.operation_id, &operation)?;
+        state.summary = summary;
+        state.presentation.layout = state.summary.layout.clone();
+        state.presentation.active_pane = pane_id;
+        state.revision = state.revision.next();
+        state.last_operation_id = Some(shared_request.operation_id.clone());
+        state.record_receipt(crate::messages::SharedOperationReceipt {
+            operation_id: shared_request.operation_id,
+            draft_mappings: Vec::new(),
+        });
+        clear_shared_size_reports(session);
         session.summary = state.summary.clone();
         session.state = state.state.clone();
         session.shared_state = Some(state.clone());
@@ -455,6 +802,163 @@ pub(super) fn spawn(
         }
     }
     Ok(SpawnOutcome::Complete)
+}
+
+/// Starts a complete set of draft processes before committing any pane or
+/// layout state. A target-based replacement is rebased against the latest
+/// tree; a whole-layout replacement remains exact-revision by design.
+pub(super) fn spawn_shared_batch(
+    daemon: &Arc<Daemon>,
+    request: crate::messages::SharedSpawnBatchRequest,
+    client_id: ClientId,
+    peer_process_id: Option<u32>,
+    session_secret: Option<&str>,
+    connection: &mut Connection,
+) -> Result<()> {
+    use crate::messages::SharedDraftMapping;
+
+    anyhow::ensure!(
+        !request.panes.is_empty(),
+        "a shared spawn batch must contain a pane"
+    );
+    let mut draft_ids = request
+        .panes
+        .iter()
+        .map(|pane| pane.draft_id)
+        .collect::<Vec<_>>();
+    draft_ids.sort_unstable();
+    anyhow::ensure!(
+        draft_ids.windows(2).all(|pair| pair[0] != pair[1]),
+        "shared draft pane IDs must be unique"
+    );
+
+    {
+        let mut sessions = daemon
+            .sessions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let session = sessions
+            .iter_mut()
+            .find(|session| session.id == request.session_id)
+            .with_context(|| format!("session {} does not exist", request.session_id))?;
+        anyhow::ensure!(
+            session.offered,
+            "session {} is not offered for shared collaboration",
+            request.session_id
+        );
+        anyhow::ensure!(
+            session_control_authorized(session, peer_process_id, session_secret),
+            "shared session {} is not authorized for this client",
+            request.session_id
+        );
+        let state = session
+            .shared_state
+            .clone()
+            .unwrap_or_else(|| {
+                crate::messages::SharedSessionState::new(
+                    session.id,
+                    session.summary.clone(),
+                    session.state.clone(),
+                )
+            })
+            .migrate()?;
+        if let Some(receipt) = state.receipt(&request.operation_id) {
+            return connection.send(&Response::SharedBatchSpawned {
+                mappings: receipt.draft_mappings.clone(),
+                state,
+            });
+        }
+        if request.target_pane_id.is_none() && state.revision != request.base_revision {
+            return connection.send(&Response::SharedConflict { state });
+        }
+    }
+
+    let mut provisional = Vec::with_capacity(request.panes.len());
+    for draft in &request.panes {
+        match start_shared_draft(daemon, draft) {
+            Ok(pane) => provisional.push(pane),
+            Err(error) => {
+                close_provisional_shared_panes(daemon, provisional);
+                return Err(error);
+            }
+        }
+    }
+    let mappings = request
+        .panes
+        .iter()
+        .zip(&provisional)
+        .map(|(draft, pane)| SharedDraftMapping {
+            draft_id: draft.draft_id,
+            pane_id: pane.pane_id,
+        })
+        .collect::<Vec<_>>();
+    let mapping_map = mappings
+        .iter()
+        .map(|mapping| (mapping.draft_id, mapping.pane_id))
+        .collect::<HashMap<_, _>>();
+    let replacement = match resolve_draft_layout(&request.replacement, &mapping_map) {
+        Ok(layout) => layout,
+        Err(error) => {
+            close_provisional_shared_panes(daemon, provisional);
+            return Err(error);
+        }
+    };
+
+    let commit = commit_shared_batch(
+        daemon,
+        &mut provisional,
+        SharedBatchCommitContext {
+            request: &request,
+            mappings: &mappings,
+            mapping_map: &mapping_map,
+            replacement: &replacement,
+            peer_process_id,
+            session_secret,
+        },
+    );
+
+    let commit = match commit {
+        Ok(committed) => committed,
+        Err(error) => {
+            close_provisional_shared_panes(daemon, provisional);
+            return Err(error);
+        }
+    };
+    let (state, removed, response_mappings) = match commit {
+        SharedBatchCommit::Applied {
+            state,
+            removed,
+            mappings,
+        } => (state, removed, mappings),
+        SharedBatchCommit::Retry { state, mappings } => {
+            close_provisional_shared_panes(daemon, provisional);
+            return connection.send(&Response::SharedBatchSpawned { mappings, state });
+        }
+        SharedBatchCommit::Conflict(state) => {
+            close_provisional_shared_panes(daemon, provisional);
+            return connection.send(&Response::SharedConflict { state });
+        }
+    };
+    let added = response_mappings
+        .iter()
+        .map(|mapping| mapping.pane_id)
+        .collect();
+    broadcast_except(
+        daemon,
+        &Event::SharedPanesChanged {
+            session_id: request.session_id,
+            added,
+            removed,
+            state: state.clone(),
+        },
+        &client_id,
+    );
+    publish(daemon);
+    wake_drain(daemon);
+    connection.send(&Response::SharedBatchSpawned {
+        mappings: response_mappings,
+        state,
+    })
 }
 
 pub(super) fn resume(
@@ -957,9 +1461,10 @@ pub(super) fn shared_snapshot(
     connection.send(&Response::SharedSnapshot { state })
 }
 
-/// Applies one exact-revision collaboration operation. The sessions mutex is
-/// the daemon's serialization point: a stale caller receives the current full
-/// state and must let its local edit be discarded rather than rebased.
+/// Applies one collaboration operation. The sessions mutex is the daemon's
+/// serialization point: whole-layout replacements remain exact-revision,
+/// while operations naming panes or dividers are validated against and
+/// applied to the latest canonical tree.
 pub(super) fn apply_shared(
     daemon: &Arc<Daemon>,
     request: crate::messages::SharedSessionOperationRequest,
@@ -991,18 +1496,28 @@ pub(super) fn apply_shared(
             "shared session {} is not authorized for this client",
             request.session_id
         );
-        let mut state = session.shared_state.clone().unwrap_or_else(|| {
-            crate::messages::SharedSessionState::new(
-                session.id,
-                session.summary.clone(),
-                session.state.clone(),
-            )
-        });
-        if state.last_operation_id.as_ref() == Some(&request.operation_id) {
+        let mut state = session
+            .shared_state
+            .clone()
+            .unwrap_or_else(|| {
+                crate::messages::SharedSessionState::new(
+                    session.id,
+                    session.summary.clone(),
+                    session.state.clone(),
+                )
+            })
+            .migrate()?;
+        if state.receipt(&request.operation_id).is_some() {
             drop(sessions);
             return connection.send(&Response::SharedOperationApplied { state });
         }
-        if state.revision != request.base_revision {
+        let exact_revision = matches!(
+            &request.operation,
+            crate::messages::SharedSessionOperation::ReplaceTab { .. }
+                | crate::messages::SharedSessionOperation::SetLayout { .. }
+                | crate::messages::SharedSessionOperation::SetTabState { .. }
+        );
+        if exact_revision && state.revision != request.base_revision {
             drop(sessions);
             return connection.send(&Response::SharedConflict { state });
         }
@@ -1017,7 +1532,12 @@ pub(super) fn apply_shared(
                 "shared tab state referenced a pane the daemon does not hold"
             );
         }
+        if state.validate_operation(&request.operation).is_err() {
+            drop(sessions);
+            return connection.send(&Response::SharedConflict { state });
+        }
         state.apply_operation(request.operation_id, &request.operation)?;
+        clear_shared_size_reports(session);
         if let Some(pane_id) = close_pane_id {
             let index = session
                 .panes
@@ -1038,9 +1558,10 @@ pub(super) fn apply_shared(
     drop(removed_pane);
     let event = if is_close {
         let pane_id = close_pane_id.expect("is_close records the closed pane");
-        Event::SharedPaneRemoved {
+        Event::SharedPanesChanged {
             session_id: request.session_id,
-            pane_id,
+            added: Vec::new(),
+            removed: vec![pane_id],
             state: state.clone(),
         }
     } else {
@@ -1298,6 +1819,7 @@ pub(super) fn attestation_needed(
     }
     let session_id = match request {
         Request::SpawnShared(request) => Some(request.session_id),
+        Request::SpawnSharedBatch(request) => Some(request.session_id),
         Request::ApplyShared(request) => Some(request.session_id),
         Request::SharedSnapshot { session_id } | Request::LeaveShared { session_id } => {
             Some(*session_id)
@@ -1393,20 +1915,45 @@ pub(super) fn pane_is_held_by(pane: &Pane, client_process_id: u32) -> bool {
 
 /// Applies a client's new size to a pane's terminal, recording it as the
 /// pane's size so a later shared attach starts from it.
-pub(super) fn resize_pane(
-    daemon: &Arc<Daemon>,
-    session_id: u64,
-    pane_id: u64,
-    columns: u16,
-    lines: u16,
-    peer_process_id: Option<u32>,
-    session_secret: Option<&str>,
-) -> Result<()> {
+pub(super) struct ResizePaneContext<'a> {
+    pub(super) session_id: u64,
+    pub(super) pane_id: u64,
+    pub(super) revision: Option<crate::messages::SessionRevision>,
+    pub(super) columns: u16,
+    pub(super) lines: u16,
+    pub(super) peer_process_id: Option<u32>,
+    pub(super) session_secret: Option<&'a str>,
+}
+
+pub(super) fn resize_pane(daemon: &Arc<Daemon>, context: ResizePaneContext<'_>) -> Result<()> {
     use alacritty_terminal::event::OnResize as _;
+    let ResizePaneContext {
+        session_id,
+        pane_id,
+        revision,
+        columns,
+        lines,
+        peer_process_id,
+        session_secret,
+    } = context;
     let mut sessions = daemon.sessions.lock().unwrap();
     let Some(session) = sessions.iter_mut().find(|session| session.id == session_id) else {
         anyhow::bail!("session {session_id} does not exist");
     };
+    if let Some(revision) = revision {
+        let current = session
+            .shared_state
+            .as_ref()
+            .map_or(crate::messages::SessionRevision::INITIAL, |state| {
+                state.revision
+            });
+        anyhow::ensure!(
+            revision == current,
+            "stale shared size report for revision {}; current revision is {}",
+            revision.0,
+            current.0
+        );
+    }
     if session.authentication.is_some()
         && !protected_holder_authorized(session, peer_process_id)
         && !session_control_authorized(session, peer_process_id, session_secret)

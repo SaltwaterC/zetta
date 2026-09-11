@@ -1,6 +1,60 @@
 use super::*;
 use crate::config::PaneSplitCommand;
 
+#[cfg(feature = "zmux")]
+#[test]
+fn complete_shared_batch_layout_preserves_template_axes_ratios_and_drafts() {
+    let layout = PaneLayout::Split {
+        axis: SplitAxis::Vertical,
+        first_ratio: 200,
+        first: Box::new(PaneLayout::Pane(1)),
+        second: Box::new(PaneLayout::Split {
+            axis: SplitAxis::Horizontal,
+            first_ratio: 420,
+            first: Box::new(PaneLayout::Pane(2)),
+            second: Box::new(PaneLayout::Pane(3)),
+        }),
+    };
+    let drafts = HashSet::from([2, 3]);
+    let mapped =
+        shared_complete_draft_layout(&layout, &drafts, &HashMap::from([(1, 101)])).unwrap();
+
+    let zmux::messages::SharedDraftLayout::Split {
+        axis,
+        first_ratio,
+        first,
+        second,
+    } = mapped
+    else {
+        panic!("template root was not preserved")
+    };
+    assert_eq!(axis, "vertical");
+    assert_eq!(first_ratio, 200);
+    assert!(matches!(
+        *first,
+        zmux::messages::SharedDraftLayout::Existing { pane_id: 101 }
+    ));
+    let zmux::messages::SharedDraftLayout::Split {
+        axis,
+        first_ratio,
+        first,
+        second,
+    } = *second
+    else {
+        panic!("nested template split was not preserved")
+    };
+    assert_eq!(axis, "horizontal");
+    assert_eq!(first_ratio, 420);
+    assert!(matches!(
+        *first,
+        zmux::messages::SharedDraftLayout::Draft { draft_id: 2 }
+    ));
+    assert!(matches!(
+        *second,
+        zmux::messages::SharedDraftLayout::Draft { draft_id: 3 }
+    ));
+}
+
 /// The exact race a rapid new-tab-then-close can hit: the tab is gone before
 /// the pane's spawn resolves and the multiplexer tells this process about it.
 /// Without releasing it here, the pane stays marked as held by this process

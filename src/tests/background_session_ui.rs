@@ -352,9 +352,8 @@ fn an_arbitrated_size_is_only_applied_when_it_differs() {
         )
     };
 
-    // Two windows tiled to the same size by a compositor is the common case, and
-    // resizing one of them to the size it already had moves the user's window for
-    // no reason at all.
+    // Two windows tiled to the same size by a compositor is the common case;
+    // applying an identical shared viewport is needless work.
     assert_eq!(
         shared_size_action(true, Some(bounds(98., 51.)), 98, 51),
         SharedSizeAction::AlreadyMatches
@@ -372,7 +371,7 @@ fn an_arbitrated_size_is_only_applied_when_it_differs() {
 
     // Before the first layout a terminal reports the placeholder a
     // `TerminalContent` starts with. Treating that as the window's real size is
-    // what resized a window that already matched: the placeholder is 100x6, so
+    // what imposed the wrong shared viewport: the placeholder is 100x6, so
     // 98x51 looked like a large change.
     assert_eq!(
         TerminalBounds::default().num_columns(),

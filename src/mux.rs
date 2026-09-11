@@ -36,11 +36,8 @@ use terminal::{ConsolePalette, PtyControl, PtyHandover, PtyProvider, PtySpawnReq
 use zmux::persistence::PersistenceOptions;
 use zmux::{
     auth::SessionSecret,
-    client::{Client, ExitReporters, PaneSignals, SharedSpawnedPane},
-    messages::{
-        SessionRevision, SharedSessionOperation, SharedSessionOperationRequest, SharedSpawnRequest,
-        SpawnRequest, TerminalSize,
-    },
+    client::{Client, ExitReporters, PaneSignals},
+    messages::{SharedSessionOperation, SharedSessionOperationRequest, SpawnRequest, TerminalSize},
     retention::Retention,
 };
 
@@ -410,39 +407,15 @@ impl MuxPtyProvider {
         &self.runtime
     }
 
-    pub(crate) fn spawn_shared(
-        &self,
-        request: PtySpawnRequest,
-        base_revision: SessionRevision,
-    ) -> Result<SharedSpawnedPane> {
-        let pane = self.runtime.client.spawn_shared(SharedSpawnRequest {
-            session_id: self
-                .session
-                .id()
-                .context("shared pane has no multiplexer session")?,
-            base_revision,
-            operation_id: self.runtime.client.next_shared_operation_id(),
-            program: request.program,
-            args: request.args,
-            env: request.env.into_iter().collect(),
-            working_directory: request.working_directory,
-            size: TerminalSize {
-                columns: 80,
-                lines: 24,
-                cell_width: 0,
-                cell_height: 0,
-            },
-            console_palette: request.console_palette,
-        })?;
-        self.session.set_id(pane.pane.session_id());
+    pub(crate) fn record_shared_opened(&self, session_id: u64, pane_id: u64) {
+        self.session.set_id(session_id);
         *self
             .opened
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(OpenedPane {
-            session_id: pane.pane.session_id(),
-            pane_id: pane.pane.pane_id(),
+            session_id,
+            pane_id,
         });
-        Ok(pane)
     }
 
     pub(crate) fn session_id(&self) -> Option<u64> {

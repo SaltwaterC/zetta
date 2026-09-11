@@ -154,6 +154,19 @@ pub(super) fn serve(daemon: &Arc<Daemon>, stream: Stream, token: &str) -> Result
                 }),
             }
         }
+        Request::SpawnSharedBatch(request) => match spawn_shared_batch(
+            daemon,
+            request,
+            client_id,
+            peer_process_id,
+            session_secret.as_deref(),
+            &mut connection,
+        ) {
+            Ok(()) => Ok(()),
+            Err(error) => connection.send(&Response::Error {
+                message: format!("{error:#}"),
+            }),
+        },
         Request::ApplyShared(request) => apply_shared(
             daemon,
             request,
@@ -180,6 +193,7 @@ pub(super) fn serve(daemon: &Arc<Daemon>, stream: Stream, token: &str) -> Result
             session_id,
             pane_id,
             secret,
+            force_shared,
         } => attach(
             daemon,
             session_id,
@@ -188,6 +202,7 @@ pub(super) fn serve(daemon: &Arc<Daemon>, stream: Stream, token: &str) -> Result
             envelope.client_process_id,
             client_id.clone(),
             stream_only,
+            force_shared,
             &mut connection,
         ),
         // A screen checkpoint from the client showing the pane. Its own
@@ -307,16 +322,20 @@ pub(super) fn serve(daemon: &Arc<Daemon>, stream: Stream, token: &str) -> Result
         Request::Resize {
             session_id,
             pane_id,
+            revision,
             columns,
             lines,
         } => match resize_pane(
             daemon,
-            session_id,
-            pane_id,
-            columns,
-            lines,
-            peer_process_id,
-            session_secret.as_deref(),
+            ResizePaneContext {
+                session_id,
+                pane_id,
+                revision,
+                columns,
+                lines,
+                peer_process_id,
+                session_secret: session_secret.as_deref(),
+            },
         ) {
             Ok(()) => connection.send(&Response::Ok),
             Err(error) => connection.send(&Response::Error {

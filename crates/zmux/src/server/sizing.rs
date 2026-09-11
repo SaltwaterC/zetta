@@ -152,6 +152,7 @@ pub(super) fn record_handover_output(pane: &mut Pane, chunk: &[u8]) {
 pub(super) fn broadcast_size(
     session_id: u64,
     pane_id: u64,
+    revision: crate::messages::SessionRevision,
     attachment: &mut Attachment,
     handover_waiters: usize,
     columns: u16,
@@ -163,6 +164,7 @@ pub(super) fn broadcast_size(
     let event = Event::Size {
         session_id,
         pane_id,
+        revision,
         columns,
         lines,
     };

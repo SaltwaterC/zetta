@@ -58,6 +58,7 @@ fn requests_are_tagged_by_name_on_the_wire() {
         session_id: 3,
         pane_id: Some(4),
         secret: None,
+        force_shared: false,
     })
     .unwrap();
     assert_eq!(attach["request"], "attach");
@@ -236,6 +237,19 @@ fn shared_state_rejects_stale_layout_references_and_removes_a_pane() {
 
     let invalid = SharedSessionOperation::SetFocus { pane_id: 99 };
     assert!(state.validate_operation(&invalid).is_err());
+
+    let mut invalid_layout = shared_summary().layout;
+    if let BackgroundPaneLayout::Split { first_ratio, .. } = &mut invalid_layout {
+        *first_ratio = crate::protocol::BACKGROUND_PANE_SPLIT_RATIO_SCALE;
+    }
+    let state = SharedSessionState::new(4, shared_summary(), serde_json::Value::Null);
+    assert!(
+        state
+            .validate_operation(&SharedSessionOperation::SetLayout {
+                layout: invalid_layout,
+            })
+            .is_err()
+    );
 }
 
 #[test]
@@ -252,6 +266,123 @@ fn shared_messages_round_trip_revision_and_operation_id() {
         Request::ApplyShared(SharedSessionOperationRequest {
             base_revision: SessionRevision(8),
             operation_id: SharedOperationId { sequence: 12, .. },
+            ..
+        })
+    ));
+}
+
+#[test]
+fn version_one_shared_state_migrates_geometry_without_losing_panes() {
+    let summary = shared_summary();
+    let wire = serde_json::json!({
+        "version": 1,
+        "session_id": 4,
+        "revision": 7,
+        "last_operation_id": null,
+        "summary": summary,
+        "state": {"opaque": true}
+    });
+
+    let state: SharedSessionState = serde_json::from_value(wire).unwrap();
+
+    assert_eq!(state.version, SHARED_SESSION_STATE_VERSION);
+    assert_eq!(state.revision, SessionRevision(7));
+    assert_eq!(state.presentation.layout, state.summary.layout);
+    assert_eq!(state.presentation.active_pane, 10);
+    assert_eq!(state.pane_ids().collect::<Vec<_>>(), vec![10, 11]);
+}
+
+#[test]
+fn typed_geometry_operations_mutate_only_canonical_presentation() {
+    let mut state = SharedSessionState::new(4, shared_summary(), serde_json::json!({"tab": true}));
+    let opaque = state.state.clone();
+    state
+        .apply_operation(
+            SharedOperationId::new(ClientId::new("geometry"), 1),
+            &SharedSessionOperation::SetSplitRatio {
+                first_pane_id: 10,
+                second_pane_id: 11,
+                first_ratio: 200,
+            },
+        )
+        .unwrap();
+    state
+        .apply_operation(
+            SharedOperationId::new(ClientId::new("geometry"), 2),
+            &SharedSessionOperation::SwapPanes {
+                first_pane_id: 10,
+                second_pane_id: 11,
+            },
+        )
+        .unwrap();
+    state
+        .apply_operation(
+            SharedOperationId::new(ClientId::new("geometry"), 3),
+            &SharedSessionOperation::SetMaximized { pane_id: Some(11) },
+        )
+        .unwrap();
+
+    assert_eq!(state.state, opaque);
+    assert_eq!(state.presentation.maximized_pane, Some(11));
+    assert_eq!(state.summary.layout, state.presentation.layout);
+    assert!(matches!(
+        state.presentation.layout,
+        BackgroundPaneLayout::Split {
+            first_ratio: 200,
+            first,
+            second,
+            ..
+        } if matches!(*first, BackgroundPaneLayout::Pane { pane_id: 11 })
+            && matches!(*second, BackgroundPaneLayout::Pane { pane_id: 10 })
+    ));
+    assert_eq!(
+        state.operation_receipts.len(),
+        1,
+        "one receipt is retained per client"
+    );
+    assert_eq!(state.operation_receipts[0].operation_id.sequence, 3);
+}
+
+#[test]
+fn shared_batch_wire_carries_exact_layout_and_draft_mapping() {
+    let request = Request::SpawnSharedBatch(SharedSpawnBatchRequest {
+        session_id: 4,
+        base_revision: SessionRevision(2),
+        operation_id: SharedOperationId::new(ClientId::new("batch"), 9),
+        target_pane_id: Some(10),
+        replacement: SharedDraftLayout::Split {
+            axis: "vertical".to_owned(),
+            first_ratio: 240,
+            first: Box::new(SharedDraftLayout::Draft { draft_id: 1 }),
+            second: Box::new(SharedDraftLayout::Existing { pane_id: 10 }),
+        },
+        panes: vec![SharedPaneDraft {
+            draft_id: 1,
+            program: Some("sh".to_owned()),
+            args: vec!["-l".to_owned()],
+            env: HashMap::new(),
+            working_directory: Some(PathBuf::from("/tmp")),
+            size: TerminalSize {
+                columns: 80,
+                lines: 24,
+                cell_width: 0,
+                cell_height: 0,
+            },
+            console_palette: ConsolePalette::default(),
+            metadata: shared_summary().panes[0].clone(),
+        }],
+        active_pane: Some(SharedPaneRef::Draft { draft_id: 1 }),
+    });
+    let parsed: Request = serde_json::from_value(serde_json::to_value(request).unwrap()).unwrap();
+
+    assert!(matches!(
+        parsed,
+        Request::SpawnSharedBatch(SharedSpawnBatchRequest {
+            target_pane_id: Some(10),
+            replacement: SharedDraftLayout::Split {
+                first_ratio: 240,
+                ..
+            },
             ..
         })
     ));

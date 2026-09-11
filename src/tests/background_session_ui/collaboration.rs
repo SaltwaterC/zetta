@@ -16,12 +16,9 @@ fn pane_summary(id: u64) -> BackgroundPaneSummary {
 }
 
 fn shared_state(session_id: u64, revision: u64) -> SharedSessionState {
-    SharedSessionState {
-        version: zmux::messages::SHARED_SESSION_STATE_VERSION,
+    let mut state = SharedSessionState::new(
         session_id,
-        revision: zmux::messages::SessionRevision(revision),
-        last_operation_id: None,
-        summary: BackgroundSessionSummary {
+        BackgroundSessionSummary {
             id: session_id,
             title: "shared".to_owned(),
             authentication_required: false,
@@ -32,8 +29,10 @@ fn shared_state(session_id: u64, revision: u64) -> SharedSessionState {
             scoped_to: None,
             key_envelope: None,
         },
-        state: serde_json::Value::Null,
-    }
+        serde_json::Value::Null,
+    );
+    state.revision = zmux::messages::SessionRevision(revision);
+    state
 }
 
 fn local_tab(tab_id: u64, pane_id: u64) -> Tab {
@@ -176,4 +175,110 @@ fn pane_events_update_mappings_and_watcher_lifecycle_is_generation_safe() {
     assert_eq!(coordinator.local_pane_id(9, 42), None);
     coordinator.end_watch(9, second_watch);
     assert!(!coordinator.watch_is_current(9, second_watch));
+}
+
+#[test]
+fn local_layout_diffs_choose_targeted_ratio_and_swap_operations() {
+    let current = BackgroundPaneLayout::Split {
+        axis: "vertical".to_owned(),
+        first_ratio: 200,
+        first: Box::new(BackgroundPaneLayout::Pane { pane_id: 10 }),
+        second: Box::new(BackgroundPaneLayout::Pane { pane_id: 11 }),
+    };
+    let resized = BackgroundPaneLayout::Split {
+        axis: "vertical".to_owned(),
+        first_ratio: 300,
+        first: Box::new(BackgroundPaneLayout::Pane { pane_id: 10 }),
+        second: Box::new(BackgroundPaneLayout::Pane { pane_id: 11 }),
+    };
+    assert!(matches!(
+        shared_layout_operation(&current, &resized, 10),
+        Some(zmux::messages::SharedSessionOperation::SetSplitRatio {
+            first_pane_id: 10,
+            second_pane_id: 11,
+            first_ratio: 300,
+        })
+    ));
+
+    let swapped = BackgroundPaneLayout::Split {
+        axis: "vertical".to_owned(),
+        first_ratio: 200,
+        first: Box::new(BackgroundPaneLayout::Pane { pane_id: 11 }),
+        second: Box::new(BackgroundPaneLayout::Pane { pane_id: 10 }),
+    };
+    assert!(matches!(
+        shared_layout_operation(&current, &swapped, 10),
+        Some(zmux::messages::SharedSessionOperation::SwapPanes {
+            first_pane_id: 10,
+            second_pane_id: 11,
+        })
+    ));
+}
+
+#[test]
+fn local_layout_diffs_choose_directional_move_and_rotation_operations() {
+    let current = BackgroundPaneLayout::Split {
+        axis: "vertical".to_owned(),
+        first_ratio: 300,
+        first: Box::new(BackgroundPaneLayout::Pane { pane_id: 10 }),
+        second: Box::new(BackgroundPaneLayout::Split {
+            axis: "horizontal".to_owned(),
+            first_ratio: 400,
+            first: Box::new(BackgroundPaneLayout::Pane { pane_id: 11 }),
+            second: Box::new(BackgroundPaneLayout::Pane { pane_id: 12 }),
+        }),
+    };
+    let moved = BackgroundPaneLayout::Split {
+        axis: "vertical".to_owned(),
+        first_ratio: 700,
+        first: Box::new(BackgroundPaneLayout::Split {
+            axis: "horizontal".to_owned(),
+            first_ratio: 400,
+            first: Box::new(BackgroundPaneLayout::Pane { pane_id: 11 }),
+            second: Box::new(BackgroundPaneLayout::Pane { pane_id: 12 }),
+        }),
+        second: Box::new(BackgroundPaneLayout::Pane { pane_id: 10 }),
+    };
+    assert!(matches!(
+        shared_layout_operation(&current, &moved, 11),
+        Some(zmux::messages::SharedSessionOperation::MovePane {
+            pane_id: 11,
+            direction: zmux::messages::SharedPaneDirection::Left,
+        })
+    ));
+
+    let pair = BackgroundPaneLayout::Split {
+        axis: "horizontal".to_owned(),
+        first_ratio: 300,
+        first: Box::new(BackgroundPaneLayout::Pane { pane_id: 10 }),
+        second: Box::new(BackgroundPaneLayout::Pane { pane_id: 11 }),
+    };
+    let rotated = BackgroundPaneLayout::Split {
+        axis: "vertical".to_owned(),
+        first_ratio: 700,
+        first: Box::new(BackgroundPaneLayout::Pane { pane_id: 11 }),
+        second: Box::new(BackgroundPaneLayout::Pane { pane_id: 10 }),
+    };
+    assert!(matches!(
+        shared_layout_operation(&pair, &rotated, 10),
+        Some(zmux::messages::SharedSessionOperation::RotateSplit {
+            pane_id: 10,
+            direction: zmux::messages::SharedRotationDirection::Clockwise,
+        })
+    ));
+}
+
+#[test]
+fn shared_geometry_queue_is_single_flight_and_remembers_pending_work() {
+    let mut coordinator = SharedSessionCoordinator::default();
+    coordinator
+        .bind(9, 100, shared_state(9, 1), [(41, 7)])
+        .unwrap();
+
+    let generation = coordinator.schedule_sync(9).unwrap();
+    assert!(!coordinator.may_report_size(9));
+    assert_eq!(coordinator.schedule_sync(9), None);
+    assert!(coordinator.finish_sync(9, generation));
+    assert!(coordinator.may_report_size(9));
+    assert!(coordinator.schedule_sync(9).is_some());
 }

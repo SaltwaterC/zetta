@@ -444,6 +444,7 @@ fn a_shared_reader_keeps_coalesced_replay_events_and_full_duplex_input() {
     let size = Event::Size {
         session_id: 1,
         pane_id: 2,
+        revision: SessionRevision::INITIAL,
         columns: 72,
         lines: 20,
     };
@@ -523,6 +524,7 @@ fn an_idle_shared_reader_does_not_delay_input_writes() {
         Request::Resize {
             session_id: 1,
             pane_id: 2,
+            revision: Some(SessionRevision::INITIAL),
             columns: 80,
             lines: 24,
         }
@@ -555,13 +557,14 @@ fn a_shared_reader_replays_a_replacement_before_framed_events_without_duplicatio
         .sizes
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .push((70, 20));
+        .push((SessionRevision::INITIAL, 70, 20));
     shared.replace_connection_from(&replacement).unwrap();
 
     let output = b"new-output";
     let mut wire = crate::transport::encode_message(&Event::Size {
         session_id: 1,
         pane_id: 2,
+        revision: SessionRevision::INITIAL,
         columns: 72,
         lines: 22,
     })

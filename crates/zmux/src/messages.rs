@@ -8,18 +8,19 @@
 use std::{collections::HashMap, path::PathBuf};
 
 use alacritty_terminal::tty::ConsolePalette;
+use anyhow::Context as _;
 use serde::{Deserialize, Serialize};
 
 use crate::protocol::{BackgroundPaneLayout, BackgroundSessionSummary, RestorableSessionRecord};
 
 /// The wire format, and what a client and a multiplexer compare before they
 /// trust each other to understand one another.
-pub const PROTOCOL_VERSION: u32 = 4;
+pub const PROTOCOL_VERSION: u32 = 5;
 
 /// Version of the durable collaboration envelope. This is independent from
 /// [`PROTOCOL_VERSION`]: a daemon upgrade may keep a session state produced by
 /// an older binary even when the live wire protocol has moved on.
-pub const SHARED_SESSION_STATE_VERSION: u32 = 1;
+pub const SHARED_SESSION_STATE_VERSION: u32 = 2;
 
 /// Maximum encoded image size accepted by the image-paste request.
 pub const MAX_IMAGE_BYTES: usize = 64 * 1024 * 1024;
@@ -135,7 +136,7 @@ impl SharedOperationId {
 /// Pane IDs in `summary` are multiplexer IDs, never a Zetta window's local
 /// entity IDs. `state` remains an opaque versioned tab payload: the daemon
 /// persists and broadcasts it, while each Zetta process interprets it locally.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SharedSessionState {
     pub version: u32,
@@ -143,8 +144,87 @@ pub struct SharedSessionState {
     pub revision: SessionRevision,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_operation_id: Option<SharedOperationId>,
+    /// The most recent committed operation for each logical client. This is
+    /// enough to make a lost-response retry idempotent without retaining an
+    /// unbounded transaction log.
+    #[serde(default)]
+    pub operation_receipts: Vec<SharedOperationReceipt>,
     pub summary: BackgroundSessionSummary,
+    /// Geometry and visibility that every viewer renders identically.
+    ///
+    /// Kept outside the opaque Zetta payload so the daemon can validate and
+    /// rebase geometry operations without understanding application state.
+    #[serde(default)]
+    pub presentation: SharedPresentationState,
     pub state: serde_json::Value,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SharedSessionStateWire {
+    version: u32,
+    session_id: u64,
+    revision: SessionRevision,
+    #[serde(default)]
+    last_operation_id: Option<SharedOperationId>,
+    #[serde(default)]
+    operation_receipts: Vec<SharedOperationReceipt>,
+    summary: BackgroundSessionSummary,
+    #[serde(default)]
+    presentation: SharedPresentationState,
+    state: serde_json::Value,
+}
+
+impl<'de> Deserialize<'de> for SharedSessionState {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::Error as _;
+        let wire = SharedSessionStateWire::deserialize(deserializer)?;
+        SharedSessionState {
+            version: wire.version,
+            session_id: wire.session_id,
+            revision: wire.revision,
+            last_operation_id: wire.last_operation_id,
+            operation_receipts: wire.operation_receipts,
+            summary: wire.summary,
+            presentation: wire.presentation,
+            state: wire.state,
+        }
+        .migrate()
+        .map_err(D::Error::custom)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SharedOperationReceipt {
+    pub operation_id: SharedOperationId,
+    #[serde(default)]
+    pub draft_mappings: Vec<SharedDraftMapping>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SharedPresentationState {
+    pub layout: BackgroundPaneLayout,
+    pub active_pane: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub maximized_pane: Option<u64>,
+    #[serde(default)]
+    pub minimized_panes: Vec<u64>,
+}
+
+impl Default for SharedPresentationState {
+    fn default() -> Self {
+        Self {
+            layout: BackgroundPaneLayout::Pane { pane_id: 0 },
+            active_pane: 0,
+            maximized_pane: None,
+            minimized_panes: Vec::new(),
+        }
+    }
 }
 
 impl SharedSessionState {
@@ -153,14 +233,46 @@ impl SharedSessionState {
         summary: BackgroundSessionSummary,
         state: serde_json::Value,
     ) -> Self {
+        let presentation = SharedPresentationState {
+            layout: summary.layout.clone(),
+            active_pane: summary.active_pane,
+            maximized_pane: None,
+            minimized_panes: Vec::new(),
+        };
         Self {
             version: SHARED_SESSION_STATE_VERSION,
             session_id,
             revision: SessionRevision::INITIAL,
             last_operation_id: None,
+            operation_receipts: Vec::new(),
             summary,
+            presentation,
             state,
         }
+    }
+
+    /// Upgrades the durable v1 envelope without touching its live panes.
+    pub fn migrate(mut self) -> anyhow::Result<Self> {
+        match self.version {
+            SHARED_SESSION_STATE_VERSION => {}
+            1 => {
+                self.presentation = SharedPresentationState {
+                    layout: self.summary.layout.clone(),
+                    active_pane: self.summary.active_pane,
+                    maximized_pane: None,
+                    minimized_panes: Vec::new(),
+                };
+                self.version = SHARED_SESSION_STATE_VERSION;
+            }
+            version => anyhow::bail!("unsupported shared session state version {version}"),
+        }
+        self.sync_summary_presentation();
+        Ok(self)
+    }
+
+    fn sync_summary_presentation(&mut self) {
+        self.summary.layout = self.presentation.layout.clone();
+        self.summary.active_pane = self.presentation.active_pane;
     }
 
     pub fn pane_ids(&self) -> impl Iterator<Item = u64> + '_ {
@@ -181,14 +293,82 @@ impl SharedSessionState {
                     self.session_id
                 );
                 validate_summary_panes(summary)?;
+                let mut current = self.pane_ids().collect::<Vec<_>>();
+                let mut replacement = summary.panes.iter().map(|pane| pane.id).collect::<Vec<_>>();
+                current.sort_unstable();
+                replacement.sort_unstable();
+                anyhow::ensure!(
+                    current == replacement,
+                    "whole-tab state cannot add or remove live shared panes"
+                );
             }
             SharedSessionOperation::SetLayout { layout } => {
                 validate_layout_panes(layout, |pane_id| self.contains_pane(pane_id))?;
+                let mut current = self.pane_ids().collect::<Vec<_>>();
+                let mut replacement = Vec::new();
+                collect_layout_pane_ids(layout, &mut replacement);
+                current.sort_unstable();
+                replacement.sort_unstable();
+                anyhow::ensure!(
+                    current == replacement,
+                    "shared layout must contain every pane exactly once"
+                );
             }
-            SharedSessionOperation::SetFocus { pane_id } => {
+            SharedSessionOperation::SetFocus { pane_id }
+            | SharedSessionOperation::SetMaximized {
+                pane_id: Some(pane_id),
+            }
+            | SharedSessionOperation::SetMinimized { pane_id, .. } => {
                 anyhow::ensure!(
                     self.contains_pane(*pane_id),
                     "shared operation targets missing pane {pane_id}"
+                );
+            }
+            SharedSessionOperation::SetMaximized { pane_id: None } => {}
+            SharedSessionOperation::SetSplitRatio {
+                first_pane_id,
+                second_pane_id,
+                first_ratio,
+            } => {
+                anyhow::ensure!(
+                    *first_ratio > 0
+                        && *first_ratio < crate::protocol::BACKGROUND_PANE_SPLIT_RATIO_SCALE,
+                    "invalid split ratio"
+                );
+                find_divider(&self.presentation.layout, *first_pane_id, *second_pane_id)
+                    .context("shared divider no longer exists")?;
+            }
+            SharedSessionOperation::SwapPanes {
+                first_pane_id,
+                second_pane_id,
+            } => {
+                anyhow::ensure!(
+                    first_pane_id != second_pane_id,
+                    "cannot swap a pane with itself"
+                );
+                anyhow::ensure!(
+                    self.contains_pane(*first_pane_id),
+                    "shared operation targets missing pane {first_pane_id}"
+                );
+                anyhow::ensure!(
+                    self.contains_pane(*second_pane_id),
+                    "shared operation targets missing pane {second_pane_id}"
+                );
+            }
+            SharedSessionOperation::MovePane { pane_id, direction } => {
+                anyhow::ensure!(
+                    self.contains_pane(*pane_id),
+                    "shared operation targets missing pane {pane_id}"
+                );
+                anyhow::ensure!(
+                    can_move_layout_pane(&self.presentation.layout, *pane_id, *direction),
+                    "shared pane {pane_id} can no longer move {direction:?}"
+                );
+            }
+            SharedSessionOperation::RotateSplit { pane_id, direction } => {
+                anyhow::ensure!(
+                    can_rotate_layout_pane(&self.presentation.layout, *pane_id, *direction),
+                    "shared split for pane {pane_id} no longer exists"
                 );
             }
             SharedSessionOperation::SetTabState { .. } => {}
@@ -225,10 +405,48 @@ impl SharedSessionState {
                 self.state = state.clone();
             }
             SharedSessionOperation::SetLayout { layout } => {
-                self.summary.layout = layout.clone();
+                self.presentation.layout = layout.clone();
             }
             SharedSessionOperation::SetFocus { pane_id } => {
-                self.summary.active_pane = *pane_id;
+                self.presentation.active_pane = *pane_id;
+            }
+            SharedSessionOperation::SetMaximized { pane_id } => {
+                self.presentation.maximized_pane = *pane_id;
+            }
+            SharedSessionOperation::SetMinimized { pane_id, minimized } => {
+                self.presentation.minimized_panes.retain(|id| id != pane_id);
+                if *minimized {
+                    self.presentation.minimized_panes.push(*pane_id);
+                }
+            }
+            SharedSessionOperation::SetSplitRatio {
+                first_pane_id,
+                second_pane_id,
+                first_ratio,
+            } => {
+                *find_divider_mut(
+                    &mut self.presentation.layout,
+                    *first_pane_id,
+                    *second_pane_id,
+                )
+                .expect("validate_operation checked the divider") = *first_ratio;
+            }
+            SharedSessionOperation::SwapPanes {
+                first_pane_id,
+                second_pane_id,
+            } => swap_layout_panes(
+                &mut self.presentation.layout,
+                *first_pane_id,
+                *second_pane_id,
+            ),
+            SharedSessionOperation::MovePane { pane_id, direction } => {
+                let moved = move_layout_pane(&mut self.presentation.layout, *pane_id, *direction);
+                debug_assert!(moved, "validate_operation checked the move");
+            }
+            SharedSessionOperation::RotateSplit { pane_id, direction } => {
+                let rotated =
+                    rotate_layout_pane(&mut self.presentation.layout, *pane_id, *direction);
+                debug_assert!(rotated, "validate_operation checked the rotation");
             }
             SharedSessionOperation::SetTabState { state } => {
                 self.state = state.clone();
@@ -253,13 +471,40 @@ impl SharedSessionState {
                 self.summary.layout = remove_pane_from_layout(&self.summary.layout, *pane_id)
                     .expect("a multi-pane layout remains valid after one pane is removed");
                 if self.summary.active_pane == *pane_id {
-                    self.summary.active_pane = self.summary.panes[0].id;
+                    self.presentation.active_pane = self.summary.panes[0].id;
+                }
+                self.presentation.layout =
+                    remove_pane_from_layout(&self.presentation.layout, *pane_id)
+                        .expect("a multi-pane layout remains valid after one pane is removed");
+                self.presentation.minimized_panes.retain(|id| id != pane_id);
+                if self.presentation.maximized_pane == Some(*pane_id) {
+                    self.presentation.maximized_pane = None;
                 }
             }
         }
+        self.sync_summary_presentation();
         self.revision = self.revision.next();
         self.last_operation_id = Some(operation_id);
+        self.record_receipt(SharedOperationReceipt {
+            operation_id: self
+                .last_operation_id
+                .clone()
+                .expect("operation id was set"),
+            draft_mappings: Vec::new(),
+        });
         Ok(())
+    }
+
+    pub fn receipt(&self, operation_id: &SharedOperationId) -> Option<&SharedOperationReceipt> {
+        self.operation_receipts
+            .iter()
+            .find(|receipt| &receipt.operation_id == operation_id)
+    }
+
+    pub fn record_receipt(&mut self, receipt: SharedOperationReceipt) {
+        self.operation_receipts
+            .retain(|existing| existing.operation_id.client_id != receipt.operation_id.client_id);
+        self.operation_receipts.push(receipt);
     }
 }
 
@@ -278,6 +523,30 @@ pub enum SharedSessionOperation {
     SetFocus {
         pane_id: u64,
     },
+    SetMaximized {
+        pane_id: Option<u64>,
+    },
+    SetMinimized {
+        pane_id: u64,
+        minimized: bool,
+    },
+    SetSplitRatio {
+        first_pane_id: u64,
+        second_pane_id: u64,
+        first_ratio: u16,
+    },
+    MovePane {
+        pane_id: u64,
+        direction: SharedPaneDirection,
+    },
+    SwapPanes {
+        first_pane_id: u64,
+        second_pane_id: u64,
+    },
+    RotateSplit {
+        pane_id: u64,
+        direction: SharedRotationDirection,
+    },
     SetTabState {
         state: serde_json::Value,
     },
@@ -288,6 +557,22 @@ pub enum SharedSessionOperation {
     ClosePane {
         pane_id: u64,
     },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SharedPaneDirection {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SharedRotationDirection {
+    Clockwise,
+    CounterClockwise,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -316,14 +601,86 @@ pub struct SharedSpawnRequest {
     pub console_palette: ConsolePalette,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum SharedDraftLayout {
+    Existing {
+        pane_id: u64,
+    },
+    Draft {
+        draft_id: u64,
+    },
+    Split {
+        axis: String,
+        first_ratio: u16,
+        first: Box<SharedDraftLayout>,
+        second: Box<SharedDraftLayout>,
+    },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SharedPaneDraft {
+    pub draft_id: u64,
+    pub program: Option<String>,
+    pub args: Vec<String>,
+    pub env: HashMap<String, String>,
+    pub working_directory: Option<PathBuf>,
+    pub size: TerminalSize,
+    pub console_palette: ConsolePalette,
+    pub metadata: crate::protocol::BackgroundPaneSummary,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SharedSpawnBatchRequest {
+    pub session_id: u64,
+    pub base_revision: SessionRevision,
+    pub operation_id: SharedOperationId,
+    /// `None` replaces the complete layout and therefore requires an exact
+    /// base revision. A pane target is rebased against the latest tree.
+    pub target_pane_id: Option<u64>,
+    pub replacement: SharedDraftLayout,
+    pub panes: Vec<SharedPaneDraft>,
+    pub active_pane: Option<SharedPaneRef>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum SharedPaneRef {
+    Existing { pane_id: u64 },
+    Draft { draft_id: u64 },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SharedDraftMapping {
+    pub draft_id: u64,
+    pub pane_id: u64,
+}
+
 fn validate_summary_panes(summary: &BackgroundSessionSummary) -> anyhow::Result<()> {
     anyhow::ensure!(
         summary.panes.iter().all(|pane| pane.id != 0),
         "shared pane IDs must be positive multiplexer IDs"
     );
+    let mut pane_ids = summary.panes.iter().map(|pane| pane.id).collect::<Vec<_>>();
+    pane_ids.sort_unstable();
+    anyhow::ensure!(
+        pane_ids.windows(2).all(|pair| pair[0] != pair[1]),
+        "shared pane IDs must be unique"
+    );
     validate_layout_panes(&summary.layout, |pane_id| {
         summary.panes.iter().any(|pane| pane.id == pane_id)
-    })
+    })?;
+    let mut layout_ids = Vec::new();
+    collect_layout_pane_ids(&summary.layout, &mut layout_ids);
+    layout_ids.sort_unstable();
+    anyhow::ensure!(
+        pane_ids == layout_ids,
+        "shared layout must contain every pane exactly once"
+    );
+    Ok(())
 }
 
 fn validate_layout_panes(
@@ -338,9 +695,33 @@ fn validate_layout_panes(
             );
             Ok(())
         }
-        BackgroundPaneLayout::Split { first, second, .. } => {
+        BackgroundPaneLayout::Split {
+            axis,
+            first_ratio,
+            first,
+            second,
+        } => {
+            anyhow::ensure!(
+                axis == "horizontal" || axis == "vertical",
+                "invalid shared split axis {axis}"
+            );
+            anyhow::ensure!(
+                *first_ratio > 0
+                    && *first_ratio < crate::protocol::BACKGROUND_PANE_SPLIT_RATIO_SCALE,
+                "invalid shared split ratio"
+            );
             validate_layout_panes(first, contains)?;
             validate_layout_panes(second, contains)
+        }
+    }
+}
+
+fn collect_layout_pane_ids(layout: &BackgroundPaneLayout, ids: &mut Vec<u64>) {
+    match layout {
+        BackgroundPaneLayout::Pane { pane_id } => ids.push(*pane_id),
+        BackgroundPaneLayout::Split { first, second, .. } => {
+            collect_layout_pane_ids(first, ids);
+            collect_layout_pane_ids(second, ids);
         }
     }
 }
@@ -374,6 +755,292 @@ fn remove_pane_from_layout(
     }
 }
 
+fn layout_contains(layout: &BackgroundPaneLayout, pane_id: u64) -> bool {
+    match layout {
+        BackgroundPaneLayout::Pane { pane_id: id } => *id == pane_id,
+        BackgroundPaneLayout::Split { first, second, .. } => {
+            layout_contains(first, pane_id) || layout_contains(second, pane_id)
+        }
+    }
+}
+
+fn find_divider(
+    layout: &BackgroundPaneLayout,
+    first_pane_id: u64,
+    second_pane_id: u64,
+) -> Option<u16> {
+    match layout {
+        BackgroundPaneLayout::Pane { .. } => None,
+        BackgroundPaneLayout::Split {
+            first_ratio,
+            first,
+            second,
+            ..
+        } => {
+            if layout_contains(first, first_pane_id) && layout_contains(second, second_pane_id) {
+                Some(*first_ratio)
+            } else {
+                find_divider(first, first_pane_id, second_pane_id)
+                    .or_else(|| find_divider(second, first_pane_id, second_pane_id))
+            }
+        }
+    }
+}
+
+fn find_divider_mut(
+    layout: &mut BackgroundPaneLayout,
+    first_pane_id: u64,
+    second_pane_id: u64,
+) -> Option<&mut u16> {
+    match layout {
+        BackgroundPaneLayout::Pane { .. } => None,
+        BackgroundPaneLayout::Split {
+            first_ratio,
+            first,
+            second,
+            ..
+        } => {
+            if layout_contains(first, first_pane_id) && layout_contains(second, second_pane_id) {
+                Some(first_ratio)
+            } else if layout_contains(first, first_pane_id)
+                || layout_contains(first, second_pane_id)
+            {
+                find_divider_mut(first, first_pane_id, second_pane_id)
+            } else {
+                find_divider_mut(second, first_pane_id, second_pane_id)
+            }
+        }
+    }
+}
+
+fn swap_layout_panes(layout: &mut BackgroundPaneLayout, first_id: u64, second_id: u64) {
+    match layout {
+        BackgroundPaneLayout::Pane { pane_id } if *pane_id == first_id => *pane_id = second_id,
+        BackgroundPaneLayout::Pane { pane_id } if *pane_id == second_id => *pane_id = first_id,
+        BackgroundPaneLayout::Pane { .. } => {}
+        BackgroundPaneLayout::Split { first, second, .. } => {
+            swap_layout_panes(first, first_id, second_id);
+            swap_layout_panes(second, first_id, second_id);
+        }
+    }
+}
+
+pub fn move_layout_pane(
+    layout: &mut BackgroundPaneLayout,
+    pane_id: u64,
+    direction: SharedPaneDirection,
+) -> bool {
+    let (axis, toward_first) = match direction {
+        SharedPaneDirection::Left => ("vertical", true),
+        SharedPaneDirection::Right => ("vertical", false),
+        SharedPaneDirection::Up => ("horizontal", true),
+        SharedPaneDirection::Down => ("horizontal", false),
+    };
+    move_layout_pane_inner(layout, pane_id, axis, toward_first).unwrap_or(false)
+}
+
+fn can_move_layout_pane(
+    layout: &BackgroundPaneLayout,
+    pane_id: u64,
+    direction: SharedPaneDirection,
+) -> bool {
+    move_layout_pane(&mut layout.clone(), pane_id, direction)
+}
+
+fn move_layout_pane_inner(
+    layout: &mut BackgroundPaneLayout,
+    pane_id: u64,
+    axis: &str,
+    toward_first: bool,
+) -> Option<bool> {
+    let BackgroundPaneLayout::Split {
+        axis: split_axis,
+        first_ratio,
+        first,
+        second,
+    } = layout
+    else {
+        return None;
+    };
+    if layout_contains(first, pane_id) {
+        if let Some(handled) = move_layout_pane_inner(first, pane_id, axis, toward_first) {
+            return Some(handled);
+        }
+        (split_axis == axis && !toward_first).then(|| {
+            std::mem::swap(first, second);
+            *first_ratio = crate::protocol::BACKGROUND_PANE_SPLIT_RATIO_SCALE - *first_ratio;
+            true
+        })
+    } else if layout_contains(second, pane_id) {
+        if let Some(handled) = move_layout_pane_inner(second, pane_id, axis, toward_first) {
+            return Some(handled);
+        }
+        (split_axis == axis && toward_first).then(|| {
+            std::mem::swap(first, second);
+            *first_ratio = crate::protocol::BACKGROUND_PANE_SPLIT_RATIO_SCALE - *first_ratio;
+            true
+        })
+    } else {
+        None
+    }
+}
+
+pub fn rotate_layout_pane(
+    layout: &mut BackgroundPaneLayout,
+    pane_id: u64,
+    direction: SharedRotationDirection,
+) -> bool {
+    let Some(active_area) = layout_pane_area(layout, pane_id, 1.) else {
+        return false;
+    };
+    let Some(path) = rotation_target(layout, pane_id, active_area, 1.) else {
+        return false;
+    };
+    rotate_at_path(layout, &path, direction);
+    true
+}
+
+fn can_rotate_layout_pane(
+    layout: &BackgroundPaneLayout,
+    pane_id: u64,
+    direction: SharedRotationDirection,
+) -> bool {
+    rotate_layout_pane(&mut layout.clone(), pane_id, direction)
+}
+
+fn layout_pane_area(layout: &BackgroundPaneLayout, pane_id: u64, area: f64) -> Option<f64> {
+    match layout {
+        BackgroundPaneLayout::Pane { pane_id: id } => (*id == pane_id).then_some(area),
+        BackgroundPaneLayout::Split {
+            first_ratio,
+            first,
+            second,
+            ..
+        } => {
+            let first_area = area * f64::from(*first_ratio)
+                / f64::from(crate::protocol::BACKGROUND_PANE_SPLIT_RATIO_SCALE);
+            layout_pane_area(first, pane_id, first_area)
+                .or_else(|| layout_pane_area(second, pane_id, area - first_area))
+        }
+    }
+}
+
+fn rotation_target(
+    layout: &BackgroundPaneLayout,
+    pane_id: u64,
+    active_area: f64,
+    area: f64,
+) -> Option<Vec<bool>> {
+    if has_four_equal_panes(layout, area) || is_two_pane_split(layout) {
+        return Some(Vec::new());
+    }
+    let BackgroundPaneLayout::Split {
+        first_ratio,
+        first,
+        second,
+        ..
+    } = layout
+    else {
+        return None;
+    };
+    let first_area = area * f64::from(*first_ratio)
+        / f64::from(crate::protocol::BACKGROUND_PANE_SPLIT_RATIO_SCALE);
+    let (child, child_area, sibling_area, child_is_first) = if layout_contains(first, pane_id) {
+        (first, first_area, area - first_area, true)
+    } else if layout_contains(second, pane_id) {
+        (second, area - first_area, first_area, false)
+    } else {
+        return None;
+    };
+    if let Some(mut path) = rotation_target(child, pane_id, active_area, child_area) {
+        path.insert(0, child_is_first);
+        return Some(path);
+    }
+    (active_area + 1e-9 >= sibling_area).then_some(Vec::new())
+}
+
+fn is_two_pane_split(layout: &BackgroundPaneLayout) -> bool {
+    matches!(
+        layout,
+        BackgroundPaneLayout::Split { first, second, .. }
+            if matches!(first.as_ref(), BackgroundPaneLayout::Pane { .. })
+                && matches!(second.as_ref(), BackgroundPaneLayout::Pane { .. })
+    )
+}
+
+fn has_four_equal_panes(layout: &BackgroundPaneLayout, area: f64) -> bool {
+    let mut areas = Vec::with_capacity(4);
+    collect_leaf_areas(layout, area, &mut areas);
+    areas.len() == 4
+        && areas
+            .iter()
+            .all(|candidate| (*candidate - areas[0]).abs() <= 1e-9)
+}
+
+fn collect_leaf_areas(layout: &BackgroundPaneLayout, area: f64, areas: &mut Vec<f64>) {
+    match layout {
+        BackgroundPaneLayout::Pane { .. } => areas.push(area),
+        BackgroundPaneLayout::Split {
+            first_ratio,
+            first,
+            second,
+            ..
+        } => {
+            let first_area = area * f64::from(*first_ratio)
+                / f64::from(crate::protocol::BACKGROUND_PANE_SPLIT_RATIO_SCALE);
+            collect_leaf_areas(first, first_area, areas);
+            collect_leaf_areas(second, area - first_area, areas);
+        }
+    }
+}
+
+fn rotate_at_path(
+    layout: &mut BackgroundPaneLayout,
+    path: &[bool],
+    direction: SharedRotationDirection,
+) {
+    if let Some((first_path, remaining)) = path.split_first() {
+        if let BackgroundPaneLayout::Split { first, second, .. } = layout {
+            rotate_at_path(
+                if *first_path { first } else { second },
+                remaining,
+                direction,
+            );
+        }
+        return;
+    }
+    rotate_layout_geometry(layout, direction);
+}
+
+fn rotate_layout_geometry(layout: &mut BackgroundPaneLayout, direction: SharedRotationDirection) {
+    let BackgroundPaneLayout::Split {
+        axis,
+        first_ratio,
+        first,
+        second,
+    } = layout
+    else {
+        return;
+    };
+    rotate_layout_geometry(first, direction);
+    rotate_layout_geometry(second, direction);
+    let reverse_children = matches!(
+        (direction, axis.as_str()),
+        (SharedRotationDirection::Clockwise, "horizontal")
+            | (SharedRotationDirection::CounterClockwise, "vertical")
+    );
+    *axis = if axis == "horizontal" {
+        "vertical"
+    } else {
+        "horizontal"
+    }
+    .to_owned();
+    if reverse_children {
+        std::mem::swap(first, second);
+        *first_ratio = crate::protocol::BACKGROUND_PANE_SPLIT_RATIO_SCALE - *first_ratio;
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "request", rename_all = "snake_case")]
 pub enum Request {
@@ -384,6 +1051,10 @@ pub enum Request {
     /// Creates a pane owned by the daemon and attaches the caller through the
     /// shared byte-stream path. No descriptor is ever returned.
     SpawnShared(SharedSpawnRequest),
+    /// Atomically starts every draft process and commits one canonical layout.
+    /// The response is stream-free; callers attach every returned pane through
+    /// the same shared path used by remote viewers.
+    SpawnSharedBatch(SharedSpawnBatchRequest),
     /// Takes over a pane's terminal from the multiplexer.
     ///
     /// `pane_id` is absent for the session's first pane, which is how an
@@ -393,6 +1064,11 @@ pub enum Request {
         session_id: u64,
         pane_id: Option<u64>,
         secret: Option<String>,
+        /// Refuses an exclusive descriptor handoff. Batch-created shared panes
+        /// use this even for a local client so every viewer follows the same
+        /// relay path.
+        #[serde(default)]
+        force_shared: bool,
     },
     /// Gives the multiplexer a screen checkpoint from the client that is
     /// showing a pane. During a revoke handover this is the screen that lets
@@ -486,6 +1162,8 @@ pub enum Request {
     Resize {
         session_id: u64,
         pane_id: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        revision: Option<SessionRevision>,
         columns: u16,
         lines: u16,
     },
@@ -770,6 +1448,10 @@ pub enum Response {
         summary: Box<BackgroundSessionSummary>,
         shared_state: SharedSessionState,
     },
+    SharedBatchSpawned {
+        mappings: Vec<SharedDraftMapping>,
+        state: SharedSessionState,
+    },
     SharedOperationApplied {
         state: SharedSessionState,
     },
@@ -880,6 +1562,7 @@ pub enum Event {
     Size {
         session_id: u64,
         pane_id: u64,
+        revision: SessionRevision,
         columns: u16,
         lines: u16,
     },
@@ -901,6 +1584,15 @@ pub enum Event {
     SharedPaneRemoved {
         session_id: u64,
         pane_id: u64,
+        state: SharedSessionState,
+    },
+    /// One atomic pane-set change and the exact canonical snapshot committed
+    /// with it. Added and removed IDs are grouped so no viewer observes a
+    /// partially applied template.
+    SharedPanesChanged {
+        session_id: u64,
+        added: Vec<u64>,
+        removed: Vec<u64>,
         state: SharedSessionState,
     },
     /// A shared data connection failed. This is recoverable; the client should

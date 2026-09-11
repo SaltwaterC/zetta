@@ -220,17 +220,15 @@ fn shared_size_to_report(
 /// The arbitrated size only needs *applying* to a viewer showing the pane at
 /// some other size — the pty runs at the smallest of the viewers, so a larger one
 /// has to shrink its grid or the shell's wrapping stops lining up with the cells
-/// drawn. A viewer that already matches must not be touched: two windows tiled to
-/// the same size by a compositor are the common case, and resizing one of them to
-/// the size it already had moves the user's window for no reason.
+/// drawn. A viewer that already matches must not be touched; a larger viewer keeps
+/// its local pane region and renders the canonical grid with padding.
 ///
 /// The semantic initialization check is the other half of the same bug. A
 /// terminal exposes the placeholder bounds a `TerminalContent` starts with
 /// until its pane has been laid out and synced once, and those are 100x6 — so a
 /// pane that was *already* the arbitrated 98x51 looked like a two-column,
-/// forty-five-row difference, and the window was resized to fit a size it
-/// already had. This ran before the first paint and then reported success, so
-/// nothing ever corrected it.
+/// forty-five-row difference. Applying that placeholder before first paint also
+/// prevented the real capacity from correcting it.
 #[cfg(feature = "zmux")]
 fn shared_size_action(
     size_initialized: bool,

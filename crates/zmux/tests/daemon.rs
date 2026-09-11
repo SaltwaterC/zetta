@@ -18,6 +18,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+use alacritty_terminal::tty::ConsolePalette;
+
 #[cfg(feature = "session-persistence")]
 use age::secrecy::ExposeSecret as _;
 
@@ -25,10 +27,12 @@ use age::secrecy::ExposeSecret as _;
 use zmux::persistence::{PersistedSession, PersistedSnapshot, PersistenceStore};
 
 use zmux::{
+    auth::SessionSecret,
     client::{AttachOutcome, Client},
     messages::{
-        ClientId, Envelope, Event, Request, Response, SessionRevision, SharedSpawnRequest,
-        SpawnRequest, TerminalSize,
+        ClientId, Envelope, Event, Request, Response, SessionRevision, SharedPaneDirection,
+        SharedRotationDirection, SharedSessionOperation, SharedSpawnBatchRequest,
+        SharedSpawnRequest, SpawnRequest, TerminalSize,
     },
     protocol::{
         BackgroundPaneLayout, BackgroundPaneState, BackgroundPaneSummary, BackgroundSessionSummary,
@@ -2864,11 +2868,29 @@ fn shared_clients_are_sized_to_the_smallest_of_them() {
     let mut holder_reader = holder_pane.reader();
     let mut second_reader = second.reader();
 
-    // The holder reattached as a new shared client and starts unmeasured. Its
-    // explicit report establishes the real 80x24 viewer size; the attach
-    // response alone must not do that on its behalf.
+    // Advance the canonical session before either viewer reports its actual
+    // layout. A delayed six-row report from the old revision must not remain
+    // in arbitration and constrain the new geometry.
+    let revision = match client
+        .apply_shared(
+            pane.session_id,
+            SessionRevision::INITIAL,
+            SharedSessionOperation::SetTabState {
+                state: serde_json::json!({"sizing-revision": 1}),
+            },
+        )
+        .unwrap()
+    {
+        zmux::client::SharedOperationResult::Applied(state) => state.revision,
+        zmux::client::SharedOperationResult::Conflict(_) => {
+            panic!("tab-state operation conflicted")
+        }
+    };
+    second
+        .send_resize(40, 6)
+        .expect("sending a deliberately stale size report");
     holder_pane
-        .send_resize(80, 24)
+        .send_resize_for_revision(revision, 80, 24)
         .expect("reporting the holder's initialized size");
 
     // A remote client reaches the same shared data path with a stream-only
@@ -2894,6 +2916,7 @@ fn shared_clients_are_sized_to_the_smallest_of_them() {
                 session_id: pane.session_id,
                 pane_id: Some(pane.pane_id),
                 secret: Some(TEST_SECRET.to_owned()),
+                force_shared: false,
             },
         })
         .unwrap();
@@ -2923,7 +2946,7 @@ fn shared_clients_are_sized_to_the_smallest_of_them() {
 
     // The smaller client's size wins, and is announced to everyone.
     second
-        .send_resize(40, 10)
+        .send_resize_for_revision(revision, 40, 10)
         .expect("reporting a smaller size");
     assert_eq!(
         wait_for_shared_size(&mut holder_reader, &holder_pane, (40, 10)).last(),
@@ -2938,10 +2961,10 @@ fn shared_clients_are_sized_to_the_smallest_of_them() {
     // second client does not change the effective size. It still gets the
     // existing size broadcast back, rather than being left divergent.
     holder_pane
-        .send_resize(40, 10)
+        .send_resize_for_revision(revision, 40, 10)
         .expect("recording the holder's corrected size");
     second
-        .send_resize(120, 40)
+        .send_resize_for_revision(revision, 120, 40)
         .expect("reporting a larger size that needs correction");
     assert_eq!(
         wait_for_shared_size(&mut holder_reader, &holder_pane, (40, 10)).last(),
@@ -2955,7 +2978,7 @@ fn shared_clients_are_sized_to_the_smallest_of_them() {
     // The largest client no longer sets the smallest size; after the holder
     // reports its real size again, the pane grows back to it.
     holder_pane
-        .send_resize(80, 24)
+        .send_resize_for_revision(revision, 80, 24)
         .expect("reporting the holder's larger size");
     assert_eq!(
         wait_for_shared_size(&mut holder_reader, &holder_pane, (80, 24)).last(),
@@ -3358,6 +3381,7 @@ fn shared_spawns_publish_events_and_preserve_local_grants() {
                 session_id: pane.session_id,
                 pane_id: Some(local.pane.pane_id()),
                 secret: Some(TEST_SECRET.to_owned()),
+                force_shared: false,
             },
         })
         .unwrap();
@@ -3391,6 +3415,258 @@ fn shared_spawns_publish_events_and_preserve_local_grants() {
     client.kill(pane.session_id).unwrap();
     drop(local);
     drop(descriptor);
+}
+
+#[test]
+fn shared_batch_spawns_commit_exact_geometry_and_rebase_same_target_additions() {
+    let daemon = TestDaemon::start();
+    let client = daemon.client();
+    let pane = client
+        .spawn(spawn_request(None, "printf ready; sleep 60"))
+        .unwrap();
+    let descriptor = std::fs::File::from(pane.descriptor);
+    read_until(&descriptor, "ready");
+    let mut offered = summary(pane.session_id, pane.pane_id);
+    offered.panes.push(pane_summary(pane.pane_id));
+    client
+        .share(
+            pane.session_id,
+            offered,
+            serde_json::json!({"shared": true}),
+            Some(&test_verifier()),
+            true,
+        )
+        .unwrap();
+    let subscription = daemon.client().subscribe().unwrap();
+    let events = subscription.shared.register(pane.session_id);
+    let draft = |draft_id, command: &str| zmux::messages::SharedPaneDraft {
+        draft_id,
+        program: Some("sh".to_owned()),
+        args: vec!["-c".to_owned(), command.to_owned()],
+        env: HashMap::new(),
+        working_directory: None,
+        size: TerminalSize {
+            columns: 80,
+            lines: 24,
+            cell_width: 0,
+            cell_height: 0,
+        },
+        console_palette: ConsolePalette::default(),
+        metadata: pane_summary(0),
+    };
+    let replacement = |draft_id, ratio| zmux::messages::SharedDraftLayout::Split {
+        axis: "vertical".to_owned(),
+        first_ratio: ratio,
+        first: Box::new(zmux::messages::SharedDraftLayout::Existing {
+            pane_id: pane.pane_id,
+        }),
+        second: Box::new(zmux::messages::SharedDraftLayout::Draft { draft_id }),
+    };
+    let failed = client.spawn_shared_batch(SharedSpawnBatchRequest {
+        session_id: pane.session_id,
+        base_revision: SessionRevision::INITIAL,
+        operation_id: client.next_shared_operation_id(),
+        target_pane_id: Some(pane.pane_id),
+        replacement: zmux::messages::SharedDraftLayout::Split {
+            axis: "horizontal".to_owned(),
+            first_ratio: 220,
+            first: Box::new(replacement(90, 210)),
+            second: Box::new(zmux::messages::SharedDraftLayout::Draft { draft_id: 999 }),
+        },
+        panes: vec![
+            draft(90, "printf provisional; sleep 60"),
+            draft(91, "printf never; sleep 60"),
+        ],
+        active_pane: Some(zmux::messages::SharedPaneRef::Draft { draft_id: 91 }),
+    });
+    assert!(failed.is_err());
+    let after_failure = client.shared_snapshot(pane.session_id).unwrap();
+    assert_eq!(after_failure.revision, SessionRevision::INITIAL);
+    assert_eq!(after_failure.summary.panes.len(), 1);
+
+    let first_id = client.next_shared_operation_id();
+    let first_request = SharedSpawnBatchRequest {
+        session_id: pane.session_id,
+        base_revision: SessionRevision::INITIAL,
+        operation_id: first_id.clone(),
+        target_pane_id: Some(pane.pane_id),
+        replacement: replacement(1, 200),
+        panes: vec![draft(1, "printf one; sleep 60")],
+        active_pane: Some(zmux::messages::SharedPaneRef::Draft { draft_id: 1 }),
+    };
+    let zmux::client::SharedBatchResult::Applied(first) =
+        client.spawn_shared_batch(first_request.clone()).unwrap()
+    else {
+        panic!("first batch conflicted")
+    };
+    assert_eq!(first.state.revision, SessionRevision(1));
+    assert_eq!(first.mappings.len(), 1);
+    let zmux::client::SharedBatchResult::Applied(retry) =
+        client.spawn_shared_batch(first_request).unwrap()
+    else {
+        panic!("idempotent retry conflicted")
+    };
+    assert_eq!(retry.mappings, first.mappings);
+    assert_eq!(retry.state.revision, SessionRevision(1));
+    assert_eq!(retry.state.summary.panes.len(), 2);
+    let forced = client
+        .attach_shared_with_secret(
+            pane.session_id,
+            first.mappings[0].pane_id,
+            Some(&SessionSecret::new(TEST_SECRET.to_owned())),
+        )
+        .unwrap();
+    assert!(matches!(forced, AttachOutcome::SharedAttached { .. }));
+
+    // The second request deliberately uses the same old base revision. A pane
+    // target is rebased into the tree committed above, nesting by arrival.
+    let second = client
+        .spawn_shared_batch(SharedSpawnBatchRequest {
+            session_id: pane.session_id,
+            base_revision: SessionRevision::INITIAL,
+            operation_id: client.next_shared_operation_id(),
+            target_pane_id: Some(pane.pane_id),
+            replacement: replacement(2, 300),
+            panes: vec![draft(2, "printf two; sleep 60")],
+            active_pane: Some(zmux::messages::SharedPaneRef::Draft { draft_id: 2 }),
+        })
+        .unwrap();
+    let zmux::client::SharedBatchResult::Applied(second) = second else {
+        panic!("targeted stale batch was not rebased")
+    };
+    assert_eq!(second.state.revision, SessionRevision(2));
+    let first_pane = first.mappings[0].pane_id;
+    let second_pane = second.mappings[0].pane_id;
+    let BackgroundPaneLayout::Split {
+        first_ratio,
+        first: first_layout,
+        second: second_layout,
+        ..
+    } = &second.state.presentation.layout
+    else {
+        panic!("first addition did not produce a split")
+    };
+    assert_eq!(*first_ratio, 200);
+    assert!(matches!(
+        second_layout.as_ref(),
+        BackgroundPaneLayout::Pane { pane_id: id } if *id == first_pane
+    ));
+    let BackgroundPaneLayout::Split {
+        first_ratio,
+        second: nested_second,
+        ..
+    } = first_layout.as_ref()
+    else {
+        panic!("same-target addition was not nested")
+    };
+    assert_eq!(*first_ratio, 300);
+    assert!(matches!(
+        nested_second.as_ref(),
+        BackgroundPaneLayout::Pane { pane_id: id } if *id == second_pane
+    ));
+
+    let first_event = recv_timeout(&events, Duration::from_secs(10)).unwrap();
+    let second_event = recv_timeout(&events, Duration::from_secs(10)).unwrap();
+    assert!(matches!(
+        first_event,
+        zmux::client::SharedSessionEvent::PanesChanged { .. }
+    ));
+    assert!(matches!(
+        second_event,
+        zmux::client::SharedSessionEvent::PanesChanged { .. }
+    ));
+
+    // Targeted geometry ignores an intervening independent focus revision and
+    // applies to the latest tree. Each operation below deliberately carries a
+    // stale base revision.
+    let focused = client
+        .apply_shared(
+            pane.session_id,
+            second.state.revision,
+            SharedSessionOperation::SetFocus {
+                pane_id: first_pane,
+            },
+        )
+        .unwrap();
+    let zmux::client::SharedOperationResult::Applied(focused) = focused else {
+        panic!("focus operation conflicted")
+    };
+    let resized = client
+        .apply_shared(
+            pane.session_id,
+            second.state.revision,
+            SharedSessionOperation::SetSplitRatio {
+                first_pane_id: pane.pane_id,
+                second_pane_id: first_pane,
+                first_ratio: 650,
+            },
+        )
+        .unwrap();
+    let zmux::client::SharedOperationResult::Applied(resized) = resized else {
+        panic!("stale divider operation was not rebased")
+    };
+    assert_eq!(resized.revision, focused.revision.next());
+    assert!(matches!(
+        resized.presentation.layout,
+        BackgroundPaneLayout::Split {
+            first_ratio: 650,
+            ..
+        }
+    ));
+
+    let moved = client
+        .apply_shared(
+            pane.session_id,
+            second.state.revision,
+            SharedSessionOperation::MovePane {
+                pane_id: pane.pane_id,
+                direction: SharedPaneDirection::Right,
+            },
+        )
+        .unwrap();
+    let zmux::client::SharedOperationResult::Applied(moved) = moved else {
+        panic!("stale directional move was not rebased")
+    };
+    let rotated = client
+        .apply_shared(
+            pane.session_id,
+            second.state.revision,
+            SharedSessionOperation::RotateSplit {
+                pane_id: pane.pane_id,
+                direction: SharedRotationDirection::Clockwise,
+            },
+        )
+        .unwrap();
+    let zmux::client::SharedOperationResult::Applied(rotated) = rotated else {
+        panic!("stale rotation was not rebased")
+    };
+    assert_eq!(rotated.revision, moved.revision.next());
+
+    let closed = client
+        .apply_shared(
+            pane.session_id,
+            second.state.revision,
+            SharedSessionOperation::ClosePane {
+                pane_id: second_pane,
+            },
+        )
+        .unwrap();
+    let zmux::client::SharedOperationResult::Applied(closed) = closed else {
+        panic!("pane close conflicted")
+    };
+    let missing_target = client
+        .apply_shared(
+            pane.session_id,
+            second.state.revision,
+            SharedSessionOperation::SetFocus {
+                pane_id: second_pane,
+            },
+        )
+        .unwrap();
+    let zmux::client::SharedOperationResult::Conflict(conflict) = missing_target else {
+        panic!("a removed operation target did not return the canonical snapshot")
+    };
+    assert_eq!(conflict, closed);
 }
 
 /// A session that is both kept and shared stays shared when its window hands

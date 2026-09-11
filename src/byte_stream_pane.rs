@@ -53,6 +53,14 @@ impl Zetta {
         cx: &mut Context<Self>,
     ) -> Option<u64> {
         let tab = self.tabs.get(self.active_tab)?;
+        if self.has_shared_tab_binding(tab.id) {
+            self.show_notice(
+                "Serial, HTTP, and TFTP panes cannot be opened in a shared tab; open them in a local tab instead."
+                    .to_owned(),
+                cx,
+            );
+            return None;
+        }
         if !can_add_panes(tab.panes.len(), 1) {
             return None;
         }

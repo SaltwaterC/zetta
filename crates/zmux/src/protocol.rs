@@ -21,6 +21,7 @@ pub const CATALOG_VERSION: u32 = 1;
 /// scale as Zetta's live pane tree. Keeping the default here lets older
 /// persisted summaries decode while newer shared snapshots retain resizing.
 pub const DEFAULT_BACKGROUND_PANE_SPLIT_RATIO: u16 = 500;
+pub const BACKGROUND_PANE_SPLIT_RATIO_SCALE: u16 = 1_000;
 
 /// A disk-retained session record before its encrypted payload has been
 /// opened. These fields are deliberately opaque: titles, commands, working

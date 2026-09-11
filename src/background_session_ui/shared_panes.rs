@@ -150,7 +150,8 @@ impl Zetta {
             // The size the pane attached at has to be applied once the tab
             // exists; without this the grid could stay at the window's size
             // while the multiplexer's pty runs at the arbitrated one.
-            let mut pending_size: Option<(u16, u16)> = pane.take_sizes().last().copied();
+            let mut pending_size: Option<(zmux::messages::SessionRevision, u16, u16)> =
+                pane.take_revisioned_sizes().last().copied();
             loop {
                 if let Some(size) = pending_size.take() {
                     let applied = this
@@ -187,7 +188,7 @@ impl Zetta {
                         if arrived.is_err() {
                             return;
                         }
-                        pending_size = pane.take_sizes().last().copied();
+                        pending_size = pane.take_revisioned_sizes().last().copied();
                     }
                 }
             }
@@ -203,9 +204,30 @@ impl Zetta {
         &mut self,
         tab_id: u64,
         pane_id: u64,
-        (columns, lines): (u16, u16),
+        (revision, columns, lines): (zmux::messages::SessionRevision, u16, u16),
         cx: &mut Context<Self>,
     ) -> bool {
+        let Some(session_id) = self.mux_panes.session_id(tab_id) else {
+            return true;
+        };
+        let Some(current_revision) = self
+            .shared_collaboration
+            .state(session_id)
+            .map(|state| state.revision)
+        else {
+            return false;
+        };
+        if revision < current_revision {
+            // A size belongs to the geometry revision that produced its pane
+            // capacity. Applying it after a newer layout arrived would let an
+            // obsolete small viewport constrain the new topology.
+            return true;
+        }
+        if revision > current_revision {
+            // The matching canonical snapshot is still queued on the session
+            // subscription. Keep this size pending until that snapshot lands.
+            return false;
+        }
         let terminal = self
             .tabs
             .iter()
@@ -299,6 +321,17 @@ impl Zetta {
         else {
             return;
         };
+        let session_id = pane.session_id();
+        if !self.shared_collaboration.may_report_size(session_id) {
+            return;
+        }
+        let Some(revision) = self
+            .shared_collaboration
+            .state(session_id)
+            .map(|state| state.revision)
+        else {
+            return;
+        };
         let terminal = terminal.read(cx);
         let bounds = terminal.local_terminal_bounds();
         let Some((columns, lines)) = shared_size_to_report(terminal.is_size_initialized(), bounds)
@@ -308,11 +341,25 @@ impl Zetta {
             return;
         };
         cx.background_spawn(async move {
-            if let Err(error) = pane.send_resize(columns, lines) {
+            if let Err(error) = pane.send_resize_for_revision(revision, columns, lines) {
                 log::debug!("could not report the shared pane's size: {error:#}");
             }
         })
         .detach();
+    }
+
+    pub(crate) fn report_all_shared_pane_sizes(&mut self, tab_id: u64, cx: &mut Context<Self>) {
+        let panes = self
+            .tabs
+            .iter()
+            .find(|tab| tab.id == tab_id)
+            .into_iter()
+            .flat_map(|tab| &tab.panes)
+            .filter_map(|pane| pane.selected_terminal().map(|terminal| (pane.id, terminal)))
+            .collect::<Vec<_>>();
+        for (pane_id, terminal) in panes {
+            self.report_shared_pane_size(pane_id, &terminal, cx);
+        }
     }
 
     /// Drops a shared pane: its terminal is going away, so the shared

@@ -1120,6 +1120,7 @@ fn protected_controls_reject_a_claimed_owner_without_peer_authority() {
         Request::Resize {
             session_id,
             pane_id,
+            revision: None,
             columns: 100,
             lines: 30,
         },

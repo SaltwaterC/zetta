@@ -483,6 +483,11 @@ pub(crate) struct Zetta {
     /// mappings used to apply subscription snapshots safely.
     #[cfg(feature = "zmux")]
     pub(crate) shared_collaboration: SharedSessionCoordinator,
+    #[cfg(feature = "zmux")]
+    pub(crate) pending_shared_terminal_launches:
+        HashMap<u64, Vec<crate::terminal_spawn::SharedTerminalLaunch>>,
+    #[cfg(feature = "zmux")]
+    pub(crate) shared_spawn_batch_scheduled: HashSet<u64>,
     pub(crate) background_observed_panes: HashSet<u64>,
     pub(crate) background_process_refresh_running: bool,
     pub(crate) background_session_picker_entries: Vec<(u64, String, String)>,
@@ -906,6 +911,10 @@ impl Zetta {
             shared_panes: HashMap::new(),
             #[cfg(feature = "zmux")]
             shared_collaboration: SharedSessionCoordinator::default(),
+            #[cfg(feature = "zmux")]
+            pending_shared_terminal_launches: HashMap::new(),
+            #[cfg(feature = "zmux")]
+            shared_spawn_batch_scheduled: HashSet::new(),
             background_observed_panes: HashSet::new(),
             background_process_refresh_running: false,
             background_session_picker_entries: Vec::new(),

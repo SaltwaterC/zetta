@@ -133,10 +133,9 @@ impl Zetta {
     /// Deliberately not a banner in the feedback column. A banner there takes
     /// vertical space, so showing one reflows every terminal in the window — and
     /// for a *shared* pane that reflow is published: the pane reports its smaller
-    /// grid, the multiplexer arbitrates every viewer down to the smallest of them,
-    /// and the other window is resized to match. Telling the user their tab can now
-    /// be joined moved their windows, which is a remarkable amount of damage for a
-    /// message that takes itself away again after a few seconds.
+    /// grid, and the multiplexer arbitrates every viewer down to the smallest of
+    /// them. Telling the user their tab can now be joined must not temporarily
+    /// reduce the shared grid for a message that removes itself moments later.
     fn render_transient_notice_overlay(&self, colors: &ThemeColors) -> Option<AnyElement> {
         let notice = self.transient_notice.message()?;
         // Styled like the resize- and move-mode labels rather than as a `Banner`.
