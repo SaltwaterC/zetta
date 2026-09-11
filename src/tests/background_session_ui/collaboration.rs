@@ -134,6 +134,82 @@ fn canonical_snapshots_apply_with_local_ids_and_reject_stale_revisions() {
     assert_eq!(coordinator.state(9).unwrap().revision.0, 5);
 }
 
+/// `Tab::remove_pane` leaves the layout alone, and the shared-session removers
+/// have no reshape of their own — they expect a canonical snapshot to supply
+/// one. When that snapshot turns out to be stale or unapplicable, the pane's
+/// region stays reserved in a layout nothing can draw into, which is the grey
+/// rectangle that outlived every close.
+#[test]
+fn detaching_a_pane_collapses_the_split_that_held_it() {
+    let mut tab = local_tab(100, 7);
+    tab.panes
+        .push(TerminalPane::new(8, tab.panes[0].profile.clone()));
+    tab.pane_indices.insert(8, 1);
+    tab.layout = PaneLayout::Split {
+        axis: SplitAxis::Vertical,
+        first_ratio: crate::pane::DEFAULT_PANE_SPLIT_RATIO,
+        first: Box::new(PaneLayout::Pane(7)),
+        second: Box::new(PaneLayout::Pane(8)),
+    };
+    tab.active_pane = 8;
+
+    detach_pane_from_tab(&mut tab, 8);
+
+    assert_eq!(
+        tab.layout,
+        PaneLayout::Pane(7),
+        "the survivor takes the whole region back"
+    );
+    assert!(tab.pane(8).is_none());
+    assert_eq!(
+        tab.active_pane, 7,
+        "focus moves off the pane that went away"
+    );
+}
+
+/// A canonical layout that places a pane the tab does not hold is exactly what
+/// left grey rectangles on screen: `render_pane_leaf` draws an empty region for
+/// it, and the split node goes on reserving the space, so the surviving panes
+/// never grow back into it.
+#[test]
+fn a_snapshot_placing_a_pane_the_tab_does_not_hold_is_refused() {
+    let mut coordinator = SharedSessionCoordinator::default();
+    coordinator
+        .bind(9, 100, canonical_state(9, 4), [(41, 7), (42, 8)])
+        .unwrap();
+
+    // The tab holds only pane 7 — pane 8 was closed here a moment ago — while
+    // the canonical state still places both.
+    let mut tab = local_tab(100, 7);
+    let mut two_panes = canonical_state(9, 5);
+    two_panes.summary.panes.push(pane_summary(42));
+    two_panes.presentation.layout = BackgroundPaneLayout::Split {
+        axis: "vertical".to_owned(),
+        first_ratio: crate::pane::DEFAULT_PANE_SPLIT_RATIO,
+        first: Box::new(BackgroundPaneLayout::Pane { pane_id: 41 }),
+        second: Box::new(BackgroundPaneLayout::Pane { pane_id: 42 }),
+    };
+
+    let error = coordinator
+        .apply_snapshot_to_tab(9, two_panes, &mut tab)
+        .expect_err("a layout naming an absent pane is not applicable");
+    assert!(
+        format!("{error:#}").contains("does not hold"),
+        "unexpected error: {error:#}"
+    );
+    assert_eq!(
+        tab.layout,
+        PaneLayout::Pane(7),
+        "a refused snapshot leaves the tab's own layout alone"
+    );
+    assert_eq!(
+        coordinator.state(9).unwrap().revision.0,
+        4,
+        "a refused snapshot is not recorded as the canonical state, so the next \
+         one is not mistaken for stale"
+    );
+}
+
 #[test]
 fn pane_events_update_mappings_and_watcher_lifecycle_is_generation_safe() {
     let mut coordinator = SharedSessionCoordinator::default();
@@ -275,10 +351,110 @@ fn shared_geometry_queue_is_single_flight_and_remembers_pending_work() {
         .bind(9, 100, shared_state(9, 1), [(41, 7)])
         .unwrap();
 
-    let generation = coordinator.schedule_sync(9).unwrap();
+    coordinator.enqueue(9, SharedOperation::PublishState);
+    coordinator.enqueue(
+        9,
+        SharedOperation::ClosePane {
+            local_pane_id: 7,
+            mux_pane_id: 41,
+            attempts: 0,
+        },
+    );
+
+    assert_eq!(
+        coordinator.take_next_operation(9),
+        Some(SharedOperation::PublishState),
+        "operations run in the order they were asked for"
+    );
     assert!(!coordinator.may_report_size(9));
-    assert_eq!(coordinator.schedule_sync(9), None);
-    assert!(coordinator.finish_sync(9, generation));
+    assert_eq!(
+        coordinator.take_next_operation(9),
+        None,
+        "a second operation waits for the one in flight"
+    );
+
+    coordinator.finish_operation(9);
     assert!(coordinator.may_report_size(9));
-    assert!(coordinator.schedule_sync(9).is_some());
+    assert_eq!(
+        coordinator.take_next_operation(9),
+        Some(SharedOperation::ClosePane {
+            local_pane_id: 7,
+            mux_pane_id: 41,
+            attempts: 0,
+        })
+    );
+    coordinator.finish_operation(9);
+    assert_eq!(coordinator.take_next_operation(9), None);
+}
+
+#[test]
+fn queued_shared_operations_collapse_onto_equivalent_work() {
+    let mut coordinator = SharedSessionCoordinator::default();
+    coordinator
+        .bind(9, 100, shared_state(9, 1), [(41, 7)])
+        .unwrap();
+
+    coordinator.enqueue(9, SharedOperation::PublishState);
+    coordinator.enqueue(9, SharedOperation::PublishState);
+    let close = SharedOperation::ClosePane {
+        local_pane_id: 7,
+        mux_pane_id: 41,
+        attempts: 0,
+    };
+    coordinator.enqueue(9, close);
+    // A retry differs only in its attempt count and must not queue a second
+    // close of the same pane: the daemon refuses one naming a pane it no
+    // longer holds, and that refusal would abandon the real close.
+    coordinator.enqueue(
+        9,
+        SharedOperation::ClosePane {
+            local_pane_id: 7,
+            mux_pane_id: 41,
+            attempts: 1,
+        },
+    );
+
+    assert_eq!(
+        coordinator.take_next_operation(9),
+        Some(SharedOperation::PublishState)
+    );
+    coordinator.finish_operation(9);
+    assert_eq!(coordinator.take_next_operation(9), Some(close));
+    coordinator.finish_operation(9);
+    assert_eq!(coordinator.take_next_operation(9), None);
+}
+
+#[test]
+fn a_snapshot_older_than_the_bound_state_is_stale() {
+    let mut coordinator = SharedSessionCoordinator::default();
+    coordinator
+        .bind(9, 100, shared_state(9, 4), [(41, 7)])
+        .unwrap();
+
+    assert!(coordinator.snapshot_is_stale(9, &shared_state(9, 3)));
+    assert!(
+        !coordinator.snapshot_is_stale(9, &shared_state(9, 4)),
+        "the revision the window already holds is applied again, not discarded: \
+         it is the answer to an operation this window asked for"
+    );
+    assert!(!coordinator.snapshot_is_stale(9, &shared_state(9, 5)));
+}
+
+#[test]
+fn a_pane_is_only_attached_once_across_concurrent_snapshots() {
+    let mut coordinator = SharedSessionCoordinator::default();
+    coordinator
+        .bind(9, 100, shared_state(9, 1), [(41, 7)])
+        .unwrap();
+
+    assert!(coordinator.begin_attach(9, 42));
+    assert!(
+        !coordinator.begin_attach(9, 42),
+        "a second snapshot seeing the same pane missing must not attach it again"
+    );
+    coordinator.end_attach(9, 42);
+    assert!(
+        coordinator.begin_attach(9, 42),
+        "a failed attachment is retried by the next snapshot"
+    );
 }

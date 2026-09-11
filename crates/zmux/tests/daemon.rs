@@ -3441,8 +3441,11 @@ fn shared_batch_spawns_commit_exact_geometry_and_rebase_same_target_additions() 
     let events = subscription.shared.register(pane.session_id);
     let draft = |draft_id, command: &str| zmux::messages::SharedPaneDraft {
         draft_id,
-        program: Some("sh".to_owned()),
-        args: vec!["-c".to_owned(), command.to_owned()],
+        profile: "System".to_owned(),
+        command: Some(zetta_profiles::ProfileCommand::with_args(
+            "sh",
+            vec!["-c".to_owned(), command.to_owned()],
+        )),
         env: HashMap::new(),
         working_directory: None,
         size: TerminalSize {

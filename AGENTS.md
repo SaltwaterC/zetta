@@ -27,6 +27,15 @@ git submodule update --init
   explicitly requires an upstream dependency change.
 - Code under `crates/` is maintained as part of Zetta and may be changed when
   the application needs corresponding terminal or platform behavior.
+- `crates/zetta_profiles` holds the half of the configuration that answers
+  "what does this profile run *here*": the shell discovery, the profile entries
+  of `config.json`, the environment every Zetta pty is given, and the shell
+  integration line. It exists because two processes start Zetta's ptys — the
+  application, and `zmux` when a pane is added to a shared session — and the one
+  that starts a pane is the one that has to resolve it. It must stay free of
+  `zed/` and `gpui` dependencies so the daemon can link it; icons, themes and
+  everything else that needs a window stay in `src/config.rs`, which layers them
+  back on.
 - A change to a `zed/` crate is made by forking it under `crates/`, never by
   editing the submodule. Cargo resolves a dependency edge from the manifest that
   declares it, so forking a crate that other `zed/` crates depend on means
@@ -207,9 +216,12 @@ is a sibling under `src/`.
   setting's name is not restated in an allow-list. Fields are `Setting<T>`
   rather than `Option<T>` because serde would read an explicit `null` as
   "absent", and this format reports it as a type error. A module directory —
-  `config/discovery.rs` holds the per-platform shell detection (Homebrew
-  prefixes, the MSYS2 and Cygwin installation roots, WSL distributions, `PATH`
-  resolution) that produces the profile set `Config::defaults` starts from
+  `config/discovery.rs` turns what `zetta_profiles` detected into what the
+  application shows, attaching the `ProfileIcon` and the `Shell` the spawn path
+  is written against, and converting back to the plain command that crosses a
+  machine boundary. The detection itself — Homebrew prefixes, the MSYS2 and
+  Cygwin installation roots, WSL distributions, `PATH` resolution — lives in
+  `crates/zetta_profiles`, because the daemon resolves the same names
 - `project.rs`: `ProjectConfig`, `ProjectRegistry`, and project field
   validation
 - `project_context.rs`: the active project for a window, project detection for
@@ -488,6 +500,7 @@ Anything touching them has to be validated from the crate's own directory, and
 ```sh
 (cd crates/alacritty_terminal && cargo test)
 (cd crates/terminal && cargo test)
+(cd crates/zetta_profiles && cargo test)
 (cd crates/zmux && cargo build --bin zmux && cargo test)
 ```
 

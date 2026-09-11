@@ -73,7 +73,20 @@ impl crate::Zetta {
 
     pub(crate) fn release_mux_pane(&mut self, _: u64, _: u64, _: &mut gpui::App) {}
 
-    pub(crate) fn request_shared_pane_close(&mut self, _: u64, _: u64, _: &mut gpui::App) {}
+    pub(crate) fn request_shared_pane_close(
+        &mut self,
+        _: u64,
+        _: u64,
+        _: &mut gpui::Context<crate::Zetta>,
+    ) -> bool {
+        false
+    }
+
+    pub(crate) fn forget_shared_pane_mapping(&mut self, _: u64, _: u64) {}
+
+    pub(crate) fn shared_pane_is_closing(&self, _: u64) -> bool {
+        false
+    }
 
     pub(crate) fn leave_shared_tab(&mut self, _: u64, _: &mut gpui::App) {}
 

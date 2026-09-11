@@ -22,6 +22,10 @@ fn with_inactive_pane_opacity(pane: gpui::Div, active: bool, inactive_opacity: f
     pane.when(!active, |pane| pane.opacity(inactive_opacity))
 }
 
+/// How faint a pane goes while its shared session is being asked to close it.
+/// Well below any configurable inactive opacity, so the two cannot be confused.
+const CLOSING_PANE_OPACITY: f32 = 0.35;
+
 /// The badge a pane shows in its bottom-right corner while resize or move mode
 /// is on. Both modes draw the same chip and differ only in what they write in
 /// it, so the two callers pass a finished label.
@@ -632,7 +636,15 @@ impl Zetta {
                 .into_any_element()
         };
         with_inactive_pane_opacity(
-            div().size_full().child(content),
+            div()
+                .size_full()
+                .child(content)
+                // A shared pane leaves the tab when the session says it has, so
+                // between asking and hearing back it is still on screen. Say so,
+                // rather than looking like a close that did nothing.
+                .when(self.shared_pane_is_closing(pane_id), |pane| {
+                    pane.opacity(CLOSING_PANE_OPACITY)
+                }),
             active,
             self.projects
                 .config_for_pane(tab.active_pane)

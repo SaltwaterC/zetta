@@ -22,19 +22,72 @@ struct ProvisionalSharedPane {
     size: TerminalSize,
 }
 
+/// What a draft runs on *this* host, and the environment it runs in.
+///
+/// The name is resolved here rather than by the requester because this is the
+/// machine the process starts on. An unknown name falls back to the login
+/// shell, which is what the "System" profile means everywhere else, so a viewer
+/// naming a profile this host has never heard of still gets a working shell
+/// rather than a failed spawn.
+///
+/// The terminal environment is applied here for the same reason: a daemon is a
+/// background process with no `TERM` of its own, and a pane that inherited that
+/// came up believing its terminal had no colour.
+fn shared_draft_process(
+    draft: &crate::messages::SharedPaneDraft,
+) -> (zetta_profiles::ProfileCommand, HashMap<String, String>) {
+    let command = draft
+        .command
+        .clone()
+        .or_else(|| {
+            zetta_profiles::resolve(
+                &crate::paths::platform_config_dir().join("config.json"),
+                &draft.profile,
+            )
+        })
+        .unwrap_or_else(|| {
+            if !draft.profile.is_empty() {
+                log::debug!(
+                    "shared pane asked for profile {:?}, which this host does not have; \
+                     starting the login shell",
+                    draft.profile
+                );
+            }
+            zetta_profiles::ProfileCommand::system()
+        });
+    let mut env = draft.env.clone();
+    for name in zetta_profiles::REMOVED_TERMINAL_ENVIRONMENT {
+        env.remove(*name);
+    }
+    for (name, value) in
+        zetta_profiles::terminal_environment(zetta_profiles::TerminalEnvironmentOptions {
+            version: env!("CARGO_PKG_VERSION"),
+        })
+    {
+        env.insert(name, value);
+    }
+    if std::env::var_os("LANG").is_none() {
+        env.entry("LANG".to_owned())
+            .or_insert_with(|| zetta_profiles::FALLBACK_LANG.to_owned());
+    }
+    (command, env)
+}
+
 fn start_shared_draft(
     daemon: &Arc<Daemon>,
     draft: &crate::messages::SharedPaneDraft,
 ) -> Result<ProvisionalSharedPane> {
+    let (command, env) = shared_draft_process(draft);
+    #[cfg(windows)]
+    let (program, args) = (command.program.clone(), command.args.clone());
     #[cfg(unix)]
     let options = tty::Options {
-        shell: draft
+        shell: command
             .program
-            .clone()
-            .map(|program| tty::Shell::new(program, draft.args.clone())),
+            .map(|program| tty::Shell::new(program, command.args)),
         working_directory: draft.working_directory.clone(),
         drain_on_exit: true,
-        env: draft.env.clone(),
+        env,
         #[cfg(not(windows))]
         child_signal_mask: None,
         #[cfg(windows)]
@@ -48,9 +101,9 @@ fn start_shared_draft(
     #[cfg(windows)]
     let (console_id, _child_pid, pty, child_events) = {
         let (console_id, child_pid, handles) = daemon.pty_host.open(
-            draft.program.clone(),
-            draft.args.clone(),
-            draft.env.clone(),
+            program,
+            args,
+            env,
             draft.working_directory.clone(),
             draft.size,
             draft.console_palette,

@@ -65,6 +65,7 @@ ZETTA_CRATE_DIRS := \
 	crates/gpui_windows \
 	crates/terminal \
 	crates/terminal_view \
+	crates/zetta_profiles \
 	crates/zwt \
 	crates/zmux \
 	crates/zosh \
@@ -75,6 +76,7 @@ ZETTA_CRATE_DIRS := \
 ZETTA_TEST_CRATE_DIRS := \
 	crates/alacritty_terminal \
 	crates/terminal \
+	crates/zetta_profiles \
 	crates/zwt \
 	crates/zmux \
 	crates/zosh \

@@ -358,8 +358,11 @@ fn shared_batch_wire_carries_exact_layout_and_draft_mapping() {
         },
         panes: vec![SharedPaneDraft {
             draft_id: 1,
-            program: Some("sh".to_owned()),
-            args: vec!["-l".to_owned()],
+            profile: "System".to_owned(),
+            command: Some(zetta_profiles::ProfileCommand::with_args(
+                "sh",
+                vec!["-l".to_owned()],
+            )),
             env: HashMap::new(),
             working_directory: Some(PathBuf::from("/tmp")),
             size: TerminalSize {

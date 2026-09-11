@@ -406,3 +406,64 @@ fn cygwin_stacked_commands_use_the_direct_profile_shell() {
     assert_eq!(program, r"C:\cygwin64\bin\zsh.exe");
     assert_eq!(args, ["-l", "-i", "-c", "pwd"]);
 }
+
+/// A pane in a shared session is started by the daemon, on the daemon's host.
+/// Resolving the profile here and shipping the result is only correct when
+/// that host is this machine; doing it for a remote one is what asked macOS to
+/// run the Linux client's `$SHELL` with a Linux `PATH` in front of it.
+#[cfg(feature = "zmux")]
+#[test]
+fn a_remote_shared_draft_sends_no_command_and_no_local_environment() {
+    let shell = Shell::WithArguments {
+        program: "/usr/bin/zsh".to_owned(),
+        args: vec!["-l".to_owned()],
+        title_override: Some("Zsh".to_owned()),
+    };
+    let environment = HashMap::from([
+        ("PATH".to_owned(), "/usr/local/bin:/usr/bin".to_owned()),
+        ("HOME".to_owned(), "/home/someone".to_owned()),
+        ("ZETTA_PANE_ROUTING_ID".to_owned(), "7".to_owned()),
+        ("ZETTA_ATTENTION_ID".to_owned(), "3".to_owned()),
+    ]);
+
+    let (command, env) = shared_draft_process(true, &shell, &environment);
+
+    assert_eq!(
+        command, None,
+        "the host that runs the pane resolves the profile name itself"
+    );
+    assert_eq!(
+        env,
+        HashMap::from([
+            ("ZETTA_PANE_ROUTING_ID".to_owned(), "7".to_owned()),
+            ("ZETTA_ATTENTION_ID".to_owned(), "3".to_owned()),
+        ]),
+        "only the pane's routing identity crosses; the rest of the environment \
+         describes the wrong machine"
+    );
+}
+
+/// The same window and the same machine: this resolution *is* the host's, and
+/// it carries the working-directory tracking wrappers a profile name alone
+/// cannot express.
+#[cfg(feature = "zmux")]
+#[test]
+fn a_local_shared_draft_sends_the_command_it_resolved() {
+    let shell = Shell::WithArguments {
+        program: "cmd.exe".to_owned(),
+        args: vec!["/c".to_owned(), "msys2_shell.cmd".to_owned()],
+        title_override: Some("MSYS2".to_owned()),
+    };
+    let environment = HashMap::from([("PATH".to_owned(), "/usr/bin".to_owned())]);
+
+    let (command, env) = shared_draft_process(false, &shell, &environment);
+
+    assert_eq!(
+        command,
+        Some(zetta_profiles::ProfileCommand::with_args(
+            "cmd.exe",
+            vec!["/c".to_owned(), "msys2_shell.cmd".to_owned()],
+        ))
+    );
+    assert_eq!(env, environment, "same machine, same environment");
+}

@@ -42,6 +42,7 @@ url = "2.2"
 urlencoding = "2.1.2"
 util = { path = "../../zed/crates/util" }
 vte = { version = "0.15.0", features = ["ansi"] }
+zetta_profiles = { path = "../zetta_profiles" }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.61", features = [

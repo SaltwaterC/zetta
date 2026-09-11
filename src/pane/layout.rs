@@ -672,14 +672,23 @@ impl PaneLayout {
         }
     }
 
-    fn pane_ids(&self) -> Vec<u64> {
+    /// Every pane this layout places, in left-to-right, top-to-bottom order.
+    ///
+    /// One allocation for the whole tree: collecting per node built and threw
+    /// away a `Vec` for every split on the way up.
+    pub(crate) fn pane_ids(&self) -> Vec<u64> {
+        let mut ids = Vec::new();
+        self.collect_pane_ids(&mut ids);
+        ids
+    }
+
+    fn collect_pane_ids(&self, ids: &mut Vec<u64>) {
         match self {
-            Self::Pane(id) => vec![*id],
-            Self::Split { first, second, .. } => first
-                .pane_ids()
-                .into_iter()
-                .chain(second.pane_ids())
-                .collect(),
+            Self::Pane(id) => ids.push(*id),
+            Self::Split { first, second, .. } => {
+                first.collect_pane_ids(ids);
+                second.collect_pane_ids(ids);
+            }
         }
     }
 

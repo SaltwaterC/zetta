@@ -483,6 +483,12 @@ pub(crate) struct Zetta {
     /// mappings used to apply subscription snapshots safely.
     #[cfg(feature = "zmux")]
     pub(crate) shared_collaboration: SharedSessionCoordinator,
+    /// Panes this window has asked the daemon to close and that the canonical
+    /// state still holds. A shared pane leaves the tab when the session says it
+    /// has, not when the user asked, so these are shown as closing and take no
+    /// further input in the meantime.
+    #[cfg(feature = "zmux")]
+    pub(crate) closing_shared_panes: HashSet<u64>,
     #[cfg(feature = "zmux")]
     pub(crate) pending_shared_terminal_launches:
         HashMap<u64, Vec<crate::terminal_spawn::SharedTerminalLaunch>>,
@@ -911,6 +917,8 @@ impl Zetta {
             shared_panes: HashMap::new(),
             #[cfg(feature = "zmux")]
             shared_collaboration: SharedSessionCoordinator::default(),
+            #[cfg(feature = "zmux")]
+            closing_shared_panes: HashSet::new(),
             #[cfg(feature = "zmux")]
             pending_shared_terminal_launches: HashMap::new(),
             #[cfg(feature = "zmux")]

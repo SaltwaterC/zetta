@@ -8103,6 +8103,7 @@ dependencies = [
  "util",
  "vte",
  "windows 0.61.3",
+ "zetta_profiles",
 ]
 
 [[package]]
@@ -10982,9 +10983,20 @@ dependencies = [
  "zbus",
  "zed_actions",
  "zeroize",
+ "zetta_profiles",
  "zmux",
  "zosh",
  "zwt",
+]
+
+[[package]]
+name = "zetta_profiles"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "windows 0.61.3",
 ]
 
 [[package]]
@@ -11028,6 +11040,7 @@ dependencies = [
  "uds_windows",
  "windows 0.61.3",
  "zeroize",
+ "zetta_profiles",
 ]
 
 [[package]]

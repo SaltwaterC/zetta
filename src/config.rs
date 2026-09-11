@@ -17,6 +17,11 @@ use crate::profile_icon::ProfileIcon;
 mod discovery;
 
 use discovery::discovered_profiles;
+/// Turning the application's `Shell` into the plain command that crosses a
+/// machine boundary. Only a shared multiplexer session sends one, which is why
+/// it follows that feature. See `config/discovery.rs`.
+#[cfg(feature = "zmux")]
+pub(crate) use discovery::profile_command;
 
 pub(crate) const DEFAULT_TERMINAL_FONT_FAMILY: &str = "MesloLGS NF";
 const DEFAULT_MAX_SCROLL_HISTORY_LINES: usize = MAX_SCROLL_HISTORY_LINES;

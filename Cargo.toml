@@ -166,6 +166,7 @@ ui = { path = "crates/ui" }
 util = { path = "zed/crates/util" }
 zeroize = "1"
 zed_actions = { path = "crates/zed_actions" }
+zetta_profiles = { path = "crates/zetta_profiles" }
 zmux = { path = "crates/zmux", default-features = false, features = ["scrollback-buffer"], optional = true }
 zosh = { path = "crates/zosh", optional = true }
 vt100 = { version = "0.16.2", optional = true }

@@ -40,6 +40,15 @@ pub struct SessionHandover {
     pub id: u64,
     pub summary: crate::protocol::BackgroundSessionSummary,
     pub state: serde_json::Value,
+    /// Canonical collaboration state, if this session was shared. Optional so
+    /// a handover from before collaboration can still be upgraded safely.
+    ///
+    /// As [`crate::upgrade::SessionHandover::shared_state`] on Unix. The two
+    /// structures describe the same handover and are read by the same code in
+    /// `server/upgrade.rs`, so a field added to one has to be added to the
+    /// other — this one was missed, and Windows has not compiled since.
+    #[serde(default)]
+    pub shared_state: Option<crate::messages::SharedSessionState>,
     pub keep: bool,
     pub offered: bool,
     #[serde(default)]

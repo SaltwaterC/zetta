@@ -4311,6 +4311,7 @@ dependencies = [
  "util_macros",
  "vte",
  "windows 0.61.3",
+ "zetta_profiles",
 ]
 
 [[package]]
@@ -5418,6 +5419,16 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "zetta_profiles"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "windows 0.61.3",
 ]
 
 [[package]]

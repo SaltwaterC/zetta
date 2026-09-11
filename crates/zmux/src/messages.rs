@@ -618,17 +618,51 @@ pub enum SharedDraftLayout {
     },
 }
 
+/// A pane a viewer has asked a shared session for.
+///
+/// It says which profile to run, not what that profile is. The daemon resolves
+/// the name against its *own* host's configuration, because that is where the
+/// process will run: a viewer on another machine resolved it against its own
+/// `$SHELL` and shipped its whole environment along, which is how a Linux
+/// client came to ask macOS for `/bin/bash` with a Linux `PATH` in front of it.
+///
+/// `env` is what only the requester can know — the pane's routing identity —
+/// and never its machine's environment; see `SHARED_DRAFT_ENVIRONMENT_PREFIX`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SharedPaneDraft {
     pub draft_id: u64,
-    pub program: Option<String>,
-    pub args: Vec<String>,
+    /// The profile to run, by name. Empty, or a name this host does not have,
+    /// means the host's login shell.
+    pub profile: String,
+    /// What that profile runs, when the requester is on this host and so
+    /// resolved the name against the very configuration the daemon would read.
+    /// It carries the working-directory tracking wrappers a profile can need,
+    /// which a name alone cannot express. Never sent by a remote requester,
+    /// whose resolution is its own machine's.
+    #[serde(default)]
+    pub command: Option<zetta_profiles::ProfileCommand>,
     pub env: HashMap<String, String>,
     pub working_directory: Option<PathBuf>,
     pub size: TerminalSize,
     pub console_palette: ConsolePalette,
     pub metadata: crate::protocol::BackgroundPaneSummary,
+}
+
+/// The only environment variables a draft may carry from the requester.
+///
+/// A pane's routing identity is the requesting window's to assign and means
+/// nothing to the daemon, so it has to cross. Everything else about the
+/// environment belongs to the host that runs the process.
+pub const SHARED_DRAFT_ENVIRONMENT_PREFIX: &str = "ZETTA_";
+
+/// Drops everything a requester must not decide for another machine.
+pub fn shared_draft_environment(
+    env: impl IntoIterator<Item = (String, String)>,
+) -> HashMap<String, String> {
+    env.into_iter()
+        .filter(|(name, _)| name.starts_with(SHARED_DRAFT_ENVIRONMENT_PREFIX))
+        .collect()
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

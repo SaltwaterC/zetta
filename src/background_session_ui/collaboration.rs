@@ -13,6 +13,19 @@ use crate::session_state::{AxisState, LayoutState, PaneState, TabState};
 use zmux::messages::SharedSessionState;
 use zmux::protocol::{BackgroundPaneLayout, BackgroundPaneSummary};
 
+/// How long local tab state settles before it is published. Pointer-driven
+/// pane resizing produces dozens of layout states per frame and only the last
+/// one is worth a round trip.
+const SHARED_PUBLICATION_DEBOUNCE: Duration = Duration::from_millis(100);
+
+/// How many times a pane close is asked for before the pane is given back to
+/// the user with an explanation.
+const SHARED_CLOSE_ATTEMPTS: u32 = 4;
+
+/// Multiplied by the attempt number, so the retries are spread rather than
+/// stacked on a daemon that is busy committing somebody else's operation.
+const SHARED_CLOSE_RETRY_BACKOFF: Duration = Duration::from_millis(120);
+
 #[derive(Default)]
 pub(crate) struct SharedSessionCoordinator {
     sessions: HashMap<u64, SharedSessionBinding>,
@@ -24,16 +37,70 @@ struct SharedSessionBinding {
     state: SharedSessionState,
     mux_to_local: HashMap<u64, u64>,
     local_to_mux: HashMap<u64, u64>,
-    sync_generation: u64,
-    sync_in_flight: bool,
-    sync_pending: bool,
+    /// Canonical mutations waiting their turn. Every change this window asks
+    /// the daemon for goes through here in order — a state publication and a
+    /// pane close racing on the same revision is how a close came to be
+    /// rejected and then silently forgotten.
+    queue: VecDeque<SharedOperation>,
+    in_flight: bool,
+    /// Whether a debounce timer is already running for a state publication, so
+    /// a gesture that notifies dozens of times starts one timer, not dozens.
+    publication_scheduled: bool,
     watch_id: Option<u64>,
+    /// The stable ids this window is in the middle of attaching. Snapshots are
+    /// applied from several places at once, so without this the same pane is
+    /// attached twice when two of them see it missing before either finishes.
+    attaching: HashSet<u64>,
+    /// How to reach the daemon for this session. Kept here because a snapshot
+    /// is applied from callers that have no connection of their own — a
+    /// committed spawn, a conflict response — and every one of them may have to
+    /// attach a pane the snapshot introduced.
+    connection: Option<SharedWatchConnection>,
 }
 
 #[derive(Clone)]
 struct SharedWatchConnection {
     client: Arc<zmux::client::Client>,
     secret: Option<zmux::auth::SessionSecret>,
+}
+
+/// One canonical mutation this window has asked the daemon for.
+///
+/// The daemon serializes operations against its own tree, but the *window* also
+/// has to: a publication built from the local tab and a close of a pane in it
+/// describe two different pane sets, and sending both at once means whichever
+/// arrives second is rejected for disagreeing with a tree the first just
+/// changed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SharedOperation {
+    /// Publish this window's view of the tab — labels, icons, themes, and the
+    /// geometry the daemon does not already own.
+    PublishState,
+    /// Close a pane for every viewer.
+    ClosePane {
+        local_pane_id: u64,
+        mux_pane_id: u64,
+        attempts: u32,
+    },
+}
+
+impl SharedOperation {
+    /// Whether two queued operations would do the same work. Compared instead
+    /// of equality because a retried close differs only in its attempt count,
+    /// and re-queuing it must not leave the original behind.
+    fn is_same_work(self, other: Self) -> bool {
+        match (self, other) {
+            (Self::PublishState, Self::PublishState) => true,
+            (
+                Self::ClosePane { local_pane_id, .. },
+                Self::ClosePane {
+                    local_pane_id: other,
+                    ..
+                },
+            ) => local_pane_id == other,
+            _ => false,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -72,10 +139,12 @@ impl SharedSessionCoordinator {
                 state,
                 mux_to_local,
                 local_to_mux,
-                sync_generation: 0,
-                sync_in_flight: false,
-                sync_pending: false,
+                queue: VecDeque::new(),
+                in_flight: false,
+                publication_scheduled: false,
                 watch_id: None,
+                attaching: HashSet::new(),
+                connection: None,
             },
         );
         Ok(())
@@ -128,37 +197,94 @@ impl SharedSessionCoordinator {
         self.sessions.get(&session_id).map(|session| &session.state)
     }
 
-    pub(crate) fn schedule_sync(&mut self, session_id: u64) -> Option<u64> {
-        let session = self.sessions.get_mut(&session_id)?;
-        if session.sync_in_flight {
-            session.sync_pending = true;
-            return None;
-        }
-        session.sync_generation = session.sync_generation.wrapping_add(1);
-        session.sync_in_flight = true;
-        Some(session.sync_generation)
-    }
-
-    pub(crate) fn sync_is_current(&self, session_id: u64, generation: u64) -> bool {
+    /// Whether this snapshot has already been superseded. Checked *before*
+    /// anything is removed for it: a snapshot that will not be applied must not
+    /// take panes out of the tab, because nothing would then put the layout
+    /// back together.
+    pub(crate) fn snapshot_is_stale(&self, session_id: u64, state: &SharedSessionState) -> bool {
         self.sessions
             .get(&session_id)
-            .is_some_and(|session| session.sync_generation == generation)
+            .is_some_and(|session| state.revision < session.state.revision)
     }
 
-    pub(crate) fn finish_sync(&mut self, session_id: u64, generation: u64) -> bool {
-        let Some(session) = self.sessions.get_mut(&session_id) else {
-            return false;
-        };
-        session.sync_in_flight = false;
-        let pending = session.sync_pending || session.sync_generation != generation;
-        session.sync_pending = false;
-        pending
+    /// Claims a pane for attachment, or reports that another task already has
+    /// it. Released by [`Self::end_attach`] whether the attachment succeeded or
+    /// not, so a failure is retried by the next snapshot rather than wedged.
+    pub(crate) fn begin_attach(&mut self, session_id: u64, mux_pane_id: u64) -> bool {
+        self.sessions
+            .get_mut(&session_id)
+            .is_some_and(|session| session.attaching.insert(mux_pane_id))
+    }
+
+    pub(crate) fn end_attach(&mut self, session_id: u64, mux_pane_id: u64) {
+        if let Some(session) = self.sessions.get_mut(&session_id) {
+            session.attaching.remove(&mux_pane_id);
+        }
+    }
+
+    fn set_connection(&mut self, session_id: u64, connection: SharedWatchConnection) {
+        if let Some(session) = self.sessions.get_mut(&session_id) {
+            session.connection = Some(connection);
+        }
+    }
+
+    fn connection(&self, session_id: u64) -> Option<SharedWatchConnection> {
+        self.sessions
+            .get(&session_id)
+            .and_then(|session| session.connection.clone())
+    }
+
+    /// Claims the debounce for a state publication. `false` means one is
+    /// already scheduled and this caller has nothing to do.
+    pub(crate) fn schedule_publication(&mut self, session_id: u64) -> bool {
+        self.sessions
+            .get_mut(&session_id)
+            .is_some_and(|session| !std::mem::replace(&mut session.publication_scheduled, true))
+    }
+
+    pub(crate) fn clear_publication_schedule(&mut self, session_id: u64) {
+        if let Some(session) = self.sessions.get_mut(&session_id) {
+            session.publication_scheduled = false;
+        }
+    }
+
+    /// Queues a canonical mutation, collapsing it into an equivalent one
+    /// already waiting. A second publication would send the same tab state
+    /// twice, and a second close of the same pane would be refused by the
+    /// daemon for naming a pane it no longer holds.
+    pub(crate) fn enqueue(&mut self, session_id: u64, operation: SharedOperation) {
+        if let Some(session) = self.sessions.get_mut(&session_id)
+            && !session
+                .queue
+                .iter()
+                .any(|queued| queued.is_same_work(operation))
+        {
+            session.queue.push_back(operation);
+        }
+    }
+
+    /// Takes the next operation to run, or `None` while one is still in flight.
+    /// Taking one marks the session busy until [`Self::finish_operation`].
+    pub(crate) fn take_next_operation(&mut self, session_id: u64) -> Option<SharedOperation> {
+        let session = self.sessions.get_mut(&session_id)?;
+        if session.in_flight {
+            return None;
+        }
+        let operation = session.queue.pop_front()?;
+        session.in_flight = true;
+        Some(operation)
+    }
+
+    pub(crate) fn finish_operation(&mut self, session_id: u64) {
+        if let Some(session) = self.sessions.get_mut(&session_id) {
+            session.in_flight = false;
+        }
     }
 
     pub(crate) fn may_report_size(&self, session_id: u64) -> bool {
         self.sessions
             .get(&session_id)
-            .is_some_and(|session| !session.sync_in_flight)
+            .is_some_and(|session| !session.in_flight)
     }
 
     pub(crate) fn local_pane_id(&self, session_id: u64, mux_pane_id: u64) -> Option<u64> {
@@ -191,7 +317,9 @@ impl SharedSessionCoordinator {
         };
         state
             .pane_ids()
-            .filter(|mux_id| !session.mux_to_local.contains_key(mux_id))
+            .filter(|mux_id| {
+                !session.mux_to_local.contains_key(mux_id) && !session.attaching.contains(mux_id)
+            })
             .collect()
     }
 
@@ -214,7 +342,13 @@ impl SharedSessionCoordinator {
         Some(local_pane_id)
     }
 
-    fn remove_local_pane(&mut self, session_id: u64, local_pane_id: u64) {
+    /// Forgets a pane this window no longer shows.
+    ///
+    /// Called wherever a pane leaves a tab, including the ordinary local close.
+    /// A mapping left behind resolves a canonical snapshot that still names the
+    /// pane onto a local id with no `TerminalPane`, which is how a closed pane
+    /// came back into the layout as a region nothing draws.
+    pub(crate) fn remove_local_pane(&mut self, session_id: u64, local_pane_id: u64) {
         if let Some(session) = self.sessions.get_mut(&session_id)
             && let Some(mux_pane_id) = session.local_to_mux.remove(&local_pane_id)
         {
@@ -254,8 +388,15 @@ impl SharedSessionCoordinator {
             Err(error) => return Err(error).context("reading the shared tab state"),
         };
         remap_tab_state(&mut tab_state, &state.presentation, &session.mux_to_local)?;
+        // Mapped and checked before anything is written. A layout naming a pane
+        // this tab does not hold renders as a region nothing draws and never
+        // gives its space back, so it is refused rather than installed;
+        // `apply_tab_state` derives its own layout from the same presentation,
+        // so one check covers both writes.
+        let layout = map_background_layout(&state.presentation.layout, &session.mux_to_local)?;
+        ensure_layout_covers_tab(tab, &layout)?;
         apply_tab_state(tab, tab_state);
-        apply_canonical_presentation(tab, &state, &session.mux_to_local)?;
+        apply_canonical_presentation(tab, &state, layout, &session.mux_to_local)?;
         session.state = state;
         Ok(SharedSnapshotDisposition::Applied)
     }
@@ -313,6 +454,60 @@ impl Zetta {
         self.mux_panes
             .session_id(tab_id)
             .is_some_and(|session_id| self.shared_collaboration.is_bound(session_id))
+    }
+
+    /// Removes a pane the daemon never committed, and says why.
+    ///
+    /// A split in a shared tab creates its pane locally first and offers it to
+    /// the session as a draft — that placeholder is what the proposed layout is
+    /// written around. When the session refuses the proposal, the draft exists
+    /// on no viewer and has a place in no canonical layout, so it is taken back
+    /// rather than left as a pane that renders nowhere and still counts.
+    pub(crate) fn discard_uncommitted_shared_pane(
+        &mut self,
+        tab_id: u64,
+        pane_id: u64,
+        reason: String,
+        cx: &mut Context<Self>,
+    ) {
+        if self.mux_panes.mux_pane_id(pane_id).is_some() {
+            // It committed after all, on another path. Report against the pane.
+            self.report_pane_spawn_error(tab_id, pane_id, reason, cx);
+            return;
+        }
+        if let Some(tab) = self
+            .tabs
+            .iter_mut()
+            .find(|tab| tab.id == tab_id && tab.panes.len() > 1)
+        {
+            detach_pane_from_tab(tab, pane_id);
+        }
+        self.projects.forget_pane(pane_id);
+        self.forget_pane_controls([pane_id]);
+        self.closing_shared_panes.remove(&pane_id);
+        self.pane_output_error = Some(reason);
+        cx.notify();
+    }
+
+    /// Whether this pane is waiting for the daemon to confirm its close. Such a
+    /// pane is still on screen and still receiving its session's output, but it
+    /// takes no input and cannot be closed again.
+    pub(crate) fn shared_pane_is_closing(&self, pane_id: u64) -> bool {
+        // Asked once per pane per frame, and the set is empty in every frame
+        // but the few between asking for a close and hearing back. The emptiness
+        // test is free; hashing the id is not.
+        !self.closing_shared_panes.is_empty() && self.closing_shared_panes.contains(&pane_id)
+    }
+
+    /// Forgets a pane's stable-id mapping when it leaves a tab by a route that
+    /// is not the shared-session remover — an ordinary local close, or a tab
+    /// being closed. See [`SharedSessionCoordinator::remove_local_pane`].
+    pub(crate) fn forget_shared_pane_mapping(&mut self, tab_id: u64, pane_id: u64) {
+        let Some(session_id) = self.mux_panes.session_id(tab_id) else {
+            return;
+        };
+        self.shared_collaboration
+            .remove_local_pane(session_id, pane_id);
     }
 
     /// Binds a tab that has just been offered to the daemon's authoritative
@@ -377,46 +572,75 @@ impl Zetta {
     /// Queues one canonical shared mutation after local state changes. Geometry
     /// uses typed operations; the opaque replacement is limited to tab state the
     /// daemon does not interpret, such as labels, icons, and themes.
+    ///
+    /// Debounced rather than sent: pointer-driven pane resizing produces dozens
+    /// of local layout states per frame, and only the settled one is worth a
+    /// round trip.
     pub(crate) fn sync_shared_tab_state(&mut self, tab_id: u64, cx: &mut Context<Self>) {
-        let Some(_runtime) = self.mux_panes.runtime_for_tab(tab_id) else {
-            return;
-        };
         let Some(session_id) = self.mux_panes.session_id(tab_id) else {
             return;
         };
-        let Some(generation) = self.shared_collaboration.schedule_sync(session_id) else {
+        if !self.shared_collaboration.schedule_publication(session_id) {
             return;
-        };
+        }
         let executor = cx.background_executor().clone();
         cx.spawn(async move |this, cx| {
-            // Pointer-driven pane resizing can produce dozens of local layout
-            // states per frame. One daemon operation for the settled state also
-            // prevents those edits from all racing on the same revision.
-            executor.timer(Duration::from_millis(100)).await;
-            let request = this
-                .update(cx, |this, cx| {
-                    if !this
-                        .shared_collaboration
-                        .sync_is_current(session_id, generation)
-                    {
-                        return None;
-                    }
-                    this.shared_tab_state_request(tab_id, session_id, cx)
-                })
-                .ok()
-                .flatten();
-            let Some((client, request)) = request else {
-                this.update(cx, |this, cx| {
-                    if this
-                        .shared_collaboration
-                        .finish_sync(session_id, generation)
-                    {
-                        this.sync_shared_tab_state(tab_id, cx);
-                    }
-                })
-                .ok();
-                return;
-            };
+            executor.timer(SHARED_PUBLICATION_DEBOUNCE).await;
+            this.update(cx, |this, cx| {
+                this.shared_collaboration
+                    .clear_publication_schedule(session_id);
+                this.shared_collaboration
+                    .enqueue(session_id, SharedOperation::PublishState);
+                this.pump_shared_operations(tab_id, session_id, cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Runs the session's next queued mutation, if one is not already running.
+    ///
+    /// Each operation is built from the tab and rebased on the canonical
+    /// revision at the moment it is sent, never at the moment it was queued, so
+    /// waiting behind another operation cannot make it stale.
+    pub(crate) fn pump_shared_operations(
+        &mut self,
+        tab_id: u64,
+        session_id: u64,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(operation) = self.shared_collaboration.take_next_operation(session_id) else {
+            return;
+        };
+        match operation {
+            SharedOperation::PublishState => self.run_shared_publication(tab_id, session_id, cx),
+            SharedOperation::ClosePane {
+                local_pane_id,
+                mux_pane_id,
+                attempts,
+            } => self.run_shared_pane_close(
+                tab_id,
+                session_id,
+                local_pane_id,
+                mux_pane_id,
+                attempts,
+                cx,
+            ),
+        }
+    }
+
+    fn finish_shared_operation(&mut self, tab_id: u64, session_id: u64, cx: &mut Context<Self>) {
+        self.shared_collaboration.finish_operation(session_id);
+        self.report_all_shared_pane_sizes(tab_id, cx);
+        self.pump_shared_operations(tab_id, session_id, cx);
+    }
+
+    fn run_shared_publication(&mut self, tab_id: u64, session_id: u64, cx: &mut Context<Self>) {
+        let Some((client, request)) = self.shared_tab_state_request(tab_id, session_id, cx) else {
+            self.finish_shared_operation(tab_id, session_id, cx);
+            return;
+        };
+        cx.spawn(async move |this, cx| {
             let result = cx
                 .background_spawn(async move { client.apply_shared_with_request(request) })
                 .await;
@@ -431,26 +655,144 @@ impl Zetta {
                                     .shared_collaboration
                                     .apply_snapshot_to_tab(session_id, state, tab)
                             {
-                                log::debug!("could not apply canonical shared response: {error:#}");
+                                log::warn!(
+                                    "could not apply the canonical response to publishing shared session {session_id}: {error:#}"
+                                );
                             }
                             cx.notify();
                         }
                     }
                     Err(error) => {
-                        log::debug!("could not publish shared tab state: {error:#}");
+                        log::warn!("could not publish shared session {session_id} tab state: {error:#}");
                     }
                 }
-                if this
-                    .shared_collaboration
-                    .finish_sync(session_id, generation)
-                {
-                    this.sync_shared_tab_state(tab_id, cx);
-                }
-                this.report_all_shared_pane_sizes(tab_id, cx);
+                this.finish_shared_operation(tab_id, session_id, cx);
             })
             .ok();
         })
         .detach();
+    }
+
+    /// Asks the daemon to close a pane for every viewer, and keeps asking.
+    ///
+    /// The pane is not removed here. It leaves this window when the canonical
+    /// state says it is gone — either through the snapshot this call answers
+    /// with, or through the `SharedPanesChanged` event the daemon broadcasts —
+    /// so a close that the daemon refuses leaves a pane that is still usable
+    /// rather than a region nothing draws.
+    fn run_shared_pane_close(
+        &mut self,
+        tab_id: u64,
+        session_id: u64,
+        local_pane_id: u64,
+        mux_pane_id: u64,
+        attempts: u32,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(runtime) = self.mux_panes.runtime_for_tab(tab_id) else {
+            self.abandon_shared_pane_close(tab_id, session_id, local_pane_id, cx);
+            // Still finished, even though nothing was sent: an operation taken
+            // off the queue holds the session until it reports back, so
+            // returning here would wedge every later close and publication.
+            self.finish_shared_operation(tab_id, session_id, cx);
+            return;
+        };
+        let client = runtime.client().clone();
+        let base_revision = self
+            .shared_collaboration
+            .state(session_id)
+            .map(|state| state.revision);
+        let executor = cx.background_executor().clone();
+        cx.spawn(async move |this, cx| {
+            if attempts > 0 {
+                executor
+                    .timer(SHARED_CLOSE_RETRY_BACKOFF * attempts)
+                    .await;
+            }
+            let outcome = cx
+                .background_spawn(async move {
+                    let base_revision = match base_revision {
+                        Some(revision) => revision,
+                        None => client.shared_snapshot(session_id)?.revision,
+                    };
+                    client.apply_shared_with_request(
+                        zmux::messages::SharedSessionOperationRequest {
+                            session_id,
+                            base_revision,
+                            operation_id: client.next_shared_operation_id(),
+                            operation: zmux::messages::SharedSessionOperation::ClosePane {
+                                pane_id: mux_pane_id,
+                            },
+                        },
+                    )
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                let settled = match outcome {
+                    Ok(zmux::client::SharedOperationResult::Applied(state)) => {
+                        this.install_shared_snapshot(session_id, state, cx);
+                        true
+                    }
+                    Ok(zmux::client::SharedOperationResult::Conflict(state)) => {
+                        // The daemon validated the close against a tree this
+                        // window had not caught up with. If the pane is gone
+                        // from it, somebody else already closed it.
+                        let gone = !state.contains_pane(mux_pane_id);
+                        this.install_shared_snapshot(session_id, state, cx);
+                        gone
+                    }
+                    Err(error) => {
+                        log::warn!(
+                            "could not close shared pane {mux_pane_id} of session {session_id}: {error:#}"
+                        );
+                        false
+                    }
+                };
+                if !settled {
+                    if attempts + 1 >= SHARED_CLOSE_ATTEMPTS {
+                        this.abandon_shared_pane_close(tab_id, session_id, local_pane_id, cx);
+                    } else {
+                        this.shared_collaboration.enqueue(
+                            session_id,
+                            SharedOperation::ClosePane {
+                                local_pane_id,
+                                mux_pane_id,
+                                attempts: attempts + 1,
+                            },
+                        );
+                    }
+                }
+                this.finish_shared_operation(tab_id, session_id, cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Gives up on a close the daemon will not commit. The pane goes back to
+    /// being usable and says why, which is the one outcome that does not leave
+    /// the window and the daemon disagreeing.
+    fn abandon_shared_pane_close(
+        &mut self,
+        tab_id: u64,
+        session_id: u64,
+        local_pane_id: u64,
+        cx: &mut Context<Self>,
+    ) {
+        self.closing_shared_panes.remove(&local_pane_id);
+        let label = self
+            .tabs
+            .iter()
+            .find(|tab| tab.id == tab_id)
+            .and_then(|tab| tab.pane(local_pane_id))
+            .map_or_else(|| local_pane_id.to_string(), TerminalPane::label);
+        log::warn!(
+            "shared session {session_id} would not close pane {local_pane_id}; leaving it open"
+        );
+        self.pane_output_error = Some(format!(
+            "The session's multiplexer would not close pane {label}. It is still running for every viewer."
+        ));
+        cx.notify();
     }
 
     pub(crate) fn shared_tab_state_request(
@@ -568,6 +910,11 @@ impl Zetta {
             client: runtime.client().clone(),
             secret: runtime.session_secret(),
         };
+        // Recorded for every caller that applies a snapshot, not just this
+        // loop: a committed spawn and a conflict response both arrive with a
+        // state that can name a pane this window still has to attach.
+        self.shared_collaboration
+            .set_connection(session_id, connection.clone());
         cx.spawn_in(window, async move |this, cx| {
             while let Ok(event) = receiver.recv().await {
                 let current = this
@@ -581,34 +928,25 @@ impl Zetta {
                 }
                 let task = match event {
                     zmux::client::SharedSessionEvent::Updated(state)
-                    | zmux::client::SharedSessionEvent::PanesChanged { state, .. } => this
-                        .update_in(cx, |this, window, cx| {
-                            this.handle_shared_snapshot_event(
-                                session_id,
-                                state,
-                                connection.clone(),
-                                window,
-                                cx,
-                            )
+                    | zmux::client::SharedSessionEvent::PanesChanged { state, .. } => {
+                        this.update_in(cx, |this, window, cx| {
+                            this.apply_shared_snapshot(session_id, state, window, cx);
                         })
-                        .ok(),
+                        .ok();
+                        None
+                    }
+                    // A pane added by another viewer needs no handling of its
+                    // own: applying the snapshot attaches every pane it names
+                    // that this window does not hold, which is exactly this one.
                     zmux::client::SharedSessionEvent::PaneAdded {
-                        session_id,
-                        pane_id,
-                        state,
-                        ..
-                    } => this
-                        .update_in(cx, |this, window, cx| {
-                            this.handle_shared_pane_added(
-                                session_id,
-                                pane_id,
-                                state,
-                                connection.clone(),
-                                window,
-                                cx,
-                            )
+                        session_id, state, ..
+                    } => {
+                        this.update_in(cx, |this, window, cx| {
+                            this.apply_shared_snapshot(session_id, state, window, cx);
                         })
-                        .ok(),
+                        .ok();
+                        None
+                    }
                     zmux::client::SharedSessionEvent::PaneRemoved {
                         session_id,
                         pane_id,
@@ -649,126 +987,63 @@ impl Zetta {
         .detach();
     }
 
-    fn handle_shared_snapshot_event(
+    /// Attaches every pane the snapshot holds that this window does not.
+    ///
+    /// One task per pane, each claimed through `begin_attach` so the several
+    /// callers that apply a snapshot cannot attach the same pane twice. Each
+    /// task re-applies the snapshot it ends up with, which is what installs the
+    /// geometry that names the pane it just attached.
+    fn attach_panes_missing_locally(
         &mut self,
         session_id: u64,
-        mut state: SharedSessionState,
-        connection: SharedWatchConnection,
+        state: &SharedSessionState,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Task<()> {
+    ) {
         let missing = self
             .shared_collaboration
-            .panes_missing_from_snapshot(session_id, &state);
-        for local_pane_id in missing {
-            self.remove_local_shared_pane(session_id, local_pane_id, cx);
+            .missing_panes_for_snapshot(session_id, state);
+        if missing.is_empty() {
+            return;
         }
-        let missing = self
-            .shared_collaboration
-            .missing_panes_for_snapshot(session_id, &state);
-        cx.spawn_in(window, async move |this, cx| {
-            for pane_id in missing {
-                let mut attached = None;
-                for delay in [
-                    Duration::ZERO,
-                    Duration::from_millis(50),
-                    Duration::from_millis(150),
-                ] {
-                    if !delay.is_zero() {
-                        cx.background_executor().timer(delay).await;
-                    }
-                    let refreshed = cx
-                        .background_spawn({
-                            let connection = connection.clone();
-                            async move {
-                                let state = connection.client.shared_snapshot(session_id)?;
-                                let pane = if state.contains_pane(pane_id) {
-                                    Some(connection.client.attach_shared_with_secret(
-                                        session_id,
-                                        pane_id,
-                                        connection.secret.as_ref(),
-                                    )?)
-                                } else {
-                                    None
-                                };
-                                Ok::<_, anyhow::Error>((state, pane))
-                            }
-                        })
-                        .await;
-                    match refreshed {
-                        Ok((
-                            latest,
-                            Some(zmux::client::AttachOutcome::SharedAttached { pane, .. }),
-                        )) => {
-                            state = latest;
-                            attached = Some(pane);
-                            break;
-                        }
-                        Ok((latest, None)) => {
-                            state = latest;
-                            break;
-                        }
-                        _ => {}
-                    }
-                }
-                if let Some(pane) = attached {
-                    this.update_in(cx, |this, window, cx| {
-                        this.attach_incoming_shared_pane(
-                            session_id,
-                            pane,
-                            state.clone(),
-                            window,
-                            cx,
-                        )
-                    })
-                    .ok();
-                }
+        let Some(connection) = self.shared_collaboration.connection(session_id) else {
+            log::warn!(
+                "shared session {session_id} has panes {missing:?} to attach but no daemon connection"
+            );
+            return;
+        };
+        for mux_pane_id in missing {
+            if !self
+                .shared_collaboration
+                .begin_attach(session_id, mux_pane_id)
+            {
+                continue;
             }
-            this.update_in(cx, |this, window, cx| {
-                this.apply_shared_snapshot(session_id, state, window, cx);
-            })
-            .ok();
-        })
-    }
-
-    fn handle_shared_pane_added(
-        &mut self,
-        session_id: u64,
-        pane_id: u64,
-        state: SharedSessionState,
-        connection: SharedWatchConnection,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Task<()> {
-        let should_attach = self
-            .shared_collaboration
-            .local_pane_id(session_id, pane_id)
-            .is_none();
-        cx.spawn_in(window, async move |this, cx| {
-            if !should_attach {
-                return;
-            }
-            let attached = cx
-                .background_spawn(async move {
-                    connection.client.attach_shared_with_secret(
-                        session_id,
-                        pane_id,
-                        connection.secret.as_ref(),
-                    )
+            let connection = connection.clone();
+            cx.spawn_in(window, async move |this, cx| {
+                let attached =
+                    attach_shared_pane_with_retries(session_id, mux_pane_id, &connection, cx).await;
+                this.update_in(cx, |this, window, cx| {
+                    this.shared_collaboration
+                        .end_attach(session_id, mux_pane_id);
+                    let Some((latest, pane)) = attached else {
+                        return;
+                    };
+                    if let Some(pane) = pane
+                        && let Err(error) =
+                            this.attach_incoming_shared_pane(session_id, pane, latest.clone(), window, cx)
+                    {
+                        log::warn!(
+                            "could not attach shared pane {mux_pane_id} of session {session_id}: {error:#}"
+                        );
+                        return;
+                    }
+                    this.apply_shared_snapshot(session_id, latest, window, cx);
                 })
-                .await;
-            let Ok(zmux::client::AttachOutcome::SharedAttached { pane, .. }) = attached else {
-                return;
-            };
-            this.update_in(cx, |this, window, cx| {
-                let result =
-                    this.attach_incoming_shared_pane(session_id, pane, state.clone(), window, cx);
-                if result.is_ok() {
-                    this.apply_shared_snapshot(session_id, state, window, cx);
-                }
+                .ok();
             })
-            .ok();
-        })
+            .detach();
+        }
     }
 
     fn handle_shared_stream_failure(
@@ -846,6 +1121,52 @@ impl Zetta {
         let Some(tab_id) = self.shared_collaboration.tab_id(session_id) else {
             return;
         };
+        if self
+            .shared_collaboration
+            .snapshot_is_stale(session_id, &state)
+        {
+            return;
+        }
+        self.attach_panes_missing_locally(session_id, &state, window, cx);
+        if self.install_shared_snapshot(session_id, state, cx) {
+            self.focus_active(window, cx);
+            let this = cx.entity().downgrade();
+            cx.defer(move |cx| {
+                this.update(cx, |this, cx| {
+                    this.report_all_shared_pane_sizes(tab_id, cx);
+                })
+                .ok();
+            });
+        }
+    }
+
+    /// The part of applying a snapshot that needs no window: drop the panes the
+    /// snapshot no longer has, then install its geometry. Reports whether the
+    /// snapshot was applied.
+    ///
+    /// Separate from [`Zetta::apply_shared_snapshot`] because the operation
+    /// queue runs off the main render path and has no window to focus with,
+    /// while still having to converge the tab on what the daemon answered.
+    pub(crate) fn install_shared_snapshot(
+        &mut self,
+        session_id: u64,
+        state: SharedSessionState,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(tab_id) = self.shared_collaboration.tab_id(session_id) else {
+            return false;
+        };
+        // Staleness is decided before anything is removed. A snapshot that will
+        // not be applied must not take panes out of the tab: the layout is only
+        // rewritten by the apply below, so removing for a snapshot that is then
+        // discarded leaves the tab holding a layout entry with no pane behind it.
+        if self
+            .shared_collaboration
+            .snapshot_is_stale(session_id, &state)
+        {
+            return false;
+        }
+        let revision = state.revision;
         let stale = self
             .shared_collaboration
             .panes_missing_from_snapshot(session_id, &state);
@@ -862,18 +1183,20 @@ impl Zetta {
             });
         match disposition.transpose() {
             Ok(Some(SharedSnapshotDisposition::Applied)) => {
-                self.focus_active(window, cx);
                 cx.notify();
-                let this = cx.entity().downgrade();
-                cx.defer(move |cx| {
-                    this.update(cx, |this, cx| {
-                        this.report_all_shared_pane_sizes(tab_id, cx);
-                    })
-                    .ok();
-                });
+                true
             }
-            Ok(Some(_)) | Ok(None) => {}
-            Err(error) => log::debug!("could not apply shared session snapshot: {error:#}"),
+            Ok(Some(_)) | Ok(None) => false,
+            // Not `debug`: this is the tab and the daemon disagreeing about the
+            // session's shape, which is the failure that leaves panes on screen
+            // that nobody can close.
+            Err(error) => {
+                log::warn!(
+                    "could not apply shared session {session_id} snapshot at revision {}: {error:#}",
+                    revision.0
+                );
+                false
+            }
         }
     }
 
@@ -887,8 +1210,9 @@ impl Zetta {
         if let Some(tab_id) = self.shared_collaboration.tab_id(session_id)
             && let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id)
         {
-            tab.remove_pane(local_pane_id);
+            detach_pane_from_tab(tab, local_pane_id);
         }
+        self.closing_shared_panes.remove(&local_pane_id);
         self.mux_panes.forget_pane(local_pane_id);
         self.shared_collaboration
             .remove_local_pane(session_id, local_pane_id);
@@ -969,6 +1293,11 @@ impl Zetta {
             .map(|pane| pane.profile.as_str())
             .or_else(|| summary_pane.map(|pane| pane.profile.as_str()))
             .unwrap_or_default();
+        // A profile of this name in *this* window supplies the theme and icon a
+        // replicated pane is drawn with. Its command is local and stays local:
+        // the pane's process runs on the session's host, and a split from it
+        // sends this name back for that host to resolve. See
+        // `terminal_spawn::shared_draft_process`.
         let profile = self
             .profiles
             .iter()
@@ -979,7 +1308,13 @@ impl Zetta {
                 command: task::Shell::System,
                 theme: None,
                 dark_theme: None,
-                icon: ProfileIcon::default(),
+                // The program the daemon reported for the pane, which is the
+                // one actually running, rather than a generic mark: a session
+                // whose profiles this window does not have still shows its
+                // panes as the shells they are.
+                icon: summary_pane.map_or_else(ProfileIcon::default, |pane| {
+                    ProfileIcon::automatic_for_program_name(&pane.application)
+                }),
             });
         let mut local_pane = TerminalPane::new(local_pane_id, profile);
         if let Some(pane_state) = pane_state {
@@ -1061,13 +1396,86 @@ impl Zetta {
         };
         if let Some(local_pane_id) = local_pane_id {
             if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
-                tab.remove_pane(local_pane_id);
+                detach_pane_from_tab(tab, local_pane_id);
             }
             self.mux_panes.forget_pane(local_pane_id);
         }
         self.apply_shared_snapshot(session_id, state, window, cx);
         cx.notify();
     }
+}
+
+/// Takes a pane out of a tab and out of its layout.
+///
+/// `Tab::remove_pane` deliberately leaves the layout alone, because most callers
+/// reshape it themselves. The shared-session removers do not have a reshape of
+/// their own — they expect the canonical snapshot to supply one — so they have
+/// to collapse the split here. A snapshot that turns out to be unapplicable
+/// would otherwise leave the pane's region reserved forever.
+fn detach_pane_from_tab(tab: &mut Tab, pane_id: u64) {
+    tab.remove_pane(pane_id);
+    if let Some(layout) = tab.layout.clone().without(pane_id) {
+        tab.layout = layout;
+    }
+    tab.restore_focus_after_close(pane_id, tab.layout.first_pane());
+}
+
+/// Asks the daemon for a pane's stream, retrying a few times.
+///
+/// The attach can arrive before the daemon has finished committing the pane, so
+/// a failure is retried rather than reported. `Some((state, None))` means the
+/// pane is no longer in the canonical state and there is nothing to attach —
+/// the caller still applies that state, because it is newer than the one that
+/// named the pane.
+async fn attach_shared_pane_with_retries(
+    session_id: u64,
+    mux_pane_id: u64,
+    connection: &SharedWatchConnection,
+    cx: &mut gpui::AsyncApp,
+) -> Option<(SharedSessionState, Option<zmux::client::SharedPane>)> {
+    for delay in [
+        Duration::ZERO,
+        Duration::from_millis(50),
+        Duration::from_millis(150),
+    ] {
+        if !delay.is_zero() {
+            cx.background_executor().timer(delay).await;
+        }
+        let refreshed = cx
+            .background_spawn({
+                let connection = connection.clone();
+                async move {
+                    let state = connection.client.shared_snapshot(session_id)?;
+                    let pane = if state.contains_pane(mux_pane_id) {
+                        Some(connection.client.attach_shared_with_secret(
+                            session_id,
+                            mux_pane_id,
+                            connection.secret.as_ref(),
+                        )?)
+                    } else {
+                        None
+                    };
+                    Ok::<_, anyhow::Error>((state, pane))
+                }
+            })
+            .await;
+        match refreshed {
+            Ok((state, Some(zmux::client::AttachOutcome::SharedAttached { pane, .. }))) => {
+                return Some((state, Some(pane)));
+            }
+            Ok((state, None)) => return Some((state, None)),
+            Ok((_, Some(_))) => {
+                log::warn!(
+                    "shared pane {mux_pane_id} of session {session_id} did not attach as a stream"
+                );
+            }
+            Err(error) => log::debug!(
+                "could not attach shared pane {mux_pane_id} of session {session_id}: {error:#}"
+            ),
+        }
+    }
+    log::warn!("gave up attaching shared pane {mux_pane_id} of session {session_id}");
+    None
 }
 
 fn shared_layout_operation(
@@ -1371,12 +1779,43 @@ fn remap_id(
         .with_context(|| format!("shared pane {mux_id} is not attached in this window"))
 }
 
+/// Refuses a layout that names a pane the tab does not hold.
+///
+/// `render_pane_leaf` draws an empty region for a layout id with no
+/// `TerminalPane`, and the split node holding it goes on reserving the space,
+/// so the survivors never grow back. The reverse direction — a pane the layout
+/// does not place — is reported but not refused, because a pane whose creation
+/// the daemon has not committed yet is legitimately in neither.
+fn ensure_layout_covers_tab(tab: &Tab, layout: &PaneLayout) -> Result<()> {
+    let placed = layout.pane_ids();
+    if let Some(missing) = placed.iter().find(|pane_id| tab.pane(**pane_id).is_none()) {
+        anyhow::bail!(
+            "shared layout places pane {missing}, which tab {} does not hold",
+            tab.id
+        );
+    }
+    let unplaced = tab
+        .panes
+        .iter()
+        .filter(|pane| !placed.contains(&pane.id))
+        .map(|pane| pane.id)
+        .collect::<Vec<_>>();
+    if !unplaced.is_empty() {
+        log::warn!(
+            "shared layout for tab {} does not place pane(s) {unplaced:?}; they are awaiting a commit",
+            tab.id
+        );
+    }
+    Ok(())
+}
+
 fn apply_canonical_presentation(
     tab: &mut Tab,
     state: &SharedSessionState,
+    layout: PaneLayout,
     mux_to_local: &HashMap<u64, u64>,
 ) -> Result<()> {
-    tab.layout = map_background_layout(&state.presentation.layout, mux_to_local)?;
+    tab.layout = layout;
     tab.active_pane = mux_to_local
         .get(&state.presentation.active_pane)
         .copied()

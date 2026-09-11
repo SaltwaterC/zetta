@@ -37,7 +37,7 @@ use zmux::persistence::PersistenceOptions;
 use zmux::{
     auth::SessionSecret,
     client::{Client, ExitReporters, PaneSignals},
-    messages::{SharedSessionOperation, SharedSessionOperationRequest, SpawnRequest, TerminalSize},
+    messages::{SpawnRequest, TerminalSize},
     retention::Retention,
 };
 
@@ -690,6 +690,10 @@ impl MuxPanes {
         self.panes.get(&pane_id).copied()
     }
 
+    pub(crate) fn local_pane_id(&self, mux_pane_id: u64) -> Option<u64> {
+        self.reverse_panes.get(&mux_pane_id).copied()
+    }
+
     pub(crate) fn ids(&self) -> &HashMap<u64, u64> {
         &self.panes
     }
@@ -1075,90 +1079,45 @@ impl crate::Zetta {
         .detach();
     }
 
-    /// Requests a global close for a pane in a shared session. The local
-    /// pane has already been removed; after the daemon commits the global
-    /// removal, publish one clean durable tab blob so it cannot retain the
-    /// closed pane in its opaque state.
+    /// Requests a global close for a pane in a shared session.
+    ///
+    /// The pane is *not* removed locally here, and the request is not sent
+    /// here either: it is queued behind whatever the session is already doing,
+    /// because a close and a state publication describe two different pane sets
+    /// and the daemon rejects whichever of the two arrives against a tree the
+    /// other has just changed. The pane leaves this window when the canonical
+    /// state says it has. See `run_shared_pane_close`.
+    /// Reports whether the request was made. A pane the session does not know
+    /// about — one whose creation the daemon never committed — has no global
+    /// close to ask for, and the caller closes it locally instead.
     pub(crate) fn request_shared_pane_close(
         &mut self,
         tab_id: u64,
         pane_id: u64,
-        cx: &mut gpui::App,
-    ) {
-        let Some(runtime) = self.mux_panes.runtime_for_tab(tab_id) else {
-            return;
-        };
+        cx: &mut gpui::Context<crate::Zetta>,
+    ) -> bool {
         let Some(session_id) = self.mux_panes.session_id(tab_id) else {
-            return;
+            return false;
         };
         let Some(mux_pane_id) = self
             .shared_collaboration
             .mux_pane_id(session_id, pane_id)
             .or_else(|| self.mux_panes.mux_pane_id(pane_id))
         else {
-            return;
+            return false;
         };
-        let base_revision = self
-            .shared_collaboration
-            .state(session_id)
-            .map(|state| state.revision);
-        let replacement = self
-            .shared_tab_state_request(tab_id, session_id, cx)
-            .and_then(|(_, request)| match request.operation {
-                SharedSessionOperation::ReplaceTab { summary, state } => Some((summary, state)),
-                _ => None,
-            });
-        let client = runtime.client().clone();
-        cx.background_spawn(async move {
-            let base_revision = match base_revision {
-                Some(revision) => revision,
-                None => match client.shared_snapshot(session_id) {
-                    Ok(state) => state.revision,
-                    Err(error) => {
-                        log::debug!(
-                            "could not read shared session {session_id} before closing pane {mux_pane_id}: {error:#}"
-                        );
-                        return;
-                    }
-                },
-            };
-            let request = SharedSessionOperationRequest {
-                session_id,
-                base_revision,
-                operation_id: client.next_shared_operation_id(),
-                operation: SharedSessionOperation::ClosePane {
-                    pane_id: mux_pane_id,
-                },
-            };
-            match client.apply_shared_with_request(request) {
-                Ok(zmux::client::SharedOperationResult::Applied(state)) => {
-                    if let Some((summary, tab_state)) = replacement {
-                        let request = SharedSessionOperationRequest {
-                            session_id,
-                            base_revision: state.revision,
-                            operation_id: client.next_shared_operation_id(),
-                            operation: SharedSessionOperation::ReplaceTab {
-                                summary,
-                                state: tab_state,
-                            },
-                        };
-                        if let Err(error) = client.apply_shared_with_request(request) {
-                            log::debug!(
-                                "could not publish shared tab state after closing pane {mux_pane_id}: {error:#}"
-                            );
-                        }
-                    }
-                }
-                Ok(zmux::client::SharedOperationResult::Conflict(state)) => log::debug!(
-                    "closing shared pane {mux_pane_id} conflicted at revision {}; waiting for canonical snapshot",
-                    state.revision.0
-                ),
-                Err(error) => log::debug!(
-                    "could not globally close shared pane {mux_pane_id}: {error:#}"
-                ),
-            }
-        })
-        .detach();
+        self.closing_shared_panes.insert(pane_id);
+        self.shared_collaboration.enqueue(
+            session_id,
+            crate::background_session_ui::collaboration::SharedOperation::ClosePane {
+                local_pane_id: pane_id,
+                mux_pane_id,
+                attempts: 0,
+            },
+        );
+        self.pump_shared_operations(tab_id, session_id, cx);
+        cx.notify();
+        true
     }
 
     /// Leaves a shared tab without handing any of its panes to the daemon as

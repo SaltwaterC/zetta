@@ -704,16 +704,26 @@ const DEBUG_CELL_WIDTH: Pixels = px(5.);
 const DEBUG_LINE_HEIGHT: Pixels = px(5.);
 
 /// Inserts Zetta-specific environment variables for terminal sessions.
+///
+/// The list itself lives in `zetta_profiles` because the daemon starts ptys
+/// too — a pane added to a shared session is created there — and a pane that
+/// missed these came up with no `TERM` at all, which a shell reads as a
+/// terminal with no colour.
 pub fn insert_zetta_terminal_env<S: std::hash::BuildHasher>(
     env: &mut std::collections::HashMap<String, String, S>,
     version: &impl std::fmt::Display,
 ) {
-    env.remove("ZED_TERM");
-    env.insert("ZETTA_TERM".to_string(), "true".to_string());
-    env.insert("TERM_PROGRAM".to_string(), "zetta".to_string());
-    env.insert("TERM".to_string(), "xterm-256color".to_string());
-    env.insert("COLORTERM".to_string(), "truecolor".to_string());
-    env.insert("TERM_PROGRAM_VERSION".to_string(), version.to_string());
+    for name in zetta_profiles::REMOVED_TERMINAL_ENVIRONMENT {
+        env.remove(*name);
+    }
+    let version = version.to_string();
+    for (name, value) in
+        zetta_profiles::terminal_environment(zetta_profiles::TerminalEnvironmentOptions {
+            version: &version,
+        })
+    {
+        env.insert(name, value);
+    }
 }
 
 ///Upward flowing events, for changing the title and such
@@ -1777,8 +1787,32 @@ fn log_wsl_startup_phase(
     );
 }
 
+/// How long a newly relayed stream is watched for a bootstrap another viewer
+/// started. It is written when a pane is created and replayed to a viewer that
+/// attaches later, so both arrive within moments of the stream opening; past
+/// that, watching would only cost a grid scan per batch of output.
+const FOREIGN_INIT_COMMAND_STARTUP_WATCH: Duration = Duration::from_secs(10);
+
+/// How long a screen stays hidden for another viewer's bootstrap before it is
+/// revealed anyway. Generous next to a handshake that normally completes in a
+/// few milliseconds, and short enough that a pane cannot sit blank.
+const FOREIGN_INIT_COMMAND_STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
+
 fn init_command_startup_marker(marker_id: u64) -> String {
     format!("{INIT_COMMAND_STARTUP_MARKER_PREFIX}{marker_id}{INIT_COMMAND_STARTUP_MARKER_SUFFIX}")
+}
+
+/// Reads the marker another viewer's bootstrap printed, if this line is one.
+///
+/// Matches the marker the command *prints*, which is contiguous, rather than
+/// the echo of the command that prints it — which is deliberately split around
+/// its arguments so it cannot satisfy a handshake. That split is what keeps
+/// this from arming on the echoed line and hiding the screen a moment early.
+fn foreign_init_command_marker_id(line: &str) -> Option<u64> {
+    let start = line.find(INIT_COMMAND_STARTUP_MARKER_PREFIX)?;
+    let rest = &line[start + INIT_COMMAND_STARTUP_MARKER_PREFIX.len()..];
+    let end = rest.find(INIT_COMMAND_STARTUP_MARKER_SUFFIX)?;
+    rest[..end].parse().ok()
 }
 
 fn init_command_startup_done_title(marker_id: u64) -> String {
@@ -2179,6 +2213,8 @@ impl TerminalBuilder {
             init_command_startup_marker: None,
             init_command_startup_done_title: None,
             init_command_startup_suppress_render: false,
+            init_command_startup_observed_at: None,
+            foreign_init_command_watch_until: None,
             init_command_startup_tx: None,
             init_command_startup_echo_disabled: false,
             init_command_startup_uses_nul: false,
@@ -2338,6 +2374,8 @@ impl TerminalBuilder {
             path_style,
         );
         builder.terminal.title_override = Some(title);
+        builder.terminal.foreign_init_command_watch_until =
+            Some(Instant::now() + FOREIGN_INIT_COMMAND_STARTUP_WATCH);
         builder.terminal.byte_stream = Some(spawn_byte_stream(
             reader,
             writer,
@@ -2960,6 +2998,8 @@ impl TerminalBuilder {
                 init_command_startup_marker: None,
                 init_command_startup_done_title: None,
                 init_command_startup_suppress_render: false,
+                init_command_startup_observed_at: None,
+                foreign_init_command_watch_until: None,
                 init_command_startup_tx: None,
                 init_command_startup_echo_disabled: false,
                 init_command_startup_uses_nul: false,
@@ -3265,6 +3305,15 @@ pub struct Terminal {
     /// being entered. Fish redraws its command line itself, so PTY echo
     /// settings cannot make this interval invisible.
     init_command_startup_suppress_render: bool,
+    /// When a bootstrap belonging to another viewer was first seen, so a screen
+    /// hidden for one that never completes is revealed anyway.
+    init_command_startup_observed_at: Option<Instant>,
+    /// How long to keep watching the stream for a bootstrap this terminal did
+    /// not start. Set only for a relayed stream, and only for a moment after it
+    /// is attached: the wrapper is written when a pane is created and reaches a
+    /// later viewer in the replay, so watching past that would scan the grid on
+    /// every batch of output for the life of the pane.
+    foreign_init_command_watch_until: Option<Instant>,
     init_command_startup_tx: Option<Sender<()>>,
     /// POSIX-like startup handshakes disable PTY echo and wait for the
     /// programmatically-generated command as a `read` payload. Keep this set
@@ -4506,6 +4555,7 @@ impl Terminal {
 
     fn detect_init_command_startup_marker(&mut self) {
         let Some(marker) = self.init_command_startup_marker.as_deref() else {
+            self.detect_foreign_init_command_startup();
             return;
         };
 
@@ -4518,6 +4568,63 @@ impl Terminal {
         if has_marker {
             self.complete_init_command_startup_handshake();
         }
+    }
+
+    /// Hides a shell-integration bootstrap this terminal did not start.
+    ///
+    /// A pane in a shared session has several viewers and one pty, and the pty
+    /// echoes the wrapper command to all of them. Only the viewer that wrote it
+    /// knew to suppress it, so every *other* window showed the wrapper and
+    /// whatever its payload printed — which is why each side saw a screenful of
+    /// shell in exactly the panes the other side had created.
+    ///
+    /// Armed from the stream rather than from having started a handshake, so it
+    /// also covers a viewer that attaches part-way through one and a replay that
+    /// carries the whole exchange.
+    fn detect_foreign_init_command_startup(&mut self) {
+        // Bounded before anything else: this runs on every batch of output, and
+        // reading the grid for a marker that can only appear at a pane's start
+        // would put a scan of 64 lines on the hottest path there is.
+        let Some(watch_until) = self.foreign_init_command_watch_until else {
+            return;
+        };
+        if Instant::now() > watch_until {
+            self.foreign_init_command_watch_until = None;
+            return;
+        }
+        if self.init_command_startup_done_title.is_some() || self.child_exited.is_some() {
+            return;
+        }
+        let marker_id = {
+            let term = self.term.lock_unfair();
+            let lines = last_non_empty_lines(&term, INIT_COMMAND_STARTUP_MARKER_SEARCH_LINES);
+            lines
+                .iter()
+                .find_map(|line| foreign_init_command_marker_id(line))
+        };
+        let Some(marker_id) = marker_id else {
+            return;
+        };
+        self.init_command_startup_done_title = Some(init_command_startup_done_title(marker_id));
+        self.init_command_startup_suppress_render = true;
+        self.init_command_startup_observed_at = Some(Instant::now());
+        self.foreign_init_command_watch_until = None;
+    }
+
+    /// Reveals a screen suppressed for a bootstrap whose completion never
+    /// arrived — a shell that died mid-wrapper, or one whose `printf` the
+    /// payload replaced. A pane showing nothing is worse than a pane showing
+    /// the wrapper.
+    fn release_abandoned_init_command_startup(&mut self) {
+        let Some(observed_at) = self.init_command_startup_observed_at else {
+            return;
+        };
+        if observed_at.elapsed() < FOREIGN_INIT_COMMAND_STARTUP_TIMEOUT {
+            return;
+        }
+        self.init_command_startup_observed_at = None;
+        self.init_command_startup_done_title = None;
+        self.release_init_command_startup_render();
     }
 
     fn complete_init_command_startup_handshake(&mut self) {
@@ -4873,6 +4980,9 @@ impl Terminal {
     }
 
     pub fn sync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Before the grid lock: this touches no grid, and a suppressed screen
+        // has to be released whether or not anything else happens this frame.
+        self.release_abandoned_init_command_startup();
         let diagnostic = TerminalSyncDiagnostic::begin();
         let term = self.term.clone();
         let mut terminal = term.lock_unfair();
@@ -5959,6 +6069,8 @@ impl Terminal {
         if let Some(mut stream) = self.byte_stream.take() {
             stream.drain_and_stop(BYTE_STREAM_DRAIN_TIMEOUT);
         }
+        self.foreign_init_command_watch_until =
+            Some(Instant::now() + FOREIGN_INIT_COMMAND_STARTUP_WATCH);
         self.byte_stream = Some(spawn_byte_stream(
             reader,
             writer,
@@ -7018,6 +7130,42 @@ pub fn rgba_color(r: u8, g: u8, b: u8) -> Hsla {
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
+
+    /// A shared pane has one pty and several viewers, and the pty echoes the
+    /// bootstrap wrapper to all of them. Recognising it from the stream is what
+    /// lets a viewer that did not write it hide it too.
+    #[test]
+    fn a_foreign_bootstrap_is_recognised_from_the_marker_it_prints() {
+        assert_eq!(
+            super::foreign_init_command_marker_id("__zed_init_command_ready_ 4 __"),
+            None,
+            "the echoed command prints the marker in pieces; only the printed \
+             marker is contiguous"
+        );
+        assert_eq!(
+            super::foreign_init_command_marker_id("__zed_init_command_ready_4__"),
+            Some(4)
+        );
+        assert_eq!(
+            super::foreign_init_command_marker_id("noise __zed_init_command_ready_17__ noise"),
+            Some(17)
+        );
+        assert_eq!(
+            super::foreign_init_command_marker_id("nothing to see here"),
+            None
+        );
+    }
+
+    /// The marker the wrapper prints has to be the one a viewer looks for, or
+    /// the suppression arms for a bootstrap that is never acknowledged and the
+    /// pane sits blank until the timeout.
+    #[test]
+    fn the_printed_marker_is_the_one_viewers_recognise() {
+        assert_eq!(
+            super::foreign_init_command_marker_id(&super::init_command_startup_marker(23)),
+            Some(23)
+        );
+    }
 
     use super::*;
     use crate::{

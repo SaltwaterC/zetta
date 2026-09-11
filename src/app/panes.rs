@@ -22,11 +22,16 @@ impl Zetta {
                 .is_some_and(|tab| {
                     tab.panes.len() > 1 && (tab.shared || self.has_shared_tab_binding(tab_id))
                 });
-        if globally_close_shared_pane {
-            // Remove it locally first so the follow-up canonical state can no
-            // longer serialize the pane that the daemon is about to terminate.
-            self.close_pane_with_policy(tab_id, pane_id, true, window, cx);
-            self.request_shared_pane_close(tab_id, pane_id, cx);
+        if self.shared_pane_is_closing(pane_id) {
+            return;
+        }
+        // Asked for, not done. A shared pane's shape is the daemon's, so
+        // removing it here and telling the daemon afterwards left the two
+        // disagreeing whenever the daemon refused — with the pane still running
+        // for every other viewer and its space still reserved in a layout
+        // nothing could draw into. A pane the session does not know about is
+        // still this window's to close.
+        if globally_close_shared_pane && self.request_shared_pane_close(tab_id, pane_id, cx) {
             return;
         }
         self.close_pane_with_policy(tab_id, pane_id, true, window, cx);
@@ -219,6 +224,10 @@ impl Zetta {
         self.projects.forget_pane(pane_id);
         self.forget_pane_controls([pane_id]);
         self.drop_shared_pane(pane_id, cx);
+        // Before `release_mux_pane`, which is what forgets the pane's stable id:
+        // a mapping left behind lets a canonical snapshot that still names this
+        // pane resolve it back onto a local id the tab no longer has.
+        self.forget_shared_pane_mapping(tab_id, pane_id);
         self.release_mux_pane(tab_id, pane_id, cx);
         self.retain_open_visible_terminals();
         let Some(layout) = layout else {

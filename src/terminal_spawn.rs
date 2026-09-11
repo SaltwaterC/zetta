@@ -308,6 +308,69 @@ fn attach_committed_shared_pane(
         .with_context(|| format!("attaching committed shared pane {pane_id}"))
 }
 
+/// What a shared pane draft may say about the process it asks for.
+///
+/// A pane in a shared session is started by the daemon, on the daemon's host.
+/// When that host is this machine, this window resolved the profile against the
+/// very configuration the daemon would read, and its resolution carries more
+/// than a name can — the working-directory tracking wrappers a WSL, MSYS2 or
+/// Cygwin profile needs — so it is sent and used as-is.
+///
+/// When the host is another machine, none of that holds. The program path, the
+/// `PATH` around it and the tracking files all name this machine, and sending
+/// them is exactly how a Linux client came to start macOS's `/bin/bash` 3.2
+/// with a Linux `PATH` in front of it. Only the profile name and the pane's
+/// routing identity cross; the daemon resolves the rest.
+#[cfg(feature = "zmux")]
+fn shared_draft_process(
+    remote: bool,
+    shell: &Shell,
+    environment: &HashMap<String, String>,
+) -> (
+    Option<zetta_profiles::ProfileCommand>,
+    HashMap<String, String>,
+) {
+    if remote {
+        (
+            None,
+            zmux::messages::shared_draft_environment(environment.clone()),
+        )
+    } else {
+        (
+            Some(crate::config::profile_command(shell)),
+            environment.clone(),
+        )
+    }
+}
+
+/// The size a pane's pty starts at, before any viewer has laid the pane out and
+/// reported a real one.
+///
+/// The daemon arbitrates a shared pane down to the smallest of its viewers, and
+/// falls back to this while none of them has measured. A fixed 80x24 meant a
+/// new pane's first screens were drawn — and wrapped — at a width no window was
+/// showing, so the source pane's own size is used instead: a split leaves the
+/// two halves near enough that the reflow, when the real sizes arrive, is
+/// small.
+#[cfg(feature = "zmux")]
+fn shared_spawn_stand_in_size(
+    tab: Option<&Tab>,
+    source_pane_id: u64,
+    cx: &App,
+) -> zmux::messages::TerminalSize {
+    let measured = tab
+        .and_then(|tab| tab.pane(source_pane_id))
+        .and_then(TerminalPane::selected_terminal)
+        .map(|terminal| terminal.read(cx).last_content().terminal_bounds)
+        .filter(|bounds| bounds.num_columns() > 0 && bounds.num_lines() > 0);
+    zmux::messages::TerminalSize {
+        columns: measured.map_or(80, |bounds| bounds.num_columns() as u16),
+        lines: measured.map_or(24, |bounds| bounds.num_lines() as u16),
+        cell_width: 0,
+        cell_height: 0,
+    }
+}
+
 #[cfg(feature = "zmux")]
 fn shared_draft_layout(
     layout: &PaneLayout,
@@ -653,7 +716,7 @@ impl Zetta {
     /// Reports a synchronous spawn failure on the pane the terminal was meant
     /// for. Failures raised once the spawn is asynchronous instead coalesce
     /// their redraw through [`Zetta::schedule_terminal_spawn_notify`].
-    fn report_pane_spawn_error(
+    pub(crate) fn report_pane_spawn_error(
         &mut self,
         tab_id: u64,
         pane_id: u64,
@@ -1115,7 +1178,13 @@ impl Zetta {
                     cursor_shape: settings.cursor_shape,
                     alternate_scroll: settings.alternate_scroll,
                     max_scroll_history_lines: settings.max_scroll_history_lines,
-                    shell_integration_startup_command,
+                    // The shell integration loads through the `zetta` on the
+                    // pane's own `PATH` and reports to the routing ids in its
+                    // environment. For a pane running on another machine both
+                    // name the wrong side, so it runs without the integration
+                    // rather than with one that answers nobody.
+                    shell_integration_startup_command: shell_integration_startup_command
+                        .filter(|_| !provider.runtime().is_remote()),
                     tracked_multi_command_launch,
                     base_revision,
                     console_palette: initial_console_palette.unwrap_or_default(),
@@ -1352,12 +1421,21 @@ impl Zetta {
             );
             return;
         };
+        let remote = provider.runtime().is_remote();
+        let (draft_command, draft_environment) = shared_draft_process(remote, &shell, &environment);
+        let stand_in_size = shared_spawn_stand_in_size(
+            self.tabs.iter().find(|tab| tab.id == tab_id),
+            target_pane_id
+                .and_then(|mux_pane_id| self.mux_panes.local_pane_id(mux_pane_id))
+                .unwrap_or(pane_id),
+            cx,
+        );
         let executor = cx.background_executor().clone();
         let terminal_executor = executor.clone();
         let build = executor.spawn(async move {
             let runtime = provider.runtime().clone();
             let startup_shell = shell.clone();
-            let (program, args) = shell.program_and_args();
+            let (program, _args) = shell.program_and_args();
             let client = runtime.client().clone();
             let operation_id = client.next_shared_operation_id();
             let session_id = provider
@@ -1371,16 +1449,11 @@ impl Zetta {
                 replacement,
                 panes: vec![zmux::messages::SharedPaneDraft {
                     draft_id: pane_id,
-                    program: Some(program.clone()),
-                    args: args.to_vec(),
-                    env: environment.clone(),
+                    profile: profile_name.clone(),
+                    command: draft_command.clone(),
+                    env: draft_environment.clone(),
                     working_directory: working_directory.clone(),
-                    size: zmux::messages::TerminalSize {
-                        columns: 80,
-                        lines: 24,
-                        cell_width: 0,
-                        cell_height: 0,
-                    },
+                    size: stand_in_size,
                     console_palette,
                     metadata: BackgroundPaneSummary {
                         id: 0,
@@ -1498,10 +1571,10 @@ impl Zetta {
                 }) => {
                     this.update_in(cx, |this, window, cx| {
                         this.apply_shared_snapshot(state.session_id, *state, window, cx);
-                        this.report_pane_spawn_error(
+                        this.discard_uncommitted_shared_pane(
                             tab_id,
                             pane_id,
-                            "The shared layout changed before this pane could be created"
+                            "The shared layout changed before this pane could be created."
                                 .to_owned(),
                             cx,
                         );
@@ -1510,7 +1583,12 @@ impl Zetta {
                 }
                 Err(error) => {
                     this.update_in(cx, |this, window, cx| {
-                        this.report_pane_spawn_error(tab_id, pane_id, format!("{error:#}"), cx);
+                        this.discard_uncommitted_shared_pane(
+                            tab_id,
+                            pane_id,
+                            format!("Could not create the shared pane: {error:#}"),
+                            cx,
+                        );
                         if tracked_multi_command_launch {
                             this.finish_multi_command_launch(window, cx);
                         }
@@ -1575,24 +1653,27 @@ impl Zetta {
             .session_id()
             .expect("a shared launch has a session id");
         let base_revision = launches[0].base_revision;
+        let remote = runtime.is_remote();
         let client = runtime.client().clone();
         let operation_id = client.next_shared_operation_id();
+        let stand_in_size = shared_spawn_stand_in_size(
+            self.tabs.iter().find(|tab| tab.id == tab_id),
+            launches[0].pane_id,
+            cx,
+        );
         let panes = launches
             .iter()
             .map(|launch| {
-                let (program, args) = launch.shell.program_and_args();
+                let (program, _args) = launch.shell.program_and_args();
+                let (command, env) =
+                    shared_draft_process(remote, &launch.shell, &launch.environment);
                 zmux::messages::SharedPaneDraft {
                     draft_id: launch.pane_id,
-                    program: Some(program.clone()),
-                    args: args.to_vec(),
-                    env: launch.environment.clone(),
+                    profile: launch.profile_name.clone(),
+                    command,
+                    env,
                     working_directory: launch.working_directory.clone(),
-                    size: zmux::messages::TerminalSize {
-                        columns: 80,
-                        lines: 24,
-                        cell_width: 0,
-                        cell_height: 0,
-                    },
+                    size: stand_in_size,
                     console_palette: launch.console_palette,
                     metadata: BackgroundPaneSummary {
                         id: 0,
@@ -1650,10 +1731,11 @@ impl Zetta {
                 this.update_in(cx, |this, window, cx| {
                     this.apply_shared_snapshot(state.session_id, state, window, cx);
                     for (tab_id, pane_id) in panes {
-                        this.report_pane_spawn_error(
+                        this.discard_uncommitted_shared_pane(
                             tab_id,
                             pane_id,
-                            "The shared layout changed before this pane batch committed".to_owned(),
+                            "The shared layout changed before this pane batch committed."
+                                .to_owned(),
                             cx,
                         );
                     }
@@ -1663,7 +1745,12 @@ impl Zetta {
             Err(error) => {
                 this.update_in(cx, |this, _window, cx| {
                     for pane_id in draft_ids {
-                        this.report_pane_spawn_error(tab_id, pane_id, format!("{error:#}"), cx);
+                        this.discard_uncommitted_shared_pane(
+                            tab_id,
+                            pane_id,
+                            format!("Could not create the shared panes: {error:#}"),
+                            cx,
+                        );
                     }
                 })
                 .ok();

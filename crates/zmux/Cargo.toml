@@ -58,6 +58,7 @@ subtle = "2"
 sysinfo = "0.37"
 tempfile = "3"
 zeroize = "1"
+zetta_profiles = { path = "../zetta_profiles" }
 
 [target.'cfg(windows)'.dependencies]
 uds_windows = "1.2"
