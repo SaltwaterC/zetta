@@ -813,7 +813,7 @@ fn native_macos_menus(
     // Keep Window separate from the first, application-owned menu and preserve
     // the standard Minimize/Zoom/separator shape that AppKit augments with its
     // native Move & Resize commands.
-    let mut application_items = vec![
+    let application_items = vec![
         MenuItem::action("New Tab", NewTab),
         MenuItem::action("New Window", NewWindow),
         MenuItem::separator(),
@@ -825,16 +825,13 @@ fn native_macos_menus(
         MenuItem::action("Open Keymap", OpenKeymap),
         MenuItem::action("Open Templates", OpenTemplates),
         MenuItem::action("Open Projects", OpenProjects),
+        #[cfg(feature = "zmux")]
+        MenuItem::action("Open Remote Session", OpenRemoteSession),
         MenuItem::separator(),
         MenuItem::action("Close Tab", CloseTab),
         MenuItem::action("Close Window", CloseWindow),
         MenuItem::action("Close All Windows", CloseAllWindows),
     ];
-    #[cfg(feature = "zmux")]
-    application_items.insert(
-        10,
-        MenuItem::action("Open Remote Session", OpenRemoteSession),
-    );
 
     [
         Menu::new("Zetta").items(application_items),

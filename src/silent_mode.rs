@@ -358,12 +358,12 @@ pub(crate) fn start_observer(cx: &mut App) {
 }
 
 /// One-shot reading for callers that only want the current value. The observer
-/// uses the platform detectors directly so it can also learn which source
-/// answered; on Linux that leaves this used only by the notification path.
-#[cfg_attr(
-    all(target_os = "linux", not(feature = "notifications")),
-    allow(dead_code)
-)]
+/// uses the platform detectors directly on Linux and macOS, so this is needed
+/// there only by the notification path.
+#[cfg(any(
+    feature = "notifications",
+    all(not(target_os = "macos"), not(target_os = "linux"))
+))]
 fn detect_system_silent_state() -> SystemSilentState {
     #[cfg(target_os = "windows")]
     {
@@ -375,7 +375,7 @@ fn detect_system_silent_state() -> SystemSilentState {
     }
     #[cfg(target_os = "macos")]
     {
-        return detect_macos_system_silent_state();
+        return detect_macos_focus_observation().1;
     }
     #[allow(unreachable_code)]
     SystemSilentState::Unknown
@@ -754,11 +754,6 @@ fn detect_macos_focus_observation() -> (FocusStatusAccess, SystemSilentState) {
         );
     };
     (access, macos_focus_status(access, Some(focused.as_bool())))
-}
-
-#[cfg(target_os = "macos")]
-fn detect_macos_system_silent_state() -> SystemSilentState {
-    detect_macos_focus_observation().1
 }
 
 #[cfg(test)]
