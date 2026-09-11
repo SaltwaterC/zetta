@@ -939,7 +939,14 @@ impl crate::Zetta {
         if self.no_mux {
             return Ok(None);
         }
-        if self.mux.is_none() {
+        // An attached tab owns the runtime that reached its daemon. In
+        // particular, a remote session id is only meaningful to that remote
+        // client; session ids are allocated independently by each daemon.
+        // Do not eagerly create or select the process-wide local runtime for
+        // such a tab, or a shared spawn can send the remote session id to the
+        // local daemon.
+        let tab_runtime = self.mux_panes.runtime_for_tab(tab_id);
+        if tab_runtime.is_none() && self.mux.is_none() {
             if let Some((failed_at, message)) = self.mux_connect_failure.as_ref()
                 && failed_at.elapsed() < MUX_CONNECT_RETRY_BACKOFF
             {
@@ -982,12 +989,10 @@ impl crate::Zetta {
             }
         }
         let session = self.mux_panes.session_for_tab(tab_id);
-        Ok(Some(
-            self.mux
-                .as_ref()
-                .context("multiplexer runtime disappeared during terminal spawn")?
-                .provider_with_restore_replay(session, replay),
-        ))
+        let runtime = tab_runtime
+            .or_else(|| self.mux.clone())
+            .context("multiplexer runtime disappeared during terminal spawn")?;
+        Ok(Some(runtime.provider_with_restore_replay(session, replay)))
     }
 
     /// Records what the multiplexer created for a pane, and routes that pane's

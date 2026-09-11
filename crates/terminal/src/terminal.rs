@@ -2175,6 +2175,7 @@ impl TerminalBuilder {
             terminal_exit_reported: false,
             task_exit_code: None,
             keyboard_input_sent: false,
+            init_command_startup_supported: false,
             init_command_startup_marker: None,
             init_command_startup_done_title: None,
             init_command_startup_suppress_render: false,
@@ -2397,6 +2398,16 @@ impl TerminalBuilder {
     pub fn with_pty_control(mut self, control: Arc<dyn PtyControl>) -> Self {
         self.terminal.pty_control = Some(control);
         self.terminal.console_palette_enabled = cfg!(windows);
+        self
+    }
+
+    /// Enables the hidden shell startup handshake for an interactive byte
+    /// stream and tells it which shell syntax to use. Ordinary byte streams
+    /// (serial consoles and service logs) are display-only and must not
+    /// receive shell commands.
+    pub fn with_init_command_startup_shell(mut self, shell: Shell) -> Self {
+        self.terminal.template.shell = shell;
+        self.terminal.init_command_startup_supported = true;
         self
     }
 
@@ -2945,6 +2956,7 @@ impl TerminalBuilder {
                 terminal_exit_reported: false,
                 task_exit_code: None,
                 keyboard_input_sent: false,
+                init_command_startup_supported: false,
                 init_command_startup_marker: None,
                 init_command_startup_done_title: None,
                 init_command_startup_suppress_render: false,
@@ -3241,6 +3253,10 @@ pub struct Terminal {
     terminal_exit_reported: bool,
     task_exit_code: Option<i32>,
     keyboard_input_sent: bool,
+    /// Byte streams are display-only by default. Shared shell panes opt in so
+    /// generated startup integration is hidden with the same handshake as a
+    /// PTY, without sending shell syntax to serial or service streams.
+    init_command_startup_supported: bool,
     init_command_startup_marker: Option<String>,
     /// A private title emitted after the payload has been evaluated and echo
     /// has been restored.
@@ -4444,13 +4460,16 @@ impl Terminal {
     }
 
     /// Sends a shell-level marker command and returns a task that completes when
-    /// the marker appears in terminal output. Already complete for non-PTY
-    /// terminals or those whose child has exited.
+    /// the marker appears in terminal output. Byte-stream terminals complete
+    /// immediately unless an interactive shared shell explicitly opted in.
     ///
     /// Call at most once per terminal: a second handshake drops the previous
     /// `Sender`, which would write the init command twice.
     pub fn start_init_command_startup_handshake(&mut self) -> Task<()> {
-        if !self.is_pty() || self.child_exited.is_some() || self.terminal_exit_reported {
+        if (!self.is_pty() && !self.init_command_startup_supported)
+            || self.child_exited.is_some()
+            || self.terminal_exit_reported
+        {
             return Task::ready(());
         }
 
@@ -9556,6 +9575,57 @@ mod tests {
             released_revision > suppressed_revision,
             "the hidden completion marker must release the deferred frame"
         );
+    }
+
+    #[gpui::test]
+    async fn byte_stream_startup_handshake_is_opt_in(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let terminal = cx.new(|cx| {
+            TerminalBuilder::new_byte_stream(
+                Box::new(CannedReader { bytes: Vec::new() }),
+                Box::new(std::io::sink()),
+                String::new(),
+                SettingsCursorShape::default(),
+                AlternateScroll::On,
+                None,
+                0,
+                cx.background_executor(),
+                PathStyle::local(),
+            )
+            .subscribe(cx)
+        });
+        terminal.update(cx, |terminal, _| {
+            let _startup = terminal.start_init_command_startup_handshake();
+        });
+        assert!(
+            terminal.update(cx, |terminal, _| terminal.take_pty_write_log().is_empty()),
+            "display-only byte streams must not receive shell startup commands"
+        );
+
+        let terminal = cx.new(|cx| {
+            TerminalBuilder::new_byte_stream(
+                Box::new(CannedReader { bytes: Vec::new() }),
+                Box::new(std::io::sink()),
+                String::new(),
+                SettingsCursorShape::default(),
+                AlternateScroll::On,
+                None,
+                0,
+                cx.background_executor(),
+                PathStyle::local(),
+            )
+            .with_init_command_startup_shell(Shell::Program("fish".to_owned()))
+            .subscribe(cx)
+        });
+        terminal.update(cx, |terminal, _| {
+            let _startup = terminal.start_init_command_startup_handshake();
+        });
+        let writes = terminal.update(cx, |terminal, _| terminal.take_pty_write_log());
+        assert_eq!(writes.len(), 1);
+        let marker_command = String::from_utf8(writes[0].clone()).unwrap();
+        assert!(marker_command.contains("__zed_init_command_ready_"));
+        assert!(marker_command.contains("read --null"));
+        assert!(marker_command.ends_with('\r'));
     }
 
     #[test]

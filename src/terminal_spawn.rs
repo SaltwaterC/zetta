@@ -921,6 +921,7 @@ impl Zetta {
         let terminal_executor = executor.clone();
         let build = executor.spawn(async move {
             let runtime = provider.runtime().clone();
+            let startup_shell = shell.clone();
             let (program, args) = shell.program_and_args();
             let spawned = provider.spawn_shared(
                 terminal::PtySpawnRequest {
@@ -971,7 +972,8 @@ impl Zetta {
                 pane.pane_id(),
                 runtime.session_secret(),
             ))
-            .with_image_paste_handler(image_paste_handler);
+            .with_image_paste_handler(image_paste_handler)
+            .with_init_command_startup_shell(startup_shell);
             Ok::<_, anyhow::Error>((
                 builder,
                 SpawnedTerminal {
