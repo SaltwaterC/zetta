@@ -365,6 +365,8 @@ fn shared_batch_wire_carries_exact_layout_and_draft_mapping() {
             )),
             env: HashMap::new(),
             working_directory: Some(PathBuf::from("/tmp")),
+            inherit_working_directory_from: None,
+            load_shell_integration: false,
             size: TerminalSize {
                 columns: 80,
                 lines: 24,

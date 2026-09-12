@@ -348,6 +348,18 @@ impl Zetta {
         .detach();
     }
 
+    /// Reports every shared pane's size again, after the layout that follows
+    /// whatever changed the session.
+    ///
+    /// Scheduled rather than sent. Two reasons, and both were live bugs. The
+    /// daemon drops a report whose revision is not the one it is on *and says
+    /// nothing*, so a report sent while a state publication is still in flight
+    /// is lost with no retry; and a report sent from the update that applied a
+    /// snapshot carries the grid as it was *before* the layout that snapshot
+    /// causes. The debounce lands after both, and reads the revision at the
+    /// moment it sends. A pane closing in a shared tab left its neighbour's pty
+    /// at the old row count for exactly this reason: the neighbour had grown to
+    /// 49 rows on screen while the shell still believed it had 25.
     pub(crate) fn report_all_shared_pane_sizes(&mut self, tab_id: u64, cx: &mut Context<Self>) {
         let panes = self
             .tabs
@@ -358,7 +370,7 @@ impl Zetta {
             .filter_map(|pane| pane.selected_terminal().map(|terminal| (pane.id, terminal)))
             .collect::<Vec<_>>();
         for (pane_id, terminal) in panes {
-            self.report_shared_pane_size(pane_id, &terminal, cx);
+            self.schedule_shared_pane_size_report(pane_id, terminal, cx);
         }
     }
 

@@ -56,7 +56,13 @@ pub fn runs_a_command(args: &[String]) -> bool {
                 | "-encodedcommand"
                 | "-encodedarguments"
                 | "-file"
-        ) || (argument.starts_with('-') && argument[1..].contains('c'))
+        ) || (argument.starts_with('-')
+            // Short clusters only: `-ic` runs a command, `--norc` does not.
+            // Testing every option that merely contains a 'c' silently denied
+            // the shell integration to a profile configured as `bash --norc`
+            // or `zsh --no-globalrcs`.
+            && !argument.starts_with("--")
+            && argument[1..].contains('c'))
     })
 }
 
@@ -92,4 +98,55 @@ pub fn shell_integration_startup_command(kind: ShellKind, args: &[String]) -> Op
     let mut command = command.as_bytes().to_vec();
     command.push(b'\r');
     Some(command)
+}
+
+/// The concealed marker the wrapper prints once the shell is ready for its
+/// payload, and the title it reports when the payload has run.
+///
+/// These strings are matched by whoever drives the handshake, so they live
+/// beside the wrapper that emits them. Two processes drive it — the
+/// application for a pane it owns, and the daemon for a pane it is adding to a
+/// shared session — and a difference between their two copies would be a
+/// handshake that never completes.
+pub const INIT_COMMAND_MARKER_PREFIX: &str = "__zed_init_command_ready_";
+pub const INIT_COMMAND_DONE_TITLE_PREFIX: &str = "zetta-init-command-done:";
+pub const INIT_COMMAND_HISTORY_PREFIX: &str = "__zed_init_command_history_";
+pub const INIT_COMMAND_MARKER_SUFFIX: &str = "__";
+
+pub fn init_command_marker(marker_id: u64) -> String {
+    format!("{INIT_COMMAND_MARKER_PREFIX}{marker_id}{INIT_COMMAND_MARKER_SUFFIX}")
+}
+
+pub fn init_command_done_title(marker_id: u64) -> String {
+    format!("{INIT_COMMAND_DONE_TITLE_PREFIX}{marker_id}")
+}
+
+/// The line that makes a shell announce it is ready, wait for a payload, run
+/// it, and announce that it has.
+///
+/// The marker is printed in pieces so the shell's own echo of this line cannot
+/// satisfy the handshake: only the `printf` output contains it contiguously.
+/// `None` for a shell with no wrapper, which is every shell that has no
+/// integration to load.
+pub fn init_command_wrapper(kind: ShellKind, marker_id: u64) -> Option<String> {
+    let marker = format!(
+        "printf '\\033[8m%s%s%s\\033[0m\\n' {INIT_COMMAND_MARKER_PREFIX} {marker_id} \
+         {INIT_COMMAND_MARKER_SUFFIX}"
+    );
+    let done = format!("printf '\\033]2;{INIT_COMMAND_DONE_TITLE_PREFIX}%s\\033\\\\' {marker_id}");
+    let history = format!("{INIT_COMMAND_HISTORY_PREFIX}{marker_id}{INIT_COMMAND_MARKER_SUFFIX}");
+    match kind {
+        ShellKind::Bash | ShellKind::Zsh => Some(format!(
+            " if [ -n \"${{BASH_VERSION:-}}\" ]; then builtin history -d -1 2>/dev/null || :; fi; \
+             stty -echo; {marker}; IFS= read -r __zed_init_command_ready_payload; \
+             if [ -n \"$__zed_init_command_ready_payload\" ]; then \
+             eval \"$__zed_init_command_ready_payload\"; fi; stty echo; {done}; : # {history}"
+        )),
+        ShellKind::Fish => Some(format!(
+            " stty -echo -icanon min 1; {marker}; read --null __zed_init_command_ready_payload; \
+             if test -n \"$__zed_init_command_ready_payload\"; \
+             eval \"$__zed_init_command_ready_payload\"; end; stty echo icanon; {done}; # {history}"
+        )),
+        ShellKind::PowerShell | ShellKind::Other => None,
+    }
 }

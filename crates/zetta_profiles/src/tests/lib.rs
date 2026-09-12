@@ -152,3 +152,47 @@ fn discovery_always_offers_the_system_profile() {
     );
     assert_eq!(profiles[0].command, ProfileCommand::system());
 }
+
+/// The wrapper prints the marker in pieces so that the shell's own echo of the
+/// line cannot satisfy the handshake — only the `printf`'s output contains it
+/// contiguously. Losing that makes whoever is driving the handshake write the
+/// payload while the shell is still echoing, and the payload lands as text.
+#[test]
+fn the_bootstrap_wrappers_echo_cannot_be_mistaken_for_its_output() {
+    let wrapper = init_command_wrapper(ShellKind::Zsh, 7).expect("zsh has a wrapper");
+
+    assert!(
+        !wrapper.contains(&init_command_marker(7)),
+        "the line itself must not contain the contiguous marker: {wrapper}"
+    );
+    assert!(wrapper.contains(INIT_COMMAND_MARKER_PREFIX));
+    // The done title is printed with the id as a `printf` argument, so the
+    // wrapper carries its prefix and the id separately — the contiguous title
+    // exists only in the output, which is what the driver matches on.
+    assert!(wrapper.contains(INIT_COMMAND_DONE_TITLE_PREFIX));
+    assert!(!wrapper.contains(&init_command_done_title(7)));
+    assert!(
+        wrapper.contains("stty -echo"),
+        "the wrapper turns the echo off before it prints anything"
+    );
+}
+
+#[test]
+fn a_shell_without_an_integration_has_no_bootstrap_wrapper() {
+    assert!(init_command_wrapper(ShellKind::Other, 1).is_none());
+    assert!(init_command_wrapper(ShellKind::PowerShell, 1).is_none());
+}
+
+/// A long option that happens to contain a 'c' is not a request to run a
+/// command. Reading it as one silently denied the shell integration to a
+/// profile configured as `bash --norc`.
+#[test]
+fn a_long_option_is_not_mistaken_for_a_command_flag() {
+    assert!(!runs_a_command(&["--norc".to_owned(), "-i".to_owned()]));
+    assert!(!runs_a_command(&["--no-globalrcs".to_owned()]));
+    assert!(!runs_a_command(&["--login".to_owned()]));
+
+    assert!(runs_a_command(&["-c".to_owned(), "ls".to_owned()]));
+    assert!(runs_a_command(&["-ic".to_owned()]));
+    assert!(runs_a_command(&["--command".to_owned()]));
+}

@@ -9,21 +9,7 @@ use crate::worktree_detection::terminal_event_requires_worktree_detection;
 /// cannot leave the pane with CWD-only tracking.
 fn shell_integration_startup_command(shell: &Shell) -> Option<Vec<u8>> {
     let (program, arguments) = shell.program_and_args();
-    let has_command = arguments.iter().any(|argument| {
-        let argument = argument.to_ascii_lowercase();
-        matches!(
-            argument.as_str(),
-            "-c" | "--command"
-                | "/c"
-                | "/k"
-                | "-command"
-                | "-commandwithargs"
-                | "-encodedcommand"
-                | "-encodedarguments"
-                | "-file"
-        ) || (argument.starts_with('-') && argument[1..].contains('c'))
-    });
-    if has_command {
+    if zetta_profiles::runs_a_command(arguments) {
         return None;
     }
 
@@ -1529,6 +1515,12 @@ impl Zetta {
         }
         let remote = provider.runtime().is_remote();
         let (draft_command, draft_environment) = shared_draft_process(remote, &shell, &environment);
+        // Loaded by the daemon, before the pane has an attachment or anything
+        // retained. The wrapper that loads it is delivered as if typed, so the
+        // terminal echoes it to every viewer of a shared pane — and a viewer
+        // that did not write it has no way to know what it is looking at.
+        let daemon_loads_shell_integration = shell_integration_startup_command.is_some();
+        let shell_integration_startup_command = None;
         let stand_in_size = shared_spawn_stand_in_size(
             self.tabs.iter().find(|tab| tab.id == tab_id),
             target_pane_id
@@ -1559,6 +1551,12 @@ impl Zetta {
                     command: draft_command.clone(),
                     env: draft_environment.clone(),
                     working_directory: working_directory.clone(),
+                    // The pane being split. Only used when this window had no
+                    // directory of its own to send, which is the case for a
+                    // pane on another machine: it reports its directory to the
+                    // window that runs it, not to this one.
+                    inherit_working_directory_from: target_pane_id,
+                    load_shell_integration: daemon_loads_shell_integration,
                     size: stand_in_size,
                     console_palette,
                     metadata: BackgroundPaneSummary {
@@ -1865,6 +1863,13 @@ impl Zetta {
             launches[0].pane_id,
             cx,
         );
+        // A batch replaces the whole layout rather than splitting one pane, so
+        // the directory to fall back to is the tab's active pane's.
+        let inherit_directory_from = self
+            .tabs
+            .iter()
+            .find(|tab| tab.id == tab_id)
+            .and_then(|tab| self.mux_panes.mux_pane_id(tab.active_pane));
         let panes = launches
             .iter()
             .map(|launch| {
@@ -1877,6 +1882,8 @@ impl Zetta {
                     command,
                     env,
                     working_directory: launch.working_directory.clone(),
+                    inherit_working_directory_from: inherit_directory_from,
+                    load_shell_integration: launch.shell_integration_startup_command.is_some(),
                     size: stand_in_size,
                     console_palette: launch.console_palette,
                     metadata: BackgroundPaneSummary {

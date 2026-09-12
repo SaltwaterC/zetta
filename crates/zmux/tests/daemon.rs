@@ -3448,6 +3448,8 @@ fn shared_batch_spawns_commit_exact_geometry_and_rebase_same_target_additions() 
         )),
         env: HashMap::new(),
         working_directory: None,
+        inherit_working_directory_from: None,
+        load_shell_integration: false,
         size: TerminalSize {
             columns: 80,
             lines: 24,
@@ -6230,6 +6232,8 @@ fn splitting_a_pane_created_by_an_earlier_split_is_accepted() {
         )),
         env: HashMap::new(),
         working_directory: None,
+        inherit_working_directory_from: None,
+        load_shell_integration: false,
         size: TerminalSize {
             columns: 80,
             lines: 24,
@@ -6330,5 +6334,104 @@ fn an_offered_summary_describing_panes_the_daemon_lacks_is_refused() {
     assert!(
         format!("{error:#}").contains("does not hold"),
         "unexpected error: {error:#}"
+    );
+}
+
+/// The wrapper that loads Zetta's shell integration is delivered as if typed,
+/// so the pane's terminal echoes it — to every viewer of a shared pane, not
+/// just whoever wrote it. Run by the daemon before the pane can be attached to,
+/// it reaches nobody: what a viewer replays afterwards starts at the prompt.
+#[test]
+fn a_daemon_loaded_shell_integration_leaves_nothing_for_viewers_to_replay() {
+    let daemon = TestDaemon::start();
+    let client = daemon.client();
+    let pane = client
+        .spawn(spawn_request(None, "printf ready; sleep 60"))
+        .unwrap();
+    let descriptor = std::fs::File::from(pane.descriptor);
+    read_until(&descriptor, "ready");
+    let mut offered = summary(pane.session_id, pane.pane_id);
+    offered.panes.push(pane_summary(pane.pane_id));
+    client
+        .share(
+            pane.session_id,
+            offered,
+            serde_json::json!({"shared": true}),
+            Some(&test_verifier()),
+            true,
+        )
+        .unwrap();
+
+    let mut draft = zmux::messages::SharedPaneDraft {
+        draft_id: 1,
+        profile: "System".to_owned(),
+        // bash, not sh: only a shell Zetta has an integration for gets a
+        // wrapper at all, so anything else would make this test pass by
+        // never running the thing it is about.
+        command: Some(zetta_profiles::ProfileCommand::with_args(
+            "/bin/bash",
+            vec!["-i".to_owned()],
+        )),
+        env: HashMap::new(),
+        working_directory: None,
+        inherit_working_directory_from: None,
+        load_shell_integration: true,
+        size: TerminalSize {
+            columns: 80,
+            lines: 24,
+            cell_width: 0,
+            cell_height: 0,
+        },
+        console_palette: ConsolePalette::default(),
+        metadata: pane_summary(0),
+    };
+    draft.metadata.profile = "System".to_owned();
+
+    let zmux::client::SharedBatchResult::Applied(spawned) = client
+        .spawn_shared_batch(SharedSpawnBatchRequest {
+            session_id: pane.session_id,
+            base_revision: SessionRevision::INITIAL,
+            operation_id: client.next_shared_operation_id(),
+            target_pane_id: Some(pane.pane_id),
+            replacement: zmux::messages::SharedDraftLayout::Split {
+                axis: "vertical".to_owned(),
+                first_ratio: 200,
+                first: Box::new(zmux::messages::SharedDraftLayout::Existing {
+                    pane_id: pane.pane_id,
+                }),
+                second: Box::new(zmux::messages::SharedDraftLayout::Draft { draft_id: 1 }),
+            },
+            panes: vec![draft],
+            active_pane: Some(zmux::messages::SharedPaneRef::Draft { draft_id: 1 }),
+        })
+        .unwrap()
+    else {
+        panic!("the bootstrapped spawn conflicted")
+    };
+
+    // Long enough for the shell to have echoed the wrapper and reached its
+    // prompt. Without this the replay is empty because nothing has happened
+    // yet, and the assertions below would hold however the bootstrap behaved.
+    std::thread::sleep(Duration::from_millis(750));
+
+    let AttachOutcome::SharedAttached { pane: shared, .. } = client
+        .attach_shared_with_secret(
+            pane.session_id,
+            spawned.mappings[0].pane_id,
+            Some(&SessionSecret::new(TEST_SECRET.to_owned())),
+        )
+        .unwrap()
+    else {
+        panic!("the bootstrapped pane did not attach as a stream")
+    };
+
+    let replay = String::from_utf8_lossy(&shared.replay).into_owned();
+    assert!(
+        !replay.contains("__zed_init_command_ready_"),
+        "a viewer must not replay the bootstrap that ran before it attached: {replay:?}"
+    );
+    assert!(
+        !replay.contains("zetta init"),
+        "nor the payload it carried: {replay:?}"
     );
 }

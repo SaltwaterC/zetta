@@ -74,6 +74,8 @@ fn draft(
             ("PATH".to_owned(), "/the/requesters/path".to_owned()),
         ]),
         working_directory: None,
+        inherit_working_directory_from: None,
+        load_shell_integration: false,
         size: TerminalSize {
             columns: 80,
             lines: 24,

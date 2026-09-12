@@ -1754,10 +1754,12 @@ impl Drop for TerminalSyncDiagnostic {
     }
 }
 
-const INIT_COMMAND_STARTUP_MARKER_PREFIX: &str = "__zed_init_command_ready_";
-const INIT_COMMAND_STARTUP_DONE_TITLE_PREFIX: &str = "zetta-init-command-done:";
-const INIT_COMMAND_STARTUP_HISTORY_MARKER_PREFIX: &str = "__zed_init_command_history_";
-const INIT_COMMAND_STARTUP_MARKER_SUFFIX: &str = "__";
+// The daemon runs this same handshake for a pane it adds to a shared session,
+// so the strings are shared rather than copied: a difference between the two
+// would be a handshake that never completes.
+const INIT_COMMAND_STARTUP_MARKER_PREFIX: &str = zetta_profiles::INIT_COMMAND_MARKER_PREFIX;
+const INIT_COMMAND_STARTUP_DONE_TITLE_PREFIX: &str = zetta_profiles::INIT_COMMAND_DONE_TITLE_PREFIX;
+const INIT_COMMAND_STARTUP_MARKER_SUFFIX: &str = zetta_profiles::INIT_COMMAND_MARKER_SUFFIX;
 const INIT_COMMAND_STARTUP_MARKER_SEARCH_LINES: usize = 64;
 
 #[cfg(windows)]
@@ -1819,9 +1821,16 @@ fn init_command_startup_done_title(marker_id: u64) -> String {
     format!("{INIT_COMMAND_STARTUP_DONE_TITLE_PREFIX}{marker_id}")
 }
 
+/// The comment the wrapper ends with, so a shell that records history does not
+/// keep the wrapper in it. Only the test that pins the wrapper's shape reaches
+/// this directly; the wrappers themselves are built in `zetta_profiles`, which
+/// the daemon shares.
+#[cfg(test)]
 fn init_command_startup_history_marker(marker_id: u64) -> String {
     format!(
-        "{INIT_COMMAND_STARTUP_HISTORY_MARKER_PREFIX}{marker_id}{INIT_COMMAND_STARTUP_MARKER_SUFFIX}"
+        "{}{marker_id}{}",
+        zetta_profiles::INIT_COMMAND_HISTORY_PREFIX,
+        zetta_profiles::INIT_COMMAND_MARKER_SUFFIX
     )
 }
 
@@ -1831,16 +1840,17 @@ fn init_command_startup_marker_command(shell_kind: ShellKind, marker_id: u64) ->
     let marker = format!(
         "printf '\\033[8m%s%s%s\\033[0m\\n' {INIT_COMMAND_STARTUP_MARKER_PREFIX} {marker_id} {INIT_COMMAND_STARTUP_MARKER_SUFFIX}"
     );
-    let done_marker =
-        format!("printf '\\033]2;{INIT_COMMAND_STARTUP_DONE_TITLE_PREFIX}%s\\033\\\\' {marker_id}");
-    let history_marker = init_command_startup_history_marker(marker_id);
     match shell_kind {
-        ShellKind::Posix => format!(
-            " if [ -n \"${{BASH_VERSION:-}}\" ]; then builtin history -d -1 2>/dev/null || :; fi; stty -echo; {marker}; IFS= read -r __zed_init_command_ready_payload; if [ -n \"$__zed_init_command_ready_payload\" ]; then eval \"$__zed_init_command_ready_payload\"; fi; stty echo; {done_marker}; : # {history_marker}"
-        ),
-        ShellKind::Fish => format!(
-            " stty -echo -icanon min 1; {marker}; read --null __zed_init_command_ready_payload; if test -n \"$__zed_init_command_ready_payload\"; eval \"$__zed_init_command_ready_payload\"; end; stty echo icanon; {done_marker}; # {history_marker}"
-        ),
+        // Shared with the daemon, which drives the same handshake for a pane it
+        // adds to a shared session.
+        ShellKind::Posix => {
+            zetta_profiles::init_command_wrapper(zetta_profiles::ShellKind::Bash, marker_id)
+                .expect("a POSIX shell has a bootstrap wrapper")
+        }
+        ShellKind::Fish => {
+            zetta_profiles::init_command_wrapper(zetta_profiles::ShellKind::Fish, marker_id)
+                .expect("fish has a bootstrap wrapper")
+        }
         ShellKind::PowerShell | ShellKind::Pwsh => format!(
             "Write-Output ('{INIT_COMMAND_STARTUP_MARKER_PREFIX}' + '{marker_id}' + '{INIT_COMMAND_STARTUP_MARKER_SUFFIX}')"
         ),

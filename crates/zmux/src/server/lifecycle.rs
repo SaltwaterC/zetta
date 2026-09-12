@@ -7,6 +7,18 @@
 
 use super::*;
 
+/// How much of a pane's startup chatter is kept while looking for a bootstrap
+/// marker. The marker cannot straddle more than one read boundary, so a fixed
+/// window finds it without growing a buffer for a shell that prints a banner.
+#[cfg(unix)]
+const BOOTSTRAP_SCAN_WINDOW: usize = 8 * 1024;
+
+/// Distinguishes one pane's bootstrap from another's, so a marker left in a
+/// shell's scrollback cannot satisfy a later handshake.
+#[cfg(unix)]
+static NEXT_BOOTSTRAP_MARKER_ID: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(1);
+
 pub(super) enum SpawnOutcome {
     Complete,
     SharedConflict(Box<crate::messages::SharedSessionState>),
@@ -20,6 +32,126 @@ struct ProvisionalSharedPane {
     #[cfg(windows)]
     child_events: tty::AttachedChildEvents,
     size: TerminalSize,
+}
+
+/// How long the bootstrap below may take before the pane is started without it.
+/// Generous next to a shell that normally reaches its prompt in a few tens of
+/// milliseconds, and bounded because nothing may wedge a spawn.
+#[cfg(unix)]
+const SHELL_INTEGRATION_BOOTSTRAP_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Loads Zetta's shell integration into a pane before anybody can see it.
+///
+/// The wrapper is delivered as if typed, so the terminal echoes it — to *every*
+/// viewer of a shared pane, not just whoever wrote it. A viewer that did not
+/// write it has no idea what it is looking at, and hiding it viewer-side is a
+/// race against the replay that delivers the whole exchange at once. Doing it
+/// here avoids the question: the pane has no attachment and nothing retained
+/// yet, so the exchange reaches nobody and is in no replay.
+///
+/// Best effort by construction. A shell that never answers leaves the pane
+/// without its integration, which is what it would have had anyway.
+#[cfg(unix)]
+fn load_shell_integration(pty: &tty::Pty, command: &zetta_profiles::ProfileCommand) -> Result<()> {
+    use std::io::Write as _;
+
+    let kind = command.shell_kind();
+    if zetta_profiles::runs_a_command(&command.args) {
+        return Ok(());
+    }
+    let Some(payload) = zetta_profiles::shell_integration_startup_command(kind, &command.args)
+    else {
+        return Ok(());
+    };
+    let marker_id = NEXT_BOOTSTRAP_MARKER_ID.fetch_add(1, Ordering::Relaxed);
+    let Some(wrapper) = zetta_profiles::init_command_wrapper(kind, marker_id) else {
+        return Ok(());
+    };
+
+    let deadline = Instant::now() + SHELL_INTEGRATION_BOOTSTRAP_TIMEOUT;
+    let mut file = pty
+        .file()
+        .try_clone()
+        .context("cloning the pane's terminal")?;
+    file.write_all(wrapper.as_bytes())?;
+    file.write_all(b"\r")?;
+    file.flush()?;
+    if !read_until(
+        &mut file,
+        &zetta_profiles::init_command_marker(marker_id),
+        deadline,
+    )? {
+        log::debug!("pane did not ask for its shell integration in time");
+        return Ok(());
+    }
+    file.write_all(&payload)?;
+    file.flush()?;
+    if !read_until(
+        &mut file,
+        &zetta_profiles::init_command_done_title(marker_id),
+        deadline,
+    )? {
+        log::debug!("pane did not finish loading its shell integration in time");
+    }
+    Ok(())
+}
+
+/// Reads until `needle` appears or the deadline passes, discarding everything.
+///
+/// Only the tail is kept, because the needle cannot straddle more than one
+/// boundary: a fixed window is enough to find it and keeps a chatty startup
+/// from growing a buffer nobody reads.
+#[cfg(unix)]
+fn read_until(file: &mut std::fs::File, needle: &str, deadline: Instant) -> Result<bool> {
+    use std::io::Read as _;
+    use std::os::fd::AsRawFd as _;
+
+    let mut tail = String::new();
+    let mut buffer = [0_u8; 4096];
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Ok(false);
+        }
+        let mut poll = libc::pollfd {
+            fd: file.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: one initialized `pollfd` describing a descriptor this
+        // function owns a handle to, with a bounded millisecond timeout.
+        let ready = unsafe {
+            libc::poll(
+                &raw mut poll,
+                1,
+                i32::try_from(left.as_millis()).unwrap_or(i32::MAX),
+            )
+        };
+        if ready < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error).context("waiting for the pane's terminal");
+        }
+        if ready == 0 {
+            return Ok(false);
+        }
+        let read = match file.read(&mut buffer) {
+            Ok(0) => return Ok(false),
+            Ok(read) => read,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error).context("reading the pane's terminal"),
+        };
+        tail.push_str(&String::from_utf8_lossy(&buffer[..read]));
+        if tail.contains(needle) {
+            return Ok(true);
+        }
+        if tail.len() > BOOTSTRAP_SCAN_WINDOW {
+            let keep = tail.len() - needle.len().max(1);
+            tail.drain(..tail.floor_char_boundary(keep));
+        }
+    }
 }
 
 /// What a draft runs on *this* host, and the environment it runs in.
@@ -73,11 +205,44 @@ fn shared_draft_process(
     (command, env)
 }
 
+/// The directory a pane is running in, read from the process the daemon
+/// started for it. Only the daemon can answer this for a pane whose viewers
+/// are on another machine: it is the process's parent, and they are not.
+fn pane_working_directory(daemon: &Arc<Daemon>, pane_id: u64) -> Option<PathBuf> {
+    let child_pid = {
+        let sessions = daemon
+            .sessions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        sessions
+            .iter()
+            .flat_map(|session| &session.panes)
+            .find(|pane| pane.id == pane_id)
+            .map(|pane| pane.pty.child_pid())?
+    };
+    if child_pid == 0 {
+        return None;
+    }
+    let child_pid = sysinfo::Pid::from_u32(child_pid);
+    let mut system = sysinfo::System::new();
+    system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[child_pid]), true);
+    system
+        .process(child_pid)
+        .and_then(|process| process.cwd().map(Path::to_path_buf))
+}
+
 fn start_shared_draft(
     daemon: &Arc<Daemon>,
     draft: &crate::messages::SharedPaneDraft,
 ) -> Result<ProvisionalSharedPane> {
     let (command, env) = shared_draft_process(draft);
+    #[cfg(unix)]
+    let bootstrap_command = command.clone();
+    let working_directory = draft.working_directory.clone().or_else(|| {
+        draft
+            .inherit_working_directory_from
+            .and_then(|pane_id| pane_working_directory(daemon, pane_id))
+    });
     #[cfg(windows)]
     let (program, args) = (command.program.clone(), command.args.clone());
     #[cfg(unix)]
@@ -85,7 +250,7 @@ fn start_shared_draft(
         shell: command
             .program
             .map(|program| tty::Shell::new(program, command.args)),
-        working_directory: draft.working_directory.clone(),
+        working_directory: working_directory.clone(),
         drain_on_exit: true,
         env,
         #[cfg(not(windows))]
@@ -96,6 +261,14 @@ fn start_shared_draft(
     #[cfg(unix)]
     let pty = tty::new(&options, window_size(draft.size), 0)
         .context("starting a shared terminal process")?;
+    // Before the pane is attachable and before anything is retained, so the
+    // exchange reaches no viewer and appears in no replay.
+    #[cfg(unix)]
+    if draft.load_shell_integration
+        && let Err(error) = load_shell_integration(&pty, &bootstrap_command)
+    {
+        log::debug!("could not load the shell integration for a shared pane: {error:#}");
+    }
     #[cfg(unix)]
     let _child_pid = pty.child_pid();
     #[cfg(windows)]
@@ -104,7 +277,7 @@ fn start_shared_draft(
             program,
             args,
             env,
-            draft.working_directory.clone(),
+            working_directory.clone(),
             draft.size,
             draft.console_palette,
             std::process::id(),

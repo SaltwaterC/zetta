@@ -25,7 +25,11 @@ pub use discovery::discovered_profiles;
 pub use environment::{
     FALLBACK_LANG, REMOVED_TERMINAL_ENVIRONMENT, TerminalEnvironmentOptions, terminal_environment,
 };
-pub use shell_integration::{ShellKind, runs_a_command, shell_integration_startup_command};
+pub use shell_integration::{
+    INIT_COMMAND_DONE_TITLE_PREFIX, INIT_COMMAND_HISTORY_PREFIX, INIT_COMMAND_MARKER_PREFIX,
+    INIT_COMMAND_MARKER_SUFFIX, ShellKind, init_command_done_title, init_command_marker,
+    init_command_wrapper, runs_a_command, shell_integration_startup_command,
+};
 
 /// What a profile starts, on the machine that will start it.
 ///
