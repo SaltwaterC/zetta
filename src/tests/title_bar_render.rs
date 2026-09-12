@@ -1,6 +1,18 @@
 use super::*;
 
 #[test]
+fn only_a_remote_overflow_entry_carries_the_server_icon() {
+    let entry = |remote| TabOverflowEntry {
+        index: 3,
+        label: "htop".into(),
+        remote,
+    };
+
+    assert_eq!(entry(true).icon(), Some(IconName::Server));
+    assert_eq!(entry(false).icon(), None);
+}
+
+#[test]
 fn compact_neighbor_control_mask_covers_the_tab_wing() {
     let background = gpui::white();
     let mut mask = compact_tab_neighbor_control_mask(background);

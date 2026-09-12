@@ -321,9 +321,27 @@ pub(crate) fn tab_overflow_entry_label(tab: &Tab, cx: &App) -> SharedString {
     })
 }
 
+/// A tab that did not fit in the bar, as its overflow menu offers it.
+///
+/// The menu is the only place such a tab is visible, so it carries the same
+/// remote/local distinction the rendered tab does — there its stripe would have
+/// nothing to attach to, so the entry takes an icon instead.
+#[derive(Clone)]
+pub(crate) struct TabOverflowEntry {
+    pub(crate) index: usize,
+    pub(crate) label: SharedString,
+    pub(crate) remote: bool,
+}
+
+impl TabOverflowEntry {
+    pub(crate) fn icon(&self) -> Option<IconName> {
+        self.remote.then_some(IconName::Server)
+    }
+}
+
 pub(crate) fn render_tab_overflow_trigger(
     is_right: bool,
-    entries: Vec<(usize, SharedString)>,
+    entries: Vec<TabOverflowEntry>,
     compact_mode: bool,
     compact_height: Pixels,
     border_color: Hsla,
@@ -377,8 +395,33 @@ pub(crate) fn render_tab_overflow_trigger(
                         })
                         .ok();
                     let menu = ui::ContextMenu::build(window, cx, move |mut menu, _, _| {
-                        for (index, label) in entries.iter().cloned() {
-                            menu = menu.action(label, Box::new(SelectOverflowTab { index }));
+                        for entry in entries.iter().cloned() {
+                            let index = entry.index;
+                            menu = match entry.icon() {
+                                // `ContextMenuEntry::action` only records the
+                                // action for the keybinding hint; the handler
+                                // is what dispatches it, which is what
+                                // `ContextMenu::action` installs for the plain
+                                // entries below.
+                                Some(icon) => menu.item(
+                                    ui::ContextMenuEntry::new(entry.label)
+                                        .icon(icon)
+                                        // Trailing, so one marked entry does
+                                        // not indent its label past every
+                                        // unmarked one's.
+                                        .icon_position(ui::IconPosition::End)
+                                        .action(Box::new(SelectOverflowTab { index }))
+                                        .handler(move |window, cx| {
+                                            window.dispatch_action(
+                                                Box::new(SelectOverflowTab { index }),
+                                                cx,
+                                            );
+                                        }),
+                                ),
+                                None => {
+                                    menu.action(entry.label, Box::new(SelectOverflowTab { index }))
+                                }
+                            };
                         }
                         menu
                     });

@@ -251,6 +251,10 @@ independent from the session-lifecycle control. Normal daemon launches expose
 to zmux when the tab or window closes; `zetta --no-mux` exposes **Keep running**.
 Both use `Ctrl-Shift-B`, while `Ctrl-Shift-K` is unbound by default.
 
+A tab whose session runs on another machine is marked with a stripe along its
+lower edge and names its SSH destination in its tooltip and context menu; see
+[Background sessions](background-sessions.md).
+
 ### Tab attention
 
 Commands running in a Zetta terminal can mark their originating tab with

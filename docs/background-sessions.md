@@ -72,6 +72,13 @@ must allow stream-local forwarding (`AllowStreamLocalForwarding`). The remote
 `zmux` must speak the same mux, endpoint, and process-control compatibility
 versions; Zetta queries it with `zmux endpoint --json` before forwarding.
 
+A tab attached to a remote daemon is marked in the tab bar: it carries a
+coloured stripe along its lower edge, its tooltip names the SSH destination
+below the tab title, and that destination heads the tab's context menu. A remote
+tab that has scrolled into a left or right overflow menu carries a server icon
+there instead of the stripe. The marking follows the tab, not the active pane,
+because every pane in a tab belongs to the same session.
+
 Remote panes are shared byte streams. They never receive a Unix descriptor or
 Windows handle, cannot take an exclusive grant, and remain live-only in Zetta:
 closing their tab disconnects that viewer but does not issue a remote

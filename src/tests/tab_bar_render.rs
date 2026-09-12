@@ -56,6 +56,36 @@ fn shared_indicator_reuses_the_lifecycle_slot_and_wins_over_keep_running() {
 }
 
 #[test]
+fn a_local_tab_keeps_the_title_it_was_given() {
+    let title = SharedString::from("htop");
+    assert_eq!(tab_title_with_remote_session(title.clone(), None), title);
+    assert_eq!(remote_session_menu_header(None), None);
+}
+
+#[test]
+fn a_remote_tab_names_its_destination_below_its_title() {
+    let title = SharedString::from("htop");
+    assert_eq!(
+        tab_title_with_remote_session(title.clone(), Some("build@rack1")),
+        SharedString::from("htop\nRemote session: build@rack1")
+    );
+}
+
+#[test]
+fn the_tooltip_and_the_menu_header_name_a_destination_the_same_way() {
+    let label = remote_session_label("build@rack1");
+    assert_eq!(
+        remote_session_menu_header(Some("build@rack1")),
+        Some(SharedString::from(label.clone()))
+    );
+    let title = SharedString::from("htop");
+    assert_eq!(
+        tab_title_with_remote_session(title.clone(), Some("build@rack1")),
+        SharedString::from(format!("htop\n{label}"))
+    );
+}
+
+#[test]
 fn tab_lifecycle_context_actions_follow_the_launch_mode() {
     assert!(action_available_in_launch_mode(
         ToggleTabSharing.name(),
@@ -226,6 +256,69 @@ fn active_tab_bottom_transitions_stay_on_the_expanded_canvas_edges() {
 
     assert_eq!(left.style().inset.left, Some(zero));
     assert_eq!(right.style().inset.right, Some(zero));
+}
+
+/// A stand-in for a rendered tab: the padded, `relative` box the remote stripe
+/// is placed in. A real tab cannot be used here, because building one needs a
+/// `Zetta` and `Zetta::new` spawns a shell.
+struct RemoteStripeView;
+
+impl RemoteStripeView {
+    const TAB_WIDTH: Pixels = px(120.);
+    const TAB_HEIGHT: Pixels = px(30.);
+}
+
+impl Render for RemoteStripeView {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .relative()
+            .w(Self::TAB_WIDTH)
+            .h(Self::TAB_HEIGHT)
+            // The same horizontal padding a tab gives its contents, which the
+            // stripe must ignore.
+            .px_2()
+            .debug_selector(|| "tab".to_owned())
+            .child(
+                render_remote_tab_stripe(gpui::red(), true)
+                    .debug_selector(|| "remote-stripe".to_owned()),
+            )
+    }
+}
+
+#[test]
+fn the_standard_tab_bar_stripe_is_drawn_a_pixel_taller_than_the_compact_one() {
+    assert_eq!(remote_tab_stripe_height(true), REMOTE_TAB_STRIPE_HEIGHT);
+    assert_eq!(
+        remote_tab_stripe_height(false),
+        REMOTE_TAB_STRIPE_HEIGHT + px(1.),
+        "the standard bar clips a tab's last pixel row, so the same visible \
+         thickness has to be drawn one row taller there"
+    );
+}
+
+#[gpui::test]
+fn the_remote_stripe_covers_the_whole_lower_edge_of_its_tab(cx: &mut TestAppContext) {
+    let (_, cx) = cx.add_window_view(|_, _| RemoteStripeView);
+    cx.run_until_parked();
+
+    let tab = cx
+        .debug_bounds("tab")
+        .expect("the stand-in tab is rendered");
+    let stripe = cx
+        .debug_bounds("remote-stripe")
+        .expect("the stripe is rendered");
+
+    assert_eq!(
+        stripe.size.width, tab.size.width,
+        "the stripe resolves against the padding box, so a tab's own \
+         horizontal padding must not inset it"
+    );
+    assert_eq!(stripe.size.height, remote_tab_stripe_height(true));
+    assert_eq!(
+        stripe.bottom(),
+        tab.bottom(),
+        "the stripe marks the tab's lower edge"
+    );
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -25,6 +25,10 @@ impl MuxPanes {
         false
     }
 
+    pub(crate) fn remote_tab_destination(&self, _: u64) -> Option<&str> {
+        None
+    }
+
     pub(crate) fn session_id(&self, _: u64) -> Option<u64> {
         None
     }

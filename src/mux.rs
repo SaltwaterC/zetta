@@ -213,6 +213,18 @@ impl MuxRuntime {
         self.remote
     }
 
+    /// The SSH destination this runtime's daemon is reached through, or `None`
+    /// for the local one.
+    ///
+    /// A remote client is only ever constructed from a [`RemoteTarget`], so
+    /// this is `Some` exactly when [`Self::is_remote`] holds; chrome that wants
+    /// both the fact and the host name needs only this.
+    pub(crate) fn remote_destination(&self) -> Option<&str> {
+        self.client
+            .remote_target()
+            .map(zmux::remote::RemoteTarget::destination)
+    }
+
     /// Keeps the authenticated remote session key for platform control requests
     /// that are separate from the shared byte-stream connection. Runtime clones
     /// share one zeroizing value, so the key is removed with the last runtime.
@@ -653,8 +665,18 @@ impl MuxPanes {
     }
 
     pub(crate) fn is_remote_tab(&self, tab_id: u64) -> bool {
-        self.runtime_for_tab(tab_id)
-            .is_some_and(|runtime| runtime.is_remote())
+        self.runtimes
+            .get(&tab_id)
+            .is_some_and(MuxRuntime::is_remote)
+    }
+
+    /// The SSH destination a tab's session lives behind, for a tab attached to
+    /// a remote multiplexer. `None` for a local tab, so this answers both
+    /// "is it remote" and "which host" in one lookup.
+    pub(crate) fn remote_tab_destination(&self, tab_id: u64) -> Option<&str> {
+        self.runtimes
+            .get(&tab_id)
+            .and_then(MuxRuntime::remote_destination)
     }
 
     pub(crate) fn session_id(&self, tab_id: u64) -> Option<u64> {

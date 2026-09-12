@@ -2,6 +2,9 @@ use super::*;
 use crate::command_palette::action_available_in_launch_mode;
 use crate::rename::resolve_tab_title;
 
+/// How much of the edge stripe marking a remote-session tab the user sees.
+const REMOTE_TAB_STRIPE_HEIGHT: Pixels = px(2.);
+
 /// The per-frame inputs the tab bar needs, gathered once by `Render for Zetta`
 /// so the measured tab row does not read them back out of the entity.
 #[derive(Clone)]
@@ -60,6 +63,64 @@ fn tab_leading_icons(
         silent_mode.then_some(IconName::BellOff),
         custom_icon.filter(|_| custom_icon_visible),
     )
+}
+
+/// How a tab whose session lives on another machine is named, wherever that is
+/// spelled out: the tab's tooltip and its context-menu header both use this, so
+/// the two cannot drift apart.
+fn remote_session_label(destination: &str) -> String {
+    format!("Remote session: {destination}")
+}
+
+/// A tab's hover tooltip and accessible name: its full title, and — for a tab
+/// attached through a remote multiplexer — the SSH destination it is attached
+/// through, on a second line. A local tab keeps the title it was given.
+fn tab_title_with_remote_session(
+    full_title: SharedString,
+    remote_destination: Option<&str>,
+) -> SharedString {
+    let Some(destination) = remote_destination else {
+        return full_title;
+    };
+    format!("{full_title}\n{}", remote_session_label(destination)).into()
+}
+
+/// The header a remote tab's context menu opens with, naming the host its
+/// session is running on. `None` leaves a local tab's menu as it was.
+fn remote_session_menu_header(remote_destination: Option<&str>) -> Option<SharedString> {
+    remote_destination.map(|destination| remote_session_label(destination).into())
+}
+
+/// How tall the stripe has to be drawn for `REMOTE_TAB_STRIPE_HEIGHT` of it to
+/// be visible.
+///
+/// The standard tab bar draws a bottom border and clips its tab row to the box
+/// inside it, while a tab is laid out at the bar's full height — so a tab's
+/// last pixel row never reaches the screen, and a stripe anchored to the tab's
+/// edge loses exactly that row. Compact mode has neither the border nor the
+/// clip, and shows the stripe whole.
+fn remote_tab_stripe_height(compact_mode: bool) -> Pixels {
+    if compact_mode {
+        REMOTE_TAB_STRIPE_HEIGHT
+    } else {
+        REMOTE_TAB_STRIPE_HEIGHT + px(1.)
+    }
+}
+
+/// The stripe marking a tab whose session lives on another machine.
+///
+/// Painted as the tab's last child so it sits over the compact active-tab
+/// shape, and positioned against the padding box so it spans the tab's full
+/// inner width. It is deliberately not the theme's accent color: tab move mode
+/// already draws an accent border on the same edge.
+fn render_remote_tab_stripe(color: Hsla, compact_mode: bool) -> gpui::Div {
+    div()
+        .absolute()
+        .bottom_0()
+        .left_0()
+        .right_0()
+        .h(remote_tab_stripe_height(compact_mode))
+        .bg(color)
 }
 
 #[derive(Clone, Copy)]
@@ -182,6 +243,11 @@ struct TabChrome<'a> {
     corner_radius: Pixels,
     left_transition_background: Hsla,
     right_transition_background: Hsla,
+    /// The SSH destination this tab's session is attached through, for a tab
+    /// belonging to a remote multiplexer. Borrowed rather than owned so every
+    /// field of this struct stays `Copy`, which is what lets `render_tab`
+    /// destructure it and still pass it on.
+    remote_destination: Option<&'a str>,
     handle: &'a WeakEntity<Zetta>,
 }
 
@@ -407,6 +473,7 @@ fn render_tab(chrome: TabChrome<'_>, tab: &Tab, tab_theme: Arc<Theme>, cx: &App)
         compact_mode,
         title_bar_height,
         compact_tab_bottom_left,
+        remote_destination,
         handle,
         ..
     } = chrome;
@@ -466,6 +533,7 @@ fn render_tab(chrome: TabChrome<'_>, tab: &Tab, tab_theme: Arc<Theme>, cx: &App)
         tab.icon,
         pinned || !is_shrinking || (is_renaming_tab && selected),
     );
+    let full_title = tab_title_with_remote_session(full_title, remote_destination);
     let accessible_title = full_title.clone();
     let content = render_tab_content(
         tab,
@@ -494,6 +562,7 @@ fn render_tab(chrome: TabChrome<'_>, tab: &Tab, tab_theme: Arc<Theme>, cx: &App)
         close_handle,
         tab_background,
         show_active_tab_shape,
+        remote_stripe: remote_destination.map(|_| tab_theme.status().info),
         select_handle,
     });
     let tab_element = with_tab_context_menu(
@@ -508,6 +577,7 @@ fn render_tab(chrome: TabChrome<'_>, tab: &Tab, tab_theme: Arc<Theme>, cx: &App)
             tab_count,
             tab_move_mode_active,
         },
+        remote_session_menu_header(remote_destination),
         cx,
     );
     let tab_element = if pinned {
@@ -577,6 +647,9 @@ struct TabShape<'a> {
     close_handle: WeakEntity<Zetta>,
     tab_background: gpui::Hsla,
     show_active_tab_shape: bool,
+    /// The color of the remote-session stripe, for a tab whose session lives on
+    /// another machine.
+    remote_stripe: Option<gpui::Hsla>,
     select_handle: WeakEntity<Zetta>,
 }
 
@@ -595,6 +668,7 @@ fn tab_shape(shape: TabShape<'_>) -> gpui::Stateful<gpui::Div> {
         close_handle,
         tab_background,
         show_active_tab_shape,
+        remote_stripe,
         select_handle,
         ..
     } = shape;
@@ -708,6 +782,13 @@ fn tab_shape(shape: TabShape<'_>) -> gpui::Stateful<gpui::Div> {
                             .ok();
                     }),
             )
+        })
+        // Last, so the stripe paints over the compact active tab's own shape
+        // rather than under it.
+        .when_some(remote_stripe, |tab_element, color| {
+            tab_element
+                .relative()
+                .child(render_remote_tab_stripe(color, compact_mode))
         })
 }
 
@@ -903,6 +984,7 @@ fn with_tab_context_menu(
     index: usize,
     handle: &WeakEntity<Zetta>,
     menu: TabMenuContext,
+    remote_session_header: Option<SharedString>,
     cx: &App,
 ) -> AnyElement {
     let TabMenuContext {
@@ -929,8 +1011,12 @@ fn with_tab_context_menu(
                 })
                 .ok();
             let action_context = action_context.clone();
+            // This closure runs once per menu open, so both of the values it
+            // hands the builder have to be cloned rather than moved.
+            let remote_session_header = remote_session_header.clone();
             ui::ContextMenu::build(window, cx, move |menu, _, _| {
                 let menu = menu.when_some(action_context, |menu, focus| menu.context(focus));
+                let menu = menu.when_some(remote_session_header, ui::ContextMenu::header);
                 menu.action("Rename Tab", Box::new(RenameTab))
                     .action("Change Tab Icon", Box::new(ChangeTabIcon))
                     .action("Change Tab Theme", Box::new(ChangeTabTheme))
@@ -1115,10 +1201,10 @@ fn tab_bar_row_contents(
 /// What the measured row learned from one read of the window.
 struct TabBarTabs {
     tabs: Vec<AnyElement>,
-    /// The tabs that did not fit to the left and to the right, as the labels
+    /// The tabs that did not fit to the left and to the right, as the entries
     /// their overflow menus offer.
-    left_overflow: Vec<(usize, SharedString)>,
-    right_overflow: Vec<(usize, SharedString)>,
+    left_overflow: Vec<TabOverflowEntry>,
+    right_overflow: Vec<TabOverflowEntry>,
     /// Whether the first tab still on screen is the selected one, which decides
     /// where the active-tab shape's left transition is drawn.
     first_visible_selected: bool,
@@ -1162,7 +1248,11 @@ fn tab_bar_tab_elements(
                     .filter_map(|index| {
                         let absolute_index = pinned_count + index;
                         let tab = this.tabs.get(absolute_index)?;
-                        Some((absolute_index, tab_overflow_entry_label(tab, cx)))
+                        Some(TabOverflowEntry {
+                            index: absolute_index,
+                            label: tab_overflow_entry_label(tab, cx),
+                            remote: this.mux_panes.is_remote_tab(tab.id),
+                        })
                     })
                     .collect::<Vec<_>>()
             };
@@ -1246,6 +1336,7 @@ fn tab_bar_tab_elements(
                             corner_radius,
                             left_transition_background,
                             right_transition_background,
+                            remote_destination: this.mux_panes.remote_tab_destination(tab.id),
                             handle: &handle,
                         },
                         tab,
