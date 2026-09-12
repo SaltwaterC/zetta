@@ -479,6 +479,11 @@ pub(crate) struct Zetta {
     /// shared connection and the sizes that arrive on it live here.
     #[cfg(feature = "zmux")]
     pub(crate) shared_panes: HashMap<u64, crate::mux::SharedPaneEntry>,
+    /// Remote panes whose bytes travel over Mosh instead of the multiplexer's
+    /// byte stream, by pane ID. Holding the session here is what keeps the
+    /// link alive for as long as the pane is shown.
+    #[cfg(feature = "zmux")]
+    pub(crate) zosh_panes: HashMap<u64, crate::remote_pane_transport::ZoshPaneEntry>,
     /// Canonical shared-session revisions and the stable mux-id/local-id
     /// mappings used to apply subscription snapshots safely.
     #[cfg(feature = "zmux")]
@@ -521,6 +526,12 @@ pub(crate) struct Zetta {
     pub(crate) remote_session_focus: gpui::FocusHandle,
     pub(crate) remote_session_picker: Option<crate::remote_session_ui::RemoteSessionPicker>,
     pub(crate) remote_session_target: Option<zmux::remote::RemoteTarget>,
+    /// How the panes of the remote session currently being opened should
+    /// travel. Kept beside the target because the two are chosen together and
+    /// have to survive the authentication prompt that may come between
+    /// choosing them and attaching.
+    #[cfg(feature = "zmux")]
+    pub(crate) remote_session_transport: crate::remote_pane_transport::RemotePaneTransport,
     #[cfg(feature = "session-persistence")]
     /// Public age ciphertext kept while a remote automatically protected
     /// session is being unlocked. The recovered session secret itself never
@@ -916,6 +927,8 @@ impl Zetta {
             #[cfg(feature = "zmux")]
             shared_panes: HashMap::new(),
             #[cfg(feature = "zmux")]
+            zosh_panes: HashMap::new(),
+            #[cfg(feature = "zmux")]
             shared_collaboration: SharedSessionCoordinator::default(),
             #[cfg(feature = "zmux")]
             closing_shared_panes: HashSet::new(),
@@ -942,6 +955,8 @@ impl Zetta {
             remote_session_focus: cx.focus_handle(),
             remote_session_picker: None,
             remote_session_target: None,
+            #[cfg(feature = "zmux")]
+            remote_session_transport: crate::remote_pane_transport::RemotePaneTransport::default(),
             #[cfg(feature = "session-persistence")]
             remote_session_key_envelope: None,
             close_confirmation_focus: cx.focus_handle(),

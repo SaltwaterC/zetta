@@ -81,15 +81,26 @@ pub fn run_reconnect_session(identifier: &str, identity_paths: &[PathBuf]) -> Re
 /// enough to validate the numeric session ID. The selected Zetta process gets
 /// the target and the zeroizing secret, then establishes its own long-lived
 /// runtime so closing this command cannot tear down the tab's data plane.
+/// What carries the panes of the session being attached, when the command line
+/// said. Nothing here decides what the names mean: the window that opens the
+/// session does, because it is the half that knows what its build can carry a
+/// pane over.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RemoteProtocolRequest {
+    pub protocol: Option<String>,
+    pub keep_alive_ms: Option<u64>,
+}
+
 pub fn run_remote_attach(
     destination: &str,
     port: Option<u16>,
     session_id: u64,
     identity_paths: &[PathBuf],
+    protocol: &RemoteProtocolRequest,
 ) -> Result<()> {
     #[cfg(not(any(unix, windows)))]
     {
-        let _ = (destination, port, session_id, identity_paths);
+        let _ = (destination, port, session_id, identity_paths, protocol);
         anyhow::bail!("remote session attach is not supported on this platform");
     }
     #[cfg(any(unix, windows))]
@@ -105,8 +116,14 @@ pub fn run_remote_attach(
                 format!("remote session {session_id} was not found or is not shared")
             })?;
         let secret = remote_session_secret(&summary, identity_paths)?;
-        let result =
-            request_remote_attach(destination, port, session_id, reconnect_origin(), secret)?;
+        let result = request_remote_attach(
+            destination,
+            port,
+            session_id,
+            reconnect_origin(),
+            secret,
+            protocol,
+        )?;
         match result {
             ReconnectSessionResult::Reconnected => {
                 println!("Attached remote session {destination}:{session_id}.");
@@ -635,6 +652,8 @@ fn send_resume_disk_session_request(
         secret: secret.as_ref().map(|secret| secret.expose().to_owned()),
         ssh_target: None,
         ssh_port: None,
+        remote_protocol: None,
+        remote_keep_alive_ms: None,
         icon: None,
         pane_theme: None,
         pane_overlay: None,
@@ -690,6 +709,8 @@ fn send_reconnect_session_request(
         secret: secret.as_ref().map(|secret| secret.expose().to_owned()),
         ssh_target: None,
         ssh_port: None,
+        remote_protocol: None,
+        remote_keep_alive_ms: None,
         icon: None,
         pane_theme: None,
         pane_overlay: None,
@@ -731,6 +752,7 @@ fn request_remote_attach(
     session_id: u64,
     origin: Option<ReconnectOrigin>,
     secret: Option<SessionSecret>,
+    protocol: &RemoteProtocolRequest,
 ) -> Result<ReconnectSessionResult> {
     let directory = paths::session_catalog_dir();
     let entries = fs::read_dir(&directory)
@@ -758,7 +780,14 @@ fn request_remote_attach(
     }
     let mut last_error = None;
     for endpoint in endpoints {
-        match send_remote_attach_request(&endpoint, destination, port, session_id, secret.clone()) {
+        match send_remote_attach_request(
+            &endpoint,
+            destination,
+            port,
+            session_id,
+            secret.clone(),
+            protocol,
+        ) {
             Ok(result) => return Ok(result),
             Err(error) => last_error = Some(error),
         }
@@ -774,6 +803,7 @@ fn send_remote_attach_request(
     port: Option<u16>,
     session_id: u64,
     secret: Option<SessionSecret>,
+    protocol: &RemoteProtocolRequest,
 ) -> Result<ReconnectSessionResult> {
     let mut stream = ControlStream::connect(&endpoint.socket_path)?;
     stream.set_read_timeout(Some(REMOTE_CONTROL_CLIENT_TIMEOUT))?;
@@ -786,6 +816,8 @@ fn send_remote_attach_request(
         secret: secret.as_ref().map(|secret| secret.expose().to_owned()),
         ssh_target: Some(destination.to_owned()),
         ssh_port: port,
+        remote_protocol: protocol.protocol.clone(),
+        remote_keep_alive_ms: protocol.keep_alive_ms,
         icon: None,
         pane_theme: None,
         pane_overlay: None,
@@ -895,6 +927,13 @@ struct ControlRequest {
     ssh_target: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     ssh_port: Option<u16>,
+    /// What should carry the session's panes, and how long its link may go
+    /// without sending. Omitted unless the command line named them, so a
+    /// window uses what it is configured for.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    remote_protocol: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    remote_keep_alive_ms: Option<u64>,
     icon: Option<String>,
     pane_theme: Option<String>,
     pane_overlay: Option<String>,

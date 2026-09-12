@@ -155,6 +155,10 @@ struct MoshCommand {
     init_explicit: bool,
     target: Option<String>,
     remote_command: Vec<String>,
+    /// The executable OpenSSH is pointed at for `--experimental-remote-ip=proxy`.
+    /// `None` means this process, which is what the `zosh` command wants; an
+    /// embedder is some other program and has to name the bundled `zosh`.
+    proxy_program: Option<PathBuf>,
     original_arguments: Vec<std::ffi::OsString>,
     help: bool,
     version: bool,
@@ -185,6 +189,7 @@ impl Default for MoshCommand {
             init_explicit: false,
             target: None,
             remote_command: Vec::new(),
+            proxy_program: None,
             original_arguments: Vec::new(),
             help: false,
             version: false,
@@ -220,6 +225,123 @@ impl BootstrapOutput {
     }
 }
 
+/// What an embedder asks a host for: a Mosh endpoint in front of one command.
+///
+/// This is the launcher's bootstrap half without its command line. Everything
+/// it does not name is what `zosh` itself would do — the same SSH invocation,
+/// the same `zosh-server`-or-`mosh-server` probe, and the same address
+/// discovery, so an alias, a `ProxyJump` or an agent in `~/.ssh/config`
+/// behaves for a pane exactly as it does for the command.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PaneBootstrapRequest {
+    /// An OpenSSH destination, passed to `ssh` as one argument.
+    pub target: String,
+    /// An SSH port, when the destination's configuration does not supply one.
+    pub ssh_port: Option<u16>,
+    /// What the remote server runs instead of a login shell.
+    pub remote_command: Vec<String>,
+    /// The keep-alive interval in milliseconds, or `None` for Mosh's own
+    /// three-second heartbeat.
+    pub keep_alive: Option<u64>,
+    /// The `zosh` executable OpenSSH should use to discover the server's
+    /// address. An embedder is not `zosh`, so it has to say where that is;
+    /// without it the address discovery falls back to resolving the
+    /// destination locally, which an alias may not answer.
+    pub proxy_program: Option<PathBuf>,
+}
+
+/// A Mosh endpoint, ready for [`crate::PaneSession::connect`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PaneEndpoint {
+    pub host: String,
+    pub port: u16,
+    pub key: String,
+    /// Anything the remote side printed alongside the endpoint. `zosh` writes
+    /// these to its stderr; an embedder has somewhere else to put them.
+    pub diagnostics: Vec<String>,
+}
+
+/// What a host answered.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PaneBootstrapOutcome {
+    Endpoint(PaneEndpoint),
+    /// The host has no usable Mosh server. `zosh` falls back to plain SSH
+    /// here; an embedder is expected to fall back to whatever carried the
+    /// same content before, rather than to fail.
+    UnsupportedServer {
+        output: String,
+        status: Option<i32>,
+    },
+}
+
+/// Bootstraps a Mosh endpoint for one remote command.
+///
+/// Blocking: this starts SSH and waits for the remote server's `MOSH CONNECT`
+/// line, so it belongs on a background thread, never on a thread that draws.
+pub fn bootstrap_pane_endpoint(request: &PaneBootstrapRequest) -> Result<PaneBootstrapOutcome> {
+    let command = embedded_command(request)?;
+    // The pane's emulator is not a terminal that can be asked, and there is no
+    // terminal behind it that a colour probe would reach either.
+    let colors = EMBEDDED_COLOR_COUNT;
+    match run_ssh_bootstrap(&command, &request.target, colors, BootstrapStdin::None)? {
+        BootstrapResult::UnsupportedServer { output, status } => {
+            Ok(PaneBootstrapOutcome::UnsupportedServer { output, status })
+        }
+        BootstrapResult::Endpoint(endpoint) => {
+            let host = select_endpoint_host(&command, &request.target, endpoint.ip.as_deref())?;
+            Ok(PaneBootstrapOutcome::Endpoint(PaneEndpoint {
+                host,
+                port: endpoint.port,
+                key: endpoint.key,
+                diagnostics: endpoint.diagnostics,
+            }))
+        }
+    }
+}
+
+/// The Mosh command an embedder's request amounts to.
+///
+/// Separate from the bootstrap itself so that what is sent — the SSH options,
+/// the remote command, and how the server's address will be discovered — can
+/// be pinned without logging in to anything.
+fn embedded_command(request: &PaneBootstrapRequest) -> Result<MoshCommand> {
+    anyhow::ensure!(
+        !request.target.trim().is_empty(),
+        "a Mosh bootstrap needs an SSH destination"
+    );
+    anyhow::ensure!(
+        !request.remote_command.is_empty(),
+        "a Mosh bootstrap for an embedder needs a remote command to run"
+    );
+    if let Some(interval) = request.keep_alive {
+        crate::client::validate_keep_alive_interval(interval)?;
+    }
+    let mut command = MoshCommand {
+        keep_alive: request.keep_alive,
+        remote_command: request.remote_command.clone(),
+        proxy_program: request.proxy_program.clone(),
+        ..MoshCommand::default()
+    };
+    if let Some(port) = request.ssh_port {
+        anyhow::ensure!(port != 0, "SSH port must be between 1 and 65535");
+        command.ssh.extend(["-p".to_owned(), port.to_string()]);
+    }
+    // Without a proxy to learn the connected address from, ask the remote SSH
+    // server which address it saw instead of resolving the destination here:
+    // an embedder's alias may have no meaning in DNS.
+    if command.proxy_program.is_none() {
+        command.remote_ip = RemoteIpMode::Remote;
+    }
+    Ok(command)
+}
+
+/// What an embedded pane tells the remote server its terminal can do.
+///
+/// The standalone client asks the terminal it is running in. A pane has no
+/// such terminal to ask, and every emulator an embedder would be rendering
+/// into handles 256 colours.
+const EMBEDDED_COLOR_COUNT: u16 = 256;
+
 /// Run the full Mosh-compatible command line.
 pub(crate) fn run(arguments: impl IntoIterator<Item = std::ffi::OsString>) -> Result<()> {
     let mut command = parse_args(arguments)?;
@@ -244,7 +366,7 @@ pub(crate) fn run(arguments: impl IntoIterator<Item = std::ffi::OsString>) -> Re
     if command.local {
         return run_local(&command, target, colors);
     }
-    let bootstrap = run_ssh_bootstrap(&command, target, colors)?;
+    let bootstrap = run_ssh_bootstrap(&command, target, colors, BootstrapStdin::Terminal)?;
     let endpoint = match bootstrap {
         BootstrapResult::Endpoint(endpoint) => endpoint,
         BootstrapResult::UnsupportedServer { output, status } => {
@@ -445,14 +567,32 @@ fn connect_proxy(candidates: Vec<SocketAddr>) -> Result<(SocketAddr, TcpStream)>
     ))
 }
 
-fn run_ssh_bootstrap(command: &MoshCommand, target: &str, colors: u16) -> Result<BootstrapResult> {
+/// Where the bootstrap's SSH process gets its standard input.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BootstrapStdin {
+    /// Keep the controlling terminal attached while OpenSSH creates the
+    /// remote PTY, so its initial window size is the user's real size.
+    Terminal,
+    /// An embedder has no terminal to lend, and does not want one consumed on
+    /// its behalf. OpenSSH falls back to its default 80x24 PTY, which the
+    /// first resize replaces.
+    None,
+}
+
+fn run_ssh_bootstrap(
+    command: &MoshCommand,
+    target: &str,
+    colors: u16,
+    stdin: BootstrapStdin,
+) -> Result<BootstrapResult> {
     let (program, arguments) = ssh_bootstrap_command_with_colors(command, target, colors)?;
     let mut ssh = Command::new(&program);
-    // Keep the controlling terminal attached while OpenSSH creates the
-    // remote PTY so its initial window size is the user's real size. `-n`
-    // below still makes the bootstrap non-consuming; redirecting stdin here
-    // makes OpenSSH fall back to its default 80x24 PTY dimensions.
-    ssh.args(&arguments).stdin(Stdio::inherit());
+    // `-n` already makes the bootstrap non-consuming; this only decides whose
+    // terminal, if any, sizes the remote PTY.
+    ssh.args(&arguments).stdin(match stdin {
+        BootstrapStdin::Terminal => Stdio::inherit(),
+        BootstrapStdin::None => Stdio::null(),
+    });
     if command.remote_ip == RemoteIpMode::Proxy {
         ssh.env("SHELL", "/bin/sh");
     }
@@ -864,8 +1004,11 @@ fn server_invocation_for(command: &MoshCommand, server: &str, colors: u16) -> St
 }
 
 fn proxy_command(command: &MoshCommand) -> String {
-    let executable = env::current_exe()
-        .unwrap_or_else(|_| PathBuf::from(if cfg!(windows) { "zosh.exe" } else { "zosh" }));
+    let executable = command
+        .proxy_program
+        .clone()
+        .or_else(|| env::current_exe().ok())
+        .unwrap_or_else(|| PathBuf::from(if cfg!(windows) { "zosh.exe" } else { "zosh" }));
     format!(
         "ProxyCommand={} --fake-proxy --family={} -- %h %p",
         proxy_executable_quote(&executable.to_string_lossy()),

@@ -22,6 +22,10 @@
   "sessions": {
     "retention": "memory",
     "ring_bytes": 262144,
+    "remote": {
+      "protocol": "ssh",
+      "keep_alive_ms": null
+    },
     "persistence": {
       "recipients": [],
       "identity": null,

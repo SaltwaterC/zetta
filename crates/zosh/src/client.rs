@@ -13,7 +13,7 @@ use std::{
 
 use anyhow::{Context as _, Result};
 use mosh_rs::{
-    Base64Key, DisplayPreference, HostEvent, MoshSession, Screen, sender::KEEP_ALIVE_DEFAULT_MS,
+    Base64Key, DisplayPreference, HostEvent, MoshSession, sender::KEEP_ALIVE_DEFAULT_MS,
 };
 
 #[cfg(not(unix))]
@@ -25,13 +25,13 @@ use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifier
 use crate::{
     display::{self, DisplayScreen},
     escape::{EscapeAction, EscapeKey, EscapeState},
+    frame::{self, ClientSession, Frame},
     notification::Notifier,
     terminal,
 };
 
 const IDLE_WAIT_MS: u64 = 100;
 const EXIT_MESSAGE: &[u8] = b"\r\n[zosh is exiting.]\r\n";
-type ClientSession = MoshSession<DisplayScreen>;
 
 const MAX_TERMINAL_QUERY_SEQUENCE: usize = 4096;
 
@@ -42,7 +42,7 @@ enum ColorQueryKind {
 }
 
 #[derive(Default)]
-struct TerminalQueryProxy {
+pub(crate) struct TerminalQueryProxy {
     pending: VecDeque<ColorQueryKind>,
     state: TerminalQueryInputState,
     sequence: Vec<u8>,
@@ -58,19 +58,19 @@ enum TerminalQueryInputState {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-enum ProxiedInput {
+pub(crate) enum ProxiedInput {
     User(Vec<u8>),
     TerminalResponse(Vec<u8>),
 }
 
 impl TerminalQueryProxy {
-    fn register_query(&mut self, query: &[u8]) {
+    pub(crate) fn register_query(&mut self, query: &[u8]) {
         if let Some(kind) = terminal_color_query_kind(query) {
             self.pending.push_back(kind);
         }
     }
 
-    fn filter(&mut self, bytes: &[u8]) -> Vec<ProxiedInput> {
+    pub(crate) fn filter(&mut self, bytes: &[u8]) -> Vec<ProxiedInput> {
         let mut output = Vec::new();
         for &byte in bytes {
             self.step(byte, &mut output);
@@ -327,11 +327,18 @@ pub(crate) fn parse_keep_alive_interval(value: &str) -> Result<u64> {
     let interval = value
         .parse::<u64>()
         .with_context(|| format!("invalid keep-alive interval {value:?}"))?;
+    validate_keep_alive_interval(interval)?;
+    Ok(interval)
+}
+
+/// Rejects an interval outside the bounds, for a caller that already has a
+/// number rather than the text one was written as.
+pub(crate) fn validate_keep_alive_interval(interval: u64) -> Result<()> {
     anyhow::ensure!(
         (KEEP_ALIVE_MIN_MS..=KEEP_ALIVE_MAX_MS).contains(&interval),
         "keep-alive interval must be between {KEEP_ALIVE_MIN_MS} and {KEEP_ALIVE_MAX_MS} milliseconds"
     );
-    Ok(interval)
+    Ok(())
 }
 
 /// Run the endpoint client with the supplied argument vector.
@@ -652,45 +659,29 @@ fn session_loop(
         let events = session.pump_ready().context("pumping the Mosh session")?;
         forward_terminal_queries(&events, &mut query_proxy, &mut stdout)
             .context("forwarding a terminal query")?;
-        let server_size = (session.displayed().cols(), session.displayed().rows());
-        let resize_ready = pending_resize.is_some_and(|expected| expected == server_size);
-        let server_reported_resize = events_contain_resize(&events);
-        if resize_ready || (server_reported_resize && pending_resize.is_none()) {
-            let previous = session.displayed().clone();
-            let repaint = session.repaint();
-            let input_modes = session.displayed().input_modes_diff(&previous);
-            let scrollback_clear = if session.displayed().clears_scrollback_since(&previous) {
-                display::clear_scrollback_sequence()
-            } else {
-                &[]
-            };
-            display::repaint_after_resize(&mut stdout, &repaint, &input_modes, scrollback_clear)?;
-            if resize_ready {
-                pending_resize = None;
+        match frame::next_frame(session, &events, pending_resize) {
+            Frame::Repaint { resolves_pending } => {
+                frame::write_repaint(session, &mut stdout)?;
+                if resolves_pending {
+                    pending_resize = None;
+                }
             }
-        } else if pending_resize.is_none() {
-            paint(
+            Frame::Paint => paint(
                 &mut stdout,
                 session,
                 &mut notifier,
                 elapsed(started),
                 size.0,
-            )?;
-        } else {
+            )?,
             // Do not apply a frame for the old geometry to a terminal that
             // has already been resized. The server's next frame will carry
             // the new geometry; repaint it atomically when it arrives.
+            Frame::Skip => {}
         }
         if session.finished() {
             return Ok(());
         }
     }
-}
-
-fn events_contain_resize(events: &[HostEvent]) -> bool {
-    events
-        .iter()
-        .any(|event| matches!(event, HostEvent::Resize { .. }))
 }
 
 #[cfg(not(unix))]
@@ -793,7 +784,7 @@ fn apply_proxied_input(
     action
 }
 
-fn forward_terminal_queries<W: Write>(
+pub(crate) fn forward_terminal_queries<W: Write>(
     events: &[HostEvent],
     query_proxy: &mut TerminalQueryProxy,
     stdout: &mut W,

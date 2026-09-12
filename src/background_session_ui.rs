@@ -372,9 +372,12 @@ mod reconnect;
 mod restore;
 #[cfg(feature = "zmux")]
 pub(crate) mod shared_panes;
+#[cfg(feature = "zmux")]
+pub(crate) mod zosh_panes;
 
 #[cfg(feature = "zmux")]
 pub(crate) use multiplexer::{AttachOutcomeSummary, RemoteAttachOutcome, load_remote_attach};
+pub(crate) use reconnect::RemoteSessionRequest;
 
 #[cfg(not(feature = "zmux"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -391,6 +394,12 @@ pub(crate) enum AttachOutcomeSummary {
 #[cfg(not(feature = "zmux"))]
 impl Zetta {
     pub(crate) fn drop_shared_pane(&mut self, _: u64, _: &mut Context<Self>) {}
+
+    /// Without the multiplexer every pane is a pty this process opened, so no
+    /// pane is relayed and every one of them runs on this machine.
+    pub(crate) fn pane_is_relayed(&self, _: u64) -> bool {
+        false
+    }
 
     pub(super) fn hand_session_to_multiplexer(
         &mut self,

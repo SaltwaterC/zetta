@@ -120,6 +120,48 @@ pub struct SessionsConfig {
     pub retention: SessionRetention,
     pub ring_bytes: usize,
     pub persistence: SessionPersistenceConfig,
+    pub remote: RemoteSessionConfig,
+}
+
+/// What a remote session defaults to when the picker opens.
+///
+/// Only the panes are affected: finding, attaching and administering a remote
+/// session is OpenSSH either way.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RemoteSessionConfig {
+    /// `"ssh"` or `"zosh"`, as written in the file. It is kept as text rather
+    /// than as the transport itself so this type stays free of the parts of
+    /// the crate that open sessions.
+    pub protocol: RemoteSessionProtocol,
+    /// How long a Zosh link may go without sending before it holds itself
+    /// open, or `None` for Mosh's own three-second heartbeat.
+    pub keep_alive_ms: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RemoteSessionProtocol {
+    #[default]
+    Ssh,
+    Zosh,
+}
+
+impl RemoteSessionProtocol {
+    pub fn parse(value: &str) -> Result<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "ssh" => Ok(Self::Ssh),
+            "zosh" => Ok(Self::Zosh),
+            other => {
+                anyhow::bail!("sessions.remote.protocol must be \"ssh\" or \"zosh\", not {other:?}")
+            }
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Ssh => "ssh",
+            Self::Zosh => "zosh",
+        }
+    }
 }
 
 impl Default for SessionsConfig {
@@ -128,6 +170,7 @@ impl Default for SessionsConfig {
             retention: SessionRetention::default(),
             ring_bytes: DEFAULT_SESSION_RING_BYTES,
             persistence: SessionPersistenceConfig::default(),
+            remote: RemoteSessionConfig::default(),
         }
     }
 }
@@ -576,6 +619,17 @@ struct SessionsFile {
     retention: Setting<String>,
     ring_bytes: Setting<u64>,
     persistence: Setting<SessionPersistenceFile>,
+    remote: Setting<RemoteSessionFile>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct RemoteSessionFile {
+    protocol: Setting<String>,
+    /// `null` means Mosh's own heartbeat, which is why this is not simply a
+    /// number: leaving it out and asking for no keep-alive are the same thing,
+    /// and both have to be expressible.
+    keep_alive_ms: Setting<Option<u64>>,
 }
 
 #[derive(Default, Deserialize)]
@@ -861,9 +915,44 @@ impl SessionsFile {
         if let Some(persistence) = self.persistence.get() {
             persistence.apply(&mut sessions.persistence)?;
         }
+        if let Some(remote) = self.remote.get() {
+            remote.apply(&mut sessions.remote)?;
+        }
         Ok(())
     }
 }
+
+impl RemoteSessionFile {
+    fn apply(self, remote: &mut RemoteSessionConfig) -> Result<()> {
+        if let Some(protocol) = self.protocol.get() {
+            remote.protocol = RemoteSessionProtocol::parse(&protocol)?;
+        }
+        if let Some(keep_alive_ms) = self.keep_alive_ms.get() {
+            remote.keep_alive_ms = keep_alive_ms
+                .map(|interval| {
+                    anyhow::ensure!(
+                        (REMOTE_KEEP_ALIVE_MIN_MS..=REMOTE_KEEP_ALIVE_MAX_MS).contains(&interval),
+                        "sessions.remote.keep_alive_ms must be between \
+                         {REMOTE_KEEP_ALIVE_MIN_MS} and {REMOTE_KEEP_ALIVE_MAX_MS} milliseconds"
+                    );
+                    Ok(interval)
+                })
+                .transpose()?;
+        }
+        Ok(())
+    }
+}
+
+/// The bounds Mosh's own frame interval and heartbeat set on a keep-alive.
+///
+/// Restated here rather than taken from the Zosh crate because configuration
+/// is parsed in builds that have no bundled Zosh client, and a file written
+/// for a full build has to read the same way in one of those. The Zosh client
+/// enforces the same pair; `remote_pane_transport` is what joins them.
+pub const REMOTE_KEEP_ALIVE_MIN_MS: u64 = 20;
+pub const REMOTE_KEEP_ALIVE_MAX_MS: u64 = 3000;
+/// What asking for a keep-alive without naming an interval asks for.
+pub const REMOTE_KEEP_ALIVE_DEFAULT_MS: u64 = 500;
 
 impl SessionPersistenceFile {
     fn apply(self, persistence: &mut SessionPersistenceConfig) -> Result<()> {

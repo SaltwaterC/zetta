@@ -346,6 +346,14 @@ fn configuration_session_rows(
         configuration.session_retention.label().to_owned(),
         SettingsDropdown::SessionRetention,
     );
+    let remote_session_protocol = dropdown(
+        "settings-remote-session-protocol".to_owned(),
+        match configuration.remote_session_protocol {
+            crate::config::RemoteSessionProtocol::Ssh => "SSH".to_owned(),
+            crate::config::RemoteSessionProtocol::Zosh => "Zosh".to_owned(),
+        },
+        SettingsDropdown::RemoteSessionProtocol,
+    );
     // `mut` only where the auto-protect row below can be pushed.
     #[cfg_attr(not(feature = "session-persistence"), allow(unused_mut))]
     let mut rows = vec![
@@ -389,6 +397,26 @@ fn configuration_session_rows(
                 configuration.session_ring_bytes.clone(),
                 NumericSetting::SessionRingBytes,
                 ConfigTextField::SessionRingBytes,
+            ),
+        ),
+        setting_row(
+            "Remote session protocol",
+            "What carries a remote session's panes. Finding and attaching one is \
+             OpenSSH either way; Zosh gives each pane a Mosh link of its own, which \
+             survives roaming and suspend",
+            SettingsControl::Dropdown(SettingsDropdown::RemoteSessionProtocol),
+            remote_session_protocol,
+        ),
+        setting_row(
+            "Remote keep-alive",
+            "Milliseconds a Zosh link may go without sending before it holds itself \
+             open. Leave empty for Mosh's own three-second heartbeat",
+            SettingsControl::Numeric(NumericSetting::RemoteSessionKeepAlive),
+            numeric(
+                "settings-remote-session-keep-alive",
+                configuration.remote_session_keep_alive.clone(),
+                NumericSetting::RemoteSessionKeepAlive,
+                ConfigTextField::RemoteSessionKeepAlive,
             ),
         ),
         #[cfg(feature = "session-persistence")]

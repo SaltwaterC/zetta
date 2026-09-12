@@ -1050,6 +1050,8 @@ fn reconnect_requests_carry_a_session_target_and_optional_secret() {
         secret: Some("not-an-argument".to_owned()),
         ssh_target: None,
         ssh_port: None,
+        remote_protocol: None,
+        remote_keep_alive_ms: None,
         icon: None,
         pane_theme: None,
         pane_theme_revision: None,
@@ -1134,6 +1136,8 @@ fn remote_session_requests_validate_the_ssh_destination_and_session_target() {
     remote.ssh_target = Some("build-host".to_owned());
     remote.ssh_port = Some(2222);
     remote.secret = Some("session-secret".to_owned());
+    remote.remote_protocol = Some("zosh".to_owned());
+    remote.remote_keep_alive_ms = Some(500);
     assert_eq!(
         decode_control_request(&mut remote, "token"),
         Some(ControlRequestCommand::OpenRemoteSession {
@@ -1141,6 +1145,8 @@ fn remote_session_requests_validate_the_ssh_destination_and_session_target() {
             port: Some(2222),
             session_id: 42,
             secret: Some(SessionSecret::new("session-secret".to_owned())),
+            protocol: Some("zosh".to_owned()),
+            keep_alive_ms: Some(500),
         })
     );
     assert!(remote.secret.is_none());
@@ -1155,6 +1161,11 @@ fn remote_session_requests_validate_the_ssh_destination_and_session_target() {
             port: None,
             session_id: 42,
             secret: None,
+            // A request that names no protocol asks for whatever the window
+            // it reaches is configured for, which is what every client before
+            // this field did.
+            protocol: None,
+            keep_alive_ms: None,
         })
     );
 

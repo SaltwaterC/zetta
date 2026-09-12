@@ -62,9 +62,16 @@ and the bundled Rust `zosh-server`. Run either zosh USER@HOST or zetta mosh
 USER@HOST for interactive remote shells; zetta mosh is a transparent proxy to
 zosh. The launcher prefers `zosh-server` through SSH, falls back to the stock
 `mosh-server` when it is unavailable, and uses plain SSH only when neither
-remote server is clearly usable. Native
-background sessions and zmux remote transport remain SSH because they need
-framed session streams.
+remote server is clearly usable.
+
+A remote zmux session can carry its panes the same way. Its control traffic —
+listing, attaching, spawning panes, layout and exit reports — is framed JSON
+and stays on SSH, but each attached pane is a terminal, so choosing Zosh in the
+remote-session picker (or `zmux attach HOST ID --protocol zosh`) gives every
+pane a Mosh link of its own and the roaming and keep-alive that come with it.
+Zetta falls back to the SSH byte stream, and says so, when the remote host has
+no usable Mosh server. Native background sessions on this machine are local and
+need no transport at all.
 
 Pass `-k`/`--keep-alive` when a link's WiFi power management stalls an idle
 session: it holds the connection to a packet in each direction every 500 ms

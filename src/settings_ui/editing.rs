@@ -663,6 +663,24 @@ impl Zetta {
                         .to_string(),
                 );
             }
+            NumericSetting::RemoteSessionKeepAlive => {
+                // An empty field means Mosh's own heartbeat, so stepping up
+                // from it starts at the default the protocol suggests rather
+                // than at the smallest interval it allows.
+                let current = configuration
+                    .remote_session_keep_alive
+                    .text
+                    .trim()
+                    .parse::<u64>()
+                    .unwrap_or(config::REMOTE_KEEP_ALIVE_DEFAULT_MS);
+                let value = current
+                    .saturating_add_signed(i64::from(direction).saturating_mul(10))
+                    .clamp(
+                        config::REMOTE_KEEP_ALIVE_MIN_MS,
+                        config::REMOTE_KEEP_ALIVE_MAX_MS,
+                    );
+                configuration.remote_session_keep_alive = TextField::new(value.to_string());
+            }
             NumericSetting::SessionRingBytes => {
                 let current = configuration
                     .session_ring_bytes

@@ -959,6 +959,19 @@ impl Client {
         self.remote.as_ref().map(|remote| remote.target())
     }
 
+    /// Where the remote host keeps its own `zmux`.
+    ///
+    /// Costs one SSH round trip, so ask once per session rather than once per
+    /// pane. It is what lets a command started outside an SSH command's
+    /// environment — inside a Mosh server, for instance — run the same
+    /// multiplexer this client is already talking to.
+    pub fn resolve_remote_program(&self) -> Result<PathBuf> {
+        self.remote
+            .as_ref()
+            .context("this client is not connected to a remote multiplexer")?
+            .resolve_remote_program()
+    }
+
     /// Retains the session key needed by a remote runtime's later control
     /// requests. It is never persisted or included in an SSH argument.
     pub fn set_session_secret(&self, secret: Option<&SessionSecret>) {

@@ -53,6 +53,7 @@ pub(crate) enum SettingsDropdown {
     PaneControlsPosition,
     PaneControlsDefaultVisibility,
     SessionRetention,
+    RemoteSessionProtocol,
     ProfileTheme(usize),
     ProfileDarkTheme(usize),
     ProfileIcon(usize),
@@ -109,6 +110,7 @@ pub(crate) enum NumericSetting {
     FontSize,
     ScrollHistory,
     SessionRingBytes,
+    RemoteSessionKeepAlive,
     #[cfg(feature = "http-server")]
     HttpServerPort,
     #[cfg(feature = "tftp-server")]

@@ -18,6 +18,8 @@ pub mod paths;
 pub mod persistence;
 pub mod protocol;
 pub mod reconnect;
+#[cfg(unix)]
+pub mod relay;
 pub mod remote;
 pub mod retention;
 
@@ -107,6 +109,10 @@ fn usage(no_mux: bool) -> String {
                 "Open a shared remote session through OpenSSH",
             ),
             (
+                "relay-pane SESSION_ID PANE_ID",
+                "Copy one shared pane between this host's multiplexer and this\nterminal. Zetta runs it on the far side of a Mosh session so a\nremote pane's output travels over Mosh while its control traffic\nstays on SSH; it is not something to run by hand.",
+            ),
+            (
                 "resume SESSION",
                 "Restore an encrypted disk record with fresh shells; original processes are not resumed",
             ),
@@ -170,10 +176,24 @@ fn usage(no_mux: bool) -> String {
                 "Print one numeric session ID per line (with list)",
             ),
             (
+                "-S, --secret-stdin",
+                "Read a protected session's secret from the first line of standard\ninput (with relay-pane)",
+            ),
+            (
                 "-H, --ssh-target TARGET",
                 "OpenSSH destination for a remote list or administration command",
             ),
             ("-p, --port PORT", "SSH port for a remote command"),
+            (
+                "-P, --protocol NAME",
+                "What carries an attached remote session's panes: ssh (the\ndefault) or zosh. Finding and attaching the session is OpenSSH\neither way; zosh gives each pane a Mosh link of its own.",
+            ),
+            (
+                "-k, --keep-alive",
+                &format!(
+                    "Hold each Zosh pane's link to a packet every {KEEP_ALIVE_DEFAULT_MS} ms\n(=MS to change, {KEEP_ALIVE_MIN_MS}-{KEEP_ALIVE_MAX_MS}); needs --protocol zosh"
+                ),
+            ),
             (
                 "-r, --retention MODE",
                 "What to keep of a detached pane's output:\nnone, memory (default), or disk",
@@ -192,6 +212,41 @@ fn usage(no_mux: bool) -> String {
     format!(
         "Zetta session multiplexer\n\nUsage: zmux [COMMAND]\n       zetta mux [COMMAND]\n\nCommands:\n{commands}\n\nOptions:\n{options}"
     )
+}
+
+/// The two protocol names a remote session's panes can travel over.
+///
+/// Checked here so `zmux attach --protocol nonsense` fails at the command line
+/// rather than in whichever window picked the request up. What each name
+/// *means* is the window's business.
+const REMOTE_PROTOCOL_SSH: &str = "ssh";
+const REMOTE_PROTOCOL_ZOSH: &str = "zosh";
+
+/// The interval `-k` asks for when it is given no value, and the bounds Mosh's
+/// own frame interval and heartbeat set on one.
+const KEEP_ALIVE_DEFAULT_MS: u64 = 500;
+const KEEP_ALIVE_MIN_MS: u64 = 20;
+const KEEP_ALIVE_MAX_MS: u64 = 3000;
+
+fn parse_remote_protocol(value: &str) -> Result<String> {
+    let protocol = value.trim().to_ascii_lowercase();
+    anyhow::ensure!(
+        protocol == REMOTE_PROTOCOL_SSH || protocol == REMOTE_PROTOCOL_ZOSH,
+        "--protocol must be {REMOTE_PROTOCOL_SSH} or {REMOTE_PROTOCOL_ZOSH}"
+    );
+    Ok(protocol)
+}
+
+fn parse_keep_alive_interval(value: &str) -> Result<u64> {
+    let interval = value
+        .trim()
+        .parse::<u64>()
+        .map_err(|_| anyhow::anyhow!("--keep-alive must be a whole number of milliseconds"))?;
+    anyhow::ensure!(
+        (KEEP_ALIVE_MIN_MS..=KEEP_ALIVE_MAX_MS).contains(&interval),
+        "--keep-alive must be between {KEEP_ALIVE_MIN_MS} and {KEEP_ALIVE_MAX_MS} milliseconds"
+    );
+    Ok(interval)
 }
 
 fn no_mux_environment() -> bool {
@@ -422,6 +477,11 @@ pub fn run_with_defaults(arguments: &[OsString], defaults: ClientDefaults) -> Re
     let mut upgrade = false;
     let mut pty_host = false;
     let mut force = false;
+    let mut relay_pane: Option<u64> = None;
+    let mut relay_secret_stdin = false;
+    let mut remote_protocol: Option<String> = None;
+    let mut expect_remote_protocol = false;
+    let mut remote_keep_alive: Option<u64> = None;
 
     for argument in arguments {
         let argument = argument.to_string_lossy();
@@ -458,6 +518,15 @@ pub fn run_with_defaults(arguments: &[OsString], defaults: ClientDefaults) -> Re
             expect_remote_target = false;
             continue;
         }
+        if expect_remote_protocol {
+            anyhow::ensure!(
+                remote_protocol.is_none(),
+                "--protocol may only be specified once"
+            );
+            remote_protocol = Some(parse_remote_protocol(&argument)?);
+            expect_remote_protocol = false;
+            continue;
+        }
         if expect_port {
             anyhow::ensure!(port.is_none(), "--port may only be specified once");
             port = Some(
@@ -472,10 +541,40 @@ pub fn run_with_defaults(arguments: &[OsString], defaults: ClientDefaults) -> Re
         match argument.as_ref() {
             "--json" | "-j" => json = true,
             "--ids-only" | "-I" => ids_only = true,
+            "--secret-stdin" | "-S" => relay_secret_stdin = true,
             "--force" | "-f" => force = true,
             "--retention" | "-r" => expect_retention = true,
             "--identity" | "-i" => expect_identity = true,
             "--ssh-target" | "-H" => expect_remote_target = true,
+            "--protocol" | "-P" => expect_remote_protocol = true,
+            value if value.starts_with("--protocol=") => {
+                anyhow::ensure!(
+                    remote_protocol.is_none(),
+                    "--protocol may only be specified once"
+                );
+                remote_protocol = Some(parse_remote_protocol(
+                    value.split_once('=').map(|(_, value)| value).unwrap_or(""),
+                )?);
+            }
+            // The short form takes no value, so `-k HOST` still names a
+            // target; `-k=MS` and `--keep-alive=MS` are how an interval is
+            // given. This is the spelling `zosh -k` already uses.
+            "--keep-alive" | "-k" => {
+                anyhow::ensure!(
+                    remote_keep_alive.is_none(),
+                    "--keep-alive may only be specified once"
+                );
+                remote_keep_alive = Some(KEEP_ALIVE_DEFAULT_MS);
+            }
+            value if value.starts_with("--keep-alive=") || value.starts_with("-k=") => {
+                anyhow::ensure!(
+                    remote_keep_alive.is_none(),
+                    "--keep-alive may only be specified once"
+                );
+                remote_keep_alive = Some(parse_keep_alive_interval(
+                    value.split_once('=').map(|(_, value)| value).unwrap_or(""),
+                )?);
+            }
             "--port" | "-p" => expect_port = true,
             value if value.starts_with("--ssh-target=") => {
                 anyhow::ensure!(
@@ -631,10 +730,22 @@ pub fn run_with_defaults(arguments: &[OsString], defaults: ClientDefaults) -> Re
                 return Ok(());
             }
             value @ ("list" | "endpoint" | "attach" | "stop" | "reconnect" | "resume" | "share"
-            | "unshare" | "kill" | "forget")
+            | "unshare" | "kill" | "forget" | "relay-pane")
                 if command.is_none() =>
             {
                 command = Some(value.to_owned());
+            }
+            value if !value.starts_with('-') && command.as_deref() == Some("relay-pane") => {
+                if session.is_none() {
+                    session = Some(SessionArgument::parse(&argument)?);
+                } else {
+                    anyhow::ensure!(relay_pane.is_none(), "only one pane may be relayed");
+                    relay_pane = Some(
+                        value
+                            .parse::<u64>()
+                            .map_err(|_| anyhow::anyhow!("the pane ID must be a whole number"))?,
+                    );
+                }
             }
             value if !value.starts_with('-') && command.as_deref() == Some("attach") => {
                 if remote_target.is_none() {
@@ -660,6 +771,19 @@ pub fn run_with_defaults(arguments: &[OsString], defaults: ClientDefaults) -> Re
     anyhow::ensure!(!expect_retention, "--retention requires a mode");
     anyhow::ensure!(!expect_identity, "--identity requires a path");
     anyhow::ensure!(!expect_remote_target, "--ssh-target requires a destination");
+    anyhow::ensure!(!expect_remote_protocol, "--protocol requires ssh or zosh");
+    anyhow::ensure!(
+        remote_protocol.is_none() || command.as_deref() == Some("attach"),
+        "--protocol is only valid with attach"
+    );
+    anyhow::ensure!(
+        remote_keep_alive.is_none() || command.as_deref() == Some("attach"),
+        "--keep-alive is only valid with attach"
+    );
+    anyhow::ensure!(
+        remote_keep_alive.is_none() || remote_protocol.as_deref() == Some(REMOTE_PROTOCOL_ZOSH),
+        "--keep-alive holds a Zosh link open, so it needs --protocol zosh"
+    );
     anyhow::ensure!(!expect_port, "--port requires a value");
     anyhow::ensure!(
         identity_paths.len() == configured_identity_count
@@ -674,6 +798,10 @@ pub fn run_with_defaults(arguments: &[OsString], defaults: ClientDefaults) -> Re
     anyhow::ensure!(
         !ids_only || command.as_deref() == Some("list"),
         "--ids-only is only valid with list"
+    );
+    anyhow::ensure!(
+        !relay_secret_stdin || command.as_deref() == Some("relay-pane"),
+        "--secret-stdin is only valid with relay-pane"
     );
     anyhow::ensure!(
         remote_target.is_none()
@@ -769,7 +897,36 @@ pub fn run_with_defaults(arguments: &[OsString], defaults: ClientDefaults) -> Re
             let SessionArgument::Bare(session_id) = session else {
                 anyhow::bail!("remote session IDs must be numeric");
             };
-            reconnect::run_remote_attach(&target, port, session_id, &identity_paths)
+            reconnect::run_remote_attach(
+                &target,
+                port,
+                session_id,
+                &identity_paths,
+                &reconnect::RemoteProtocolRequest {
+                    protocol: remote_protocol,
+                    keep_alive_ms: remote_keep_alive,
+                },
+            )
+        }
+        Some("relay-pane") => {
+            let session = session.context("relay-pane requires a numeric session ID")?;
+            let SessionArgument::Bare(session_id) = session else {
+                anyhow::bail!("relayed session IDs must be numeric");
+            };
+            let pane_id = relay_pane.context("relay-pane requires a pane ID")?;
+            #[cfg(unix)]
+            {
+                relay::run(relay::RelayOptions {
+                    session_id,
+                    pane_id,
+                    secret_from_stdin: relay_secret_stdin,
+                })
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = (session_id, pane_id, relay_secret_stdin);
+                anyhow::bail!("relaying a pane needs a POSIX terminal, which this host is not")
+            }
         }
         Some("reconnect") => {
             let session = session.context_missing()?;

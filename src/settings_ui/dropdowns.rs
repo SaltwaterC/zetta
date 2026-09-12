@@ -80,6 +80,13 @@ impl Zetta {
                     options,
                 )
             }
+            SettingsDropdown::RemoteSessionProtocol => (
+                remote_protocol_label(editor.configuration.remote_session_protocol).to_owned(),
+                Arc::from([
+                    String::from(REMOTE_PROTOCOL_SSH),
+                    String::from(REMOTE_PROTOCOL_ZOSH),
+                ]),
+            ),
             SettingsDropdown::ProfileTheme(index) => (
                 editor
                     .configuration
@@ -440,6 +447,13 @@ fn apply_settings_dropdown_value(
                 _ => crate::config::SessionRetention::Memory,
             };
         }
+        SettingsDropdown::RemoteSessionProtocol => {
+            editor.configuration.remote_session_protocol = if value == REMOTE_PROTOCOL_ZOSH {
+                crate::config::RemoteSessionProtocol::Zosh
+            } else {
+                crate::config::RemoteSessionProtocol::Ssh
+            };
+        }
         SettingsDropdown::ProfileTheme(index) => {
             if let Some(profile) = editor.configuration.profiles.get_mut(index) {
                 profile.theme = (value != "Use application theme").then_some(value);
@@ -557,5 +571,17 @@ fn apply_settings_dropdown_value(
         | SettingsDropdown::ProjectProfileIcon(_) => {
             if !projects::set_project_dropdown(editor, dropdown, &value) {}
         }
+    }
+}
+
+/// How the two remote protocols are labelled. The names the configuration file
+/// uses are lowercase; these are what a reader of the dialog expects to see.
+const REMOTE_PROTOCOL_SSH: &str = "SSH";
+const REMOTE_PROTOCOL_ZOSH: &str = "Zosh";
+
+fn remote_protocol_label(protocol: crate::config::RemoteSessionProtocol) -> &'static str {
+    match protocol {
+        crate::config::RemoteSessionProtocol::Ssh => REMOTE_PROTOCOL_SSH,
+        crate::config::RemoteSessionProtocol::Zosh => REMOTE_PROTOCOL_ZOSH,
     }
 }

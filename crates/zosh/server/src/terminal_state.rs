@@ -6,7 +6,120 @@ const CLEAR_SCROLLBACK_MARKER_PREFIX: &[u8] = b"\x1b]777;zosh-clear-scrollback;"
 struct TerminalSnapshot {
     screen: vt100::Screen,
     scrollback_clear_count: u64,
+    /// The title that state showed, so an acknowledged one is not restated on
+    /// every later diff.
+    title: Option<String>,
     query_count: usize,
+}
+
+/// Picks the window title out of the program's byte stream.
+///
+/// `vt100` parses the sequence and hands it to a callback, keeping none of it
+/// in the screen; this reads the same bytes on the way past so the title can
+/// be carried in the state the client is sent. OSC 0 sets the icon name and
+/// the title together and OSC 2 sets the title alone — both are titles; OSC 1
+/// is an icon name and deliberately is not.
+#[derive(Default)]
+struct TitleScanner {
+    state: TitleScannerState,
+    command: u16,
+    pending: String,
+    title: Option<String>,
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum TitleScannerState {
+    #[default]
+    Ground,
+    Escape,
+    Command,
+    Text,
+    Skip,
+    Terminator,
+}
+
+/// The longest title accepted. A program that never terminates its sequence
+/// must not be able to make the server allocate without bound.
+const MAX_TITLE_BYTES: usize = 4096;
+
+impl TitleScanner {
+    fn title(&self) -> Option<&str> {
+        self.title.as_deref()
+    }
+
+    fn feed(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            self.step(byte);
+        }
+    }
+
+    fn step(&mut self, byte: u8) {
+        match self.state {
+            TitleScannerState::Ground => {
+                if byte == 0x1b {
+                    self.state = TitleScannerState::Escape;
+                }
+            }
+            TitleScannerState::Escape => {
+                if byte == b']' {
+                    self.state = TitleScannerState::Command;
+                    self.command = 0;
+                    self.pending.clear();
+                } else {
+                    // Any other escape sequence belongs to somebody else.
+                    self.state = TitleScannerState::Ground;
+                }
+            }
+            TitleScannerState::Command => match byte {
+                b'0'..=b'9' => {
+                    self.command = self.command.saturating_mul(10) + u16::from(byte - b'0');
+                }
+                b';' => {
+                    self.state = if matches!(self.command, 0 | 2) {
+                        TitleScannerState::Text
+                    } else {
+                        TitleScannerState::Skip
+                    };
+                }
+                // A malformed OSC: give up rather than swallow the rest of the
+                // stream looking for a terminator.
+                _ => self.state = TitleScannerState::Ground,
+            },
+            TitleScannerState::Text | TitleScannerState::Skip => match byte {
+                // BEL ends it, and so does ST; both are in use.
+                0x07 => self.finish(),
+                0x1b => self.state = TitleScannerState::Terminator,
+                0x18 | 0x1a => self.state = TitleScannerState::Ground,
+                _ if self.state == TitleScannerState::Text => {
+                    if byte < 0x20 || self.pending.len() >= MAX_TITLE_BYTES {
+                        // A title is text, and a bounded amount of it.
+                        self.state = TitleScannerState::Ground;
+                    } else {
+                        self.pending.push(char::from(byte));
+                    }
+                }
+                _ => {}
+            },
+            TitleScannerState::Terminator => {
+                if byte == b'\\' {
+                    self.finish();
+                } else if byte == 0x1b {
+                    // Another escape: still waiting for the terminator.
+                } else {
+                    self.state = TitleScannerState::Text;
+                    self.step(byte);
+                }
+            }
+        }
+    }
+
+    fn finish(&mut self) {
+        if self.state == TitleScannerState::Text || self.state == TitleScannerState::Terminator {
+            self.title = Some(std::mem::take(&mut self.pending));
+        }
+        self.pending.clear();
+        self.state = TitleScannerState::Ground;
+    }
 }
 
 #[derive(Clone, Copy, Default)]
@@ -202,6 +315,12 @@ pub struct TerminalState {
     scrollback_detector: ScrollbackClearDetector,
     scrollback_clear_count: u64,
     base_scrollback_clear_count: u64,
+    /// The window title the program has asked for, and the one the peer's
+    /// acknowledged state already shows. `vt100` hands a title to a callback
+    /// and models none of it in the screen, so `state_diff` cannot carry it —
+    /// see [`TerminalState::diff_from_ack`] for why that matters.
+    title_scanner: TitleScanner,
+    base_title: Option<String>,
     snapshots: BTreeMap<u64, TerminalSnapshot>,
     max_snapshots: usize,
     pending_queries: Vec<TerminalQuery>,
@@ -228,6 +347,8 @@ impl TerminalState {
             scrollback_detector: ScrollbackClearDetector::default(),
             scrollback_clear_count: 0,
             base_scrollback_clear_count: 0,
+            title_scanner: TitleScanner::default(),
+            base_title: None,
             snapshots: BTreeMap::new(),
             max_snapshots: 64,
             pending_queries: Vec::new(),
@@ -239,6 +360,7 @@ impl TerminalState {
         self.scrollback_clear_count = self
             .scrollback_clear_count
             .wrapping_add(self.scrollback_detector.feed(bytes));
+        self.title_scanner.feed(bytes);
         self.parser.process(bytes);
     }
 
@@ -289,6 +411,18 @@ impl TerminalState {
             marked.append(&mut diff);
             diff = marked;
         }
+        // The title is part of a terminal's state and none of its contents, so
+        // it has to be restated here or it never crosses at all: `vt100` gives
+        // it to a callback and `state_diff` knows nothing about it. It is not
+        // cosmetic — Zetta reports a pane's working directory as a window
+        // title, so a session whose titles are dropped is one whose panes
+        // never learn where they are.
+        let title = self.title_scanner.title();
+        if title.is_some() && title != self.base_title.as_deref() {
+            let mut titled = title_escape(title.unwrap_or_default());
+            titled.append(&mut diff);
+            diff = titled;
+        }
         diff
     }
 
@@ -303,6 +437,7 @@ impl TerminalState {
             TerminalSnapshot {
                 screen: self.parser.screen().clone(),
                 scrollback_clear_count: self.scrollback_clear_count,
+                title: self.title_scanner.title().map(str::to_owned),
                 query_count: self.pending_queries.len(),
             },
         );
@@ -330,6 +465,7 @@ impl TerminalState {
         if let Some((_, snapshot)) = self.snapshots.range(..=ack_num).next_back() {
             self.base_screen = snapshot.screen.clone();
             self.base_scrollback_clear_count = snapshot.scrollback_clear_count;
+            self.base_title = snapshot.title.clone();
         }
         if acknowledged_query_count > 0 {
             let query_count = acknowledged_query_count.min(self.pending_queries.len());
@@ -348,6 +484,17 @@ impl TerminalState {
     pub fn scrollback_clear_count(&self) -> u64 {
         self.scrollback_clear_count
     }
+}
+
+/// `ESC ] 0 ; <title> BEL`, the spelling stock Mosh sends a title with: OSC 0
+/// sets the icon name and the title together, and BEL is the terminator with
+/// the widest support.
+fn title_escape(title: &str) -> Vec<u8> {
+    let mut escape = Vec::with_capacity(title.len() + 5);
+    escape.extend_from_slice(b"\x1b]0;");
+    escape.extend_from_slice(title.as_bytes());
+    escape.push(0x07);
+    escape
 }
 
 fn scrollback_clear_marker(generation: u64) -> Vec<u8> {
@@ -712,6 +859,72 @@ mod tests {
         );
         terminal.acknowledge(2);
         assert!(terminal.queries_from_ack().is_empty());
+    }
+
+    /// A title is terminal state that `vt100::Screen::state_diff` knows
+    /// nothing about, so the server has to restate it or it never crosses.
+    /// Zetta reports a pane's working directory this way, which is what makes
+    /// this more than cosmetic.
+    #[test]
+    fn a_window_title_is_carried_in_the_state_the_client_is_sent() {
+        let mut state = TerminalState::new(24, 80);
+        state.process(b"\x1b]2;zetta-cwd:/tmp/project\x1b\\");
+
+        let diff = state.diff_from_ack();
+        let text = String::from_utf8_lossy(&diff);
+        assert!(
+            text.contains("\u{1b}]0;zetta-cwd:/tmp/project\u{7}"),
+            "the title has to be restated in the diff: {text:?}"
+        );
+        // And in front of the contents, so a client that is still painting the
+        // screen it belongs to has it by the time the frame is shown.
+        assert!(text.starts_with("\u{1b}]0;"), "{text:?}");
+    }
+
+    /// Cumulative diffs are sent until one is acknowledged, so an unchanged
+    /// title must not be restated forever — and a changed one must be.
+    #[test]
+    fn an_acknowledged_title_is_not_restated_and_a_new_one_is() {
+        let mut state = TerminalState::new(24, 80);
+        state.process(b"\x1b]2;first\x07");
+        state.snapshot_for_state(1);
+        state.acknowledge(1);
+        assert!(
+            !String::from_utf8_lossy(&state.diff_from_ack()).contains("\u{1b}]0;"),
+            "a title the peer already shows is not state it is missing"
+        );
+
+        state.process(b"\x1b]2;second\x07");
+        assert!(
+            String::from_utf8_lossy(&state.diff_from_ack()).contains("\u{1b}]0;second\u{7}"),
+            "a title that changed since the acknowledged state has to be sent"
+        );
+    }
+
+    /// OSC 1 is an icon name rather than a window title, and a sequence that
+    /// never terminates must not be able to make the server hold an unbounded
+    /// string.
+    #[test]
+    fn the_title_scanner_reads_titles_and_only_titles() {
+        let mut scanner = TitleScanner::default();
+        scanner.feed(b"\x1b]1;icon-name\x07");
+        assert_eq!(scanner.title(), None);
+
+        scanner.feed(b"\x1b]0;icon and title\x07");
+        assert_eq!(scanner.title(), Some("icon and title"));
+
+        scanner.feed(b"\x1b]2;title alone\x1b\\");
+        assert_eq!(scanner.title(), Some("title alone"));
+
+        let mut unbounded = TitleScanner::default();
+        unbounded.feed(b"\x1b]2;");
+        unbounded.feed(&vec![b'x'; MAX_TITLE_BYTES * 2]);
+        unbounded.feed(b"\x07");
+        assert_eq!(
+            unbounded.title(),
+            None,
+            "an unbounded title is abandoned rather than buffered"
+        );
     }
 
     #[test]

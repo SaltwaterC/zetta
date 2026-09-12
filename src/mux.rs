@@ -76,6 +76,11 @@ fn mux_recovery_generation_matches(
 pub(crate) struct MuxRuntime {
     client: Arc<Client>,
     remote: bool,
+    /// What carries this session's panes. Always SSH for a local runtime,
+    /// which has nothing between its panes and their ptys; for a remote one it
+    /// is what the window was asked to open the session with, and every pane
+    /// added later has to travel the same way as the ones it started with.
+    pane_transport: crate::remote_pane_transport::RemotePaneTransport,
     retention_state: Arc<Mutex<MuxRetentionState>>,
     reporters: Arc<ExitReporters>,
     revoke_reporters: Arc<PaneSignals>,
@@ -116,6 +121,7 @@ impl MuxRuntime {
         Ok(Self {
             client,
             remote: false,
+            pane_transport: crate::remote_pane_transport::RemotePaneTransport::Ssh,
             retention_state: Arc::new(Mutex::new(MuxRetentionState::exact(retention))),
             reporters: subscription.exits,
             revoke_reporters: subscription.revokes,
@@ -145,6 +151,7 @@ impl MuxRuntime {
         Ok(Self {
             client,
             remote: false,
+            pane_transport: crate::remote_pane_transport::RemotePaneTransport::Ssh,
             retention_state: Arc::new(Mutex::new(MuxRetentionState {
                 requested: retention,
                 effective: effective_retention,
@@ -169,6 +176,7 @@ impl MuxRuntime {
         Ok(Self {
             client,
             remote: false,
+            pane_transport: crate::remote_pane_transport::RemotePaneTransport::Ssh,
             retention_state: Arc::new(Mutex::new(MuxRetentionState::exact(Retention::Disk))),
             reporters: subscription.exits,
             revoke_reporters: subscription.revokes,
@@ -189,7 +197,10 @@ impl MuxRuntime {
     /// Remote sessions are live-only in Zetta: the remote daemon owns their
     /// retention policy, while this runtime only keeps the forwarded client
     /// and its shared event subscription alive for the tabs using it.
-    pub(crate) fn connect_remote(target: zmux::remote::RemoteTarget) -> Result<Self> {
+    pub(crate) fn connect_remote(
+        target: zmux::remote::RemoteTarget,
+        pane_transport: crate::remote_pane_transport::RemotePaneTransport,
+    ) -> Result<Self> {
         let client = Arc::new(
             Client::connect_remote(target).context("connecting to the remote multiplexer")?,
         );
@@ -199,6 +210,7 @@ impl MuxRuntime {
         Ok(Self {
             client,
             remote: true,
+            pane_transport,
             retention_state: Arc::new(Mutex::new(MuxRetentionState::exact(Retention::Memory {
                 bytes: 0,
             }))),
@@ -211,6 +223,11 @@ impl MuxRuntime {
 
     pub(crate) fn is_remote(&self) -> bool {
         self.remote
+    }
+
+    /// What carries this session's panes.
+    pub(crate) fn pane_transport(&self) -> crate::remote_pane_transport::RemotePaneTransport {
+        self.pane_transport
     }
 
     /// The SSH destination this runtime's daemon is reached through, or `None`
@@ -1068,7 +1085,7 @@ impl crate::Zetta {
             .find(|tab| tab.id == tab_id)
             .is_some_and(|tab| tab.shared)
             || self.has_shared_tab_binding(tab_id)
-            || self.shared_panes.contains_key(&pane_id);
+            || self.pane_is_relayed(pane_id);
         self.mux_panes.forget_pane(pane_id);
         let Some(runtime) = self
             .mux_panes

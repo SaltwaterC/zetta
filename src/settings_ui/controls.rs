@@ -144,6 +144,8 @@ impl Zetta {
                     // these fields scrolled it out of view.
                     SettingsControl::Dropdown(SettingsDropdown::SessionRetention),
                     SettingsControl::Numeric(NumericSetting::SessionRingBytes),
+                    SettingsControl::Dropdown(SettingsDropdown::RemoteSessionProtocol),
+                    SettingsControl::Numeric(NumericSetting::RemoteSessionKeepAlive),
                     #[cfg(feature = "session-persistence")]
                     SettingsControl::Input(SettingsInput::Configuration(
                         ConfigTextField::SessionPersistenceRecipients,

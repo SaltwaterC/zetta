@@ -417,6 +417,8 @@ mod pane_render;
 mod pane_theme_picker;
 mod pane_view_state;
 #[cfg(feature = "zmux")]
+mod remote_pane_transport;
+#[cfg(feature = "zmux")]
 mod remote_session_ui;
 #[cfg(not(feature = "zmux"))]
 #[path = "remote_session_ui_stub.rs"]

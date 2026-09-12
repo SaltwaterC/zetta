@@ -35,6 +35,30 @@ impl Drop for ReconnectCompletion {
     }
 }
 
+/// What a `zmux attach` asked a window for.
+///
+/// A bundle rather than six parameters, because they travel together from the
+/// control socket all the way to the attach, and because the protocol fields
+/// are meaningless apart from the target they apply to.
+#[cfg_attr(
+    not(feature = "zmux"),
+    allow(
+        dead_code,
+        reason = "a build without the multiplexer refuses the request whole, \
+                  without reading what it asked for"
+    )
+)]
+pub(crate) struct RemoteSessionRequest {
+    pub(crate) target: String,
+    pub(crate) port: Option<u16>,
+    pub(crate) session_id: u64,
+    pub(crate) secret: Option<SessionSecret>,
+    /// The protocol name as the command line wrote it, or `None` to use what
+    /// this window is configured for.
+    pub(crate) protocol: Option<String>,
+    pub(crate) keep_alive_ms: Option<u64>,
+}
+
 impl Zetta {
     pub(crate) fn reconnect_background_session(
         &mut self,
@@ -594,28 +618,52 @@ impl Zetta {
         .detach();
     }
 
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "the CLI request's five fields plus the GPUI window and context"
-    )]
     #[cfg(feature = "zmux")]
     pub(crate) fn open_remote_session_from_cli(
         &mut self,
-        target: String,
-        port: Option<u16>,
-        session_id: u64,
-        secret: Option<SessionSecret>,
+        request: RemoteSessionRequest,
         completion: std::sync::mpsc::Sender<ReconnectSessionResult>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let RemoteSessionRequest {
+            target,
+            port,
+            session_id,
+            secret,
+            protocol,
+            keep_alive_ms,
+        } = request;
         let target = zmux::remote::RemoteTarget::new(target).with_port(port);
+        // A protocol the command line named beats the configured default; a
+        // command that named none asks for the default itself, rather than for
+        // whatever this window's picker was last left on — a `zmux attach`
+        // reads the same on any window.
+        let transport = match protocol {
+            Some(protocol) => {
+                match crate::remote_pane_transport::RemotePaneTransport::parse(
+                    &protocol,
+                    keep_alive_ms,
+                ) {
+                    Ok(transport) => transport,
+                    Err(error) => {
+                        self.show_notice(format!("{error:#}"), cx);
+                        let _ = completion.send(ReconnectSessionResult::Rejected);
+                        return;
+                    }
+                }
+            }
+            None => crate::remote_pane_transport::RemotePaneTransport::from_config(
+                &self.launch_config.sessions.remote,
+            ),
+        };
+        self.remote_session_transport = transport;
         let operation_generation = self.next_remote_session_operation_generation();
         let mut completion = ReconnectCompletion::new(completion);
         cx.spawn_in(window, async move |this, cx| {
             let result = cx
                 .background_spawn(async move {
-                    load_remote_attach(target, session_id, secret)
+                    load_remote_attach(target, session_id, secret, transport)
                 })
                 .await;
             let result = this
@@ -667,21 +715,14 @@ impl Zetta {
     }
 
     #[cfg(not(feature = "zmux"))]
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "the CLI request's five fields plus the GPUI window and context"
-    )]
     pub(crate) fn open_remote_session_from_cli(
         &mut self,
-        target: String,
-        port: Option<u16>,
-        session_id: u64,
-        secret: Option<SessionSecret>,
+        request: RemoteSessionRequest,
         completion: std::sync::mpsc::Sender<ReconnectSessionResult>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let _ = (target, port, session_id, secret, window, cx);
+        let _ = (request, window, cx);
         let _ = completion.send(ReconnectSessionResult::Rejected);
     }
 

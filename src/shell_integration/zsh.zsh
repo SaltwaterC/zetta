@@ -1037,7 +1037,7 @@ _zetta() {
                 _zetta_options --identity --help
             elif [[ ${words[3]} == attach ]]; then
                 if [[ $words[CURRENT] == -* ]]; then
-                    _zetta_options --ssh-target --port --identity --help
+                    _zetta_options --ssh-target --port --protocol --keep-alive --identity --help
                 else
                     _zmux_attach_arguments
                 fi

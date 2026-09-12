@@ -363,11 +363,19 @@ impl Zetta {
         let inherited_wsl_directory = active_pane
             .filter(|_| inherit_working_directory)
             .and_then(|pane| pane.wsl_working_directory(cx));
+        // A pane the multiplexer relays runs on the machine the multiplexer is
+        // on, which may not be this one, so this window's launch directory is
+        // not a directory the split can start in. Sending nothing is what lets
+        // the daemon inherit from the pane being split: it is that process's
+        // parent, and this window is not.
+        let launch_fallback = (!self.pane_is_relayed(active_pane_id))
+            .then(|| self.working_directory.clone())
+            .flatten();
         let (working_directory, wsl_directory) = launch_working_directory(
             &profile,
             inherited_working_directory,
             inherited_wsl_directory,
-            self.working_directory.clone(),
+            launch_fallback,
             working_directory_configured,
         );
         let terminals_resized_by_split = matches!(axis, SplitAxis::Vertical)

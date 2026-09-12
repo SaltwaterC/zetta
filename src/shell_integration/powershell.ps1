@@ -634,7 +634,7 @@ $zettaCompletions = {
                 }
                 elseif ($noMux -and $words[2] -notin 'list', 'reconnect', 'attach') { @() }
                 elseif ($words[2] -eq 'stop') { '--force', '--help' }
-                elseif ($words[2] -eq 'attach') { '--ssh-target', '--port', '--identity', '--help' }
+                elseif ($words[2] -eq 'attach') { '--ssh-target', '--port', '--protocol', '--keep-alive', '--identity', '--help' }
                 elseif ($words[2] -in 'resume', 'reconnect') { '--identity', '--help' }
                 else { '--json', '--ids-only', '--ssh-target', '--port', '--help' }
             }

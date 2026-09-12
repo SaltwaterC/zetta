@@ -1146,7 +1146,7 @@ _zetta_complete() {
                 _zetta_complete_mux_session_ids
             elif [[ ${COMP_WORDS[2]} == attach ]]; then
                 if [[ $current == -* ]]; then
-                    _zetta_compgen '--ssh-target --port --identity --help'
+                    _zetta_compgen '--ssh-target --port --protocol --keep-alive --identity --help'
                 else
                     _zetta_complete_mux_attach
                 fi

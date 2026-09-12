@@ -252,6 +252,7 @@ impl Zetta {
         cx: &mut Context<Self>,
     ) {
         let generation = self.session_authentication_generation;
+        let transport = self.remote_session_transport;
         let operation_generation = self.next_remote_session_operation_generation();
         if let Some(prompt) = self.session_authentication.as_mut() {
             prompt.working = true;
@@ -263,7 +264,7 @@ impl Zetta {
             let result = cx
                 .background_spawn(async move {
                     let secret = auto_protect.open(&envelope, passphrase)?;
-                    load_remote_attach(target, session_id, Some(secret))
+                    load_remote_attach(target, session_id, Some(secret), transport)
                 })
                 .await;
             this.update_in(cx, |this, window, cx| {
@@ -849,12 +850,13 @@ impl Zetta {
                     return true;
                 };
                 let generation = self.session_authentication_generation;
+                let transport = self.remote_session_transport;
                 let operation_generation = self.next_remote_session_operation_generation();
                 let secret = SessionSecret::from_zeroizing(secret.clone());
                 cx.spawn_in(window, async move |this, cx| {
                     let result = cx
                         .background_spawn(async move {
-                            load_remote_attach(target, session_id, Some(secret))
+                            load_remote_attach(target, session_id, Some(secret), transport)
                         })
                         .await;
                     this.update_in(cx, |this, window, cx| {

@@ -7,6 +7,8 @@
 
 use super::*;
 use crate::background_session_ui::{RemoteAttachOutcome, load_remote_attach};
+use crate::config::REMOTE_KEEP_ALIVE_DEFAULT_MS;
+use crate::remote_pane_transport::{RemotePaneTransport, parse_keep_alive_interval};
 
 const REMOTE_SESSION_SUGGESTION_VIEWPORT_ROWS: usize = 6;
 const REMOTE_SESSION_SUGGESTION_VIEWPORT_HEIGHT: gpui::Rems =
@@ -16,6 +18,8 @@ const REMOTE_SESSION_SUGGESTION_VIEWPORT_HEIGHT: gpui::Rems =
 pub(crate) enum RemoteSessionField {
     Target,
     Port,
+    Protocol,
+    KeepAlive,
     List,
 }
 
@@ -42,6 +46,12 @@ enum RemoteSessionEnterAction {
 pub(crate) struct RemoteSessionPicker {
     pub(crate) target: TextField,
     pub(crate) port: TextField,
+    /// What carries the session's panes. Control traffic is SSH either way,
+    /// so this is only ever about the panes themselves.
+    pub(crate) transport: RemotePaneTransport,
+    /// The keep-alive interval, as typed. Empty means Mosh's own heartbeat;
+    /// what it parses to is only asked for when Zosh is the protocol.
+    pub(crate) keep_alive: TextField,
     pub(crate) field: RemoteSessionField,
     pub(crate) sessions: Vec<zmux::protocol::BackgroundSessionSummary>,
     pub(crate) selected: usize,
@@ -61,6 +71,8 @@ impl Default for RemoteSessionPicker {
         Self {
             target: TextField::default(),
             port: TextField::default(),
+            transport: RemotePaneTransport::default(),
+            keep_alive: TextField::default(),
             field: RemoteSessionField::Target,
             sessions: Vec::new(),
             selected: 0,
@@ -90,6 +102,69 @@ impl RemoteSessionPicker {
         self.selected = 0;
         self.loading = false;
         self.error = None;
+    }
+
+    /// The fields in tab order.
+    ///
+    /// Keep-alive is only reachable while Zosh is the protocol: it holds a
+    /// Mosh link open, and an SSH session has no link of that kind to hold.
+    fn field_order(&self) -> &'static [RemoteSessionField] {
+        const WITH_KEEP_ALIVE: &[RemoteSessionField] = &[
+            RemoteSessionField::Target,
+            RemoteSessionField::Port,
+            RemoteSessionField::Protocol,
+            RemoteSessionField::KeepAlive,
+            RemoteSessionField::List,
+        ];
+        const WITHOUT_KEEP_ALIVE: &[RemoteSessionField] = &[
+            RemoteSessionField::Target,
+            RemoteSessionField::Port,
+            RemoteSessionField::Protocol,
+            RemoteSessionField::List,
+        ];
+        if self.transport.is_zosh() {
+            WITH_KEEP_ALIVE
+        } else {
+            WITHOUT_KEEP_ALIVE
+        }
+    }
+
+    fn cycle_field(&mut self, reverse: bool) {
+        let order = self.field_order();
+        let current = order
+            .iter()
+            .position(|field| *field == self.field)
+            .unwrap_or(0);
+        let next = if reverse {
+            (current + order.len() - 1) % order.len()
+        } else {
+            (current + 1) % order.len()
+        };
+        self.field = order[next];
+    }
+
+    /// Switches between carrying the panes over SSH and over Zosh.
+    ///
+    /// Changing the protocol invalidates nothing that was loaded: the session
+    /// list comes from the control connection, which is SSH either way.
+    fn toggle_transport(&mut self) {
+        self.transport = if self.transport.is_zosh() {
+            RemotePaneTransport::Ssh
+        } else {
+            // Choosing Zosh with nothing in the field means the same thing
+            // `-k` does on the command line: hold the link open at the default
+            // interval. Emptying the field afterwards is how to ask for Mosh's
+            // own heartbeat instead.
+            if self.keep_alive.text.trim().is_empty() {
+                self.keep_alive = TextField::new(REMOTE_KEEP_ALIVE_DEFAULT_MS.to_string());
+            }
+            RemotePaneTransport::Zosh {
+                keep_alive_ms: None,
+            }
+        };
+        if !self.transport.is_zosh() && self.field == RemoteSessionField::KeepAlive {
+            self.field = RemoteSessionField::Protocol;
+        }
     }
 
     fn reset_suggestion_navigation(&mut self) {
@@ -181,9 +256,17 @@ impl Zetta {
         {
             self.serial_console = None;
         }
+        let remote = self.launch_config.sessions.remote.clone();
         let picker = RemoteSessionPicker {
             suggestions: crate::multi_command::ssh_config_host_suggestions(),
             generation: operation_generation,
+            transport: RemotePaneTransport::from_config(&remote),
+            keep_alive: TextField::new(
+                remote
+                    .keep_alive_ms
+                    .map(|interval| interval.to_string())
+                    .unwrap_or_default(),
+            ),
             ..Default::default()
         };
         self.remote_session_picker = Some(picker);
@@ -230,6 +313,25 @@ impl Zetta {
         let target = zmux::remote::RemoteTarget::new(destination).with_port(port);
         target.validate()?;
         Ok(target)
+    }
+
+    /// What the picker's protocol and keep-alive fields amount to.
+    ///
+    /// The interval is validated here rather than as it is typed: a partially
+    /// typed number is not an error yet, and the picker has one error line.
+    fn remote_transport_from_picker(
+        picker: &RemoteSessionPicker,
+    ) -> anyhow::Result<RemotePaneTransport> {
+        if !picker.transport.is_zosh() {
+            return Ok(RemotePaneTransport::Ssh);
+        }
+        let keep_alive = picker.keep_alive.text.trim();
+        let keep_alive_ms = if keep_alive.is_empty() {
+            None
+        } else {
+            Some(parse_keep_alive_interval(keep_alive)?)
+        };
+        Ok(RemotePaneTransport::Zosh { keep_alive_ms })
     }
 
     pub(crate) fn load_remote_sessions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -323,8 +425,13 @@ impl Zetta {
         let Some(summary) = picker.sessions.get(index).cloned() else {
             return;
         };
-        let target = match Self::remote_target_from_picker(picker) {
-            Ok(target) => target,
+        let target = match Self::remote_target_from_picker(picker)
+            .and_then(|target| Ok((target, Self::remote_transport_from_picker(picker)?)))
+        {
+            Ok((target, transport)) => {
+                self.remote_session_transport = transport;
+                target
+            }
             Err(error) => {
                 if let Some(picker) = self.remote_session_picker.as_mut() {
                     picker.error = Some(format!("{error:#}"));
@@ -334,6 +441,7 @@ impl Zetta {
                 return;
             }
         };
+        let transport = self.remote_session_transport;
         let operation_generation = self.next_remote_session_operation_generation();
         let picker = self
             .remote_session_picker
@@ -345,9 +453,9 @@ impl Zetta {
         let background_target = target.clone();
         let task = cx.spawn_in(window, async move |this, cx| {
             let result = cx
-                .background_spawn(
-                    async move { load_remote_attach(background_target, summary.id, None) },
-                )
+                .background_spawn(async move {
+                    load_remote_attach(background_target, summary.id, None, transport)
+                })
                 .await;
             this.update_in(cx, |this, window, cx| {
                 this.apply_remote_attach_result(
@@ -491,15 +599,12 @@ impl Zetta {
         };
         match (event.keystroke.key.as_str(), picker.field) {
             ("tab", _) => {
-                picker.field = match (picker.field, event.keystroke.modifiers.shift) {
-                    (RemoteSessionField::Target, false) => RemoteSessionField::Port,
-                    (RemoteSessionField::Port, false) => RemoteSessionField::List,
-                    (RemoteSessionField::List, false) => RemoteSessionField::Target,
-                    (RemoteSessionField::Target, true) => RemoteSessionField::List,
-                    (RemoteSessionField::Port, true) => RemoteSessionField::Target,
-                    (RemoteSessionField::List, true) => RemoteSessionField::Port,
-                };
+                picker.cycle_field(event.keystroke.modifiers.shift);
                 picker.reset_suggestion_navigation();
+                cx.notify();
+            }
+            ("left" | "right" | "space", RemoteSessionField::Protocol) => {
+                picker.toggle_transport();
                 cx.notify();
             }
             ("up" | "down", RemoteSessionField::Target) => {
@@ -517,11 +622,21 @@ impl Zetta {
                     .scroll_to_item(picker.selected, ScrollStrategy::Nearest);
                 cx.notify();
             }
-            (_, RemoteSessionField::Target | RemoteSessionField::Port) => {
+            (
+                _,
+                RemoteSessionField::Target
+                | RemoteSessionField::Port
+                | RemoteSessionField::KeepAlive,
+            ) => {
+                let numeric = matches!(
+                    picker.field,
+                    RemoteSessionField::Port | RemoteSessionField::KeepAlive
+                );
                 let field = match picker.field {
                     RemoteSessionField::Target => &mut picker.target,
                     RemoteSessionField::Port => &mut picker.port,
-                    RemoteSessionField::List => unreachable!(),
+                    RemoteSessionField::KeepAlive => &mut picker.keep_alive,
+                    RemoteSessionField::Protocol | RemoteSessionField::List => unreachable!(),
                 };
                 match apply_clipboard_shortcut(field, &event.keystroke, cx) {
                     ClipboardOutcome::Unchanged => {
@@ -540,10 +655,10 @@ impl Zetta {
                     }
                     ClipboardOutcome::Ignored => {}
                 }
-                // The port field takes digits only, so a character that is not
-                // one is dropped before the field sees it; everything else is
-                // the shared editing behaviour.
-                let typed_a_rejected_character = picker.field == RemoteSessionField::Port
+                // The port and keep-alive fields take digits only, so a
+                // character that is not one is dropped before the field sees
+                // it; everything else is the shared editing behaviour.
+                let typed_a_rejected_character = numeric
                     && event
                         .keystroke
                         .key_char
@@ -589,6 +704,8 @@ impl Zetta {
         let picker = self.remote_session_picker.as_ref()?;
         let target = picker.target.clone();
         let port = picker.port.clone();
+        let transport = picker.transport;
+        let keep_alive = picker.keep_alive.clone();
         let field = picker.field;
         let error = picker.error.clone();
         let loading = picker.loading;
@@ -693,19 +810,20 @@ impl Zetta {
                             div()
                                 .text_sm()
                                 .text_color(colors.text_muted)
-                                .child("Connect through your normal OpenSSH configuration. Remote sessions must be shared.")
+                                .child(remote_session_description(transport)),
                         )
-                        .child(remote_session_fields(
-                            &field_widget,
-                            target,
-                            port,
+                        .child(remote_session_fields(&field_widget, target, port, handle))
+                        .child(remote_session_transport_row(RemoteSessionTransportRow {
+                            transport,
+                            keep_alive,
+                            field,
+                            colors,
+                            field_widget: &field_widget,
                             handle,
-                        ))
+                        }))
                         .when(
                             field == RemoteSessionField::Target && has_suggestions,
-                            |panel| {
-                                panel.child(suggestion_rows)
-                            },
+                            |panel| panel.child(suggestion_rows),
                         )
                         .child(
                             div()
@@ -713,29 +831,27 @@ impl Zetta {
                                 .items_center()
                                 .justify_between()
                                 .child(Label::new("Shared sessions").size(LabelSize::Small))
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(colors.text_muted)
-                                        .child(if loading {
-                                            "Loading…".to_owned()
-                                        } else {
-                                            format!("{session_count} session{}", if session_count == 1 { "" } else { "s" })
-                                        }),
-                                ),
+                                .child(div().text_xs().text_color(colors.text_muted).child(
+                                    if loading {
+                                        "Loading…".to_owned()
+                                    } else {
+                                        format!(
+                                            "{session_count} session{}",
+                                            if session_count == 1 { "" } else { "s" }
+                                        )
+                                    },
+                                )),
                         )
                         .child(session_list)
-                        .child(
-                            remote_session_actions(RemoteSessionActions {
-                                loading,
-                                session_count,
-                                selected,
-                                colors,
-                                cancel_handle,
-                                load_handle,
-                                attach_handle,
-                            }),
-                        ),
+                        .child(remote_session_actions(RemoteSessionActions {
+                            loading,
+                            session_count,
+                            selected,
+                            colors,
+                            cancel_handle,
+                            load_handle,
+                            attach_handle,
+                        })),
                 )
                 .into_any_element(),
         )
@@ -974,6 +1090,151 @@ fn remote_session_field(
                 .ok();
         })
         .into_any_element()
+}
+
+/// What the picker says it is about to do, which depends on what carries the
+/// panes. Control traffic is OpenSSH either way, and that is the part a user
+/// has to have configured.
+fn remote_session_description(transport: RemotePaneTransport) -> &'static str {
+    if transport.is_zosh() {
+        "Sessions are found through your normal OpenSSH configuration, and each pane is then \
+         carried over Zosh. Remote sessions must be shared."
+    } else {
+        "Connect through your normal OpenSSH configuration. Remote sessions must be shared."
+    }
+}
+
+/// What the protocol row needs. A bundle rather than a parameter list: it is
+/// the picker's own state plus the two things every row here is built from.
+struct RemoteSessionTransportRow<'a, F> {
+    transport: RemotePaneTransport,
+    keep_alive: TextField,
+    field: RemoteSessionField,
+    colors: &'a ThemeColors,
+    field_widget: &'a F,
+    handle: &'a WeakEntity<Zetta>,
+}
+
+/// The protocol choice, and the keep-alive interval that only Zosh has.
+fn remote_session_transport_row<F>(row: RemoteSessionTransportRow<'_, F>) -> impl IntoElement
+where
+    F: Fn(
+        &'static str,
+        TextField,
+        RemoteSessionField,
+        &'static str,
+        WeakEntity<Zetta>,
+    ) -> AnyElement,
+{
+    let RemoteSessionTransportRow {
+        transport,
+        keep_alive,
+        field,
+        colors,
+        field_widget,
+        handle,
+    } = row;
+    h_flex()
+        .w_full()
+        .gap_2()
+        .items_center()
+        .child(
+            div()
+                .flex_none()
+                .text_xs()
+                .text_color(colors.text_muted)
+                .child("Panes over"),
+        )
+        .child(remote_session_protocol_control(
+            transport,
+            field == RemoteSessionField::Protocol,
+            colors,
+            handle,
+        ))
+        .when(transport.is_zosh(), |row| {
+            row.child(
+                div()
+                    .flex_none()
+                    .text_xs()
+                    .text_color(colors.text_muted)
+                    .child("Keep-alive"),
+            )
+            .child(div().flex_none().w(px(120.)).child(field_widget(
+                "remote-session-keep-alive",
+                keep_alive,
+                RemoteSessionField::KeepAlive,
+                KEEP_ALIVE_PLACEHOLDER,
+                handle.clone(),
+            )))
+            .child(
+                div()
+                    .flex_none()
+                    .text_xs()
+                    .text_color(colors.text_muted)
+                    .child("ms"),
+            )
+        })
+}
+
+/// The placeholder names what an empty field means, which is not "nothing":
+/// Mosh still has its own three-second heartbeat.
+const KEEP_ALIVE_PLACEHOLDER: &str = "Off";
+
+/// Two buttons that behave as one control: the protocol the panes take.
+fn remote_session_protocol_control(
+    transport: RemotePaneTransport,
+    focused: bool,
+    colors: &ThemeColors,
+    handle: &WeakEntity<Zetta>,
+) -> impl IntoElement {
+    h_flex()
+        .flex_none()
+        .rounded(px(4.))
+        .border_1()
+        .border_color(if focused {
+            colors.border_focused
+        } else {
+            colors.border
+        })
+        .children(
+            [RemotePaneTransport::SSH, RemotePaneTransport::ZOSH].map(|name| {
+                let selected = transport.name() == name;
+                let handle = handle.clone();
+                div()
+                    .id(SharedString::from(format!(
+                        "remote-session-protocol-{name}"
+                    )))
+                    .debug_selector(move || format!("remote-session-protocol-{name}"))
+                    .px_3()
+                    .py_1()
+                    .text_xs()
+                    .cursor_pointer()
+                    .when(selected, |option| {
+                        option.bg(colors.element_selected).text_color(colors.text)
+                    })
+                    .when(!selected, |option| option.text_color(colors.text_muted))
+                    .hover(|style| style.bg(colors.element_hover))
+                    .on_click(move |_, _, cx| {
+                        handle
+                            .update(cx, |this, cx| {
+                                let Some(picker) = this.remote_session_picker.as_mut() else {
+                                    return;
+                                };
+                                if picker.transport.name() != name {
+                                    picker.toggle_transport();
+                                }
+                                picker.field = RemoteSessionField::Protocol;
+                                cx.notify();
+                            })
+                            .ok();
+                    })
+                    .child(if name == RemotePaneTransport::SSH {
+                        "SSH"
+                    } else {
+                        "Zosh"
+                    })
+            }),
+        )
 }
 
 /// The SSH target and port fields, side by side.

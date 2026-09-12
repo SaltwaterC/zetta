@@ -12394,23 +12394,34 @@ mod tests {
         });
     }
 
-    /// Polls the terminal content until `expected` appears, or panics after ~1s.
-    /// The PTY IO thread writes into the terminal grid independently of the
-    /// GPUI executor, so we need a real-time polling loop to synchronize.
+    /// How long these helpers wait for a real shell to produce something.
+    ///
+    /// The budget is generous because it is only ever paid by a *failing*
+    /// test: each poll returns the moment what it is waiting for appears, so
+    /// the ordinary run costs one interval or two whatever this is set to.
+    /// Waiting a second was not enough — a machine running the rest of the
+    /// suite alongside these took longer than that to get a shell to its first
+    /// line of output, and a loaded machine must not be mistaken for a broken
+    /// one.
+    const PTY_POLL_ATTEMPTS: usize = 500;
+    const PTY_POLL_INTERVAL: Duration = Duration::from_millis(10);
+
+    /// Polls the terminal content until `expected` appears, or panics once the
+    /// budget above is spent. The PTY IO thread writes into the terminal grid
+    /// independently of the GPUI executor, so we need a real-time polling loop
+    /// to synchronize.
     async fn assert_content_eventually(
         terminal: &Entity<Terminal>,
         expected: &str,
         cx: &mut TestAppContext,
     ) {
         let mut content = String::new();
-        for _ in 0..100 {
+        for _ in 0..PTY_POLL_ATTEMPTS {
             content = terminal.update(cx, |term, _| term.get_content());
             if content.contains(expected) {
                 return;
             }
-            cx.background_executor
-                .timer(Duration::from_millis(10))
-                .await;
+            cx.background_executor.timer(PTY_POLL_INTERVAL).await;
         }
         panic!("Expected terminal content to contain {expected:?}, got: {content}");
     }
@@ -12422,13 +12433,10 @@ mod tests {
         cx: &mut TestAppContext,
     ) {
         // Spawning a shell and letting it fork the command is at the mercy of
-        // whatever else the machine is doing, and this returns as soon as the
-        // command appears, so the budget only needs to be generous enough that a
-        // loaded machine is not mistaken for a broken one.
-        const ATTEMPTS: usize = 500;
-
+        // whatever else the machine is doing, which is the same reason the
+        // budget above is what it is.
         let mut command_name = None;
-        for _ in 0..ATTEMPTS {
+        for _ in 0..PTY_POLL_ATTEMPTS {
             terminal.update(cx, |terminal, _| {
                 if let TerminalType::Pty { info, .. } = &terminal.terminal_type {
                     info.load_for_test();
@@ -12439,9 +12447,7 @@ mod tests {
             if command_name.as_deref() == Some(expected) {
                 return;
             }
-            cx.background_executor
-                .timer(Duration::from_millis(10))
-                .await;
+            cx.background_executor.timer(PTY_POLL_INTERVAL).await;
         }
         let process_info = terminal.update(cx, |terminal, _| match &terminal.terminal_type {
             TerminalType::Pty { info, .. } => format!(

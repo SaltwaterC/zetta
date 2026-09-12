@@ -511,7 +511,7 @@ impl Zetta {
             let snapshots = tab
                 .panes
                 .iter()
-                .filter(|pane| !self.shared_panes.contains_key(&pane.id))
+                .filter(|pane| !self.pane_is_relayed(pane.id))
                 .filter_map(|pane| {
                     let mux_pane_id = self.mux_panes.mux_pane_id(pane.id)?;
                     let terminal = pane.terminal.as_ref()?.read(cx);

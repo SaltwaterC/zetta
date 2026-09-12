@@ -432,3 +432,88 @@ fn launcher_help_has_the_stock_mosh_surface() {
     );
     assert!(!help.contains("--init                  initialize the local terminal [default]"));
 }
+
+/// What an embedder's bootstrap asks a host for: the same SSH invocation the
+/// command builds, with the embedder's own command in place of a login shell
+/// and the bundled `zosh` named as the proxy — an embedder is not `zosh`, so
+/// the address discovery cannot point OpenSSH at its own executable.
+#[test]
+fn an_embedded_bootstrap_runs_its_command_and_names_the_bundled_zosh() {
+    let request = PaneBootstrapRequest {
+        target: "build-host".to_owned(),
+        ssh_port: Some(2222),
+        remote_command: vec![
+            "/usr/local/bin/zmux".to_owned(),
+            "relay-pane".to_owned(),
+            "7".to_owned(),
+            "42".to_owned(),
+        ],
+        keep_alive: Some(250),
+        proxy_program: Some(PathBuf::from("/opt/zetta/zosh")),
+    };
+    let command = embedded_command(&request).expect("a valid request");
+    let (program, arguments) = ssh_bootstrap_command(&command, &request.target);
+
+    assert_eq!(program, "ssh");
+    assert!(
+        arguments.windows(2).any(|pair| pair == ["-p", "2222"]),
+        "{arguments:?}"
+    );
+    assert!(
+        arguments
+            .iter()
+            .any(|argument| argument.contains("ProxyCommand='/opt/zetta/zosh' --fake-proxy")),
+        "{arguments:?}"
+    );
+    let remote = arguments.last().expect("the remote command");
+    assert!(remote.contains("'zosh-server' 'new'"), "{remote}");
+    assert!(
+        remote.contains("'--' '/usr/local/bin/zmux' 'relay-pane' '7' '42'"),
+        "{remote}"
+    );
+    assert!(
+        remote.contains("command -v zosh-server") && remote.contains("'mosh-server'"),
+        "a host without the bundled server still gets a stock one: {remote}"
+    );
+}
+
+/// A request that could not name a session is refused here rather than
+/// producing an SSH command that logs in and does nothing.
+#[test]
+fn an_embedded_bootstrap_needs_a_target_and_a_command() {
+    let complete = PaneBootstrapRequest {
+        target: "build-host".to_owned(),
+        remote_command: vec!["zmux".to_owned()],
+        ..PaneBootstrapRequest::default()
+    };
+    assert!(embedded_command(&complete).is_ok());
+    assert!(
+        embedded_command(&PaneBootstrapRequest {
+            target: "  ".to_owned(),
+            ..complete.clone()
+        })
+        .is_err()
+    );
+    assert!(
+        embedded_command(&PaneBootstrapRequest {
+            remote_command: Vec::new(),
+            ..complete.clone()
+        })
+        .is_err()
+    );
+    assert!(
+        embedded_command(&PaneBootstrapRequest {
+            keep_alive: Some(5),
+            ..complete.clone()
+        })
+        .is_err(),
+        "an interval Mosh cannot hold to is refused before SSH is started"
+    );
+    assert!(
+        embedded_command(&PaneBootstrapRequest {
+            ssh_port: Some(0),
+            ..complete
+        })
+        .is_err()
+    );
+}

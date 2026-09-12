@@ -602,3 +602,110 @@ fn remote_picker_parses_optional_ports_and_rejects_invalid_values() {
     picker.port = TextField::new("not-a-port");
     assert!(Zetta::remote_target_from_picker(&picker).is_err());
 }
+
+/// The keep-alive field only exists while Zosh is carrying the panes, so the
+/// tab order has to change with the protocol rather than land on a field the
+/// picker is not showing.
+#[test]
+fn the_keep_alive_field_is_only_in_the_tab_order_under_zosh() {
+    let mut picker = RemoteSessionPicker::default();
+
+    let ssh_order = collect_tab_order(&mut picker);
+    assert_eq!(
+        ssh_order,
+        vec![
+            RemoteSessionField::Port,
+            RemoteSessionField::Protocol,
+            RemoteSessionField::List,
+            RemoteSessionField::Target,
+        ]
+    );
+
+    picker.field = RemoteSessionField::Protocol;
+    picker.toggle_transport();
+    assert!(picker.transport.is_zosh());
+    picker.field = RemoteSessionField::Target;
+    assert_eq!(
+        collect_tab_order(&mut picker),
+        vec![
+            RemoteSessionField::Port,
+            RemoteSessionField::Protocol,
+            RemoteSessionField::KeepAlive,
+            RemoteSessionField::List,
+            RemoteSessionField::Target,
+        ]
+    );
+}
+
+/// Turning Zosh back off while the keep-alive field has the focus would leave
+/// the focus on a field nothing draws.
+#[test]
+fn leaving_zosh_moves_the_focus_off_the_keep_alive_field() {
+    let mut picker = RemoteSessionPicker::default();
+    picker.toggle_transport();
+    picker.field = RemoteSessionField::KeepAlive;
+
+    picker.toggle_transport();
+
+    assert!(!picker.transport.is_zosh());
+    assert_eq!(picker.field, RemoteSessionField::Protocol);
+}
+
+/// Choosing Zosh with an empty field asks for the default interval, the way
+/// `-k` with no value does; emptying the field afterwards is how a session is
+/// left on Mosh's own heartbeat.
+#[test]
+fn the_protocol_decides_what_the_picker_asks_for() {
+    let mut picker = RemoteSessionPicker {
+        target: TextField::new("dev.example"),
+        ..Default::default()
+    };
+    assert_eq!(
+        Zetta::remote_transport_from_picker(&picker).unwrap(),
+        RemotePaneTransport::Ssh
+    );
+
+    picker.toggle_transport();
+    assert_eq!(
+        Zetta::remote_transport_from_picker(&picker).unwrap(),
+        RemotePaneTransport::Zosh {
+            keep_alive_ms: Some(REMOTE_KEEP_ALIVE_DEFAULT_MS)
+        }
+    );
+
+    picker.keep_alive = TextField::default();
+    assert_eq!(
+        Zetta::remote_transport_from_picker(&picker).unwrap(),
+        RemotePaneTransport::Zosh {
+            keep_alive_ms: None
+        },
+        "an empty interval leaves the link on Mosh's own heartbeat"
+    );
+
+    picker.keep_alive = TextField::new("5");
+    assert!(
+        Zetta::remote_transport_from_picker(&picker).is_err(),
+        "an interval below Mosh's frame interval cannot be held to"
+    );
+
+    // An unusable interval belongs to Zosh alone: switching back to SSH must
+    // not keep reporting it.
+    picker.toggle_transport();
+    assert_eq!(
+        Zetta::remote_transport_from_picker(&picker).unwrap(),
+        RemotePaneTransport::Ssh
+    );
+}
+
+/// Walks the tab order from wherever the picker is, once round.
+fn collect_tab_order(picker: &mut RemoteSessionPicker) -> Vec<RemoteSessionField> {
+    let started = picker.field;
+    let mut visited = Vec::new();
+    loop {
+        picker.cycle_field(false);
+        visited.push(picker.field);
+        if picker.field == started || visited.len() > 8 {
+            return visited;
+        }
+    }
+}

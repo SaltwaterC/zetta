@@ -79,6 +79,59 @@ tab that has scrolled into a left or right overflow menu carries a server icon
 there instead of the stripe. The marking follows the tab, not the active pane,
 because every pane in a tab belongs to the same session.
 
+### Carrying panes over Zosh
+
+By default every pane of a remote session arrives on that one SSH forward,
+which means the panes inherit TCP over SSH: a suspended laptop or a changed
+network stalls or kills them, and each keystroke waits a round trip. A pane is
+a terminal, though, and a terminal is what Mosh carries well. So the panes can
+be moved onto Zosh while everything else stays where it is:
+
+```sh
+zmux attach HOST 42 --protocol zosh              # hold each link open at 500 ms
+zmux attach HOST 42 --protocol zosh --keep-alive=250
+zetta mux attach -H HOST -P zosh -k 42
+```
+
+The remote-session picker has the same choice, and
+`sessions.remote.protocol` sets which one a session starts on.
+
+What moves and what does not:
+
+- **Control stays on SSH.** Listing, attaching, spawning and closing panes,
+  layout revisions, exit reports and image paste are framed JSON, and they
+  continue to travel over the stream-local forward.
+- **Each pane gets its own Mosh link.** Mosh carries one terminal, so Zetta
+  bootstraps one `zosh-server` per pane — the same way `zosh HOST` does,
+  through SSH — running `zmux relay-pane SESSION PANE` on the far side. That
+  relay is the multiplexer's viewer for the pane: it writes the pane's retained
+  output into its own terminal, copies bytes both ways, and turns its
+  `SIGWINCH` into the pane's resize, reported at the session's current geometry
+  revision. Splitting a pane later brings up another link the same way, so a
+  tab never has half its panes on one transport and half on the other.
+- **A protected session's secret travels inside the link**, never in the remote
+  command line, which every account on that host can read.
+- **Titles cross, so the working directory does.** Zetta's shell integration
+  reports a pane's directory as a window title, and a title is terminal state
+  that a screen diff does not carry; the bundled `zosh-server` restates it in
+  the state it sends, so a Zosh pane tracks its directory exactly as an SSH one
+  does. Splitting such a pane starts the new one in the directory the pane is
+  actually in: this window sends the directory it was told about, and when it
+  has not been told — a remote host without shell integration — it sends
+  nothing and the remote daemon inherits from the pane being split, which it
+  can read because it is that process's parent.
+- **Falling back is automatic.** A host with no usable Mosh server, no `zmux`
+  on the path its shell resolves, or no reachable UDP port attaches that pane
+  over the SSH byte stream and says so. The session still opens.
+
+The requirements are the ones `zosh` already has, plus a `zmux` on the remote
+host new enough to have `relay-pane`; the relay needs a POSIX pty, so a Windows
+*host* keeps its panes on SSH. Two costs are worth knowing: there is an
+emulator on each end of the link, so a Zosh pane has Mosh's scrollback fidelity
+rather than a byte stream's, and the size the multiplexer arbitrates between
+viewers reaches the relay rather than this window — a second, smaller viewer
+resizes the remote program but not this pane's grid.
+
 Remote panes are shared byte streams. They never receive a Unix descriptor or
 Windows handle, cannot take an exclusive grant, and remain live-only in Zetta:
 closing their tab disconnects that viewer but does not issue a remote

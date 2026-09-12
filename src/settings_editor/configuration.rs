@@ -13,6 +13,7 @@ pub enum ConfigTextField {
     FontSize,
     ScrollHistory,
     SessionRingBytes,
+    RemoteSessionKeepAlive,
     #[cfg(feature = "session-persistence")]
     SessionPersistenceRecipients,
     #[cfg(feature = "session-persistence")]
@@ -64,6 +65,12 @@ pub struct ConfigurationForm {
     pub pane_controls_hidden_by_default: bool,
     pub session_retention: SessionRetention,
     pub session_ring_bytes: TextField,
+    /// What carries a remote session's panes. Its control traffic is OpenSSH
+    /// whichever this is.
+    pub remote_session_protocol: crate::config::RemoteSessionProtocol,
+    /// The Zosh keep-alive interval in milliseconds. Empty leaves the link on
+    /// Mosh's own heartbeat.
+    pub remote_session_keep_alive: TextField,
     pub session_persistence_recipients: TextField,
     pub session_persistence_identity: TextField,
     /// Whether background sessions are protected with the configured age key
@@ -244,6 +251,15 @@ impl ConfigurationForm {
             pane_controls_hidden_by_default: config.pane_controls_hidden_by_default,
             session_retention: config.sessions.retention,
             session_ring_bytes: TextField::new(session_ring_bytes.to_string()),
+            remote_session_protocol: config.sessions.remote.protocol,
+            remote_session_keep_alive: TextField::new(
+                config
+                    .sessions
+                    .remote
+                    .keep_alive_ms
+                    .map(|interval| interval.to_string())
+                    .unwrap_or_default(),
+            ),
             session_persistence_recipients: TextField::new(session_persistence_recipients),
             session_persistence_identity: TextField::new(session_persistence_identity),
             session_persistence_auto_protect: config.sessions.persistence.auto_protect,
@@ -263,6 +279,7 @@ impl ConfigurationForm {
             ConfigTextField::FontSize => Some(&mut self.terminal_font_size),
             ConfigTextField::ScrollHistory => Some(&mut self.max_scroll_history_lines),
             ConfigTextField::SessionRingBytes => Some(&mut self.session_ring_bytes),
+            ConfigTextField::RemoteSessionKeepAlive => Some(&mut self.remote_session_keep_alive),
             #[cfg(feature = "session-persistence")]
             ConfigTextField::SessionPersistenceRecipients => {
                 Some(&mut self.session_persistence_recipients)
@@ -385,11 +402,32 @@ impl ConfigurationForm {
             .map(str::to_owned)
             .collect::<Vec<_>>();
         let identity = self.session_persistence_identity.text.trim();
+        let remote_keep_alive = self.remote_session_keep_alive.text.trim();
+        let remote_keep_alive = (!remote_keep_alive.is_empty())
+            .then(|| {
+                let interval = remote_keep_alive.parse::<u64>().context(
+                    "the remote keep-alive interval must be a whole number of milliseconds",
+                )?;
+                anyhow::ensure!(
+                    (crate::config::REMOTE_KEEP_ALIVE_MIN_MS
+                        ..=crate::config::REMOTE_KEEP_ALIVE_MAX_MS)
+                        .contains(&interval),
+                    "the remote keep-alive interval must be between {} and {} milliseconds",
+                    crate::config::REMOTE_KEEP_ALIVE_MIN_MS,
+                    crate::config::REMOTE_KEEP_ALIVE_MAX_MS
+                );
+                Ok(interval)
+            })
+            .transpose()?;
         root.insert(
             "sessions".into(),
             json!({
                 "retention": self.session_retention.as_str(),
                 "ring_bytes": session_ring_bytes,
+                "remote": {
+                    "protocol": self.remote_session_protocol.name(),
+                    "keep_alive_ms": remote_keep_alive,
+                },
                 "persistence": {
                     "recipients": recipients,
                     "identity": (!identity.is_empty()).then_some(identity),
@@ -543,6 +581,10 @@ fn strip_default_configuration_values(
             json!({
                 "retention": SessionRetention::default().as_str(),
                 "ring_bytes": crate::config::DEFAULT_SESSION_RING_BYTES,
+                "remote": {
+                    "protocol": crate::config::RemoteSessionProtocol::default().name(),
+                    "keep_alive_ms": null,
+                },
                 "persistence": {
                     "recipients": [],
                     "identity": null,

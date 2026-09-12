@@ -44,7 +44,9 @@ shell startup.
 
 `zmux`, the standalone multiplexer binary, gets the same completion as
 `zetta mux`, since the two take identical arguments. Both also complete
-`attach` targets from `~/.ssh/config` and remote numeric session IDs.
+`attach` targets from `~/.ssh/config` and remote numeric session IDs, and
+`attach`'s `--protocol` offers the two protocols its panes can travel over,
+`ssh` and `zosh`.
 The mux command list includes `list`, `stop`, `reconnect`, `attach`, `share`, `unshare`,
 `kill`, and `forget`; the session argument for `reconnect`, `share`, `unshare`,
 `kill`, and `forget` is

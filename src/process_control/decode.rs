@@ -54,6 +54,8 @@ mod field {
     pub(super) const SECRET: u32 = 1 << 2;
     pub(super) const SSH_TARGET: u32 = 1 << 3;
     pub(super) const SSH_PORT: u32 = 1 << 4;
+    pub(super) const REMOTE_PROTOCOL: u32 = 1 << 25;
+    pub(super) const REMOTE_KEEP_ALIVE: u32 = 1 << 26;
     pub(super) const ICON: u32 = 1 << 5;
     pub(super) const PANE_THEME: u32 = 1 << 6;
     pub(super) const PANE_ID: u32 = 1 << 7;
@@ -106,6 +108,11 @@ fn control_request_fields(request: &ControlRequest) -> ControlFields {
             | bit(request.secret.is_some(), field::SECRET)
             | bit(request.ssh_target.is_some(), field::SSH_TARGET)
             | bit(request.ssh_port.is_some(), field::SSH_PORT)
+            | bit(request.remote_protocol.is_some(), field::REMOTE_PROTOCOL)
+            | bit(
+                request.remote_keep_alive_ms.is_some(),
+                field::REMOTE_KEEP_ALIVE,
+            )
             | bit(request.icon.is_some(), field::ICON)
             | bit(request.pane_theme.is_some(), field::PANE_THEME)
             | bit(
@@ -172,7 +179,9 @@ fn allowed_control_fields(command: &str) -> Option<ControlFields> {
         "run_shell_command" => SHELL_COMMAND,
         "open_command" => CONFIG_PATH | PANE_REQUEST,
         "list_panes" => ATTENTION_ID,
-        "open_remote_session" => SESSION_ID | SECRET | SSH_TARGET | SSH_PORT,
+        "open_remote_session" => {
+            SESSION_ID | SECRET | SSH_TARGET | SSH_PORT | REMOTE_PROTOCOL | REMOTE_KEEP_ALIVE
+        }
         "reconnect_session" => RUNNER_ID | SESSION_ID | SECRET | ATTENTION_ID,
         "resume_disk_session" => SESSION_ID | SECRET | CONFIG_PATH,
         "set_tab_icon" => UNREAD_STYLE,
@@ -429,11 +438,22 @@ fn decode_session_command(request: &mut ControlRequest) -> Option<ControlRequest
             if secret.as_deref().is_some_and(str::is_empty) {
                 return None;
             }
+            // The protocol name is checked here only for a shape that cannot
+            // be a name at all; which names exist is the opening half's
+            // business, and it has to answer for one this build cannot carry
+            // anyway.
+            let protocol = request
+                .remote_protocol
+                .take()
+                .filter(|protocol| !protocol.is_empty() && protocol.len() <= 32);
+            let keep_alive_ms = request.remote_keep_alive_ms.take();
             Some(ControlRequestCommand::OpenRemoteSession {
                 target,
                 port,
                 session_id,
                 secret: secret.map(SessionSecret::new),
+                protocol,
+                keep_alive_ms,
             })
         }
         "reconnect_session" => {

@@ -6524,6 +6524,114 @@ fn a_daemon_loaded_shell_integration_leaves_nothing_for_viewers_to_replay() {
     );
 }
 
+/// The far side of a pane carried over Mosh.
+///
+/// `zmux relay-pane` is what runs on the PTY `zosh-server` creates, so the
+/// pane has to come out of that process's stdout, its stdin has to reach the
+/// program, and a protected session's secret has to be taken from stdin
+/// rather than from a command line every account on the host can read.
+#[test]
+fn relay_pane_copies_a_shared_pane_between_the_daemon_and_its_own_stdio() {
+    let daemon = TestDaemon::start();
+    let client = daemon.client();
+    let pane = client
+        .spawn(spawn_request(None, "printf ready; sleep 60"))
+        .unwrap();
+    let descriptor = std::fs::File::from(pane.descriptor);
+    read_until(&descriptor, "ready");
+    let mut offered = summary(pane.session_id, pane.pane_id);
+    offered.panes.push(pane_summary(pane.pane_id));
+    client
+        .share(
+            pane.session_id,
+            offered,
+            serde_json::Value::Null,
+            Some(&test_verifier()),
+            true,
+        )
+        .unwrap();
+
+    // A shared spawn, so the pane the relay attaches is one no other process
+    // is holding a descriptor for — which is the shape a remote pane has.
+    let request = spawn_request(Some(pane.session_id), "printf relayed; cat");
+    let spawned = client
+        .spawn_shared(SharedSpawnRequest {
+            session_id: pane.session_id,
+            base_revision: SessionRevision::INITIAL,
+            operation_id: client.next_shared_operation_id(),
+            program: request.program,
+            args: request.args,
+            env: request.env,
+            working_directory: request.working_directory,
+            size: request.size,
+            console_palette: request.console_palette,
+        })
+        .unwrap();
+    let relayed_pane = spawned.pane.pane_id();
+    drop(spawned);
+
+    let mut relay = Command::new(daemon_binary())
+        .args([
+            "relay-pane",
+            &pane.session_id.to_string(),
+            &relayed_pane.to_string(),
+            "--secret-stdin",
+        ])
+        .env("XDG_CONFIG_HOME", &daemon.config)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("starting the relay");
+    let mut relay_input = relay.stdin.take().expect("the relay's stdin");
+    let relayed = collect_output(relay.stdout.take().expect("the relay's stdout"));
+
+    writeln!(relay_input, "{TEST_SECRET}").expect("sending the session secret");
+    wait_for_output(&relayed, "relayed", &relay);
+
+    write!(relay_input, "typed\r").expect("sending pane input");
+    wait_for_output(&relayed, "typed", &relay);
+
+    let _ = relay.kill();
+    let _ = relay.wait();
+}
+
+/// Reads a child's pipe on its own thread: a blocking read cannot be given a
+/// deadline, and a test that hangs on one says nothing about what failed.
+fn collect_output(mut output: impl Read + Send + 'static) -> Arc<Mutex<String>> {
+    let collected = Arc::new(Mutex::new(String::new()));
+    let thread_collected = Arc::clone(&collected);
+    std::thread::spawn(move || {
+        let mut bytes = [0_u8; 4096];
+        loop {
+            match output.read(&mut bytes) {
+                Ok(0) | Err(_) => return,
+                Ok(read) => thread_collected
+                    .lock()
+                    .unwrap()
+                    .push_str(&String::from_utf8_lossy(&bytes[..read])),
+            }
+        }
+    });
+    collected
+}
+
+fn wait_for_output(collected: &Arc<Mutex<String>>, expected: &str, child: &Child) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let seen = collected.lock().unwrap().clone();
+        if seen.contains(expected) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "never saw {expected:?} from the relay (process {}); read {seen:?}",
+            child.id()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
 /// The smallest valid PNG: an 8-byte signature, an IHDR for a 1x1 greyscale
 /// image, and IEND. The daemon checks the signature, so the payload cannot be
 /// arbitrary bytes.

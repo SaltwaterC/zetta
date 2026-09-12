@@ -1254,6 +1254,12 @@ impl Zetta {
             );
             return;
         };
+        // A pane another viewer added travels the same way as the ones this
+        // window attached with: the runtime is what remembers which that is.
+        let runtime = self
+            .shared_collaboration
+            .tab_id(session_id)
+            .and_then(|tab_id| self.mux_panes.runtime_for_tab(tab_id));
         for mux_pane_id in missing {
             if !self
                 .shared_collaboration
@@ -1262,9 +1268,29 @@ impl Zetta {
                 continue;
             }
             let connection = connection.clone();
+            let runtime = runtime.clone();
             cx.spawn_in(window, async move |this, cx| {
                 let attached =
                     attach_shared_pane_with_retries(session_id, mux_pane_id, &connection, cx).await;
+                // Before the pane is shown, because the transport a pane is on
+                // is decided before its terminal is built; this is an SSH round
+                // trip, so it happens here rather than on the thread that draws.
+                let mut pane_streams = match runtime {
+                    Some(runtime) if attached.as_ref().is_some_and(|(_, pane)| pane.is_some()) => {
+                        cx.background_spawn(async move {
+                            crate::remote_pane_transport::RemotePaneStreams::one(
+                                mux_pane_id,
+                                crate::remote_pane_transport::bootstrap_spawned_pane(
+                                    &runtime,
+                                    session_id,
+                                    mux_pane_id,
+                                ),
+                            )
+                        })
+                        .await
+                    }
+                    _ => crate::remote_pane_transport::RemotePaneStreams::default(),
+                };
                 this.update_in(cx, |this, window, cx| {
                     this.shared_collaboration
                         .end_attach(session_id, mux_pane_id);
@@ -1272,8 +1298,14 @@ impl Zetta {
                         return;
                     };
                     if let Some(pane) = pane
-                        && let Err(error) =
-                            this.attach_incoming_shared_pane(session_id, pane, latest.clone(), window, cx)
+                        && let Err(error) = this.attach_incoming_shared_pane(
+                            session_id,
+                            pane,
+                            latest.clone(),
+                            &mut pane_streams,
+                            window,
+                            cx,
+                        )
                     {
                         log::warn!(
                             "could not attach shared pane {mux_pane_id} of session {session_id}: {error:#}"
@@ -1507,6 +1539,7 @@ impl Zetta {
         session_id: u64,
         pane: zmux::client::SharedPane,
         state: SharedSessionState,
+        pane_streams: &mut crate::remote_pane_transport::RemotePaneStreams,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<()> {
@@ -1603,7 +1636,14 @@ impl Zetta {
             .expect("the shared tab was checked above");
         let mut tab = self.tabs.remove(tab_index);
         self.build_attached_panes(
-            &mut tab, session_id, attached, &restored, &runtime, window, cx,
+            &mut tab,
+            session_id,
+            attached,
+            &restored,
+            &runtime,
+            pane_streams,
+            window,
+            cx,
         );
         self.tabs.insert(tab_index, tab);
         let view = self

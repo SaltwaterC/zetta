@@ -37,6 +37,11 @@ const MAX_SSH_OUTPUT_BYTES: usize = 1024 * 1024;
 // remote command arguments into the command string it gives the server.
 const REMOTE_ENDPOINT_COMMAND: &str = r#"/bin/sh -c 'exec 3>&1 1>/dev/null; exec "${SHELL:-/bin/sh}" -lic "command zmux endpoint --json >&3"'"#;
 
+/// Where that same shell resolves `zmux`. Written the same way, and for the
+/// same reasons, as the endpoint command above.
+const REMOTE_PROGRAM_COMMAND: &str =
+    r#"/bin/sh -c 'exec 3>&1 1>/dev/null; exec "${SHELL:-/bin/sh}" -lic "command -v zmux >&3"'"#;
+
 /// A destination understood by OpenSSH.
 ///
 /// `destination` is deliberately passed as one argument to `ssh`, so aliases,
@@ -377,6 +382,39 @@ impl RemoteTransport {
         }
     }
 
+    /// Resolves the remote host's own `zmux` executable.
+    ///
+    /// Same shell wrapper and the same fd discipline as the endpoint query,
+    /// for the same reason: the directory Zetta's CLI is installed into is
+    /// usually added to an interactive rc file, and rc files write to stdout.
+    ///
+    /// What comes back is an absolute path, which is what makes it worth
+    /// asking for: a `zmux` started somewhere other than an SSH command —
+    /// inside a Mosh server, say — cannot rely on the `PATH` that found this
+    /// one.
+    pub fn resolve_remote_program(&self) -> Result<PathBuf> {
+        let arguments = program_arguments(&self.target);
+        let output = run_capture(&self.ssh_program, &arguments, ENDPOINT_TIMEOUT)?;
+        let text = std::str::from_utf8(&output.stdout)
+            .context("remote zmux path was not UTF-8")?
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .unwrap_or_default()
+            .to_owned();
+        anyhow::ensure!(
+            !text.is_empty(),
+            "the remote host has no zmux on the path its shell resolves"
+        );
+        let path = PathBuf::from(text);
+        anyhow::ensure!(
+            path.is_absolute(),
+            "the remote host resolved zmux to {}, which is not an absolute path",
+            path.display()
+        );
+        Ok(path)
+    }
+
     fn query_endpoint(&self) -> Result<Endpoint> {
         let arguments = endpoint_arguments(&self.target);
         let output = run_capture(&self.ssh_program, &arguments, ENDPOINT_TIMEOUT)?;
@@ -417,6 +455,19 @@ fn endpoint_arguments(target: &RemoteTarget) -> Vec<String> {
     arguments.extend([
         target.destination.clone(),
         REMOTE_ENDPOINT_COMMAND.to_owned(),
+    ]);
+    arguments
+}
+
+fn program_arguments(target: &RemoteTarget) -> Vec<String> {
+    let mut arguments = vec!["-T".to_owned()];
+    if let Some(port) = target.port {
+        arguments.push("-p".to_owned());
+        arguments.push(port.to_string());
+    }
+    arguments.extend([
+        target.destination.clone(),
+        REMOTE_PROGRAM_COMMAND.to_owned(),
     ]);
     arguments
 }

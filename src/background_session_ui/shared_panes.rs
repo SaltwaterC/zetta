@@ -260,7 +260,7 @@ impl Zetta {
     /// The terminal no longer reads the pty, so it has no event loop to learn
     /// the exit from; the multiplexer is the child's parent and its
     /// attribution of input replaces the terminal's own.
-    fn route_shared_pane_exit(
+    pub(super) fn route_shared_pane_exit(
         &mut self,
         tab_id: u64,
         pane_id: u64,
@@ -388,6 +388,10 @@ impl Zetta {
         {
             terminal.update(cx, |terminal, _| terminal.stop_byte_stream());
         }
+        // A pane carried over Mosh is closed by the same paths as one carried
+        // over the multiplexer's own stream, and is registered in neither the
+        // other's map, so both are asked here.
+        self.drop_zosh_pane(pane_id);
         let Some(entry) = self.shared_panes.remove(&pane_id) else {
             return;
         };

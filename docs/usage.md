@@ -165,9 +165,13 @@ discards the request, so both the local client and remote server must support
 the extension. See the linked instructions to build the server and select it
 with `--server=/absolute/path/to/zosh-server`.
 
-The native background-session and zmux remote-session commands continue to use
-SSH because Mosh carries terminal state rather than the framed streams needed
-for listing, attach, sharing, and restoration.
+A remote zmux session can be carried over Zosh as well, one link per pane. The
+commands that list, attach, share and restore a session stay on SSH, because
+those are framed streams and Mosh carries terminal state rather than bytes; the
+panes themselves are terminals, which is exactly what Mosh is for. Choose the
+protocol in the remote-session picker, with `zmux attach HOST ID --protocol
+zosh`, or by default with `sessions.remote.protocol`. See
+[Background sessions](background-sessions.md#carrying-panes-over-zosh).
 
 ## CLI command panes
 

@@ -85,6 +85,12 @@ struct SpawnedTerminal {
     mux_provider: Option<Arc<crate::mux::MuxPtyProvider>>,
     #[cfg(feature = "zmux")]
     shared_pane: Option<Arc<zmux::client::SharedPane>>,
+    /// Set when this pane's bytes travel over Mosh rather than over the
+    /// multiplexer's own stream. The shared pane above is still carried, for
+    /// the identities every shared session is bookkept by; what changes is
+    /// what feeds the terminal, and what is registered for it.
+    #[cfg(feature = "zmux")]
+    zosh_session: Option<Arc<crate::remote_pane_transport::ZoshPaneHandle>>,
     #[cfg(feature = "zmux")]
     shared_runtime: Option<crate::mux::MuxRuntime>,
     #[cfg(feature = "zmux")]
@@ -181,6 +187,94 @@ enum SharedTerminalBatchBuild {
     },
 }
 
+/// What a shared pane's terminal is built from, whichever way its bytes travel.
+///
+/// A bundle because the two spawn paths — one pane, and a batch of them — build
+/// the same thing from values they hold differently.
+#[cfg(feature = "zmux")]
+struct SharedPaneTerminal<'a> {
+    pane: &'a Arc<zmux::client::SharedPane>,
+    runtime: &'a crate::mux::MuxRuntime,
+    title: String,
+    cursor_shape: terminal::terminal_settings::CursorShape,
+    alternate_scroll: terminal::terminal_settings::AlternateScroll,
+    max_scroll_history_lines: Option<usize>,
+    working_directory: Option<PathBuf>,
+    executor: &'a gpui::BackgroundExecutor,
+}
+
+/// Builds the byte stream a shared pane's terminal reads.
+///
+/// Over the multiplexer's own stream unless the session's panes travel over
+/// Mosh, in which case this brings up that pane's link and hands back the
+/// session to keep: the multiplexer's stream for it is then released with the
+/// `SharedPane` the caller drops.
+#[cfg(feature = "zmux")]
+fn build_shared_pane_terminal(
+    build: SharedPaneTerminal<'_>,
+) -> (
+    TerminalBuilder,
+    Option<Arc<crate::remote_pane_transport::ZoshPaneHandle>>,
+) {
+    let SharedPaneTerminal {
+        pane,
+        runtime,
+        title,
+        cursor_shape,
+        alternate_scroll,
+        max_scroll_history_lines,
+        working_directory,
+        executor,
+    } = build;
+    let session_id = pane.session_id();
+    let mux_pane_id = pane.pane_id();
+    // A pane added to a session whose panes travel over Mosh travels the same
+    // way: half a tab on a transport the other half is not on would come apart
+    // the moment either one was interrupted.
+    if let Some(stream) =
+        crate::remote_pane_transport::bootstrap_spawned_pane(runtime, session_id, mux_pane_id)
+    {
+        let (built, session) = crate::background_session_ui::zosh_panes::build_zosh_pane(
+            crate::background_session_ui::zosh_panes::ZoshPaneBuild {
+                title,
+                cursor_shape,
+                alternate_scroll,
+                max_scroll_history_lines,
+                window_id: 0,
+                working_directory,
+                runtime,
+                session_id,
+                mux_pane_id,
+                executor,
+            },
+            stream,
+        );
+        return (built, Some(session));
+    }
+    let built = TerminalBuilder::new_byte_stream(
+        Box::new(pane.reader()),
+        Box::new(
+            crate::background_session_ui::shared_panes::SharedPaneWriter { pane: pane.clone() },
+        ),
+        title,
+        cursor_shape,
+        alternate_scroll,
+        max_scroll_history_lines,
+        0,
+        executor,
+        PathStyle::local(),
+    )
+    .with_working_directory(working_directory)
+    .with_replay(pane.replay.clone())
+    .with_pty_control(crate::mux::mux_pty_control_with_secret(
+        runtime.client().clone(),
+        session_id,
+        mux_pane_id,
+        runtime.session_secret(),
+    ));
+    (built, None)
+}
+
 #[cfg(feature = "zmux")]
 fn build_shared_terminal_batch(
     launches: Vec<SharedTerminalLaunch>,
@@ -255,29 +349,19 @@ fn build_shared_terminal_batch(
                 working_directory: launch.working_directory.clone(),
             },
         );
-        let builder = TerminalBuilder::new_byte_stream(
-            Box::new(pane.reader()),
-            Box::new(
-                crate::background_session_ui::shared_panes::SharedPaneWriter { pane: pane.clone() },
-            ),
-            launch.title,
-            launch.cursor_shape,
-            launch.alternate_scroll,
-            launch.max_scroll_history_lines,
-            0,
-            terminal_executor,
-            PathStyle::local(),
-        )
-        .with_working_directory(launch.working_directory)
-        .with_replay(pane.replay.clone())
-        .with_pty_control(crate::mux::mux_pty_control_with_secret(
-            client.clone(),
-            session_id,
-            mapping.pane_id,
-            runtime.session_secret(),
-        ))
-        .with_image_paste_handler(image_paste_handler)
-        .with_init_command_startup_shell(launch.shell);
+        let (builder, zosh_session) = build_shared_pane_terminal(SharedPaneTerminal {
+            pane: &pane,
+            runtime: &runtime,
+            title: launch.title.clone(),
+            cursor_shape: launch.cursor_shape,
+            alternate_scroll: launch.alternate_scroll,
+            max_scroll_history_lines: launch.max_scroll_history_lines,
+            working_directory: launch.working_directory.clone(),
+            executor: terminal_executor,
+        });
+        let builder = builder
+            .with_image_paste_handler(image_paste_handler)
+            .with_init_command_startup_shell(launch.shell);
         terminals.push((
             builder,
             SpawnedTerminal {
@@ -290,6 +374,7 @@ fn build_shared_terminal_batch(
                 restored_working_directory: None,
                 mux_provider: None,
                 shared_pane: Some(pane),
+                zosh_session,
                 shared_runtime: Some(runtime.clone()),
                 shared_state: None,
                 shell_integration_startup_command: launch.shell_integration_startup_command,
@@ -1346,6 +1431,8 @@ impl Zetta {
             #[cfg(feature = "zmux")]
             shared_pane: None,
             #[cfg(feature = "zmux")]
+            zosh_session: None,
+            #[cfg(feature = "zmux")]
             shared_runtime: None,
             #[cfg(feature = "zmux")]
             shared_state: None,
@@ -1637,31 +1724,19 @@ impl Zetta {
                     working_directory: working_directory.clone(),
                 },
             );
-            let builder = TerminalBuilder::new_byte_stream(
-                Box::new(pane.reader()),
-                Box::new(
-                    crate::background_session_ui::shared_panes::SharedPaneWriter {
-                        pane: pane.clone(),
-                    },
-                ),
+            let (builder, zosh_session) = build_shared_pane_terminal(SharedPaneTerminal {
+                pane: &pane,
+                runtime: &runtime,
                 title,
                 cursor_shape,
                 alternate_scroll,
                 max_scroll_history_lines,
-                0,
-                &terminal_executor,
-                PathStyle::local(),
-            )
-            .with_working_directory(working_directory)
-            .with_replay(pane.replay.clone())
-            .with_pty_control(crate::mux::mux_pty_control_with_secret(
-                runtime.client().clone(),
-                pane.session_id(),
-                pane.pane_id(),
-                runtime.session_secret(),
-            ))
-            .with_image_paste_handler(image_paste_handler)
-            .with_init_command_startup_shell(startup_shell);
+                working_directory,
+                executor: &terminal_executor,
+            });
+            let builder = builder
+                .with_image_paste_handler(image_paste_handler)
+                .with_init_command_startup_shell(startup_shell);
             Ok::<_, anyhow::Error>(SharedTerminalBuild::Ready(
                 Box::new(builder),
                 Box::new(SpawnedTerminal {
@@ -1674,6 +1749,7 @@ impl Zetta {
                     restored_working_directory: None,
                     mux_provider: None,
                     shared_pane: Some(pane),
+                    zosh_session,
                     shared_runtime: Some(runtime),
                     shared_state: Some(committed_state),
                     shell_integration_startup_command,
@@ -2045,6 +2121,33 @@ impl Zetta {
     /// The pane may have been closed or detached while the builder was in
     /// flight, which is why the install below falls back to the background
     /// session that now owns it.
+    /// Registers a pane the multiplexer relays, once its terminal exists.
+    ///
+    /// Which registry it belongs in follows from how it is fed: a pane carried
+    /// over Mosh holds no stream from the multiplexer, and the one it was
+    /// attached with is released when the caller drops it — reading the remote
+    /// host's output twice would pay for it twice.
+    #[cfg(feature = "zmux")]
+    fn register_spawned_shared_pane(
+        &mut self,
+        ids: MuxPaneIds,
+        shared_pane: &Arc<zmux::client::SharedPane>,
+        zosh_session: Option<Arc<crate::remote_pane_transport::ZoshPaneHandle>>,
+        runtime: &crate::mux::MuxRuntime,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let tab_id = ids.tab_id;
+        match zosh_session {
+            Some(session) => self.register_zosh_pane(ids, session, runtime, window, cx),
+            None => self.register_shared_pane(ids, shared_pane, runtime, window, cx),
+        }
+        // Geometry and pane metadata were committed in the batch. Once the
+        // terminal exists, publish the remaining opaque PaneState that needs
+        // its stable local-to-mux mapping.
+        self.sync_shared_tab_state(tab_id, cx);
+    }
+
     fn finish_terminal_spawn(
         &mut self,
         mut builder: TerminalBuilder,
@@ -2064,6 +2167,8 @@ impl Zetta {
             mux_provider,
             #[cfg(feature = "zmux")]
             shared_pane,
+            #[cfg(feature = "zmux")]
+            zosh_session,
             #[cfg(feature = "zmux")]
             shared_runtime,
             #[cfg(feature = "zmux")]
@@ -2175,7 +2280,7 @@ impl Zetta {
         }
         #[cfg(feature = "zmux")]
         if let (Some(shared_pane), Some(runtime)) = (&shared_pane, &shared_runtime) {
-            this.register_shared_pane(
+            this.register_spawned_shared_pane(
                 MuxPaneIds {
                     tab_id,
                     pane_id,
@@ -2183,14 +2288,11 @@ impl Zetta {
                     mux_pane_id: shared_pane.pane_id(),
                 },
                 shared_pane,
+                zosh_session,
                 runtime,
                 window,
                 cx,
             );
-            // Geometry and pane metadata were committed in the batch. Once the
-            // terminal exists, publish the remaining opaque PaneState that needs
-            // its stable local-to-mux mapping.
-            this.sync_shared_tab_state(tab_id, cx);
         }
         this.schedule_worktree_detection_for_pane(tab_id, pane_id, cx);
         this.schedule_project_detection_for_pane(tab_id, pane_id, window, cx);

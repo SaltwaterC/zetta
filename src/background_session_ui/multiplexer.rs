@@ -8,6 +8,8 @@ use super::*;
 
 use super::image_paste::{LocalPasteTarget, handler_for_pane};
 use super::shared_panes::SharedPaneWriter;
+use super::zosh_panes::{ZoshPaneBuild, build_zosh_pane};
+use crate::remote_pane_transport::{RemotePaneStreams, RemotePaneTransport};
 
 /// The result of the remote data phase. Authentication outcomes contain no
 /// partially attached pane, while a successful result owns every stream needed
@@ -26,6 +28,28 @@ pub(crate) struct RemoteAttachData {
     additional: Vec<(u64, AttachedPaneKind)>,
     canonical_shared_state: Option<zmux::messages::SharedSessionState>,
     runtime: MuxRuntime,
+    /// The Mosh sessions the background phase brought up, by multiplexer pane
+    /// ID. Empty for an SSH session, and missing an entry for any pane whose
+    /// bootstrap fell back.
+    pane_streams: RemotePaneStreams,
+}
+
+impl Zetta {
+    /// Says so when a pane could not be carried the way it was asked to be.
+    ///
+    /// Falling back is not a failure — the session opened, and every pane
+    /// works — so this is a notice rather than an error, and the first reason
+    /// is the one shown: they are almost always the same reason repeated once
+    /// per pane, and the rest are in the log.
+    fn report_transport_fallbacks(&mut self, fallbacks: &[String], cx: &mut Context<Self>) {
+        let Some(first) = fallbacks.first() else {
+            return;
+        };
+        for reason in fallbacks {
+            log::warn!("remote pane transport fell back: {reason}");
+        }
+        self.show_notice(first.clone(), cx);
+    }
 }
 
 /// Performs all remote I/O needed before a tab can be built. This function is
@@ -35,8 +59,9 @@ pub(crate) fn load_remote_attach(
     target: zmux::remote::RemoteTarget,
     session_id: u64,
     secret: Option<SessionSecret>,
+    transport: RemotePaneTransport,
 ) -> anyhow::Result<RemoteAttachOutcome> {
-    let runtime = MuxRuntime::connect_remote(target)?;
+    let runtime = MuxRuntime::connect_remote(target, transport)?;
     load_attached_session_data(&runtime, session_id, secret.as_ref())
 }
 
@@ -113,6 +138,25 @@ fn load_attached_session_data(
             _ => break,
         }
     }
+    // Bringing the panes up on Mosh is the last thing the background phase
+    // does, and it is done for every pane at once: each one is an SSH round
+    // trip, and the tab cannot be built until they have all answered.
+    let relayed = std::iter::once(&first)
+        .chain(additional.iter().map(|(_, kind)| kind))
+        .filter_map(|kind| match kind {
+            AttachedPaneKind::Shared(pane) => Some(pane.pane_id()),
+            // An exclusive pane is a descriptor this window owns, not a stream
+            // the daemon relays, so there is nothing for Mosh to carry.
+            AttachedPaneKind::Exclusive(_) => None,
+        })
+        .collect::<Vec<_>>();
+    let pane_streams = crate::remote_pane_transport::bootstrap_remote_pane_streams(
+        runtime.client(),
+        runtime.pane_transport(),
+        session_id,
+        secret,
+        &relayed,
+    );
     Ok(RemoteAttachOutcome::Attached(Box::new(RemoteAttachData {
         session_id,
         state,
@@ -121,6 +165,7 @@ fn load_attached_session_data(
         additional,
         canonical_shared_state,
         runtime: runtime.clone(),
+        pane_streams,
     })))
 }
 
@@ -340,6 +385,7 @@ impl Zetta {
             additional,
             canonical_shared_state,
             runtime,
+            mut pane_streams,
         } = data;
         if pane_theme_source_is_stale(
             state.pane_theme_source,
@@ -420,9 +466,11 @@ impl Zetta {
             attached,
             &restored_metadata,
             &runtime,
+            &mut pane_streams,
             window,
             cx,
         );
+        self.report_transport_fallbacks(pane_streams.fallbacks(), cx);
         self.active_tab = insert_tab_in_pin_order(&mut self.tabs, tab);
         // The pane views were built before the tab was inserted. Wire them up
         // now that it is: without the view subscription, the terminal's
@@ -463,6 +511,22 @@ pub(crate) enum AttachedPaneKind {
     Shared(zmux::client::SharedPane),
 }
 
+/// What this window has to keep watching for a pane it has just built.
+///
+/// It follows from how the pane is fed, which is why it is decided where the
+/// terminal is built rather than asked again afterwards.
+enum AttachedPaneRegistration {
+    /// A stream the multiplexer relays to this window: arbitrated sizes and
+    /// the pane's exit both arrive on it.
+    Shared(Arc<zmux::client::SharedPane>),
+    /// A pty descriptor this window owns, which the multiplexer may ask it to
+    /// hand over.
+    Exclusive,
+    /// A pane carried over Mosh. This window holds no descriptor for it and no
+    /// stream from the multiplexer, only the session that renders it.
+    Relayed(Arc<crate::remote_pane_transport::ZoshPaneHandle>),
+}
+
 impl AttachedPaneKind {
     fn pane_id(&self) -> u64 {
         match self {
@@ -470,6 +534,123 @@ impl AttachedPaneKind {
             AttachedPaneKind::Shared(pane) => pane.pane_id(),
         }
     }
+}
+
+/// What every pane of an attached session is built with. A borrowed bundle
+/// rather than a parameter list: the two builders below differ in what feeds
+/// the terminal, not in what it is configured with.
+struct AttachedPaneBuild<'a> {
+    session_id: u64,
+    title: String,
+    settings: &'a TerminalSpawnSettings,
+    working_directory: Option<PathBuf>,
+    runtime: &'a MuxRuntime,
+    window_id: u64,
+    executor: &'a gpui::BackgroundExecutor,
+}
+
+/// A pane this window holds the pty for.
+fn build_exclusive_pane<I>(
+    build: &AttachedPaneBuild<'_>,
+    attached: zmux::client::AttachedPane,
+    options: terminal::AttachedOptions,
+    local_paste_target: LocalPasteTarget<I>,
+) -> anyhow::Result<terminal::AttachedTerminal>
+where
+    I: IntoIterator<Item = (String, String)>,
+{
+    let mux_pane_id = attached.pane_id;
+    let image_paste_handler = handler_for_pane(
+        build.runtime,
+        build.session_id,
+        mux_pane_id,
+        local_paste_target,
+    );
+    let mut built = TerminalBuilder::new_attached(
+        crate::mux::attached_pane_handover_with_secret(
+            attached,
+            build.runtime.client().clone(),
+            build.runtime.session_secret(),
+        ),
+        options,
+        build.executor,
+        PathStyle::local(),
+    )?;
+    built.builder = built
+        .builder
+        .with_image_paste_handler(image_paste_handler)
+        .with_working_directory(build.working_directory.clone());
+    Ok(built)
+}
+
+/// A pane the multiplexer relays, over its own stream or over Mosh.
+///
+/// Taking the Mosh stream is what releases the multiplexer's: `pane` is
+/// dropped by the caller in that case, and reading the remote host's output
+/// twice would pay for it twice.
+fn build_relayed_pane<I>(
+    build: &AttachedPaneBuild<'_>,
+    pane: &Arc<zmux::client::SharedPane>,
+    stream: Option<crate::remote_pane_transport::ZoshPaneStream>,
+    local_paste_target: LocalPasteTarget<I>,
+) -> (TerminalBuilder, AttachedPaneRegistration)
+where
+    I: IntoIterator<Item = (String, String)>,
+{
+    let mux_pane_id = pane.pane_id();
+    if let Some(stream) = stream {
+        let (built, session) = build_zosh_pane(
+            ZoshPaneBuild {
+                title: build.title.clone(),
+                cursor_shape: build.settings.cursor_shape,
+                alternate_scroll: build.settings.alternate_scroll,
+                max_scroll_history_lines: build.settings.max_scroll_history_lines,
+                window_id: build.window_id,
+                working_directory: build.working_directory.clone(),
+                runtime: build.runtime,
+                session_id: build.session_id,
+                mux_pane_id,
+                executor: build.executor,
+            },
+            stream,
+        );
+        return (built, AttachedPaneRegistration::Relayed(session));
+    }
+    // The replay goes to `with_replay` below and *only* there. Prefixing the
+    // reader with it as well wrote the restored screen twice: once here, into a
+    // grid still at its placeholder size, where all but the last few lines were
+    // lost and the survivors landed at the top — and once properly after the
+    // pane was laid out. A full-screen program redraws only what it thinks has
+    // changed, so the stray first rows stayed there: htop's footer, painted
+    // across the top of the window.
+    let reader: Box<dyn std::io::Read + Send> = Box::new(pane.reader());
+    let writer: Box<dyn std::io::Write + Send> = Box::new(SharedPaneWriter { pane: pane.clone() });
+    let built = TerminalBuilder::new_byte_stream(
+        reader,
+        writer,
+        build.title.clone(),
+        build.settings.cursor_shape,
+        build.settings.alternate_scroll,
+        build.settings.max_scroll_history_lines,
+        build.window_id,
+        build.executor,
+        PathStyle::local(),
+    )
+    .with_working_directory(build.working_directory.clone())
+    .with_replay(pane.replay.clone())
+    .with_pty_control(crate::mux::mux_pty_control_with_secret(
+        build.runtime.client().clone(),
+        build.session_id,
+        mux_pane_id,
+        build.runtime.session_secret(),
+    ))
+    .with_image_paste_handler(handler_for_pane(
+        build.runtime,
+        build.session_id,
+        mux_pane_id,
+        local_paste_target,
+    ));
+    (built, AttachedPaneRegistration::Shared(pane.clone()))
 }
 
 impl Zetta {
@@ -490,6 +671,7 @@ impl Zetta {
         attached: Vec<(u64, AttachedPaneKind)>,
         restored: &RestoredPaneMetadata,
         runtime: &MuxRuntime,
+        pane_streams: &mut RemotePaneStreams,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -527,88 +709,45 @@ impl Zetta {
                 environment: options.env.clone(),
                 working_directory: working_directory.clone(),
             };
-            let (mux_pane_id, built, child_events, shared) = match attached {
+            let build = AttachedPaneBuild {
+                session_id,
+                title: tab.process_title.clone().unwrap_or_default(),
+                settings: &settings,
+                working_directory: working_directory.clone(),
+                runtime,
+                window_id: cx.entity_id().as_u64(),
+                executor: cx.background_executor(),
+            };
+            let (mux_pane_id, built, child_events, registration) = match attached {
                 AttachedPaneKind::Exclusive(attached) => {
                     let mux_pane_id = attached.pane_id;
-                    let image_paste_handler =
-                        handler_for_pane(runtime, session_id, mux_pane_id, local_paste_target());
-                    match TerminalBuilder::new_attached(
-                        crate::mux::attached_pane_handover_with_secret(
-                            attached,
-                            runtime.client().clone(),
-                            runtime.session_secret(),
+                    let paste_target = local_paste_target();
+                    match build_exclusive_pane(&build, attached, options, paste_target) {
+                        Ok(built) => (
+                            mux_pane_id,
+                            Some(built.builder),
+                            Some(built.child_events),
+                            AttachedPaneRegistration::Exclusive,
                         ),
-                        options,
-                        cx.background_executor(),
-                        PathStyle::local(),
-                    ) {
-                        Ok(mut built) => {
-                            built.builder =
-                                built.builder.with_image_paste_handler(image_paste_handler);
-                            built.builder = built
-                                .builder
-                                .with_working_directory(working_directory.clone());
-                            (
-                                mux_pane_id,
-                                Some(built.builder),
-                                Some(built.child_events),
-                                None::<Arc<zmux::client::SharedPane>>,
-                            )
-                        }
                         Err(error) => {
                             if let Some(pane) = tab.pane_mut(pane_id) {
                                 pane.error =
                                     Some(format!("Could not reattach the terminal: {error:#}"));
                             }
-                            (
-                                mux_pane_id,
-                                None,
-                                None,
-                                None::<Arc<zmux::client::SharedPane>>,
-                            )
+                            (mux_pane_id, None, None, AttachedPaneRegistration::Exclusive)
                         }
                     }
                 }
                 AttachedPaneKind::Shared(pane) => {
                     let pane = Arc::new(pane);
                     let mux_pane_id = pane.pane_id();
-                    // The replay goes to `with_replay` below and *only* there.
-                    // Prefixing the reader with it as well wrote the restored
-                    // screen twice: once here, into a grid still at its
-                    // placeholder size, where all but the last few lines were lost
-                    // and the survivors landed at the top — and once properly after
-                    // the pane was laid out. A full-screen program redraws only
-                    // what it thinks has changed, so the stray first rows stayed
-                    // there: htop's footer, painted across the top of the window.
-                    let reader: Box<dyn std::io::Read + Send> = Box::new(pane.reader());
-                    let writer: Box<dyn std::io::Write + Send> =
-                        Box::new(SharedPaneWriter { pane: pane.clone() });
-                    let built = TerminalBuilder::new_byte_stream(
-                        reader,
-                        writer,
-                        tab.process_title.clone().unwrap_or_default(),
-                        settings.cursor_shape,
-                        settings.alternate_scroll,
-                        settings.max_scroll_history_lines,
-                        cx.entity_id().as_u64(),
-                        cx.background_executor(),
-                        PathStyle::local(),
-                    )
-                    .with_working_directory(working_directory.clone())
-                    .with_replay(pane.replay.clone())
-                    .with_pty_control(crate::mux::mux_pty_control_with_secret(
-                        runtime.client().clone(),
-                        session_id,
-                        mux_pane_id,
-                        runtime.session_secret(),
-                    ));
-                    let built = built.with_image_paste_handler(handler_for_pane(
-                        runtime,
-                        session_id,
-                        mux_pane_id,
+                    let (built, registration) = build_relayed_pane(
+                        &build,
+                        &pane,
+                        pane_streams.take(mux_pane_id),
                         local_paste_target(),
-                    ));
-                    (mux_pane_id, Some(built), None, Some(pane))
+                    );
+                    (mux_pane_id, Some(built), None, registration)
                 }
             };
             let Some(built) = built else {
@@ -629,14 +768,20 @@ impl Zetta {
                 session_id,
                 mux_pane_id,
             };
-            if let Some(shared) = &shared {
-                self.register_shared_pane(ids, shared, runtime, window, cx);
-            } else {
+            match registration {
+                AttachedPaneRegistration::Shared(shared) => {
+                    self.register_shared_pane(ids, &shared, runtime, window, cx);
+                }
+                AttachedPaneRegistration::Relayed(session) => {
+                    self.register_zosh_pane(ids, session, runtime, window, cx);
+                }
                 // This window now holds the descriptor, so it is the one the
                 // multiplexer will ask to hand the pane over when a third
                 // window attaches. Without this the request went nowhere and
                 // that attach waited out the whole handover timeout.
-                self.watch_for_revoke(ids, runtime, window, cx);
+                AttachedPaneRegistration::Exclusive => {
+                    self.watch_for_revoke(ids, runtime, window, cx);
+                }
             }
 
             let terminal = cx.new(|cx| built.subscribe(cx));

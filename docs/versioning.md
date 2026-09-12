@@ -6,7 +6,7 @@ installation:
 
 ```text
 Zetta 0.1.0
-CONTROL_VERSION=4
+CONTROL_VERSION=5
 CATALOG_VERSION=1
 ZMUX_PROTOCOL_VERSION=4
 ```
@@ -22,7 +22,7 @@ current source tree.
 | Marker | Current value | Owned by | What it versions | Compatibility effect |
 | --- | ---: | --- | --- | --- |
 | `CARGO_PKG_VERSION` | package version | Zetta and `zmux` | User-facing executable release | Identifies the build; it is not a wire-protocol negotiation value. |
-| `CONTROL_VERSION` | `4` | `crates/zmux/src/protocol.rs` | The Zetta-to-Zetta process-control endpoint and request meanings, including remote SSH session attach, disk-session resume, managed-worktree project opening, the explicit fresh-window launch, `zetta pane wait`, registered project shell commands, and payload-free tab-icon resets | Endpoints with another version are skipped. |
+| `CONTROL_VERSION` | `5` | `crates/zmux/src/protocol.rs` | The Zetta-to-Zetta process-control endpoint and request meanings, including remote session attach and the protocol its panes travel over, disk-session resume, managed-worktree project opening, the explicit fresh-window launch, `zetta pane wait`, registered project shell commands, and payload-free tab-icon resets | Endpoints with another version are skipped. |
 | `zmux::protocol::CATALOG_VERSION` | `1` | `crates/zmux/src/protocol.rs` | The public background-session catalog JSON | A catalog with another version is ignored until its owner publishes the current schema. |
 | `zmux::messages::PROTOCOL_VERSION` | `4` | `crates/zmux/src/messages.rs` | The client/daemon message protocol, including logical client IDs, stream-only SSH attach, session-secret envelopes, revisioned shared-session collaboration, shared-pane lifecycle events, disk-session resume, and length-prefixed transport framing | Normal requests require an exact match. `zmux --upgrade` is the compatibility path for replacing an older daemon. Debug session directories are namespaced by this value. |
 | `zmux::messages::SHARED_SESSION_STATE_VERSION` | `1` | `crates/zmux/src/messages.rs` | The versioned durable envelope containing a shared session's canonical revision, pane summary, layout/focus state, and opaque tab payload | A daemon preserves and validates this envelope across persistence and upgrade; an unknown state version is not interpreted as a different collaboration schema. |

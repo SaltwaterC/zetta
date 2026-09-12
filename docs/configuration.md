@@ -253,6 +253,34 @@ The `--retention` option is a bootstrap option for an independently launched
 `config.json` after the daemon is ready. The daemon's configured state, rather
 than an old process command line, is authoritative.
 
+## Remote session protocol
+
+What carries a remote session's panes, and how hard its link is held open:
+
+```json
+{
+  "sessions": {
+    "remote": {
+      "protocol": "zosh",
+      "keep_alive_ms": 500
+    }
+  }
+}
+```
+
+`sessions.remote.protocol` accepts `"ssh"` (the default) or `"zosh"`. Finding,
+attaching and administering a remote session is OpenSSH either way; `zosh`
+gives each attached pane a Mosh link of its own, which survives roaming and
+suspend. `keep_alive_ms` is how long such a link may go without sending before
+it holds itself open, between 20 and 3000 milliseconds; `null` leaves it on
+Mosh's own three-second heartbeat. It has no effect under `ssh`.
+
+Both are defaults for the remote-session picker, which can change either before
+connecting, and both are overridden by `zmux attach --protocol` and
+`--keep-alive`. See
+[Background sessions](background-sessions.md#carrying-panes-over-zosh) for what
+moves onto the Mosh link and what stays on SSH.
+
 ## Git worktree root
 
 The standalone `zwt` command and the compatible `zetta wt` commands use Git's

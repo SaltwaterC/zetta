@@ -163,3 +163,61 @@ fn an_ambiguous_bare_session_id_requires_the_full_identifier() {
     assert!(error.contains("ambiguous"), "{error}");
     assert!(error.contains("PROCESS:RUNNER:SESSION"), "{error}");
 }
+
+/// The protocol names a remote attach may ask for are checked here rather than
+/// in whichever window picks the request up, so a typo fails where it was
+/// typed.
+#[test]
+fn attach_takes_a_protocol_and_refuses_an_unknown_one() {
+    assert_eq!(parse_remote_protocol("ZOSH").unwrap(), "zosh");
+    assert_eq!(parse_remote_protocol(" ssh ").unwrap(), "ssh");
+
+    let error = parse_remote_protocol("mosh").unwrap_err().to_string();
+    assert!(error.contains("ssh"), "{error}");
+    assert!(error.contains("zosh"), "{error}");
+
+    let error = run(&args(&["attach", "--protocol"]))
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("--protocol requires"), "{error}");
+}
+
+/// `-k` takes no separate value, so `zmux attach -k host 42` still names a
+/// target; an interval is given with `=`, exactly as `zosh -k` spells it.
+#[test]
+fn keep_alive_defaults_without_a_value_and_bounds_one_that_is_given() {
+    assert_eq!(parse_keep_alive_interval("250").unwrap(), 250);
+    assert!(parse_keep_alive_interval("5").is_err());
+    assert!(parse_keep_alive_interval("99999").is_err());
+    assert!(parse_keep_alive_interval("soon").is_err());
+
+    // It holds a Zosh link open, so asking for one without asking for Zosh is
+    // a mistake rather than a setting that quietly does nothing.
+    let error = run(&args(&["attach", "host", "42", "--keep-alive"]))
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("--protocol zosh"), "{error}");
+}
+
+/// Both belong to `attach`; naming one anywhere else is a mistake worth
+/// reporting rather than an option that is silently ignored.
+#[test]
+fn the_remote_protocol_options_belong_to_attach() {
+    for arguments in [
+        args(&["list", "--protocol", "zosh"]),
+        args(&["reconnect", "42", "--keep-alive=250"]),
+    ] {
+        let error = run(&arguments).unwrap_err().to_string();
+        assert!(error.contains("only valid with attach"), "{error}");
+    }
+}
+
+/// The help has to name both, because a user who cannot see an option cannot
+/// choose it.
+#[test]
+fn the_protocol_options_are_documented() {
+    let help = usage(false);
+    assert!(help.contains("-P, --protocol NAME"), "{help}");
+    assert!(help.contains("-k, --keep-alive"), "{help}");
+    assert!(help.contains("relay-pane SESSION_ID PANE_ID"), "{help}");
+}

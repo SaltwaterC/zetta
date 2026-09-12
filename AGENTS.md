@@ -251,12 +251,23 @@ is a sibling under `src/`.
   `background_session_ui/observers.rs` (what a window watches on a background
   pane, and the catalog it publishes),
   `background_session_ui/multiplexer.rs` (handing a session to `zmux` and
-  attaching one from it), and `background_session_ui/shared_panes.rs`
+  attaching one from it), `background_session_ui/shared_panes.rs`, and
+  `background_session_ui/zosh_panes.rs` (a remote pane whose bytes arrive over
+  Mosh instead: what it registers, and what it deliberately does not)
 - `session_state.rs`: a tab as the multiplexer stores it — the opaque durable
   blob `zmux` round-trips without reading; see the module docs before adding a
   durable tab feature
 - `session_auto_protect.rs`: the automatic-protection policy for stored
   sessions
+- `remote_pane_transport.rs`: what carries a remote session's *panes*, as
+  distinct from its control traffic, which is always the SSH forward. A module
+  directory — the root owns `RemotePaneTransport` and the concurrent bootstrap;
+  `remote_pane_transport/zosh_stream.rs` brings up one `zosh-server` per pane
+  in front of `zmux relay-pane` and renders it with a headless
+  `zosh::PaneSession`, and `zosh_stream_disabled.rs` is the same surface for a
+  build without the bundled Zosh client, where the type has no values at all so
+  no call site needs a feature predicate. Read its module docs before changing
+  what a Mosh pane does and does not register
 - `mux.rs`: `MuxRuntime`, the `zmux` client connection shared by every pane in
   the process, and its retention/recovery state
 - `mux_identity.rs`: identity-file resolution for multiplexer commands
@@ -513,6 +524,16 @@ Note also that `crates/zmux` builds a `zmux` binary of its own, while the root
 package builds one from `src/bin/zmux.rs`. The one that actually runs is the
 root's, because a client resolves the multiplexer beside its own executable —
 so `crates/zmux`'s tests passing says nothing about the binary a user runs.
+
+The root's own `tests/` directory holds the one thing no unit test can reach:
+a remote pane carried over Mosh, end to end. It drives the root's `zmux` and
+`zosh-server` for the same reason `crates/zmux`'s tests do, so it is ignored by
+default and run deliberately:
+
+```sh
+cargo build --bin zmux --bin zosh-server
+cargo test --test zosh_pane -- --ignored
+```
 
 Cargo serialises on the target-directory lock, so `make build` run alongside
 `make test` blocks until the tests finish rather than building immediately.

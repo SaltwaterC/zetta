@@ -209,8 +209,21 @@ fn dispatch(command: ProcessControlCommand, cx: &mut AsyncApp) {
             port,
             session_id,
             secret,
+            protocol,
+            keep_alive_ms,
             completion,
-        } => open_remote_session(target, port, session_id, secret, completion, cx),
+        } => open_remote_session(
+            crate::background_session_ui::RemoteSessionRequest {
+                target,
+                port,
+                session_id,
+                secret,
+                protocol,
+                keep_alive_ms,
+            },
+            completion,
+            cx,
+        ),
         ProcessControlCommand::ResumeDiskSession {
             session_id,
             identity_paths,
@@ -743,21 +756,16 @@ fn reconnect_session(
 }
 
 fn open_remote_session(
-    target: String,
-    port: Option<u16>,
-    session_id: u64,
-    secret: Option<SessionSecret>,
+    request: crate::background_session_ui::RemoteSessionRequest,
     completion: Sender<ReconnectSessionResult>,
     cx: &mut AsyncApp,
 ) {
     let mut completion = Some(completion);
+    let mut request = Some(request);
     let dispatched = cx.update(|cx| {
         with_any_window(cx, |zetta, window, cx| {
             zetta.open_remote_session_from_cli(
-                target,
-                port,
-                session_id,
-                secret,
+                request.take().expect("remote session request"),
                 completion.take().expect("completion sender"),
                 window,
                 cx,
