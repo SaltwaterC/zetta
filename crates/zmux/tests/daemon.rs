@@ -3417,6 +3417,94 @@ fn shared_spawns_publish_events_and_preserve_local_grants() {
     drop(descriptor);
 }
 
+/// A window publishes a shared tab in two halves: the geometry the daemon owns,
+/// as a typed operation, and everything it stores without reading — the tab's
+/// icon, its titles, its pane names — as an opaque blob. Only the second half
+/// replaces that blob, so a viewer watching a geometry revision go past must be
+/// handed back the blob it already had, and must be given the new one as soon as
+/// it is published.
+#[test]
+fn a_published_tab_state_reaches_another_viewer_and_geometry_leaves_it_alone() {
+    let daemon = TestDaemon::start();
+    let client = daemon.client();
+    let _subscription = client.subscribe().unwrap();
+    let observer = daemon.client();
+    let observer_subscription = observer.subscribe().unwrap();
+
+    let pane = client
+        .spawn(spawn_request(None, "printf ready; sleep 60"))
+        .unwrap();
+    let descriptor = std::fs::File::from(pane.descriptor);
+    read_until(&descriptor, "ready");
+    let mut offered = summary(pane.session_id, pane.pane_id);
+    offered.panes.push(pane_summary(pane.pane_id));
+    let shared_at_first = serde_json::json!({ "icon": "pin" });
+    client
+        .share(
+            pane.session_id,
+            offered,
+            shared_at_first.clone(),
+            None,
+            true,
+        )
+        .unwrap();
+    let events = observer_subscription.shared.register(pane.session_id);
+
+    let focused = match client
+        .apply_shared(
+            pane.session_id,
+            SessionRevision::INITIAL,
+            SharedSessionOperation::SetFocus {
+                pane_id: pane.pane_id,
+            },
+        )
+        .unwrap()
+    {
+        zmux::client::SharedOperationResult::Applied(state) => state,
+        zmux::client::SharedOperationResult::Conflict(_) => panic!("the focus change conflicted"),
+    };
+    match recv_timeout(&events, Duration::from_secs(10))
+        .expect("a geometry change must reach the other viewer")
+    {
+        zmux::client::SharedSessionEvent::Updated(state) => assert_eq!(
+            state.state, shared_at_first,
+            "a geometry revision carries the tab state it already had"
+        ),
+        other => panic!("unexpected geometry event: {other:?}"),
+    }
+
+    let published = serde_json::json!({ "icon": "sparkle" });
+    match client
+        .apply_shared(
+            pane.session_id,
+            focused.revision,
+            SharedSessionOperation::SetTabState {
+                state: published.clone(),
+            },
+        )
+        .unwrap()
+    {
+        zmux::client::SharedOperationResult::Applied(state) => {
+            assert_eq!(state.state, published);
+        }
+        zmux::client::SharedOperationResult::Conflict(_) => {
+            panic!("the tab state conflicted at the revision the focus change returned")
+        }
+    }
+    match recv_timeout(&events, Duration::from_secs(10))
+        .expect("a published tab state must reach the other viewer")
+    {
+        zmux::client::SharedSessionEvent::Updated(state) => {
+            assert_eq!(state.state, published);
+            assert!(state.revision > focused.revision);
+        }
+        other => panic!("unexpected tab-state event: {other:?}"),
+    }
+
+    client.kill(pane.session_id).unwrap();
+    drop(descriptor);
+}
+
 #[test]
 fn shared_batch_spawns_commit_exact_geometry_and_rebase_same_target_additions() {
     let daemon = TestDaemon::start();

@@ -22,6 +22,12 @@ const SHARED_PUBLICATION_DEBOUNCE: Duration = Duration::from_millis(100);
 /// the user with an explanation.
 const SHARED_CLOSE_ATTEMPTS: u32 = 4;
 
+/// How many requests one publication may take. A publication converges the
+/// daemon on one dimension at a time — geometry first, then the durable tab
+/// state — and re-queues itself until nothing differs. The bound is what stops
+/// geometry the daemon will not accept from re-queuing for ever.
+const SHARED_PUBLISH_ATTEMPTS: u32 = 4;
+
 /// Multiplied by the attempt number, so the retries are spread rather than
 /// stacked on a daemon that is busy committing somebody else's operation.
 const SHARED_CLOSE_RETRY_BACKOFF: Duration = Duration::from_millis(120);
@@ -35,6 +41,18 @@ pub(crate) struct SharedSessionCoordinator {
 struct SharedSessionBinding {
     tab_id: u64,
     state: SharedSessionState,
+    /// The opaque tab blob this window last wrote into its tab.
+    ///
+    /// Only `ReplaceTab` and `SetTabState` replace the daemon's copy, so every
+    /// geometry revision carries the blob from whichever publication set it
+    /// last. Applying that again would rewrite the icon, the titles, the pane
+    /// names and the overlays from it — undoing a local change that has not
+    /// been published yet. Compared rather than the revision because both sides
+    /// are the same daemon field in the publisher's own id space.
+    applied_state: serde_json::Value,
+    /// The blob this window last published, so a publication driven by geometry
+    /// churn does not send identical bytes again.
+    last_published_state: Option<serde_json::Value>,
     mux_to_local: HashMap<u64, u64>,
     local_to_mux: HashMap<u64, u64>,
     /// Canonical mutations waiting their turn. Every change this window asks
@@ -73,9 +91,14 @@ struct SharedWatchConnection {
 /// changed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SharedOperation {
-    /// Publish this window's view of the tab — labels, icons, themes, and the
-    /// geometry the daemon does not already own.
-    PublishState,
+    /// Publish this window's view of the tab: the geometry the daemon does not
+    /// already own, and then the durable state it stores without reading —
+    /// labels, icons, titles, themes and overlays.
+    ///
+    /// The two halves are separate canonical operations, so one publication can
+    /// need two requests. It re-queues itself between them, counting attempts
+    /// so geometry that never converges cannot loop.
+    PublishState { attempts: u32 },
     /// Close a pane for every viewer.
     ClosePane {
         local_pane_id: u64,
@@ -90,7 +113,7 @@ impl SharedOperation {
     /// and re-queuing it must not leave the original behind.
     fn is_same_work(self, other: Self) -> bool {
         match (self, other) {
-            (Self::PublishState, Self::PublishState) => true,
+            (Self::PublishState { .. }, Self::PublishState { .. }) => true,
             (
                 Self::ClosePane { local_pane_id, .. },
                 Self::ClosePane {
@@ -136,6 +159,10 @@ impl SharedSessionCoordinator {
             session_id,
             SharedSessionBinding {
                 tab_id,
+                // Whoever binds has the tab this blob describes: a joiner built
+                // it from exactly these bytes, and a sharer published them.
+                applied_state: state.state.clone(),
+                last_published_state: None,
                 state,
                 mux_to_local,
                 local_to_mux,
@@ -195,6 +222,28 @@ impl SharedSessionCoordinator {
 
     pub(crate) fn state(&self, session_id: u64) -> Option<&SharedSessionState> {
         self.sessions.get(&session_id).map(|session| &session.state)
+    }
+
+    /// Whether this blob says something the daemon has not been told yet.
+    ///
+    /// Compared against what *this window* last published rather than against
+    /// the canonical copy: the two windows write their own pane ids into the
+    /// blob, so the canonical copy differs from ours whenever the other window
+    /// published last, even when both describe the same tab.
+    pub(crate) fn durable_state_is_unpublished(
+        &self,
+        session_id: u64,
+        state: &serde_json::Value,
+    ) -> bool {
+        self.sessions
+            .get(&session_id)
+            .is_some_and(|session| session.last_published_state.as_ref() != Some(state))
+    }
+
+    pub(crate) fn record_published_state(&mut self, session_id: u64, state: serde_json::Value) {
+        if let Some(session) = self.sessions.get_mut(&session_id) {
+            session.last_published_state = Some(state);
+        }
     }
 
     /// Whether this snapshot has already been superseded. Checked *before*
@@ -359,6 +408,13 @@ impl SharedSessionCoordinator {
     /// Accepts a complete canonical snapshot and maps its opaque tab state
     /// into this window's ids. A stale event is harmless; a caller that needs
     /// the full state after a gap asks `zmux` directly and calls this again.
+    ///
+    /// Geometry is installed from every snapshot, the durable tab state only
+    /// from one that carries a blob this window has not already applied. Only
+    /// `ReplaceTab` and `SetTabState` replace the daemon's copy of that blob, so
+    /// a geometry revision hands back whichever one was published last —
+    /// applying it again would undo an icon, a title or a rename that is still
+    /// waiting for its own publication.
     pub(crate) fn apply_snapshot_to_tab(
         &mut self,
         session_id: u64,
@@ -377,17 +433,27 @@ impl SharedSessionCoordinator {
             session.tab_id,
             tab.id
         );
-        let mut tab_state: TabState = match serde_json::from_value(state.state.clone()) {
-            Ok(state) => state,
-            Err(_error) if state.state.is_null() => {
-                // Sessions published by an older daemon may not have carried a
-                // durable tab blob. Preserve the local model while the summary
-                // supplies the authoritative shared layout below.
-                TabState::from_tab(tab, &session.local_to_mux)
-            }
-            Err(error) => return Err(error).context("reading the shared tab state"),
+        // Geometry is canonical on every snapshot; the durable half is only
+        // rewritten when the daemon's copy of it actually changed. Every
+        // geometry operation leaves that copy alone and hands it back
+        // unchanged, so applying it again would undo a local icon, title or
+        // rename that has not had its own publication yet.
+        let tab_state = if state.state == session.applied_state {
+            None
+        } else {
+            let mut tab_state: TabState = match serde_json::from_value(state.state.clone()) {
+                Ok(state) => state,
+                Err(_error) if state.state.is_null() => {
+                    // Sessions published by an older daemon may not have carried
+                    // a durable tab blob. Preserve the local model while the
+                    // summary supplies the authoritative shared layout below.
+                    TabState::from_tab(tab, &session.local_to_mux)
+                }
+                Err(error) => return Err(error).context("reading the shared tab state"),
+            };
+            remap_tab_state(&mut tab_state, &state.presentation, &session.mux_to_local)?;
+            Some(tab_state)
         };
-        remap_tab_state(&mut tab_state, &state.presentation, &session.mux_to_local)?;
         // Mapped and checked before anything is written. A layout naming a pane
         // this tab does not hold renders as a region nothing draws and never
         // gives its space back, so it is refused rather than installed;
@@ -413,7 +479,10 @@ impl SharedSessionCoordinator {
             }
         }
         ensure_layout_covers_tab(tab, &layout)?;
-        apply_tab_state(tab, tab_state);
+        if let Some(tab_state) = tab_state {
+            apply_tab_state(tab, tab_state);
+            session.applied_state = state.state.clone();
+        }
         apply_canonical_presentation(tab, &state, layout, &session.mux_to_local)?;
         session.state = state;
         Ok(SharedSnapshotDisposition::Applied)
@@ -653,9 +722,11 @@ impl Zetta {
         }
     }
 
-    /// Queues one canonical shared mutation after local state changes. Geometry
-    /// uses typed operations; the opaque replacement is limited to tab state the
-    /// daemon does not interpret, such as labels, icons, and themes.
+    /// Queues one canonical publication after local state changes. Geometry uses
+    /// typed operations; everything else the daemon stores without reading —
+    /// labels, icons, titles, themes and overlays — travels as the opaque tab
+    /// blob. A publication converges both, in that order, so a change to one is
+    /// never dropped because the other also changed.
     ///
     /// Debounced rather than sent: pointer-driven pane resizing produces dozens
     /// of local layout states per frame, and only the settled one is worth a
@@ -674,7 +745,7 @@ impl Zetta {
                 this.shared_collaboration
                     .clear_publication_schedule(session_id);
                 this.shared_collaboration
-                    .enqueue(session_id, SharedOperation::PublishState);
+                    .enqueue(session_id, SharedOperation::PublishState { attempts: 0 });
                 this.pump_shared_operations(tab_id, session_id, cx);
             })
             .ok();
@@ -697,7 +768,9 @@ impl Zetta {
             return;
         };
         match operation {
-            SharedOperation::PublishState => self.run_shared_publication(tab_id, session_id, cx),
+            SharedOperation::PublishState { attempts } => {
+                self.run_shared_publication(tab_id, session_id, attempts, cx);
+            }
             SharedOperation::ClosePane {
                 local_pane_id,
                 mux_pane_id,
@@ -719,36 +792,92 @@ impl Zetta {
         self.pump_shared_operations(tab_id, session_id, cx);
     }
 
-    fn run_shared_publication(&mut self, tab_id: u64, session_id: u64, cx: &mut Context<Self>) {
-        let Some((client, request)) = self.shared_tab_state_request(tab_id, session_id, cx) else {
+    /// Converges the tab on what the daemon answered a publication with, and
+    /// records the blob as published when it was the daemon that accepted it.
+    fn install_shared_publication_response(
+        &mut self,
+        session_id: u64,
+        published_state: Option<serde_json::Value>,
+        state: SharedSessionState,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(published_state) = published_state {
+            self.shared_collaboration
+                .record_published_state(session_id, published_state);
+        }
+        let Some(tab_id) = self.shared_collaboration.tab_id(session_id) else {
+            return;
+        };
+        if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id)
+            && let Err(error) = self
+                .shared_collaboration
+                .apply_snapshot_to_tab(session_id, state, tab)
+        {
+            log::warn!(
+                "could not apply the canonical response to publishing shared session \
+                 {session_id}: {error:#}"
+            );
+        }
+        cx.notify();
+    }
+
+    /// Sends one of a publication's two halves and queues the rest of it.
+    ///
+    /// Geometry goes first, because the durable half is built from the tab as it
+    /// stands once the daemon's answer has been installed. A publication that
+    /// sent geometry therefore re-queues itself: the follow-up finds geometry
+    /// converged and carries the tab blob. A publication that sent the blob is
+    /// the end of the chain unless the daemon refused it for a revision that
+    /// moved underneath it.
+    fn run_shared_publication(
+        &mut self,
+        tab_id: u64,
+        session_id: u64,
+        attempts: u32,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((client, request, published_state)) =
+            self.shared_publication_request(tab_id, session_id, cx)
+        else {
             self.finish_shared_operation(tab_id, session_id, cx);
             return;
         };
+        let sent_durable_state = published_state.is_some();
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_spawn(async move { client.apply_shared_with_request(request) })
                 .await;
             this.update(cx, |this, cx| {
-                match result {
-                    Ok(zmux::client::SharedOperationResult::Applied(state))
-                    | Ok(zmux::client::SharedOperationResult::Conflict(state)) => {
-                        if let Some(bound_tab_id) = this.shared_collaboration.tab_id(session_id) {
-                            if let Some(tab) =
-                                this.tabs.iter_mut().find(|tab| tab.id == bound_tab_id)
-                                && let Err(error) = this
-                                    .shared_collaboration
-                                    .apply_snapshot_to_tab(session_id, state, tab)
-                            {
-                                log::warn!(
-                                    "could not apply the canonical response to publishing shared session {session_id}: {error:#}"
-                                );
-                            }
-                            cx.notify();
-                        }
+                let settled = match result {
+                    Ok(zmux::client::SharedOperationResult::Applied(state)) => {
+                        this.install_shared_publication_response(
+                            session_id,
+                            published_state,
+                            state,
+                            cx,
+                        );
+                        sent_durable_state
                     }
+                    // Refused for a revision that moved underneath the request,
+                    // which for an exact-revision operation needs no more than
+                    // another viewer changing the geometry. Worth one more try
+                    // from the state the refusal carried.
+                    Ok(zmux::client::SharedOperationResult::Conflict(state)) => {
+                        this.install_shared_publication_response(session_id, None, state, cx);
+                        false
+                    }
+                    // Nothing came back to converge on, so there is nothing to
+                    // rebase a second attempt against either. The next local
+                    // change publishes again.
                     Err(error) => {
-                        log::warn!("could not publish shared session {session_id} tab state: {error:#}");
+                        log::warn!(
+                            "could not publish shared session {session_id} tab state: {error:#}"
+                        );
+                        true
                     }
+                };
+                if !settled && let Some(retry) = publication_retry(attempts) {
+                    this.shared_collaboration.enqueue(session_id, retry);
                 }
                 this.finish_shared_operation(tab_id, session_id, cx);
             })
@@ -879,7 +1008,13 @@ impl Zetta {
         cx.notify();
     }
 
-    pub(crate) fn shared_tab_state_request(
+    /// The next request a publication owes the daemon, and — when that request
+    /// is the durable half — the blob it carries, so the caller can record it as
+    /// published once the daemon has taken it.
+    ///
+    /// `None` means this window and the daemon already agree and nothing needs
+    /// sending.
+    fn shared_publication_request(
         &self,
         tab_id: u64,
         session_id: u64,
@@ -887,33 +1022,13 @@ impl Zetta {
     ) -> Option<(
         Arc<zmux::client::Client>,
         zmux::messages::SharedSessionOperationRequest,
+        Option<serde_json::Value>,
     )> {
         let runtime = self.mux_panes.runtime_for_tab(tab_id)?;
         let canonical = self.shared_collaboration.state(session_id)?;
         let base_revision = canonical.revision;
         let tab = self.tabs.iter().find(|tab| tab.id == tab_id)?;
-        let protected = tab
-            .close_policy
-            .background_authentication()
-            .flatten()
-            .is_some();
-        let mut summary = self.background_session_summary(tab, protected, cx);
-        if let Err(error) = remap_summary_to_mux(&mut summary, self.mux_panes.ids()) {
-            log::debug!("could not serialize shared tab state: {error:#}");
-            return None;
-        }
-        summary.id = session_id;
-        let state = match serde_json::to_value(crate::session_state::TabState::from_tab(
-            tab,
-            self.mux_panes.ids(),
-        )) {
-            Ok(state) => state,
-            Err(error) => {
-                log::debug!("could not serialize shared tab state: {error:#}");
-                return None;
-            }
-        };
-        let client = runtime.client().clone();
+        let summary = self.shared_summary_in_mux_ids(tab, session_id, cx);
         let maximized_pane = tab
             .maximized_pane
             .and_then(|pane_id| self.mux_panes.mux_pane_id(pane_id));
@@ -922,46 +1037,89 @@ impl Zetta {
             .iter()
             .filter_map(|pane_id| self.mux_panes.mux_pane_id(*pane_id))
             .collect::<Vec<_>>();
-        let operation = if summary.layout != canonical.presentation.layout {
-            shared_layout_operation(
-                &canonical.presentation.layout,
-                &summary.layout,
-                summary.active_pane,
+        let geometry = summary.as_ref().and_then(|summary| {
+            shared_geometry_operation(
+                &canonical.presentation,
+                summary,
+                maximized_pane,
+                &minimized_panes,
             )
-            .unwrap_or(zmux::messages::SharedSessionOperation::SetLayout {
-                layout: summary.layout.clone(),
-            })
-        } else if summary.active_pane != canonical.presentation.active_pane {
-            zmux::messages::SharedSessionOperation::SetFocus {
-                pane_id: summary.active_pane,
+        });
+        let (operation, published_state) = match geometry {
+            Some(operation) => (operation, None),
+            None => {
+                let (operation, state) = self.shared_durable_operation(tab, session_id, summary)?;
+                (operation, Some(state))
             }
-        } else if maximized_pane != canonical.presentation.maximized_pane {
-            zmux::messages::SharedSessionOperation::SetMaximized {
-                pane_id: maximized_pane,
-            }
-        } else if minimized_panes != canonical.presentation.minimized_panes {
-            let changed = minimized_panes
-                .iter()
-                .chain(&canonical.presentation.minimized_panes)
-                .copied()
-                .find(|pane_id| {
-                    minimized_panes.contains(pane_id)
-                        != canonical.presentation.minimized_panes.contains(pane_id)
-                })?;
-            zmux::messages::SharedSessionOperation::SetMinimized {
-                pane_id: changed,
-                minimized: minimized_panes.contains(&changed),
-            }
-        } else {
-            zmux::messages::SharedSessionOperation::ReplaceTab { summary, state }
         };
+        let client = runtime.client().clone();
         let request = zmux::messages::SharedSessionOperationRequest {
             session_id,
             base_revision,
             operation_id: client.next_shared_operation_id(),
             operation,
         };
-        Some((client, request))
+        Some((client, request, published_state))
+    }
+
+    /// This window's summary of the tab, in the daemon's pane ids.
+    ///
+    /// `None` when a pane of the tab has no multiplexer id yet — the draft of a
+    /// split still in flight. That makes the summary undescribable, and with it
+    /// every geometry operation, but not the durable tab state: the blob records
+    /// `mux_pane_id: None` for such a pane and the receiving side already drops
+    /// it, so the icon, the titles and the pane names still travel.
+    fn shared_summary_in_mux_ids(
+        &self,
+        tab: &Tab,
+        session_id: u64,
+        cx: &App,
+    ) -> Option<BackgroundSessionSummary> {
+        let protected = tab
+            .close_policy
+            .background_authentication()
+            .flatten()
+            .is_some();
+        let mut summary = self.background_session_summary(tab, protected, cx);
+        if let Err(error) = remap_summary_to_mux(&mut summary, self.mux_panes.ids()) {
+            // Not `debug`: this is the window and the daemon disagreeing about
+            // which panes the session holds, which is what leaves geometry
+            // diverged with nothing saying so.
+            log::warn!(
+                "could not describe shared session {session_id} in the multiplexer's pane ids: \
+                 {error:#}"
+            );
+            return None;
+        }
+        summary.id = session_id;
+        Some(summary)
+    }
+
+    /// The durable tab state to publish and the blob it carries, or `None` when
+    /// this window already published exactly these bytes.
+    fn shared_durable_operation(
+        &self,
+        tab: &Tab,
+        session_id: u64,
+        summary: Option<BackgroundSessionSummary>,
+    ) -> Option<(zmux::messages::SharedSessionOperation, serde_json::Value)> {
+        let state = match serde_json::to_value(crate::session_state::TabState::from_tab(
+            tab,
+            self.mux_panes.ids(),
+        )) {
+            Ok(state) => state,
+            Err(error) => {
+                log::warn!("could not serialize shared session {session_id} tab state: {error:#}");
+                return None;
+            }
+        };
+        if !self
+            .shared_collaboration
+            .durable_state_is_unpublished(session_id, &state)
+        {
+            return None;
+        }
+        Some((durable_state_operation(state.clone(), summary), state))
     }
 
     /// Keeps a shared tab subscribed to canonical collaboration snapshots.
@@ -1644,6 +1802,85 @@ async fn attach_shared_pane_with_retries(
     }
     log::warn!("gave up attaching shared pane {mux_pane_id} of session {session_id}");
     None
+}
+
+/// The one canonical geometry change a publication owes, or `None` when the
+/// daemon's geometry already matches this window's.
+///
+/// Geometry converges a dimension at a time, deliberately: each operation names
+/// what changed rather than replacing the tree, so two viewers moving different
+/// dividers do not undo one another. The caller sends the durable tab state
+/// once this returns `None`, which is what keeps an icon or a rename from being
+/// dropped because the layout happened to differ in the same publication.
+fn shared_geometry_operation(
+    canonical: &zmux::messages::SharedPresentationState,
+    summary: &BackgroundSessionSummary,
+    maximized_pane: Option<u64>,
+    minimized_panes: &[u64],
+) -> Option<zmux::messages::SharedSessionOperation> {
+    if summary.layout != canonical.layout {
+        return Some(
+            shared_layout_operation(&canonical.layout, &summary.layout, summary.active_pane)
+                .unwrap_or(zmux::messages::SharedSessionOperation::SetLayout {
+                    layout: summary.layout.clone(),
+                }),
+        );
+    }
+    if summary.active_pane != canonical.active_pane {
+        return Some(zmux::messages::SharedSessionOperation::SetFocus {
+            pane_id: summary.active_pane,
+        });
+    }
+    if maximized_pane != canonical.maximized_pane {
+        return Some(zmux::messages::SharedSessionOperation::SetMaximized {
+            pane_id: maximized_pane,
+        });
+    }
+    if minimized_panes == canonical.minimized_panes {
+        return None;
+    }
+    let changed = minimized_panes
+        .iter()
+        .chain(&canonical.minimized_panes)
+        .copied()
+        .find(|pane_id| {
+            minimized_panes.contains(pane_id) != canonical.minimized_panes.contains(pane_id)
+        })?;
+    Some(zmux::messages::SharedSessionOperation::SetMinimized {
+        pane_id: changed,
+        minimized: minimized_panes.contains(&changed),
+    })
+}
+
+/// How the tab state the daemon stores without reading it — icons, titles, pane
+/// names, themes and overlays — is carried to the other viewers.
+///
+/// `ReplaceTab` when the summary can be described, because that also refreshes
+/// what the catalog and the pickers show; `SetTabState` otherwise, so a tab
+/// holding a pane the daemon has not committed yet still publishes what the user
+/// chose. The daemon discards a `ReplaceTab`'s layout and focus in favour of its
+/// own presentation, so neither form can move geometry — which is why the two
+/// halves of a publication are independent.
+fn durable_state_operation(
+    state: serde_json::Value,
+    summary: Option<BackgroundSessionSummary>,
+) -> zmux::messages::SharedSessionOperation {
+    match summary {
+        Some(summary) => zmux::messages::SharedSessionOperation::ReplaceTab { summary, state },
+        None => zmux::messages::SharedSessionOperation::SetTabState { state },
+    }
+}
+
+/// The publication to queue when this one has not converged yet, or `None` once
+/// it has asked as many times as it may.
+///
+/// Geometry the daemon will not accept would otherwise re-queue for ever: each
+/// answer installs the canonical state, the tab still disagrees, and the next
+/// publication proposes the same change again.
+fn publication_retry(attempts: u32) -> Option<SharedOperation> {
+    (attempts + 1 < SHARED_PUBLISH_ATTEMPTS).then_some(SharedOperation::PublishState {
+        attempts: attempts + 1,
+    })
 }
 
 fn shared_layout_operation(

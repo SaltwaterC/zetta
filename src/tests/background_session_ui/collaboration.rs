@@ -134,6 +134,150 @@ fn canonical_snapshots_apply_with_local_ids_and_reject_stale_revisions() {
     assert_eq!(coordinator.state(9).unwrap().revision.0, 5);
 }
 
+/// Only `ReplaceTab` and `SetTabState` replace the daemon's copy of the opaque
+/// tab blob, so every geometry revision hands back whichever one was published
+/// last. Applying that again rewrote the icon, the titles and the pane names
+/// from it — undoing a local change still waiting for its own publication, which
+/// is how an icon set in one window snapped back and never reached the other.
+#[test]
+fn a_geometry_only_snapshot_does_not_roll_back_unpublished_tab_state() {
+    let mut coordinator = SharedSessionCoordinator::default();
+    coordinator
+        .bind(9, 100, canonical_state(9, 4), [(41, 7)])
+        .unwrap();
+    let mut tab = local_tab(100, 7);
+    coordinator
+        .apply_snapshot_to_tab(9, canonical_state(9, 5), &mut tab)
+        .unwrap();
+
+    // A durable change this window has made and not published yet.
+    tab.custom_title = Some("chosen here".to_owned());
+    tab.icon = Some(IconName::Sparkle);
+    tab.icon_override = TabIconOverride::Icon(IconName::Sparkle);
+
+    // A revision that moved the geometry and nothing else: same blob, because
+    // no viewer published one.
+    let mut geometry = canonical_state(9, 5);
+    geometry.revision = zmux::messages::SessionRevision(6);
+    geometry.presentation.maximized_pane = Some(41);
+    assert_eq!(
+        coordinator
+            .apply_snapshot_to_tab(9, geometry, &mut tab)
+            .unwrap(),
+        SharedSnapshotDisposition::Applied
+    );
+    assert_eq!(
+        tab.maximized_pane,
+        Some(7),
+        "geometry is canonical on every snapshot"
+    );
+    assert_eq!(tab.custom_title.as_deref(), Some("chosen here"));
+    assert_eq!(tab.icon, Some(IconName::Sparkle));
+
+    // The control: a snapshot that does carry a new blob still wins, so the
+    // assertions above are about the blob being unchanged and not about the
+    // durable half having stopped applying altogether.
+    assert_eq!(
+        coordinator
+            .apply_snapshot_to_tab(9, canonical_state(9, 7), &mut tab)
+            .unwrap(),
+        SharedSnapshotDisposition::Applied
+    );
+    assert_eq!(tab.custom_title.as_deref(), Some("canonical-7"));
+    assert_eq!(tab.icon, None);
+}
+
+/// The publication chain: geometry converges one dimension per request, and the
+/// durable half is what runs once there is no geometry left to send. It used to
+/// be the last arm of the same `if`/`else`, so any difference in the layout, the
+/// focus, the maximized pane or the minimized ones sent a geometry operation
+/// *instead of* the tab state, and nothing ever retried it.
+#[test]
+fn geometry_converges_a_dimension_at_a_time_and_then_yields_to_the_tab_state() {
+    let canonical = canonical_state(9, 3);
+    let mut summary = canonical.summary.clone();
+
+    assert_eq!(
+        shared_geometry_operation(&canonical.presentation, &summary, None, &[]),
+        None,
+        "an agreed geometry leaves the publication free to send the tab state"
+    );
+
+    summary.active_pane = 42;
+    assert_eq!(
+        shared_geometry_operation(&canonical.presentation, &summary, None, &[]),
+        Some(zmux::messages::SharedSessionOperation::SetFocus { pane_id: 42 })
+    );
+
+    summary.active_pane = canonical.presentation.active_pane;
+    assert_eq!(
+        shared_geometry_operation(&canonical.presentation, &summary, Some(41), &[]),
+        Some(zmux::messages::SharedSessionOperation::SetMaximized { pane_id: Some(41) })
+    );
+    assert_eq!(
+        shared_geometry_operation(&canonical.presentation, &summary, None, &[41]),
+        Some(zmux::messages::SharedSessionOperation::SetMinimized {
+            pane_id: 41,
+            minimized: true
+        })
+    );
+}
+
+/// A pane the daemon has not committed yet — the draft of a split in flight —
+/// makes the summary undescribable in the multiplexer's ids, which used to
+/// abandon the whole publication. The blob needs no such mapping.
+#[test]
+fn a_tab_the_summary_cannot_describe_still_publishes_its_durable_state() {
+    let state = serde_json::json!({ "icon": "sparkle" });
+    assert!(matches!(
+        durable_state_operation(state.clone(), None),
+        zmux::messages::SharedSessionOperation::SetTabState { .. }
+    ));
+    assert!(
+        matches!(
+            durable_state_operation(state, Some(shared_state(9, 1).summary)),
+            zmux::messages::SharedSessionOperation::ReplaceTab { .. }
+        ),
+        "a summary that does map is published with the blob, so the catalog stays fresh"
+    );
+}
+
+/// Geometry churn republishing identical bytes would bump the canonical revision
+/// for every viewer and give them a blob they already have.
+#[test]
+fn the_same_tab_state_is_not_published_twice() {
+    let mut coordinator = SharedSessionCoordinator::default();
+    coordinator
+        .bind(9, 100, canonical_state(9, 4), [(41, 7)])
+        .unwrap();
+    let state = serde_json::json!({ "icon": "sparkle" });
+
+    assert!(
+        coordinator.durable_state_is_unpublished(9, &state),
+        "a window that has published nothing owes its first blob"
+    );
+    coordinator.record_published_state(9, state.clone());
+    assert!(!coordinator.durable_state_is_unpublished(9, &state));
+    assert!(coordinator.durable_state_is_unpublished(9, &serde_json::json!({ "icon": "pin" })));
+}
+
+/// A publication re-queues itself between its halves. Geometry the daemon will
+/// not accept would otherwise propose the same change for ever.
+#[test]
+fn a_publication_stops_re_queuing_at_its_attempt_limit() {
+    assert_eq!(
+        publication_retry(0),
+        Some(SharedOperation::PublishState { attempts: 1 })
+    );
+    assert_eq!(
+        publication_retry(SHARED_PUBLISH_ATTEMPTS - 2),
+        Some(SharedOperation::PublishState {
+            attempts: SHARED_PUBLISH_ATTEMPTS - 1
+        })
+    );
+    assert_eq!(publication_retry(SHARED_PUBLISH_ATTEMPTS - 1), None);
+}
+
 /// `Tab::remove_pane` leaves the layout alone, and the shared-session removers
 /// have no reshape of their own — they expect a canonical snapshot to supply
 /// one. When that snapshot turns out to be stale or unapplicable, the pane's
@@ -351,7 +495,7 @@ fn shared_geometry_queue_is_single_flight_and_remembers_pending_work() {
         .bind(9, 100, shared_state(9, 1), [(41, 7)])
         .unwrap();
 
-    coordinator.enqueue(9, SharedOperation::PublishState);
+    coordinator.enqueue(9, SharedOperation::PublishState { attempts: 0 });
     coordinator.enqueue(
         9,
         SharedOperation::ClosePane {
@@ -363,7 +507,7 @@ fn shared_geometry_queue_is_single_flight_and_remembers_pending_work() {
 
     assert_eq!(
         coordinator.take_next_operation(9),
-        Some(SharedOperation::PublishState),
+        Some(SharedOperation::PublishState { attempts: 0 }),
         "operations run in the order they were asked for"
     );
     assert!(!coordinator.may_report_size(9));
@@ -394,8 +538,11 @@ fn queued_shared_operations_collapse_onto_equivalent_work() {
         .bind(9, 100, shared_state(9, 1), [(41, 7)])
         .unwrap();
 
-    coordinator.enqueue(9, SharedOperation::PublishState);
-    coordinator.enqueue(9, SharedOperation::PublishState);
+    coordinator.enqueue(9, SharedOperation::PublishState { attempts: 0 });
+    // A publication re-queues itself between its geometry and durable halves,
+    // and must not leave a second one behind when a local change queues one at
+    // the same time: both would publish the same tab.
+    coordinator.enqueue(9, SharedOperation::PublishState { attempts: 1 });
     let close = SharedOperation::ClosePane {
         local_pane_id: 7,
         mux_pane_id: 41,
@@ -416,7 +563,7 @@ fn queued_shared_operations_collapse_onto_equivalent_work() {
 
     assert_eq!(
         coordinator.take_next_operation(9),
-        Some(SharedOperation::PublishState)
+        Some(SharedOperation::PublishState { attempts: 0 })
     );
     coordinator.finish_operation(9);
     assert_eq!(coordinator.take_next_operation(9), Some(close));
