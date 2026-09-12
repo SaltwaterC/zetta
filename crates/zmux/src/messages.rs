@@ -15,7 +15,13 @@ use crate::protocol::{BackgroundPaneLayout, BackgroundSessionSummary, Restorable
 
 /// The wire format, and what a client and a multiplexer compare before they
 /// trust each other to understand one another.
-pub const PROTOCOL_VERSION: u32 = 5;
+///
+/// 6: a shared pane draft names its profile and lets the daemon's host resolve
+///    it, instead of carrying the requester's program, arguments and whole
+///    environment. `SharedPaneDraft` rejects unknown fields, so a client that
+///    sends the new shape to a daemon that predates it gets a parse failure
+///    rather than a version mismatch — which is why this has to move with it.
+pub const PROTOCOL_VERSION: u32 = 6;
 
 /// Version of the durable collaboration envelope. This is independent from
 /// [`PROTOCOL_VERSION`]: a daemon upgrade may keep a session state produced by

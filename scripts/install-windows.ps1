@@ -18,6 +18,7 @@ param(
     [string]$SourceZwtBinary,
     [switch]$WorktreeEnabled,
     [switch]$MuxDisabled,
+    [switch]$UpgradeMux,
     [switch]$ZoshEnabled,
     [switch]$ZoshServerEnabled,
     [string]$InstallDirectory,
@@ -513,6 +514,27 @@ function Install-Binary {
     Write-Host "Installed Zetta and its Windows runtime to $InstallDirectory"
 }
 
+function Invoke-MuxUpgrade {
+    if (-not $UpgradeMux -or -not $muxEnabled) {
+        return
+    }
+
+    $output = @(& $installedMuxBinary --upgrade 2>&1)
+    $exitCode = $LASTEXITCODE
+    if ($exitCode -eq 0) {
+        foreach ($line in $output) {
+            Write-Host $line
+        }
+        return
+    }
+
+    $message = $output -join [Environment]::NewLine
+    if ($message -match "no multiplexer is running") {
+        return
+    }
+    throw "Could not upgrade the installed multiplexer: $message"
+}
+
 function Install-Shortcut {
     if (-not (Test-Path -LiteralPath $installedGuiBinary -PathType Leaf)) {
         throw "Installed GUI launcher not found at $installedGuiBinary. Install the binaries first."
@@ -598,6 +620,7 @@ function Uninstall-Binary {
 switch ($Action) {
     "Install" {
         Install-Binary
+        Invoke-MuxUpgrade
         Install-Shortcut
     }
     "InstallBinary" { Install-Binary }

@@ -205,13 +205,14 @@ LINUX_USER_ZOSH_PATH := $(LINUX_USER_BIN_DIR)/zosh
 WINDOWS_ZWT_ARGS := $(if $(call tool_enabled,$(WORKTREE)), -SourceZwtBinary "$(BUILD_TARGET_DIR)/zwt.exe",)
 WINDOWS_ZOSH_ARGS := $(if $(call tool_enabled,$(ZOSH_CLIENT)), -SourceZoshBinary "$(BUILD_TARGET_DIR)/zosh.exe",)$(if $(call tool_enabled,$(ZOSH_SERVER)), -SourceZoshServerBinary "$(BUILD_TARGET_DIR)/zosh-server.exe",)
 WINDOWS_ZMUX_ARGS := $(if $(call tool_enabled,$(ZMUX)),, -MuxDisabled)
+WINDOWS_ZMUX_UPGRADE_ARGS := $(if $(call tool_enabled,$(ZMUX)), -UpgradeMux,)
 
 .PHONY: all build fmt test lint check-platforms check-features \
 	check-linux check-windows check-macos \
 	clippy-platforms clippy-features clippy-linux clippy-windows clippy-macos \
 	can-check-linux can-check-windows can-check-macos \
 	install install-binary install-capabilities install-assets install-user-path uninstall \
-	uninstall-binary uninstall-assets uninstall-user-path refresh-desktop-caches clean
+	uninstall-binary uninstall-assets uninstall-user-path refresh-desktop-caches upgrade-mux clean
 
 all: fmt lint test build
 
@@ -459,12 +460,29 @@ clippy-linux clippy-windows clippy-macos clippy-features clippy-platforms:
 	@$(MAKE) --no-print-directory $(patsubst clippy-%,check-%,$@) \
 		PLATFORM_CARGO_CMD=clippy PLATFORM_CARGO_ARGS='-- -D warnings'
 
+# `zmux --upgrade` is intentionally best-effort only when no daemon exists:
+# that is the normal case on a first install, while a real upgrade failure must
+# still stop the install. Staged installs must not contact the installing
+# user's live session daemon or hand it a path inside DESTDIR.
+define run_zmux_upgrade
+	@upgrade_output=$$($(1) --upgrade 2>&1); \
+	upgrade_status=$$?; \
+	if [ "$$upgrade_status" -eq 0 ]; then \
+		printf '%s\n' "$$upgrade_output"; \
+	else \
+		case "$$upgrade_output" in \
+			*"no multiplexer is running"*) ;; \
+			*) printf '%s\n' "$$upgrade_output" >&2; exit "$$upgrade_status";; \
+		esac; \
+	fi
+endef
+
 ifeq ($(OS),Windows_NT)
 build:
 	cmd.exe /d /c scripts\build-windows.cmd $(CARGO_PROFILE_ARGS)
 
 install: build
-	powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/install-windows.ps1 -Action Install -SourceBinary "$(BUILD_TARGET_DIR)/zetta.exe" -SourceGuiBinary "$(BUILD_TARGET_DIR)/zetta-gui.exe" $(WINDOWS_ZMUX_ARGS) $(WINDOWS_ZOSH_ARGS)$(WINDOWS_ZWT_ARGS)
+	powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/install-windows.ps1 -Action Install -SourceBinary "$(BUILD_TARGET_DIR)/zetta.exe" -SourceGuiBinary "$(BUILD_TARGET_DIR)/zetta-gui.exe" $(WINDOWS_ZMUX_ARGS)$(WINDOWS_ZMUX_UPGRADE_ARGS) $(WINDOWS_ZOSH_ARGS)$(WINDOWS_ZWT_ARGS)
 
 install-binary:
 	powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/install-windows.ps1 -Action InstallBinary -SourceBinary "$(BUILD_TARGET_DIR)/zetta.exe" -SourceGuiBinary "$(BUILD_TARGET_DIR)/zetta-gui.exe" $(WINDOWS_ZMUX_ARGS) $(WINDOWS_ZOSH_ARGS)$(WINDOWS_ZWT_ARGS)
@@ -502,9 +520,17 @@ install:
 		$(MAKE) build; \
 	fi
 	$(MAKE) install-binary
+	$(MAKE) upgrade-mux
 	$(MAKE) install-capabilities
 	$(MAKE) install-assets
 	$(MAKE) install-user-path
+
+upgrade-mux:
+ifneq ($(call tool_enabled,$(ZMUX)),)
+ifeq ($(DESTDIR),)
+	$(call run_zmux_upgrade,"$(MAC_RUNTIME_BUNDLE)/Contents/MacOS/zmux")
+endif
+endif
 
 install-binary:
 	mkdir -p "$(MAC_BUNDLE)/Contents/MacOS" "$(BINDIR)"
@@ -612,9 +638,17 @@ install:
 		$(MAKE) build; \
 	fi
 	$(MAKE) install-binary
+	$(MAKE) upgrade-mux
 	$(MAKE) install-capabilities
 	$(MAKE) install-assets
 	$(MAKE) install-user-path
+
+upgrade-mux:
+ifneq ($(call tool_enabled,$(ZMUX)),)
+ifeq ($(DESTDIR),)
+	$(call run_zmux_upgrade,"$(BINDIR)/zmux")
+endif
+endif
 
 install-binary:
 	$(INSTALL) -Dm755 "$(BUILD_TARGET_DIR)/zetta" $(BINDIR)/zetta

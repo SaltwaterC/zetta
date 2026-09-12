@@ -596,3 +596,45 @@ fn a_shared_reader_replays_a_replacement_before_framed_events_without_duplicatio
         b"after-reconnect"
     );
 }
+
+/// A daemon left over from an earlier build has to be reported as one, before
+/// anything is sent to it.
+///
+/// Without this the mismatch surfaces wherever the two builds' messages first
+/// disagree: changing `SharedPaneDraft` to name a profile made an older daemon
+/// answer "unknown field `profile`" to every attempt to open a pane, because
+/// its request never parsed far enough for the version to be compared. The
+/// endpoint publishes the version for exactly this reason — so the check
+/// happens before a request is framed, not inside one.
+#[cfg(unix)]
+#[test]
+fn a_daemon_from_an_earlier_protocol_is_refused_by_version_not_by_parse_failure() {
+    use std::os::unix::net::UnixListener;
+
+    let directory = tempfile::tempdir().unwrap();
+    let socket_path = directory.path().join("zmux.sock");
+    let _listener = UnixListener::bind(&socket_path).unwrap();
+    Endpoint {
+        version: crate::transport::ENDPOINT_VERSION,
+        protocol_version: PROTOCOL_VERSION - 1,
+        process_id: 4242,
+        socket_path,
+        token: "test-token".to_owned(),
+    }
+    .write(&directory.path().join("zmux.json"))
+    .unwrap();
+
+    let Err(error) = Client::connect_existing_at(directory.path()) else {
+        panic!("a daemon speaking another protocol cannot serve this client");
+    };
+    let error = format!("{error:#}");
+
+    assert!(
+        error.contains(&format!("protocol version {}", PROTOCOL_VERSION - 1)),
+        "the error has to name the version actually running: {error}"
+    );
+    assert!(
+        error.contains("--upgrade"),
+        "and say how to replace it without losing its sessions: {error}"
+    );
+}
