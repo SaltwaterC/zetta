@@ -458,3 +458,124 @@ fn a_pane_is_only_attached_once_across_concurrent_snapshots() {
         "a failed attachment is retried by the next snapshot"
     );
 }
+
+/// A split puts its new pane in the tab before the session has heard of it, so
+/// a tab being reconciled mid-split holds a pane with no translation. Reading
+/// that as "the session dropped this pane" deletes the very pane the split is
+/// about to propose — which is how every split in a shared tab came to fail
+/// with "shared draft pane is not in the tab layout".
+#[test]
+fn a_pane_the_session_has_not_heard_of_yet_is_not_one_it_lost() {
+    let mut tab = local_tab(100, 7);
+    tab.panes
+        .push(TerminalPane::new(8, tab.panes[0].profile.clone()));
+    tab.pane_indices.insert(8, 1);
+    // Pane 7 is the session's pane 41; pane 8 is a draft with no translation.
+    let local_to_mux = HashMap::from([(7, 41)]);
+
+    let lost = panes_the_session_lost(&tab, &local_to_mux, &shared_state(9, 1));
+
+    assert!(
+        lost.is_empty(),
+        "an untranslated pane is a draft, not a loss: {lost:?}"
+    );
+}
+
+#[test]
+fn a_pane_whose_session_pane_is_gone_is_dropped() {
+    let mut tab = local_tab(100, 7);
+    tab.panes
+        .push(TerminalPane::new(8, tab.panes[0].profile.clone()));
+    tab.pane_indices.insert(8, 1);
+    // Pane 8 translates to a session pane the snapshot does not contain.
+    let local_to_mux = HashMap::from([(7, 41), (8, 99)]);
+
+    assert_eq!(
+        panes_the_session_lost(&tab, &local_to_mux, &shared_state(9, 1)),
+        vec![8]
+    );
+}
+
+/// A snapshot arriving while a split is in flight describes a tab without the
+/// pane that split just created. Installing it verbatim dropped that pane out
+/// of the layout, and the proposal built from the layout then had nothing to
+/// describe — every split in a shared tab failed once any event raced it.
+#[test]
+fn a_snapshot_keeps_a_pane_the_session_has_not_accepted_yet() {
+    // The tab as a split leaves it: pane 8 has just been created beside pane 7.
+    let mut previous = PaneLayout::Split {
+        axis: SplitAxis::Vertical,
+        first_ratio: crate::pane::DEFAULT_PANE_SPLIT_RATIO,
+        first: Box::new(PaneLayout::Pane(7)),
+        second: Box::new(PaneLayout::Pane(8)),
+    };
+    // The session's layout, which knows only pane 7.
+    let mut canonical = PaneLayout::Pane(7);
+
+    assert!(reinsert_unplaced_pane(&previous, &mut canonical, 8));
+    assert_eq!(
+        canonical, previous,
+        "the pane goes back beside what it was split from, with that split's axis and ratio"
+    );
+
+    // And the other way round: a pane split off to the left comes back left.
+    previous = PaneLayout::Split {
+        axis: SplitAxis::Horizontal,
+        first_ratio: 300,
+        first: Box::new(PaneLayout::Pane(8)),
+        second: Box::new(PaneLayout::Pane(7)),
+    };
+    let mut canonical = PaneLayout::Pane(7);
+    assert!(reinsert_unplaced_pane(&previous, &mut canonical, 8));
+    assert_eq!(canonical, previous);
+}
+
+#[test]
+fn a_pane_with_nothing_left_to_sit_beside_is_not_reinserted() {
+    let previous = PaneLayout::Split {
+        axis: SplitAxis::Vertical,
+        first_ratio: crate::pane::DEFAULT_PANE_SPLIT_RATIO,
+        first: Box::new(PaneLayout::Pane(7)),
+        second: Box::new(PaneLayout::Pane(8)),
+    };
+    // Pane 7 is gone from the session too, so there is no anchor for pane 8.
+    let mut canonical = PaneLayout::Pane(9);
+
+    assert!(!reinsert_unplaced_pane(&previous, &mut canonical, 8));
+    assert_eq!(canonical, PaneLayout::Pane(9), "the layout is left alone");
+}
+
+/// The same property through the path that actually installs a layout.
+#[test]
+fn applying_a_snapshot_mid_split_leaves_the_new_pane_in_the_layout() {
+    let mut coordinator = SharedSessionCoordinator::default();
+    coordinator
+        .bind(9, 100, canonical_state(9, 4), [(41, 7)])
+        .unwrap();
+
+    // The tab as a split leaves it: pane 8 exists beside pane 7 and the
+    // session has not been told about it yet.
+    let mut tab = local_tab(100, 7);
+    tab.panes
+        .push(TerminalPane::new(8, tab.panes[0].profile.clone()));
+    tab.pane_indices.insert(8, 1);
+    tab.layout = PaneLayout::Split {
+        axis: SplitAxis::Vertical,
+        first_ratio: crate::pane::DEFAULT_PANE_SPLIT_RATIO,
+        first: Box::new(PaneLayout::Pane(7)),
+        second: Box::new(PaneLayout::Pane(8)),
+    };
+
+    assert_eq!(
+        coordinator
+            .apply_snapshot_to_tab(9, canonical_state(9, 5), &mut tab)
+            .unwrap(),
+        SharedSnapshotDisposition::Applied
+    );
+    assert!(
+        tab.layout.contains_pane(8),
+        "the pane a split is still proposing has to survive the snapshot that races it: {:?}",
+        tab.layout
+    );
+    assert!(tab.layout.contains_pane(7));
+}

@@ -393,7 +393,25 @@ impl SharedSessionCoordinator {
         // gives its space back, so it is refused rather than installed;
         // `apply_tab_state` derives its own layout from the same presentation,
         // so one check covers both writes.
-        let layout = map_background_layout(&state.presentation.layout, &session.mux_to_local)?;
+        let mut layout = map_background_layout(&state.presentation.layout, &session.mux_to_local)?;
+        // Panes this tab holds that the session has not accepted yet — the
+        // drafts of splits still in flight — go back where they were before the
+        // session's own layout is installed over the top of them.
+        for pane_id in tab
+            .panes
+            .iter()
+            .map(|pane| pane.id)
+            .filter(|pane_id| !layout.contains_pane(*pane_id))
+            .collect::<Vec<_>>()
+        {
+            if !reinsert_unplaced_pane(&tab.layout, &mut layout, pane_id) {
+                log::debug!(
+                    "pane {pane_id} of tab {} has no place in the session's layout and nothing \
+                     to sit beside",
+                    tab.id
+                );
+            }
+        }
         ensure_layout_covers_tab(tab, &layout)?;
         apply_tab_state(tab, tab_state);
         apply_canonical_presentation(tab, &state, layout, &session.mux_to_local)?;
@@ -513,15 +531,8 @@ impl Zetta {
             .tabs
             .iter()
             .find(|tab| tab.id == tab_id)
-            .into_iter()
-            .flat_map(|tab| &tab.panes)
-            .filter(|pane| {
-                self.mux_panes
-                    .mux_pane_id(pane.id)
-                    .is_some_and(|mux_pane_id| !state.contains_pane(mux_pane_id))
-            })
-            .map(|pane| pane.id)
-            .collect::<Vec<_>>();
+            .map(|tab| panes_the_session_lost(tab, self.mux_panes.ids(), &state))
+            .unwrap_or_default();
         if !stale.is_empty() {
             log::warn!(
                 "shared session {session_id} no longer holds the pane(s) behind local pane(s) \
@@ -531,7 +542,14 @@ impl Zetta {
         for pane_id in stale {
             self.remove_local_shared_pane(session_id, pane_id, cx);
         }
-        self.install_shared_snapshot(session_id, state, cx);
+        // The session's own layout is deliberately *not* installed here. This
+        // runs while a pane the session has not been told about is already in
+        // the tab — the draft a split is about to propose — and the session's
+        // layout has no place for one. Installing it took the draft out of the
+        // layout, and the proposal built from that layout then had nothing to
+        // describe: every split in a shared tab failed. Canonical geometry
+        // arrives through the snapshot path, which runs when the session has
+        // something to say.
     }
 
     /// Whether every pane a proposal names is one the session holds. The safety
@@ -1469,6 +1487,90 @@ impl Zetta {
         self.apply_shared_snapshot(session_id, state, window, cx);
         cx.notify();
     }
+}
+
+/// Puts back a pane the session's layout does not place.
+///
+/// A split puts its pane in the tab before the session has accepted it, so any
+/// snapshot arriving in between describes a tab without that pane. Installing
+/// one verbatim drops it out of the layout, and the split — whose whole
+/// proposal is "put this pane next to that one" — then has nothing to describe.
+///
+/// It goes back beside whatever it was split from, read out of the layout being
+/// replaced, which is where the session is about to put it too. Reports whether
+/// there was somewhere to put it; there is not if the pane it was split from
+/// has itself gone.
+fn reinsert_unplaced_pane(previous: &PaneLayout, layout: &mut PaneLayout, pane_id: u64) -> bool {
+    let Some((axis, first_ratio, draft_is_first, sibling)) = pane_split_context(previous, pane_id)
+    else {
+        return false;
+    };
+    let anchor = sibling.first_pane();
+    if !layout.contains_pane(anchor) {
+        return false;
+    }
+    let pane = Box::new(PaneLayout::Pane(pane_id));
+    let anchor_layout = Box::new(PaneLayout::Pane(anchor));
+    let (first, second) = if draft_is_first {
+        (pane, anchor_layout)
+    } else {
+        (anchor_layout, pane)
+    };
+    layout.replace(
+        anchor,
+        PaneLayout::Split {
+            axis,
+            first_ratio,
+            first,
+            second,
+        },
+    )
+}
+
+/// The split that holds `pane_id` directly: its axis and ratio, whether the
+/// pane is the first child, and the subtree on the other side.
+fn pane_split_context(
+    layout: &PaneLayout,
+    pane_id: u64,
+) -> Option<(SplitAxis, u16, bool, &PaneLayout)> {
+    let PaneLayout::Split {
+        axis,
+        first_ratio,
+        first,
+        second,
+    } = layout
+    else {
+        return None;
+    };
+    if matches!(first.as_ref(), PaneLayout::Pane(id) if *id == pane_id) {
+        return Some((*axis, *first_ratio, true, second));
+    }
+    if matches!(second.as_ref(), PaneLayout::Pane(id) if *id == pane_id) {
+        return Some((*axis, *first_ratio, false, first));
+    }
+    pane_split_context(first, pane_id).or_else(|| pane_split_context(second, pane_id))
+}
+
+/// The panes in this tab whose session pane is gone.
+///
+/// A pane with no translation at all is *not* one of them: it is a draft the
+/// session has not been told about yet, which is exactly the state a tab is in
+/// while a split is being proposed. Treating "no translation" as "lost" would
+/// delete the pane the proposal is about.
+fn panes_the_session_lost(
+    tab: &Tab,
+    local_to_mux: &HashMap<u64, u64>,
+    state: &SharedSessionState,
+) -> Vec<u64> {
+    tab.panes
+        .iter()
+        .filter(|pane| {
+            local_to_mux
+                .get(&pane.id)
+                .is_some_and(|mux_pane_id| !state.contains_pane(*mux_pane_id))
+        })
+        .map(|pane| pane.id)
+        .collect()
 }
 
 /// Takes a pane out of a tab and out of its layout.

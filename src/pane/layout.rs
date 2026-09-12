@@ -663,7 +663,7 @@ impl PaneLayout {
         true
     }
 
-    fn contains_pane(&self, pane_id: u64) -> bool {
+    pub(crate) fn contains_pane(&self, pane_id: u64) -> bool {
         match self {
             Self::Pane(id) => *id == pane_id,
             Self::Split { first, second, .. } => {

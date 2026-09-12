@@ -472,6 +472,21 @@ impl Zetta {
         // a single window happen to have counted the same number of panes,
         // which is why this went unnoticed.
         if offered {
+            // A pane the multiplexer does not own cannot be described to it,
+            // and could not be joined from another window even if it were: its
+            // terminal reads a stream this process holds. Said plainly here,
+            // because the alternative is a translation failure naming an id
+            // that means nothing outside this window.
+            if let Some(pane) = tab
+                .panes
+                .iter()
+                .find(|pane| self.mux_panes.mux_pane_id(pane.id).is_none())
+            {
+                anyhow::bail!(
+                    "pane {} is not run by the session multiplexer, so this tab cannot be shared",
+                    pane.label()
+                );
+            }
             crate::background_session_ui::collaboration::remap_summary_to_mux(
                 &mut summary,
                 self.mux_panes.ids(),
