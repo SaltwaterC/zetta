@@ -12394,36 +12394,48 @@ mod tests {
         });
     }
 
-    /// How long these helpers wait for a real shell to produce something.
+    /// How long these helpers wait for a real shell to produce something, in
+    /// real time.
     ///
-    /// The budget is generous because it is only ever paid by a *failing*
-    /// test: each poll returns the moment what it is waiting for appears, so
-    /// the ordinary run costs one interval or two whatever this is set to.
-    /// Waiting a second was not enough — a machine running the rest of the
-    /// suite alongside these took longer than that to get a shell to its first
-    /// line of output, and a loaded machine must not be mistaken for a broken
-    /// one.
-    const PTY_POLL_ATTEMPTS: usize = 500;
+    /// Only a *failing* test ever spends it: each poll returns the moment what
+    /// it is waiting for appears, so an ordinary run costs one interval or
+    /// two whatever this is set to.
+    const PTY_POLL_BUDGET: Duration = Duration::from_secs(10);
     const PTY_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
+    /// Waits for one poll's worth of *both* clocks these tests live on.
+    ///
+    /// The executor's timer runs on the test scheduler's simulated clock: it
+    /// lets queued tasks run, but no real time passes, so a loop built only on
+    /// it spins through any budget in microseconds. What these helpers are
+    /// waiting for is a pty drained by an OS thread, which makes progress only
+    /// in real time and knows nothing about that clock. Waiting on either one
+    /// alone is what made these tests fail on a loaded machine with a screen
+    /// that was simply still empty.
+    async fn poll_pty(cx: &mut TestAppContext) {
+        cx.background_executor.timer(PTY_POLL_INTERVAL).await;
+        std::thread::sleep(PTY_POLL_INTERVAL);
+    }
+
     /// Polls the terminal content until `expected` appears, or panics once the
-    /// budget above is spent. The PTY IO thread writes into the terminal grid
-    /// independently of the GPUI executor, so we need a real-time polling loop
-    /// to synchronize.
+    /// budget above is spent.
     async fn assert_content_eventually(
         terminal: &Entity<Terminal>,
         expected: &str,
         cx: &mut TestAppContext,
     ) {
-        let mut content = String::new();
-        for _ in 0..PTY_POLL_ATTEMPTS {
-            content = terminal.update(cx, |term, _| term.get_content());
+        let deadline = Instant::now() + PTY_POLL_BUDGET;
+        loop {
+            let content = terminal.update(cx, |term, _| term.get_content());
             if content.contains(expected) {
                 return;
             }
-            cx.background_executor.timer(PTY_POLL_INTERVAL).await;
+            assert!(
+                Instant::now() < deadline,
+                "Expected terminal content to contain {expected:?}, got: {content}"
+            );
+            poll_pty(cx).await;
         }
-        panic!("Expected terminal content to contain {expected:?}, got: {content}");
     }
 
     #[cfg(unix)]
@@ -12435,20 +12447,23 @@ mod tests {
         // Spawning a shell and letting it fork the command is at the mercy of
         // whatever else the machine is doing, which is the same reason the
         // budget above is what it is.
-        let mut command_name = None;
-        for _ in 0..PTY_POLL_ATTEMPTS {
+        let deadline = Instant::now() + PTY_POLL_BUDGET;
+        let command_name = loop {
             terminal.update(cx, |terminal, _| {
                 if let TerminalType::Pty { info, .. } = &terminal.terminal_type {
                     info.load_for_test();
                 }
             });
-            command_name =
+            let command_name =
                 terminal.update(cx, |terminal, _| terminal.foreground_process_command_name());
             if command_name.as_deref() == Some(expected) {
                 return;
             }
-            cx.background_executor.timer(PTY_POLL_INTERVAL).await;
-        }
+            if Instant::now() >= deadline {
+                break command_name;
+            }
+            poll_pty(cx).await;
+        };
         let process_info = terminal.update(cx, |terminal, _| match &terminal.terminal_type {
             TerminalType::Pty { info, .. } => format!(
                 "pid={:?}, fallback_pid={:?}, has_current_info={}",

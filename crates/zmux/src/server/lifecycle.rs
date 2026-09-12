@@ -225,10 +225,21 @@ fn pane_working_directory(daemon: &Arc<Daemon>, pane_id: u64) -> Option<PathBuf>
     }
     let child_pid = sysinfo::Pid::from_u32(child_pid);
     let mut system = sysinfo::System::new();
-    system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[child_pid]), true);
+    // Ask for the working directory by name. `refresh_processes` refreshes
+    // memory, CPU, disk usage, the executable and the task list — everything
+    // except the one field this function exists to read — so asking with it
+    // returned `None` on every platform, and a pane split from a remote one
+    // started wherever the daemon happened to be, which is `/`. Naming the
+    // field is also less work than the default set, not more.
+    system.refresh_processes_specifics(
+        sysinfo::ProcessesToUpdate::Some(&[child_pid]),
+        true,
+        sysinfo::ProcessRefreshKind::nothing().with_cwd(sysinfo::UpdateKind::Always),
+    );
     system
         .process(child_pid)
         .and_then(|process| process.cwd().map(Path::to_path_buf))
+        .filter(|directory| !directory.as_os_str().is_empty())
 }
 
 fn start_shared_draft(
