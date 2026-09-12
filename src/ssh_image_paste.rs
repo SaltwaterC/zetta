@@ -1,9 +1,16 @@
-//! Image paste for a foreground OpenSSH process.
+//! Image paste for a foreground OpenSSH or Mosh process.
 //!
 //! A local terminal normally sends the native image-paste chord. When the
 //! foreground process is OpenSSH, the remote application cannot read the
 //! desktop clipboard, so this module sends a PNG through a second, batch-mode
 //! SSH connection and pastes the resulting remote path instead.
+//!
+//! A Mosh session is the same problem reached a different way: `zosh` is the
+//! launcher *and* the client in one process, so its argument vector still names
+//! the SSH command and target it bootstrapped through. Recovering those turns a
+//! Mosh pane into the invocation the OpenSSH path above already knows how to
+//! upload through — Mosh's own UDP `-p`/`--port` deliberately plays no part in
+//! it, because the auxiliary connection is taken from `--ssh` alone.
 
 use std::{
     collections::HashMap,
@@ -129,7 +136,15 @@ impl ImagePasteHandler for SshImagePasteHandler {
         image: &Image,
         foreground_process: Option<&[String]>,
     ) -> Result<ImagePasteResult> {
-        let Some(argv) = foreground_process.and_then(foreground_ssh_argv) else {
+        let Some(argv) = foreground_process.and_then(foreground_invocation) else {
+            // The one failure this module has no way to report: keeping the
+            // native chord is right for a genuinely local pane and useless for
+            // anything else, and the two are indistinguishable from here. Say
+            // which command line was declined so a session that pastes the
+            // chord into a program on another host can be diagnosed in one run.
+            log::debug!(
+                "image paste kept the native shortcut for foreground process {foreground_process:?}"
+            );
             return Ok(ImagePasteResult::UseNativeShortcut);
         };
         let image = normalize_image(image)?;
@@ -280,21 +295,142 @@ struct CleanupEntry {
     directory: String,
 }
 
+/// The auxiliary SSH connection a foreground process's clipboard image has to
+/// travel through, or `None` when this pane's process is local and the native
+/// chord is the right answer.
+fn foreground_invocation(argv: &[String]) -> Option<OpenSshInvocation> {
+    if let Some(invocation) = foreground_ssh_argv(argv) {
+        return Some(invocation);
+    }
+    #[cfg(feature = "zosh-client")]
+    if let Some(invocation) = foreground_mosh_argv(argv) {
+        return Some(invocation);
+    }
+    None
+}
+
 fn foreground_ssh_argv(argv: &[String]) -> Option<OpenSshInvocation> {
-    let argv = if argv.first().is_some_and(|program| is_open_ssh(program)) {
-        argv.to_vec()
-    } else if argv.len() == 1 {
-        parse_shell_command(&argv[0]).ok()?
-    } else {
+    parse_ssh_argv(&foreground_argv(argv, is_open_ssh)?)
+}
+
+/// Recovers the SSH bootstrap of a Mosh session from the launcher's own
+/// argument vector.
+///
+/// Only the `--ssh` command and the target are taken. Everything else a Mosh
+/// command line carries describes the UDP session — `-p`/`--port` names the
+/// *server's* port range and would be a different option entirely to `ssh` —
+/// and building the invocation from `--ssh` alone is what keeps them apart.
+#[cfg(feature = "zosh-client")]
+fn foreground_mosh_argv(argv: &[String]) -> Option<OpenSshInvocation> {
+    let arguments = mosh_launcher_arguments(argv)?;
+    let command = crate::mosh::parse_mosh_args(arguments.values()).ok()?;
+    // `--local` never opens an SSH connection, and `--fake-proxy` is the
+    // launcher re-entering itself as an SSH `ProxyCommand` rather than a
+    // session anyone is typing into.
+    if command.local || command.proxy.is_some() {
         return None;
-    };
-    parse_ssh_argv(&argv)
+    }
+    let target = command.target?;
+    // A reconstruction cannot tell an option's value from the next argument
+    // where the original was quoted, and the first thing that misparse reaches
+    // is the target. An SSH destination is never an assignment, so this is what
+    // stops a lossy split from uploading somewhere nobody asked for.
+    if arguments.is_reconstructed() && target.contains('=') {
+        return None;
+    }
+    let mut ssh_argv = command.ssh;
+    ssh_argv.push(target);
+    parse_ssh_argv(&ssh_argv)
+}
+
+/// A Mosh launcher's arguments, and how much they can be trusted.
+#[cfg(feature = "zosh-client")]
+enum MoshLauncherArguments {
+    /// Taken from a launcher that is still the pane's process, exactly as it
+    /// was invoked.
+    Exact(Vec<std::ffi::OsString>),
+    /// Rebuilt from `mosh-client`'s display string, where quoting is lost.
+    Reconstructed(Vec<std::ffi::OsString>),
+}
+
+#[cfg(feature = "zosh-client")]
+impl MoshLauncherArguments {
+    fn values(&self) -> &[std::ffi::OsString] {
+        match self {
+            Self::Exact(arguments) | Self::Reconstructed(arguments) => arguments,
+        }
+    }
+
+    fn is_reconstructed(&self) -> bool {
+        matches!(self, Self::Reconstructed(_))
+    }
+}
+
+/// The Mosh command line behind a pane's foreground process.
+///
+/// Two shapes, because the launcher only survives in one of them. The bundled
+/// `zosh` is launcher and client in one process and still has its own argument
+/// vector. Upstream Mosh replaces its launcher with `mosh-client`, which keeps
+/// the original command line only as the `ps` display string Mosh builds for
+/// it: `-# <arguments> |`. Mosh joins those arguments with a space, so quoting
+/// is gone for good and the result is a reconstruction rather than the command
+/// line — see the caller for what that costs.
+#[cfg(feature = "zosh-client")]
+fn mosh_launcher_arguments(argv: &[String]) -> Option<MoshLauncherArguments> {
+    if let Some(launcher) = foreground_argv(argv, is_mosh_launcher) {
+        return Some(MoshLauncherArguments::Exact(
+            launcher[1..]
+                .iter()
+                .map(std::ffi::OsString::from)
+                .collect::<Vec<_>>(),
+        ));
+    }
+    let argv = foreground_argv(argv, is_mosh_client)?;
+    let display = argv
+        .get(1)?
+        .strip_prefix("-#")?
+        .strip_suffix('|')?
+        .split_whitespace()
+        .map(std::ffi::OsString::from)
+        .collect::<Vec<_>>();
+    (!display.is_empty()).then_some(MoshLauncherArguments::Reconstructed(display))
+}
+
+/// A foreground process's argument vector, accepting the single-string form a
+/// shell reports a command line as.
+fn foreground_argv(argv: &[String], is_launcher: fn(&str) -> bool) -> Option<Vec<String>> {
+    if argv.first().is_some_and(|program| is_launcher(program)) {
+        return Some(argv.to_vec());
+    }
+    if argv.len() == 1 {
+        let words = parse_shell_command(&argv[0]).ok()?;
+        return is_launcher(words.first()?).then_some(words);
+    }
+    None
 }
 
 fn is_open_ssh(program: &str) -> bool {
-    program.rsplit(['/', '\\']).next().is_some_and(|name| {
-        name.eq_ignore_ascii_case("ssh") || name.eq_ignore_ascii_case("ssh.exe")
-    })
+    program_is_named(program, &["ssh", "ssh.exe"])
+}
+
+/// The bundled `zosh` launcher, and a `mosh` that has not yet replaced itself
+/// with its client.
+#[cfg(feature = "zosh-client")]
+fn is_mosh_launcher(program: &str) -> bool {
+    program_is_named(program, &["zosh", "zosh.exe", "mosh", "mosh.exe"])
+}
+
+/// What upstream Mosh's launcher becomes, and what `zosh --client` runs.
+#[cfg(feature = "zosh-client")]
+fn is_mosh_client(program: &str) -> bool {
+    program_is_named(program, &["mosh-client", "mosh-client.exe"])
+}
+
+fn program_is_named(program: &str, names: &[&str]) -> bool {
+    program
+        .rsplit(['/', '\\'])
+        .next()
+        .is_some_and(|program| names.iter().any(|name| program.eq_ignore_ascii_case(name)))
 }
 
 fn parse_ssh_argv(argv: &[String]) -> Option<OpenSshInvocation> {

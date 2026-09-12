@@ -5029,6 +5029,17 @@ impl Terminal {
             return;
         }
 
+        // Correct for a pane whose process is on this machine, and useless for
+        // one whose is not: the chord reaches the remote program as an empty
+        // clipboard. A terminal cannot tell the two apart, so say which case
+        // this was rather than leaving a silent degradation to be guessed at.
+        log::debug!(
+            "image paste used the native shortcut without a handler (handler installed: {}, \
+             byte stream: {}, input worker: {})",
+            self.image_paste_handler.is_some(),
+            self.byte_stream.is_some(),
+            self.input_worker.is_some()
+        );
         if let Some(shortcut) = native_image_paste_shortcut(self.last_content.mode, option_as_meta)
         {
             self.input(shortcut);

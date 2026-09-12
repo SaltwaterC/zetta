@@ -245,21 +245,16 @@ fn build_shared_terminal_batch(
             }
         };
         let pane = Arc::new(pane);
-        let image_paste_handler: Arc<dyn terminal::ImagePasteHandler> = if runtime.is_remote() {
-            Arc::new(
-                crate::background_session_ui::image_paste::RemoteImagePasteHandler::new(
-                    &runtime,
-                    session_id,
-                    mapping.pane_id,
-                ),
-            )
-        } else {
-            Arc::new(crate::ssh_image_paste::SshImagePasteHandler::new(
-                launch.shell.clone(),
-                launch.environment.clone(),
-                launch.working_directory.clone(),
-            ))
-        };
+        let image_paste_handler = crate::background_session_ui::image_paste::handler_for_pane(
+            &runtime,
+            session_id,
+            mapping.pane_id,
+            crate::background_session_ui::image_paste::LocalPasteTarget {
+                shell: launch.shell.clone(),
+                environment: launch.environment.clone(),
+                working_directory: launch.working_directory.clone(),
+            },
+        );
         let builder = TerminalBuilder::new_byte_stream(
             Box::new(pane.reader()),
             Box::new(
@@ -1632,21 +1627,16 @@ impl Zetta {
                 }
             };
             let pane = Arc::new(pane);
-            let image_paste_handler: Arc<dyn terminal::ImagePasteHandler> = if runtime.is_remote() {
-                Arc::new(
-                    crate::background_session_ui::image_paste::RemoteImagePasteHandler::new(
-                        &runtime,
-                        pane.session_id(),
-                        pane.pane_id(),
-                    ),
-                )
-            } else {
-                Arc::new(crate::ssh_image_paste::SshImagePasteHandler::new(
+            let image_paste_handler = crate::background_session_ui::image_paste::handler_for_pane(
+                &runtime,
+                pane.session_id(),
+                pane.pane_id(),
+                crate::background_session_ui::image_paste::LocalPasteTarget {
                     shell,
                     environment,
-                    working_directory.clone(),
-                ))
-            };
+                    working_directory: working_directory.clone(),
+                },
+            );
             let builder = TerminalBuilder::new_byte_stream(
                 Box::new(pane.reader()),
                 Box::new(

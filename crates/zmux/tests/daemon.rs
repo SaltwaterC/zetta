@@ -6523,3 +6523,266 @@ fn a_daemon_loaded_shell_integration_leaves_nothing_for_viewers_to_replay() {
         "nor the payload it carried: {replay:?}"
     );
 }
+
+/// The smallest valid PNG: an 8-byte signature, an IHDR for a 1x1 greyscale
+/// image, and IEND. The daemon checks the signature, so the payload cannot be
+/// arbitrary bytes.
+fn test_png() -> Vec<u8> {
+    let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+    png.extend([0, 0, 0, 13]);
+    png.extend(b"IHDR");
+    png.extend([0, 0, 0, 1, 0, 0, 0, 1, 8, 0, 0, 0, 0]);
+    png.extend([0x3a, 0x7e, 0x9b, 0x55]);
+    png.extend([0, 0, 0, 0]);
+    png.extend(b"IEND");
+    png.extend([0xae, 0x42, 0x60, 0x82]);
+    png
+}
+
+/// Opens a shared session with one daemon-owned pane, which is what a window
+/// attached to a session — remote or local — is actually looking at.
+fn shared_pane_for_image_paste(
+    daemon: &TestDaemon,
+    client: &Client,
+    protection: Option<&zmux::auth::SessionAuthentication>,
+) -> (u64, zmux::client::SharedSpawnedPane) {
+    let pane = client
+        .spawn(spawn_request(None, "printf ready; sleep 60"))
+        .unwrap();
+    let descriptor = std::fs::File::from(pane.descriptor);
+    read_until(&descriptor, "ready");
+    let mut offered = summary(pane.session_id, pane.pane_id);
+    offered.panes.push(pane_summary(pane.pane_id));
+    client
+        .share(
+            pane.session_id,
+            offered,
+            serde_json::Value::Null,
+            protection,
+            true,
+        )
+        .unwrap();
+
+    let request = spawn_request(Some(pane.session_id), "sleep 60");
+    let shared = client
+        .spawn_shared(SharedSpawnRequest {
+            session_id: pane.session_id,
+            base_revision: SessionRevision::INITIAL,
+            operation_id: client.next_shared_operation_id(),
+            program: request.program,
+            args: request.args,
+            env: request.env,
+            working_directory: request.working_directory,
+            size: request.size,
+            console_palette: request.console_palette,
+        })
+        .unwrap_or_else(|error| {
+            panic!(
+                "spawning the shared pane: {error:#}\ndaemon log:\n{}",
+                daemon.log()
+            )
+        });
+    (pane.session_id, shared)
+}
+
+/// Image paste in a remote session is exactly this request: the window uploads
+/// a PNG and pastes back a path the pane's own process can open. Nothing
+/// exercised the round trip on either side, so the whole feature rested on a
+/// serialization test.
+#[test]
+fn a_shared_viewer_stores_an_image_the_panes_process_can_open() {
+    let daemon = TestDaemon::start();
+    let client = daemon.client();
+    let (session_id, shared) = shared_pane_for_image_paste(&daemon, &client, None);
+
+    let png = test_png();
+    let path = client
+        .store_image(session_id, shared.pane.pane_id(), png.clone())
+        .unwrap_or_else(|error| {
+            panic!(
+                "storing a clipboard image: {error:#}\ndaemon log:\n{}",
+                daemon.log()
+            )
+        });
+
+    assert!(
+        Path::new(&path).is_absolute(),
+        "a pasted image path has to be absolute: {path}"
+    );
+    assert_eq!(
+        std::fs::read(&path).expect("the stored image must be readable"),
+        png
+    );
+
+    // A second paste is a second file: overwriting the first would replace an
+    // image a program may still be reading.
+    let again = client
+        .store_image(session_id, shared.pane.pane_id(), png.clone())
+        .unwrap();
+    assert_ne!(again, path);
+    assert_eq!(std::fs::read(&again).unwrap(), png);
+
+    // The staging directory goes with the session.
+    client.kill(session_id).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Path::new(&path).exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        !Path::new(&path).exists(),
+        "a killed session must not leave its staged images behind"
+    );
+}
+
+/// The upload is addressed to a pane, and authorized by watching it. Each of
+/// these refusals is a message a user would otherwise see as a failed paste.
+#[test]
+fn storing_an_image_is_refused_for_anything_but_a_pane_this_client_is_watching() {
+    let daemon = TestDaemon::start();
+    let client = daemon.client();
+    let (session_id, shared) = shared_pane_for_image_paste(&daemon, &client, None);
+    let pane_id = shared.pane.pane_id();
+    let png = test_png();
+
+    let refused = |description: &str, error: anyhow::Error, expected: &str| {
+        assert!(
+            format!("{error:#}").contains(expected),
+            "{description}: expected {expected:?}, got {error:#}"
+        );
+    };
+    let stranger = daemon.client();
+
+    refused(
+        "an unknown session",
+        client
+            .store_image(session_id + 4096, pane_id, png.clone())
+            .expect_err("an unknown session"),
+        "does not exist",
+    );
+    refused(
+        "an unknown pane",
+        client
+            .store_image(session_id, pane_id + 4096, png.clone())
+            .expect_err("an unknown pane"),
+        "no pane",
+    );
+    refused(
+        // A second `Client` is a second logical viewer: it has its own identity
+        // and never attached, which is what the daemon checks.
+        "a client that is not watching the pane",
+        stranger
+            .store_image(session_id, pane_id, png.clone())
+            .expect_err("a client that is not watching the pane"),
+        "not an active shared viewer",
+    );
+
+    // The watching client, so this reaches the payload check rather than being
+    // refused as a viewer before the bytes are read.
+    refused(
+        "a payload that is not a PNG",
+        client
+            .store_image(session_id, pane_id, b"GIF89a not a png".to_vec())
+            .expect_err("a payload that is not a PNG"),
+        "not a PNG",
+    );
+
+    // The refusals leave the real viewer working.
+    assert!(
+        client
+            .store_image(session_id, pane_id, png)
+            .is_ok_and(|path| Path::new(&path).exists())
+    );
+    client.kill(session_id).unwrap();
+}
+
+/// The shape a remote window actually uses: one stream-only attach whose
+/// connection stays open for the pane's relay, and a *separate* request
+/// connection carrying the same client identity for the upload. The identity
+/// crossing between those two connections is what the daemon's viewer check
+/// matches on, and nothing else exercises it.
+///
+/// The session is protected so the authorized path is the one under test. This
+/// cannot also pin the refusal: `session_control_authorized` admits the
+/// session's owner outright, and in one test process the peer credentials of
+/// every connection are the owner's. A client identity that never attached is
+/// refused by the test above.
+#[test]
+fn a_remote_shaped_viewer_uploads_over_its_own_request_connection() {
+    let daemon = TestDaemon::start();
+    let client = daemon.client();
+    let (session_id, shared) =
+        shared_pane_for_image_paste(&daemon, &client, Some(&test_verifier()));
+    let pane_id = shared.pane.pane_id();
+    let png = test_png();
+
+    let endpoint: zmux::transport::Endpoint =
+        serde_json::from_slice(&std::fs::read(daemon.sessions_dir().join("zmux.json")).unwrap())
+            .unwrap();
+    let viewer = ClientId::new("remote-image-viewer");
+
+    // The viewer first, exactly as a remote window does: one stream-only attach
+    // whose connection stays open, then a separate request connection for the
+    // upload carrying the same identity.
+    let mut attach = Connection::new(Stream::connect(&endpoint.socket_path).unwrap());
+    attach
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    attach
+        .send(&Envelope {
+            version: zmux::messages::PROTOCOL_VERSION,
+            token: endpoint.token.clone(),
+            client_process_id: std::process::id(),
+            client_id: viewer.clone(),
+            stream_only: true,
+            session_secret: Some(TEST_SECRET.to_owned()),
+            request: Request::Attach {
+                session_id,
+                pane_id: Some(pane_id),
+                secret: Some(TEST_SECRET.to_owned()),
+                force_shared: false,
+            },
+        })
+        .unwrap();
+    let replay_length = match attach.receive::<Response>().unwrap().0 {
+        Response::SharedAttached { replay_length, .. } => replay_length,
+        other => panic!("unexpected attach response: {other:?}"),
+    };
+    attach.read_exact(replay_length).unwrap();
+
+    let upload = |secret: Option<&str>| -> Response {
+        let mut connection = Connection::new(Stream::connect(&endpoint.socket_path).unwrap());
+        connection
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        connection
+            .send(&Envelope {
+                version: zmux::messages::PROTOCOL_VERSION,
+                token: endpoint.token.clone(),
+                client_process_id: std::process::id(),
+                client_id: viewer.clone(),
+                stream_only: true,
+                session_secret: secret.map(str::to_owned),
+                request: Request::StoreImage {
+                    session_id,
+                    pane_id,
+                    length: png.len(),
+                },
+            })
+            .unwrap();
+        connection.write_all(&png).unwrap();
+        connection.receive::<Response>().unwrap().0
+    };
+
+    match upload(Some(TEST_SECRET)) {
+        Response::ImageStored { path } => {
+            assert_eq!(std::fs::read(&path).unwrap(), png);
+        }
+        other => panic!(
+            "unexpected response to an authorized image upload: {other:?}\ndaemon log:\n{}",
+            daemon.log()
+        ),
+    }
+
+    drop(attach);
+    client.kill(session_id).unwrap();
+}

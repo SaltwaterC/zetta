@@ -6,9 +6,8 @@
 
 use super::*;
 
-use super::image_paste::RemoteImagePasteHandler;
+use super::image_paste::{LocalPasteTarget, handler_for_pane};
 use super::shared_panes::SharedPaneWriter;
-use crate::ssh_image_paste::SshImagePasteHandler;
 
 /// The result of the remote data phase. Authentication outcomes contain no
 /// partially attached pane, while a successful result owns every stream needed
@@ -523,16 +522,16 @@ impl Zetta {
                 path_hyperlink_timeout_ms: settings.path_hyperlink_timeout_ms,
                 window_id: cx.entity_id().as_u64(),
             };
-            let local_image_paste_handler = (!runtime.is_remote()).then(|| {
-                Arc::new(SshImagePasteHandler::new(
-                    options.shell.clone(),
-                    options.env.clone(),
-                    working_directory.clone(),
-                ))
-            });
+            let local_paste_target = || LocalPasteTarget {
+                shell: options.shell.clone(),
+                environment: options.env.clone(),
+                working_directory: working_directory.clone(),
+            };
             let (mux_pane_id, built, child_events, shared) = match attached {
                 AttachedPaneKind::Exclusive(attached) => {
                     let mux_pane_id = attached.pane_id;
+                    let image_paste_handler =
+                        handler_for_pane(runtime, session_id, mux_pane_id, local_paste_target());
                     match TerminalBuilder::new_attached(
                         crate::mux::attached_pane_handover_with_secret(
                             attached,
@@ -544,9 +543,8 @@ impl Zetta {
                         PathStyle::local(),
                     ) {
                         Ok(mut built) => {
-                            if let Some(handler) = local_image_paste_handler.clone() {
-                                built.builder = built.builder.with_image_paste_handler(handler);
-                            }
+                            built.builder =
+                                built.builder.with_image_paste_handler(image_paste_handler);
                             built.builder = built
                                 .builder
                                 .with_working_directory(working_directory.clone());
@@ -604,17 +602,12 @@ impl Zetta {
                         mux_pane_id,
                         runtime.session_secret(),
                     ));
-                    let built = if runtime.is_remote() {
-                        built.with_image_paste_handler(Arc::new(RemoteImagePasteHandler::new(
-                            runtime,
-                            session_id,
-                            mux_pane_id,
-                        )))
-                    } else if let Some(handler) = local_image_paste_handler {
-                        built.with_image_paste_handler(handler)
-                    } else {
-                        built
-                    };
+                    let built = built.with_image_paste_handler(handler_for_pane(
+                        runtime,
+                        session_id,
+                        mux_pane_id,
+                        local_paste_target(),
+                    ));
                     (mux_pane_id, Some(built), None, Some(pane))
                 }
             };

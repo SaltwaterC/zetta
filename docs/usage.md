@@ -804,6 +804,38 @@ menu. **Paste Trimmed** removes leading and trailing whitespace while preserving
 whitespace inside the text. Middle-click is passed to the terminal as a mouse
 event; it is not a paste gesture.
 
+### Pasting images
+
+Pasting while the clipboard holds an image sends the terminal application the
+image, not a description of it. What that means depends on where the pane's
+process is running, because a program on another machine cannot read this
+desktop's clipboard:
+
+- A **local** pane receives the native image-paste chord, so a terminal
+  application reads the clipboard itself, as it would under any terminal.
+- A pane running **`ssh`** gets the image uploaded over a second, batch-mode SSH
+  connection to the same target, into a private temporary directory there. What
+  is pasted is the remote path. The directory is removed when the pane closes.
+- A pane running **`mosh`** — or the bundled `zosh` launcher — is handled the
+  same way, through the SSH command and target the Mosh session was
+  bootstrapped with. Mosh's own `-p`/`--port` selects the server's UDP port and
+  has no bearing on the upload. The bundled `zosh` is launcher and client in one
+  process, so its command line is read directly. Upstream Mosh replaces its
+  launcher with `mosh-client` and keeps the original command line only as the
+  display string it builds for `ps`; Zetta reads that too, but because Mosh
+  joins the launcher's arguments with spaces, a quoted `--ssh` value cannot be
+  recovered from it. Such a session either uploads over a plain `ssh` to the
+  same target or, where the target itself cannot be trusted, falls back to the
+  native chord rather than guessing at a host.
+- A pane in a **[remote session](background-sessions.md)** uploads through the
+  session multiplexer itself, so the image is written on the session's host and
+  the pasted path is the one that host's processes can open. Staged images are
+  removed with the session.
+
+Images are converted to PNG before they are sent, and the payload is bounded.
+SVG clipboard content is not a raster image and is not uploaded. When an upload
+fails, the pane reports why rather than pasting anything.
+
 Ctrl-Shift-click a file path on Windows/Linux, or Cmd-Shift-click it on macOS,
 to open the path in `$EDITOR` (or `$env:EDITOR` on Windows). If the variable is
 unset, Zetta falls back to `zetta vi`. The editor runs in the active terminal
