@@ -83,14 +83,14 @@ use crate::alacritty::current_child_signal_mask;
 use crate::alacritty::{
     AlacrittyCell, AlacrittyGridIterator, AlacrittyHyperlink, AlacrittyPty, AlacrittySearch,
     AlacrittyTerm, AlacrittyTermConfig, AlacrittyTermLock, HyperlinkMatch, PtyIo, PtySender,
-    RegexSearches, ScrollbackSearch, WakeupGate, ZedListener, append_text_to_term, apply_config,
-    clear_current_line, clear_saved_screen, content_text, display_offset, display_only_term_config,
-    find_from_terminal_point, full_content_range, last_non_empty_lines, make_content, new_term,
-    open_pty, pty_options, pty_term_config, resize, screen_lines, scroll_display, scroll_to_point,
-    selection_text, set_default_cursor_style, set_selection as set_term_selection, shrink_to_used,
-    spawn_event_loop, toggle_vi_mode as toggle_term_vi_mode, total_lines,
-    update_selection as update_term_selection, update_selection_to_vi_cursor,
-    update_vi_cursor_for_scroll, vi_goto_point, vi_motion,
+    RegexSearches, ReplayBarrier, ScrollbackSearch, WakeupGate, ZedListener, append_text_to_term,
+    apply_config, clear_current_line, clear_saved_screen, content_text, display_offset,
+    display_only_term_config, find_from_terminal_point, full_content_range, last_non_empty_lines,
+    make_content, new_term, open_pty, pty_options, pty_term_config, resize, screen_lines,
+    scroll_display, scroll_to_point, selection_text, set_default_cursor_style,
+    set_selection as set_term_selection, shrink_to_used, spawn_event_loop,
+    toggle_vi_mode as toggle_term_vi_mode, total_lines, update_selection as update_term_selection,
+    update_selection_to_vi_cursor, update_vi_cursor_for_scroll, vi_goto_point, vi_motion,
 };
 use crate::mappings::colors::to_vte_rgb;
 use crate::mappings::keys::to_esc_str;
@@ -1915,9 +1915,10 @@ struct ProvidedPtyRequest<'a> {
 
 /// Asks `provider` for a PTY and turns it into one this process can drive.
 ///
-/// The replay is processed into the grid here, before the event loop starts, so
-/// the first frame already shows what the provider had retained rather than
-/// painting a blank terminal and filling it in a frame later.
+/// The returned replay is kept behind the event loop's replay barrier. The
+/// first real layout applies it to the correctly sized grid before live PTY
+/// bytes are allowed through, so a provider handover cannot parse the two
+/// streams in the wrong order.
 #[cfg(unix)]
 fn open_provided_pty(request: ProvidedPtyRequest) -> Result<OpenedProvidedPty> {
     let ProvidedPtyRequest {
@@ -2057,8 +2058,8 @@ pub struct PtyHandover {
     #[cfg(windows)]
     pub conin: std::os::windows::io::OwnedHandle,
     pub child_pid: u32,
-    /// Anything the provider retained before handing over, replayed into the
-    /// grid before the terminal is shown.
+    /// Anything the provider retained before handing over. It is replayed into
+    /// the correctly sized grid before the attached reader is released.
     pub replay: Vec<u8>,
     pub control: Arc<dyn PtyControl>,
 }
@@ -2195,6 +2196,7 @@ impl TerminalBuilder {
             },
             child_is_the_multiplexers: false,
             pending_replay: None,
+            replay_barrier: ReplayBarrier::open(),
             // Explicit bounds are an initialized display-only layout even when
             // they happen to equal the default 100x6 dimensions. The no-bounds
             // constructor resets this after calling us above.
@@ -2253,9 +2255,9 @@ impl TerminalBuilder {
     /// dropping this terminal leaves the process running, and its exit status
     /// arrives over [`AttachedTerminal::child_events`] rather than `waitpid`.
     ///
-    /// `replay` is processed into the grid *before* the event loop starts, so
-    /// the first frame already shows the restored screen rather than painting
-    /// a blank terminal and filling it in afterwards.
+    /// `replay` is held behind the reader until the first real layout sizes
+    /// the grid. The replay is then applied before the barrier releases live
+    /// output, so the first live bytes cannot wrap it at the placeholder size.
     pub fn new_attached(
         handover: PtyHandover,
         options: AttachedOptions,
@@ -2296,6 +2298,11 @@ impl TerminalBuilder {
         // pane is laid out — which is what turns a restored screen into a
         // mangled one.
         builder.terminal.pending_replay = (!handover.replay.is_empty()).then_some(handover.replay);
+        builder.terminal.replay_barrier = if builder.terminal.pending_replay.is_some() {
+            ReplayBarrier::closed()
+        } else {
+            ReplayBarrier::open()
+        };
 
         let control = handover.control.clone();
         #[cfg(unix)]
@@ -2311,7 +2318,13 @@ impl TerminalBuilder {
             builder.events_tx.clone(),
             builder.terminal.wakeup_gate.clone(),
         );
-        let (pty_tx, io) = spawn_event_loop(builder.terminal.term.clone(), listener, pty, true)?;
+        let (pty_tx, io) = spawn_event_loop(
+            builder.terminal.term.clone(),
+            listener,
+            pty,
+            true,
+            builder.terminal.replay_barrier.clone(),
+        )?;
 
         builder.terminal.terminal_type = TerminalType::Pty {
             pty_tx: Some(pty_tx),
@@ -2376,12 +2389,17 @@ impl TerminalBuilder {
         builder.terminal.title_override = Some(title);
         builder.terminal.foreign_init_command_watch_until =
             Some(Instant::now() + FOREIGN_INIT_COMMAND_STARTUP_WATCH);
+        // The builder may receive replay after this constructor returns. Keep
+        // the reader behind a closed barrier until `subscribe` knows whether
+        // there is replay to apply.
+        builder.terminal.replay_barrier.close();
         builder.terminal.byte_stream = Some(spawn_byte_stream(
             reader,
             writer,
             builder.terminal.term.clone(),
             builder.events_tx.clone(),
             builder.terminal.wakeup_gate.clone(),
+            builder.terminal.replay_barrier.clone(),
         ));
         builder
     }
@@ -2392,6 +2410,7 @@ impl TerminalBuilder {
     /// The byte-stream constructor carries no handover, so a terminal built
     /// for a shared pane replays through this instead.
     pub fn with_replay(mut self, bytes: Vec<u8>) -> Self {
+        self.terminal.replay_barrier.close();
         self.terminal.pending_replay = (!bytes.is_empty()).then_some(bytes);
         self
     }
@@ -2739,6 +2758,9 @@ impl TerminalBuilder {
             // Why the multiplexer was not used, when it was meant to be. The
             // terminal still opens; the caller decides how loudly to say so.
             let mut multiplexer_error = None;
+            // A provider may return retained bytes. The event loop is started
+            // below, so decide whether its reader must wait before spawning it.
+            let replay_barrier = ReplayBarrier::open();
             //Set up the terminal...
             let term = new_term(
                 &config,
@@ -2875,6 +2897,9 @@ impl TerminalBuilder {
                 };
                 child_events = attached_child_events;
                 pending_replay = (!replay.is_empty()).then_some(replay);
+                if pending_replay.is_some() {
+                    replay_barrier.close();
+                }
 
                 #[cfg(windows)]
                 if is_wsl_startup {
@@ -2894,8 +2919,13 @@ impl TerminalBuilder {
                 let pty_info = PtyProcessInfo::new(ProcessIdGetter::from(&pty));
 
                 //And connect them together
-                let (pty_tx, io) =
-                    spawn_event_loop(term.clone(), listener, pty, pty_options.drain_on_exit)?;
+                let (pty_tx, io) = spawn_event_loop(
+                    term.clone(),
+                    listener,
+                    pty,
+                    pty_options.drain_on_exit,
+                    replay_barrier.clone(),
+                )?;
                 let pty_control_is_local = provided_control.is_none();
                 let pty_control = provided_control
                     .unwrap_or_else(|| Arc::new(pty_tx.clone()) as Arc<dyn PtyControl>);
@@ -2983,6 +3013,7 @@ impl TerminalBuilder {
                 // `owns_child` reads from the template).
                 child_is_the_multiplexers: false,
                 pending_replay,
+                replay_barrier,
                 terminal_size_initialized: false,
                 size_initialization_queued: false,
                 fresh_shell_restore: false,
@@ -3081,6 +3112,14 @@ impl TerminalBuilder {
         });
         cx.on_release(move |_, _| drop(app_quit_subscription))
             .detach();
+
+        // Byte-stream readers start before builder options such as
+        // `with_replay` are applied. A stream without replay is released here;
+        // a replay-backed stream stays closed until its first real layout has
+        // seeded the grid.
+        if self.terminal.pending_replay.is_none() {
+            self.terminal.replay_barrier.release();
+        }
 
         //Event loop
         self.terminal.event_loop_task = cx.spawn(async move |terminal, cx| {
@@ -3271,6 +3310,9 @@ pub struct Terminal {
     /// width and then reflows it again, which is how a restored session ends
     /// up looking corrupted rather than resumed.
     pending_replay: Option<Vec<u8>>,
+    /// Keeps backend readers from parsing live output until `pending_replay` has
+    /// been applied at the first real layout.
+    replay_barrier: ReplayBarrier,
     /// Whether a real pane layout has supplied the terminal's grid size. The
     /// constructor's debug bounds are only a placeholder for PTYs.
     terminal_size_initialized: bool,
@@ -3677,6 +3719,10 @@ impl Terminal {
             term.normalize_for_fresh_shell();
             self.start_fresh_shell_input();
         }
+        // The terminal lock is still held by the caller. Readers can therefore
+        // wake now and will not parse live output until this replay is fully in
+        // the grid.
+        self.replay_barrier.release();
     }
 
     fn process_terminal_event(
@@ -6011,6 +6057,7 @@ impl Terminal {
         let TerminalType::Pty { pty_tx, io, info } = &mut self.terminal_type else {
             return;
         };
+        self.replay_barrier.abort();
         if let Some(pty_tx) = pty_tx.take() {
             pty_tx.shutdown();
         }
@@ -6041,6 +6088,7 @@ impl Terminal {
         let TerminalType::Pty { pty_tx, io, info } = &mut self.terminal_type else {
             return Ok(());
         };
+        self.replay_barrier.abort();
         if let Some(pty_tx) = pty_tx.take() {
             pty_tx.shutdown();
         }
@@ -6069,6 +6117,11 @@ impl Terminal {
         if let Some(mut stream) = self.byte_stream.take() {
             stream.drain_and_stop(BYTE_STREAM_DRAIN_TIMEOUT);
         }
+        self.replay_barrier = if self.pending_replay.is_some() {
+            ReplayBarrier::closed()
+        } else {
+            ReplayBarrier::open()
+        };
         self.foreign_init_command_watch_until =
             Some(Instant::now() + FOREIGN_INIT_COMMAND_STARTUP_WATCH);
         self.byte_stream = Some(spawn_byte_stream(
@@ -6077,6 +6130,7 @@ impl Terminal {
             self.term.clone(),
             self.events_tx.clone(),
             self.wakeup_gate.clone(),
+            self.replay_barrier.clone(),
         ));
         Ok(())
     }
@@ -6123,6 +6177,11 @@ impl Terminal {
         if let Some(mut stream) = self.byte_stream.take() {
             stream.drain_and_stop(BYTE_STREAM_DRAIN_TIMEOUT);
         }
+        self.replay_barrier = if self.pending_replay.is_some() {
+            ReplayBarrier::closed()
+        } else {
+            ReplayBarrier::open()
+        };
         // A pty-backed terminal has to answer the sequences a program expects of
         // one; a byte-stream terminal was configured as display-only.
         let scrolling_history = options
@@ -6142,7 +6201,13 @@ impl Terminal {
                 .context("adopting the multiplexer's terminal")?;
         let info = PtyProcessInfo::new(ProcessIdGetter::from(&pty));
         let listener = ZedListener::new(self.events_tx.clone(), self.wakeup_gate.clone());
-        let (pty_tx, io) = spawn_event_loop(self.term.clone(), listener, pty, true)?;
+        let (pty_tx, io) = spawn_event_loop(
+            self.term.clone(),
+            listener,
+            pty,
+            true,
+            self.replay_barrier.clone(),
+        )?;
         // Whatever was there before is replaced, including a stopped pty loop left
         // behind by the revoke that made this pane shared in the first place.
         self.terminal_type = TerminalType::Pty {
@@ -6596,6 +6661,7 @@ fn prepare_input_command(
 
 struct ByteStreamHandle {
     stopped: Arc<std::sync::atomic::AtomicBool>,
+    replay_barrier: ReplayBarrier,
     input: InputWorker,
     /// Signalled by the reader thread as it returns, so a caller can tell
     /// "everything the stream held is in the grid" from "the thread is still
@@ -6610,6 +6676,7 @@ impl ByteStreamHandle {
     }
 
     fn stop(&mut self) {
+        self.replay_barrier.abort();
         self.stopped.store(true, Ordering::Release);
         self.input.stop();
     }
@@ -6626,11 +6693,13 @@ impl ByteStreamHandle {
     /// multiplexer that failed to close its end cannot hang the caller.
     fn drain_and_stop(&mut self, patience: Duration) {
         self.input.close_sender();
+        self.replay_barrier.abort_if_closed();
         // `Disconnected` is the success case: the sender is dropped as the reader
         // thread returns, which is precisely "it read everything there was".
         match self.finished.recv_timeout(patience) {
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 log::warn!("a byte stream did not end within {patience:?}; abandoning it");
+                self.replay_barrier.abort();
                 self.stopped.store(true, Ordering::Release);
                 self.input.stop();
             }
@@ -6645,10 +6714,12 @@ fn spawn_byte_stream(
     term: Arc<AlacrittyTermLock>,
     events_tx: futures::channel::mpsc::UnboundedSender<PtyEvent>,
     wakeup_gate: WakeupGate,
+    replay_barrier: ReplayBarrier,
 ) -> ByteStreamHandle {
     let stopped = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let reader_stopped = stopped.clone();
     let reader_events = events_tx.clone();
+    let reader_barrier = replay_barrier.clone();
     let (finished_tx, finished) = mpsc::channel::<()>();
     let reader_thread = thread::Builder::new()
         .name("terminal-byte-stream-reader".to_owned())
@@ -6660,7 +6731,14 @@ fn spawn_byte_stream(
             let mut buffer = [0u8; 8192];
             let mut previous_byte_was_cr = false;
             while !reader_stopped.load(Ordering::Acquire) {
-                match reader.read(&mut buffer) {
+                if !reader_barrier.wait() {
+                    break;
+                }
+                let read = reader.read(&mut buffer);
+                if reader_stopped.load(Ordering::Acquire) || !reader_barrier.wait() {
+                    break;
+                }
+                match read {
                     Ok(0) => break,
                     Err(error)
                         if matches!(
@@ -6706,6 +6784,7 @@ fn spawn_byte_stream(
 
     ByteStreamHandle {
         stopped,
+        replay_barrier,
         input,
         finished,
         _reader: reader_thread,
@@ -6845,6 +6924,7 @@ fn spawn_task_subprocess(request: TaskSubprocessRequest) -> Result<SubprocessHan
 
 impl Drop for Terminal {
     fn drop(&mut self) {
+        self.replay_barrier.abort();
         if let Some(mut byte_stream) = self.byte_stream.take() {
             byte_stream.stop();
         }
@@ -8350,9 +8430,12 @@ mod tests {
         // the 200 the pane is laid out at, so a replay written too early is
         // visible as two lines rather than one.
         let restored = format!("restored-screen{}\r\n", "-".repeat(140));
+        let live = "\x1b[31mlive-output-after-replay\x1b[0m\r\n";
         let builder = cx.update(|cx| {
             TerminalBuilder::new_byte_stream(
-                Box::new(CannedReader { bytes: Vec::new() }),
+                Box::new(CannedReader {
+                    bytes: live.as_bytes().to_vec(),
+                }),
                 Box::new(std::io::sink()),
                 String::new(),
                 SettingsCursorShape::default(),
@@ -8373,6 +8456,12 @@ mod tests {
                 .contains("restored-screen"),
             "the screen must wait for a real size rather than be wrapped at the placeholder's"
         );
+        assert!(
+            !terminal
+                .update(window, |terminal, _| terminal.get_content())
+                .contains("live-output-after-replay"),
+            "live output must wait behind the retained replay"
+        );
 
         window.update_window_entity(&terminal, |terminal, window, cx| {
             terminal.set_size(TerminalBounds::new(
@@ -8386,7 +8475,15 @@ mod tests {
             terminal.sync(window, cx);
         });
         window.run_until_parked();
-        let content = terminal.update(window, |terminal, _| terminal.get_content());
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let content = loop {
+            let content = terminal.update(window, |terminal, _| terminal.get_content());
+            if content.contains("live-output-after-replay") || Instant::now() >= deadline {
+                break content;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+            window.run_until_parked();
+        };
         assert!(
             content.contains(restored.trim_end()),
             "the screen must be replayed at the laid-out width, unwrapped: {content:?}"
@@ -8397,10 +8494,72 @@ mod tests {
             "the screen must be written exactly once: {content:?}"
         );
         assert_eq!(
-            content.matches("restored-screen").count(),
+            content.matches("live-output-after-replay").count(),
             1,
-            "the screen must be replayed exactly once: {content:?}"
+            "live output must be parsed exactly once: {content:?}"
         );
+        assert!(
+            content.find("restored-screen") < content.find("live-output-after-replay"),
+            "live output must follow the retained replay: {content:?}"
+        );
+    }
+
+    /// A reader waiting for the first layout must be woken when its terminal is
+    /// released; dropping a replay-backed pane cannot leave a worker blocked
+    /// forever behind the barrier.
+    #[gpui::test]
+    async fn dropping_a_replay_terminal_before_layout_releases_its_reader(cx: &mut TestAppContext) {
+        init_test(cx);
+        cx.executor().allow_parking();
+
+        let read_started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let reader_dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let reader_release = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+        let builder = cx.update(|cx| {
+            TerminalBuilder::new_byte_stream(
+                Box::new(BlockingReader {
+                    read_started: read_started.clone(),
+                    dropped: reader_dropped.clone(),
+                    release: reader_release.clone(),
+                }),
+                Box::new(std::io::sink()),
+                String::new(),
+                SettingsCursorShape::default(),
+                AlternateScroll::On,
+                None,
+                0,
+                cx.background_executor(),
+                PathStyle::local(),
+            )
+            .with_replay(b"saved screen".to_vec())
+        });
+        let terminal = cx.new(|cx| builder.subscribe(cx));
+        cx.run_until_parked();
+        assert!(
+            !read_started.load(Ordering::Acquire),
+            "the reader must wait at the replay barrier before its first read"
+        );
+
+        let weak = terminal.downgrade();
+        drop(terminal);
+        cx.update(|_| {});
+        cx.run_until_parked();
+        assert!(weak.upgrade().is_none(), "the terminal must be released");
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while !reader_dropped.load(Ordering::Acquire) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            reader_dropped.load(Ordering::Acquire),
+            "aborting the replay barrier must release the reader"
+        );
+
+        let (released, condition) = &*reader_release;
+        *released
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = true;
+        condition.notify_all();
     }
 
     /// Disk restore reuses the ordinary replay boundary, then turns a possibly
@@ -9026,6 +9185,34 @@ mod tests {
             buffer[..n].copy_from_slice(&self.bytes[..n]);
             self.bytes.drain(..n);
             Ok(n)
+        }
+    }
+
+    struct BlockingReader {
+        read_started: Arc<std::sync::atomic::AtomicBool>,
+        dropped: Arc<std::sync::atomic::AtomicBool>,
+        release: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
+    }
+
+    impl std::io::Read for BlockingReader {
+        fn read(&mut self, _buffer: &mut [u8]) -> std::io::Result<usize> {
+            self.read_started.store(true, Ordering::Release);
+            let (released, condition) = &*self.release;
+            let mut released = released
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            while !*released {
+                released = condition
+                    .wait(released)
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+            }
+            Ok(0)
+        }
+    }
+
+    impl Drop for BlockingReader {
+        fn drop(&mut self) {
+            self.dropped.store(true, Ordering::Release);
         }
     }
 

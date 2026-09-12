@@ -49,6 +49,9 @@ Retain these Zetta changes when synchronizing:
   `conpty::PIPE_CAPACITY`, which is why that constant is `pub(super)`. It must
   not be re-declared beside `attach`; `piper::pipe` asserts a positive capacity,
   and a second constant that drifted to zero panicked every attached pane.
+- The event loop accepts a `ReplayBarrier` supplied by Zetta. Attached PTY
+  readers wait behind retained-screen replay until the first real layout, and
+  an abort wakes them when a terminal is dropped or its backend is replaced.
 
 The eight Zetta commits carrying these changes are `d6aa84b`, `d7b896f`,
 `57ecffe`, `d83beb7`, `1f6b1f7`, `9de38c6`, `31c3303`, and `7ba5a85`.

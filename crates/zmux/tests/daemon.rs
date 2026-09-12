@@ -6148,8 +6148,19 @@ fn an_upgrade_keeps_the_retained_screen_at_the_width_it_was_drawn_at() {
     );
 
     // Wider than the stand-in, so a grid rebuilt at the wrong width has to wrap
-    // it and the damage is visible in the replay.
+    // it and the damage is visible in the replay. Deliberately report the stale
+    // spawn size too: snapshot ingestion must not put that metadata back after
+    // it has queried the live PTY.
     let line = "W".repeat(100);
+    client
+        .send_snapshot(
+            pane.session_id,
+            pane.pane_id,
+            line.clone().into_bytes(),
+            80,
+            24,
+        )
+        .unwrap();
     drop(descriptor);
     client
         .detach(
@@ -6157,7 +6168,7 @@ fn an_upgrade_keeps_the_retained_screen_at_the_width_it_was_drawn_at() {
             summary(pane.session_id, pane.pane_id),
             serde_json::Value::Null,
             None,
-            vec![(pane.pane_id, line.clone().into_bytes())],
+            Vec::new(),
         )
         .unwrap();
 

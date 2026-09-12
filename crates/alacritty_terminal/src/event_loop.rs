@@ -6,8 +6,8 @@ use std::fmt::{self, Display, Formatter};
 use std::fs::File;
 use std::io::{self, ErrorKind, Read, Write};
 use std::num::NonZeroUsize;
-use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::Instant;
 
@@ -87,6 +87,98 @@ pub enum Msg {
     SetConsolePalette(tty::ConsolePalette),
 }
 
+/// Keeps a backend reader behind a retained-screen replay until the terminal
+/// has applied that replay at its first real layout.
+///
+/// The barrier is deliberately separate from the terminal lock. A reader may
+/// wait here while the UI thread is waiting for layout, and teardown must be
+/// able to wake that wait without needing the terminal lock first.
+#[derive(Clone)]
+pub struct ReplayBarrier {
+    state: Arc<ReplayBarrierState>,
+}
+
+struct ReplayBarrierState {
+    state: Mutex<ReplayBarrierStatus>,
+    changed: Condvar,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ReplayBarrierStatus {
+    Closed,
+    Open,
+    Aborted,
+}
+
+impl ReplayBarrier {
+    /// Creates a barrier that is open for a backend with no retained replay.
+    pub fn open() -> Self {
+        Self::new(ReplayBarrierStatus::Open)
+    }
+
+    /// Creates a barrier that waits for the retained replay to be applied.
+    pub fn closed() -> Self {
+        Self::new(ReplayBarrierStatus::Closed)
+    }
+
+    fn new(status: ReplayBarrierStatus) -> Self {
+        Self {
+            state: Arc::new(ReplayBarrierState {
+                state: Mutex::new(status),
+                changed: Condvar::new(),
+            }),
+        }
+    }
+
+    /// Closes an as-yet-unused barrier before a replay-backed reader starts.
+    pub fn close(&self) {
+        let mut status = self.state.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if *status == ReplayBarrierStatus::Open {
+            *status = ReplayBarrierStatus::Closed;
+        }
+    }
+
+    /// Releases readers after the replay has been written to the correctly
+    /// sized grid. An aborted barrier cannot be reopened.
+    pub fn release(&self) {
+        let mut status = self.state.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if *status == ReplayBarrierStatus::Closed {
+            *status = ReplayBarrierStatus::Open;
+            self.state.changed.notify_all();
+        }
+    }
+
+    /// Wakes every reader and tells it not to parse any more bytes.
+    pub fn abort(&self) {
+        let mut status = self.state.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if *status != ReplayBarrierStatus::Aborted {
+            *status = ReplayBarrierStatus::Aborted;
+            self.state.changed.notify_all();
+        }
+    }
+
+    /// Waits until parsing is allowed, returning `false` when teardown won the
+    /// race and the backend must return without touching the terminal.
+    pub fn wait(&self) -> bool {
+        let mut status = self.state.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        while *status == ReplayBarrierStatus::Closed {
+            status =
+                self.state.changed.wait(status).unwrap_or_else(|poisoned| poisoned.into_inner());
+        }
+        *status == ReplayBarrierStatus::Open
+    }
+
+    /// Aborts only a reader that is still waiting for replay. An open reader
+    /// remains drainable when a backend is replaced.
+    pub fn abort_if_closed(&self) {
+        let mut status = self.state.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if *status == ReplayBarrierStatus::Closed {
+            *status = ReplayBarrierStatus::Aborted;
+            self.state.changed.notify_all();
+        }
+    }
+}
+
 /// The main event loop.
 ///
 /// Handles all the PTY I/O and runs the PTY parser which updates terminal
@@ -100,6 +192,7 @@ pub struct EventLoop<T: tty::EventedPty, U: EventListener> {
     event_proxy: U,
     drain_on_exit: bool,
     ref_test: bool,
+    replay_barrier: ReplayBarrier,
 }
 
 impl<T, U> EventLoop<T, U>
@@ -114,6 +207,7 @@ where
         pty: T,
         drain_on_exit: bool,
         ref_test: bool,
+        replay_barrier: ReplayBarrier,
     ) -> io::Result<EventLoop<T, U>> {
         let (tx, rx) = mpsc::channel();
         let poll = Poller::new()?.into();
@@ -126,6 +220,7 @@ where
             event_proxy,
             drain_on_exit,
             ref_test,
+            replay_barrier,
         })
     }
 
@@ -160,6 +255,9 @@ where
     where
         X: Write,
     {
+        if !self.replay_barrier.wait() {
+            return Ok(());
+        }
         #[cfg(windows)]
         {
             state.profile.read_batches += 1;
@@ -294,6 +392,12 @@ where
             // loop intentionally. Any other exit is an infrastructure
             // failure and must be visible to the owning terminal.
             let mut backend_shutdown = true;
+            if !self.replay_barrier.wait() {
+                // A terminal can be dropped before its first layout. The
+                // barrier's abort is the intentional shutdown in that case,
+                // not a backend failure to report to the terminal.
+                return (self, state);
+            }
             // When the master first reported a hangup that produced no child
             // event, so a foreign child's missing exit report can time out
             // instead of being waited on forever.
@@ -787,6 +891,36 @@ impl<T> PeekableReceiver<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replay_barrier_releases_waiters_in_order() {
+        let barrier = ReplayBarrier::closed();
+        let waiter_barrier = barrier.clone();
+        let (started_tx, started_rx) = mpsc::channel();
+        let waiter = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            waiter_barrier.wait()
+        });
+        started_rx.recv().unwrap();
+        barrier.release();
+        assert!(waiter.join().unwrap());
+    }
+
+    #[test]
+    fn replay_barrier_aborts_waiters_without_reopening() {
+        let barrier = ReplayBarrier::closed();
+        let waiter_barrier = barrier.clone();
+        let (started_tx, started_rx) = mpsc::channel();
+        let waiter = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            waiter_barrier.wait()
+        });
+        started_rx.recv().unwrap();
+        barrier.abort();
+        assert!(!waiter.join().unwrap());
+        barrier.release();
+        assert!(!barrier.wait());
+    }
 
     /// The skip has to be re-applied every time the machine returns to
     /// `Ground`. Coloured output puts escapes throughout the buffer, so a

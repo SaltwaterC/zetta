@@ -1223,13 +1223,7 @@ pub(super) fn snapshot(
         // daemon's retained screen without changing the attachment, so a
         // following Share request can persist it and the live tab keeps
         // reading the PTY directly.
-        seed_retained_screen(pane, bytes);
-        pane.size = TerminalSize {
-            columns,
-            lines,
-            cell_width: 0,
-            cell_height: 0,
-        };
+        seed_retained_screen_with_fallback(pane, bytes, (columns, lines));
         return connection.send(&Response::Ok);
     }
     // The holder is still showing this screen, so it is the one client that
@@ -1238,16 +1232,8 @@ pub(super) fn snapshot(
         client_process_id: holder,
         output: Vec::new(),
     });
-    seed_retained_screen(pane, bytes);
+    seed_retained_screen_with_fallback(pane, bytes, (columns, lines));
     pane.attachment = Attachment::Shared(Vec::new());
-    // The holder's size is what it was showing the pane at; shared clients
-    // join at that size until their own reports refine it.
-    pane.size = TerminalSize {
-        columns,
-        lines,
-        cell_width: 0,
-        cell_height: 0,
-    };
     #[cfg(feature = "session-persistence")]
     let persisted = session.offered.then(|| persisted_live_session(session));
     drop(sessions);

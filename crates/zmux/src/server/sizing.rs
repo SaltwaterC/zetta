@@ -124,12 +124,37 @@ pub(super) fn terminal_size(pane: &Pane) -> Option<(u16, u16)> {
 /// image. A screen drawn at the real width, rebuilt at the stand-in's, comes back
 /// as a full-screen program wrapped into fragments of itself.
 pub(super) fn seed_retained_screen(pane: &mut Pane, snapshot: Vec<u8>) {
-    if let Some((columns, lines)) = terminal_size(pane) {
-        pane.retained.resize(columns, lines);
-        pane.size.columns = columns;
-        pane.size.lines = lines;
-    }
+    let fallback = (pane.size.columns, pane.size.lines);
+    seed_retained_screen_with_fallback(pane, snapshot, fallback);
+}
+
+/// Seeds a snapshot using the live terminal size when it can be queried, or a
+/// size reported by the caller when the platform has no queryable PTY.
+pub(super) fn seed_retained_screen_with_fallback(
+    pane: &mut Pane,
+    snapshot: Vec<u8>,
+    fallback: (u16, u16),
+) {
+    let (columns, lines) = terminal_size(pane).unwrap_or(fallback);
+    pane.retained.resize(columns, lines);
+    pane.size.columns = columns;
+    pane.size.lines = lines;
     pane.retained.seed(snapshot);
+}
+
+/// Makes the retained grid and the handover metadata use one geometry.
+///
+/// Unix clients resize through the descriptor they hold, so the remembered
+/// pane size can remain the spawn placeholder even while the live PTY is much
+/// larger. Querying here avoids carrying that stale placeholder into the next
+/// daemon image. Windows has no local query, so its remembered dimensions are
+/// the fallback by construction.
+pub(super) fn snapshot_for_upgrade(pane: &mut Pane) -> (u16, u16, Vec<u8>) {
+    let (columns, lines) = terminal_size(pane).unwrap_or((pane.size.columns, pane.size.lines));
+    pane.retained.resize(columns, lines);
+    pane.size.columns = columns;
+    pane.size.lines = lines;
+    (columns, lines, pane.retained.snapshot())
 }
 
 /// Keeps a copy of `chunk` for a client that is mid-handover.

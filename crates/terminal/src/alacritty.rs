@@ -59,6 +59,7 @@ pub(super) type AlacrittyTermLock = FairMutex<AlacrittyTerm>;
 pub(super) type AlacrittyCell = AlacCell;
 pub(super) type AlacrittyGridIterator<'a> = GridIterator<'a, AlacCell>;
 pub(super) type AlacrittyHyperlink = AlacHyperlink;
+pub(super) use alacritty_terminal::event_loop::ReplayBarrier;
 
 const HIDDEN_TERMINAL_READ_PAUSE: Duration = Duration::from_millis(8);
 
@@ -297,8 +298,9 @@ pub(super) fn spawn_event_loop(
     listener: ZedListener,
     pty: AlacrittyPty,
     drain_on_exit: bool,
+    replay_barrier: ReplayBarrier,
 ) -> Result<(PtySender, PtyIo)> {
-    let event_loop = EventLoop::new(term, listener, pty, drain_on_exit, false)
+    let event_loop = EventLoop::new(term, listener, pty, drain_on_exit, false, replay_barrier)
         .context("failed to create event loop")?;
     let pty_tx = event_loop.channel();
     let join = event_loop.spawn();

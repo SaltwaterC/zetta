@@ -95,7 +95,7 @@ pub(super) fn prepare_upgrade(daemon: &Arc<Daemon>) -> Result<(PathBuf, std::fs:
             .context("flushing encrypted scrollback before replacing the daemon")?;
     }
 
-    let sessions = daemon.sessions.lock().unwrap();
+    let mut sessions = daemon.sessions.lock().unwrap();
     let now = std::time::Instant::now();
     let handover = crate::upgrade::Handover {
         version: crate::upgrade::HANDOVER_VERSION,
@@ -103,7 +103,7 @@ pub(super) fn prepare_upgrade(daemon: &Arc<Daemon>) -> Result<(PathBuf, std::fs:
         next_session_id: daemon.next_session_id.load(Ordering::SeqCst),
         next_pane_id: daemon.next_pane_id.load(Ordering::SeqCst),
         sessions: sessions
-            .iter()
+            .iter_mut()
             .map(|session| {
                 crate::upgrade::SessionHandover {
                     id: session.id,
@@ -126,21 +126,24 @@ pub(super) fn prepare_upgrade(daemon: &Arc<Daemon>) -> Result<(PathBuf, std::fs:
                         .and_then(|until| until.checked_duration_since(now)),
                     panes: session
                         .panes
-                        .iter()
-                        .map(|pane| crate::upgrade::PaneHandover {
-                            id: pane.id,
-                            descriptor: pane.pty.file().as_raw_fd(),
-                            child_pid: pane.pty.child_pid(),
-                            attachment: attachment_handover(&pane.attachment),
-                            columns: pane.size.columns,
-                            lines: pane.size.lines,
-                            exited: pane.exited,
-                            exit_status: pane.exit_status,
-                            // Copied, not taken. The exec is irreversible but
-                            // everything before it is not, and emptying the live
-                            // ring here meant a refused upgrade had already
-                            // destroyed the output it was protecting.
-                            retained: pane.retained.snapshot(),
+                        .iter_mut()
+                        .map(|pane| {
+                            let (columns, lines, retained) = snapshot_for_upgrade(pane);
+                            crate::upgrade::PaneHandover {
+                                id: pane.id,
+                                descriptor: pane.pty.file().as_raw_fd(),
+                                child_pid: pane.pty.child_pid(),
+                                attachment: attachment_handover(&pane.attachment),
+                                columns,
+                                lines,
+                                exited: pane.exited,
+                                exit_status: pane.exit_status,
+                                // Copied, not taken. The exec is irreversible but
+                                // everything before it is not, and emptying the live
+                                // ring here meant a refused upgrade had already
+                                // destroyed the output it was protecting.
+                                retained,
+                            }
                         })
                         .collect(),
                 }
@@ -217,7 +220,7 @@ pub(super) fn prepare_upgrade(daemon: &Arc<Daemon>) -> Result<(PathBuf, PathBuf,
         executable.display()
     );
 
-    let sessions = daemon.sessions.lock().unwrap();
+    let mut sessions = daemon.sessions.lock().unwrap();
     let now = Instant::now();
     let handover = crate::upgrade::Handover {
         version: crate::upgrade::HANDOVER_VERSION,
@@ -226,7 +229,7 @@ pub(super) fn prepare_upgrade(daemon: &Arc<Daemon>) -> Result<(PathBuf, PathBuf,
         next_pane_id: daemon.next_pane_id.load(Ordering::SeqCst),
         retention: *daemon.retention.lock().unwrap(),
         sessions: sessions
-            .iter()
+            .iter_mut()
             .map(|session| crate::upgrade::SessionHandover {
                 id: session.id,
                 summary: session.summary.clone(),
@@ -246,17 +249,20 @@ pub(super) fn prepare_upgrade(daemon: &Arc<Daemon>) -> Result<(PathBuf, PathBuf,
                     .and_then(|until| until.checked_duration_since(now)),
                 panes: session
                     .panes
-                    .iter()
-                    .map(|pane| crate::upgrade::PaneHandover {
-                        id: pane.id,
-                        console_id: pane.console_id,
-                        child_pid: pane.pty.child_pid(),
-                        attachment: attachment_handover(&pane.attachment),
-                        columns: pane.size.columns,
-                        lines: pane.size.lines,
-                        exited: pane.exited,
-                        exit_status: pane.exit_status,
-                        retained: pane.retained.snapshot(),
+                    .iter_mut()
+                    .map(|pane| {
+                        let (columns, lines, retained) = snapshot_for_upgrade(pane);
+                        crate::upgrade::PaneHandover {
+                            id: pane.id,
+                            console_id: pane.console_id,
+                            child_pid: pane.pty.child_pid(),
+                            attachment: attachment_handover(&pane.attachment),
+                            columns,
+                            lines,
+                            exited: pane.exited,
+                            exit_status: pane.exit_status,
+                            retained,
+                        }
                     })
                     .collect(),
             })
