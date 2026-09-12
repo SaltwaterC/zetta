@@ -25,6 +25,20 @@ struct RemoteSessionSuggestionNavigation {
     selected: usize,
 }
 
+/// What pressing Enter in the picker does.
+///
+/// Deliberately decided from the loaded sessions rather than from which field
+/// is focused: every edit to the target or the port runs `invalidate_results`,
+/// so a non-empty list always belongs to the target currently in the field and
+/// Enter can attach from anywhere in the picker. Explicit re-listing stays on
+/// the Load button.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RemoteSessionEnterAction {
+    Attach(usize),
+    Load,
+    Ignore,
+}
+
 pub(crate) struct RemoteSessionPicker {
     pub(crate) target: TextField,
     pub(crate) port: TextField,
@@ -99,6 +113,16 @@ impl RemoteSessionPicker {
             })
             .cloned()
             .collect()
+    }
+
+    fn enter_action(&self) -> RemoteSessionEnterAction {
+        if self.loading {
+            return RemoteSessionEnterAction::Ignore;
+        }
+        match self.sessions.len() {
+            0 => RemoteSessionEnterAction::Load,
+            count => RemoteSessionEnterAction::Attach(self.selected.min(count - 1)),
+        }
     }
 
     fn navigate_suggestions(&mut self, reverse: bool) -> bool {
@@ -273,6 +297,14 @@ impl Zetta {
                 picker.selected = 0;
                 if picker.sessions.is_empty() {
                     picker.error = Some("The remote host has no shared sessions.".into());
+                } else {
+                    // The sessions are what the user asked for, so the list is
+                    // what Enter and the arrow keys should act on; leaving the
+                    // picker on the target field made Enter open a second SSH
+                    // connection instead of attaching.
+                    picker.field = RemoteSessionField::List;
+                    picker.reset_suggestion_navigation();
+                    picker.scroll.scroll_to_item(0, ScrollStrategy::Top);
                 }
             }
             Err(error) => picker.error = Some(format!("{error:#}")),
@@ -440,20 +472,16 @@ impl Zetta {
             return true;
         }
         if event.keystroke.key == "enter" {
-            let action = self.remote_session_picker.as_ref().map(|picker| {
-                (
-                    picker.field,
-                    picker.loading,
-                    picker.selected,
-                    !picker.sessions.is_empty(),
-                )
-            });
-            if let Some((field, loading, selected, has_sessions)) = action {
-                if field == RemoteSessionField::List && has_sessions {
+            let action = self
+                .remote_session_picker
+                .as_ref()
+                .map(RemoteSessionPicker::enter_action);
+            match action {
+                Some(RemoteSessionEnterAction::Attach(selected)) => {
                     self.select_remote_session(selected, window, cx);
-                } else if !loading {
-                    self.load_remote_sessions(window, cx);
                 }
+                Some(RemoteSessionEnterAction::Load) => self.load_remote_sessions(window, cx),
+                Some(RemoteSessionEnterAction::Ignore) | None => {}
             }
             cx.stop_propagation();
             return true;

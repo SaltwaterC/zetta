@@ -277,6 +277,136 @@ fn a_dismissed_remote_attach_cannot_fill_a_reopened_picker(cx: &mut TestAppConte
 }
 
 #[test]
+fn enter_attaches_the_selected_session_from_any_field() {
+    let mut picker = RemoteSessionPicker {
+        target: TextField::new("dev.example"),
+        sessions: vec![
+            remote_session_summary(4, false),
+            remote_session_summary(9, false),
+        ],
+        selected: 1,
+        ..Default::default()
+    };
+
+    assert_eq!(picker.field, RemoteSessionField::Target);
+    assert_eq!(picker.enter_action(), RemoteSessionEnterAction::Attach(1));
+
+    picker.field = RemoteSessionField::List;
+    assert_eq!(picker.enter_action(), RemoteSessionEnterAction::Attach(1));
+}
+
+#[test]
+fn enter_loads_only_while_the_session_list_is_empty() {
+    let mut picker = RemoteSessionPicker {
+        target: TextField::new("dev.example"),
+        ..Default::default()
+    };
+
+    assert_eq!(picker.enter_action(), RemoteSessionEnterAction::Load);
+
+    picker.loading = true;
+    assert_eq!(picker.enter_action(), RemoteSessionEnterAction::Ignore);
+
+    picker.sessions = vec![remote_session_summary(4, false)];
+    assert_eq!(
+        picker.enter_action(),
+        RemoteSessionEnterAction::Ignore,
+        "an attach in flight must not be started twice"
+    );
+}
+
+#[test]
+fn enter_clamps_a_selection_past_the_end_of_the_list() {
+    let picker = RemoteSessionPicker {
+        sessions: vec![
+            remote_session_summary(4, false),
+            remote_session_summary(9, false),
+        ],
+        selected: 7,
+        ..Default::default()
+    };
+
+    assert_eq!(picker.enter_action(), RemoteSessionEnterAction::Attach(1));
+}
+
+#[gpui::test]
+fn loaded_sessions_move_the_picker_onto_the_list(cx: &mut TestAppContext) {
+    cx.update(|cx| theme_settings::init(theme::LoadThemes::JustBase, cx));
+    let (harness, cx) = cx.add_window_view(move |window, cx| {
+        let mut config = Config::defaults(None, None);
+        config.profiles.clear();
+        let zetta = cx.new(|cx| {
+            Zetta::new(
+                config,
+                None,
+                ZettaLaunchOptions {
+                    no_mux: true,
+                    ..Default::default()
+                },
+                window,
+                cx,
+            )
+        });
+        RemoteSessionEscapeHarness {
+            picker_focus: zetta.read(cx).remote_session_focus.clone(),
+            child_focus: cx.focus_handle(),
+            zetta,
+            bubble_seen: Rc::new(Cell::new(false)),
+        }
+    });
+    let zetta = harness.update(cx, |harness, _| harness.zetta.clone());
+
+    let (field, suggestion_navigation_cleared) = zetta.update_in(cx, |zetta, window, cx| {
+        let mut picker = picker_with_suggestions("prod");
+        picker.generation = 11;
+        picker.navigate_suggestions(false);
+        picker.generation = 11;
+        zetta.remote_session_picker = Some(picker);
+        zetta.apply_remote_session_result(
+            11,
+            Ok(vec![
+                remote_session_summary(3, false),
+                remote_session_summary(5, false),
+            ]),
+            window,
+            cx,
+        );
+        let picker = zetta
+            .remote_session_picker
+            .as_ref()
+            .expect("a successful load keeps the picker open");
+        (picker.field, picker.suggestion_navigation.is_none())
+    });
+    assert_eq!(
+        field,
+        RemoteSessionField::List,
+        "loaded sessions should put Enter and the arrow keys on the list"
+    );
+    assert!(suggestion_navigation_cleared);
+
+    let (field, error) = zetta.update_in(cx, |zetta, window, cx| {
+        let picker = zetta
+            .remote_session_picker
+            .as_mut()
+            .expect("the picker is still open");
+        picker.generation = 12;
+        picker.field = RemoteSessionField::Target;
+        zetta.apply_remote_session_result(12, Ok(Vec::new()), window, cx);
+        let picker = zetta
+            .remote_session_picker
+            .as_ref()
+            .expect("an empty load keeps the picker open");
+        (picker.field, picker.error.clone())
+    });
+    assert_eq!(
+        field,
+        RemoteSessionField::Target,
+        "a host with no shared sessions should leave the user on the target field"
+    );
+    assert!(error.is_some());
+}
+
+#[test]
 fn down_selects_the_first_host_without_leaving_the_target_field() {
     let mut picker = picker_with_suggestions("");
 
