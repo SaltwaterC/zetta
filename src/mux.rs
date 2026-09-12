@@ -1087,9 +1087,13 @@ impl crate::Zetta {
     /// and the daemon rejects whichever of the two arrives against a tree the
     /// other has just changed. The pane leaves this window when the canonical
     /// state says it has. See `run_shared_pane_close`.
+    ///
     /// Reports whether the request was made. A pane the session does not know
-    /// about — one whose creation the daemon never committed — has no global
-    /// close to ask for, and the caller closes it locally instead.
+    /// about — one whose creation the daemon never committed, or one in a tab
+    /// whose collaboration binding has gone — has no global close to ask for,
+    /// and the caller closes it locally instead. Answering `true` without
+    /// queuing anything would leave a pane marked as closing that nothing ever
+    /// closes, and that `close_pane` then refuses to try again.
     pub(crate) fn request_shared_pane_close(
         &mut self,
         tab_id: u64,
@@ -1099,6 +1103,9 @@ impl crate::Zetta {
         let Some(session_id) = self.mux_panes.session_id(tab_id) else {
             return false;
         };
+        if !self.shared_collaboration.is_bound(session_id) {
+            return false;
+        }
         let Some(mux_pane_id) = self
             .shared_collaboration
             .mux_pane_id(session_id, pane_id)

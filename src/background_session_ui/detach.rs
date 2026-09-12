@@ -462,7 +462,23 @@ impl Zetta {
                 .background_authentication()
                 .flatten()
                 .is_some();
-        let (summary, state) = self.session_publication(tab, session_id, protected, cx)?;
+        let (mut summary, state) = self.session_publication(tab, session_id, protected, cx)?;
+        // An offered summary is the seed of the session's canonical geometry,
+        // and canonical geometry is written in the daemon's pane ids. A summary
+        // straight from the tab is written in this window's, and the daemon
+        // stores it verbatim — so every later proposal is validated against a
+        // layout naming panes it does not hold, and no pane can be added to the
+        // session again. The two id spaces agree only while a fresh daemon and
+        // a single window happen to have counted the same number of panes,
+        // which is why this went unnoticed.
+        if offered {
+            crate::background_session_ui::collaboration::remap_summary_to_mux(
+                &mut summary,
+                self.mux_panes.ids(),
+            )
+            .context("describing the shared session in the multiplexer's pane ids")?;
+            summary.id = session_id;
+        }
         // The verifier is what makes sharing safe, and the multiplexer refuses to
         // offer a session that has none: a window joining one is handed whatever
         // its terminals can already do. Scoping a session back needs none, and
@@ -544,9 +560,18 @@ impl Zetta {
             .background_authentication()
             .flatten()
             .is_some();
-        let (summary, state) = self
+        let (mut summary, state) = self
             .session_publication(tab, session_id, protected, cx)
             .ok()?;
+        // In the multiplexer's pane ids, as in `publish_session_offer`: this
+        // refresh is published through the same request and becomes the same
+        // canonical geometry.
+        crate::background_session_ui::collaboration::remap_summary_to_mux(
+            &mut summary,
+            self.mux_panes.ids(),
+        )
+        .ok()?;
+        summary.id = session_id;
         Some((session_id, summary, state))
     }
 

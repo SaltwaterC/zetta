@@ -6196,3 +6196,139 @@ fn an_upgrade_keeps_the_retained_screen_at_the_width_it_was_drawn_at() {
         _ => panic!("attach failed"),
     }
 }
+
+/// The sequence a window actually performs when a user splits twice: the
+/// second split targets the pane the first one created, and its replacement
+/// names that pane by the id the commit handed back.
+#[test]
+fn splitting_a_pane_created_by_an_earlier_split_is_accepted() {
+    let daemon = TestDaemon::start();
+    let client = daemon.client();
+    let pane = client
+        .spawn(spawn_request(None, "printf ready; sleep 60"))
+        .unwrap();
+    let descriptor = std::fs::File::from(pane.descriptor);
+    read_until(&descriptor, "ready");
+    let mut offered = summary(pane.session_id, pane.pane_id);
+    offered.panes.push(pane_summary(pane.pane_id));
+    client
+        .share(
+            pane.session_id,
+            offered,
+            serde_json::json!({"shared": true}),
+            Some(&test_verifier()),
+            true,
+        )
+        .unwrap();
+
+    let draft = |draft_id| zmux::messages::SharedPaneDraft {
+        draft_id,
+        profile: "System".to_owned(),
+        command: Some(zetta_profiles::ProfileCommand::with_args(
+            "sh",
+            vec!["-c".to_owned(), "sleep 60".to_owned()],
+        )),
+        env: HashMap::new(),
+        working_directory: None,
+        size: TerminalSize {
+            columns: 80,
+            lines: 24,
+            cell_width: 0,
+            cell_height: 0,
+        },
+        console_palette: ConsolePalette::default(),
+        metadata: pane_summary(0),
+    };
+
+    let zmux::client::SharedBatchResult::Applied(first) = client
+        .spawn_shared_batch(SharedSpawnBatchRequest {
+            session_id: pane.session_id,
+            base_revision: SessionRevision::INITIAL,
+            operation_id: client.next_shared_operation_id(),
+            target_pane_id: Some(pane.pane_id),
+            replacement: zmux::messages::SharedDraftLayout::Split {
+                axis: "vertical".to_owned(),
+                first_ratio: 200,
+                first: Box::new(zmux::messages::SharedDraftLayout::Existing {
+                    pane_id: pane.pane_id,
+                }),
+                second: Box::new(zmux::messages::SharedDraftLayout::Draft { draft_id: 1 }),
+            },
+            panes: vec![draft(1)],
+            active_pane: Some(zmux::messages::SharedPaneRef::Draft { draft_id: 1 }),
+        })
+        .unwrap()
+    else {
+        panic!("the first split conflicted")
+    };
+    let second_pane = first.mappings[0].pane_id;
+
+    // Now split *that* pane, exactly as the window does: the target is the
+    // pane the commit created, and the replacement nests it with a new draft.
+    let outcome = client.spawn_shared_batch(SharedSpawnBatchRequest {
+        session_id: pane.session_id,
+        base_revision: first.state.revision,
+        operation_id: client.next_shared_operation_id(),
+        target_pane_id: Some(second_pane),
+        replacement: zmux::messages::SharedDraftLayout::Split {
+            axis: "vertical".to_owned(),
+            first_ratio: 200,
+            first: Box::new(zmux::messages::SharedDraftLayout::Existing {
+                pane_id: second_pane,
+            }),
+            second: Box::new(zmux::messages::SharedDraftLayout::Draft { draft_id: 2 }),
+        },
+        panes: vec![draft(2)],
+        active_pane: Some(zmux::messages::SharedPaneRef::Draft { draft_id: 2 }),
+    });
+
+    let zmux::client::SharedBatchResult::Applied(second) =
+        outcome.expect("splitting a pane the daemon holds is not an error")
+    else {
+        panic!("the second split conflicted")
+    };
+    assert_eq!(second.state.summary.panes.len(), 3);
+}
+
+/// An offered summary describes the session's geometry, and the daemon keeps
+/// it as the canonical layout every later proposal is validated against. It
+/// therefore has to be written in the daemon's pane ids.
+///
+/// A window numbers its panes from its own counter, so a summary taken
+/// straight from a tab is written in *that* space. The two agree only while a
+/// fresh daemon and a single window have happened to count the same number of
+/// panes; once they diverge, the canonical layout names panes the daemon does
+/// not hold and no pane can ever be added to the session again — the failure
+/// looked like "shared layout references a pane the daemon does not hold" on
+/// every split, with the session otherwise working.
+#[test]
+fn an_offered_summary_describing_panes_the_daemon_lacks_is_refused() {
+    let daemon = TestDaemon::start();
+    let client = daemon.client();
+    let pane = client
+        .spawn(spawn_request(None, "printf ready; sleep 60"))
+        .unwrap();
+    let descriptor = std::fs::File::from(pane.descriptor);
+    read_until(&descriptor, "ready");
+
+    // A window's local pane id that this daemon has never issued.
+    let foreign = pane.pane_id + 9_000;
+    let mut offered = summary(pane.session_id, foreign);
+    offered.panes.push(pane_summary(foreign));
+    offered.layout = BackgroundPaneLayout::Pane { pane_id: foreign };
+
+    let error = client
+        .share(
+            pane.session_id,
+            offered,
+            serde_json::json!({"shared": true}),
+            Some(&test_verifier()),
+            true,
+        )
+        .expect_err("a summary in another id space cannot describe this session");
+
+    assert!(
+        format!("{error:#}").contains("does not hold"),
+        "unexpected error: {error:#}"
+    );
+}

@@ -1449,6 +1449,35 @@ pub(super) fn share(
         session.refuse_until = None;
     }
     session.summary.authentication_required = session.authentication.is_some();
+    // An offered summary seeds the session's canonical geometry, so it has to
+    // describe panes this daemon actually holds — every later proposal is
+    // validated against that geometry, and one written in another id space
+    // makes every one of them fail with no way to recover. Checked here rather
+    // than trusted, the way `apply_shared` checks a `ReplaceTab`: the two
+    // requests write the same field and had different rules.
+    if request.offered {
+        let held = session
+            .panes
+            .iter()
+            .map(|pane| pane.id)
+            .collect::<std::collections::HashSet<_>>();
+        if let Some(pane) = session
+            .summary
+            .panes
+            .iter()
+            .find(|pane| !held.contains(&pane.id))
+        {
+            let pane_id = pane.id;
+            let session_id = session.id;
+            drop(sessions);
+            return connection.send(&Response::Error {
+                message: format!(
+                    "the offered summary for session {session_id} describes pane {pane_id}, \
+                     which this multiplexer does not hold"
+                ),
+            });
+        }
+    }
     session.shared_state = request.offered.then(|| {
         let mut state = session.shared_state.take().unwrap_or_else(|| {
             crate::messages::SharedSessionState::new(

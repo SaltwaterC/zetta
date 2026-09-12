@@ -467,3 +467,31 @@ fn a_local_shared_draft_sends_the_command_it_resolved() {
     );
     assert_eq!(env, environment, "same machine, same environment");
 }
+
+/// A window proposes geometry in the session's pane ids, translated from its
+/// own. The session refuses the whole proposal if one of them names a pane it
+/// no longer holds, so the ids have to be collectable before it is sent.
+#[cfg(feature = "zmux")]
+#[test]
+fn a_proposed_layout_reports_every_existing_pane_it_names() {
+    let layout = zmux::messages::SharedDraftLayout::Split {
+        axis: "vertical".to_owned(),
+        first_ratio: 200,
+        first: Box::new(zmux::messages::SharedDraftLayout::Existing { pane_id: 41 }),
+        second: Box::new(zmux::messages::SharedDraftLayout::Split {
+            axis: "horizontal".to_owned(),
+            first_ratio: 300,
+            first: Box::new(zmux::messages::SharedDraftLayout::Existing { pane_id: 42 }),
+            second: Box::new(zmux::messages::SharedDraftLayout::Draft { draft_id: 7 }),
+        }),
+    };
+
+    let mut named = Vec::new();
+    shared_draft_layout_existing_ids(&layout, &mut named);
+
+    assert_eq!(
+        named,
+        vec![41, 42],
+        "a draft has no id in the session yet, so only the existing panes are named"
+    );
+}

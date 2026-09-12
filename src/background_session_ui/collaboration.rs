@@ -489,6 +489,72 @@ impl Zetta {
         cx.notify();
     }
 
+    /// Drops this window's view of any pane the session no longer holds.
+    ///
+    /// Geometry is proposed in the session's pane ids, translated from this
+    /// window's own, so a translation kept for a pane the session dropped is
+    /// not geometry the session can accept — it refuses the whole request, and
+    /// goes on refusing it, because nothing about the window has changed. Run
+    /// before a proposal is built rather than after it is rejected, and against
+    /// the snapshot the window already holds, so it costs no round trip.
+    ///
+    /// `install_shared_snapshot` handles the panes this window knows are the
+    /// session's. The loop before it is for the ones it does not: the map that
+    /// translates a proposal is `mux_panes`, which outlives the collaboration
+    /// binding's own, and an entry only in there is invisible to a snapshot.
+    pub(crate) fn reconcile_shared_tab(&mut self, tab_id: u64, cx: &mut Context<Self>) {
+        let Some(session_id) = self.mux_panes.session_id(tab_id) else {
+            return;
+        };
+        let Some(state) = self.shared_collaboration.state(session_id).cloned() else {
+            return;
+        };
+        let stale = self
+            .tabs
+            .iter()
+            .find(|tab| tab.id == tab_id)
+            .into_iter()
+            .flat_map(|tab| &tab.panes)
+            .filter(|pane| {
+                self.mux_panes
+                    .mux_pane_id(pane.id)
+                    .is_some_and(|mux_pane_id| !state.contains_pane(mux_pane_id))
+            })
+            .map(|pane| pane.id)
+            .collect::<Vec<_>>();
+        if !stale.is_empty() {
+            log::warn!(
+                "shared session {session_id} no longer holds the pane(s) behind local pane(s) \
+                 {stale:?}; dropping this window's view of them"
+            );
+        }
+        for pane_id in stale {
+            self.remove_local_shared_pane(session_id, pane_id, cx);
+        }
+        self.install_shared_snapshot(session_id, state, cx);
+    }
+
+    /// Whether every pane a proposal names is one the session holds. The safety
+    /// net behind [`Zetta::reconcile_shared_tab`]: a proposal that fails this
+    /// would be refused in full, and refusing it here keeps the refusal out of
+    /// the session's history.
+    pub(crate) fn shared_geometry_is_current(&self, session_id: u64, named: &[u64]) -> bool {
+        let Some(state) = self.shared_collaboration.state(session_id) else {
+            return false;
+        };
+        let stale = named
+            .iter()
+            .filter(|pane_id| !state.contains_pane(**pane_id))
+            .collect::<Vec<_>>();
+        if !stale.is_empty() {
+            log::warn!(
+                "shared session {session_id} does not hold pane(s) {stale:?} that this window's \
+                 layout names; the proposal was not sent"
+            );
+        }
+        stale.is_empty()
+    }
+
     /// Whether this pane is waiting for the daemon to confirm its close. Such a
     /// pane is still on screen and still receiving its session's output, but it
     /// takes no input and cannot be closed again.
@@ -1877,7 +1943,7 @@ fn map_background_layout(
     })
 }
 
-fn remap_summary_to_mux(
+pub(crate) fn remap_summary_to_mux(
     summary: &mut BackgroundSessionSummary,
     local_to_mux: &HashMap<u64, u64>,
 ) -> Result<()> {

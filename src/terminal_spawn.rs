@@ -126,6 +126,7 @@ struct LocalTerminalLaunch {
 }
 
 #[cfg(feature = "zmux")]
+#[derive(Clone)]
 pub(crate) struct SharedTerminalLaunch {
     tab_id: u64,
     pane_id: u64,
@@ -145,6 +146,12 @@ pub(crate) struct SharedTerminalLaunch {
     tracked_multi_command_launch: bool,
     base_revision: zmux::messages::SessionRevision,
     console_palette: terminal::ConsolePalette,
+    /// Whether this launch has already been resynchronised once. A session
+    /// whose daemon was replaced leaves every window proposing pane ids that no
+    /// longer exist; the first refusal brings the window up to date and the
+    /// launch is made again, but only once, so a session that refuses for some
+    /// other reason cannot put the window in a loop.
+    resynchronized: bool,
 }
 
 #[cfg(feature = "zmux")]
@@ -154,6 +161,16 @@ enum SharedTerminalBuild {
         tab_id: u64,
         pane_id: u64,
         state: Box<zmux::messages::SharedSessionState>,
+    },
+    /// The session refused the proposed geometry, and a fresh snapshot came
+    /// back with it. This window's picture of the session was wrong, so the
+    /// snapshot is applied before the draft is given up — otherwise the same
+    /// wrong picture produces the same refusal for every later split.
+    Desynchronized {
+        tab_id: u64,
+        pane_id: u64,
+        state: Box<zmux::messages::SharedSessionState>,
+        reason: String,
     },
 }
 
@@ -168,6 +185,14 @@ enum SharedTerminalBatchBuild {
         state: zmux::messages::SharedSessionState,
         panes: Vec<(u64, u64)>,
     },
+    /// As [`SharedTerminalBuild::Desynchronized`]: the panes are the session's
+    /// now, whatever went wrong here, so the window converges on the committed
+    /// state rather than dropping them.
+    Desynchronized {
+        state: zmux::messages::SharedSessionState,
+        panes: Vec<(u64, u64)>,
+        reason: String,
+    },
 }
 
 #[cfg(feature = "zmux")]
@@ -179,14 +204,28 @@ fn build_shared_terminal_batch(
 ) -> Result<SharedTerminalBatchBuild> {
     let session_id = request.session_id;
     let client = runtime.client().clone();
-    let result = client.spawn_shared_batch(request)?;
+    // Taken before the launches are consumed below: every recovery path has to
+    // name the drafts, including the ones that run after the loop has started.
+    let panes = launches
+        .iter()
+        .map(|launch| (launch.tab_id, launch.pane_id))
+        .collect::<Vec<_>>();
+    let result = match client.spawn_shared_batch(request) {
+        Ok(result) => result,
+        Err(error) => {
+            // The session would not take this geometry. Bring back what it
+            // actually holds so the window stops proposing the same thing.
+            let state = client.shared_snapshot(session_id)?;
+            return Ok(SharedTerminalBatchBuild::Desynchronized {
+                state,
+                panes,
+                reason: format!("{error:#}"),
+            });
+        }
+    };
     let mut committed = match result {
         zmux::client::SharedBatchResult::Applied(committed) => committed,
         zmux::client::SharedBatchResult::Conflict(state) => {
-            let panes = launches
-                .iter()
-                .map(|launch| (launch.tab_id, launch.pane_id))
-                .collect();
             return Ok(SharedTerminalBatchBuild::Conflict { state, panes });
         }
     };
@@ -200,13 +239,25 @@ fn build_shared_terminal_batch(
         launch
             .provider
             .record_shared_opened(session_id, mapping.pane_id);
-        let pane = attach_committed_shared_pane(
+        // Committed already: the panes belong to the session whatever happens
+        // here, so a failed attachment converges the window on them instead of
+        // dropping panes that are running for every other viewer.
+        let pane = match attach_committed_shared_pane(
             &client,
             &runtime,
             session_id,
             mapping.pane_id,
             &mut committed.state,
-        )?;
+        ) {
+            Ok(pane) => pane,
+            Err(error) => {
+                return Ok(SharedTerminalBatchBuild::Desynchronized {
+                    state: committed.state,
+                    panes,
+                    reason: format!("{error:#}"),
+                });
+            }
+        };
         let pane = Arc::new(pane);
         let image_paste_handler: Arc<dyn terminal::ImagePasteHandler> = if runtime.is_remote() {
             Arc::new(
@@ -368,6 +419,26 @@ fn shared_spawn_stand_in_size(
         lines: measured.map_or(24, |bounds| bounds.num_lines() as u16),
         cell_width: 0,
         cell_height: 0,
+    }
+}
+
+/// Every pane a proposed layout names as already existing.
+///
+/// These are the ids the session is asked to place, translated from this
+/// window's own map. The daemon refuses the whole request if one of them names
+/// a pane it does not hold, which is why they are worth checking first.
+#[cfg(feature = "zmux")]
+fn shared_draft_layout_existing_ids(
+    layout: &zmux::messages::SharedDraftLayout,
+    ids: &mut Vec<u64>,
+) {
+    match layout {
+        zmux::messages::SharedDraftLayout::Draft { .. } => {}
+        zmux::messages::SharedDraftLayout::Existing { pane_id } => ids.push(*pane_id),
+        zmux::messages::SharedDraftLayout::Split { first, second, .. } => {
+            shared_draft_layout_existing_ids(first, ids);
+            shared_draft_layout_existing_ids(second, ids);
+        }
     }
 }
 
@@ -1188,6 +1259,7 @@ impl Zetta {
                     tracked_multi_command_launch,
                     base_revision,
                     console_palette: initial_console_palette.unwrap_or_default(),
+                    resynchronized: false,
                 },
                 window,
                 cx,
@@ -1370,6 +1442,13 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Kept so a refusal that turns out to be this window being behind can
+        // be answered by making the same launch again, once, against the
+        // session as it actually is.
+        let retry = (!launch.resynchronized).then(|| SharedTerminalLaunch {
+            resynchronized: true,
+            ..launch.clone()
+        });
         let SharedTerminalLaunch {
             tab_id,
             pane_id,
@@ -1389,7 +1468,12 @@ impl Zetta {
             tracked_multi_command_launch,
             base_revision,
             console_palette,
+            resynchronized: _,
         } = launch;
+        // Before the geometry is read out of the tab, not after the session has
+        // refused it: the proposal is built from this window's translation of
+        // its panes, so a translation the session has outlived has to go first.
+        self.reconcile_shared_tab(tab_id, cx);
         let spawn_geometry = self
             .tabs
             .iter()
@@ -1421,6 +1505,28 @@ impl Zetta {
             );
             return;
         };
+        // The proposal is checked against what this window believes the session
+        // holds before it is sent, and the window is reconciled with that same
+        // belief on the way. A stale translation would otherwise be refused by
+        // the daemon for the whole request, and refused again for every split
+        // after it, because nothing here would have learned anything.
+        let mut named = target_pane_id.into_iter().collect::<Vec<_>>();
+        shared_draft_layout_existing_ids(&replacement, &mut named);
+        if let Some(zmux::messages::SharedPaneRef::Existing { pane_id }) = active_pane {
+            named.push(pane_id);
+        }
+        let session_id = provider.session_id();
+        if !session_id.is_some_and(|session_id| self.shared_geometry_is_current(session_id, &named))
+        {
+            self.discard_uncommitted_shared_pane(
+                tab_id,
+                pane_id,
+                "The shared session changed while this pane was being created. Try again."
+                    .to_owned(),
+                cx,
+            );
+            return;
+        }
         let remote = provider.runtime().is_remote();
         let (draft_command, draft_environment) = shared_draft_process(remote, &shell, &environment);
         let stand_in_size = shared_spawn_stand_in_size(
@@ -1441,7 +1547,7 @@ impl Zetta {
             let session_id = provider
                 .session_id()
                 .context("shared pane has no multiplexer session")?;
-            let spawned = client.spawn_shared_batch(zmux::messages::SharedSpawnBatchRequest {
+            let request = zmux::messages::SharedSpawnBatchRequest {
                 session_id,
                 base_revision,
                 operation_id,
@@ -1469,7 +1575,25 @@ impl Zetta {
                     },
                 }],
                 active_pane,
-            })?;
+            };
+            let spawned = match client.spawn_shared_batch(request) {
+                Ok(spawned) => spawned,
+                Err(error) => {
+                    // The session would not take the geometry. Whatever this
+                    // window believed about the session was wrong, so bring
+                    // back what is actually there rather than reporting and
+                    // leaving the same belief in place to fail again.
+                    let Ok(state) = client.shared_snapshot(session_id) else {
+                        return Err(error);
+                    };
+                    return Ok(SharedTerminalBuild::Desynchronized {
+                        tab_id,
+                        pane_id,
+                        state: Box::new(state),
+                        reason: format!("{error:#}"),
+                    });
+                }
+            };
             let spawned = match spawned {
                 zmux::client::SharedBatchResult::Applied(spawned) => spawned,
                 zmux::client::SharedBatchResult::Conflict(state) => {
@@ -1487,13 +1611,28 @@ impl Zetta {
                 .context("shared batch did not commit its requested pane")?;
             provider.record_shared_opened(session_id, mapping.pane_id);
             let mut committed_state = spawned.state;
-            let pane = attach_committed_shared_pane(
+            // Past this point the pane exists for every viewer, so a failure
+            // here is this window's alone. Handing back the committed state
+            // rather than an error is what lets the pane arrive the ordinary
+            // way — as one the session holds and this window has yet to
+            // attach — instead of being dropped locally and left running.
+            let pane = match attach_committed_shared_pane(
                 &client,
                 &runtime,
                 session_id,
                 mapping.pane_id,
                 &mut committed_state,
-            )?;
+            ) {
+                Ok(pane) => pane,
+                Err(error) => {
+                    return Ok(SharedTerminalBuild::Desynchronized {
+                        tab_id,
+                        pane_id,
+                        state: Box::new(committed_state),
+                        reason: format!("{error:#}"),
+                    });
+                }
+            };
             let pane = Arc::new(pane);
             let image_paste_handler: Arc<dyn terminal::ImagePasteHandler> = if runtime.is_remote() {
                 Arc::new(
@@ -1564,6 +1703,45 @@ impl Zetta {
                     })
                     .ok();
                 }
+                Ok(SharedTerminalBuild::Desynchronized {
+                    tab_id,
+                    pane_id,
+                    state,
+                    reason,
+                }) => {
+                    this.update_in(cx, |this, window, cx| {
+                        log::warn!(
+                            "shared session {} refused this window's pane layout: {reason}",
+                            state.session_id
+                        );
+                        // The snapshot first: it is the session as it is, and
+                        // applying it is what makes the retry below propose
+                        // something the session can actually accept.
+                        this.apply_shared_snapshot(state.session_id, *state, window, cx);
+                        let Some(mut retry) = retry else {
+                            this.discard_uncommitted_shared_pane(
+                                tab_id,
+                                pane_id,
+                                format!("Could not create the shared pane: {reason}"),
+                                cx,
+                            );
+                            return;
+                        };
+                        // Rebased on what the session is at now. The revision
+                        // the launch was built with belongs to the picture that
+                        // has just been replaced.
+                        if let Some(revision) = retry
+                            .provider
+                            .session_id()
+                            .and_then(|session_id| this.shared_collaboration.state(session_id))
+                            .map(|state| state.revision)
+                        {
+                            retry.base_revision = revision;
+                        }
+                        this.spawn_shared_terminal_now(retry, window, cx);
+                    })
+                    .ok();
+                }
                 Ok(SharedTerminalBuild::Conflict {
                     tab_id,
                     pane_id,
@@ -1607,6 +1785,7 @@ impl Zetta {
         cx: &mut Context<Self>,
     ) {
         let tab_id = launches[0].tab_id;
+        self.reconcile_shared_tab(tab_id, cx);
         let draft_ids = launches
             .iter()
             .map(|launch| launch.pane_id)
@@ -1647,6 +1826,31 @@ impl Zetta {
             }
             return;
         };
+        // A batch replaces the session's whole layout rather than one node of
+        // it, so every pane the tab holds is named. That makes it the request
+        // most exposed to a translation this window kept for a pane the session
+        // dropped — one such id and the session refuses all of it.
+        let mut named = Vec::new();
+        shared_draft_layout_existing_ids(&replacement, &mut named);
+        if let zmux::messages::SharedPaneRef::Existing { pane_id } = active_pane {
+            named.push(pane_id);
+        }
+        let current = launches[0]
+            .provider
+            .session_id()
+            .is_some_and(|session_id| self.shared_geometry_is_current(session_id, &named));
+        if !current {
+            for launch in &launches {
+                self.discard_uncommitted_shared_pane(
+                    tab_id,
+                    launch.pane_id,
+                    "The shared session changed while these panes were being created. Try again."
+                        .to_owned(),
+                    cx,
+                );
+            }
+            return;
+        }
         let runtime = launches[0].provider.runtime().clone();
         let session_id = launches[0]
             .provider
@@ -1723,6 +1927,30 @@ impl Zetta {
                     this.apply_shared_snapshot(session_id, state, window, cx);
                     for (builder, spawned) in terminals.drain(..) {
                         this.finish_terminal_spawn(builder, spawned, window, cx);
+                    }
+                })
+                .ok();
+            }
+            Ok(SharedTerminalBatchBuild::Desynchronized {
+                state,
+                panes,
+                reason,
+            }) => {
+                this.update_in(cx, |this, window, cx| {
+                    log::warn!(
+                        "shared session {} refused this window's pane batch: {reason}",
+                        state.session_id
+                    );
+                    this.apply_shared_snapshot(state.session_id, state, window, cx);
+                    for (tab_id, pane_id) in panes {
+                        this.discard_uncommitted_shared_pane(
+                            tab_id,
+                            pane_id,
+                            "This window's view of the shared session was out of date. It has \
+                             been brought up to date — try again."
+                                .to_owned(),
+                            cx,
+                        );
                     }
                 })
                 .ok();
