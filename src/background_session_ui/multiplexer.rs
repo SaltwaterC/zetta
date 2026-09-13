@@ -199,8 +199,7 @@ fn recover_empty_attached_tab_state(
         .panes
         .iter()
         .find(|pane| pane.id == mux_pane_id)
-        .map(|pane| pane.profile.clone())
-        .unwrap_or_else(|| "System".to_owned());
+        .map_or_else(|| "System".to_owned(), |pane| pane.profile.clone());
     state.next_pane_label = state.next_pane_label.max(2);
     state.layout = LayoutState::Pane {
         pane_id: mux_pane_id,
