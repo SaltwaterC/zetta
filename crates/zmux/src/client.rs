@@ -378,7 +378,12 @@ impl SharedPane {
             child_pid,
             writer: Arc::new(Mutex::new(connection)),
             sizes: Arc::new(Mutex::new(Vec::new())),
-            initial_viewport: Arc::new(Mutex::new(initial_viewport)),
+            // A daemon must advertise a real grid, but older or interrupted
+            // handovers can leave its dimensions unset. Treat that as no
+            // initial viewport rather than turning a pane into a 1x1 grid.
+            initial_viewport: Arc::new(Mutex::new(
+                initial_viewport.filter(|(columns, lines)| *columns > 0 && *lines > 0),
+            )),
             size_signal: async_channel::bounded(1),
             reader_handoffs: Arc::new(Mutex::new(VecDeque::new())),
             replay,
