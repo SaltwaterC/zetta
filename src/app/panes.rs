@@ -682,6 +682,6 @@ impl Zetta {
         };
         tab.activate_pane(pane_id);
         self.focus_active(window, cx);
-        self.sync_shared_tab_state(tab_id, cx);
+        self.focus_shared_pane(tab_id, pane_id, cx);
     }
 }

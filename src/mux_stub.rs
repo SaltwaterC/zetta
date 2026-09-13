@@ -95,4 +95,12 @@ impl crate::Zetta {
     pub(crate) fn leave_shared_tab(&mut self, _: u64, _: &mut gpui::App) {}
 
     pub(crate) fn sync_shared_tab_state(&mut self, _: u64, _: &mut gpui::Context<crate::Zetta>) {}
+
+    pub(crate) fn focus_shared_pane(
+        &mut self,
+        _: u64,
+        _: u64,
+        _: &mut gpui::Context<crate::Zetta>,
+    ) {
+    }
 }

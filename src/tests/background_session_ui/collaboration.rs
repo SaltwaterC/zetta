@@ -87,6 +87,36 @@ fn canonical_state(session_id: u64, revision: u64) -> SharedSessionState {
     state
 }
 
+fn two_pane_state(session_id: u64, revision: u64, active_pane: u64) -> SharedSessionState {
+    let mut state = canonical_state(session_id, revision);
+    let layout = BackgroundPaneLayout::Split {
+        axis: "vertical".to_owned(),
+        first_ratio: crate::pane::DEFAULT_PANE_SPLIT_RATIO,
+        first: Box::new(BackgroundPaneLayout::Pane { pane_id: 41 }),
+        second: Box::new(BackgroundPaneLayout::Pane { pane_id: 42 }),
+    };
+    state.summary.panes.push(pane_summary(42));
+    state.summary.active_pane = active_pane;
+    state.summary.layout = layout.clone();
+    state.presentation.active_pane = active_pane;
+    state.presentation.layout = layout;
+    state
+}
+
+fn two_pane_tab() -> Tab {
+    let mut tab = local_tab(100, 7);
+    tab.panes
+        .push(TerminalPane::new(8, tab.panes[0].profile.clone()));
+    tab.pane_indices.insert(8, 1);
+    tab.layout = PaneLayout::Split {
+        axis: SplitAxis::Vertical,
+        first_ratio: crate::pane::DEFAULT_PANE_SPLIT_RATIO,
+        first: Box::new(PaneLayout::Pane(7)),
+        second: Box::new(PaneLayout::Pane(8)),
+    };
+    tab
+}
+
 #[test]
 fn stable_mux_ids_are_mapped_to_local_pane_ids() {
     let mut coordinator = SharedSessionCoordinator::default();
@@ -198,24 +228,24 @@ fn geometry_converges_a_dimension_at_a_time_and_then_yields_to_the_tab_state() {
     let mut summary = canonical.summary.clone();
 
     assert_eq!(
-        shared_geometry_operation(&canonical.presentation, &summary, None, &[]),
+        shared_geometry_operation(&canonical.presentation, &summary, None, &[], false),
         None,
         "an agreed geometry leaves the publication free to send the tab state"
     );
 
     summary.active_pane = 42;
     assert_eq!(
-        shared_geometry_operation(&canonical.presentation, &summary, None, &[]),
+        shared_geometry_operation(&canonical.presentation, &summary, None, &[], false),
         Some(zmux::messages::SharedSessionOperation::SetFocus { pane_id: 42 })
     );
 
     summary.active_pane = canonical.presentation.active_pane;
     assert_eq!(
-        shared_geometry_operation(&canonical.presentation, &summary, Some(41), &[]),
+        shared_geometry_operation(&canonical.presentation, &summary, Some(41), &[], false),
         Some(zmux::messages::SharedSessionOperation::SetMaximized { pane_id: Some(41) })
     );
     assert_eq!(
-        shared_geometry_operation(&canonical.presentation, &summary, None, &[41]),
+        shared_geometry_operation(&canonical.presentation, &summary, None, &[41], false),
         Some(zmux::messages::SharedSessionOperation::SetMinimized {
             pane_id: 41,
             minimized: true
@@ -276,6 +306,149 @@ fn a_publication_stops_re_queuing_at_its_attempt_limit() {
         })
     );
     assert_eq!(publication_retry(SHARED_PUBLISH_ATTEMPTS - 1), None);
+}
+
+/// A subscription reconnect can replay the same revision it originally
+/// delivered. Keyboard focus is local immediately, so that replay must still
+/// install its metadata without moving focus away before the queued request
+/// has a chance to run.
+#[test]
+fn recovery_snapshot_keeps_pending_keyboard_focus_while_applying_canonical_state() {
+    let mut coordinator = SharedSessionCoordinator::default();
+    coordinator
+        .bind(9, 100, two_pane_state(9, 4, 41), [(41, 7), (42, 8)])
+        .unwrap();
+    let mut tab = two_pane_tab();
+    tab.active_pane = 8;
+    let generation = coordinator.request_focus(9, 42).unwrap();
+
+    let mut recovery = two_pane_state(9, 4, 41);
+    recovery.presentation.maximized_pane = Some(41);
+    assert_eq!(
+        coordinator
+            .apply_snapshot_to_tab(9, recovery, &mut tab)
+            .unwrap(),
+        SharedSnapshotDisposition::Applied
+    );
+    assert_eq!(
+        tab.active_pane, 8,
+        "the requested pane stays active locally"
+    );
+    assert_eq!(
+        tab.maximized_pane,
+        Some(7),
+        "canonical metadata still applies"
+    );
+    assert!(coordinator.focus_intent_is_current(9, 42, generation));
+}
+
+#[test]
+fn focus_acknowledgement_clears_the_intent_and_later_canonical_focus_wins() {
+    let mut coordinator = SharedSessionCoordinator::default();
+    coordinator
+        .bind(9, 100, two_pane_state(9, 4, 41), [(41, 7), (42, 8)])
+        .unwrap();
+    let mut tab = two_pane_tab();
+    tab.active_pane = 8;
+    let generation = coordinator.request_focus(9, 42).unwrap();
+
+    coordinator
+        .apply_snapshot_to_tab(9, two_pane_state(9, 5, 42), &mut tab)
+        .unwrap();
+    assert!(!coordinator.focus_intent_is_current(9, 42, generation));
+    assert_eq!(tab.active_pane, 8);
+
+    coordinator
+        .apply_snapshot_to_tab(9, two_pane_state(9, 6, 41), &mut tab)
+        .unwrap();
+    assert_eq!(
+        tab.active_pane, 7,
+        "canonical focus resumes after acknowledgement"
+    );
+}
+
+#[test]
+fn rapid_focus_changes_collapse_and_an_old_response_cannot_settle_the_newer_one() {
+    let mut coordinator = SharedSessionCoordinator::default();
+    coordinator
+        .bind(9, 100, two_pane_state(9, 4, 41), [(41, 7), (42, 8)])
+        .unwrap();
+    let mut tab = two_pane_tab();
+    let first = coordinator.request_focus(9, 42).unwrap();
+    assert_eq!(
+        coordinator.take_next_operation(9),
+        Some(SharedOperation::FocusPane {
+            mux_pane_id: 42,
+            generation: first,
+            attempts: 0,
+        })
+    );
+    let second = coordinator.request_focus(9, 41).unwrap();
+
+    coordinator
+        .apply_snapshot_to_tab(9, two_pane_state(9, 5, 42), &mut tab)
+        .unwrap();
+    assert!(coordinator.focus_intent_is_current(9, 41, second));
+    assert_eq!(
+        tab.active_pane, 7,
+        "the old response cannot clear newer focus"
+    );
+    coordinator.finish_operation(9);
+    assert_eq!(
+        coordinator.take_next_operation(9),
+        Some(SharedOperation::FocusPane {
+            mux_pane_id: 41,
+            generation: second,
+            attempts: 0,
+        })
+    );
+}
+
+#[test]
+fn removed_focus_targets_and_exhausted_old_retries_discard_only_their_intent() {
+    let mut coordinator = SharedSessionCoordinator::default();
+    coordinator
+        .bind(9, 100, two_pane_state(9, 4, 41), [(41, 7), (42, 8)])
+        .unwrap();
+    let mut tab = two_pane_tab();
+    tab.active_pane = 8;
+    let removed = coordinator.request_focus(9, 42).unwrap();
+    let mut without_target = shared_state(9, 5);
+    without_target.state = canonical_state(9, 5).state;
+    coordinator
+        .apply_snapshot_to_tab(9, without_target, &mut tab)
+        .unwrap();
+    assert!(!coordinator.focus_intent_is_current(9, 42, removed));
+    assert_eq!(tab.active_pane, 7);
+
+    let old = coordinator.request_focus(9, 41).unwrap();
+    let newest = coordinator.request_focus(9, 41).unwrap();
+    coordinator.clear_focus_intent(9, 41, old);
+    assert!(coordinator.focus_intent_is_current(9, 41, newest));
+    assert_eq!(
+        focus_retry(41, newest, SHARED_FOCUS_ATTEMPTS - 1),
+        None,
+        "the bounded retry limit gives up rather than preserving stale focus forever"
+    );
+    coordinator.clear_focus_intent(9, 41, newest);
+    assert!(!coordinator.focus_intent_is_current(9, 41, newest));
+}
+
+#[test]
+fn pending_explicit_focus_suppresses_only_the_duplicate_generic_focus_operation() {
+    let canonical = two_pane_state(9, 4, 41);
+    let mut summary = canonical.summary.clone();
+    summary.active_pane = 42;
+    assert_eq!(
+        shared_geometry_operation(&canonical.presentation, &summary, None, &[], true),
+        None,
+        "the explicit request owns this focus change"
+    );
+    assert_eq!(
+        shared_geometry_operation(&canonical.presentation, &summary, Some(41), &[], true),
+        Some(zmux::messages::SharedSessionOperation::SetMaximized { pane_id: Some(41) }),
+        "other shared-state dimensions continue publishing"
+    );
 }
 
 /// `Tab::remove_pane` leaves the layout alone, and the shared-session removers

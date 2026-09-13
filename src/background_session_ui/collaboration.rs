@@ -32,6 +32,10 @@ const SHARED_PUBLISH_ATTEMPTS: u32 = 4;
 /// stacked on a daemon that is busy committing somebody else's operation.
 const SHARED_CLOSE_RETRY_BACKOFF: Duration = Duration::from_millis(120);
 
+/// Focus travels independently from the debounced tab publication, but uses
+/// the same bounded retry policy as a shared close.
+const SHARED_FOCUS_ATTEMPTS: u32 = 4;
+
 #[derive(Default)]
 pub(crate) struct SharedSessionCoordinator {
     sessions: HashMap<u64, SharedSessionBinding>,
@@ -61,6 +65,12 @@ struct SharedSessionBinding {
     /// rejected and then silently forgotten.
     queue: VecDeque<SharedOperation>,
     in_flight: bool,
+    /// The newest keyboard focus choice that has not yet been reflected by a
+    /// canonical snapshot. A recovery snapshot may legitimately repeat the
+    /// previous focus at the same revision, so it must not undo this choice
+    /// while its explicit request is still queued or in flight.
+    pending_focus: Option<PendingFocusIntent>,
+    next_focus_generation: u64,
     /// Whether a debounce timer is already running for a state publication, so
     /// a gesture that notifies dozens of times starts one timer, not dozens.
     publication_scheduled: bool,
@@ -74,6 +84,12 @@ struct SharedSessionBinding {
     /// committed spawn, a conflict response — and every one of them may have to
     /// attach a pane the snapshot introduced.
     connection: Option<SharedWatchConnection>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PendingFocusIntent {
+    mux_pane_id: u64,
+    generation: u64,
 }
 
 #[derive(Clone)]
@@ -99,6 +115,14 @@ pub(crate) enum SharedOperation {
     /// need two requests. It re-queues itself between them, counting attempts
     /// so geometry that never converges cannot loop.
     PublishState { attempts: u32 },
+    /// A keyboard focus choice. Unlike [`Self::PublishState`], it is not
+    /// debounced: it guards local focus against recovery snapshots until the
+    /// daemon has acknowledged this exact generation.
+    FocusPane {
+        mux_pane_id: u64,
+        generation: u64,
+        attempts: u32,
+    },
     /// Close a pane for every viewer.
     ClosePane {
         local_pane_id: u64,
@@ -114,6 +138,12 @@ impl SharedOperation {
     fn is_same_work(self, other: Self) -> bool {
         match (self, other) {
             (Self::PublishState { .. }, Self::PublishState { .. }) => true,
+            (
+                Self::FocusPane { generation, .. },
+                Self::FocusPane {
+                    generation: other, ..
+                },
+            ) => generation == other,
             (
                 Self::ClosePane { local_pane_id, .. },
                 Self::ClosePane {
@@ -168,6 +198,8 @@ impl SharedSessionCoordinator {
                 local_to_mux,
                 queue: VecDeque::new(),
                 in_flight: false,
+                pending_focus: None,
+                next_focus_generation: 0,
                 publication_scheduled: false,
                 watch_id: None,
                 attaching: HashSet::new(),
@@ -297,6 +329,88 @@ impl SharedSessionCoordinator {
         }
     }
 
+    /// Records a local keyboard focus choice and replaces an unsent older
+    /// choice. An older request already in flight stays ordered before this
+    /// one, but its generation cannot acknowledge the newer intent.
+    pub(crate) fn request_focus(&mut self, session_id: u64, mux_pane_id: u64) -> Option<u64> {
+        let session = self.sessions.get_mut(&session_id)?;
+        if !session.state.contains_pane(mux_pane_id) {
+            return None;
+        }
+        let Some(generation) = session.next_focus_generation.checked_add(1) else {
+            log::warn!("shared session {session_id} exhausted its focus intent generations");
+            return None;
+        };
+        session.next_focus_generation = generation;
+        session.pending_focus = Some(PendingFocusIntent {
+            mux_pane_id,
+            generation,
+        });
+        session
+            .queue
+            .retain(|operation| !matches!(operation, SharedOperation::FocusPane { .. }));
+        session.queue.push_back(SharedOperation::FocusPane {
+            mux_pane_id,
+            generation,
+            attempts: 0,
+        });
+        Some(generation)
+    }
+
+    fn focus_intent_is_current(&self, session_id: u64, mux_pane_id: u64, generation: u64) -> bool {
+        self.sessions.get(&session_id).is_some_and(|session| {
+            session.pending_focus
+                == Some(PendingFocusIntent {
+                    mux_pane_id,
+                    generation,
+                })
+        })
+    }
+
+    fn has_pending_focus(&self, session_id: u64) -> bool {
+        self.sessions
+            .get(&session_id)
+            .is_some_and(|session| session.pending_focus.is_some())
+    }
+
+    /// Keeps a current local target through a recovery snapshot, but only for
+    /// a pane that remains visible in the canonical presentation. A matching
+    /// canonical focus is its acknowledgement and returns control to normal
+    /// snapshot ordering.
+    fn pending_focus_for_snapshot(
+        session: &mut SharedSessionBinding,
+        state: &SharedSessionState,
+        tab: &Tab,
+        layout: &PaneLayout,
+    ) -> Option<u64> {
+        let intent = session.pending_focus?;
+        if state.presentation.active_pane == intent.mux_pane_id {
+            session.pending_focus = None;
+            return None;
+        }
+        let Some(local_pane_id) = session.mux_to_local.get(&intent.mux_pane_id).copied() else {
+            session.pending_focus = None;
+            return None;
+        };
+        let still_visible = state.contains_pane(intent.mux_pane_id)
+            && layout.contains_pane(local_pane_id)
+            && tab.pane(local_pane_id).is_some();
+        if still_visible {
+            Some(local_pane_id)
+        } else {
+            session.pending_focus = None;
+            None
+        }
+    }
+
+    fn clear_focus_intent(&mut self, session_id: u64, mux_pane_id: u64, generation: u64) {
+        if self.focus_intent_is_current(session_id, mux_pane_id, generation)
+            && let Some(session) = self.sessions.get_mut(&session_id)
+        {
+            session.pending_focus = None;
+        }
+    }
+
     /// Queues a canonical mutation, collapsing it into an equivalent one
     /// already waiting. A second publication would send the same tab state
     /// twice, and a second close of the same pane would be refused by the
@@ -402,6 +516,12 @@ impl SharedSessionCoordinator {
             && let Some(mux_pane_id) = session.local_to_mux.remove(&local_pane_id)
         {
             session.mux_to_local.remove(&mux_pane_id);
+            if session
+                .pending_focus
+                .is_some_and(|intent| intent.mux_pane_id == mux_pane_id)
+            {
+                session.pending_focus = None;
+            }
         }
     }
 
@@ -483,7 +603,8 @@ impl SharedSessionCoordinator {
             apply_tab_state(tab, tab_state);
             session.applied_state = state.state.clone();
         }
-        apply_canonical_presentation(tab, &state, layout, &session.mux_to_local)?;
+        let active_pane = Self::pending_focus_for_snapshot(session, &state, tab, &layout);
+        apply_canonical_presentation(tab, &state, layout, &session.mux_to_local, active_pane)?;
         session.state = state;
         Ok(SharedSnapshotDisposition::Applied)
     }
@@ -753,6 +874,34 @@ impl Zetta {
         .detach();
     }
 
+    /// Sends keyboard pane focus through the shared-operation queue without
+    /// waiting for the normal state-publication debounce. Local pointer focus
+    /// continues to use the ordinary publication path; this is deliberately
+    /// called only by the keyboard pane-navigation action.
+    pub(crate) fn focus_shared_pane(
+        &mut self,
+        tab_id: u64,
+        local_pane_id: u64,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session_id) = self.mux_panes.session_id(tab_id) else {
+            return;
+        };
+        let Some(mux_pane_id) = self
+            .shared_collaboration
+            .mux_pane_id(session_id, local_pane_id)
+        else {
+            return;
+        };
+        if self
+            .shared_collaboration
+            .request_focus(session_id, mux_pane_id)
+            .is_some()
+        {
+            self.pump_shared_operations(tab_id, session_id, cx);
+        }
+    }
+
     /// Runs the session's next queued mutation, if one is not already running.
     ///
     /// Each operation is built from the tab and rebased on the canonical
@@ -771,6 +920,11 @@ impl Zetta {
             SharedOperation::PublishState { attempts } => {
                 self.run_shared_publication(tab_id, session_id, attempts, cx);
             }
+            SharedOperation::FocusPane {
+                mux_pane_id,
+                generation,
+                attempts,
+            } => self.run_shared_focus(tab_id, session_id, mux_pane_id, generation, attempts, cx),
             SharedOperation::ClosePane {
                 local_pane_id,
                 mux_pane_id,
@@ -880,6 +1034,107 @@ impl Zetta {
                     this.shared_collaboration.enqueue(session_id, retry);
                 }
                 this.finish_shared_operation(tab_id, session_id, cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Sends a keyboard focus request against the revision current at send
+    /// time. A newer keystroke may replace the intent while an older request is
+    /// in flight; its response is then allowed to update canonical metadata but
+    /// cannot settle the newer intent.
+    fn run_shared_focus(
+        &mut self,
+        tab_id: u64,
+        session_id: u64,
+        mux_pane_id: u64,
+        generation: u64,
+        attempts: u32,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((client, request)) =
+            self.shared_focus_request(tab_id, session_id, mux_pane_id, generation)
+        else {
+            self.finish_shared_operation(tab_id, session_id, cx);
+            return;
+        };
+        cx.spawn(async move |this, cx| {
+            let outcome = cx
+                .background_spawn(async move { client.apply_shared_with_request(request) })
+                .await;
+            this.update(cx, |this, cx| {
+                match outcome {
+                    Ok(zmux::client::SharedOperationResult::Applied(state))
+                    | Ok(zmux::client::SharedOperationResult::Conflict(state)) => {
+                        this.install_shared_snapshot(session_id, state, cx);
+                    }
+                    Err(error) => log::warn!(
+                        "could not focus shared pane {mux_pane_id} of session {session_id}: {error:#}"
+                    ),
+                }
+                if this.shared_collaboration.focus_intent_is_current(
+                    session_id,
+                    mux_pane_id,
+                    generation,
+                ) {
+                    if let Some(SharedOperation::FocusPane { attempts, .. }) =
+                        focus_retry(mux_pane_id, generation, attempts)
+                    {
+                        this.schedule_shared_focus_retry(
+                            tab_id,
+                            session_id,
+                            mux_pane_id,
+                            generation,
+                            attempts,
+                            cx,
+                        );
+                    } else {
+                        this.shared_collaboration.clear_focus_intent(
+                            session_id,
+                            mux_pane_id,
+                            generation,
+                        );
+                    }
+                }
+                this.finish_shared_operation(tab_id, session_id, cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Wait before re-queueing a failed focus request rather than holding the
+    /// session queue in flight. The next run therefore reads the latest
+    /// canonical revision immediately before it sends.
+    fn schedule_shared_focus_retry(
+        &mut self,
+        tab_id: u64,
+        session_id: u64,
+        mux_pane_id: u64,
+        generation: u64,
+        attempts: u32,
+        cx: &mut Context<Self>,
+    ) {
+        let executor = cx.background_executor().clone();
+        cx.spawn(async move |this, cx| {
+            executor.timer(SHARED_CLOSE_RETRY_BACKOFF * attempts).await;
+            this.update(cx, |this, cx| {
+                if this.shared_collaboration.focus_intent_is_current(
+                    session_id,
+                    mux_pane_id,
+                    generation,
+                ) {
+                    this.shared_collaboration.enqueue(
+                        session_id,
+                        SharedOperation::FocusPane {
+                            mux_pane_id,
+                            generation,
+                            attempts,
+                        },
+                    );
+                    this.pump_shared_operations(tab_id, session_id, cx);
+                }
             })
             .ok();
         })
@@ -1043,6 +1298,7 @@ impl Zetta {
                 summary,
                 maximized_pane,
                 &minimized_panes,
+                self.shared_collaboration.has_pending_focus(session_id),
             )
         });
         let (operation, published_state) = match geometry {
@@ -1060,6 +1316,50 @@ impl Zetta {
             operation,
         };
         Some((client, request, published_state))
+    }
+
+    /// Builds the explicit keyboard-focus request only while it still names
+    /// this session's newest intent. It reads the canonical revision here,
+    /// immediately before the request is spawned, rather than when the key was
+    /// pressed or when a previous queued operation completed.
+    fn shared_focus_request(
+        &mut self,
+        tab_id: u64,
+        session_id: u64,
+        mux_pane_id: u64,
+        generation: u64,
+    ) -> Option<(
+        Arc<zmux::client::Client>,
+        zmux::messages::SharedSessionOperationRequest,
+    )> {
+        if !self
+            .shared_collaboration
+            .focus_intent_is_current(session_id, mux_pane_id, generation)
+        {
+            return None;
+        }
+        if !self
+            .shared_collaboration
+            .state(session_id)
+            .is_some_and(|state| state.contains_pane(mux_pane_id))
+        {
+            self.shared_collaboration
+                .clear_focus_intent(session_id, mux_pane_id, generation);
+            return None;
+        }
+        let canonical = self.shared_collaboration.state(session_id)?;
+        let client = self.mux_panes.runtime_for_tab(tab_id)?.client().clone();
+        Some((
+            client.clone(),
+            zmux::messages::SharedSessionOperationRequest {
+                session_id,
+                base_revision: canonical.revision,
+                operation_id: client.next_shared_operation_id(),
+                operation: zmux::messages::SharedSessionOperation::SetFocus {
+                    pane_id: mux_pane_id,
+                },
+            },
+        ))
     }
 
     /// This window's summary of the tab, in the daemon's pane ids.
@@ -1865,6 +2165,7 @@ fn shared_geometry_operation(
     summary: &BackgroundSessionSummary,
     maximized_pane: Option<u64>,
     minimized_panes: &[u64],
+    explicit_focus_pending: bool,
 ) -> Option<zmux::messages::SharedSessionOperation> {
     if summary.layout != canonical.layout {
         return Some(
@@ -1874,7 +2175,7 @@ fn shared_geometry_operation(
                 }),
         );
     }
-    if summary.active_pane != canonical.active_pane {
+    if !explicit_focus_pending && summary.active_pane != canonical.active_pane {
         return Some(zmux::messages::SharedSessionOperation::SetFocus {
             pane_id: summary.active_pane,
         });
@@ -1927,6 +2228,14 @@ fn durable_state_operation(
 /// publication proposes the same change again.
 fn publication_retry(attempts: u32) -> Option<SharedOperation> {
     (attempts + 1 < SHARED_PUBLISH_ATTEMPTS).then_some(SharedOperation::PublishState {
+        attempts: attempts + 1,
+    })
+}
+
+fn focus_retry(mux_pane_id: u64, generation: u64, attempts: u32) -> Option<SharedOperation> {
+    (attempts + 1 < SHARED_FOCUS_ATTEMPTS).then_some(SharedOperation::FocusPane {
+        mux_pane_id,
+        generation,
         attempts: attempts + 1,
     })
 }
@@ -2267,17 +2576,20 @@ fn apply_canonical_presentation(
     state: &SharedSessionState,
     layout: PaneLayout,
     mux_to_local: &HashMap<u64, u64>,
+    active_pane_override: Option<u64>,
 ) -> Result<()> {
     tab.layout = layout;
-    tab.active_pane = mux_to_local
-        .get(&state.presentation.active_pane)
-        .copied()
-        .with_context(|| {
-            format!(
-                "active shared pane {} is not attached",
-                state.presentation.active_pane
-            )
-        })?;
+    tab.active_pane = active_pane_override.unwrap_or(
+        mux_to_local
+            .get(&state.presentation.active_pane)
+            .copied()
+            .with_context(|| {
+                format!(
+                    "active shared pane {} is not attached",
+                    state.presentation.active_pane
+                )
+            })?,
+    );
     tab.maximized_pane = state
         .presentation
         .maximized_pane
