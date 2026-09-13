@@ -31,6 +31,19 @@ pub use launcher::{
 pub use mosh_rs::{Base64Key, DisplayPreference};
 pub use stream::{PaneReader, PaneSession, PaneSessionSettings, PaneWriter};
 
+/// What `--scrollback` asks for when it is given no value: the KiB of
+/// scrolled-off history a server may hold for this client before the program
+/// producing it is slowed down to what the link can take.
+pub const SCROLLBACK_DEFAULT_KIB: u32 = client::SCROLLBACK_DEFAULT_KIB;
+/// The bounds a scrollback budget is held to.
+pub const SCROLLBACK_MIN_KIB: u32 = client::SCROLLBACK_MIN_KIB;
+pub const SCROLLBACK_MAX_KIB: u32 = client::SCROLLBACK_MAX_KIB;
+
+/// Parses a `--scrollback=KIB` value. Zero turns it off.
+pub fn parse_scrollback_kib(value: &str) -> anyhow::Result<u32> {
+    client::parse_scrollback_kib(value)
+}
+
 /// The keep-alive interval `-k` asks for when it is given no value.
 pub const KEEP_ALIVE_DEFAULT_MS: u64 = mosh_rs::sender::KEEP_ALIVE_DEFAULT_MS;
 /// The smallest interval a keep-alive can be held to: below Mosh's own

@@ -234,6 +234,17 @@ impl<S: Screen> MoshSession<S> {
         self.sender.state_mut().push_terminal_response(bytes);
     }
 
+    /// Ask the server to carry the rows that scroll off the top of its
+    /// screen, holding at most `budget_kib` KiB of them in flight.
+    ///
+    /// Send it once, before anything has had a chance to scroll: it is an
+    /// event in the cumulative `UserStream`, so SSP delivers it exactly once
+    /// without it having to be repeated. A server that does not understand
+    /// the field ignores it and the session is an ordinary Mosh session.
+    pub fn request_scrollback(&mut self, budget_kib: u32) {
+        self.sender.state_mut().push_scrollback_request(budget_kib);
+    }
+
     /// What to prepend to a window title before passing it on. Empty
     /// by default: the mechanism is here, the text is the caller's.
     pub fn set_title_prefix(&mut self, prefix: impl Into<String>) {

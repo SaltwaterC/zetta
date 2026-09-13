@@ -144,6 +144,9 @@ struct MoshCommand {
     /// `-k`/`--keep-alive`: how long the session may go without sending
     /// before it emits a keep-alive, or `None` for Mosh's own heartbeat.
     keep_alive: Option<u64>,
+    /// `-s`/`--scrollback`: KiB of scrolled-off history to ask the server to
+    /// carry, or zero for none. See `PROTOCOL.md`.
+    scrollback_kib: u32,
     family: AddressFamily,
     port: Option<PortRequest>,
     bind_server: BindServer,
@@ -176,6 +179,7 @@ impl Default for MoshCommand {
             predict_overwrite: false,
             predict_overwrite_explicit: false,
             keep_alive: None,
+            scrollback_kib: client::SCROLLBACK_DEFAULT_KIB,
             family: AddressFamily::default(),
             port: None,
             bind_server: BindServer::default(),
@@ -739,6 +743,7 @@ fn endpoint_settings(command: &MoshCommand) -> SessionSettings {
         predict_overwrite: command.predict_overwrite,
         initialize_terminal: command.init,
         keep_alive: command.keep_alive,
+        scrollback_kib: command.scrollback_kib,
     }
 }
 
@@ -766,6 +771,10 @@ fn launch_external_client(
     } else {
         process.env_remove(client::KEEP_ALIVE_ENV);
     }
+    // Likewise: an external client may be stock `mosh-client`, which would
+    // reject the argument but ignores an environment variable it has never
+    // heard of.
+    process.env(client::SCROLLBACK_ENV, command.scrollback_kib.to_string());
     if !command.init {
         process.env("MOSH_NO_TERM_INIT", "1");
     } else {
@@ -1202,6 +1211,7 @@ struct SeenOptions {
     init: bool,
     remote_ip: bool,
     keep_alive: bool,
+    scrollback: bool,
 }
 
 fn parse_args(arguments: impl IntoIterator<Item = std::ffi::OsString>) -> Result<MoshCommand> {
@@ -1277,6 +1287,10 @@ fn parse_flag(
             command.predict_overwrite_explicit = true;
         }
         "--keep-alive" | "-k" => set_keep_alive(command, seen, KEEP_ALIVE_DEFAULT_MS)?,
+        "--scrollback" | "-s" => {
+            set_scrollback(command, seen, client::SCROLLBACK_DEFAULT_KIB)?;
+        }
+        "--no-scrollback" => set_scrollback(command, seen, 0)?,
         "-4" => set_family(command, seen, AddressFamily::Inet)?,
         "-6" => set_family(command, seen, AddressFamily::Inet6)?,
         "--ssh-pty" => {
@@ -1341,6 +1355,9 @@ fn parse_attached_value(
         "--predict" => set_prediction(command, seen, parse_prediction(value)?),
         "--keep-alive" | "-k" => {
             set_keep_alive(command, seen, client::parse_keep_alive_interval(value)?)
+        }
+        "--scrollback" | "-s" => {
+            set_scrollback(command, seen, client::parse_scrollback_kib(value)?)
         }
         "-p" | "--port" => set_port(command, seen, value),
         "--family" => set_family(command, seen, parse_family(value)?),
@@ -1420,6 +1437,13 @@ fn set_prediction(
     seen.prediction = true;
     command.prediction = prediction;
     command.prediction_explicit = true;
+    Ok(())
+}
+
+fn set_scrollback(command: &mut MoshCommand, seen: &mut SeenOptions, kib: u32) -> Result<()> {
+    anyhow::ensure!(!seen.scrollback, "duplicate --scrollback");
+    seen.scrollback = true;
+    command.scrollback_kib = kib;
     Ok(())
 }
 
@@ -1629,6 +1653,14 @@ pub(crate) fn help_text() -> &'static str {
                                 so aggressive WiFi power management cannot
                                 park the radio between Mosh's 3 s heartbeats
         --keep-alive=MS         use MS milliseconds instead (20-3000)
+
+-s      --scrollback            keep the output that scrolls off the screen,
+                                which Mosh alone cannot: up to 1 MiB of it in
+                                flight, and the program waits rather than the
+                                history being lost [default]
+        --scrollback=KIB        hold KIB kibibytes in flight instead (16-2048)
+        --no-scrollback         keep only what is on the screen, as stock
+                                Mosh does
 
 -4      --family=inet           use IPv4 only
 -6      --family=inet6           use IPv6 only

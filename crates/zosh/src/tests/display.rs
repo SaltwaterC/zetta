@@ -219,3 +219,272 @@ fn repeated_output_keeps_the_physical_screen_in_sync() {
         previous = current;
     }
 }
+
+// ---------------------------------------------------------------------- //
+// Scrollback carriage: the rows the server sends, and where they land.
+//
+// These drive both halves against a model of a real terminal, because the
+// claim is not about the bytes emitted but about what a terminal does with
+// them. `PROTOCOL.md` is the specification.
+// ---------------------------------------------------------------------- //
+
+use mosh_rs::{ClientTerminal, screen::OverlayCursor};
+
+/// Just enough of `zosh-server` to produce the diffs a client would see.
+struct FakeServer {
+    parser: vt100::Parser,
+    base: vt100::Screen,
+    carry_scrollback: bool,
+}
+
+impl FakeServer {
+    fn new(rows: u16, cols: u16, carry_scrollback: bool) -> Self {
+        let mut parser = vt100::Parser::new(rows, cols, 0);
+        parser
+            .screen_mut()
+            .set_capture_evicted_rows(carry_scrollback);
+        let base = parser.screen().clone();
+        Self {
+            parser,
+            base,
+            carry_scrollback,
+        }
+    }
+
+    fn run(&mut self, bytes: &[u8]) {
+        self.parser.process(bytes);
+    }
+
+    /// The diff for everything since the last one, which the caller is taken
+    /// to have acknowledged.
+    fn diff(&mut self) -> Vec<u8> {
+        let mut out = Vec::new();
+        if self.carry_scrollback {
+            let (first, rows) = self.parser.screen_mut().take_evicted_rows();
+            if !rows.is_empty() {
+                let mut payload = Vec::new();
+                for row in &rows {
+                    payload.push(u8::from(row.wrapped));
+                    payload.extend_from_slice(&(row.contents.len() as u32).to_be_bytes());
+                    payload.extend_from_slice(&row.contents);
+                }
+                let encoded = {
+                    use base64::Engine as _;
+                    base64::engine::general_purpose::STANDARD_NO_PAD.encode(&payload)
+                };
+                out.extend_from_slice(format!("\x1b]777;zosh-scrollback;{first};").as_bytes());
+                out.extend_from_slice(encoded.as_bytes());
+                out.push(0x07);
+            }
+        }
+        out.extend_from_slice(&self.parser.screen().state_diff(&self.base));
+        self.base = self.parser.screen().clone();
+        out
+    }
+
+    fn text(&self) -> String {
+        self.parser.screen().contents()
+    }
+}
+
+/// A real terminal, as far as this matters: a screen, and a history that only
+/// ever gains the rows it is asked to scroll off the top.
+struct ModelTerminal {
+    parser: vt100::Parser,
+    history: Vec<String>,
+}
+
+impl ModelTerminal {
+    fn new(rows: u16, cols: u16) -> Self {
+        let mut parser = vt100::Parser::new(rows, cols, 0);
+        parser.screen_mut().set_capture_evicted_rows(true);
+        let mut model = Self {
+            parser,
+            history: Vec::new(),
+        };
+        model.write(DISPLAY_OPEN);
+        model
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        self.parser.process(bytes);
+        let (_, rows) = self.parser.screen_mut().take_evicted_rows();
+        for row in rows {
+            let mut text = String::new();
+            let mut plain = vt100::Parser::new(1, self.parser.screen().size().1, 0);
+            plain.process(&row.contents);
+            text.push_str(plain.screen().contents().trim_end());
+            self.history.push(text);
+        }
+    }
+
+    fn text(&self) -> String {
+        self.parser.screen().contents()
+    }
+}
+
+/// Runs a program's output through both halves and reports what the terminal
+/// ended up holding: everything in its history, then what is on its screen.
+fn replay(rows: u16, cols: u16, carry_scrollback: bool, chunks: &[&[u8]]) -> (Vec<String>, String) {
+    let mut server = FakeServer::new(rows, cols, carry_scrollback);
+    let mut terminal = ClientTerminal::new(DisplayScreen::new(rows, cols));
+    let mut model = ModelTerminal::new(rows, cols);
+    for (index, chunk) in chunks.iter().enumerate() {
+        server.run(chunk);
+        let state = index as u64 + 1;
+        assert!(terminal.apply_diff(state - 1, state, &server.diff()));
+        model.write(&terminal.render(&[], OverlayCursor::Unchanged));
+    }
+    assert_eq!(
+        model.text().trim_end(),
+        server.text().trim_end(),
+        "the screen the client painted is not the screen the server has"
+    );
+    (model.history.clone(), model.text())
+}
+
+fn lines(from: usize, to: usize) -> Vec<u8> {
+    (from..to).fold(Vec::new(), |mut out, n| {
+        out.extend_from_slice(format!("LINE{n}\r\n").as_bytes());
+        out
+    })
+}
+
+/// The regression this whole extension exists for: a burst that moves the
+/// screen by more than a screenful between two states. Stock Mosh, and zosh
+/// before the extension, kept only the last screen of it.
+#[test]
+fn a_burst_larger_than_the_screen_keeps_every_line() {
+    let (history, screen) = replay(24, 80, true, &[b"START\r\n", &lines(0, 500)]);
+
+    let kept: Vec<&String> = history.iter().filter(|line| !line.is_empty()).collect();
+    assert_eq!(kept[0], "START");
+    for n in 0..476 {
+        assert_eq!(kept[n + 1], &format!("LINE{n}"), "line {n} went missing");
+    }
+    // And the rest is on the screen, which is where the 500 lines end.
+    assert!(screen.contains("LINE499"));
+}
+
+/// Without the extension the client is back to inferring scrolls from the
+/// screen, which is all stock Mosh has ever been able to do.
+#[test]
+fn without_the_extension_a_burst_keeps_only_the_last_screen() {
+    let (history, _) = replay(24, 80, false, &[b"START\r\n", &lines(0, 500)]);
+
+    assert!(
+        history.iter().all(|line| !line.starts_with("LINE1")),
+        "a stock session cannot have kept these: {history:?}"
+    );
+}
+
+/// A paced session scrolls a row at a time, which the inference already
+/// handled. The extension must not double it up.
+#[test]
+fn a_line_at_a_time_is_kept_exactly_once() {
+    let chunks: Vec<Vec<u8>> = (0..60)
+        .map(|n| format!("LINE{n}\r\n").into_bytes())
+        .collect();
+    let borrowed: Vec<&[u8]> = chunks.iter().map(Vec::as_slice).collect();
+    let (history, _) = replay(24, 80, true, &borrowed);
+
+    let kept: Vec<&String> = history.iter().filter(|line| !line.is_empty()).collect();
+    // 60 lines plus the blank the cursor sits on, through a 24-row window.
+    assert_eq!(kept.len(), 37, "37 of 60 lines have left a 24-row screen");
+    for (n, line) in kept.iter().enumerate() {
+        assert_eq!(*line, &format!("LINE{n}"));
+    }
+}
+
+#[test]
+fn colour_and_wrapping_survive_the_round_trip() {
+    let mut program = b"\x1b[31mred line\x1b[m\r\n".to_vec();
+    program.extend_from_slice(&"w".repeat(100).into_bytes());
+    program.extend_from_slice(b"\r\n");
+    program.extend_from_slice(&lines(0, 60));
+    let mut server = FakeServer::new(24, 80, true);
+    let mut terminal = ClientTerminal::new(DisplayScreen::new(24, 80));
+    server.run(&program);
+    assert!(terminal.apply_diff(0, 1, &server.diff()));
+    let painted = terminal.render(&[], OverlayCursor::Unchanged);
+
+    let text = String::from_utf8_lossy(&painted).into_owned();
+    assert!(text.contains("\x1b[31mred line"), "the colour was dropped");
+    // The wrapped line is written as its two physical rows, and the first of
+    // them fills its last column so the terminal wraps it back together.
+    assert!(
+        text.contains(&"w".repeat(80)),
+        "the wrapped row was truncated"
+    );
+}
+
+/// A resize during a burst must not be the one way to lose output: the rows
+/// go into the history before the repaint clears the screen.
+#[test]
+fn a_resize_mid_burst_still_keeps_the_history() {
+    let mut server = FakeServer::new(24, 80, true);
+    let mut terminal = ClientTerminal::new(DisplayScreen::new(24, 80));
+    let mut model = ModelTerminal::new(24, 80);
+
+    server.run(&lines(0, 200));
+    assert!(terminal.apply_diff(0, 1, &server.diff()));
+    model.write(&terminal.render(&[], OverlayCursor::Unchanged));
+
+    // Now the same burst again, but the frame that carries it is a resize.
+    server.run(&lines(200, 400));
+    server.parser.screen_mut().set_size(30, 80);
+    terminal.resize(30, 80);
+    assert!(terminal.apply_diff(1, 2, &server.diff()));
+    model.parser.screen_mut().set_size(30, 80);
+    model.write(&terminal.render(&[], OverlayCursor::Unchanged));
+
+    let kept: Vec<&String> = model
+        .history
+        .iter()
+        .filter(|line| !line.is_empty())
+        .collect();
+    for n in 0..340 {
+        assert!(
+            kept.iter().any(|line| *line == &format!("LINE{n}")),
+            "line {n} was lost across the resize"
+        );
+    }
+}
+
+/// Rows the server had to drop are reported rather than silently skipped, and
+/// the screen still lands where it should.
+#[test]
+fn dropped_rows_are_reported_where_they_would_have_been() {
+    let mut server = FakeServer::new(24, 80, true);
+    let mut terminal = ClientTerminal::new(DisplayScreen::new(24, 80));
+    let mut model = ModelTerminal::new(24, 80);
+
+    server.run(&lines(0, 300));
+    let mut diff = server.diff();
+    // Rewrite the marker to claim a much later starting index: the shape of a
+    // server that dropped its oldest unacknowledged rows.
+    let marker_end = diff
+        .iter()
+        .position(|&byte| byte == 0x07)
+        .expect("a marker");
+    let mut trimmed = b"\x1b]777;zosh-scrollback;270;".to_vec();
+    trimmed.push(0x07);
+    trimmed.extend_from_slice(&diff[marker_end + 1..]);
+    diff = trimmed;
+
+    assert!(terminal.apply_diff(0, 1, &diff));
+    model.write(&terminal.render(&[], OverlayCursor::Unchanged));
+
+    // 270 rows left the screen and none were carried. The 24 the terminal was
+    // showing are kept as it was showing them, so what is reported gone is the
+    // 246 it never saw.
+    assert!(
+        model
+            .history
+            .iter()
+            .any(|line| line.contains("246 lines of scrollback dropped")),
+        "{:?}",
+        model.history
+    );
+    assert_eq!(model.text().trim_end(), server.text().trim_end());
+}

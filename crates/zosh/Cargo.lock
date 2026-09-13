@@ -666,9 +666,11 @@ name = "zosh"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64",
  "crossterm",
  "libc",
  "mosh-rs",
  "shlex",
  "signal-hook 0.4.4",
+ "vt100",
 ]

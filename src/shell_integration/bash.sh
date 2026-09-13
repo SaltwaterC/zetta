@@ -715,11 +715,11 @@ _zetta_complete() {
                 if (( delimiter )); then
                     _zetta_complete_ssh_targets
                 elif [[ $current == -* ]]; then
-                    _zetta_compgen '--client --server --predict -a -n -o --predict-overwrite --no-predict-overwrite -k --keep-alive -4 -6 --family -p --port --bind-server --ssh --ssh-pty --no-ssh-pty --init --no-init --local --experimental-remote-ip -h --help -V --version --'
+                    _zetta_compgen '--client --server --predict -a -n -o --predict-overwrite --no-predict-overwrite -k --keep-alive --scrollback --no-scrollback -4 -6 --family -p --port --bind-server --ssh --ssh-pty --no-ssh-pty --init --no-init --local --experimental-remote-ip -h --help -V --version --'
                 else
                     _zetta_complete_ssh_targets
                     local -a mosh_hosts=("${COMPREPLY[@]}")
-                    _zetta_compgen '--client --server --predict -a -n -o --predict-overwrite --no-predict-overwrite -k --keep-alive -4 -6 --family -p --port --bind-server --ssh --ssh-pty --no-ssh-pty --init --no-init --local --experimental-remote-ip -h --help -V --version --'
+                    _zetta_compgen '--client --server --predict -a -n -o --predict-overwrite --no-predict-overwrite -k --keep-alive --scrollback --no-scrollback -4 -6 --family -p --port --bind-server --ssh --ssh-pty --no-ssh-pty --init --no-init --local --experimental-remote-ip -h --help -V --version --'
                     COMPREPLY=( "${mosh_hosts[@]}" "${COMPREPLY[@]}" )
                 fi
                 ;;
@@ -1463,7 +1463,7 @@ _zosh_complete() {
         COMPREPLY=()
         return
     fi
-    local zosh_options='-c --client --server --predict -a -n -o --predict-overwrite --no-predict-overwrite -k --keep-alive -4 -6 --family -p --port --bind-server --ssh --ssh-pty --no-ssh-pty --init --no-init --local --experimental-remote-ip -h --help -V --version --'
+    local zosh_options='-c --client --server --predict -a -n -o --predict-overwrite --no-predict-overwrite -k --keep-alive --scrollback --no-scrollback -4 -6 --family -p --port --bind-server --ssh --ssh-pty --no-ssh-pty --init --no-init --local --experimental-remote-ip -h --help -V --version --'
     case "$previous" in
         --predict) _zetta_compgen 'adaptive always never experimental' ;;
         --family) _zetta_compgen 'prefer-inet prefer-inet6 inet inet6 auto all' ;;

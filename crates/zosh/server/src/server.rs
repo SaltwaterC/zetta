@@ -43,6 +43,14 @@ const KEEP_ALIVE_MAX: Duration = Duration::from_millis(3000);
 // still covering a power-management stall an order of magnitude longer than
 // any that has been observed.
 const KEEP_ALIVE_LINGER: Duration = Duration::from_secs(10);
+// How long the peer may go unheard before its scrollback budget stops
+// holding the program back. Up to here the program is slowed to what the
+// client can take, which is what makes the history complete; past here the
+// session is one whose client may never return, and a Mosh session outliving
+// its client matters more than the history it is accumulating for nobody.
+// Matching KEEP_ALIVE_LINGER is deliberate: it is the same judgement about
+// when a peer has stopped being a peer.
+const SCROLLBACK_STALL: Duration = KEEP_ALIVE_LINGER;
 
 pub fn run(mut cfg: Config) -> Result<()> {
     let timing_file = timing::open()?;
@@ -121,6 +129,11 @@ fn serve_session(cfg: Config, socket: UdpSocket, mut transport: ServerTransport)
     spawn_pty_writer(writer, pty_write_rx, pty_event_tx);
 
     let mut terminal = TerminalState::new(INITIAL_ROWS, INITIAL_COLS);
+    // Until the first client state arrives the server does not know whether it
+    // is talking to something that can take scrolled-off rows, and it is
+    // already producing them. It collects on spec and settles the question
+    // here, once, from the first state it accepts.
+    let mut scrollback_settled = false;
     let mut responder = QueryResponder::new();
     let mut user_stream = UserStreamTracker::new();
     let mut udp_buf = vec![0u8; UDP_BUFFER];
@@ -143,14 +156,34 @@ fn serve_session(cfg: Config, socket: UdpSocket, mut transport: ServerTransport)
     loop {
         loop_timing.tick();
         let phase = timing::begin();
-        let pty = drain_pty_events(
-            &pty_event_rx,
-            &mut terminal,
-            &mut responder,
-            &pty_write_tx,
-            &mut echo,
-            cfg.verbose > 0,
-        )?;
+        // Reading the program is what produces scrolled-off rows, so a client
+        // that is behind on them is kept up with by not reading — the PTY
+        // queue fills, its reader thread blocks, and the program waits, the
+        // way it would on an SSH session whose window has closed. A peer that
+        // has stopped answering altogether is not worth stalling a program
+        // for; past `SCROLLBACK_STALL` the oldest rows are dropped instead.
+        let hold_for_scrollback = if terminal.scrollback_over_budget() {
+            if transport.last_recv().elapsed() >= SCROLLBACK_STALL {
+                terminal.drop_scrollback_over_budget();
+                false
+            } else {
+                true
+            }
+        } else {
+            false
+        };
+        let pty = if hold_for_scrollback {
+            PtyProgress::default()
+        } else {
+            drain_pty_events(
+                &pty_event_rx,
+                &mut terminal,
+                &mut responder,
+                &pty_write_tx,
+                &mut echo,
+                cfg.verbose > 0,
+            )?
+        };
         dirty |= pty.dirty;
         child_exited |= pty.ended;
         timing::slow("pty_drain_slow", phase);
@@ -207,6 +240,23 @@ fn serve_session(cfg: Config, socket: UdpSocket, mut transport: ServerTransport)
                                         .clamp(KEEP_ALIVE_MIN, KEEP_ALIVE_MAX),
                                 );
                                 transport.force_next_send();
+                            }
+                            if let Some(kib) = accepted.scrollback_kib {
+                                // The one negotiation the extension has.
+                                timing::record(
+                                    "scrollback_request",
+                                    accepted.frame,
+                                    u64::from(kib),
+                                );
+                                terminal.set_scrollback_budget((kib as usize).saturating_mul(1024));
+                                scrollback_settled = true;
+                            } else if !scrollback_settled {
+                                // A client announces on its first instruction,
+                                // and the announcement is cumulative, so a
+                                // first state without one is a client that
+                                // will never send one: a stock Mosh client.
+                                terminal.forget_scrollback();
+                                scrollback_settled = true;
                             }
                             apply_user_events(
                                 accepted.events,

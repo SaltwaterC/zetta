@@ -27,6 +27,10 @@ pub struct AcceptedInput {
     /// it carried one.  It contributes no input; see `../../PROTOCOL.md`
     /// for what the server owes it.
     pub keep_alive_ms: Option<u32>,
+    /// How much scrolled-off history this state asked to have carried, in
+    /// KiB, if it asked at all.  Like the keep-alive it contributes no
+    /// input, so the prefix arithmetic above never sees it.
+    pub scrollback_kib: Option<u32>,
 }
 
 #[derive(Debug, Clone)]
@@ -70,6 +74,7 @@ impl UserStreamTracker {
                 frame: state.new_num,
                 events: Vec::new(),
                 keep_alive_ms: None,
+                scrollback_kib: None,
             });
         }
 
@@ -77,7 +82,10 @@ impl UserStreamTracker {
         // keep-alive is deliberately invisible to `decode_events`: the
         // prefix arithmetic here counts decoded events, and a stock Mosh
         // server decodes none from it either.
-        let keep_alive_ms = keep_alive_interval(&state.diff);
+        let Announcements {
+            keep_alive_ms,
+            scrollback_kib,
+        } = announcements(&state.diff);
 
         let base = self.states.get(&state.old_num).cloned().ok_or_else(|| {
             anyhow!(
@@ -136,6 +144,7 @@ impl UserStreamTracker {
                 frame: state.new_num,
                 events: Vec::new(),
                 keep_alive_ms,
+                scrollback_kib,
             });
         }
 
@@ -171,6 +180,7 @@ impl UserStreamTracker {
             frame: state.new_num,
             events: pending,
             keep_alive_ms,
+            scrollback_kib,
         })
     }
 }
@@ -182,13 +192,22 @@ const INSTRUCTION_FIELD: u64 = 1;
 const KEEP_ALIVE_FIELD: u64 = 20;
 /// Zosh's terminal response on `ClientBuffers.Instruction`.
 const TERMINAL_RESPONSE_FIELD: u64 = 21;
+/// Zosh's scrollback request on `ClientBuffers.Instruction`; see `PROTOCOL.md`.
+const SCROLLBACK_FIELD: u64 = 22;
 const WIRE_VARINT: u64 = 0;
 const WIRE_FIXED64: u64 = 1;
 const WIRE_BYTES: u64 = 2;
 const WIRE_FIXED32: u64 = 5;
 
-/// The keep-alive interval a UserStream diff announces, if it carries a
-/// keep-alive at all.
+/// What a UserStream diff announces about the session rather than about the
+/// user: the two zosh extensions that carry a setting and no input.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct Announcements {
+    keep_alive_ms: Option<u32>,
+    scrollback_kib: Option<u32>,
+}
+
+/// The settings a UserStream diff announces, if it announces any.
 ///
 /// This remains a small second pass over the same bytes. It skips
 /// length-delimited fields by their length, so it is linear in the number of
@@ -196,18 +215,25 @@ const WIRE_FIXED32: u64 = 5;
 /// below handles the fields moshcatty does not know while preserving its
 /// keystroke/resize precedence.
 ///
-/// A byte it cannot read is reported as "no keep-alive" rather than as an
+/// Both are deliberately invisible to `decode_events`: the prefix arithmetic
+/// there counts decoded events, and a stock Mosh server decodes neither.
+///
+/// A byte it cannot read is reported as "nothing announced" rather than as an
 /// error. `decode_events` runs over the same diff and is what rejects a
 /// malformed UserMessage properly.
-fn keep_alive_interval(diff: &[u8]) -> Option<u32> {
+fn announcements(diff: &[u8]) -> Announcements {
     let mut rest = diff;
-    let mut found = None;
+    let mut found = Announcements::default();
     while let Some((field, wire)) = read_tag(&mut rest) {
         if (field, wire) == (INSTRUCTION_FIELD, WIRE_BYTES) {
-            let instruction = read_bytes(&mut rest)?;
-            // Keep walking rather than returning: a diff can carry several
-            // keep-alives, and the newest one is the interval now in force.
-            found = instruction_keep_alive(instruction).or(found);
+            let Some(instruction) = read_bytes(&mut rest) else {
+                return found;
+            };
+            // Keep walking rather than returning: a diff can carry several,
+            // and the newest of each is the one now in force.
+            let announced = instruction_announcements(instruction);
+            found.keep_alive_ms = announced.keep_alive_ms.or(found.keep_alive_ms);
+            found.scrollback_kib = announced.scrollback_kib.or(found.scrollback_kib);
             continue;
         }
         if !skip_field(&mut rest, wire) {
@@ -217,16 +243,24 @@ fn keep_alive_interval(diff: &[u8]) -> Option<u32> {
     found
 }
 
-fn instruction_keep_alive(mut rest: &[u8]) -> Option<u32> {
+fn instruction_announcements(mut rest: &[u8]) -> Announcements {
+    let mut found = Announcements::default();
     while let Some((field, wire)) = read_tag(&mut rest) {
-        if (field, wire) == (KEEP_ALIVE_FIELD, WIRE_VARINT) {
-            return u32::try_from(read_varint(&mut rest)?).ok();
-        }
-        if !skip_field(&mut rest, wire) {
-            return None;
+        match (field, wire) {
+            (KEEP_ALIVE_FIELD, WIRE_VARINT) => {
+                found.keep_alive_ms = read_varint(&mut rest).and_then(|v| u32::try_from(v).ok());
+            }
+            (SCROLLBACK_FIELD, WIRE_VARINT) => {
+                found.scrollback_kib = read_varint(&mut rest).and_then(|v| u32::try_from(v).ok());
+            }
+            _ => {
+                if !skip_field(&mut rest, wire) {
+                    return found;
+                }
+            }
         }
     }
-    None
+    found
 }
 
 fn read_varint(rest: &mut &[u8]) -> Option<u64> {
@@ -599,6 +633,12 @@ mod tests {
         assert_eq!(keep_alive_interval(&diff), None);
         diff.extend_from_slice(&keep_alive(100));
         assert_eq!(keep_alive_interval(&diff), Some(100));
+    }
+
+    /// The keep-alive half of what a diff announces, which is all these
+    /// tests are about.
+    fn keep_alive_interval(diff: &[u8]) -> Option<u32> {
+        announcements(diff).keep_alive_ms
     }
 
     fn terminal_response(bytes: &[u8]) -> Vec<u8> {

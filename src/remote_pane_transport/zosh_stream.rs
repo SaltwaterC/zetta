@@ -196,6 +196,11 @@ fn bootstrap_one(request: &PaneRequest, mux_pane_id: u64) -> Result<ZoshPaneStre
         INITIAL_PANE_SIZE.1,
         zosh::PaneSessionSettings {
             keep_alive: request.keep_alive_ms,
+            // A pane is scrolled, so the history a Mosh state cannot describe
+            // is exactly what it is for. The remote relay's own replay comes
+            // through the same screen, so without this a reattached pane would
+            // show one screenful of what it had been showing all along.
+            scrollback_kib: zosh::SCROLLBACK_DEFAULT_KIB,
             ..zosh::PaneSessionSettings::default()
         },
     )

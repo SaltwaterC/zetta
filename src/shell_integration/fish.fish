@@ -925,6 +925,8 @@ function __zetta_long_options
                 -o 'Allow predictive overwrites' \
                 --predict-overwrite 'Allow predictive overwrites' \
                 --keep-alive 'Send a keep-alive packet every 500 ms' \
+                --scrollback 'Keep the output that scrolls off the screen (default)' \
+                --no-scrollback 'Keep only what is on the screen, as stock Mosh does' \
                 --family 'Address family' \
                 --port 'Mosh server port or range' \
                 --bind-server 'Mosh server bind address' \
@@ -1188,6 +1190,8 @@ complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_give
 complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_given' -l no-predict-overwrite -d 'Do not overwrite predictions'
 complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_given' -s k -d 'Send a keep-alive packet every 500 ms'
 complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_given' -l keep-alive -d 'Send a keep-alive packet every 500 ms'
+complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_given' -l scrollback -d 'Keep the output that scrolls off the screen (default)'
+complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_given' -l no-scrollback -d 'Keep only what is on the screen, as stock Mosh does'
 complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_given' -s a -d 'Always predict'
 complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_given' -s n -d 'Never predict'
 complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_given' -s 4 -d 'Force IPv4'
@@ -1226,6 +1230,8 @@ complete -c zosh -n 'not __zetta_mosh_host_given' -l predict-overwrite -d 'Allow
 complete -c zosh -n 'not __zetta_mosh_host_given' -l no-predict-overwrite -d 'Do not overwrite predictions'
 complete -c zosh -n 'not __zetta_mosh_host_given' -s k -d 'Send a keep-alive packet every 500 ms'
 complete -c zosh -n 'not __zetta_mosh_host_given' -l keep-alive -d 'Send a keep-alive packet every 500 ms'
+complete -c zosh -n 'not __zetta_mosh_host_given' -l scrollback -d 'Keep the output that scrolls off the screen (default)'
+complete -c zosh -n 'not __zetta_mosh_host_given' -l no-scrollback -d 'Keep only what is on the screen, as stock Mosh does'
 complete -c zosh -n 'not __zetta_mosh_host_given' -s a -d 'Always predict'
 complete -c zosh -n 'not __zetta_mosh_host_given' -s n -d 'Never predict'
 complete -c zosh -n 'not __zetta_mosh_host_given' -s 4 -d 'Force IPv4'

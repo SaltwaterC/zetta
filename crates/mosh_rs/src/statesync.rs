@@ -52,7 +52,7 @@ pub struct ResizeMessage {
 }
 
 /// One user instruction. In the `.proto` these fields are extensions of
-/// an empty message; on the wire they are just fields 2, 3, 20 and 21.
+/// an empty message; on the wire they are just fields 2, 3, 20, 21 and 22.
 ///
 /// Field 20 is not mosh's. It is Zetta's keep-alive extension, and it
 /// is deliberately a bare varint rather than a nested message so the
@@ -65,6 +65,12 @@ pub struct ResizeMessage {
 /// Field 21 carries a response to a terminal query forwarded by a zosh
 /// server. It is kept as a separate instruction so stock Mosh continues to
 /// ignore it and so the server can write responses to its PTY in order.
+///
+/// Field 22 asks a zosh server to carry the rows that scroll off the top of
+/// the screen, which stock Mosh throws away. It is the only negotiation the
+/// extension has: a server that does not understand it sends nothing extra,
+/// and a client that does not send it is one that would not know what to do
+/// with the rows.
 #[derive(Clone, PartialEq, Eq, prost::Message)]
 pub struct UserInstruction {
     #[prost(message, optional, tag = "2")]
@@ -79,6 +85,10 @@ pub struct UserInstruction {
     pub zosh_keepalive_ms: Option<u32>,
     #[prost(bytes = "vec", optional, tag = "21")]
     pub terminal_response: Option<Vec<u8>>,
+    /// How much scrolled-off history, in KiB, this client is willing to have
+    /// the server hold for it and send. Zero asks for none.
+    #[prost(uint32, optional, tag = "22")]
+    pub zosh_scrollback_kib: Option<u32>,
 }
 
 #[derive(Clone, PartialEq, Eq, prost::Message)]
@@ -128,6 +138,14 @@ pub enum UserEvent {
     /// forwarded. It is not keyboard input, but it is part of the cumulative
     /// UserStream so retransmitted states cannot write it twice to the PTY.
     TerminalResponse(Vec<u8>),
+    /// This client can receive the rows that scroll off the top of the
+    /// server's screen, and will hold up to this many KiB of them in flight.
+    ///
+    /// It is an event in the cumulative stream rather than a handshake
+    /// because that is what makes it reliable: SSP resends the suffix until
+    /// it is acknowledged, so the announcement arrives exactly once without
+    /// anything having to repeat or confirm it.
+    ScrollbackRequest(u32),
 }
 
 /// The client's state: everything the user has done, in order.
@@ -170,6 +188,13 @@ impl UserStream {
             self.events
                 .push(UserEvent::TerminalResponse(bytes.to_vec()));
         }
+    }
+
+    /// Announce that this client wants the server's scrolled-off rows, and
+    /// how much of them it is willing to have in flight. See
+    /// [`UserEvent::ScrollbackRequest`].
+    pub fn push_scrollback_request(&mut self, budget_kib: u32) {
+        self.events.push(UserEvent::ScrollbackRequest(budget_kib));
     }
 
     pub fn is_empty(&self) -> bool {
@@ -219,6 +244,7 @@ impl UserStream {
                             resize: None,
                             zosh_keepalive_ms: None,
                             terminal_response: None,
+                            zosh_scrollback_kib: None,
                         }),
                     }
                 }
@@ -231,6 +257,7 @@ impl UserStream {
                         }),
                         zosh_keepalive_ms: None,
                         terminal_response: None,
+                        zosh_scrollback_kib: None,
                     });
                 }
                 // Its own instruction, like a resize: a keep-alive
@@ -243,6 +270,7 @@ impl UserStream {
                         resize: None,
                         zosh_keepalive_ms: Some(*interval_ms),
                         terminal_response: None,
+                        zosh_scrollback_kib: None,
                     });
                 }
                 UserEvent::TerminalResponse(bytes) => {
@@ -251,6 +279,19 @@ impl UserStream {
                         resize: None,
                         zosh_keepalive_ms: None,
                         terminal_response: Some(bytes.clone()),
+                        zosh_scrollback_kib: None,
+                    });
+                }
+                // Its own instruction for the same reason a keep-alive is:
+                // a peer that ignores field 22 sees an empty instruction
+                // and the typing either side of it is unaffected.
+                UserEvent::ScrollbackRequest(budget_kib) => {
+                    msg.instruction.push(UserInstruction {
+                        keystroke: None,
+                        resize: None,
+                        zosh_keepalive_ms: None,
+                        terminal_response: None,
+                        zosh_scrollback_kib: Some(*budget_kib),
                     });
                 }
             }
@@ -284,6 +325,9 @@ impl UserStream {
             }
             if let Some(response) = inst.terminal_response {
                 self.push_terminal_response(&response);
+            }
+            if let Some(budget_kib) = inst.zosh_scrollback_kib {
+                self.push_scrollback_request(budget_kib);
             }
         }
         Ok(())
@@ -518,6 +562,28 @@ mod tests {
             Some(b"\x1b]10;rgb:aaaa/bbbb/cccc\x07".as_slice())
         );
         assert!(msg.instruction[1].keystroke.is_none());
+
+        let mut rebuilt = UserStream::new();
+        rebuilt.apply_string(&diff).unwrap();
+        assert_eq!(rebuilt, stream);
+    }
+
+    #[test]
+    fn a_scrollback_request_is_a_standalone_field_twenty_two_instruction() {
+        let mut stream = UserStream::new();
+        stream.push_bytes(b"a");
+        stream.push_scrollback_request(256);
+        stream.push_bytes(b"b");
+
+        let diff = stream.init_diff();
+        let msg = UserMessage::decode(diff.as_slice()).unwrap();
+        assert_eq!(msg.instruction.len(), 3);
+        assert_eq!(msg.instruction[1].zosh_scrollback_kib, Some(256));
+        assert!(msg.instruction[1].keystroke.is_none());
+        assert!(msg.instruction[1].resize.is_none());
+        // A peer that ignores field 22 sees an instruction with nothing in
+        // it, and the typing either side of it is untouched.
+        assert_eq!(UserMessage::keystrokes_of(&diff).unwrap(), b"ab".to_vec());
 
         let mut rebuilt = UserStream::new();
         rebuilt.apply_string(&diff).unwrap();

@@ -50,6 +50,53 @@ pub enum MouseProtocolEncoding {
     // Urxvt,
 }
 
+/// One row that has scrolled off the top of the normal screen.
+///
+/// [`Screen::take_evicted_rows`] produces these for a caller that keeps a
+/// history of its own. The contents are self-contained: they assume only
+/// that the cursor is at the start of an otherwise blank row with default
+/// attributes, and they leave the attributes as they found them, so they
+/// can be written to a terminal without knowing anything about what
+/// surrounds them.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EvictedRow {
+    /// The row's contents, with formatting inline as escape sequences.
+    pub contents: Vec<u8>,
+    /// Whether the logical line continued onto the row below, so that a
+    /// consumer writing these out can reproduce the wrap rather than
+    /// turning it into a line of its own.
+    ///
+    /// It is only set when the row really does fill its last column. A
+    /// row marked wrapped whose contents stop short would leave a
+    /// consumer's cursor mid-row and run the next row onto the same line.
+    pub wrapped: bool,
+}
+
+impl EvictedRow {
+    fn from_row(row: &crate::row::Row, cols: u16) -> Self {
+        let mut contents = vec![];
+        let (position, attrs) = row.write_contents_formatted(
+            &mut contents,
+            0,
+            cols,
+            0,
+            false,
+            None,
+            None,
+        );
+        // Leave the attributes as the row found them. Every position in
+        // a single row's rendering moves forward, so nothing above emits
+        // an absolute cursor move and the result stays independent of
+        // the row it is eventually written to.
+        crate::attrs::Attrs::default()
+            .write_escape_code_diff(&mut contents, &attrs);
+        Self {
+            contents,
+            wrapped: row.wrapped() && position.col >= cols,
+        }
+    }
+}
+
 /// Represents the overall terminal state.
 #[derive(Clone, Debug)]
 pub struct Screen {
@@ -633,6 +680,62 @@ impl Screen {
     #[must_use]
     pub fn inverse(&self) -> bool {
         self.attrs.inverse()
+    }
+
+    /// Starts or stops keeping the rows that scroll off the top of the
+    /// screen, for a caller that wants to put them somewhere of its own.
+    ///
+    /// Off by default, because a caller that never collects them must not
+    /// be made to pay for them. Only the normal screen is captured: what
+    /// leaves the top of an alternate screen is a full-screen program
+    /// redrawing itself, not history.
+    pub fn set_capture_evicted_rows(&mut self, capture: bool) {
+        self.grid.set_capture_evicted(capture);
+    }
+
+    /// How many rows have scrolled off the top of the normal screen since
+    /// the terminal was created, captured or not.
+    ///
+    /// It only ever grows, so it names a position in the session's output
+    /// that stays meaningful across a reconnect or a retransmission.
+    #[must_use]
+    pub fn evicted_rows_total(&self) -> u64 {
+        self.grid.evicted_total()
+    }
+
+    /// Takes the rows captured since the last call, oldest first, along
+    /// with the absolute index of the first of them.
+    ///
+    /// That index is normally the number collected so far. When it is
+    /// larger, rows were dropped because the caller stopped collecting
+    /// for long enough to fill the buffer, and the gap is the caller's to
+    /// report.
+    pub fn take_evicted_rows(&mut self) -> (u64, Vec<EvictedRow>) {
+        let cols = self.grid.size().cols;
+        let (first, rows) = self.grid.take_evicted();
+        let rows = rows
+            .iter()
+            .map(|row| EvictedRow::from_row(row, cols))
+            .collect();
+        (first, rows)
+    }
+
+    /// The rows currently on screen, rendered exactly as
+    /// [`Screen::take_evicted_rows`] renders the ones that have gone.
+    ///
+    /// For a caller holding both: it is what tells it whether a row it
+    /// has been handed is one it is already showing, which a
+    /// differently-rendered row could not answer.
+    ///
+    /// Lazy, because the usual caller wants the top row or two rather
+    /// than the screen, and rendering a row is not free.
+    pub fn visible_rows_as_evicted(
+        &self,
+    ) -> impl Iterator<Item = EvictedRow> + '_ {
+        let cols = self.grid().size().cols;
+        self.grid()
+            .visible_rows()
+            .map(move |row| EvictedRow::from_row(row, cols))
     }
 
     pub(crate) fn grid(&self) -> &crate::grid::Grid {
@@ -1363,5 +1466,135 @@ fn u16_to_u8(i: u16) -> Option<u8> {
     } else {
         // safe because we just ensured that the value fits in a u8
         Some(i.try_into().unwrap())
+    }
+}
+
+#[cfg(test)]
+mod evicted_row_tests {
+    //! Zetta's addition: the rows that leave the top of the screen, kept
+    //! for a caller that puts them in a history of its own. See
+    //! `UPSTREAM.md`.
+
+    fn text_of(rows: &[crate::EvictedRow]) -> Vec<String> {
+        rows.iter()
+            .map(|row| String::from_utf8_lossy(&row.contents).into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn nothing_is_captured_until_it_is_asked_for() {
+        let mut parser = crate::Parser::new(2, 8, 0);
+        parser.process(b"one\r\ntwo\r\nthree\r\n");
+        // The counter runs whether or not anything is collecting, so a
+        // collector that starts late still knows where it is.
+        assert_eq!(parser.screen().evicted_rows_total(), 2);
+        assert_eq!(parser.screen_mut().take_evicted_rows(), (2, vec![]));
+    }
+
+    #[test]
+    fn captured_rows_arrive_oldest_first_with_their_absolute_index() {
+        let mut parser = crate::Parser::new(2, 8, 0);
+        parser.screen_mut().set_capture_evicted_rows(true);
+        parser.process(b"one\r\ntwo\r\nthree\r\n");
+
+        let (first, rows) = parser.screen_mut().take_evicted_rows();
+        assert_eq!(first, 0);
+        assert_eq!(text_of(&rows), vec!["one", "two"]);
+        // Taking them twice does not repeat them, and the index goes on.
+        parser.process(b"four\r\n");
+        let (first, rows) = parser.screen_mut().take_evicted_rows();
+        assert_eq!(first, 2);
+        assert_eq!(text_of(&rows), vec!["three"]);
+    }
+
+    #[test]
+    fn a_captured_row_carries_its_formatting_and_leaves_none_behind() {
+        let mut parser = crate::Parser::new(2, 8, 0);
+        parser.screen_mut().set_capture_evicted_rows(true);
+        parser.process(b"\x1b[31mred\x1b[m\r\nplain\r\nlast\r\n");
+
+        let (_, rows) = parser.screen_mut().take_evicted_rows();
+        let red = String::from_utf8_lossy(&rows[0].contents).into_owned();
+        assert!(red.contains("\x1b[31m"), "{red:?}");
+        // Replaying it must not colour whatever is written next.
+        assert!(red.ends_with("\x1b[m"), "{red:?}");
+        assert!(
+            !String::from_utf8_lossy(&rows[1].contents).contains("\x1b[31m"),
+            "the next row inherited a colour it does not have"
+        );
+    }
+
+    #[test]
+    fn a_row_is_only_wrapped_when_it_fills_its_last_column() {
+        let mut parser = crate::Parser::new(2, 4, 0);
+        parser.screen_mut().set_capture_evicted_rows(true);
+        // Eight characters over four columns: the first row wraps into
+        // the second, and both are pushed off by the third line.
+        parser.process(b"abcdefgh\r\nx\r\ny\r\n");
+
+        let (_, rows) = parser.screen_mut().take_evicted_rows();
+        assert_eq!(text_of(&rows)[0], "abcd");
+        assert!(rows[0].wrapped, "a full row that continued below");
+        assert!(!rows[1].wrapped, "efgh ended its line");
+    }
+
+    #[test]
+    fn a_scroll_region_discards_rather_than_evicting() {
+        let mut parser = crate::Parser::new(4, 8, 0);
+        parser.screen_mut().set_capture_evicted_rows(true);
+        // Scrolling inside a region is a program redrawing part of its
+        // screen; none of it is history.
+        parser.process(b"\x1b[1;3r\x1b[3;1H\n\n\n\n");
+
+        assert_eq!(parser.screen().evicted_rows_total(), 0);
+        assert_eq!(parser.screen_mut().take_evicted_rows().1, vec![]);
+    }
+
+    #[test]
+    fn an_alternate_screen_produces_no_history() {
+        let mut parser = crate::Parser::new(2, 8, 0);
+        parser.screen_mut().set_capture_evicted_rows(true);
+        parser.process(b"\x1b[?1049hone\r\ntwo\r\nthree\r\n");
+
+        assert_eq!(parser.screen().evicted_rows_total(), 0);
+        assert_eq!(parser.screen_mut().take_evicted_rows().1, vec![]);
+
+        // And the normal screen underneath counts once it is back.
+        parser.process(b"\x1b[?1049lback\r\nagain\r\nonce more\r\n");
+        assert!(parser.screen().evicted_rows_total() > 0);
+    }
+
+    #[test]
+    fn a_row_on_screen_renders_the_same_way_one_that_left_does() {
+        // The two are compared by a caller deciding whether a row it has
+        // been handed is one it is already showing.
+        let mut parser = crate::Parser::new(2, 8, 0);
+        parser.screen_mut().set_capture_evicted_rows(true);
+        parser.process(b"\x1b[31mone\x1b[m\r\n");
+        let showing: Vec<_> =
+            parser.screen().visible_rows_as_evicted().collect();
+
+        // The same row, now on its way out.
+        parser.process(b"two\r\n");
+        let (_, gone) = parser.screen_mut().take_evicted_rows();
+        assert_eq!(gone[0], showing[0]);
+    }
+
+    #[test]
+    fn a_collector_that_stops_draining_costs_a_bounded_amount() {
+        let mut parser = crate::Parser::new(2, 8, 0);
+        parser.screen_mut().set_capture_evicted_rows(true);
+        let overflow = crate::grid::EVICTED_CAP + 100;
+        for line in 0..overflow {
+            parser.process(format!("L{line}\r\n").as_bytes());
+        }
+
+        let (first, rows) = parser.screen_mut().take_evicted_rows();
+        assert_eq!(rows.len(), crate::grid::EVICTED_CAP);
+        // The index says how many were dropped, so the gap is reportable
+        // rather than silent.
+        let cap = u64::try_from(crate::grid::EVICTED_CAP).unwrap();
+        assert_eq!(first, parser.screen().evicted_rows_total() - cap);
+        assert!(first > 0, "the oldest rows were dropped");
     }
 }

@@ -90,6 +90,22 @@ and how to prove it is working on a real link.
 The Zosh client and bundled Rust server support repeated-character (REP)
 updates, including repeated spaces used to align full-screen applications.
 
+Output that scrolls off the screen is kept, which Mosh alone cannot do. Mosh
+synchronizes a screen, so anything that scrolled past between two of its
+updates is in neither of them: `cat` a long file over stock Mosh and you are
+left with its last screenful and nothing above it to scroll back to or copy
+out of. With the bundled server, `zosh-server` keeps the rows that leave the
+top of the screen and carries them to the client, which writes them into the
+local terminal's history. A 100 000-line burst arrives complete; the same burst
+over stock Mosh leaves 23 lines. It is on by default and needs no flag. What is
+bounded is how much may be in flight — 1 MiB, `--scrollback=KIB` to change it
+— and a client that falls behind slows the remote program down rather than
+losing its output, the way an SSH session does. `--no-scrollback` turns it off.
+An unmodified `mosh-server` never sends the rows and an unmodified
+`mosh-client` never asks for them, so either pairing is an ordinary Mosh
+session; [the protocol note](crates/zosh/PROTOCOL.md) specifies the wire
+format and what each pairing does.
+
 Zosh intentionally defaults to `--no-init`, unlike stock `mosh`: it keeps the
 current terminal screen and its scrollback instead of entering an alternate
 screen. Use `zosh --init USER@HOST` when the stock Mosh terminal behavior is

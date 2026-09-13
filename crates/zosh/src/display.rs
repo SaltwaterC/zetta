@@ -104,6 +104,13 @@ impl DiffScreen for DisplayScreen {
             // a new frame, clears the display, and repaints every row. A
             // normal state diff compares mismatched grids and leaves a TUI
             // such as htop shredded after a maximize/restore cycle.
+            //
+            // Anything that scrolled past on the way has to reach the
+            // terminal's history before the clear does, or resizing during a
+            // burst would be the one way to lose output.
+            if let Some(replay) = self.scrollback_replay(previous) {
+                output.extend_from_slice(&replay);
+            }
             output.extend_from_slice(DISPLAY_RESIZE);
             let blank = Vt100Screen::new(self.rows(), self.cols());
             output.extend_from_slice(&self.inner.inner().contents_diff(blank.inner()));
@@ -111,7 +118,16 @@ impl DiffScreen for DisplayScreen {
             return output;
         }
         let mut physical_previous = previous.inner.clone();
-        if let Some(plan) = scroll_plan(previous, self) {
+        // What the server says left the screen beats anything that can be
+        // inferred from the screen itself, so the two are never both applied.
+        // Against a peer that does not carry scrollback there is nothing to
+        // say, and the inference below is all there has ever been.
+        if let Some(replay) = self.scrollback_replay(previous) {
+            physical_previous.feed(&replay);
+            output.extend_from_slice(&replay);
+        } else if !self.scrollback.active
+            && let Some(plan) = scroll_plan(previous, self)
+        {
             let scroll = plan.sequence(previous.inner.cursor().0, self.rows());
             physical_previous.feed(&scroll);
             output.extend_from_slice(&scroll);
@@ -133,6 +149,138 @@ impl DiffScreen for DisplayScreen {
 impl DisplayScreen {
     pub(crate) fn clears_scrollback_since(&self, previous: &Self) -> bool {
         self.scrollback.generation != previous.scrollback.generation
+    }
+
+    /// The rows that belong between the screen the terminal is showing and the
+    /// one it is about to be shown, written so that the terminal's own history
+    /// ends up holding them.
+    ///
+    /// A Mosh state describes one screen, so everything that scrolled past
+    /// between two of them is normally gone. The server counts what left and
+    /// carries the rows it cannot assume the client still has, and this puts
+    /// them back: every row the terminal is asked to scroll off the top is one
+    /// it keeps, so the replay writes the rows it was not shown and then
+    /// scrolls the ones it was.
+    ///
+    /// Exactly `missing` rows are scrolled off, which is what leaves the screen
+    /// aligned for the ordinary state diff that follows. `None` when the peer
+    /// does not carry scrollback, or when nothing left the screen.
+    pub(crate) fn scrollback_replay(&self, previous: &Self) -> Option<Vec<u8>> {
+        let height = self.rows();
+        let missing = self
+            .scrollback
+            .evicted
+            .checked_sub(previous.scrollback.evicted)
+            .filter(|missing| *missing > 0)?;
+        if !self.scrollback.active || height < 1 {
+            return None;
+        }
+
+        let mut output = Vec::new();
+        // A row's contents assume a blank row and default attributes, and
+        // nothing else. Both are made true here rather than assumed.
+        output.extend_from_slice(b"\x1b[r\x1b[0m");
+        self.correct_stale_rows(previous, missing, &mut output);
+        output.extend_from_slice(format!("\x1b[{height};1H").as_bytes());
+
+        // The first `height` rows to leave are the ones the terminal is
+        // already showing: scrolling is enough, and their contents are not
+        // carried at all. Anything beyond that never reached this terminal and
+        // has to be written out.
+        let unseen_from = previous
+            .scrollback
+            .evicted
+            .saturating_add(u64::from(height));
+        let mut wrapping = false;
+        let mut dropped = 0_u64;
+        for index in unseen_from..self.scrollback.evicted {
+            match self.carried_row(index) {
+                Some(row) => {
+                    if dropped > 0 {
+                        Self::write_gap(&mut output, dropped, &mut wrapping);
+                        dropped = 0;
+                    }
+                    if !wrapping {
+                        output.extend_from_slice(b"\r\n");
+                    }
+                    output.extend_from_slice(&row.contents);
+                    wrapping = row.wrapped;
+                }
+                // A row the server had to drop to keep running while this
+                // client was away. Runs of them collapse into one line rather
+                // than into a screenful of blanks.
+                None => dropped += 1,
+            }
+        }
+        if dropped > 0 {
+            Self::write_gap(&mut output, dropped, &mut wrapping);
+        }
+
+        // Then the rows that are on the screen, which scrolling is all it
+        // takes to keep. `\r` also cancels any wrap left pending by the row
+        // above, so a row ends where it said it did.
+        output.push(b'\r');
+        output.extend(std::iter::repeat_n(
+            b'\n',
+            usize::try_from(missing.min(u64::from(height))).unwrap_or(usize::from(height)),
+        ));
+        Some(output)
+    }
+
+    /// Repaints the rows that are about to be scrolled into the terminal's
+    /// history but are no longer what the server has.
+    ///
+    /// A row only reaches the history by travelling off the top of the screen,
+    /// so what the screen holds is what gets kept — and the screen can be out
+    /// of date. The case that matters is the first scroll of a session: the
+    /// terminal is showing a prompt over blank rows, the program then fills
+    /// those rows and scrolls far past them in one state, and the blanks are
+    /// what would be kept. The server carried the real rows, so they are put
+    /// on the screen before it moves.
+    ///
+    /// Nothing to do in the ordinary case, where the rows leaving are ones the
+    /// terminal has been showing all along. The comparison is exact rather
+    /// than a guess about where the program writes.
+    fn correct_stale_rows(&self, previous: &Self, missing: u64, output: &mut Vec<u8>) {
+        let leaving = usize::try_from(missing.min(u64::from(self.rows()))).unwrap_or(0);
+        // Only the rows that are about to leave are rendered: a one-line
+        // scroll must not cost a screen's worth of row formatting, and this
+        // runs on every frame that scrolls at all.
+        let shown = previous
+            .inner
+            .inner()
+            .visible_rows_as_evicted()
+            .take(leaving);
+        for (row, on_screen) in shown.enumerate() {
+            let index = previous.scrollback.evicted + row as u64;
+            let Some(carried) = self.carried_row(index) else {
+                // Not carried, so there is nothing better to put there than
+                // what the terminal already has.
+                continue;
+            };
+            if carried.contents == on_screen.contents {
+                continue;
+            }
+            output.extend_from_slice(format!("\x1b[{};1H\x1b[2K", row + 1).as_bytes());
+            output.extend_from_slice(&carried.contents);
+        }
+    }
+
+    fn carried_row(&self, index: u64) -> Option<&crate::scrollback::ScrollbackRow> {
+        let offset = index.checked_sub(self.scrollback.rows_first)?;
+        self.scrollback.rows.get(usize::try_from(offset).ok()?)
+    }
+
+    /// Says what is missing, in place of the rows themselves. Silently showing
+    /// less than happened is the one outcome worth ruling out.
+    fn write_gap(output: &mut Vec<u8>, dropped: u64, wrapping: &mut bool) {
+        if !*wrapping {
+            output.extend_from_slice(b"\r\n");
+        }
+        output.extend_from_slice(
+            format!("\x1b[2m[zosh: {dropped} lines of scrollback dropped]\x1b[0m").as_bytes(),
+        );
+        *wrapping = false;
     }
 
     pub(crate) fn input_modes(&self) -> Vec<u8> {

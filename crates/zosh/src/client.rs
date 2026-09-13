@@ -243,6 +243,23 @@ pub(crate) const KEEP_ALIVE_MAX_MS: u64 = 3000;
 /// The environment variable that carries `--keep-alive` to an external
 /// endpoint client, alongside Mosh's own `MOSH_*` settings.
 pub(crate) const KEEP_ALIVE_ENV: &str = "MOSH_KEEPALIVE";
+pub(crate) const SCROLLBACK_ENV: &str = "MOSH_SCROLLBACK";
+
+/// How much scrolled-off history a session asks its server to hold for it, in
+/// KiB, when nothing says otherwise.
+///
+/// Mosh throws that history away; a zosh server carries it, and this is the
+/// most of it that may be in flight before the program is slowed down to what
+/// the link can take. Big enough that ordinary output never reaches it at all.
+pub const SCROLLBACK_DEFAULT_KIB: u32 = 1024;
+/// The bounds the server clamps to, restated here so the command line rejects
+/// what it would only have quietly adjusted.
+///
+/// The ceiling is what keeps one state inside Mosh's 4 MiB instruction limit:
+/// the rows travel as Base64, which is a third larger again, and the screen
+/// diff shares the same instruction.
+pub const SCROLLBACK_MIN_KIB: u32 = 16;
+pub const SCROLLBACK_MAX_KIB: u32 = 2048;
 
 /// Parsed endpoint arguments for `zosh SERVER_IP UDP_PORT`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -253,6 +270,8 @@ pub struct ClientArgs {
     pub version: bool,
     pub colors: bool,
     pub keep_alive: Option<u64>,
+    /// KiB of scrolled-off history to ask the server for, or zero for none.
+    pub scrollback_kib: Option<u32>,
 }
 
 /// The part of the Mosh launcher contract that is consumed by the bundled
@@ -266,6 +285,9 @@ pub(crate) struct SessionSettings {
     /// How long the session may go without sending before it emits a
     /// keep-alive, or `None` for Mosh's own three-second heartbeat.
     pub(crate) keep_alive: Option<u64>,
+    /// KiB of scrolled-off history to ask the server to carry, or zero to ask
+    /// for none and be an ordinary Mosh client.
+    pub(crate) scrollback_kib: u32,
 }
 
 impl SessionSettings {
@@ -291,8 +313,35 @@ impl SessionSettings {
             // endpoint entry point consistent when it is invoked directly.
             initialize_terminal: false,
             keep_alive: keep_alive_from_environment(),
+            scrollback_kib: scrollback_from_environment(),
         }
     }
+}
+
+fn scrollback_from_environment() -> u32 {
+    let Some(value) = std::env::var(SCROLLBACK_ENV).ok() else {
+        return SCROLLBACK_DEFAULT_KIB;
+    };
+    match parse_scrollback_kib(&value) {
+        Ok(kib) => kib,
+        Err(error) => {
+            eprintln!("zosh: ignoring {SCROLLBACK_ENV}={value:?} ({error})");
+            SCROLLBACK_DEFAULT_KIB
+        }
+    }
+}
+
+/// Reads a `--scrollback=KIB` value. Zero turns the extension off, which is
+/// the one value outside the range that means something.
+pub(crate) fn parse_scrollback_kib(value: &str) -> Result<u32> {
+    let kib = value
+        .parse::<u32>()
+        .with_context(|| format!("invalid scrollback size {value:?}"))?;
+    anyhow::ensure!(
+        kib == 0 || (SCROLLBACK_MIN_KIB..=SCROLLBACK_MAX_KIB).contains(&kib),
+        "scrollback size must be 0 or between {SCROLLBACK_MIN_KIB} and {SCROLLBACK_MAX_KIB} KiB"
+    );
+    Ok(kib)
 }
 
 fn keep_alive_from_environment() -> Option<u64> {
@@ -374,6 +423,7 @@ pub(crate) fn parse_args(arguments: impl IntoIterator<Item = OsString>) -> Resul
     let mut version = false;
     let mut colors = false;
     let mut keep_alive = None;
+    let mut scrollback_kib = None;
     let mut positional = Vec::new();
     for argument in arguments {
         let value = argument.to_string_lossy().into_owned();
@@ -383,6 +433,11 @@ pub(crate) fn parse_args(arguments: impl IntoIterator<Item = OsString>) -> Resul
         if let Some(interval) = keep_alive_argument(&value)? {
             anyhow::ensure!(keep_alive.is_none(), "duplicate --keep-alive");
             keep_alive = Some(interval);
+            continue;
+        }
+        if let Some(kib) = scrollback_argument(&value)? {
+            anyhow::ensure!(scrollback_kib.is_none(), "duplicate --scrollback");
+            scrollback_kib = Some(kib);
             continue;
         }
         match value.as_str() {
@@ -413,6 +468,7 @@ pub(crate) fn parse_args(arguments: impl IntoIterator<Item = OsString>) -> Resul
             version,
             colors,
             keep_alive,
+            scrollback_kib,
         });
     }
     anyhow::ensure!(positional.len() == 2, "usage: zosh SERVER_IP UDP_PORT");
@@ -427,12 +483,26 @@ pub(crate) fn parse_args(arguments: impl IntoIterator<Item = OsString>) -> Resul
         version,
         colors,
         keep_alive,
+        scrollback_kib,
     })
+}
+
+/// `--scrollback`, `--scrollback=KIB` or `--no-scrollback`, in the shape
+/// `keep_alive_argument` reads its own.
+fn scrollback_argument(value: &str) -> Result<Option<u32>> {
+    match value {
+        "--no-scrollback" => Ok(Some(0)),
+        "--scrollback" | "-s" => Ok(Some(SCROLLBACK_DEFAULT_KIB)),
+        _ => match value.strip_prefix("--scrollback=") {
+            Some(size) => parse_scrollback_kib(size).map(Some),
+            None => Ok(None),
+        },
+    }
 }
 
 fn print_help() {
     println!(
-        "Zosh client\n\nUsage: zosh SERVER_IP UDP_PORT\n       zosh -c\n\nReads the session key from MOSH_KEY. `-c` prints the terminal color count for the Mosh bootstrap.\n\nOptions:\n  -c                 Print terminal color count\n  -k, --keep-alive   Hold the link to a packet every {KEEP_ALIVE_DEFAULT_MS} ms (=MS to change, {KEEP_ALIVE_MIN_MS}-{KEEP_ALIVE_MAX_MS})\n  -h, --help         Print help\n  -V, --version      Print version"
+        "Zosh client\n\nUsage: zosh SERVER_IP UDP_PORT\n       zosh -c\n\nReads the session key from MOSH_KEY. `-c` prints the terminal color count for the Mosh bootstrap.\n\nOptions:\n  -c                 Print terminal color count\n  -k, --keep-alive   Hold the link to a packet every {KEEP_ALIVE_DEFAULT_MS} ms (=MS to change, {KEEP_ALIVE_MIN_MS}-{KEEP_ALIVE_MAX_MS})\n  -s, --scrollback   Keep scrolled-off history, {SCROLLBACK_DEFAULT_KIB} KiB in flight (=KIB to change, {SCROLLBACK_MIN_KIB}-{SCROLLBACK_MAX_KIB})\n      --no-scrollback  Do not keep it, the way stock Mosh cannot\n  -h, --help         Print help\n  -V, --version      Print version"
     );
 }
 
@@ -443,6 +513,9 @@ fn run_session(args: &ClientArgs, key: &Base64Key) -> Result<()> {
     // sets them.
     if args.keep_alive.is_some() {
         settings.keep_alive = args.keep_alive;
+    }
+    if let Some(kib) = args.scrollback_kib {
+        settings.scrollback_kib = kib;
     }
     run_session_with_settings(&args.host, args.port, key, settings)
 }
@@ -499,6 +572,14 @@ fn configure_session(session: &mut ClientSession, settings: SessionSettings) {
         session.prediction_mut().set_predict_overwrite(true);
     }
     session.set_keep_alive(settings.keep_alive);
+    if settings.scrollback_kib > 0 {
+        // Before anything is sent, so it rides the first instruction and the
+        // server is carrying history from the first row that scrolls. It is a
+        // cumulative UserStream event, so saying it once is saying it
+        // reliably; a server that does not understand field 22 ignores it and
+        // the session is an ordinary Mosh session.
+        session.request_scrollback(settings.scrollback_kib);
+    }
     if std::env::var_os("MOSH_TITLE_NOPREFIX").is_none() {
         session.set_title_prefix("[mosh] ");
     }

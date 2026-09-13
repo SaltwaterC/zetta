@@ -13,7 +13,16 @@ pub struct Grid {
     scrollback: std::collections::VecDeque<crate::row::Row>,
     scrollback_len: usize,
     scrollback_offset: usize,
+    evicted: std::collections::VecDeque<crate::row::Row>,
+    evicted_total: u64,
+    capture_evicted: bool,
 }
+
+/// How many uncollected evicted rows a grid holds before it starts
+/// dropping the oldest. A collector that drains every pass never
+/// reaches this; it is here so that one which stops draining costs a
+/// bounded amount of memory rather than an unbounded one.
+pub const EVICTED_CAP: usize = 16 * 1024;
 
 impl Grid {
     pub fn new(size: Size, scrollback_len: usize) -> Self {
@@ -29,6 +38,9 @@ impl Grid {
             scrollback: std::collections::VecDeque::new(),
             scrollback_len,
             scrollback_offset: 0,
+            evicted: std::collections::VecDeque::new(),
+            evicted_total: 0,
+            capture_evicted: false,
         }
     }
 
@@ -563,7 +575,21 @@ impl Grid {
             self.rows
                 .insert(usize::from(self.scroll_bottom) + 1, self.new_row());
             let removed = self.rows.remove(usize::from(self.scroll_top));
-            if self.scrollback_len > 0 && !self.scroll_region_active() {
+            if self.scroll_region_active() {
+                // A row pushed out of a scroll region is discarded
+                // rather than remembered: that is the region's whole
+                // purpose, and it is what keeps a full-screen program's
+                // redraw out of the history.
+                continue;
+            }
+            self.evicted_total += 1;
+            if self.capture_evicted {
+                if self.evicted.len() >= EVICTED_CAP {
+                    self.evicted.pop_front();
+                }
+                self.evicted.push_back(removed.clone());
+            }
+            if self.scrollback_len > 0 {
                 self.scrollback.push_back(removed);
                 while self.scrollback.len() > self.scrollback_len {
                     self.scrollback.pop_front();
@@ -574,6 +600,31 @@ impl Grid {
                 }
             }
         }
+    }
+
+    pub fn set_capture_evicted(&mut self, capture: bool) {
+        self.capture_evicted = capture;
+        if !capture {
+            self.evicted.clear();
+        }
+    }
+
+    pub fn evicted_total(&self) -> u64 {
+        self.evicted_total
+    }
+
+    /// The captured rows, and the absolute index of the first of them.
+    /// The index is what tells a collector that rows were dropped: it
+    /// runs ahead of the count collected so far exactly when
+    /// [`EVICTED_CAP`] was reached.
+    pub fn take_evicted(&mut self) -> (u64, Vec<crate::row::Row>) {
+        let rows: Vec<_> = self.evicted.drain(..).collect();
+        // `evicted_total` counts every eviction, captured or not, so
+        // the first row returned is that many rows back from the end.
+        let first = self
+            .evicted_total
+            .saturating_sub(u64::try_from(rows.len()).unwrap_or(u64::MAX));
+        (first, rows)
     }
 
     pub fn scroll_down(&mut self, count: u16) {

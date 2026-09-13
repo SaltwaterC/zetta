@@ -1,0 +1,4 @@
+# Upstream vt100 formats at this width. Pinned so that `cargo fmt` reapplies
+# the fork's own style rather than the workspace default, which would rewrite
+# every file it tracks and bury the Zetta changes in merge friction.
+max_width = 78

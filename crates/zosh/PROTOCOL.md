@@ -4,10 +4,15 @@ Zosh speaks stock Mosh protocol v2. This document specifies the optional
 additions it makes to that wire, what each half of zosh does with them, and
 why every existing Mosh implementation keeps working either way.
 
-It is implemented in three places: `crates/mosh_rs` (the client's
-`UserStream` and host-event extensions), `crates/zosh/src` (the terminal
-frontend and the `-k/--keep-alive` command line), and `crates/zosh/server/src`
-(recognising the extensions and answering them promptly).
+It is implemented in four places: `crates/mosh_rs` (the client's `UserStream`
+and host-event extensions), `crates/zosh/src` (the terminal frontend and the
+command line), `crates/zosh/server/src` (recognising the extensions and
+answering them promptly), and `crates/vt100` (the eviction queue the server's
+emulator keeps so that the rows leaving the top of the screen can be carried at
+all).
+
+Three extensions are specified here: the keep-alive, terminal color-query
+forwarding, and scrollback.
 
 ## The problem
 
@@ -103,6 +108,123 @@ Only the zosh client/server pair implements this proxy. A stock Mosh client
 skips host field 20, and a stock Mosh server skips client field 21; neither
 peer gains color-query forwarding, but ordinary terminal output and keyboard
 input remain compatible.
+
+### Scrollback
+
+Mosh synchronizes a screen. Everything that scrolls past the top of it between
+two states is not in either of them, so it is gone — which is why `cat` of a
+long file over Mosh leaves you with its last screenful and nothing above it,
+and why the output of a command cannot be scrolled back to or copied out of.
+Stock Mosh's client recovers a little of this by noticing that a screen has
+shifted upward and scrolling the real terminal instead of repainting it, but
+that only works while the screen moves by less than its own height between
+frames. A burst moves it much further, matches nothing, and is repainted in
+place.
+
+zosh owns both ends, so its server keeps the rows that leave the top of the
+screen and carries them to the client, which writes them into the real
+terminal's history. There is no bound on how much survives a burst: what
+bounds the extension is how much may be **in flight**, and a client that is
+behind slows the program down rather than losing its output.
+
+The rows travel in the display diff, as an OSC string:
+
+```
+ESC ] 777 ; zosh-scrollback ; FIRST ; BASE64 BEL
+```
+
+`FIRST` is the absolute index of the first row carried, counted from the start
+of the session. Each row in the payload is framed as a flags byte
+(bit 0: the logical line continued onto the row below), a big-endian `uint32`
+length, and that many bytes of the row's contents with its formatting inline.
+The contents assume only that the cursor is at the start of a blank row with
+default attributes, and restore the attributes they found, so the client can
+write one anywhere. Base64 is what keeps the payload inside an OSC string, so
+that a Mosh implementation which has never heard of the extension discards it
+as an unknown OSC rather than drawing it.
+
+A marker is sent whenever the count has moved, **even with no rows attached**:
+the number is how the client learns where the screen it is about to be shown
+sits in the session's output. A count that moved further than the rows carried
+is the server saying it had to drop some, and the client writes one line
+saying how many rather than silently showing less.
+
+The marker travels in the cumulative terminal-state diff for the same reason
+the clear-scrollback generation does: retransmission, an out-of-order arrival
+and a diff recomputed from an older acknowledged state are all then handled by
+the machinery that already handles them for the screen. The rows are attached
+to the protocol screen, and what reaches the terminal is the difference
+between the screen it is showing and the one it is about to show.
+
+#### Negotiation
+
+One new field on the client → server `ClientBuffers.Instruction`:
+
+```proto
+// zosh extension
+extend ClientBuffers.Instruction {
+  optional uint32 zosh_scrollback_kib = 22;  // KiB the client will hold in flight
+}
+```
+
+**Field 22 is reserved for zosh.** A client sends it once, in its first
+instruction, before anything can have scrolled. It is an event in the
+cumulative `UserStream`, so SSP delivers it exactly once without it having to
+be repeated or confirmed — unlike the keep-alive, which is repeated because it
+announces a setting that can change.
+
+There is no server-side flag and there must not be one, for the reason given
+under "Command line" below. The negotiation is in-band or it is nothing.
+
+The server begins collecting rows **before** it has heard from anybody: the
+program starts writing the moment the server does, which is before the first
+datagram can arrive, so a server that only began collecting on request would
+lose its opening screenfuls. What is collected on spec is bounded, is never
+allowed to hold the program back, and is thrown away the moment the first
+client state turns out not to carry field 22 — which is what every stock Mosh
+client silently says by never sending it.
+
+#### Flow control
+
+The budget the client announces is how many bytes of **unacknowledged** rows
+the server may hold. While it is reached the server stops reading the program:
+its PTY queue fills, the reader blocks, and the program waits — the same
+backpressure an SSH session has, and the reason nothing is lost rather than
+the newest output winning.
+
+Backpressure stops at `SCROLLBACK_STALL` (10 s, matching Mosh's own
+`ACTIVE_RETRY_TIMEOUT`) since the peer was last heard from. Past that the
+session is one whose client may never come back, and a Mosh session outliving
+its client matters more than history accumulating for nobody, so the oldest
+rows give way instead. Their indices are skipped rather than reused, which is
+what lets a client that does return say how much it missed.
+
+#### What is not carried
+
+- **A scroll region.** A row pushed out of one is discarded rather than
+  remembered, which is what keeps a full-screen program's redraw out of the
+  history.
+- **The alternate screen.** What leaves the top of it is a program redrawing
+  itself, not history.
+- **Rows a `CSI 3 J` asked to be forgotten**, including ones still in flight.
+  A program that clears its history is asking for exactly that; the count
+  still moves, and the clear travels in the same state, which is how the
+  client knows the gap is deliberate rather than lost.
+- **A wrapped line's identity across a resize.** A row that filled its last
+  column is replayed so the terminal wraps it back together, but a row marked
+  wrapped whose contents stop short is written as a line of its own rather
+  than run onto the next.
+
+#### Cost
+
+The rows are Base64 inside the state that carries them, which is a third
+larger than the bytes themselves before Mosh's zlib gets to them. That is the
+price of riding in the display diff rather than in a field of its own, and it
+buys the retransmission and rebase semantics above. The in-flight ceiling is
+2048 KiB because one state has to stay inside Mosh's 4 MiB instruction limit
+with the screen diff beside it.
+
+A session that scrolls nothing pays nothing: no rows, no marker, not a byte.
 
 ## Semantics
 
@@ -213,6 +335,9 @@ since its last send). See "Proving it" below.
 | `zosh` without `-k`, or stock `mosh-client` | zosh `zosh-server` | No keep-alives; the server behaves exactly as before. |
 | zosh client | zosh `zosh-server` | OSC 10/11 color queries are forwarded to the local terminal and their responses are written to the remote PTY. |
 | zosh client | stock `mosh-server` | The host query extension is ignored; ordinary terminal traffic remains compatible. |
+| `zosh` (default) | zosh `zosh-server` | Scrolled-off rows are carried and written into the local terminal's history. Measured on loopback, a 100 000-line burst arrives complete; without it, 23 lines of it do. |
+| `zosh` (default) | stock `mosh-server` | Field 22 is skipped, no rows are ever carried, and the client falls back to inferring scrolls from the screen — exactly what stock Mosh does. |
+| `zosh --no-scrollback`, or stock `mosh-client` | zosh `zosh-server` | The server settles the question on the first state it accepts, forgets what it had collected, and behaves exactly as a stock server for the rest of the session. |
 | stock `mosh-client` | reference `mosh-server` | Untouched. |
 
 ## Cost
@@ -269,6 +394,9 @@ thing from either end, `-ttt` printing the gap between packets.
 ```
 -k, --keep-alive        hold the session to a packet every 500 ms
     --keep-alive=MS     use MS milliseconds instead (20-3000)
+-s, --scrollback        keep the output that scrolls off the screen [default]
+    --scrollback=KIB    hold KIB kibibytes of it in flight (16-2048)
+    --no-scrollback     keep only what is on the screen, as stock Mosh does
 ```
 
 Accepted by `zosh`, by `zetta mosh` (which forwards its arguments
@@ -285,6 +413,6 @@ the launcher added to the remote command line would break every stock
 server. The extension is in-band or it is nothing.
 
 `--client=PATH` runs an external endpoint client, which is not
-necessarily zosh, so the setting travels to it as `MOSH_KEEPALIVE=<ms>`
-in the environment alongside Mosh's own `MOSH_*` settings rather than as
-an argument stock `mosh-client` would reject.
+necessarily zosh, so the settings travel to it as `MOSH_KEEPALIVE=<ms>` and
+`MOSH_SCROLLBACK=<kib>` in the environment alongside Mosh's own `MOSH_*`
+settings rather than as arguments stock `mosh-client` would reject.

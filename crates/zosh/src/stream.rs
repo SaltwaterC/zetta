@@ -59,6 +59,14 @@ pub struct PaneSessionSettings {
     pub keep_alive: Option<u64>,
     pub prediction: DisplayPreference,
     pub predict_overwrite: bool,
+    /// KiB of scrolled-off history to ask the server to carry, or zero to ask
+    /// for none.
+    ///
+    /// A pane has a scrollback of its own and an embedder that expects to be
+    /// able to scroll it, so this is the setting a pane is least able to do
+    /// without. `Default` asks for none, because a default has to be the inert
+    /// one; [`crate::SCROLLBACK_DEFAULT_KIB`] is what to pass.
+    pub scrollback_kib: u32,
 }
 
 /// A live Mosh session rendered into a byte stream.
@@ -105,6 +113,11 @@ impl PaneSession {
             session.prediction_mut().set_predict_overwrite(true);
         }
         session.set_keep_alive(settings.keep_alive);
+        if settings.scrollback_kib > 0 {
+            // Before the loop starts, so it rides the first instruction and
+            // the server carries history from the first row that scrolls.
+            session.request_scrollback(settings.scrollback_kib);
+        }
 
         let wake = Arc::new(Wake::new().context("creating the session wake-up pipe")?);
         let output = Arc::new(OutputPipe::default());

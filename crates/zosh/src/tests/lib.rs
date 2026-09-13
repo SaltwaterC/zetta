@@ -11,10 +11,38 @@ fn endpoint_arguments_require_host_and_nonzero_port() {
             version: false,
             colors: false,
             keep_alive: None,
+            scrollback_kib: None,
         }
     );
     assert!(client::parse_args(["host".into()]).is_err());
     assert!(client::parse_args(["host".into(), "0".into()]).is_err());
+}
+
+/// The same shape as `-k`: the short form takes no value, so `-s host` still
+/// names a target, and `0` is the one value outside the range that means
+/// something.
+#[test]
+fn the_endpoint_client_takes_a_scrollback_size_or_turns_it_off() {
+    let scrollback = |arguments: [std::ffi::OsString; 3]| {
+        client::parse_args(arguments).map(|args| args.scrollback_kib)
+    };
+    assert_eq!(
+        scrollback(["-s".into(), "host".into(), "60001".into()]).unwrap(),
+        Some(client::SCROLLBACK_DEFAULT_KIB)
+    );
+    assert_eq!(
+        scrollback(["--scrollback=512".into(), "host".into(), "60001".into()]).unwrap(),
+        Some(512)
+    );
+    assert_eq!(
+        scrollback(["--no-scrollback".into(), "host".into(), "60001".into()]).unwrap(),
+        Some(0)
+    );
+    // `-c` prints a colour count and takes no endpoint, so it cannot be
+    // combined with one; the size still parses on its own.
+    assert!(scrollback(["host".into(), "60001".into(), "-c".into()]).is_err());
+    assert!(scrollback(["--scrollback=1".into(), "host".into(), "60001".into()]).is_err());
+    assert!(scrollback(["--scrollback=99999".into(), "host".into(), "60001".into()]).is_err());
 }
 
 #[test]
