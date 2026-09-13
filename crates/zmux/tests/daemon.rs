@@ -8,6 +8,7 @@
 use std::{
     collections::HashMap,
     io::{Read, Write as _},
+    net::Shutdown,
     os::unix::net::{UnixListener, UnixStream},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
@@ -2230,8 +2231,7 @@ fn an_upgrade_is_accepted_from_a_client_that_disagrees_about_the_protocol() {
     );
 
     // And it really replaced itself, keeping what it held.
-    let client = wait_for_multiplexer(&daemon);
-    let sessions = client.list().unwrap();
+    let sessions = wait_for_session_list(&daemon);
     assert_eq!(
         sessions.len(),
         1,
@@ -2617,6 +2617,30 @@ fn wait_for_multiplexer(daemon: &TestDaemon) -> Client {
         assert!(
             Instant::now() < deadline,
             "the multiplexer never came back (process: {}); log:\n{}",
+            daemon.process.id(),
+            daemon.log()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Lists sessions once the replacement can answer the list request itself.
+///
+/// A readiness ping can succeed in the outgoing daemon's final instant before
+/// `exec`. The next connection then sees its deliberate EOF, so a test that
+/// needs the listing must retry that listing rather than reuse the client that
+/// answered the earlier ping.
+fn wait_for_session_list(daemon: &TestDaemon) -> Vec<BackgroundSessionSummary> {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        if let Ok(Some(client)) = Client::connect_ready_at(&daemon.sessions_dir())
+            && let Ok(sessions) = client.list()
+        {
+            return sessions;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the multiplexer never answered a session list (process: {}); log:\n{}",
             daemon.process.id(),
             daemon.log()
         );
@@ -6591,8 +6615,12 @@ fn a_handover_that_is_abandoned_leaves_the_pane_readable() {
     let endpoint: zmux::transport::Endpoint =
         serde_json::from_slice(&std::fs::read(daemon.sessions_dir().join("zmux.json")).unwrap())
             .unwrap();
-    // Asks for the descriptor and walks away before it arrives, which is what a
-    // window that dies mid-handover does.
+    // Asks for the descriptor, then refuses the response while keeping the
+    // write half alive. Dropping a just-written socket races the daemon's
+    // initial read: on some Unix kernels it can see EOF before the request.
+    // Shutting down only reads leaves the complete request available to the
+    // daemon but makes its descriptor reply fail, which is the abandoned
+    // handover this test needs to exercise.
     let abandon_handover = || {
         let stream = Stream::connect(&endpoint.socket_path).unwrap();
         let mut abandoned = Connection::new(stream);
@@ -6610,7 +6638,8 @@ fn a_handover_that_is_abandoned_leaves_the_pane_readable() {
                 },
             })
             .unwrap();
-        drop(abandoned);
+        abandoned.stream().shutdown(Shutdown::Read).unwrap();
+        abandoned
     };
 
     // Retried because a pane is only handed to its *sole* viewer, and the
@@ -6626,9 +6655,13 @@ fn a_handover_that_is_abandoned_leaves_the_pane_readable() {
             Some(TEST_SECRET.to_owned()),
         ) {
             let mut reader = viewer.reader();
-            abandon_handover();
-            let taken = relay_ended(&mut reader, Duration::from_secs(2));
+            let abandoned = abandon_handover();
+            // The daemon gives a handover up to five seconds to flush frames
+            // already queued for this relay. Let that documented transition
+            // finish before treating the take as refused.
+            let taken = relay_ended(&mut reader, Duration::from_secs(6));
             drop(viewer);
+            drop(abandoned);
             if taken {
                 break;
             }
