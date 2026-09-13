@@ -164,12 +164,30 @@ impl Zetta {
         let executor = cx.background_executor().clone();
         let size_arrived = pane.size_arrived();
         cx.spawn_in(window, async move |this, cx| {
-            // The size the pane attached at has to be applied once the tab
-            // exists; without this the grid could stay at the window's size
-            // while the multiplexer's pty runs at the arbitrated one.
+            // The daemon advertises the grid this stream attached at. Apply
+            // that client-only viewport once the tab has real layout bounds;
+            // it is deliberately separate from revisioned daemon updates and
+            // from this viewer's eventual capacity report.
+            let mut pending_initial_viewport = pane.take_initial_viewport();
             let mut pending_size: Option<(zmux::messages::SessionRevision, u16, u16)> =
                 pane.take_revisioned_sizes().last().copied();
             loop {
+                if let Some((columns, lines)) = pending_initial_viewport {
+                    let applied = this
+                        .update_in(cx, |this, _window, cx| {
+                            this.apply_initial_shared_pane_viewport(
+                                tab_id, pane_id, columns, lines, cx,
+                            )
+                        })
+                        .unwrap_or(true);
+                    if !applied {
+                        // A layout, rather than a daemon message, is what
+                        // makes the initial viewport safe to apply.
+                        executor.timer(SHARED_SIZE_POLL_INTERVAL).await;
+                        continue;
+                    }
+                    pending_initial_viewport = None;
+                }
                 if let Some(size) = pending_size.take() {
                     let applied = this
                         .update_in(cx, |this, _window, cx| {
@@ -205,6 +223,7 @@ impl Zetta {
                         if arrived.is_err() {
                             return;
                         }
+                        pending_initial_viewport = pane.take_initial_viewport();
                         pending_size = pane.take_revisioned_sizes().last().copied();
                     }
                 }
@@ -251,14 +270,56 @@ impl Zetta {
             .find(|tab| tab.id == tab_id)
             .and_then(|tab| tab.pane(pane_id))
             .and_then(TerminalPane::selected_terminal);
-        let (size_initialized, bounds) = terminal.as_ref().map_or((false, None), |terminal| {
-            let terminal = terminal.read(cx);
-            (
-                terminal.is_size_initialized(),
-                Some(terminal.last_content().terminal_bounds),
-            )
-        });
-        match shared_size_action(size_initialized, bounds, columns, lines) {
+        let (size_initialized, bounds, shared_viewport) =
+            terminal.as_ref().map_or((false, None, None), |terminal| {
+                let terminal = terminal.read(cx);
+                (
+                    terminal.is_size_initialized(),
+                    Some(terminal.last_content().terminal_bounds),
+                    terminal.shared_viewport(),
+                )
+            });
+        match shared_size_action(size_initialized, bounds, shared_viewport, columns, lines) {
+            SharedSizeAction::WaitForLayout => false,
+            SharedSizeAction::AlreadyMatches => true,
+            SharedSizeAction::Resize => {
+                if let Some(terminal) = terminal {
+                    terminal.update(cx, |terminal, _| {
+                        terminal.set_shared_viewport(columns as usize, lines as usize);
+                    });
+                }
+                true
+            }
+        }
+    }
+
+    /// Applies the viewport advertised by an attach response. This does not
+    /// have a geometry revision: it is a local rendering limit for the stream
+    /// the daemon just handed us, not a new daemon size event.
+    fn apply_initial_shared_pane_viewport(
+        &mut self,
+        tab_id: u64,
+        pane_id: u64,
+        columns: u16,
+        lines: u16,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let terminal = self
+            .tabs
+            .iter()
+            .find(|tab| tab.id == tab_id)
+            .and_then(|tab| tab.pane(pane_id))
+            .and_then(TerminalPane::selected_terminal);
+        let (size_initialized, bounds, shared_viewport) =
+            terminal.as_ref().map_or((false, None, None), |terminal| {
+                let terminal = terminal.read(cx);
+                (
+                    terminal.is_size_initialized(),
+                    Some(terminal.last_content().terminal_bounds),
+                    terminal.shared_viewport(),
+                )
+            });
+        match shared_size_action(size_initialized, bounds, shared_viewport, columns, lines) {
             SharedSizeAction::WaitForLayout => false,
             SharedSizeAction::AlreadyMatches => true,
             SharedSizeAction::Resize => {

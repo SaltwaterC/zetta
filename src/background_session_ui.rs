@@ -197,7 +197,7 @@ enum SharedSizeAction {
     /// The viewer's own size is not known yet. Keep the arbitrated size pending
     /// rather than resizing against a guess.
     WaitForLayout,
-    /// The viewer is already showing the pane at that size.
+    /// The viewer has already stored this shared viewport.
     AlreadyMatches,
     Resize,
 }
@@ -217,11 +217,10 @@ fn shared_size_to_report(
 
 /// Decides whether an arbitrated size has to be imposed on this viewer.
 ///
-/// The arbitrated size only needs *applying* to a viewer showing the pane at
-/// some other size — the pty runs at the smallest of the viewers, so a larger one
-/// has to shrink its grid or the shell's wrapping stops lining up with the cells
-/// drawn. A viewer that already matches must not be touched; a larger viewer keeps
-/// its local pane region and renders the canonical grid with padding.
+/// The arbitrated size needs applying unless it is already the terminal's
+/// stored shared viewport. Comparing only the effective grid is insufficient:
+/// an 80x24 local grid can look correct before the limit is recorded, then grow
+/// to 120x30 on a later layout change and corrupt the shared terminal.
 ///
 /// The semantic initialization check is the other half of the same bug. A
 /// terminal exposes the placeholder bounds a `TerminalContent` starts with
@@ -233,16 +232,17 @@ fn shared_size_to_report(
 fn shared_size_action(
     size_initialized: bool,
     bounds: Option<terminal::TerminalBounds>,
+    shared_viewport: Option<(usize, usize)>,
     columns: u16,
     lines: u16,
 ) -> SharedSizeAction {
-    let Some(bounds) = bounds else {
+    if bounds.is_none() {
         return SharedSizeAction::WaitForLayout;
-    };
+    }
     if !size_initialized {
         return SharedSizeAction::WaitForLayout;
     }
-    if (bounds.num_columns(), bounds.num_lines()) == (columns as usize, lines as usize) {
+    if shared_viewport == Some((columns as usize, lines as usize)) {
         return SharedSizeAction::AlreadyMatches;
     }
     SharedSizeAction::Resize
