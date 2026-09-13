@@ -168,8 +168,13 @@ fn forward_output(
         // Every size the daemon arbitrates carries the revision it arbitrated
         // at, which is how this side learns that the layout moved on. Nothing
         // is done with the size itself: Mosh owns this terminal's geometry.
-        if let Some((arbitrated, _, _)) = pane.take_revisioned_sizes().last() {
+        if let Some((arbitrated, columns, lines)) = pane.take_revisioned_sizes().last() {
             *revision = *arbitrated;
+            // Unlike the GUI terminal, this relay writes directly to a real
+            // terminal whose geometry Mosh owns. It has still observed the
+            // size boundary, so let the shared reader continue to the redraw
+            // queued after it.
+            pane.finish_size_application((*arbitrated, *columns, *lines));
         }
         if resized.swap(false, Ordering::SeqCst)
             && let Some((columns, lines)) = terminal_size()

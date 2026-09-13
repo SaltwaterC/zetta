@@ -4967,7 +4967,11 @@ fn wait_for_shared_size(
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
             Err(error) => panic!("reading the shared pane failed: {error}"),
         }
-        sizes.extend(pane.take_sizes());
+        let new_sizes = pane.take_revisioned_sizes();
+        sizes.extend(new_sizes.iter().map(|(_, columns, lines)| (*columns, *lines)));
+        for (revision, columns, lines) in &new_sizes {
+            pane.finish_size_application((*revision, *columns, *lines));
+        }
         if sizes.contains(&expected) {
             return sizes;
         }

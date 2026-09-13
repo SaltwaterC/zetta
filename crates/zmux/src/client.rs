@@ -10,7 +10,7 @@ use std::{
     io,
     path::PathBuf,
     process::{Command, Stdio},
-    sync::atomic::{AtomicU64, Ordering},
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
     sync::{Arc, Mutex},
     thread,
     time::{Duration, Instant},
@@ -185,6 +185,14 @@ pub struct SharedPane {
     /// can wait for one instead of asking on a timer. Bounded at one: a pending
     /// signal already means "there are sizes to take".
     size_signal: (async_channel::Sender<()>, async_channel::Receiver<()>),
+    /// Holds the byte stream immediately after a daemon size frame. The frame
+    /// precedes output drawn for the new grid, so letting the reader consume
+    /// that output before its terminal applies the size irreversibly corrupts
+    /// a full-screen application's incremental redraw.
+    size_application_pending: Arc<AtomicBool>,
+    /// The exact size frame holding the stream. A delayed wake-up for an
+    /// older, non-blocking handoff size must not release a newer frame.
+    pending_size_frame: Arc<Mutex<Option<(SessionRevision, u16, u16)>>>,
     /// Replacements are handed to the reader after the current connection has
     /// reported a transport failure. The queue lock is held only while moving
     /// a ready connection between the pane and its reader; no network read is
@@ -272,6 +280,8 @@ impl SharedPane {
             offset: 0,
             sizes: self.sizes.clone(),
             size_signal: self.size_signal.0.clone(),
+            size_application_pending: self.size_application_pending.clone(),
+            pending_size_frame: self.pending_size_frame.clone(),
             reader_handoffs: self.reader_handoffs.clone(),
             reconnect_replay: VecDeque::new(),
         }
@@ -364,6 +374,19 @@ impl SharedPane {
         self.size_signal.1.clone()
     }
 
+    /// Releases output held behind an arbitrated size frame after the UI has
+    /// applied that frame to its terminal grid.
+    pub fn finish_size_application(&self, size: (SessionRevision, u16, u16)) {
+        let mut pending = self
+            .pending_size_frame
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if *pending == Some(size) {
+            *pending = None;
+            self.size_application_pending.store(false, Ordering::Release);
+        }
+    }
+
     fn from_connection(
         session_id: u64,
         pane_id: u64,
@@ -385,6 +408,8 @@ impl SharedPane {
                 initial_viewport.filter(|(columns, lines)| *columns > 0 && *lines > 0),
             )),
             size_signal: async_channel::bounded(1),
+            size_application_pending: Arc::new(AtomicBool::new(false)),
+            pending_size_frame: Arc::new(Mutex::new(None)),
             reader_handoffs: Arc::new(Mutex::new(VecDeque::new())),
             replay,
         }
@@ -407,6 +432,8 @@ pub struct SharedReader {
     offset: usize,
     sizes: Arc<Mutex<Vec<(SessionRevision, u16, u16)>>>,
     size_signal: async_channel::Sender<()>,
+    size_application_pending: Arc<AtomicBool>,
+    pending_size_frame: Arc<Mutex<Option<(SessionRevision, u16, u16)>>>,
     reader_handoffs: Arc<Mutex<VecDeque<SharedReaderHandoff>>>,
     reconnect_replay: VecDeque<u8>,
 }
@@ -423,6 +450,9 @@ impl io::Read for SharedReader {
         }
         if let Some(error) = self.initialization_error.take() {
             return Err(error);
+        }
+        if self.size_application_pending.load(Ordering::Acquire) {
+            return Err(io::Error::from(io::ErrorKind::WouldBlock));
         }
         loop {
             if self.offset < self.pending.len() {
@@ -477,13 +507,25 @@ impl io::Read for SharedReader {
                     },
                     _,
                 )) => {
+                    // Set the barrier before publishing the size to the UI:
+                    // it may already be awake for an earlier event.
+                    self.size_application_pending.store(true, Ordering::Release);
+                    *self
+                        .pending_size_frame
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                        Some((revision, columns, lines));
                     self.sizes
                         .lock()
                         .unwrap_or_else(|poisoned| poisoned.into_inner())
                         .push((revision, columns, lines));
+                    // The daemon queues this before bytes produced for the
+                    // resized PTY. Stop here; the terminal's UI task releases
+                    // us only after its emulator has the same grid.
                     // Full means a signal is already pending, which says the
                     // same thing.
                     let _ = self.size_signal.try_send(());
+                    return Err(io::Error::from(io::ErrorKind::WouldBlock));
                 }
                 Ok((Event::SharedClosed { .. }, _)) => return Ok(0),
                 Ok(_) => {}

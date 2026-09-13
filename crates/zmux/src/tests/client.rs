@@ -553,10 +553,18 @@ fn a_shared_reader_keeps_coalesced_replay_events_and_full_duplex_input() {
     assert_eq!(shared.take_initial_viewport(), Some((80, 24)));
     assert!(shared.take_revisioned_sizes().is_empty());
     let mut reader = shared.reader();
+    let mut byte = [0; 1];
+    assert_eq!(
+        reader.read(&mut byte).unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+    assert_eq!(shared.take_sizes(), vec![(72, 20)]);
+    // A size frame is a stream boundary: the htop/vim redraw queued after it
+    // must wait until the terminal has switched grids.
+    shared.finish_size_application((SessionRevision::INITIAL, 72, 20));
     let mut received_output = vec![0; output.len()];
     reader.read_exact(&mut received_output).unwrap();
     assert_eq!(received_output, output);
-    assert_eq!(shared.take_sizes(), vec![(72, 20)]);
 
     shared.send_input(b"typed").unwrap();
     let mut server_connection = Connection::new(server_stream);
@@ -670,11 +678,19 @@ fn a_shared_reader_replays_a_replacement_before_framed_events_without_duplicatio
     wire.extend_from_slice(output);
     replacement_server.write_all(&wire).unwrap();
 
-    let mut bytes = vec![0; b"reconnected".len() + output.len()];
-    reader.read_exact(&mut bytes).unwrap();
-    assert_eq!(&bytes[..b"reconnected".len()], b"reconnected");
-    assert_eq!(&bytes[b"reconnected".len()..], output);
+    let mut replay_bytes = vec![0; b"reconnected".len()];
+    reader.read_exact(&mut replay_bytes).unwrap();
+    assert_eq!(replay_bytes, b"reconnected");
+    let mut byte = [0; 1];
+    assert_eq!(
+        reader.read(&mut byte).unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
     assert_eq!(shared.take_sizes(), vec![(70, 20), (72, 22)]);
+    shared.finish_size_application((SessionRevision::INITIAL, 72, 22));
+    let mut output_bytes = vec![0; output.len()];
+    reader.read_exact(&mut output_bytes).unwrap();
+    assert_eq!(output_bytes, output);
 
     // The writer follows the same replacement as the reader. Input queued by
     // the terminal while the old relay was down must reach the new socket.

@@ -203,6 +203,10 @@ impl Zetta {
                         executor.timer(SHARED_SIZE_POLL_INTERVAL).await;
                         continue;
                     }
+                    // `SharedReader` stops at a daemon size frame. It can
+                    // parse the following redraw only after this emulator is
+                    // on the same grid.
+                    pane.finish_size_application(size);
                 }
 
                 // Wait for something to happen rather than asking whether it
