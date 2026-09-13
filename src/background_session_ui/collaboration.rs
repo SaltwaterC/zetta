@@ -1283,6 +1283,14 @@ impl Zetta {
         let canonical = self.shared_collaboration.state(session_id)?;
         let base_revision = canonical.revision;
         let tab = self.tabs.iter().find(|tab| tab.id == tab_id)?;
+        if tab.panes.is_empty() {
+            // A tab can briefly be empty while an attach/rebuild is in flight.
+            // Its delayed publication must never replace a session that still
+            // owns panes: doing so loses the durable mapping needed to attach
+            // those terminals later.
+            log::error!("refusing to publish empty tab {tab_id} over shared session {session_id}");
+            return None;
+        }
         let summary = self.shared_summary_in_mux_ids(tab, session_id, cx);
         let maximized_pane = tab
             .maximized_pane
@@ -1749,6 +1757,9 @@ impl Zetta {
             return false;
         }
         let revision = state.revision;
+        let durable_state_has_no_panes = serde_json::from_value::<TabState>(state.state.clone())
+            .ok()
+            .is_some_and(|tab_state| tab_state.panes.is_empty());
         let stale = self
             .shared_collaboration
             .panes_missing_from_snapshot(session_id, &state);
@@ -1777,6 +1788,22 @@ impl Zetta {
                     "could not apply shared session {session_id} snapshot at revision {}: {error:#}",
                     revision.0
                 );
+                if durable_state_has_no_panes
+                    && self
+                        .tabs
+                        .iter()
+                        .find(|tab| tab.id == tab_id)
+                        .is_some_and(|tab| !tab.panes.is_empty())
+                {
+                    // Keep the live local panes intact and repair the
+                    // daemon's malformed durable blob from them. The
+                    // publication guard below prevents a concurrently empty
+                    // reconstruction tab from overwriting this repair.
+                    log::error!(
+                        "shared session {session_id} published an empty durable pane list; restoring it from tab {tab_id}"
+                    );
+                    self.sync_shared_tab_state(tab_id, cx);
+                }
                 false
             }
         }
