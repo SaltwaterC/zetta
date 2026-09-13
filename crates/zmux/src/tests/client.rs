@@ -416,73 +416,6 @@ fn an_exit_report_waits_for_a_late_shared_reporter() {
 
 #[cfg(unix)]
 #[test]
-fn a_shared_attachment_preserves_its_advertised_viewport_without_a_size_report() {
-    use std::os::unix::net::UnixListener;
-
-    let directory = tempfile::tempdir().unwrap();
-    let socket_path = directory.path().join("zmux.sock");
-    let listener = UnixListener::bind(&socket_path).unwrap();
-    Endpoint {
-        version: crate::transport::ENDPOINT_VERSION,
-        protocol_version: PROTOCOL_VERSION,
-        process_id: 4242,
-        socket_path,
-        token: "test-token".to_owned(),
-    }
-    .write(&directory.path().join("zmux.json"))
-    .unwrap();
-
-    let server = thread::spawn(move || {
-        // `connect_existing_at` probes liveness before returning the client.
-        let _ = listener.accept().unwrap();
-
-        let (stream, _) = listener.accept().unwrap();
-        let mut connection = Connection::new(stream);
-        let (envelope, _) = connection.receive::<Envelope>().unwrap();
-        assert!(matches!(envelope.request, Request::Ping));
-        connection.send(&Response::Ok).unwrap();
-
-        let (stream, _) = listener.accept().unwrap();
-        let mut connection = Connection::new(stream);
-        let (envelope, _) = connection.receive::<Envelope>().unwrap();
-        assert!(matches!(envelope.request, Request::Attach { .. }));
-        connection
-            .send(&Response::SharedAttached {
-                pane_id: 2,
-                child_pid: 3,
-                replay_length: 0,
-                state: serde_json::json!({}),
-                summary: Box::new(crate::protocol::BackgroundSessionSummary {
-                    id: 1,
-                    title: "shared".to_owned(),
-                    authentication_required: false,
-                    active_pane: 2,
-                    layout: crate::protocol::BackgroundPaneLayout::Pane { pane_id: 2 },
-                    panes: Vec::new(),
-                    held: false,
-                    scoped_to: None,
-                    key_envelope: None,
-                }),
-                columns: 80,
-                lines: 24,
-            })
-            .unwrap();
-    });
-
-    let client = Client::connect_existing_at(directory.path())
-        .unwrap()
-        .unwrap();
-    let AttachOutcome::SharedAttached { pane, .. } = client.attach(1, Some(2), None).unwrap()
-    else {
-        panic!("expected shared attachment");
-    };
-    assert_eq!(pane.take_initial_viewport(), Some((80, 24)));
-    assert!(pane.take_revisioned_sizes().is_empty());
-    server.join().unwrap();
-}
-
-#[cfg(unix)]
-#[test]
 fn a_shared_reader_keeps_coalesced_replay_events_and_full_duplex_input() {
     use std::io::{Read as _, Write as _};
 
@@ -528,30 +461,19 @@ fn a_shared_reader_keeps_coalesced_replay_events_and_full_duplex_input() {
 
     let mut connection = Connection::new(client_stream);
     let (received, _) = connection.receive::<Response>().unwrap();
-    let Response::SharedAttached {
-        pane_id,
-        child_pid,
-        columns,
-        lines,
-        ..
-    } = received
-    else {
-        panic!("expected shared attachment");
-    };
+    assert!(matches!(received, Response::SharedAttached { .. }));
     assert_eq!(connection.read_exact(replay.len()).unwrap(), replay);
 
-    let shared = SharedPane::from_connection(
-        1,
-        pane_id,
-        child_pid,
-        connection,
-        replay.to_vec(),
-        Some((columns, lines)),
-    );
-    // The dimensions in SharedAttached are an initial display viewport, not a
-    // size report from this new viewer.
-    assert_eq!(shared.take_initial_viewport(), Some((80, 24)));
-    assert!(shared.take_revisioned_sizes().is_empty());
+    let shared = SharedPane {
+        session_id: 1,
+        pane_id: 2,
+        child_pid: 3,
+        writer: Arc::new(Mutex::new(connection)),
+        sizes: Arc::new(Mutex::new(Vec::new())),
+        size_signal: async_channel::bounded(1),
+        reader_handoffs: Arc::new(Mutex::new(std::collections::VecDeque::new())),
+        replay: replay.to_vec(),
+    };
     let mut reader = shared.reader();
     let mut received_output = vec![0; output.len()];
     reader.read_exact(&mut received_output).unwrap();
@@ -571,8 +493,7 @@ fn an_idle_shared_reader_does_not_delay_input_writes() {
     use std::io::Read as _;
 
     let (server_stream, client_stream) = Stream::pair().unwrap();
-    let shared =
-        SharedPane::from_connection(1, 2, 3, Connection::new(client_stream), Vec::new(), None);
+    let shared = SharedPane::from_connection(1, 2, 3, Connection::new(client_stream), Vec::new());
     let mut reader = shared.reader();
     let reader_thread = thread::spawn(move || {
         let mut byte = [0; 1];
@@ -620,15 +541,7 @@ fn a_shared_reader_replays_a_replacement_before_framed_events_without_duplicatio
     use std::io::{Read as _, Write as _};
 
     let (initial_server, initial_client) = Stream::pair().unwrap();
-    let shared = SharedPane::from_connection(
-        1,
-        2,
-        3,
-        Connection::new(initial_client),
-        Vec::new(),
-        Some((80, 24)),
-    );
-    assert_eq!(shared.take_initial_viewport(), Some((80, 24)));
+    let shared = SharedPane::from_connection(1, 2, 3, Connection::new(initial_client), Vec::new());
     let mut reader = shared.reader();
     drop(initial_server);
 
@@ -639,7 +552,6 @@ fn a_shared_reader_replays_a_replacement_before_framed_events_without_duplicatio
         3,
         Connection::new(replacement_client),
         b"reconnected".to_vec(),
-        Some((70, 20)),
     );
     replacement
         .sizes
@@ -647,9 +559,6 @@ fn a_shared_reader_replays_a_replacement_before_framed_events_without_duplicatio
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .push((SessionRevision::INITIAL, 70, 20));
     shared.replace_connection_from(&replacement).unwrap();
-    // A reconnection is another attach stream, so its advertised viewport is
-    // carried through even after the failed stream's viewport was consumed.
-    assert_eq!(shared.take_initial_viewport(), Some((70, 20)));
 
     let output = b"new-output";
     let mut wire = crate::transport::encode_message(&Event::Size {

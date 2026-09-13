@@ -352,27 +352,20 @@ fn an_arbitrated_size_is_only_applied_when_it_differs() {
         )
     };
 
-    // A matching effective grid alone is not enough: until the shared limit
-    // has been stored, a later maximize would let this terminal outgrow the
-    // daemon's common grid.
+    // Two windows tiled to the same size by a compositor is the common case;
+    // applying an identical shared viewport is needless work.
     assert_eq!(
-        shared_size_action(true, Some(bounds(98., 51.)), None, 98, 51),
-        SharedSizeAction::Resize
-    );
-    // Once that identical viewport has been stored, applying it again is
-    // needless work.
-    assert_eq!(
-        shared_size_action(true, Some(bounds(98., 51.)), Some((98, 51)), 98, 51),
+        shared_size_action(true, Some(bounds(98., 51.)), 98, 51),
         SharedSizeAction::AlreadyMatches
     );
     // A viewer larger than the arbitrated size has to shrink, or the shell's
     // wrapping stops lining up with the cells drawn.
     assert_eq!(
-        shared_size_action(true, Some(bounds(120., 51.)), Some((120, 51)), 98, 51),
+        shared_size_action(true, Some(bounds(120., 51.)), 98, 51),
         SharedSizeAction::Resize
     );
     assert_eq!(
-        shared_size_action(true, Some(bounds(98., 60.)), Some((98, 60)), 98, 51),
+        shared_size_action(true, Some(bounds(98., 60.)), 98, 51),
         SharedSizeAction::Resize
     );
 
@@ -387,12 +380,12 @@ fn an_arbitrated_size_is_only_applied_when_it_differs() {
     );
     assert_eq!(TerminalBounds::default().num_lines(), 6);
     assert_eq!(
-        shared_size_action(false, Some(TerminalBounds::default()), None, 98, 51),
+        shared_size_action(false, Some(TerminalBounds::default()), 98, 51),
         SharedSizeAction::WaitForLayout
     );
     // No terminal yet is the same answer: wait, and stay pending.
     assert_eq!(
-        shared_size_action(false, None, None, 98, 51),
+        shared_size_action(false, None, 98, 51),
         SharedSizeAction::WaitForLayout
     );
 }

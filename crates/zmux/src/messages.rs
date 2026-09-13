@@ -1508,9 +1508,9 @@ pub enum Response {
     ///
     /// No handles are attached: the connection *is* the terminal. The raw
     /// replay bytes follow the message, exactly as with [`Response::Attached`].
-    /// `columns`/`lines` are the daemon's current effective size. A client
-    /// uses them as its initial viewport once its pane is laid out; they are
-    /// not that client's own size report for shared-size arbitration.
+    /// `columns`/`lines` are the daemon's current effective size. They are
+    /// advisory: a client reports its own initialized layout over `Resize`
+    /// before it participates in shared-size arbitration.
     SharedAttached {
         pane_id: u64,
         child_pid: u32,

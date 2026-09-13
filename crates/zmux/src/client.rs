@@ -176,11 +176,6 @@ pub struct SharedPane {
     /// [`Event::Size`] arrives. The holder of the pane applies the latest
     /// each time it is woken.
     sizes: Arc<Mutex<Vec<(SessionRevision, u16, u16)>>>,
-    /// The grid the daemon advertised when this stream attached. Unlike an
-    /// [`Event::Size`], this is not a revisioned update and does not mean this
-    /// viewer has measured or reported its own capacity. Its holder consumes
-    /// it once, after the terminal has real layout bounds.
-    initial_viewport: Arc<Mutex<Option<(u16, u16)>>>,
     /// Signalled by the reader whenever it records a size, so the pane's holder
     /// can wait for one instead of asking on a timer. Bounded at one: a pending
     /// signal already means "there are sizes to take".
@@ -311,32 +306,7 @@ impl SharedPane {
                 .extend(replacement_sizes);
             let _ = self.size_signal.0.try_send(());
         }
-        let replacement_viewport = replacement
-            .initial_viewport
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .take();
-        if let Some(viewport) = replacement_viewport {
-            *self
-                .initial_viewport
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(viewport);
-            // The shared-pane task uses the same wake-up for an advertised
-            // viewport and revisioned size events, but keeps their values in
-            // separate queues so the former can never be reported as the
-            // latter.
-            let _ = self.size_signal.0.try_send(());
-        }
         Ok(())
-    }
-
-    /// The daemon's advertised grid for this attachment, if it has not
-    /// already been applied by the client terminal.
-    pub fn take_initial_viewport(&self) -> Option<(u16, u16)> {
-        self.initial_viewport
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .take()
     }
 
     /// The sizes the multiplexer arbitrated since the last call, oldest
@@ -370,7 +340,6 @@ impl SharedPane {
         child_pid: u32,
         connection: Connection,
         replay: Vec<u8>,
-        initial_viewport: Option<(u16, u16)>,
     ) -> Self {
         Self {
             session_id,
@@ -378,7 +347,6 @@ impl SharedPane {
             child_pid,
             writer: Arc::new(Mutex::new(connection)),
             sizes: Arc::new(Mutex::new(Vec::new())),
-            initial_viewport: Arc::new(Mutex::new(initial_viewport)),
             size_signal: async_channel::bounded(1),
             reader_handoffs: Arc::new(Mutex::new(VecDeque::new())),
             replay,
@@ -1135,18 +1103,13 @@ impl Client {
                     replay_length,
                     state,
                     summary,
-                    columns,
-                    lines,
+                    columns: _,
+                    lines: _,
                 } => {
                     let replay = connection.read_exact(replay_length)?;
                     Ok(AttachOutcome::SharedAttached {
                         pane: SharedPane::from_connection(
-                            session_id,
-                            pane_id,
-                            child_pid,
-                            connection,
-                            replay,
-                            Some((columns, lines)),
+                            session_id, pane_id, child_pid, connection, replay,
                         ),
                         state,
                         summary: *summary,
@@ -1691,7 +1654,7 @@ impl Client {
                 let replay = connection.read_exact(replay_length)?;
                 Ok(SharedSpawnedPane {
                     pane: SharedPane::from_connection(
-                        session_id, pane_id, child_pid, connection, replay, None,
+                        session_id, pane_id, child_pid, connection, replay,
                     ),
                     state: shared_state,
                 })

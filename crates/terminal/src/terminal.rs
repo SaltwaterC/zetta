@@ -11276,46 +11276,6 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn an_initially_matching_shared_viewport_stays_clamped_after_local_growth(
-        cx: &mut TestAppContext,
-    ) {
-        let builder = cx.update(|cx| {
-            TerminalBuilder::new_display_only(
-                SettingsCursorShape::Block,
-                AlternateScroll::On,
-                None,
-                0,
-                cx.background_executor(),
-                PathStyle::local(),
-            )
-        });
-        let mut terminal = builder.terminal;
-        let make_bounds = |columns: f32, lines: f32| TerminalBounds {
-            cell_width: Pixels::from(10.),
-            line_height: Pixels::from(10.),
-            bounds: bounds(
-                GpuiPoint::default(),
-                size(Pixels::from(columns * 10.), Pixels::from(lines * 10.)),
-            ),
-        };
-
-        // This is the attachment race: the pane and daemon both start at
-        // 80x24, so the limit must be recorded even though no resize occurs.
-        terminal.set_size(make_bounds(80., 24.));
-        terminal.set_shared_viewport(80, 24);
-        terminal.set_size(make_bounds(120., 30.));
-
-        assert_eq!(terminal.shared_viewport(), Some((80, 24)));
-        assert_eq!(
-            (
-                terminal.last_content().terminal_bounds.num_columns(),
-                terminal.last_content().terminal_bounds.num_lines(),
-            ),
-            (80, 24)
-        );
-    }
-
-    #[gpui::test]
     async fn a_shared_viewer_reports_local_capacity_without_changing_its_effective_grid(
         cx: &mut TestAppContext,
     ) {
