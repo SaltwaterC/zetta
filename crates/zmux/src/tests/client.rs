@@ -469,7 +469,9 @@ fn a_shared_attachment_preserves_its_advertised_viewport_without_a_size_report()
             .unwrap();
     });
 
-    let client = Client::connect_existing_at(directory.path()).unwrap().unwrap();
+    let client = Client::connect_existing_at(directory.path())
+        .unwrap()
+        .unwrap();
     let AttachOutcome::SharedAttached { pane, .. } = client.attach(1, Some(2), None).unwrap()
     else {
         panic!("expected shared attachment");
@@ -569,14 +571,8 @@ fn an_idle_shared_reader_does_not_delay_input_writes() {
     use std::io::Read as _;
 
     let (server_stream, client_stream) = Stream::pair().unwrap();
-    let shared = SharedPane::from_connection(
-        1,
-        2,
-        3,
-        Connection::new(client_stream),
-        Vec::new(),
-        None,
-    );
+    let shared =
+        SharedPane::from_connection(1, 2, 3, Connection::new(client_stream), Vec::new(), None);
     let mut reader = shared.reader();
     let reader_thread = thread::spawn(move || {
         let mut byte = [0; 1];
