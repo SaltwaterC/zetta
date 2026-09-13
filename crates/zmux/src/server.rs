@@ -19,6 +19,7 @@ use std::{
     sync::{
         Arc, Condvar, Mutex, MutexGuard,
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+        mpsc::{self, SyncSender, TrySendError},
     },
     thread,
     time::{Duration, Instant},
@@ -464,6 +465,7 @@ pub struct Daemon {
     /// being broadcast to every subscriber. A client reconnecting subscribes
     /// again, replacing its earlier entry.
     subscribers: Mutex<HashMap<ClientId, Subscriber>>,
+    next_subscriber_relay_id: AtomicU64,
     catalog: Mutex<SessionCatalogPublisher>,
     retention: Mutex<Retention>,
     running: AtomicBool,
@@ -501,9 +503,111 @@ pub struct Daemon {
 
 struct Subscriber {
     process_id: u32,
-    connection: Connection,
+    relay: Arc<SubscriberRelay>,
 }
 
+/// The daemon never writes directly to a subscriber: an SSH forward can stop
+/// accepting bytes for minutes while Wi-Fi recovers.  Keeping that write on its
+/// own thread means the control plane continues to make progress, while the
+/// bounded queue still disconnects a subscriber that is permanently stuck.
+struct SubscriberRelay {
+    id: u64,
+    client_id: ClientId,
+    sender: SyncSender<Event>,
+    closed: Arc<AtomicBool>,
+}
+
+const SUBSCRIBER_RELAY_QUEUE_CAPACITY: usize = 16;
+const SUBSCRIBER_RELAY_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
+
+impl SubscriberRelay {
+    fn start(daemon: &Arc<Daemon>, client_id: ClientId, connection: Connection) -> Arc<Self> {
+        let id = daemon
+            .next_subscriber_relay_id
+            .fetch_add(1, Ordering::Relaxed);
+        let (sender, receiver) = mpsc::sync_channel(SUBSCRIBER_RELAY_QUEUE_CAPACITY);
+        let receiver = Arc::new(Mutex::new(Some(receiver)));
+        let connection = Arc::new(Mutex::new(Some(connection)));
+        let closed = Arc::new(AtomicBool::new(false));
+        let relay = Arc::new(Self {
+            id,
+            client_id: client_id.clone(),
+            sender,
+            closed: Arc::clone(&closed),
+        });
+        let daemon = Arc::downgrade(daemon);
+        spawn_worker("zmux subscription relay", move || {
+            let daemon = daemon.clone();
+            let client_id = client_id.clone();
+            let closed = Arc::clone(&closed);
+            let receiver = Arc::clone(&receiver);
+            let connection = Arc::clone(&connection);
+            Box::new(move || {
+                let receiver = receiver
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .take()
+                    .expect("the subscription relay receiver was already claimed");
+                let connection = connection
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .take()
+                    .expect("the subscription relay connection was already claimed");
+                run_subscriber_relay(daemon, client_id, id, closed, connection, receiver);
+            })
+        });
+        relay
+    }
+
+    /// Queues an event without waiting for the remote socket.  A full queue is
+    /// a permanently stalled subscription for the daemon's purposes.
+    fn enqueue(&self, event: Event) -> bool {
+        if self.closed.load(Ordering::Acquire) {
+            return false;
+        }
+        match self.sender.try_send(event) {
+            Ok(()) => true,
+            Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => {
+                self.closed.store(true, Ordering::Release);
+                false
+            }
+        }
+    }
+}
+
+fn run_subscriber_relay(
+    daemon: std::sync::Weak<Daemon>,
+    client_id: ClientId,
+    relay_id: u64,
+    closed: Arc<AtomicBool>,
+    mut connection: Connection,
+    receiver: mpsc::Receiver<Event>,
+) {
+    if let Err(error) = connection.set_write_timeout(Some(SUBSCRIBER_RELAY_WRITE_TIMEOUT)) {
+        log::debug!("could not set subscription write timeout: {error:#}");
+        closed.store(true, Ordering::Release);
+        if let Some(daemon) = daemon.upgrade() {
+            remove_subscriber_if_matches(&daemon, &client_id, relay_id);
+        }
+        return;
+    }
+    while let Ok(event) = receiver.recv() {
+        if closed.load(Ordering::Acquire) {
+            break;
+        }
+        if let Err(error) = connection.send(&event) {
+            log::debug!(
+                "subscription delivery to client {} failed: {error:#}",
+                client_id.as_str()
+            );
+            closed.store(true, Ordering::Release);
+            if let Some(daemon) = daemon.upgrade() {
+                remove_subscriber_if_matches(&daemon, &client_id, relay_id);
+            }
+            break;
+        }
+    }
+}
 impl Daemon {
     fn new(
         directory: &Path,
@@ -523,6 +627,7 @@ impl Daemon {
             next_session_id: AtomicU64::new(next_session_id),
             next_pane_id: AtomicU64::new(1),
             subscribers: Mutex::new(HashMap::new()),
+            next_subscriber_relay_id: AtomicU64::new(1),
             catalog: Mutex::new(SessionCatalogPublisher::with_generation(
                 directory, generation,
             )),
@@ -1058,8 +1163,16 @@ fn unix_now() -> u64 {
 }
 
 fn broadcast(daemon: &Arc<Daemon>, event: &Event) {
-    let mut subscribers = daemon.subscribers.lock().unwrap();
-    subscribers.retain(|_, subscriber| subscriber.connection.send(event).is_ok());
+    let relays = daemon
+        .subscribers
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .values()
+        .map(|subscriber| Arc::clone(&subscriber.relay))
+        .collect::<Vec<_>>();
+    for relay in relays {
+        enqueue_subscriber_event(daemon, &relay, event);
+    }
 }
 
 /// Broadcasts an event to every subscribed client except the one whose request
@@ -1067,23 +1180,59 @@ fn broadcast(daemon: &Arc<Daemon>, event: &Event) {
 /// pane creation: its request connection is already the data plane, so handling
 /// the pane-added event as well would attach a duplicate local pane.
 pub(super) fn broadcast_except(daemon: &Arc<Daemon>, event: &Event, excluded: &ClientId) {
-    let mut subscribers = daemon.subscribers.lock().unwrap();
-    subscribers.retain(|client_id, subscriber| {
-        client_id == excluded || subscriber.connection.send(event).is_ok()
-    });
+    let relays = daemon
+        .subscribers
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .iter()
+        .filter(|(client_id, _)| *client_id != excluded)
+        .map(|(_, subscriber)| Arc::clone(&subscriber.relay))
+        .collect::<Vec<_>>();
+    for relay in relays {
+        enqueue_subscriber_event(daemon, &relay, event);
+    }
 }
 
 /// Sends a shared-stream failure only to the viewer whose data connection
 /// failed. Other viewers keep their relays and must not reconnect or lose their
 /// byte ordering merely because one socket disappeared.
 pub(super) fn broadcast_to(daemon: &Arc<Daemon>, event: &Event, target: &ClientId) {
-    let mut subscribers = daemon.subscribers.lock().unwrap();
-    if let Some(subscriber) = subscribers.get_mut(target)
-        && subscriber.connection.send(event).is_err()
-    {
-        subscribers.remove(target);
+    let relay = daemon
+        .subscribers
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(target)
+        .map(|subscriber| Arc::clone(&subscriber.relay));
+    if let Some(relay) = relay {
+        enqueue_subscriber_event(daemon, &relay, event);
     }
 }
+
+/// Delivers one event without allowing a subscriber's socket to block the
+/// caller. The identity check prevents an old writer's failure from removing a
+/// replacement subscription for the same logical client.
+fn enqueue_subscriber_event(daemon: &Arc<Daemon>, relay: &Arc<SubscriberRelay>, event: &Event) {
+    if !relay.enqueue(event.clone()) {
+        remove_subscriber_if_matches(daemon, &relay.client_id, relay.id);
+    }
+}
+
+fn remove_subscriber_if_matches(daemon: &Daemon, client_id: &ClientId, relay_id: u64) {
+    let mut subscribers = daemon
+        .subscribers
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if subscribers
+        .get(client_id)
+        .is_some_and(|subscriber| subscriber.relay.id == relay_id)
+    {
+        subscribers.remove(client_id);
+    }
+}
+
+#[cfg(all(test, unix, not(target_os = "macos")))]
+#[path = "tests/server/subscriber_relay.rs"]
+mod subscriber_relay_tests;
 
 fn window_size(size: TerminalSize) -> WindowSize {
     WindowSize {

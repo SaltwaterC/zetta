@@ -80,13 +80,18 @@ pub(super) fn serve(daemon: &Arc<Daemon>, stream: Stream, token: &str) -> Result
             // holds a pane rather than broadcast to every subscriber. A client
             // that subscribes twice is the same process, so the later
             // connection replaces the earlier one.
-            daemon.subscribers.lock().unwrap().insert(
-                client_id,
-                Subscriber {
-                    process_id: envelope.client_process_id,
-                    connection,
-                },
-            );
+            let relay = SubscriberRelay::start(daemon, client_id.clone(), connection);
+            daemon
+                .subscribers
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .insert(
+                    client_id,
+                    Subscriber {
+                        process_id: envelope.client_process_id,
+                        relay,
+                    },
+                );
             Ok(())
         }
         Request::Spawn(request) => {

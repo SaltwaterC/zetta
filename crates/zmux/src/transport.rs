@@ -539,6 +539,17 @@ impl Connection {
             .context("setting a multiplexer read timeout")
     }
 
+    /// Bounds how long a write on this connection waits.
+    ///
+    /// Event subscriptions have their own writer threads, so one stalled
+    /// remote socket must eventually retire only that subscription rather than
+    /// holding the daemon's session or subscriber registry locks hostage.
+    pub fn set_write_timeout(&self, timeout: Option<std::time::Duration>) -> Result<()> {
+        self.stream
+            .set_write_timeout(timeout)
+            .context("setting a multiplexer write timeout")
+    }
+
     pub fn stream(&self) -> &Stream {
         &self.stream
     }

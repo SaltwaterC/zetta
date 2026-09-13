@@ -210,16 +210,8 @@ pub(super) fn attach(
                 session_id,
                 pane_id,
             };
-            let subscribers = daemon.subscribers.lock().unwrap();
-            let subscriber = subscribers
-                .values()
-                .find(|subscriber| subscriber.process_id == holder)
-                .map(|subscriber| subscriber.connection.try_clone());
-            drop(subscribers);
-            if let Some(Ok(mut subscriber)) = subscriber
-                && let Err(error) = subscriber.send(&revoke)
-            {
-                log::debug!("revoke delivery to client {holder} failed: {error:#}");
+            if let Some(subscriber) = subscriber_relay(daemon, &client_id, holder) {
+                enqueue_subscriber_event(daemon, &subscriber, &revoke);
             }
         }
         // Mid-handover in either direction. Wait: a revoke resolves to shared,
@@ -354,17 +346,8 @@ pub(super) fn attach(
                     session_id,
                     pane_id,
                 };
-                let subscriber = daemon
-                    .subscribers
-                    .lock()
-                    .unwrap()
-                    .values()
-                    .find(|subscriber| subscriber.process_id == holder)
-                    .map(|subscriber| subscriber.connection.try_clone());
-                if let Some(Ok(mut subscriber)) = subscriber
-                    && let Err(error) = subscriber.send(&revoke)
-                {
-                    log::debug!("revoke delivery to client {holder} failed: {error:#}");
+                if let Some(subscriber) = subscriber_relay(daemon, &client_id, holder) {
+                    enqueue_subscriber_event(daemon, &subscriber, &revoke);
                 }
             }
             // A grant whose taker died leaves nobody holding the descriptor: the
@@ -1159,15 +1142,8 @@ pub(super) fn offer_exclusive_if_alone(daemon: &Arc<Daemon>, session_id: u64, pa
         session_id,
         pane_id: pane.id,
     };
-    let subscriber = subscriber_connection(daemon, &client_id, client.process_id);
-    if let Some(mut subscriber) = subscriber
-        && let Err(error) = subscriber.send(&grant)
-    {
-        log::debug!(
-            "offering pane {} back to client {} failed: {error:#}",
-            pane.id,
-            client_id.as_str()
-        );
+    if let Some(subscriber) = subscriber_relay(daemon, &client_id, client.process_id) {
+        enqueue_subscriber_event(daemon, &subscriber, &grant);
     }
 }
 
@@ -1176,12 +1152,15 @@ pub(super) fn offer_exclusive_if_alone(daemon: &Arc<Daemon>, session_id: u64, pa
 /// connection. Local ownership remains PID-based, though: a local process can
 /// create a short-lived `Client` for a handover while its long-lived
 /// subscription was opened by another `Client` value.
-pub(super) fn subscriber_connection(
+pub(super) fn subscriber_relay(
     daemon: &Arc<Daemon>,
     client_id: &ClientId,
     process_id: u32,
-) -> Option<Connection> {
-    let subscribers = daemon.subscribers.lock().unwrap();
+) -> Option<Arc<SubscriberRelay>> {
+    let subscribers = daemon
+        .subscribers
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     subscribers
         .get(client_id)
         .or_else(|| {
@@ -1189,7 +1168,7 @@ pub(super) fn subscriber_connection(
                 .values()
                 .find(|subscriber| subscriber.process_id == process_id)
         })
-        .and_then(|subscriber| subscriber.connection.try_clone().ok())
+        .map(|subscriber| Arc::clone(&subscriber.relay))
 }
 
 /// Drops a client from a pane's shared set, ending shared mode when it was

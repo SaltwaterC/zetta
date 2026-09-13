@@ -4289,6 +4289,114 @@ fn a_shared_panes_round_trip_is_not_paced_by_a_timer() {
     );
 }
 
+/// A subscription crossing an SSH forward can stop reading while Wi-Fi
+/// recovers. Its event writer used to hold `Daemon::subscribers`; a concurrent
+/// revoke then held `Daemon::sessions` while it waited for that writer, which
+/// stopped an unrelated shared pane from accepting input.
+#[test]
+fn a_stalled_subscription_cannot_block_another_shared_panes_input() {
+    let daemon = TestDaemon::start();
+    let holder = daemon.client();
+    let _holder_subscription = holder.subscribe().unwrap();
+    let held = holder
+        .spawn(spawn_request(None, "sleep 60"))
+        .expect("spawning the exclusive pane");
+    let held_descriptor = std::fs::File::from(held.descriptor);
+    let mut offered = summary(held.session_id, held.pane_id);
+    offered.panes.push(pane_summary(held.pane_id));
+    holder
+        .share(
+            held.session_id,
+            offered,
+            serde_json::Value::Null,
+            None,
+            true,
+        )
+        .expect("offering the session");
+
+    let request = spawn_request(Some(held.session_id), "exec cat");
+    let spawned = holder
+        .spawn_shared(SharedSpawnRequest {
+            session_id: held.session_id,
+            base_revision: SessionRevision::INITIAL,
+            operation_id: holder.next_shared_operation_id(),
+            program: request.program,
+            args: request.args,
+            env: request.env,
+            working_directory: request.working_directory,
+            size: request.size,
+            console_palette: request.console_palette,
+        })
+        .expect("spawning the healthy shared pane");
+    let mut healthy_reader = spawned.pane.reader();
+
+    let endpoint: zmux::transport::Endpoint =
+        serde_json::from_slice(&std::fs::read(daemon.sessions_dir().join("zmux.json")).unwrap())
+            .unwrap();
+    let mut stalled = Connection::new(Stream::connect(&endpoint.socket_path).unwrap());
+    stalled
+        .send(&Envelope {
+            version: zmux::messages::PROTOCOL_VERSION,
+            token: endpoint.token,
+            client_process_id: std::process::id(),
+            client_id: ClientId::new("stalled-subscription"),
+            stream_only: true,
+            session_secret: None,
+            request: Request::Subscribe,
+        })
+        .expect("opening the subscription that intentionally never reads");
+    std::thread::sleep(Duration::from_millis(100));
+
+    let updates_started = Arc::new(AtomicUsize::new(0));
+    let update_client = daemon.client();
+    let update_started = Arc::clone(&updates_started);
+    let session_id = held.session_id;
+    let initial_revision = spawned.state.revision;
+    std::thread::spawn(move || {
+        let mut revision = initial_revision;
+        let payload = "x".repeat(48 * 1024);
+        for round in 0..24 {
+            update_started.fetch_add(1, Ordering::Release);
+            let result = update_client.apply_shared(
+                session_id,
+                revision,
+                SharedSessionOperation::SetTabState {
+                    state: serde_json::json!({ "round": round, "payload": payload }),
+                },
+            );
+            let Ok(zmux::client::SharedOperationResult::Applied(state)) = result else {
+                return;
+            };
+            revision = state.revision;
+        }
+    });
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while updates_started.load(Ordering::Acquire) < 4 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    // The exclusive pane's revoke needs the subscriber registry. On the old
+    // path it waits behind the stalled event write while holding sessions.
+    let contender_process = Command::new("/bin/sleep").arg("60").spawn().unwrap();
+    let contender_pid = contender_process.id();
+    let contender = daemon.client();
+    std::thread::spawn(move || {
+        let _ = contender.attach_as(session_id, held.pane_id, contender_pid, None);
+    });
+    std::thread::sleep(Duration::from_millis(100));
+
+    let marker = "subscription-control-plane-still-live";
+    spawned
+        .pane
+        .send_input(format!("{marker}\n").as_bytes())
+        .expect("sending input through the healthy shared pane");
+    read_until_reader(&mut healthy_reader, marker);
+
+    drop(stalled);
+    drop(held_descriptor);
+    reap(contender_process);
+}
+
 /// A pane shared with one viewer is handed back to it, and reads its own terminal
 /// from then on.
 ///
