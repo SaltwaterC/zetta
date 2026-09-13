@@ -902,10 +902,10 @@ pub(crate) fn install_native_macos_menus(
 #[cfg(target_os = "macos")]
 fn install_native_macos_window_menu_key_equivalents() {
     // GPUI's content view sees key equivalents before AppKit searches the main
-    // menu. A terminal consumes Control+Function combinations as terminal
-    // input, so macOS never gets to invoke the tiling items that it injects
-    // into the registered Window menu. Give that menu first refusal; exact
-    // modifier matching in NSMenu keeps ordinary terminal shortcuts intact.
+    // menu. A terminal consumes Function-modified native menu accelerators as
+    // input, so macOS never gets to invoke the Window-menu items it supplies,
+    // including fullscreen. Give that menu first refusal; exact modifier
+    // matching in NSMenu keeps unmatched terminal shortcuts intact.
     unsafe {
         let main_thread =
             MainThreadMarker::new().expect("menu monitor must be installed on AppKit");
@@ -913,9 +913,7 @@ fn install_native_macos_window_menu_key_equivalents() {
         let handler = block2::RcBlock::new(move |event: std::ptr::NonNull<NSEvent>| {
             let event_ref = event.as_ref();
             let modifiers = event_ref.modifierFlags();
-            if !modifiers.contains(NSEventModifierFlags::Control)
-                || !modifiers.contains(NSEventModifierFlags::Function)
-            {
+            if !macos_native_menu_key_equivalent_is_eligible(modifiers) {
                 return event.as_ptr();
             }
             let handled = application.mainMenu().is_some_and(|menu| {
@@ -937,6 +935,13 @@ fn install_native_macos_window_menu_key_equivalents() {
         // The monitor is intentionally process-scoped and removed when AppKit exits.
         std::mem::forget(monitor);
     }
+}
+
+/// Function-modified events may be native Window-menu key equivalents before
+/// terminal input handles them.
+#[cfg(target_os = "macos")]
+fn macos_native_menu_key_equivalent_is_eligible(modifiers: NSEventModifierFlags) -> bool {
+    modifiers.contains(NSEventModifierFlags::Function)
 }
 
 #[cfg(test)]

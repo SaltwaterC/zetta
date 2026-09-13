@@ -1,5 +1,21 @@
 use super::*;
 
+#[cfg(target_os = "macos")]
+#[test]
+fn function_modified_native_menu_key_equivalents_are_eligible() {
+    assert!(macos_native_menu_key_equivalent_is_eligible(
+        NSEventModifierFlags::Function
+    ));
+    for modifiers in [
+        NSEventModifierFlags::Control,
+        NSEventModifierFlags::Shift,
+        NSEventModifierFlags::Command,
+        NSEventModifierFlags::Option,
+    ] {
+        assert!(!macos_native_menu_key_equivalent_is_eligible(modifiers));
+    }
+}
+
 #[test]
 fn profile_shortcuts_match_the_shifted_number_row() {
     const SHIFTED_DIGITS: [&str; 10] = ["!", "@", "#", "$", "%", "^", "&", "*", "(", ")"];
