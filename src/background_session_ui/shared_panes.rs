@@ -764,6 +764,7 @@ impl Zetta {
         cx: &mut Context<Self>,
     ) {
         let pane = Arc::new(pane);
+        let initial_viewport = pane.take_initial_viewport();
         // The daemon retained what the pane produced while this window's pty
         // loop was stopped; replay it into the grid, which holds the snapshot
         // but not those bytes.
@@ -774,7 +775,14 @@ impl Zetta {
         let writer: Box<dyn std::io::Write + Send> =
             Box::new(SharedPaneWriter { pane: pane.clone() });
         if terminal
-            .update(cx, |terminal, _| {
+            .update(cx, |terminal, cx| {
+                if let Some((columns, lines)) = initial_viewport {
+                    // The relay's replay is a screen painted at the daemon's
+                    // grid. Resize the emulator before starting its reader so
+                    // htop/vim's incremental frames have the same base state.
+                    terminal.set_shared_viewport(columns as usize, lines as usize);
+                    terminal.sync(window, cx);
+                }
                 terminal.attach_byte_stream(reader, writer)
             })
             .is_err()
