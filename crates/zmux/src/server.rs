@@ -41,7 +41,8 @@ use crate::{
     auth::SessionAuthentication,
     catalog::{SessionCatalogPublisher, create_private_dir},
     messages::{
-        ClientId, Envelope, Event, PROTOCOL_VERSION, Request, Response, SpawnRequest, TerminalSize,
+        ClientId, Envelope, Event, PROTOCOL_VERSION, Request, Response, SharedOperationId,
+        SharedSessionOperation, SpawnRequest, TerminalSize,
     },
     paths::session_catalog_dir,
     protocol::{BackgroundPaneLayout, BackgroundSessionSummary},
@@ -253,12 +254,19 @@ fn prune_exited_panes(daemon: &Arc<Daemon>) -> bool {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let mut changed = false;
     let mut removed_session_ids = Vec::new();
+    let mut shared_removals = Vec::new();
     #[cfg(windows)]
     let mut closed_consoles = Vec::new();
     for session in sessions.iter_mut() {
+        let removed = session
+            .panes
+            .iter()
+            .filter(|pane| exited_pane_is_unread(pane))
+            .map(|pane| pane.id)
+            .collect::<Vec<_>>();
         let before = session.panes.len();
         session.panes.retain(|pane| {
-            let remove = pane.exited && matches!(pane.attachment, Attachment::None);
+            let remove = exited_pane_is_unread(pane);
             #[cfg(windows)]
             if remove {
                 closed_consoles.push(pane.console_id);
@@ -266,6 +274,12 @@ fn prune_exited_panes(daemon: &Arc<Daemon>) -> bool {
             !remove
         });
         changed |= session.panes.len() != before;
+        if !removed.is_empty()
+            && !session.panes.is_empty()
+            && let Some(state) = remove_pruned_shared_panes(session, &removed)
+        {
+            shared_removals.push((session.id, removed, state));
+        }
         if session.panes.is_empty() {
             removed_session_ids.push(session.id);
         }
@@ -292,7 +306,72 @@ fn prune_exited_panes(daemon: &Arc<Daemon>) -> bool {
     for console_id in closed_consoles {
         close_host_console(daemon, console_id);
     }
+    for (session_id, removed, state) in shared_removals {
+        broadcast(
+            daemon,
+            &Event::SharedPanesChanged {
+                session_id,
+                added: Vec::new(),
+                removed,
+                state,
+            },
+        );
+    }
     changed
+}
+
+/// A batch-created shared pane has no data-plane client until the requester
+/// attaches one. If its program exits first, it is just as unobservable as an
+/// unheld pane and must not keep a dead entry in the session forever.
+fn exited_pane_is_unread(pane: &Pane) -> bool {
+    pane.exited
+        && match &pane.attachment {
+            Attachment::None => true,
+            Attachment::Shared(clients) => clients.is_empty(),
+            Attachment::Exclusive(_)
+            | Attachment::Revoking { .. }
+            | Attachment::Granting { .. } => false,
+        }
+}
+
+/// Keeps an offered session's canonical layout in lockstep with a pane that
+/// the reaper has removed.  A shared split replaces one node of the existing
+/// canonical tree, so leaving an exited node in that tree makes every later
+/// split name a pane the daemon no longer owns.
+fn remove_pruned_shared_panes(
+    session: &mut Session,
+    removed: &[u64],
+) -> Option<crate::messages::SharedSessionState> {
+    let state = session.shared_state.as_mut()?;
+    let mut changed = false;
+    for pane_id in removed {
+        if !state.contains_pane(*pane_id) {
+            continue;
+        }
+        // The final pane takes the session with it, so there is no surviving
+        // shared state or viewer to update.
+        if state.summary.panes.len() == 1 {
+            break;
+        }
+        let operation_id = SharedOperationId::new(
+            ClientId::new("daemon-prune"),
+            state.revision.0.saturating_add(1),
+        );
+        state
+            .apply_operation(
+                operation_id,
+                &SharedSessionOperation::ClosePane { pane_id: *pane_id },
+            )
+            .expect("the daemon pane set and canonical shared state agree");
+        changed = true;
+    }
+    if !changed {
+        return None;
+    }
+    session.summary = state.summary.clone();
+    session.summary.id = session.id;
+    session.state = state.state.clone();
+    Some(state.clone())
 }
 
 struct Session {

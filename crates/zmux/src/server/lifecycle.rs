@@ -1895,6 +1895,7 @@ pub(super) fn leave_shared(
     }
     drop(sessions);
     daemon.sessions_condvar.notify_all();
+    prune_exited_panes(daemon);
     publish(daemon);
     wake_drain(daemon);
     connection.send(&Response::Ok)

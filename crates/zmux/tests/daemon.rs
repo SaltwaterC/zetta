@@ -6417,6 +6417,121 @@ fn splitting_a_pane_created_by_an_earlier_split_is_accepted() {
     assert_eq!(second.state.summary.panes.len(), 3);
 }
 
+/// An exited shared pane is eventually removed once no viewer is reading it.
+/// Its removal must also change the canonical layout: a later split replaces
+/// only one layout node and retains every other node, including this one.
+#[test]
+fn pruning_an_exited_shared_pane_keeps_the_next_split_valid() {
+    let daemon = TestDaemon::start();
+    let client = daemon.client();
+    let pane = client
+        .spawn(spawn_request(None, "printf ready; sleep 60"))
+        .unwrap();
+    let descriptor = std::fs::File::from(pane.descriptor);
+    read_until(&descriptor, "ready");
+    let mut offered = summary(pane.session_id, pane.pane_id);
+    offered.panes.push(pane_summary(pane.pane_id));
+    client
+        .share(
+            pane.session_id,
+            offered,
+            serde_json::Value::Null,
+            Some(&test_verifier()),
+            true,
+        )
+        .unwrap();
+
+    let draft = |draft_id, command: &str| zmux::messages::SharedPaneDraft {
+        draft_id,
+        profile: "System".to_owned(),
+        command: Some(zetta_profiles::ProfileCommand::with_args(
+            "sh",
+            vec!["-c".to_owned(), command.to_owned()],
+        )),
+        env: HashMap::new(),
+        working_directory: None,
+        inherit_working_directory_from: None,
+        load_shell_integration: false,
+        size: TerminalSize {
+            columns: 80,
+            lines: 24,
+            cell_width: 0,
+            cell_height: 0,
+        },
+        console_palette: ConsolePalette::default(),
+        metadata: pane_summary(0),
+    };
+    let request = spawn_request(Some(pane.session_id), "sleep 0.1; exit 0");
+    let spawned = client
+        .spawn_shared(SharedSpawnRequest {
+            session_id: pane.session_id,
+            base_revision: SessionRevision::INITIAL,
+            operation_id: client.next_shared_operation_id(),
+            program: request.program,
+            args: request.args,
+            env: request.env,
+            working_directory: request.working_directory,
+            size: request.size,
+            console_palette: request.console_palette,
+        })
+        .unwrap();
+    let exited_pane = spawned.pane.pane_id();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let states = client.pane_states(vec![exited_pane]).unwrap();
+        if states.first().is_some_and(|state| state.exited) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the shared pane did not exit; daemon log:\n{}",
+            daemon.log()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    drop(spawned);
+    client.leave_shared(pane.session_id).unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let state = loop {
+        let state = client.shared_snapshot(pane.session_id).unwrap();
+        if !state.contains_pane(exited_pane) {
+            break state;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the exited shared pane was never pruned; daemon log:\n{}",
+            daemon.log()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    };
+
+    let outcome = client.spawn_shared_batch(SharedSpawnBatchRequest {
+        session_id: pane.session_id,
+        base_revision: state.revision,
+        operation_id: client.next_shared_operation_id(),
+        target_pane_id: Some(pane.pane_id),
+        replacement: zmux::messages::SharedDraftLayout::Split {
+            axis: "horizontal".to_owned(),
+            first_ratio: 200,
+            first: Box::new(zmux::messages::SharedDraftLayout::Existing {
+                pane_id: pane.pane_id,
+            }),
+            second: Box::new(zmux::messages::SharedDraftLayout::Draft { draft_id: 2 }),
+        },
+        panes: vec![draft(2, "sleep 60")],
+        active_pane: Some(zmux::messages::SharedPaneRef::Draft { draft_id: 2 }),
+    });
+
+    match outcome {
+        Ok(zmux::client::SharedBatchResult::Applied(_)) => {}
+        Ok(zmux::client::SharedBatchResult::Conflict(_)) => {
+            panic!("splitting after an exited shared pane was pruned conflicted")
+        }
+        Err(error) => panic!("splitting after an exited shared pane was pruned failed: {error:#}"),
+    }
+}
+
 /// An offered summary describes the session's geometry, and the daemon keeps
 /// it as the canonical layout every later proposal is validated against. It
 /// therefore has to be written in the daemon's pane ids.
