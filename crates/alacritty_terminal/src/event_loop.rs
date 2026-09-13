@@ -455,14 +455,23 @@ where
                     match event.key {
                         tty::PTY_CHILD_EVENT_TOKEN => {
                             if let Some(child_event) = self.pty.next_child_event() {
-                                // `Term::exit` sends `Event::Exit`, which the owning
-                                // terminal reads as "the child ended with no usable
-                                // status". That is true of the two exit events and
-                                // false of a watcher disconnect, where the child's
-                                // fate is simply unknown — so a disconnect must not
-                                // send it, or it would overrule whatever the
-                                // consumer decided a disconnect means.
-                                let mut child_ended = true;
+                                if self.drain_on_exit {
+                                    let _ = self.pty_read(&mut state, &mut buf, pipe.as_mut());
+                                }
+
+                                // Report an exit only after the configured final drain. Its
+                                // consumer can release the PTY resources as soon as it sees the
+                                // event, so reporting first could abort the drain and discard the
+                                // child's last output.
+                                //
+                                // `Term::exit` sends `Event::Exit`, which the owning terminal
+                                // reads as "the child ended with no usable status". That is true
+                                // of the two exit events and false of a watcher disconnect, where
+                                // the child's fate is simply unknown — so a disconnect must not
+                                // send it, or it would overrule whatever the consumer decided a
+                                // disconnect means.
+                                let child_ended =
+                                    !matches!(&child_event, tty::ChildEvent::WatcherDisconnected);
                                 match child_event {
                                     tty::ChildEvent::Exited(status) => {
                                         self.event_proxy.send_event(Event::ChildExit(status));
@@ -472,13 +481,9 @@ where
                                             .send_event(Event::ChildExitStatusUnavailable);
                                     },
                                     tty::ChildEvent::WatcherDisconnected => {
-                                        child_ended = false;
                                         self.event_proxy
                                             .send_event(Event::ChildWatcherDisconnected);
                                     },
-                                }
-                                if self.drain_on_exit {
-                                    let _ = self.pty_read(&mut state, &mut buf, pipe.as_mut());
                                 }
                                 if child_ended {
                                     self.terminal.lock().exit();

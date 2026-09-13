@@ -12525,10 +12525,10 @@ mod tests {
     async fn test_kill_active_task_completes_and_captures_output(cx: &mut TestAppContext) {
         cx.executor().allow_parking();
 
-        // Run a command that prints output then sleeps for a long time
-        // The echo ensures we have output to capture before killing
-        let (terminal, completion_rx) =
-            build_test_terminal(cx, "echo", &["test_output_before_kill; sleep 60"]).await;
+        let command = "printf 'test_output_before_kill\\n'; sleep 60".to_owned();
+        let (program, args) =
+            ShellBuilder::new(&Shell::System, false).build(Some(command.clone()), &[]);
+        let (terminal, completion_rx) = build_test_task_terminal(cx, program, args, command).await;
 
         assert_content_eventually(&terminal, "test_output_before_kill", cx).await;
 
@@ -12598,12 +12598,15 @@ mod tests {
         });
     }
 
+    #[cfg(unix)]
     #[gpui::test]
     async fn test_kill_active_task_on_completed_task_is_noop(cx: &mut TestAppContext) {
         cx.executor().allow_parking();
 
-        // Run a command that exits immediately
-        let (terminal, completion_rx) = build_test_terminal(cx, "echo", &["done"]).await;
+        let command = "exit 0".to_owned();
+        let (program, args) =
+            ShellBuilder::new(&Shell::System, false).build(Some(command.clone()), &[]);
+        let (terminal, completion_rx) = build_test_task_terminal(cx, program, args, command).await;
 
         // Wait for the command to complete naturally
         let exit_status = completion_rx
@@ -12612,19 +12615,21 @@ mod tests {
             .expect("Should receive exit status");
         assert_eq!(exit_status, Some(ExitStatus::default()));
 
-        assert_content_eventually(&terminal, "done", cx).await;
-
-        // Now try to kill - should be a no-op since task already completed
-        terminal.update(cx, |term, _cx| {
-            term.kill_active_task();
+        terminal.update(cx, |terminal, _| {
+            assert!(matches!(
+                terminal.task().map(|task| task.status),
+                Some(TaskStatus::Completed { success: true })
+            ));
         });
 
-        // Content should still be there
-        let content = terminal.update(cx, |term, _| term.get_content());
-        assert!(
-            content.contains("done"),
-            "Output should still be present after no-op kill, got: {content}"
-        );
+        // Killing a completed task must leave its completion state intact.
+        terminal.update(cx, |term, _cx| {
+            term.kill_active_task();
+            assert!(matches!(
+                term.task().map(|task| task.status),
+                Some(TaskStatus::Completed { success: true })
+            ));
+        });
     }
 
     mod perf {

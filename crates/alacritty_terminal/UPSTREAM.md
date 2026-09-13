@@ -52,6 +52,10 @@ Retain these Zetta changes when synchronizing:
 - The event loop accepts a `ReplayBarrier` supplied by Zetta. Attached PTY
   readers wait behind retained-screen replay until the first real layout, and
   an abort wakes them when a terminal is dropped or its backend is replaced.
+- The event loop reports a child exit only after its configured final PTY
+  drain. Zetta releases an exited PTY as soon as it receives that report, so
+  reporting first could abort the drain and discard the child process's final
+  output.
 
 The eight Zetta commits carrying these changes are `d6aa84b`, `d7b896f`,
 `57ecffe`, `d83beb7`, `1f6b1f7`, `9de38c6`, `31c3303`, and `7ba5a85`.
