@@ -1021,6 +1021,25 @@ impl Client {
         client.attach_as_process(session_id, Some(pane_id), secret, client_process_id, false)
     }
 
+    /// Joins a pane through the shared relay on behalf of another process.
+    ///
+    /// [`Self::attach_as`] with the shared attach [`Self::attach_shared_with_secret`]
+    /// forces, for the same reason: a test that needs a viewer the daemon will
+    /// not confuse with the test's own client needs it to carry both a
+    /// different process and a different client ID.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn attach_shared_as(
+        &self,
+        session_id: u64,
+        pane_id: u64,
+        client_process_id: u32,
+        secret: Option<String>,
+    ) -> Result<AttachOutcome> {
+        let mut client = self.reconnect_client();
+        client.client_id = ClientId::random()?;
+        client.attach_as_process(session_id, Some(pane_id), secret, client_process_id, true)
+    }
+
     fn attach_as_process(
         &self,
         session_id: u64,
@@ -1510,8 +1529,19 @@ impl Client {
             std::process::id(),
             secret.as_ref(),
         )?;
-        connection.write_all(&bytes)?;
-        match Self::receive(&mut connection)?.0 {
+        // The daemon refuses an unknown session, or a pane this client is not
+        // watching, as soon as it has read the request — which can be before
+        // this payload has finished being written. The write then fails with a
+        // broken pipe that says nothing about why, and that is what the user
+        // would be shown instead of the refusal. So the response is the
+        // authority: a failed write is only reported when there is no response
+        // to read.
+        let written = connection.write_all(&bytes);
+        let response = match Self::receive(&mut connection) {
+            Ok((response, _)) => response,
+            Err(error) => return Err(written.err().map_or(error, anyhow::Error::from)),
+        };
+        match response {
             Response::ImageStored { path } => Ok(path),
             Response::AuthenticationRequired => {
                 anyhow::bail!("the remote session requires authentication for image paste")
@@ -2352,6 +2382,26 @@ impl Client {
             }
             Response::Error { message } => anyhow::bail!("{message}"),
             other => anyhow::bail!("unexpected response to taking a pane back: {other:?}"),
+        }
+    }
+
+    /// Gives a taken pane back, after this client turned out not to be able to
+    /// show it.
+    ///
+    /// The multiplexer stops reading a pane the moment it hands the descriptor
+    /// over, because the client that took it is the one reading it from then
+    /// on. A client that took one and could not adopt it has to say so, or the
+    /// pane is read by nobody: its pty fills and the program on the other end
+    /// of it stops reading input for every viewer, not just this one.
+    pub fn release_exclusive(&self, session_id: u64, pane_id: u64) -> Result<()> {
+        let mut connection = self.open(Request::ReleaseExclusive {
+            session_id,
+            pane_id,
+        })?;
+        match Self::receive(&mut connection)?.0 {
+            Response::Ok => Ok(()),
+            Response::Error { message } => anyhow::bail!("{message}"),
+            other => anyhow::bail!("unexpected response to releasing a pane: {other:?}"),
         }
     }
 }

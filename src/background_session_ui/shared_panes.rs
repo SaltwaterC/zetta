@@ -18,6 +18,23 @@ use std::sync::{
 const SHARED_SIZE_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const SHARED_SIZE_REPORT_DEBOUNCE: Duration = Duration::from_millis(100);
 
+/// Tells the multiplexer this window cannot show a pane it was handed.
+///
+/// Both handovers reach a point where the multiplexer has stopped reading the
+/// pane and this window is not reading it either: a grant whose descriptor the
+/// terminal would not adopt, and a revoke this window stopped its pty loop for
+/// and then could not complete. Neither is recoverable from the multiplexer's
+/// side — it only reclaims a pane whose holder has *died* — so a window that
+/// finds itself there has to say so, or the pane's pty fills and the program
+/// on the far end of it stops reading input for every viewer.
+///
+/// Blocking, and called from a background task for that reason.
+fn give_pane_back(client: &zmux::client::Client, session_id: u64, mux_pane_id: u64) {
+    if let Err(error) = client.release_exclusive(session_id, mux_pane_id) {
+        log::warn!("could not give pane {mux_pane_id} back to the multiplexer: {error:#}");
+    }
+}
+
 /// A reader that yields a replay prefix before the live stream, for a
 /// terminal built around a shared pane whose retained output the multiplexer
 /// sent with the attachment.
@@ -482,17 +499,35 @@ impl Zetta {
                     return;
                 }
             };
-            this.update_in(cx, |this, window, cx| {
-                this.complete_grant_conversion(
-                    ids, attached, terminal, options, &runtime, window, cx,
-                );
-            })
-            .ok();
+            let shown = this
+                .update_in(cx, |this, window, cx| {
+                    this.complete_grant_conversion(
+                        ids, attached, terminal, options, &runtime, window, cx,
+                    )
+                })
+                .unwrap_or(false);
+            if !shown {
+                // Nothing in this window reads the pane now — its terminal
+                // would not adopt the descriptor, or the window went away while
+                // the answer was in flight — and the multiplexer stopped
+                // reading it the moment it handed it over. Give it back, or the
+                // pane goes dead for every viewer of it and not just this one.
+                let client = runtime.client().clone();
+                cx.background_spawn(async move {
+                    give_pane_back(&client, session_id, mux_pane_id);
+                })
+                .await;
+            }
         })
         .detach();
     }
 
     /// Finishes taking a pane back: its terminal now reads the pty itself.
+    ///
+    /// Returns whether the terminal took the descriptor. It has to be said in
+    /// the return rather than left to the error banner: the multiplexer has
+    /// already stopped reading this pane, so a caller that does not hear about
+    /// the failure leaves a pane nobody reads at all.
     #[expect(
         clippy::too_many_arguments,
         reason = "the pane's ids already travel as one bundle; the rest are the \
@@ -507,7 +542,7 @@ impl Zetta {
         runtime: &MuxRuntime,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         let handover = crate::mux::attached_pane_handover_with_secret(
             attached,
             runtime.client().clone(),
@@ -521,12 +556,12 @@ impl Zetta {
                 // The pane is left as it was — still shared as far as this window
                 // is concerned — but the multiplexer has already given the
                 // descriptor away, so say so rather than leaving a pane that reads
-                // nothing.
+                // nothing. The caller gives the pane back.
                 self.pane_output_error = Some(format!(
                     "Could not take this pane's terminal back from the multiplexer: {error:#}"
                 ));
                 cx.notify();
-                return;
+                return false;
             }
         };
         // The shared bookkeeping goes, and with it the shared connection: this
@@ -538,6 +573,7 @@ impl Zetta {
         runtime.reporters().register(ids.mux_pane_id, child_events);
         self.watch_for_revoke(ids, runtime, window, cx);
         cx.notify();
+        true
     }
 
     /// The multiplexer asked this window to hand an exclusively attached pane
@@ -569,6 +605,9 @@ impl Zetta {
         if runtime.is_remote() {
             return;
         }
+        // A window with no terminal for this pane cannot hand anything over,
+        // and the multiplexer is waiting on it having stopped reading the pane
+        // to ask. Giving it back is what releases both.
         let Some(terminal) = self
             .tabs
             .iter()
@@ -576,6 +615,11 @@ impl Zetta {
             .and_then(|tab| tab.pane(pane_id))
             .and_then(|pane| pane.terminal.clone())
         else {
+            let client = runtime.client().clone();
+            cx.background_spawn(async move {
+                give_pane_back(&client, session_id, mux_pane_id);
+            })
+            .detach();
             return;
         };
         // The snapshot has to be a stable picture of what the daemon will
@@ -584,6 +628,11 @@ impl Zetta {
             .update(cx, |terminal, _| terminal.stop_pty_loop())
             .is_err()
         {
+            let client = runtime.client().clone();
+            cx.background_spawn(async move {
+                give_pane_back(&client, session_id, mux_pane_id);
+            })
+            .detach();
             return;
         }
         let (snapshot, columns, lines) = terminal.update(cx, |terminal, _| {
@@ -621,9 +670,17 @@ impl Zetta {
                 .await
                 .ok();
             let Some(zmux::client::AttachOutcome::SharedAttached { pane, .. }) = outcome else {
-                // The handover failed; the daemon keeps the pane under revoke
-                // until the next attach attempt times out.
+                // The handover failed, and this window has already stopped
+                // reading the pty for it. Give the pane back rather than leave
+                // it under a revoke nobody answers: the daemon refuses this if
+                // it did convert the pane after all, so saying it is safe even
+                // where the failure was only in hearing the answer.
                 log::debug!("the multiplexer handover of pane {mux_pane_id} did not complete");
+                let client = runtime.client().clone();
+                cx.background_spawn(async move {
+                    give_pane_back(&client, session_id, mux_pane_id);
+                })
+                .await;
                 return;
             };
             this.update_in(cx, |this, window, cx| {
@@ -682,7 +739,7 @@ impl Zetta {
     /// arbitrate every shared client down to the smallest of them. Called from
     /// both routes into shared mode — attaching into it, and being revoked into
     /// it — because a pane that never reports cannot be arbitrated for.
-    pub(super) fn subscribe_shared_pane_size(
+    pub(crate) fn subscribe_shared_pane_size(
         &mut self,
         pane_id: u64,
         terminal: &Entity<Terminal>,

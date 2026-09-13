@@ -1272,11 +1272,19 @@ impl Zetta {
             cx.spawn_in(window, async move |this, cx| {
                 let attached =
                     attach_shared_pane_with_retries(session_id, mux_pane_id, &connection, cx).await;
-                // Before the pane is shown, because the transport a pane is on
-                // is decided before its terminal is built; this is an SSH round
-                // trip, so it happens here rather than on the thread that draws.
-                let mut pane_streams = match runtime {
-                    Some(runtime) if attached.as_ref().is_some_and(|(_, pane)| pane.is_some()) => {
+                // Only a session whose panes travel over Mosh takes the step
+                // below, and the test is made here rather than inside it: what
+                // follows this task is the snapshot that names the session's
+                // active pane, so anything awaited in between delays *that*.
+                // Waiting on a task that had nothing to do was enough to let a
+                // snapshot land after the focus change it then undid — the
+                // pane the user had just moved to lost the focus again.
+                let relayed = runtime
+                    .filter(|runtime| runtime.pane_transport().is_zosh())
+                    .filter(|_| attached.as_ref().is_some_and(|(_, pane)| pane.is_some()));
+                let mut pane_streams = match relayed {
+                    Some(runtime) => {
+                        // An SSH round trip, so not on the thread that draws.
                         cx.background_spawn(async move {
                             crate::remote_pane_transport::RemotePaneStreams::one(
                                 mux_pane_id,
@@ -1289,7 +1297,7 @@ impl Zetta {
                         })
                         .await
                     }
-                    _ => crate::remote_pane_transport::RemotePaneStreams::default(),
+                    None => crate::remote_pane_transport::RemotePaneStreams::default(),
                 };
                 this.update_in(cx, |this, window, cx| {
                     this.shared_collaboration

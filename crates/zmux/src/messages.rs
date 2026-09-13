@@ -1210,6 +1210,24 @@ pub enum Request {
     /// connection is being retired, and the multiplexer closes its end of it once
     /// the last relayed frame has gone out.
     TakeExclusive { session_id: u64, pane_id: u64 },
+    /// Gives a pane back after the client that took it could not use it.
+    ///
+    /// [`Request::TakeExclusive`] hands the descriptor over before the client
+    /// knows whether its terminal can adopt it, and a client that fails at that
+    /// point — or whose window closes as the answer arrives — is left holding a
+    /// pane it does not read. The daemon does not read one either, because the
+    /// holder is supposed to, so the pty fills, the shell blocks on its own
+    /// output and stops reading input: the pane goes dead for every viewer of
+    /// it, not only for the client that asked.
+    ///
+    /// A holder that has died is recovered by the liveness sweep. This is for
+    /// the one that is still running, which nothing else can detect.
+    ///
+    /// Deliberately not a [`PROTOCOL_VERSION`] change: a daemon that predates
+    /// this request answers it with an error, which is what a daemon that
+    /// cannot release a pane should say, and bumping the version would instead
+    /// refuse every remote session whose two ends were built a day apart.
+    ReleaseExclusive { session_id: u64, pane_id: u64 },
     /// Offers a session that the client is still showing, so another client can
     /// attach to it and both then see the same panes.
     ///

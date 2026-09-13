@@ -1009,7 +1009,13 @@ pub(super) fn take_exclusive(
     pane.retained.clear();
     pane.handed_over = None;
     let child_pid = pane.pty.child_pid();
-    let handles = handover_handles(daemon, pane, client_process_id)?;
+    let handles = match handover_handles(daemon, pane, client_process_id) {
+        Ok(handles) => handles,
+        Err(error) => {
+            release_failed_handover(daemon, sessions, session_id, pane_id);
+            return Err(error);
+        }
+    };
     // Neither is read on this path: the client already has the tab this pane
     // belongs to and is only swapping what feeds it. They travel because the
     // exclusive attach's reply is the shape that carries a descriptor.
@@ -1019,7 +1025,7 @@ pub(super) fn take_exclusive(
     if let Err(error) = forget_persisted_session(daemon, session_id) {
         log::warn!("could not remove the attached session's persisted record: {error:#}");
     }
-    connection.send_with(
+    if let Err(error) = connection.send_with(
         &Response::Attached {
             pane_id,
             child_pid,
@@ -1029,11 +1035,100 @@ pub(super) fn take_exclusive(
             handles: handles.values,
         },
         &handles.attachments,
-    )?;
+    ) {
+        release_failed_handover(daemon, daemon.sessions.lock().unwrap(), session_id, pane_id);
+        return Err(error);
+    }
     daemon.sessions_condvar.notify_all();
     publish(daemon);
     wake_drain(daemon);
     Ok(())
+}
+
+/// Gives a taken pane back, at the request of the client that took it.
+///
+/// The other half of [`release_failed_handover`]: that one covers a handover
+/// this daemon could not finish sending, and this one covers a handover the
+/// client could not finish receiving — its terminal would not adopt the
+/// descriptor, or the window it belonged to closed as the answer arrived.
+/// Either way a live process holds a pane it does not read, which nothing else
+/// here can detect: the liveness sweep only recovers a pane whose holder has
+/// died.
+pub(super) fn release_exclusive(
+    daemon: &Arc<Daemon>,
+    session_id: u64,
+    pane_id: u64,
+    client_process_id: u32,
+    peer_process_id: Option<u32>,
+    connection: &mut Connection,
+) -> Result<()> {
+    let sessions = daemon.sessions.lock().unwrap();
+    let caller_process_id = control_process_id(client_process_id, peer_process_id);
+    let Some(pane) = sessions
+        .iter()
+        .find(|session| session.id == session_id)
+        .and_then(|session| session.panes.iter().find(|pane| pane.id == pane_id))
+    else {
+        drop(sessions);
+        return connection.send(&Response::Error {
+            message: format!("session {session_id} has no pane {pane_id}"),
+        });
+    };
+    // A handover that was never answered leaves the pane granting or revoking
+    // rather than exclusive, and that client is the one this request is for:
+    // a revoke it could not carry out strands the pane just as surely, because
+    // it has already stopped reading the pty by the time it finds out.
+    let holder = match pane.attachment {
+        Attachment::Exclusive(holder)
+        | Attachment::Granting { holder }
+        | Attachment::Revoking { holder } => holder,
+        Attachment::None | Attachment::Shared(_) => {
+            drop(sessions);
+            return connection.send(&Response::Error {
+                message: format!("session {session_id} pane {pane_id} is not held exclusively"),
+            });
+        }
+    };
+    if holder != caller_process_id {
+        drop(sessions);
+        return connection.send(&Response::Error {
+            message: format!("session {session_id} pane {pane_id} is held by another client"),
+        });
+    }
+    release_failed_handover(daemon, sessions, session_id, pane_id);
+    connection.send(&Response::Ok)
+}
+
+/// Puts a pane back under the drain thread after a handover that did not
+/// complete.
+///
+/// The pane was marked exclusive before the descriptor was sent, because that
+/// is the order the send needs. If the send then fails — the client died as it
+/// was being answered — the pane is left attached to a client that does not
+/// have it, and `drain_reads` skips a pane whose holder is supposed to be
+/// reading it. Nobody reads the pty, it fills, the shell blocks on its own
+/// output and stops reading input: one keystroke lands and every viewer of
+/// that pane is stuck for good. Marking it unheld is what puts it back in the
+/// drain's hands.
+fn release_failed_handover(
+    daemon: &Arc<Daemon>,
+    mut sessions: std::sync::MutexGuard<'_, Vec<Session>>,
+    session_id: u64,
+    pane_id: u64,
+) {
+    if let Some(pane) = sessions
+        .iter_mut()
+        .find(|session| session.id == session_id)
+        .and_then(|session| session.panes.iter_mut().find(|pane| pane.id == pane_id))
+    {
+        pane.attachment = Attachment::None;
+        #[cfg(windows)]
+        pane.pty.resume_reader();
+    }
+    drop(sessions);
+    daemon.sessions_condvar.notify_all();
+    publish(daemon);
+    wake_drain(daemon);
 }
 
 /// Offers a pane back to its viewer when a *departure* has left it the only one.

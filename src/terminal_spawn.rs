@@ -2114,13 +2114,20 @@ impl Zetta {
             None => profile.command.clone(),
         })
     }
+}
 
-    /// Wires a terminal whose builder has resolved into the pane that asked for
-    /// it, and runs whatever has to happen once it exists.
-    ///
-    /// The pane may have been closed or detached while the builder was in
-    /// flight, which is why the install below falls back to the background
-    /// session that now owns it.
+/// What a spawned pane is registered from: the stream the multiplexer relays it
+/// on, the Mosh session carrying it when it has one instead, and the terminal
+/// showing it.
+#[cfg(feature = "zmux")]
+struct SpawnedSharedPane<'a> {
+    shared_pane: &'a Arc<zmux::client::SharedPane>,
+    zosh_session: Option<Arc<crate::remote_pane_transport::ZoshPaneHandle>>,
+    runtime: &'a crate::mux::MuxRuntime,
+    terminal: &'a Entity<Terminal>,
+}
+
+impl Zetta {
     /// Registers a pane the multiplexer relays, once its terminal exists.
     ///
     /// Which registry it belongs in follows from how it is fed: a pane carried
@@ -2131,16 +2138,32 @@ impl Zetta {
     fn register_spawned_shared_pane(
         &mut self,
         ids: MuxPaneIds,
-        shared_pane: &Arc<zmux::client::SharedPane>,
-        zosh_session: Option<Arc<crate::remote_pane_transport::ZoshPaneHandle>>,
-        runtime: &crate::mux::MuxRuntime,
+        pane: SpawnedSharedPane<'_>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let SpawnedSharedPane {
+            shared_pane,
+            zosh_session,
+            runtime,
+            terminal,
+        } = pane;
         let tab_id = ids.tab_id;
+        let pane_id = ids.pane_id;
         match zosh_session {
             Some(session) => self.register_zosh_pane(ids, session, runtime, window, cx),
-            None => self.register_shared_pane(ids, shared_pane, runtime, window, cx),
+            None => {
+                self.register_shared_pane(ids, shared_pane, runtime, window, cx);
+                // A pane spawned into a shared session is wired up here rather
+                // than in `connect_terminal_view`, which is what subscribes the
+                // panes an *attach* builds — so without this a pane you split
+                // never tells the daemon how big it is. The pty then keeps the
+                // stand-in size the draft was created with for the rest of its
+                // life: the pane draws at 24 lines in a full-height window, and
+                // maximizing it changes nothing, because the size this viewer
+                // is showing was never reported.
+                self.subscribe_shared_pane_size(pane_id, terminal, window, cx);
+            }
         }
         // Geometry and pane metadata were committed in the batch. Once the
         // terminal exists, publish the remaining opaque PaneState that needs
@@ -2148,6 +2171,12 @@ impl Zetta {
         self.sync_shared_tab_state(tab_id, cx);
     }
 
+    /// Wires a terminal whose builder has resolved into the pane that asked for
+    /// it, and runs whatever has to happen once it exists.
+    ///
+    /// The pane may have been closed or detached while the builder was in
+    /// flight, which is why the install below falls back to the background
+    /// session that now owns it.
     fn finish_terminal_spawn(
         &mut self,
         mut builder: TerminalBuilder,
@@ -2287,9 +2316,12 @@ impl Zetta {
                     session_id: shared_pane.session_id(),
                     mux_pane_id: shared_pane.pane_id(),
                 },
-                shared_pane,
-                zosh_session,
-                runtime,
+                SpawnedSharedPane {
+                    shared_pane,
+                    zosh_session,
+                    runtime,
+                    terminal: &terminal,
+                },
                 window,
                 cx,
             );

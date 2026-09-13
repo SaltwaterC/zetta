@@ -311,6 +311,17 @@ pub(super) fn serve(daemon: &Arc<Daemon>, stream: Stream, token: &str) -> Result
             stream_only,
             &mut connection,
         ),
+        Request::ReleaseExclusive {
+            session_id,
+            pane_id,
+        } => release_exclusive(
+            daemon,
+            session_id,
+            pane_id,
+            envelope.client_process_id,
+            peer_process_id,
+            &mut connection,
+        ),
         Request::Share(request) => share(
             daemon,
             request,

@@ -205,6 +205,30 @@ fn shared_draft_process(
     (command, env)
 }
 
+/// The directory a pane is started in, given what the requester asked for.
+///
+/// Never the daemon's own. A daemon is started detached — by a window that has
+/// since closed, by a login item, by `zmux --daemon` from anywhere — so its
+/// working directory is an accident, and on macOS it is `/`. A pane that
+/// inherits it opens on the root of the filesystem, which is no use to
+/// anybody; the account's home directory is the shell's own answer to "where
+/// should I start", and is what every login shell would have used.
+fn pane_start_directory(requested: Option<PathBuf>) -> Option<PathBuf> {
+    requested
+        .filter(|directory| !directory.as_os_str().is_empty())
+        .or_else(home_directory)
+}
+
+/// The account's home directory, when it has a usable one.
+fn home_directory() -> Option<PathBuf> {
+    #[cfg(windows)]
+    let home = std::env::var_os("USERPROFILE");
+    #[cfg(not(windows))]
+    let home = std::env::var_os("HOME");
+    home.map(PathBuf::from)
+        .filter(|home| !home.as_os_str().is_empty() && home.is_dir())
+}
+
 /// The directory a pane is running in, read from the process the daemon
 /// started for it. Only the daemon can answer this for a pane whose viewers
 /// are on another machine: it is the process's parent, and they are not.
@@ -249,11 +273,11 @@ fn start_shared_draft(
     let (command, env) = shared_draft_process(draft);
     #[cfg(unix)]
     let bootstrap_command = command.clone();
-    let working_directory = draft.working_directory.clone().or_else(|| {
+    let working_directory = pane_start_directory(draft.working_directory.clone().or_else(|| {
         draft
             .inherit_working_directory_from
             .and_then(|pane_id| pane_working_directory(daemon, pane_id))
-    });
+    }));
     #[cfg(windows)]
     let (program, args) = (command.program.clone(), command.args.clone());
     #[cfg(unix)]
@@ -708,12 +732,13 @@ pub(super) fn spawn(
         );
     }
 
+    let start_directory = pane_start_directory(request.working_directory);
     #[cfg(unix)]
     let options = tty::Options {
         shell: request
             .program
             .map(|program| tty::Shell::new(program, request.args)),
-        working_directory: request.working_directory,
+        working_directory: start_directory.clone(),
         drain_on_exit: true,
         env: request.env,
         #[cfg(not(windows))]
@@ -734,7 +759,7 @@ pub(super) fn spawn(
             request.program,
             request.args,
             request.env,
-            request.working_directory,
+            start_directory,
             request.size,
             request.console_palette,
             std::process::id(),

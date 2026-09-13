@@ -71,9 +71,20 @@ impl TestDaemon {
     }
 
     fn start_with(extra: &[&str]) -> Self {
+        Self::start_in(extra, None)
+    }
+
+    /// A daemon whose own working directory is `working_directory`, which is
+    /// how a detached one starts: a window that has since closed, a login
+    /// item, `zmux --daemon` run from anywhere. On macOS that is `/`.
+    fn start_in(extra: &[&str], working_directory: Option<&Path>) -> Self {
         let directory = tempfile::tempdir().unwrap();
         let config = directory.path().to_path_buf();
-        let process = Command::new(daemon_binary())
+        let mut command = Command::new(daemon_binary());
+        if let Some(working_directory) = working_directory {
+            command.current_dir(working_directory);
+        }
+        let process = command
             .arg("--daemon")
             .args(extra)
             .env("XDG_CONFIG_HOME", &config)
@@ -6569,34 +6580,189 @@ fn a_handover_that_is_abandoned_leaves_the_pane_readable() {
         })
         .unwrap();
     let shared_pane_id = spawned.pane.pane_id();
-    // The sole viewer, which is what makes the pane takeable at all.
+    // The viewer that spawned it steps aside for one with a client ID of its
+    // own, standing in for the window that is about to die. The process stays
+    // this one, and deliberately: a pane whose holder process is gone is
+    // released by the reaper, so a handover abandoned by a *dead* process
+    // recovers without any of what is under test here. What wedges a pane is a
+    // holder that is alive and does not have it.
     drop(spawned);
 
-    // Ask for the descriptor and walk away before it arrives, which is what a
-    // window that dies mid-handover does.
     let endpoint: zmux::transport::Endpoint =
         serde_json::from_slice(&std::fs::read(daemon.sessions_dir().join("zmux.json")).unwrap())
             .unwrap();
-    let stream = Stream::connect(&endpoint.socket_path).unwrap();
-    let mut abandoned = Connection::new(stream);
-    abandoned
-        .send(&Envelope {
-            version: zmux::messages::PROTOCOL_VERSION,
-            token: endpoint.token.clone(),
-            client_process_id: std::process::id(),
-            client_id: ClientId::new("abandoned-handover"),
-            stream_only: false,
-            session_secret: Some(TEST_SECRET.to_owned()),
-            request: Request::TakeExclusive {
-                session_id: pane.session_id,
-                pane_id: shared_pane_id,
-            },
-        })
-        .unwrap();
-    drop(abandoned);
+    // Asks for the descriptor and walks away before it arrives, which is what a
+    // window that dies mid-handover does.
+    let abandon_handover = || {
+        let stream = Stream::connect(&endpoint.socket_path).unwrap();
+        let mut abandoned = Connection::new(stream);
+        abandoned
+            .send(&Envelope {
+                version: zmux::messages::PROTOCOL_VERSION,
+                token: endpoint.token.clone(),
+                client_process_id: std::process::id(),
+                client_id: ClientId::new("abandoned-handover"),
+                stream_only: false,
+                session_secret: Some(TEST_SECRET.to_owned()),
+                request: Request::TakeExclusive {
+                    session_id: pane.session_id,
+                    pane_id: shared_pane_id,
+                },
+            })
+            .unwrap();
+        drop(abandoned);
+    };
 
+    // Retried because a pane is only handed to its *sole* viewer, and the
+    // daemon may not have noticed the spawning viewer's departure yet. The
+    // daemon ending this viewer's relay is what says the take was accepted:
+    // it is the step the handover takes before the descriptor goes out.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        if let Ok(AttachOutcome::SharedAttached { pane: viewer, .. }) = client.attach_shared_as(
+            pane.session_id,
+            shared_pane_id,
+            std::process::id(),
+            Some(TEST_SECRET.to_owned()),
+        ) {
+            let mut reader = viewer.reader();
+            abandon_handover();
+            let taken = relay_ended(&mut reader, Duration::from_secs(2));
+            drop(viewer);
+            if taken {
+                break;
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the daemon never accepted the take, so the abandoned handover was never reached"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
     // A pane the daemon is still reading can be attached and produces output.
     // A wedged one accepts the attach and then says nothing ever again.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        if let Ok(AttachOutcome::SharedAttached { pane: viewer, .. }) = client
+            .attach_shared_with_secret(
+                pane.session_id,
+                shared_pane_id,
+                Some(&SessionSecret::new(TEST_SECRET.to_owned())),
+            )
+        {
+            let (seen, ended) = collect_output_until_end(viewer.reader());
+            viewer.send_input(b"echo pane-still-lives\r").unwrap();
+            let answered = Instant::now() + Duration::from_secs(10);
+            loop {
+                if seen.lock().unwrap().contains("pane-still-lives") {
+                    return;
+                }
+                assert!(
+                    Instant::now() < answered,
+                    "the pane stopped reading its input after an abandoned handover; \
+                     the viewer's stream ended: {}; \
+                     the daemon reports {:?}, and this viewer read {:?}",
+                    ended.load(Ordering::SeqCst),
+                    client
+                        .list()
+                        .map(|sessions| sessions
+                            .into_iter()
+                            .map(|session| format!(
+                                "session {} held={} panes={:?}",
+                                session.id,
+                                session.held,
+                                session
+                                    .panes
+                                    .iter()
+                                    .map(|pane| (pane.id, pane.state))
+                                    .collect::<Vec<_>>()
+                            ))
+                            .collect::<Vec<_>>())
+                        .unwrap_or_else(|error| vec![format!("list failed: {error:#}")]),
+                    seen.lock().unwrap().clone()
+                );
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the pane never became attachable again after an abandoned handover; \
+             the daemon reports {:?}",
+            client
+                .list()
+                .map(|sessions| sessions
+                    .into_iter()
+                    .map(|session| format!(
+                        "session {} held={} panes={}",
+                        session.id,
+                        session.held,
+                        session.panes.len()
+                    ))
+                    .collect::<Vec<_>>())
+                .unwrap_or_else(|error| vec![format!("list failed: {error:#}")])
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// A pane whose taker could not show it has to be recoverable.
+///
+/// The daemon stops reading a pane the moment it hands the descriptor over,
+/// because from then on the client that took it is the reader. A client whose
+/// terminal cannot adopt the descriptor — or whose window closed while the
+/// answer was in flight — therefore holds a pane nobody drains, and nothing in
+/// the daemon can notice: the liveness sweep only recovers a pane whose holder
+/// has *died*, and this one is still running. Giving it back is the only way
+/// out, and it has to work from the same client that took it.
+#[test]
+fn a_pane_the_client_could_not_show_can_be_given_back() {
+    let daemon = TestDaemon::start();
+    let client = daemon.client();
+    let pane = client
+        .spawn(spawn_request(None, "printf ready; cat"))
+        .unwrap();
+    let descriptor = std::fs::File::from(pane.descriptor);
+    read_until(&descriptor, "ready");
+    let mut offered = summary(pane.session_id, pane.pane_id);
+    offered.panes.push(pane_summary(pane.pane_id));
+    client
+        .share(
+            pane.session_id,
+            offered,
+            serde_json::Value::Null,
+            Some(&test_verifier()),
+            true,
+        )
+        .unwrap();
+
+    let request = spawn_request(Some(pane.session_id), "printf shared-ready; cat");
+    let spawned = client
+        .spawn_shared(SharedSpawnRequest {
+            session_id: pane.session_id,
+            base_revision: SessionRevision::INITIAL,
+            operation_id: client.next_shared_operation_id(),
+            program: request.program,
+            args: request.args,
+            env: request.env,
+            working_directory: request.working_directory,
+            size: request.size,
+            console_palette: request.console_palette,
+        })
+        .unwrap();
+    let shared_pane_id = spawned.pane.pane_id();
+
+    // The sole viewer takes the pane back, the way a window does when the
+    // other viewers have gone — and then drops the descriptor on the floor,
+    // the way one does whose terminal would not adopt it.
+    let taken = client
+        .take_exclusive(pane.session_id, shared_pane_id)
+        .unwrap();
+    drop(spawned);
+    drop(taken);
+    client
+        .release_exclusive(pane.session_id, shared_pane_id)
+        .unwrap();
+
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
         if let Ok(AttachOutcome::SharedAttached { pane: viewer, .. }) = client
@@ -6615,15 +6781,15 @@ fn a_handover_that_is_abandoned_leaves_the_pane_readable() {
                 }
                 assert!(
                     Instant::now() < answered,
-                    "the pane stopped reading its input after an abandoned handover; \
-                     it is attached to nobody and drained by nobody"
+                    "the pane read no input after it was given back; this viewer read {:?}",
+                    seen.lock().unwrap().clone()
                 );
                 std::thread::sleep(Duration::from_millis(50));
             }
         }
         assert!(
             Instant::now() < deadline,
-            "the pane never became attachable again after an abandoned handover"
+            "a pane that was given back must be attachable again"
         );
         std::thread::sleep(Duration::from_millis(100));
     }
@@ -6712,6 +6878,104 @@ fn a_viewer_that_stops_reading_does_not_wedge_the_pane_for_the_others() {
         std::thread::sleep(Duration::from_millis(50));
     }
     drop(silent);
+}
+
+/// No pane ever starts in the daemon's own directory.
+///
+/// A daemon is started detached, so its working directory is an accident —
+/// `/` on macOS — and a pane that inherits it opens on the root of the
+/// filesystem. This is the floor under the inherit above: when the requester
+/// names no directory and none can be read from the pane being split, the new
+/// pane still starts somewhere a person would want to be.
+#[test]
+fn a_pane_never_starts_in_the_daemons_own_directory() {
+    let daemon = TestDaemon::start_in(&[], Some(Path::new("/")));
+    let client = daemon.client();
+    let home = std::env::var("HOME").expect("a home directory");
+
+    // A plain spawn that names no directory.
+    let mut request = spawn_request(None, "pwd; sleep 60");
+    request.working_directory = None;
+    let pane = client.spawn(request).expect("spawning a pane");
+    let descriptor = std::fs::File::from(pane.descriptor);
+    let printed = read_until(&descriptor, "\n");
+    assert_eq!(
+        printed.lines().next().map(str::trim),
+        Some(home.as_str()),
+        "a pane with no directory of its own has to start at home, not in the \
+         daemon's `/`"
+    );
+
+    // And a shared draft whose inherit cannot be resolved: pane 999 does not
+    // exist, which is the same dead end as a pane whose process is gone.
+    let mut offered = summary(pane.session_id, pane.pane_id);
+    offered.panes.push(pane_summary(pane.pane_id));
+    client
+        .share(
+            pane.session_id,
+            offered,
+            serde_json::Value::Null,
+            Some(&test_verifier()),
+            true,
+        )
+        .expect("sharing the session");
+    let zmux::client::SharedBatchResult::Applied(spawned) = client
+        .spawn_shared_batch(SharedSpawnBatchRequest {
+            session_id: pane.session_id,
+            base_revision: SessionRevision::INITIAL,
+            operation_id: client.next_shared_operation_id(),
+            target_pane_id: Some(pane.pane_id),
+            replacement: zmux::messages::SharedDraftLayout::Split {
+                axis: "vertical".to_owned(),
+                first_ratio: 500,
+                first: Box::new(zmux::messages::SharedDraftLayout::Existing {
+                    pane_id: pane.pane_id,
+                }),
+                second: Box::new(zmux::messages::SharedDraftLayout::Draft { draft_id: 1 }),
+            },
+            panes: vec![zmux::messages::SharedPaneDraft {
+                draft_id: 1,
+                profile: "System".to_owned(),
+                command: Some(zetta_profiles::ProfileCommand::with_args(
+                    "sh",
+                    vec!["-c".to_owned(), "pwd; sleep 60".to_owned()],
+                )),
+                env: HashMap::new(),
+                working_directory: None,
+                inherit_working_directory_from: Some(999),
+                load_shell_integration: false,
+                size: TerminalSize {
+                    columns: 80,
+                    lines: 24,
+                    cell_width: 0,
+                    cell_height: 0,
+                },
+                console_palette: ConsolePalette::default(),
+                metadata: pane_summary(0),
+            }],
+            active_pane: Some(zmux::messages::SharedPaneRef::Draft { draft_id: 1 }),
+        })
+        .expect("splitting the shared pane")
+    else {
+        panic!("the split conflicted")
+    };
+
+    let AttachOutcome::SharedAttached { pane: split, .. } = client
+        .attach_shared_with_secret(
+            pane.session_id,
+            spawned.mappings[0].pane_id,
+            Some(&SessionSecret::new(TEST_SECRET.to_owned())),
+        )
+        .expect("attaching the new pane")
+    else {
+        panic!("the new pane did not attach as a stream")
+    };
+    let printed = collect_output(split.reader());
+    printed
+        .lock()
+        .unwrap()
+        .insert_str(0, &String::from_utf8_lossy(&split.replay));
+    wait_for_shared_output(&printed, &home);
 }
 
 /// A pane split from one on another machine has to start where that pane is.
@@ -6903,6 +7167,58 @@ fn relay_pane_copies_a_shared_pane_between_the_daemon_and_its_own_stdio() {
 
 /// Reads a child's pipe on its own thread: a blocking read cannot be given a
 /// deadline, and a test that hangs on one says nothing about what failed.
+/// Waits for the daemon to close a shared viewer's relay, which is what a
+/// granted handover does to the viewer it is taking the pane from — and the
+/// only thing a client can observe about a take it is not the one making.
+///
+/// Returns false if the relay was still open when the wait ran out, meaning
+/// the take was refused.
+fn relay_ended(reader: &mut impl Read, within: Duration) -> bool {
+    let deadline = Instant::now() + within;
+    let mut bytes = [0_u8; 4096];
+    while Instant::now() < deadline {
+        match reader.read(&mut bytes) {
+            Ok(0) => return true,
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(_) => return true,
+        }
+    }
+    false
+}
+
+/// [`collect_output`], plus the flag that says the stream ended rather than
+/// went quiet — the difference between a viewer that was dropped and a pane
+/// that stopped answering.
+fn collect_output_until_end(
+    mut output: impl Read + Send + 'static,
+) -> (Arc<Mutex<String>>, Arc<AtomicBool>) {
+    let collected = Arc::new(Mutex::new(String::new()));
+    let ended = Arc::new(AtomicBool::new(false));
+    let thread_collected = Arc::clone(&collected);
+    let thread_ended = Arc::clone(&ended);
+    std::thread::spawn(move || {
+        let mut bytes = [0_u8; 4096];
+        loop {
+            match output.read(&mut bytes) {
+                Ok(0) => break,
+                Ok(read) => thread_collected
+                    .lock()
+                    .unwrap()
+                    .push_str(&String::from_utf8_lossy(&bytes[..read])),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(_) => break,
+            }
+        }
+        thread_ended.store(true, Ordering::SeqCst);
+    });
+    (collected, ended)
+}
+
 fn collect_output(mut output: impl Read + Send + 'static) -> Arc<Mutex<String>> {
     let collected = Arc::new(Mutex::new(String::new()));
     let thread_collected = Arc::clone(&collected);
@@ -7050,6 +7366,33 @@ fn a_shared_viewer_stores_an_image_the_panes_process_can_open() {
     assert!(
         !Path::new(&path).exists(),
         "a killed session must not leave its staged images behind"
+    );
+}
+
+/// A refusal has to reach the user as the reason it was refused.
+///
+/// The payload is written after the request, so the daemon can reject an
+/// unknown session and close while that write is still going — and a paste
+/// large enough not to fit in a socket buffer then fails with a broken pipe
+/// rather than with what the daemon said. The response is the authority.
+#[test]
+fn a_refused_image_reports_the_refusal_rather_than_the_broken_write() {
+    let daemon = TestDaemon::start();
+    let client = daemon.client();
+    let (session_id, shared) = shared_pane_for_image_paste(&daemon, &client, None);
+
+    // Big enough that the write cannot complete into a socket buffer before
+    // the daemon has refused the request and gone.
+    let mut png = test_png();
+    png.resize(4 * 1024 * 1024, 0);
+
+    let error = client
+        .store_image(session_id + 1_000, shared.pane.pane_id(), png)
+        .expect_err("an unknown session is refused");
+    let error = format!("{error:#}");
+    assert!(
+        error.contains("does not exist"),
+        "the refusal has to survive the broken write: {error}"
     );
 }
 
