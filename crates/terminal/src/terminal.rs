@@ -2425,18 +2425,6 @@ impl TerminalBuilder {
         self
     }
 
-    /// Applies a shared-session viewport before this builder's deferred replay
-    /// or byte stream is released. A shared TUI's retained screen is encoded
-    /// for the daemon's grid, so parsing it first at this window's larger
-    /// layout permanently desynchronizes subsequent incremental redraws.
-    pub fn with_shared_viewport(mut self, viewport: Option<(u16, u16)>) -> Self {
-        if let Some((columns, lines)) = viewport {
-            self.terminal
-                .set_shared_viewport(columns as usize, lines as usize);
-        }
-        self
-    }
-
     /// Installs the resolver used when this terminal receives an image paste.
     /// The handler is captured by each queued image command, so it is safe to
     /// add after [`Self::new_byte_stream`] has started its writer.
@@ -11325,48 +11313,6 @@ mod tests {
             ),
             (80, 24)
         );
-    }
-
-    #[gpui::test]
-    async fn a_builder_shared_viewport_clamps_the_grid_before_deferred_replay(
-        cx: &mut TestAppContext,
-    ) {
-        let builder = cx.update(|cx| {
-            TerminalBuilder::new_display_only(
-                SettingsCursorShape::Block,
-                AlternateScroll::On,
-                None,
-                0,
-                cx.background_executor(),
-                PathStyle::local(),
-            )
-            .with_shared_viewport(Some((80, 24)))
-            .with_replay(b"restored shared screen".to_vec())
-        });
-        let window = cx.add_empty_window();
-        let terminal = window.new(|cx| builder.subscribe(cx));
-        let local_bounds = TerminalBounds {
-            cell_width: Pixels::from(10.),
-            line_height: Pixels::from(10.),
-            bounds: bounds(
-                GpuiPoint::default(),
-                size(Pixels::from(1200.), Pixels::from(300.)),
-            ),
-        };
-
-        window.update_window_entity(&terminal, |terminal, window, cx| {
-            terminal.set_size(local_bounds);
-            terminal.sync(window, cx);
-            assert_eq!(terminal.shared_viewport(), Some((80, 24)));
-            assert_eq!(
-                (
-                    terminal.last_content().terminal_bounds.num_columns(),
-                    terminal.last_content().terminal_bounds.num_lines(),
-                ),
-                (80, 24)
-            );
-            assert!(terminal.get_content().contains("restored shared screen"));
-        });
     }
 
     #[gpui::test]
