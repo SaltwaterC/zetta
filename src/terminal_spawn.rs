@@ -265,6 +265,7 @@ fn build_shared_pane_terminal(
         executor,
         PathStyle::local(),
     )
+    .with_raw_output()
     .with_shared_viewport(initial_viewport)
     .with_working_directory(working_directory)
     .with_replay(pane.replay.clone())

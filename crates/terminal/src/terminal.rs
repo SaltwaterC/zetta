@@ -1575,22 +1575,21 @@ fn normalize_terminal_bounds(mut bounds: TerminalBounds) -> TerminalBounds {
     bounds
 }
 
-/// Limit the grid presented by a shared pane without changing the size of the
-/// pane that contains it. The caller still lays out the terminal at its local
-/// size; the effective bounds only decide how many cells the emulator owns.
+/// Keep the emulator at the dimensions of its shared output stream. Layout
+/// describes the viewer's capacity, which can change before the daemon has
+/// arbitrated a new grid. Until that size arrives, a smaller pane clips the
+/// existing grid and a larger one leaves spare space.
 fn effective_terminal_bounds(
     local_bounds: TerminalBounds,
     shared_viewport: Option<(usize, usize)>,
 ) -> TerminalBounds {
-    let Some((max_columns, max_lines)) = shared_viewport else {
+    let Some((columns, lines)) = shared_viewport else {
         return local_bounds;
     };
 
-    let columns = local_bounds.num_columns().min(max_columns.max(1));
-    let lines = local_bounds.num_lines().min(max_lines.max(1));
     let mut effective_bounds = local_bounds;
-    effective_bounds.bounds.size.width = local_bounds.cell_width * columns as f32;
-    effective_bounds.bounds.size.height = local_bounds.line_height * lines as f32;
+    effective_bounds.bounds.size.width = local_bounds.cell_width * columns.max(1) as f32;
+    effective_bounds.bounds.size.height = local_bounds.line_height * lines.max(1) as f32;
     effective_bounds
 }
 
@@ -2410,6 +2409,7 @@ impl TerminalBuilder {
             builder.events_tx.clone(),
             builder.terminal.wakeup_gate.clone(),
             builder.terminal.replay_barrier.clone(),
+            false,
         ));
         builder
     }
@@ -2418,10 +2418,11 @@ impl TerminalBuilder {
     /// [`TerminalBuilder::new_attached`] replays a handover's retained output.
     ///
     /// The byte-stream constructor carries no handover, so a terminal built
-    /// for a shared pane replays through this instead.
+    /// for a shared pane replays through this instead. An empty replay still
+    /// keeps live output waiting for the initial grid.
     pub fn with_replay(mut self, bytes: Vec<u8>) -> Self {
         self.terminal.replay_barrier.close();
-        self.terminal.pending_replay = (!bytes.is_empty()).then_some(bytes);
+        self.terminal.pending_replay = Some(bytes);
         self
     }
 
@@ -2431,8 +2432,19 @@ impl TerminalBuilder {
     /// layout permanently desynchronizes subsequent incremental redraws.
     pub fn with_shared_viewport(mut self, viewport: Option<(u16, u16)>) -> Self {
         if let Some((columns, lines)) = viewport {
+            self.terminal.replay_barrier.close();
+            self.terminal.pending_replay.get_or_insert_default();
             self.terminal
                 .set_shared_viewport(columns as usize, lines as usize);
+        }
+        self
+    }
+
+    /// Preserves PTY control bytes, including LF's column-preserving cursor
+    /// movement. Plain log streams use newline normalization by default.
+    pub fn with_raw_output(self) -> Self {
+        if let Some(stream) = &self.terminal.byte_stream {
+            stream.raw_output.store(true, Ordering::Release);
         }
         self
     }
@@ -4265,7 +4277,7 @@ impl Terminal {
         self.queue_effective_resize(old_bounds, new_bounds, local_grid_changed);
     }
 
-    /// Applies a daemon-owned grid limit. This changes the emulator's grid,
+    /// Applies the daemon-owned grid dimensions. This changes the emulator's grid,
     /// never the GPUI bounds of the pane, so a larger viewer keeps its spare
     /// rows and columns blank.
     pub fn set_shared_viewport(&mut self, columns: usize, lines: usize) {
@@ -6164,6 +6176,7 @@ impl Terminal {
             self.events_tx.clone(),
             self.wakeup_gate.clone(),
             self.replay_barrier.clone(),
+            true,
         ));
         Ok(())
     }
@@ -6694,6 +6707,7 @@ fn prepare_input_command(
 
 struct ByteStreamHandle {
     stopped: Arc<std::sync::atomic::AtomicBool>,
+    raw_output: Arc<std::sync::atomic::AtomicBool>,
     replay_barrier: ReplayBarrier,
     input: InputWorker,
     /// Signalled by the reader thread as it returns, so a caller can tell
@@ -6748,8 +6762,11 @@ fn spawn_byte_stream(
     events_tx: futures::channel::mpsc::UnboundedSender<PtyEvent>,
     wakeup_gate: WakeupGate,
     replay_barrier: ReplayBarrier,
+    raw_output: bool,
 ) -> ByteStreamHandle {
     let stopped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let raw_output = Arc::new(std::sync::atomic::AtomicBool::new(raw_output));
+    let reader_raw_output = raw_output.clone();
     let reader_stopped = stopped.clone();
     let reader_events = events_tx.clone();
     let reader_barrier = replay_barrier.clone();
@@ -6792,8 +6809,14 @@ fn spawn_byte_stream(
                         break;
                     }
                     Ok(count) => {
-                        let converted =
-                            convert_lf_to_crlf(&buffer[..count], &mut previous_byte_was_cr);
+                        let converted = if reader_raw_output.load(Ordering::Acquire) {
+                            Cow::Borrowed(&buffer[..count])
+                        } else {
+                            Cow::Owned(convert_lf_to_crlf(
+                                &buffer[..count],
+                                &mut previous_byte_was_cr,
+                            ))
+                        };
                         let mut terminal = term.lock();
                         processor.advance(&mut *terminal, &converted);
                         drop(terminal);
@@ -6817,6 +6840,7 @@ fn spawn_byte_stream(
 
     ByteStreamHandle {
         stopped,
+        raw_output,
         replay_barrier,
         input,
         finished,
@@ -11271,7 +11295,8 @@ mod tests {
             (80, 23)
         );
 
-        // A larger common grid never grows this viewer beyond its own layout.
+        // Until the daemon arbitrates this viewer's smaller capacity, its
+        // output still needs the larger grid. Rendering clips it to the pane.
         terminal.set_shared_viewport(100, 30);
         assert_eq!(terminal.local_terminal_bounds(), local_bounds);
         assert_eq!(
@@ -11279,7 +11304,7 @@ mod tests {
                 terminal.last_content().terminal_bounds.num_columns(),
                 terminal.last_content().terminal_bounds.num_lines(),
             ),
-            (80, 24)
+            (100, 30)
         );
 
         terminal.clear_shared_viewport();
@@ -11325,6 +11350,111 @@ mod tests {
             ),
             (80, 24)
         );
+    }
+
+    #[gpui::test]
+    async fn shared_pty_output_preserves_newline_cursor_movements(cx: &mut TestAppContext) {
+        use alacritty_terminal::index::{Column, Line, Point as AlacPoint};
+
+        let builder = cx.update(|cx| {
+            TerminalBuilder::new_byte_stream(
+                Box::new(CannedReader {
+                    bytes: b"\x1b[?1049h\x1b[2J\x1b[2;10HA\nB".to_vec(),
+                }),
+                Box::new(std::io::sink()),
+                String::new(),
+                SettingsCursorShape::Block,
+                AlternateScroll::On,
+                None,
+                0,
+                cx.background_executor(),
+                PathStyle::local(),
+            )
+            .with_raw_output()
+            .with_shared_viewport(Some((80, 24)))
+            .with_replay(Vec::new())
+        });
+        let window = cx.add_empty_window();
+        let terminal = window.new(|cx| builder.subscribe(cx));
+        window.update_window_entity(&terminal, |terminal, window, cx| {
+            assert!(
+                matches!(
+                    terminal
+                        .byte_stream
+                        .as_ref()
+                        .unwrap()
+                        .finished
+                        .recv_timeout(Duration::from_millis(50)),
+                    Err(mpsc::RecvTimeoutError::Timeout)
+                ),
+                "even an empty replay must hold live output until the initial grid is applied"
+            );
+            terminal.set_size(TerminalBounds::default());
+            terminal.sync(window, cx);
+            assert!(!matches!(
+                terminal
+                    .byte_stream
+                    .as_ref()
+                    .unwrap()
+                    .finished
+                    .recv_timeout(Duration::from_secs(5)),
+                Err(mpsc::RecvTimeoutError::Timeout)
+            ));
+            let term = terminal.term.lock();
+            assert_eq!(term.grid()[AlacPoint::new(Line(1), Column(9))].c, 'A');
+            assert_eq!(term.grid()[AlacPoint::new(Line(2), Column(10))].c, 'B');
+        });
+    }
+
+    #[gpui::test]
+    async fn shared_output_keeps_its_grid_while_local_layout_changes(cx: &mut TestAppContext) {
+        use alacritty_terminal::index::{Column, Line, Point as AlacPoint};
+
+        let builder = cx.update(|cx| {
+            TerminalBuilder::new_display_only(
+                SettingsCursorShape::Block,
+                AlternateScroll::On,
+                None,
+                0,
+                cx.background_executor(),
+                PathStyle::local(),
+            )
+            .with_shared_viewport(Some((120, 30)))
+        });
+        let window = cx.add_empty_window();
+        let terminal = window.new(|cx| builder.subscribe(cx));
+        let make_bounds = |columns: f32, lines: f32| TerminalBounds {
+            cell_width: px(10.),
+            line_height: px(10.),
+            bounds: bounds(
+                GpuiPoint::default(),
+                size(px(columns * 10.), px(lines * 10.)),
+            ),
+        };
+        window.update_window_entity(&terminal, |terminal, window, cx| {
+            terminal.set_size(make_bounds(120., 30.));
+            terminal.sync(window, cx);
+            // Restore the split before the daemon has received and arbitrated
+            // the smaller capacity. Its output is still encoded for 120x30.
+            terminal.set_size(make_bounds(80., 24.));
+            terminal.sync(window, cx);
+            assert_eq!(terminal.local_terminal_bounds().num_columns(), 80);
+            let mut processor = Processor::<StdSyncHandler>::new();
+            {
+                let mut term = terminal.term.lock();
+                assert_eq!((term.columns(), term.screen_lines()), (120, 30));
+                processor.advance(&mut *term, b"\x1b[?1049h\x1b[2J\x1b[30;116HEDGE");
+                assert_eq!(term.grid()[AlacPoint::new(Line(29), Column(115))].c, 'E');
+            }
+            // Only a stream size boundary changes the emulator. A later
+            // maximize must still wait for the daemon's larger grid.
+            terminal.set_shared_viewport(80, 24);
+            terminal.sync(window, cx);
+            terminal.set_size(make_bounds(120., 30.));
+            terminal.sync(window, cx);
+            let term = terminal.term.lock();
+            assert_eq!((term.columns(), term.screen_lines()), (80, 24));
+        });
     }
 
     #[gpui::test]

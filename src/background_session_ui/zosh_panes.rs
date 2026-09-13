@@ -83,6 +83,7 @@ pub(crate) fn build_zosh_pane(
         executor,
         PathStyle::local(),
     )
+    .with_raw_output()
     .with_working_directory(working_directory)
     .with_pty_control(control)
     // Pasting an image is a control operation: it stores the bytes with the

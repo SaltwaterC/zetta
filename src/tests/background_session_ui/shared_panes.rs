@@ -1,5 +1,55 @@
 use super::*;
 
+#[gpui::test]
+async fn a_shared_redraw_uses_the_new_grid_before_the_next_render(cx: &mut gpui::TestAppContext) {
+    let window = cx.add_empty_window();
+    let terminal = window.new(|cx| {
+        terminal::TerminalBuilder::new_display_only(
+            terminal::terminal_settings::CursorShape::Block,
+            terminal::terminal_settings::AlternateScroll::On,
+            None,
+            0,
+            cx.background_executor(),
+            util::paths::PathStyle::local(),
+        )
+        .with_shared_viewport(Some((80, 24)))
+        .subscribe(cx)
+    });
+    window.update_window_entity(&terminal, |terminal, window, cx| {
+        terminal.set_size(terminal::TerminalBounds {
+            cell_width: gpui::px(10.),
+            line_height: gpui::px(10.),
+            bounds: gpui::Bounds {
+                origin: gpui::Point::default(),
+                size: gpui::Size {
+                    width: gpui::px(1200.),
+                    height: gpui::px(300.),
+                },
+            },
+        });
+        terminal.sync(window, cx);
+        terminal.write_output(b"\x1b[?1049h\x1b[2J", cx);
+    });
+
+    window.update(|window, cx| {
+        assert!(apply_shared_terminal_viewport(
+            &terminal, 120, 30, window, cx
+        ));
+        // The reader resumes immediately after the size is acknowledged. No
+        // layout/render pass runs between that acknowledgement and this TUI
+        // redraw, whose right edge and footer do not fit the old 80x24 grid.
+        terminal.update(cx, |terminal, cx| {
+            terminal.write_output(b"\x1b[1;100HRIGHT\x1b[30;1HFOOTER", cx);
+            let content = terminal.get_content();
+            assert!(
+                content.lines().next().unwrap().contains("RIGHT"),
+                "{content:?}"
+            );
+            assert_eq!(content.lines().nth(29).map(str::trim), Some("FOOTER"));
+        });
+    });
+}
+
 /// A stand-in subscriber, in place of a real `Zetta` — `Zetta::new` opens a tab,
 /// which spawns a shell.
 struct SizeWatcher;

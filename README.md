@@ -73,6 +73,11 @@ Zetta falls back to the SSH byte stream, and says so, when the remote host has
 no usable Mosh server. Native background sessions on this machine are local and
 need no transport at all.
 
+Shared panes carried over SSH use the daemon's common terminal grid. Maximizing
+a pane can leave spare space until every viewer has room for a larger grid.
+During resizing, a smaller pane clips the existing grid until the daemon
+announces the new size, keeping TUI cursor movements consistent across viewers.
+
 Pass `-k`/`--keep-alive` when a link's WiFi power management stalls an idle
 session: it holds the connection to a packet in each direction every 500 ms
 (`--keep-alive=MS` to choose another interval) instead of Mosh's three-second

@@ -722,6 +722,7 @@ where
         build.executor,
         PathStyle::local(),
     )
+    .with_raw_output()
     .with_shared_viewport(initial_viewport)
     .with_working_directory(build.working_directory.clone())
     .with_replay(pane.replay.clone())
