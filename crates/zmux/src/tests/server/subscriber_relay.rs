@@ -132,3 +132,32 @@ fn an_old_relay_cannot_remove_a_replacement_subscription() {
         replacement.id
     );
 }
+
+#[test]
+fn a_revoke_targets_the_holder_when_both_clients_are_subscribed() {
+    let (daemon, _directory) = test_daemon();
+    let (holder, _holder_receiver) = relay_with_sender(1, 1, ClientId::new("holder"));
+    let (requester, _requester_receiver) = relay_with_sender(1, 2, ClientId::new("requester"));
+    let mut subscribers = daemon
+        .subscribers
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    subscribers.insert(
+        ClientId::new("holder"),
+        Subscriber {
+            process_id: 41,
+            relay: Arc::clone(&holder),
+        },
+    );
+    subscribers.insert(
+        ClientId::new("requester"),
+        Subscriber {
+            process_id: 42,
+            relay: requester,
+        },
+    );
+    drop(subscribers);
+
+    let target = subscriber_relay_for_process(&daemon, 41).expect("finding the holder relay");
+    assert_eq!(target.id, holder.id);
+}

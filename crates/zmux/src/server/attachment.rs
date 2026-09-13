@@ -210,7 +210,7 @@ pub(super) fn attach(
                 session_id,
                 pane_id,
             };
-            if let Some(subscriber) = subscriber_relay(daemon, &client_id, holder) {
+            if let Some(subscriber) = subscriber_relay_for_process(daemon, holder) {
                 enqueue_subscriber_event(daemon, &subscriber, &revoke);
             }
         }
@@ -346,7 +346,7 @@ pub(super) fn attach(
                     session_id,
                     pane_id,
                 };
-                if let Some(subscriber) = subscriber_relay(daemon, &client_id, holder) {
+                if let Some(subscriber) = subscriber_relay_for_process(daemon, holder) {
                     enqueue_subscriber_event(daemon, &subscriber, &revoke);
                 }
             }
@@ -1168,6 +1168,22 @@ pub(super) fn subscriber_relay(
                 .values()
                 .find(|subscriber| subscriber.process_id == process_id)
         })
+        .map(|subscriber| Arc::clone(&subscriber.relay))
+}
+
+/// Finds the client that currently owns an exclusive pane. A revoke must not
+/// prefer the attaching client's logical ID: both windows subscribe, and that
+/// would send the handover request back to the requester instead of its holder.
+pub(super) fn subscriber_relay_for_process(
+    daemon: &Arc<Daemon>,
+    process_id: u32,
+) -> Option<Arc<SubscriberRelay>> {
+    daemon
+        .subscribers
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .values()
+        .find(|subscriber| subscriber.process_id == process_id)
         .map(|subscriber| Arc::clone(&subscriber.relay))
 }
 
