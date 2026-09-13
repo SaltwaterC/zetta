@@ -228,6 +228,7 @@ fn build_shared_pane_terminal(
     } = build;
     let session_id = pane.session_id();
     let mux_pane_id = pane.pane_id();
+    let initial_viewport = pane.take_initial_viewport();
     // A pane added to a session whose panes travel over Mosh travels the same
     // way: half a tab on a transport the other half is not on would come apart
     // the moment either one was interrupted.
@@ -249,7 +250,7 @@ fn build_shared_pane_terminal(
             },
             stream,
         );
-        return (built, Some(session));
+        return (built.with_shared_viewport(initial_viewport), Some(session));
     }
     let built = TerminalBuilder::new_byte_stream(
         Box::new(pane.reader()),
@@ -264,6 +265,7 @@ fn build_shared_pane_terminal(
         executor,
         PathStyle::local(),
     )
+    .with_shared_viewport(initial_viewport)
     .with_working_directory(working_directory)
     .with_replay(pane.replay.clone())
     .with_pty_control(crate::mux::mux_pty_control_with_secret(

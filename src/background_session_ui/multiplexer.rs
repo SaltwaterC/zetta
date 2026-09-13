@@ -598,6 +598,7 @@ where
     I: IntoIterator<Item = (String, String)>,
 {
     let mux_pane_id = pane.pane_id();
+    let initial_viewport = pane.take_initial_viewport();
     if let Some(stream) = stream {
         let (built, session) = build_zosh_pane(
             ZoshPaneBuild {
@@ -614,7 +615,10 @@ where
             },
             stream,
         );
-        return (built, AttachedPaneRegistration::Relayed(session));
+        return (
+            built.with_shared_viewport(initial_viewport),
+            AttachedPaneRegistration::Relayed(session),
+        );
     }
     // The replay goes to `with_replay` below and *only* there. Prefixing the
     // reader with it as well wrote the restored screen twice: once here, into a
@@ -636,6 +640,7 @@ where
         build.executor,
         PathStyle::local(),
     )
+    .with_shared_viewport(initial_viewport)
     .with_working_directory(build.working_directory.clone())
     .with_replay(pane.replay.clone())
     .with_pty_control(crate::mux::mux_pty_control_with_secret(
