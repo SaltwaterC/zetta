@@ -383,7 +383,8 @@ impl SharedPane {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if *pending == Some(size) {
             *pending = None;
-            self.size_application_pending.store(false, Ordering::Release);
+            self.size_application_pending
+                .store(false, Ordering::Release);
         }
     }
 

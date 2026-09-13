@@ -4968,7 +4968,11 @@ fn wait_for_shared_size(
             Err(error) => panic!("reading the shared pane failed: {error}"),
         }
         let new_sizes = pane.take_revisioned_sizes();
-        sizes.extend(new_sizes.iter().map(|(_, columns, lines)| (*columns, *lines)));
+        sizes.extend(
+            new_sizes
+                .iter()
+                .map(|(_, columns, lines)| (*columns, *lines)),
+        );
         for (revision, columns, lines) in &new_sizes {
             pane.finish_size_application((*revision, *columns, *lines));
         }
