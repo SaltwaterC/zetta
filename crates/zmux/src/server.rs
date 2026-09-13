@@ -515,13 +515,15 @@ struct SubscriberRelay {
     client_id: ClientId,
     sender: SyncSender<Event>,
     closed: Arc<AtomicBool>,
+    receiver: Arc<Mutex<Option<mpsc::Receiver<Event>>>>,
+    connection: Arc<Mutex<Option<Connection>>>,
 }
 
 const SUBSCRIBER_RELAY_QUEUE_CAPACITY: usize = 16;
 const SUBSCRIBER_RELAY_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 
 impl SubscriberRelay {
-    fn start(daemon: &Arc<Daemon>, client_id: ClientId, connection: Connection) -> Arc<Self> {
+    fn new(daemon: &Arc<Daemon>, client_id: ClientId, connection: Connection) -> Arc<Self> {
         let id = daemon
             .next_subscriber_relay_id
             .fetch_add(1, Ordering::Relaxed);
@@ -529,13 +531,26 @@ impl SubscriberRelay {
         let receiver = Arc::new(Mutex::new(Some(receiver)));
         let connection = Arc::new(Mutex::new(Some(connection)));
         let closed = Arc::new(AtomicBool::new(false));
-        let relay = Arc::new(Self {
+        Arc::new(Self {
             id,
             client_id: client_id.clone(),
             sender,
             closed: Arc::clone(&closed),
-        });
+            receiver,
+            connection,
+        })
+    }
+
+    /// Starts delivery only after the relay has entered `Daemon::subscribers`.
+    /// A client can attach immediately after sending Subscribe, so publishing
+    /// the handle first ensures its first revoke is queued rather than missed.
+    fn start(&self, daemon: &Arc<Daemon>) {
         let daemon = Arc::downgrade(daemon);
+        let client_id = self.client_id.clone();
+        let id = self.id;
+        let closed = Arc::clone(&self.closed);
+        let receiver = Arc::clone(&self.receiver);
+        let connection = Arc::clone(&self.connection);
         spawn_worker("zmux subscription relay", move || {
             let daemon = daemon.clone();
             let client_id = client_id.clone();
@@ -556,7 +571,6 @@ impl SubscriberRelay {
                 run_subscriber_relay(daemon, client_id, id, closed, connection, receiver);
             })
         });
-        relay
     }
 
     /// Queues an event without waiting for the remote socket.  A full queue is

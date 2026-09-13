@@ -17,6 +17,8 @@ fn relay_with_sender(
         client_id,
         sender,
         closed: Arc::new(AtomicBool::new(false)),
+        receiver: Arc::new(Mutex::new(None)),
+        connection: Arc::new(Mutex::new(None)),
     });
     (relay, receiver)
 }

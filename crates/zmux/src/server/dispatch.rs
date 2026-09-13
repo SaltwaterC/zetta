@@ -80,7 +80,7 @@ pub(super) fn serve(daemon: &Arc<Daemon>, stream: Stream, token: &str) -> Result
             // holds a pane rather than broadcast to every subscriber. A client
             // that subscribes twice is the same process, so the later
             // connection replaces the earlier one.
-            let relay = SubscriberRelay::start(daemon, client_id.clone(), connection);
+            let relay = SubscriberRelay::new(daemon, client_id.clone(), connection);
             daemon
                 .subscribers
                 .lock()
@@ -89,9 +89,10 @@ pub(super) fn serve(daemon: &Arc<Daemon>, stream: Stream, token: &str) -> Result
                     client_id,
                     Subscriber {
                         process_id: envelope.client_process_id,
-                        relay,
+                        relay: Arc::clone(&relay),
                     },
                 );
+            relay.start(daemon);
             Ok(())
         }
         Request::Spawn(request) => {
