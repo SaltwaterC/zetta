@@ -14,6 +14,93 @@ use crate::session_auth_ui::SessionAuthenticationPromptMode;
 const REMOTE_SESSION_SUGGESTION_VIEWPORT_ROWS: usize = 6;
 const REMOTE_SESSION_SUGGESTION_VIEWPORT_HEIGHT: gpui::Rems =
     gpui::rems(1.75 * REMOTE_SESSION_SUGGESTION_VIEWPORT_ROWS as f32);
+const REMOTE_ERROR_MAX_CHARS: usize = 240;
+
+/// Turn output from a remote login shell into a short message that can safely
+/// live in the picker. Login-shell startup scripts often emit ANSI colour
+/// sequences and several unrelated diagnostics before `zmux` gets to run;
+/// showing that whole stream makes the picker grow past its useful controls.
+fn remote_error_message(error: &anyhow::Error) -> String {
+    let output = strip_remote_terminal_sequences(&format!("{error:#}"));
+    let lower_output = output.to_ascii_lowercase();
+    if lower_output.contains("exit status: 127")
+        || lower_output.contains("command not found: zmux")
+        || lower_output.contains("zmux: command not found")
+    {
+        return "Remote zmux could not be started (exit status 127). Make sure it is installed and available in the remote login shell's PATH.".to_owned();
+    }
+
+    let mut message = output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .take(3)
+        .collect::<Vec<_>>()
+        .join(" ");
+    if message.is_empty() {
+        message = "The remote operation failed.".to_owned();
+    }
+    truncate_remote_error(&message)
+}
+
+/// Remove terminal control sequences before a remote error reaches a regular
+/// text element. The UI is not a terminal, so rendering CSI/OSC bytes as
+/// printable text is both noisy and liable to produce surprising layout.
+fn strip_remote_terminal_sequences(output: &str) -> String {
+    let mut cleaned = String::with_capacity(output.len());
+    let mut characters = output.chars();
+    while let Some(character) = characters.next() {
+        if character != '\x1b' {
+            match character {
+                '\n' => cleaned.push('\n'),
+                '\t' => cleaned.push(' '),
+                character if character.is_control() => {}
+                character => cleaned.push(character),
+            }
+            continue;
+        }
+
+        match characters.next() {
+            Some('[') => {
+                for character in characters.by_ref() {
+                    if ('@'..='~').contains(&character) {
+                        break;
+                    }
+                }
+            }
+            Some(']') => {
+                let mut terminated_by_escape = false;
+                for character in characters.by_ref() {
+                    if character == '\x07' {
+                        break;
+                    }
+                    if terminated_by_escape {
+                        if character == '\\' {
+                            break;
+                        }
+                        terminated_by_escape = false;
+                    } else if character == '\x1b' {
+                        terminated_by_escape = true;
+                    }
+                }
+            }
+            Some(_) | None => {}
+        }
+    }
+    cleaned
+}
+
+fn truncate_remote_error(message: &str) -> String {
+    if message.chars().count() <= REMOTE_ERROR_MAX_CHARS {
+        return message.to_owned();
+    }
+    let mut truncated = message
+        .chars()
+        .take(REMOTE_ERROR_MAX_CHARS.saturating_sub(1))
+        .collect::<String>();
+    truncated.push('…');
+    truncated
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RemoteSessionField {
@@ -461,7 +548,7 @@ impl Zetta {
             }
             Err(error) => {
                 if let Some(picker) = self.remote_session_picker.as_mut() {
-                    picker.error = Some(format!("{error:#}"));
+                    picker.error = Some(remote_error_message(&error));
                 }
                 self.remote_session_focus.focus(window, cx);
                 cx.notify();
@@ -477,7 +564,7 @@ impl Zetta {
             Ok(spec) => spec,
             Err(error) => {
                 if let Some(picker) = self.remote_session_picker.as_mut() {
-                    picker.error = Some(format!("{error:#}"));
+                    picker.error = Some(remote_error_message(&error));
                 }
                 self.remote_session_focus.focus(window, cx);
                 cx.notify();
@@ -589,7 +676,8 @@ impl Zetta {
                     ),
                     Err(error) => self.show_notice(
                         format!(
-                            "Created remote session {session_id}, but could not show it: {error:#}"
+                            "Created remote session {session_id}, but could not show it: {}",
+                            remote_error_message(&error)
                         ),
                         cx,
                     ),
@@ -606,7 +694,13 @@ impl Zetta {
                 self.remote_session_target = None;
             }
             Err(error) => {
-                self.show_notice(format!("Could not create a remote session: {error:#}"), cx);
+                self.show_notice(
+                    format!(
+                        "Could not create a remote session: {}",
+                        remote_error_message(&error)
+                    ),
+                    cx,
+                );
                 self.remote_session_target = None;
             }
         }
@@ -621,7 +715,7 @@ impl Zetta {
             Ok(target) => target,
             Err(error) => {
                 if let Some(picker) = self.remote_session_picker.as_mut() {
-                    picker.error = Some(format!("{error:#}"));
+                    picker.error = Some(remote_error_message(&error));
                 }
                 self.remote_session_focus.focus(window, cx);
                 cx.notify();
@@ -702,7 +796,7 @@ impl Zetta {
                     .unwrap_or(0);
                 picker.profile_error = None;
             }
-            Err(error) => picker.profile_error = Some(format!("{error:#}")),
+            Err(error) => picker.profile_error = Some(remote_error_message(&error)),
         }
         match result.sessions {
             Ok(sessions) => {
@@ -721,7 +815,7 @@ impl Zetta {
                     picker.scroll.scroll_to_item(0, ScrollStrategy::Top);
                 }
             }
-            Err(error) => picker.error = Some(format!("{error:#}")),
+            Err(error) => picker.error = Some(remote_error_message(&error)),
         }
         self.remote_session_focus.focus(window, cx);
         cx.notify();
@@ -759,7 +853,7 @@ impl Zetta {
                     picker.scroll.scroll_to_item(0, ScrollStrategy::Top);
                 }
             }
-            Err(error) => picker.error = Some(format!("{error:#}")),
+            Err(error) => picker.error = Some(remote_error_message(&error)),
         }
         self.remote_session_focus.focus(window, cx);
         cx.notify();
@@ -784,7 +878,7 @@ impl Zetta {
             }
             Err(error) => {
                 if let Some(picker) = self.remote_session_picker.as_mut() {
-                    picker.error = Some(format!("{error:#}"));
+                    picker.error = Some(remote_error_message(&error));
                 }
                 self.remote_session_focus.focus(window, cx);
                 cx.notify();
@@ -870,8 +964,9 @@ impl Zetta {
                     Err(error) => {
                         if let Some(picker) = self.remote_session_picker.as_mut() {
                             picker.error = Some(format!(
-                                "Could not show remote session {}: {error:#}",
-                                summary.id
+                                "Could not show remote session {}: {}",
+                                summary.id,
+                                remote_error_message(&error)
                             ));
                         }
                         self.remote_session_focus.focus(window, cx);
@@ -905,8 +1000,9 @@ impl Zetta {
             Err(error) => {
                 if let Some(picker) = self.remote_session_picker.as_mut() {
                     picker.error = Some(format!(
-                        "Could not attach remote session {}: {error:#}",
-                        summary.id
+                        "Could not attach remote session {}: {}",
+                        summary.id,
+                        remote_error_message(&error)
                     ));
                 }
                 self.remote_session_focus.focus(window, cx);
@@ -1143,7 +1239,11 @@ impl Zetta {
                 )
             })
             .when_some(error, |panel, error| {
-                panel.child(div().p_2().text_sm().text_color(error_color).child(error))
+                panel.child(div().p_2().min_w_0().child(remote_session_error(
+                    error,
+                    error_color,
+                    LabelSize::Small,
+                )))
             });
 
         let field_widget = |id: &'static str,
@@ -1872,8 +1972,17 @@ fn remote_session_create_options(options: RemoteSessionCreateOptions<'_>) -> imp
                 })),
         )
         .when_some(profile_error, |panel, error| {
-            panel.child(div().text_xs().text_color(error_color).child(error))
+            panel.child(remote_session_error(error, error_color, LabelSize::XSmall))
         })
+}
+
+fn remote_session_error(error: String, error_color: Hsla, size: LabelSize) -> impl IntoElement {
+    div().min_w_0().child(
+        Label::new(error)
+            .size(size)
+            .color(Color::Custom(error_color))
+            .line_clamp(3),
+    )
 }
 
 struct RemoteSessionChoice<'a> {

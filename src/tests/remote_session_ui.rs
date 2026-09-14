@@ -114,6 +114,38 @@ fn remote_picker_starts_on_the_target_field() {
 }
 
 #[test]
+fn remote_shell_startup_failures_are_short_and_readable() {
+    let error = anyhow::anyhow!(
+        "SSH endpoint query failed with exit status: 127: (anon):setopt:7: can't change option: monitor\n\n\x1b[31mERROR\x1b[39m: gitstatus failed to initialize.\n\n\x1b[32mexec zsh\x1b[39m\nzsh:1: command not found: zmux"
+    );
+
+    let message = remote_error_message(&error);
+
+    assert_eq!(
+        message,
+        "Remote zmux could not be started (exit status 127). Make sure it is installed and available in the remote login shell's PATH."
+    );
+    assert!(!message.contains('\x1b'));
+    assert!(!message.contains("gitstatus"));
+}
+
+#[test]
+fn remote_errors_strip_terminal_sequences_and_are_bounded() {
+    let error = anyhow::anyhow!(
+        "\x1b]0;remote\x07\x1b[31mremote operation failed\x1b[39m\nsecond detail\n{}",
+        "long detail ".repeat(40)
+    );
+
+    let message = remote_error_message(&error);
+
+    assert!(message.starts_with("remote operation failed"));
+    assert!(message.contains("second detail"));
+    assert!(!message.contains('\x1b'));
+    assert!(message.chars().count() <= REMOTE_ERROR_MAX_CHARS);
+    assert!(message.ends_with('…'));
+}
+
+#[test]
 fn create_is_available_only_after_remote_profiles_and_templates_load() {
     let mut picker = RemoteSessionPicker {
         field: RemoteSessionField::Create,
