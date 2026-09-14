@@ -66,6 +66,11 @@ without exposing it in shell history or the process list. `--layout -` reads
 the JSON layout from standard input, and therefore cannot be combined with
 `--secret-stdin`.
 
+The remote-session dialog's Template selector always starts with **Single pane**,
+which uses the selected remote profile. Configured split templates follow it as
+alternatives; they remain subject to their existing remote profile validation.
+This built-in option is available even when no split templates are configured.
+
 `SESSION_ID` accepts the short numeric session ID when it is unambiguous, and
 the stable `PROCESS:RUNNER:SESSION` identifier printed by `zmux list` in every
 case. The human-readable list shows both forms for an unambiguous session and

@@ -115,6 +115,21 @@ pub(crate) enum RemoteSessionField {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum RemoteSessionTemplate {
+    SinglePane,
+    Configured(String),
+}
+
+impl RemoteSessionTemplate {
+    fn label(&self) -> &str {
+        match self {
+            Self::SinglePane => "Single pane",
+            Self::Configured(name) => name,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct RemoteSessionSuggestionNavigation {
     filter: String,
     selected: usize,
@@ -169,7 +184,7 @@ pub(crate) struct RemoteSessionPicker {
     pub(crate) selected_profile: usize,
     pub(crate) profiles_loading: bool,
     pub(crate) profile_error: Option<String>,
-    pub(crate) templates: Vec<String>,
+    pub(crate) templates: Vec<RemoteSessionTemplate>,
     pub(crate) selected_template: usize,
     pub(crate) creating: bool,
     pub(crate) suggestions: Vec<String>,
@@ -197,7 +212,7 @@ impl Default for RemoteSessionPicker {
             selected_profile: 0,
             profiles_loading: false,
             profile_error: None,
-            templates: Vec::new(),
+            templates: vec![RemoteSessionTemplate::SinglePane],
             selected_template: 0,
             creating: false,
             suggestions: Vec::new(),
@@ -356,7 +371,6 @@ impl RemoteSessionPicker {
 
     fn can_create(&self) -> bool {
         !self.profiles.is_empty()
-            && !self.templates.is_empty()
             && self.selected_profile < self.profiles.len()
             && self.selected_template < self.templates.len()
     }
@@ -405,6 +419,16 @@ fn sorted_names(values: impl IntoIterator<Item = String>) -> Vec<String> {
     values
 }
 
+fn remote_session_templates(config: &Config) -> Vec<RemoteSessionTemplate> {
+    std::iter::once(RemoteSessionTemplate::SinglePane)
+        .chain(
+            sorted_names(config.pane_split_templates.keys().cloned())
+                .into_iter()
+                .map(RemoteSessionTemplate::Configured),
+        )
+        .collect()
+}
+
 impl Zetta {
     pub(crate) fn next_remote_session_operation_generation(&mut self) -> u64 {
         self.remote_session_operation_generation =
@@ -432,7 +456,7 @@ impl Zetta {
             self.serial_console = None;
         }
         let remote = self.launch_config.sessions.remote.clone();
-        let templates = sorted_names(self.effective_config().pane_split_templates.keys().cloned());
+        let templates = remote_session_templates(self.effective_config());
         let picker = RemoteSessionPicker {
             suggestions: crate::multi_command::ssh_config_host_suggestions(),
             generation: operation_generation,
@@ -535,7 +559,7 @@ impl Zetta {
             });
             (values, picker.can_create())
         };
-        let (target, transport, template_name, profile_name, profiles) = match values {
+        let (target, transport, template, profile_name, profiles) = match values {
             Ok(values) if can_create => values,
             Ok(_) => {
                 if let Some(picker) = self.remote_session_picker.as_mut() {
@@ -557,7 +581,7 @@ impl Zetta {
         };
         let spec = match build_remote_create_spec(
             self.effective_config(),
-            &template_name,
+            &template,
             &profile_name,
             &profiles,
         ) {
@@ -1190,11 +1214,10 @@ impl Zetta {
                     "Load remote profiles".to_owned()
                 }
             });
-        let template_value = picker
-            .templates
-            .get(picker.selected_template)
-            .cloned()
-            .unwrap_or_else(|| "No templates configured".to_owned());
+        let template_value = picker.templates.get(picker.selected_template).map_or_else(
+            || "No templates configured".to_owned(),
+            |template| template.label().to_owned(),
+        );
         let profile_error = picker.profile_error.clone();
         let can_create = picker.can_create();
         let creating = picker.creating;
@@ -1357,19 +1380,29 @@ impl Zetta {
 
 fn build_remote_create_spec(
     config: &Config,
-    template_name: &str,
+    template_option: &RemoteSessionTemplate,
     default_profile: &str,
     remote_profiles: &[String],
 ) -> anyhow::Result<zmux::headless::CreateSpec> {
-    let template = config
-        .pane_split_templates
-        .get(template_name)
-        .with_context(|| format!("remote template {template_name:?} is no longer available"))?;
-    let mut panes = Vec::with_capacity(template.pane_count());
+    let empty_environment = HashMap::new();
+    let single_pane = PaneSplitTemplate::Pane(Box::default());
+    let (layout_template, template_environment) = match template_option {
+        RemoteSessionTemplate::SinglePane => (&single_pane, &empty_environment),
+        RemoteSessionTemplate::Configured(template_name) => {
+            let template = config
+                .pane_split_templates
+                .get(template_name)
+                .with_context(|| {
+                    format!("remote template {template_name:?} is no longer available")
+                })?;
+            (&template.layout, &template.env)
+        }
+    };
+    let mut panes = Vec::with_capacity(layout_template.pane_count());
     let mut next_draft_id = 1;
     let layout = build_remote_create_layout(
-        &template.layout,
-        &template.env,
+        layout_template,
+        template_environment,
         default_profile,
         remote_profiles,
         &mut panes,

@@ -114,6 +114,65 @@ fn remote_picker_starts_on_the_target_field() {
 }
 
 #[test]
+fn single_pane_is_first_and_selected_by_default() {
+    let picker = RemoteSessionPicker::default();
+
+    assert_eq!(picker.selected_template, 0);
+    assert_eq!(picker.templates, vec![RemoteSessionTemplate::SinglePane]);
+    assert_eq!(picker.templates[0].label(), "Single pane");
+}
+
+#[test]
+fn single_pane_precedes_sorted_configured_templates() {
+    let mut config = Config::defaults(None, None);
+    config.pane_split_templates.clear();
+    config.pane_split_templates.insert(
+        "zulu".to_owned(),
+        PaneSplitTemplateConfig {
+            layout: PaneSplitTemplate::Pane(Box::default()),
+            env: HashMap::new(),
+        },
+    );
+    config.pane_split_templates.insert(
+        "Alpha".to_owned(),
+        PaneSplitTemplateConfig {
+            layout: PaneSplitTemplate::Pane(Box::default()),
+            env: HashMap::new(),
+        },
+    );
+
+    assert_eq!(
+        remote_session_templates(&config),
+        vec![
+            RemoteSessionTemplate::SinglePane,
+            RemoteSessionTemplate::Configured("Alpha".to_owned()),
+            RemoteSessionTemplate::Configured("zulu".to_owned()),
+        ]
+    );
+}
+
+#[test]
+fn template_cycling_wraps_between_single_pane_and_configured_templates() {
+    let mut picker = RemoteSessionPicker {
+        templates: vec![
+            RemoteSessionTemplate::SinglePane,
+            RemoteSessionTemplate::Configured("one".to_owned()),
+            RemoteSessionTemplate::Configured("two".to_owned()),
+        ],
+        ..Default::default()
+    };
+
+    picker.cycle_template(false);
+    assert_eq!(picker.selected_template, 1);
+    picker.cycle_template(false);
+    assert_eq!(picker.selected_template, 2);
+    picker.cycle_template(false);
+    assert_eq!(picker.selected_template, 0);
+    picker.cycle_template(true);
+    assert_eq!(picker.selected_template, 2);
+}
+
+#[test]
 fn remote_shell_startup_failures_are_short_and_readable() {
     let error = anyhow::anyhow!(
         "SSH endpoint query failed with exit status: 127: (anon):setopt:7: can't change option: monitor\n\n\x1b[31mERROR\x1b[39m: gitstatus failed to initialize.\n\n\x1b[32mexec zsh\x1b[39m\nzsh:1: command not found: zmux"
@@ -150,7 +209,7 @@ fn create_is_available_only_after_remote_profiles_and_templates_load() {
     let mut picker = RemoteSessionPicker {
         field: RemoteSessionField::Create,
         profiles: vec!["System".to_owned()],
-        templates: vec!["single".to_owned()],
+        templates: vec![RemoteSessionTemplate::Configured("split".to_owned())],
         ..Default::default()
     };
 
@@ -162,6 +221,70 @@ fn create_is_available_only_after_remote_profiles_and_templates_load() {
     picker.profiles_loading = false;
     picker.creating = true;
     assert_eq!(picker.enter_action(), RemoteSessionEnterAction::Ignore);
+}
+
+#[test]
+fn create_is_available_with_remote_profiles_and_no_configured_templates() {
+    let picker = RemoteSessionPicker {
+        field: RemoteSessionField::Create,
+        profiles: vec!["Remote shell".to_owned()],
+        templates: vec![RemoteSessionTemplate::SinglePane],
+        ..Default::default()
+    };
+
+    assert!(picker.can_create());
+    assert_eq!(picker.enter_action(), RemoteSessionEnterAction::Create);
+}
+
+#[test]
+fn single_pane_creation_uses_the_selected_remote_profile() {
+    let config = Config::defaults(None, None);
+    let spec = build_remote_create_spec(
+        &config,
+        &RemoteSessionTemplate::SinglePane,
+        "Remote shell",
+        &["Remote shell".to_owned()],
+    )
+    .expect("single-pane creation should build a remote spec");
+
+    assert_eq!(spec.panes.len(), 1);
+    assert_eq!(
+        spec.layout,
+        zmux::messages::SharedDraftLayout::Draft { draft_id: 1 }
+    );
+    assert_eq!(
+        spec.active_pane,
+        zmux::messages::SharedPaneRef::Draft { draft_id: 1 }
+    );
+    let pane = &spec.panes[0];
+    assert_eq!(pane.draft_id, 1);
+    assert_eq!(pane.profile, "Remote shell");
+    assert!(pane.command.is_none());
+    assert!(pane.env.is_empty());
+    assert!(pane.load_shell_integration);
+    assert_eq!(pane.size.columns, zmux::headless::DEFAULT_COLUMNS);
+    assert_eq!(pane.size.lines, zmux::headless::DEFAULT_LINES);
+    assert_eq!(pane.metadata.label, "pane-1");
+    assert_eq!(pane.metadata.profile, "Remote shell");
+    assert_eq!(pane.metadata.application, "Remote shell");
+}
+
+#[test]
+fn configured_split_template_creation_still_builds_every_pane() {
+    let config = Config::defaults(None, None);
+    let spec = build_remote_create_spec(
+        &config,
+        &RemoteSessionTemplate::Configured("three-right".to_owned()),
+        "System",
+        &["System".to_owned()],
+    )
+    .expect("configured split creation should build a remote spec");
+
+    assert_eq!(spec.panes.len(), 3);
+    assert!(matches!(
+        spec.layout,
+        zmux::messages::SharedDraftLayout::Split { .. }
+    ));
 }
 
 #[test]
