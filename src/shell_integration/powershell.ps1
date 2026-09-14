@@ -630,10 +630,12 @@ $zettaCompletions = {
             'mux' {
                 if ($words.Count -le 2) {
                     if ($noMux) { 'list', 'reconnect', '--json', '--help', '--version' }
-                    else { 'list', 'stop', 'reconnect', 'attach', 'resume', 'share', 'unshare', 'kill', 'forget', '--json', '--ids-only', '--ssh-target', '--port', '--upgrade', '--identity', '--help', '--version' }
+                    else { 'list', 'profiles', 'create', 'stop', 'reconnect', 'attach', 'resume', 'share', 'unshare', 'kill', 'forget', '--json', '--ids-only', '--ssh-target', '--port', '--upgrade', '--identity', '--secret-stdin', '--layout', '--profile', '--title', '--working-directory', '--env', '--retention', '--help', '--version' }
                 }
                 elseif ($noMux -and $words[2] -notin 'list', 'reconnect', 'attach') { @() }
                 elseif ($words[2] -eq 'stop') { '--force', '--help' }
+                elseif ($words[2] -eq 'profiles') { '--json', '--ssh-target', '--port', '--help', '--version' }
+                elseif ($words[2] -eq 'create') { '--json', '--secret-stdin', '--layout', '--profile', '--title', '--working-directory', '--env', '--retention', '--ssh-target', '--port', '--help', '--version' }
                 elseif ($words[2] -eq 'attach') { '--ssh-target', '--port', '--protocol', '--keep-alive', '--identity', '--help' }
                 elseif ($words[2] -in 'resume', 'reconnect') { '--identity', '--help' }
                 else { '--json', '--ids-only', '--ssh-target', '--port', '--help' }

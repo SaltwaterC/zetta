@@ -42,6 +42,9 @@ const REMOTE_ENDPOINT_COMMAND: &str = r#"/bin/sh -c 'exec 3>&1 1>/dev/null; exec
 const REMOTE_PROGRAM_COMMAND: &str =
     r#"/bin/sh -c 'exec 3>&1 1>/dev/null; exec "${SHELL:-/bin/sh}" -lic "command -v zmux >&3"'"#;
 
+/// Runs the standalone profile discovery command without requiring a daemon.
+const REMOTE_PROFILES_COMMAND: &str = r#"/bin/sh -c 'exec 3>&1 1>/dev/null; exec "${SHELL:-/bin/sh}" -lic "exec zmux profiles --json >&3"'"#;
+
 /// A destination understood by OpenSSH.
 ///
 /// `destination` is deliberately passed as one argument to `ssh`, so aliases,
@@ -140,13 +143,29 @@ impl RemoteTransport {
     /// run against a small fake SSH program without requiring an SSH server.
     pub fn with_ssh_program(target: RemoteTarget, ssh_program: impl Into<PathBuf>) -> Result<Self> {
         target.validate()?;
-        let transport = Self {
+        let transport = Self::for_creation_with_ssh_program(target, ssh_program)?;
+        transport.refresh()?;
+        Ok(transport)
+    }
+
+    /// Creates a transport for an operation that may need to start the remote
+    /// daemon. Unlike [`Self::with_ssh_program`], this does not query an
+    /// existing endpoint during construction.
+    pub fn for_creation(target: RemoteTarget) -> Result<Self> {
+        Self::for_creation_with_ssh_program(target, PathBuf::from("ssh"))
+    }
+
+    /// Testable form of [`Self::for_creation`].
+    pub fn for_creation_with_ssh_program(
+        target: RemoteTarget,
+        ssh_program: impl Into<PathBuf>,
+    ) -> Result<Self> {
+        target.validate()?;
+        Ok(Self {
             target,
             ssh_program: ssh_program.into(),
             state: Mutex::new(RemoteState { forward: None }),
-        };
-        transport.refresh()?;
-        Ok(transport)
+        })
     }
 
     pub fn target(&self) -> &RemoteTarget {
@@ -415,6 +434,61 @@ impl RemoteTransport {
         Ok(path)
     }
 
+    /// Returns the names the remote host can resolve through its standalone
+    /// `zmux` profile boundary. This intentionally does not start a daemon.
+    pub fn query_profiles(&self) -> Result<Vec<String>> {
+        let output = run_capture(
+            &self.ssh_program,
+            &profiles_arguments(&self.target),
+            ENDPOINT_TIMEOUT,
+        )?;
+        let text = std::str::from_utf8(&output.stdout)
+            .context("remote profile output was not UTF-8")?
+            .trim();
+        anyhow::ensure!(
+            !text.is_empty(),
+            "remote zmux profile query returned no JSON"
+        );
+        let mut profiles: Vec<String> =
+            serde_json::from_str(text).context("parsing remote `zmux profiles --json` output")?;
+        profiles.retain(|profile| !profile.trim().is_empty());
+        profiles.sort_unstable_by_key(|profile| profile.to_ascii_lowercase());
+        profiles.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
+        anyhow::ensure!(
+            !profiles.is_empty(),
+            "remote zmux profile query returned no profiles"
+        );
+        Ok(profiles)
+    }
+
+    /// Starts the remote standalone daemon when it is not already reachable,
+    /// then waits for its endpoint to become available.
+    pub fn ensure_daemon(&self) -> Result<Endpoint> {
+        if let Ok(endpoint) = self.query_endpoint() {
+            return Ok(endpoint);
+        }
+        let program = self.resolve_remote_program()?;
+        let arguments = start_daemon_arguments(&self.target, &program);
+        run_capture(&self.ssh_program, &arguments, ENDPOINT_TIMEOUT)
+            .context("starting the remote zmux daemon")?;
+        let deadline = Instant::now() + ENDPOINT_TIMEOUT;
+        loop {
+            match self.query_endpoint() {
+                Ok(endpoint) => return Ok(endpoint),
+                Err(error) if Instant::now() < deadline => {
+                    log::debug!(
+                        "remote zmux daemon for {} is not ready: {error:#}",
+                        self.target.destination()
+                    );
+                    thread::sleep(POLL_INTERVAL);
+                }
+                Err(error) => {
+                    return Err(error).context("waiting for the remote zmux daemon endpoint");
+                }
+            }
+        }
+    }
+
     fn query_endpoint(&self) -> Result<Endpoint> {
         let arguments = endpoint_arguments(&self.target);
         let output = run_capture(&self.ssh_program, &arguments, ENDPOINT_TIMEOUT)?;
@@ -470,6 +544,41 @@ fn program_arguments(target: &RemoteTarget) -> Vec<String> {
         REMOTE_PROGRAM_COMMAND.to_owned(),
     ]);
     arguments
+}
+
+fn profiles_arguments(target: &RemoteTarget) -> Vec<String> {
+    let mut arguments = vec!["-T".to_owned()];
+    if let Some(port) = target.port {
+        arguments.push("-p".to_owned());
+        arguments.push(port.to_string());
+    }
+    arguments.extend([
+        target.destination.clone(),
+        REMOTE_PROFILES_COMMAND.to_owned(),
+    ]);
+    arguments
+}
+
+fn start_daemon_arguments(target: &RemoteTarget, program: &Path) -> Vec<String> {
+    let mut arguments = vec!["-T".to_owned()];
+    if let Some(port) = target.port {
+        arguments.push("-p".to_owned());
+        arguments.push(port.to_string());
+    }
+    let program = shell_escape_double_quoted(&program.to_string_lossy());
+    let command = format!(
+        r#"/bin/sh -c 'exec "${{SHELL:-/bin/sh}}" -lic "nohup \"{program}\" --daemon >/dev/null 2>&1 </dev/null &"'"#
+    );
+    arguments.extend([target.destination.clone(), command]);
+    arguments
+}
+
+fn shell_escape_double_quoted(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('$', "\\$")
+        .replace('`', "\\`")
 }
 
 fn forward_arguments(target: &RemoteTarget, forwarding: &str) -> Vec<String> {

@@ -114,6 +114,25 @@ fn remote_picker_starts_on_the_target_field() {
 }
 
 #[test]
+fn create_is_available_only_after_remote_profiles_and_templates_load() {
+    let mut picker = RemoteSessionPicker {
+        field: RemoteSessionField::Create,
+        profiles: vec!["System".to_owned()],
+        templates: vec!["single".to_owned()],
+        ..Default::default()
+    };
+
+    assert_eq!(picker.enter_action(), RemoteSessionEnterAction::Create);
+
+    picker.profiles_loading = true;
+    assert_eq!(picker.enter_action(), RemoteSessionEnterAction::Ignore);
+
+    picker.profiles_loading = false;
+    picker.creating = true;
+    assert_eq!(picker.enter_action(), RemoteSessionEnterAction::Ignore);
+}
+
+#[test]
 fn invalidating_picker_results_clears_a_pending_attach() {
     let mut picker = RemoteSessionPicker {
         attach_generation: Some(9),
@@ -616,7 +635,10 @@ fn the_keep_alive_field_is_only_in_the_tab_order_under_zosh() {
         vec![
             RemoteSessionField::Port,
             RemoteSessionField::Protocol,
+            RemoteSessionField::Profile,
+            RemoteSessionField::Template,
             RemoteSessionField::List,
+            RemoteSessionField::Create,
             RemoteSessionField::Target,
         ]
     );
@@ -631,7 +653,10 @@ fn the_keep_alive_field_is_only_in_the_tab_order_under_zosh() {
             RemoteSessionField::Port,
             RemoteSessionField::Protocol,
             RemoteSessionField::KeepAlive,
+            RemoteSessionField::Profile,
+            RemoteSessionField::Template,
             RemoteSessionField::List,
+            RemoteSessionField::Create,
             RemoteSessionField::Target,
         ]
     );

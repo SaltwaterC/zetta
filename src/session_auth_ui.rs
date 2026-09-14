@@ -26,6 +26,10 @@ pub(crate) enum SessionAuthenticationPromptMode {
     RemoteAttach {
         session_id: u64,
     },
+    /// Choosing an optional secret for a headless remote session before the
+    /// daemon creates it.
+    #[cfg(feature = "zmux")]
+    RemoteCreate,
     ResumeDisk {
         session_id: u64,
     },
@@ -61,6 +65,11 @@ pub(crate) enum SessionAuthenticationField {
 /// cannot be confused for one another when the result is matched below.
 enum Outcome {
     Created(SessionAuthentication),
+    #[cfg(feature = "zmux")]
+    CreatedRemote {
+        authentication: SessionAuthentication,
+        secret: SessionSecret,
+    },
     Verified(Option<VerifiedSession>),
 }
 
@@ -527,7 +536,7 @@ impl Zetta {
         );
     }
 
-    fn open_session_authentication_prompt(
+    pub(crate) fn open_session_authentication_prompt(
         &mut self,
         mode: SessionAuthenticationPromptMode,
         window: &mut Window,
@@ -563,6 +572,10 @@ impl Zetta {
             SessionAuthenticationPromptMode::Reconnect { .. }
             | SessionAuthenticationPromptMode::RemoteAttach { .. }
             | SessionAuthenticationPromptMode::ResumeDisk { .. } => {}
+            #[cfg(feature = "zmux")]
+            SessionAuthenticationPromptMode::RemoteCreate => {
+                self.start_remote_session_create(None, None, window, cx);
+            }
             // There is no "without": the identity file is encrypted and its
             // passphrase is the only way to read it.
             #[cfg(feature = "session-persistence")]
@@ -579,6 +592,14 @@ impl Zetta {
                 .map(|prompt| prompt.mode),
             Some(SessionAuthenticationPromptMode::RemoteAttach { .. }),
         );
+        #[cfg(feature = "zmux")]
+        let remote_attach = remote_attach
+            || matches!(
+                self.session_authentication
+                    .as_ref()
+                    .map(|prompt| prompt.mode),
+                Some(SessionAuthenticationPromptMode::RemoteCreate),
+            );
         #[cfg(feature = "session-persistence")]
         let remote_attach = remote_attach
             || matches!(
@@ -589,7 +610,10 @@ impl Zetta {
             );
         if remote_attach {
             #[cfg(feature = "zmux")]
-            self.next_remote_session_operation_generation();
+            {
+                self.next_remote_session_operation_generation();
+                self.remote_session_create = None;
+            }
             self.remote_session_target = None;
             #[cfg(feature = "session-persistence")]
             {
@@ -687,6 +711,8 @@ impl Zetta {
             SessionAuthenticationPromptMode::UnlockRemoteSealedSession { .. } => {
                 unreachable!("the remote identity passphrase is handled before the verifier")
             }
+            #[cfg(feature = "zmux")]
+            SessionAuthenticationPromptMode::RemoteCreate => None,
         };
         cx.spawn_in(window, async move |this, cx| {
             let result = cx
@@ -721,21 +747,28 @@ impl Zetta {
             return false;
         };
         let secret = Zeroizing::new(prompt.secret.text.clone());
-        match mode {
-            SessionAuthenticationPromptMode::Protect { .. } => {
-                match session_authentication_choice(&secret, &prompt.confirmation.text) {
-                    SessionAuthenticationChoice::Unprotected => {
-                        self.continue_without_session_authentication(window, cx);
-                        return false;
-                    }
-                    SessionAuthenticationChoice::Protected => {}
-                    SessionAuthenticationChoice::Incomplete => {
-                        prompt.error = Some("Enter the same secret in both fields.".into());
-                        cx.notify();
-                        return false;
-                    }
+        let optional_secret = match mode {
+            SessionAuthenticationPromptMode::Protect { .. } => true,
+            #[cfg(feature = "zmux")]
+            SessionAuthenticationPromptMode::RemoteCreate => true,
+            _ => false,
+        };
+        if optional_secret {
+            match session_authentication_choice(&secret, &prompt.confirmation.text) {
+                SessionAuthenticationChoice::Unprotected => {
+                    self.continue_without_session_authentication(window, cx);
+                    return false;
+                }
+                SessionAuthenticationChoice::Protected => {}
+                SessionAuthenticationChoice::Incomplete => {
+                    prompt.error = Some("Enter the same secret in both fields.".into());
+                    cx.notify();
+                    return false;
                 }
             }
+        }
+        match mode {
+            SessionAuthenticationPromptMode::Protect { .. } => {}
             SessionAuthenticationPromptMode::Reconnect { .. }
             | SessionAuthenticationPromptMode::RemoteAttach { .. }
                 if secret.is_empty() =>
@@ -766,6 +799,8 @@ impl Zetta {
             SessionAuthenticationPromptMode::RemoteAttach { .. } => {
                 unreachable!("remote attach is handled before the local verifier")
             }
+            #[cfg(feature = "zmux")]
+            SessionAuthenticationPromptMode::RemoteCreate => {}
             #[cfg(feature = "session-persistence")]
             SessionAuthenticationPromptMode::UnlockSealedSession { .. } => {
                 unreachable!("the identity passphrase is handled before the verifier")
@@ -942,6 +977,17 @@ impl Zetta {
                     cx,
                 );
             }
+            #[cfg(feature = "zmux")]
+            (
+                SessionAuthenticationPromptMode::RemoteCreate,
+                Ok(Outcome::CreatedRemote {
+                    authentication,
+                    secret,
+                }),
+            ) => {
+                this.session_authentication = None;
+                this.start_remote_session_create(Some(authentication), Some(secret), window, cx);
+            }
             (
                 SessionAuthenticationPromptMode::Reconnect {
                     runner_id,
@@ -1089,6 +1135,8 @@ impl Zetta {
             SessionAuthenticationPromptMode::Protect { .. } => true,
             SessionAuthenticationPromptMode::Reconnect { .. } => false,
             SessionAuthenticationPromptMode::RemoteAttach { .. } => false,
+            #[cfg(feature = "zmux")]
+            SessionAuthenticationPromptMode::RemoteCreate => true,
             // One field: the identity's passphrase, and nothing else to type.
             #[cfg(feature = "session-persistence")]
             SessionAuthenticationPromptMode::UnlockSealedSession { .. } => false,
@@ -1152,6 +1200,8 @@ impl Zetta {
             SessionAuthenticationPromptMode::Reconnect { .. }
             | SessionAuthenticationPromptMode::RemoteAttach { .. }
             | SessionAuthenticationPromptMode::ResumeDisk { .. } => None,
+            #[cfg(feature = "zmux")]
+            SessionAuthenticationPromptMode::RemoteCreate => None,
             #[cfg(feature = "session-persistence")]
             SessionAuthenticationPromptMode::UnlockSealedSession { .. } => None,
             #[cfg(feature = "session-persistence")]
@@ -1177,6 +1227,10 @@ impl Zetta {
         #[cfg(not(feature = "session-persistence"))]
         let disk_protected = false;
         let disk_has_secondary_field = disk_identity_required && disk_protected;
+        #[cfg(feature = "zmux")]
+        let remote_create = matches!(prompt.mode, SessionAuthenticationPromptMode::RemoteCreate);
+        #[cfg(not(feature = "zmux"))]
+        let remote_create = false;
         let view = SessionPromptView {
             prompt,
             colors: &colors,
@@ -1184,6 +1238,7 @@ impl Zetta {
             no_mux: self.no_mux,
             error_color: self.window_theme(cx).status().error,
             action,
+            remote_create,
             unlocking_sealed_session,
             disk_identity_required,
             disk_protected,
@@ -1243,6 +1298,7 @@ struct SessionPromptView<'a> {
     /// it travels separately.
     error_color: gpui::Hsla,
     action: Option<ProtectedSessionAction>,
+    remote_create: bool,
     unlocking_sealed_session: bool,
     disk_identity_required: bool,
     disk_protected: bool,
@@ -1307,6 +1363,7 @@ fn session_prompt_heading(view: SessionPromptView<'_>) -> impl IntoElement {
         colors,
         no_mux,
         action,
+        remote_create,
         unlocking_sealed_session,
         ..
     } = view;
@@ -1320,6 +1377,7 @@ fn session_prompt_heading(view: SessionPromptView<'_>) -> impl IntoElement {
         {
             "Restore encrypted disk session"
         }
+        None if remote_create => "Create remote session",
         None => "Authenticate protected session",
     })
     .size(LabelSize::Large)
@@ -1333,6 +1391,7 @@ fn session_prompt_description(view: SessionPromptView<'_>) -> impl IntoElement {
         colors,
         no_mux,
         action,
+        remote_create,
         unlocking_sealed_session,
         disk_identity_required,
         disk_has_secondary_field,
@@ -1367,6 +1426,9 @@ fn session_prompt_description(view: SessionPromptView<'_>) -> impl IntoElement {
             ) =>
             {
                 "Enter the secret chosen when this remote session was shared."
+            }
+            None if remote_create => {
+                "Choose an optional secret for this remote session. Leave both fields empty to create it without protection."
             }
             None => "Enter the secret chosen when this session was detached.",
         })
@@ -1413,33 +1475,37 @@ fn session_prompt_secondary_fields(view: SessionPromptView<'_>) -> impl IntoElem
         colors,
         error_color,
         action,
+        remote_create,
         disk_has_secondary_field,
         ..
     } = view;
     let field = |id, value, selected| view.field(id, value, selected);
     div()
-        .when(action.is_some() || disk_has_secondary_field, |panel| {
-            panel.child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(
-                        Label::new(if disk_has_secondary_field {
-                            "Identity passphrase"
-                        } else {
-                            "Confirm secret"
-                        })
-                        .size(LabelSize::Small)
-                        .color(Color::Custom(colors.text)),
-                    )
-                    .child(field(
-                        "session-authentication-confirmation",
-                        &prompt.confirmation,
-                        SessionAuthenticationField::Confirmation,
-                    )),
-            )
-        })
+        .when(
+            action.is_some() || remote_create || disk_has_secondary_field,
+            |panel| {
+                panel.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(
+                            Label::new(if disk_has_secondary_field {
+                                "Identity passphrase"
+                            } else {
+                                "Confirm secret"
+                            })
+                            .size(LabelSize::Small)
+                            .color(Color::Custom(colors.text)),
+                        )
+                        .child(field(
+                            "session-authentication-confirmation",
+                            &prompt.confirmation,
+                            SessionAuthenticationField::Confirmation,
+                        )),
+                )
+            },
+        )
         .when_some(prompt.error.as_ref(), |panel, error| {
             panel.child(div().text_sm().text_color(error_color).child(error.clone()))
         })
@@ -1454,6 +1520,7 @@ fn session_prompt_buttons(view: SessionPromptView<'_>) -> impl IntoElement {
         handle,
         no_mux,
         action,
+        remote_create,
         unlocking_sealed_session,
         ..
     } = view;
@@ -1476,7 +1543,7 @@ fn session_prompt_buttons(view: SessionPromptView<'_>) -> impl IntoElement {
                         .ok();
                 }),
         )
-        .when(action.is_some(), |buttons| {
+        .when(action.is_some() || remote_create, |buttons| {
             buttons.child(
                 Button::new(
                     "continue-without-session-authentication",
@@ -1499,6 +1566,7 @@ fn session_prompt_buttons(view: SessionPromptView<'_>) -> impl IntoElement {
                 "submit-session-authentication",
                 match action {
                     Some(action) => action.submit_label(no_mux),
+                    None if remote_create => "Create",
                     None if unlocking_sealed_session => "Unlock",
                     None => "Authenticate",
                 },
@@ -1530,6 +1598,13 @@ fn verify_session_secret(
     match mode {
         SessionAuthenticationPromptMode::Protect { .. } => {
             SessionAuthentication::create(secret).map(Outcome::Created)
+        }
+        #[cfg(feature = "zmux")]
+        SessionAuthenticationPromptMode::RemoteCreate => {
+            SessionAuthentication::create(secret).map(|authentication| Outcome::CreatedRemote {
+                authentication,
+                secret: SessionSecret::new(secret.to_string()),
+            })
         }
         SessionAuthenticationPromptMode::Reconnect { .. } => verifier
             .context("the protected session is no longer available")

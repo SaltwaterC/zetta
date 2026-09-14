@@ -392,6 +392,20 @@ fn resolve_draft_layout(
     }
 }
 
+fn ensure_draft_layout(layout: &crate::messages::SharedDraftLayout) -> Result<()> {
+    use crate::messages::SharedDraftLayout;
+    match layout {
+        SharedDraftLayout::Existing { .. } => {
+            anyhow::bail!("a headless session layout cannot contain an existing pane")
+        }
+        SharedDraftLayout::Draft { .. } => Ok(()),
+        SharedDraftLayout::Split { first, second, .. } => {
+            ensure_draft_layout(first)?;
+            ensure_draft_layout(second)
+        }
+    }
+}
+
 fn layout_pane_ids(layout: &BackgroundPaneLayout, ids: &mut Vec<u64>) {
     match layout {
         BackgroundPaneLayout::Pane { pane_id } => ids.push(*pane_id),
@@ -444,6 +458,253 @@ enum SharedBatchCommit {
         mappings: Vec<crate::messages::SharedDraftMapping>,
     },
     Conflict(crate::messages::SharedSessionState),
+}
+
+/// Creates a complete shared session without involving a window-owned session.
+///
+/// All processes are started before the new session is published. This keeps a
+/// malformed layout or an unavailable profile from leaving a half-created
+/// session in the catalog, which is especially important for a remote CLI that
+/// cannot repair the failure through a Zetta process-control request.
+pub(super) fn create_shared(
+    daemon: &Arc<Daemon>,
+    request: crate::messages::CreateSharedRequest,
+    connection: &mut Connection,
+) -> Result<()> {
+    validate_create_request(&request)?;
+
+    {
+        let sessions = daemon
+            .sessions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(state) = sessions.iter().find_map(|session| {
+            session
+                .shared_state
+                .as_ref()
+                .filter(|state| state.receipt(&request.operation_id).is_some())
+                .cloned()
+        }) {
+            return connection.send(&Response::SharedCreated {
+                session_id: state.session_id,
+                state,
+            });
+        }
+    }
+
+    let authentication = request
+        .verifier
+        .clone()
+        .map(SessionAuthentication::from_verifier)
+        .transpose()?;
+    let mut provisional = Vec::with_capacity(request.panes.len());
+    for draft in &request.panes {
+        match start_shared_draft(daemon, draft) {
+            Ok(pane) => provisional.push(pane),
+            Err(error) => {
+                close_provisional_shared_panes(daemon, provisional);
+                return Err(error);
+            }
+        }
+    }
+
+    let draft_mappings = request
+        .panes
+        .iter()
+        .zip(&provisional)
+        .map(|(draft, pane)| crate::messages::SharedDraftMapping {
+            draft_id: draft.draft_id,
+            pane_id: pane.pane_id,
+        })
+        .collect::<Vec<_>>();
+    let mappings = draft_mappings
+        .iter()
+        .map(|mapping| (mapping.draft_id, mapping.pane_id))
+        .collect::<HashMap<_, _>>();
+    let replacement = match resolve_draft_layout(&request.replacement, &mappings) {
+        Ok(layout) => layout,
+        Err(error) => {
+            close_provisional_shared_panes(daemon, provisional);
+            return Err(error);
+        }
+    };
+    let active_pane = match request.active_pane {
+        Some(crate::messages::SharedPaneRef::Draft { draft_id }) => *mappings
+            .get(&draft_id)
+            .with_context(|| format!("active pane references unknown draft {draft_id}"))?,
+        Some(crate::messages::SharedPaneRef::Existing { .. }) => {
+            close_provisional_shared_panes(daemon, provisional);
+            anyhow::bail!("a headless session cannot activate an existing pane")
+        }
+        None => provisional
+            .first()
+            .map(|pane| pane.pane_id)
+            .context("a headless session must contain a pane")?,
+    };
+
+    let mut sessions = daemon
+        .sessions
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(state) = sessions.iter().find_map(|session| {
+        session
+            .shared_state
+            .as_ref()
+            .filter(|state| state.receipt(&request.operation_id).is_some())
+            .cloned()
+    }) {
+        drop(sessions);
+        close_provisional_shared_panes(daemon, provisional);
+        return connection.send(&Response::SharedCreated {
+            session_id: state.session_id,
+            state,
+        });
+    }
+
+    let session_id = daemon.next_session_id.fetch_add(1, Ordering::Relaxed);
+    let mut summary = crate::protocol::BackgroundSessionSummary {
+        id: session_id,
+        title: request.title,
+        authentication_required: authentication.is_some(),
+        active_pane,
+        layout: replacement,
+        panes: Vec::with_capacity(request.panes.len()),
+        held: false,
+        scoped_to: None,
+        key_envelope: None,
+    };
+    let retention = *daemon
+        .retention
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut panes = Vec::with_capacity(provisional.len());
+    for (draft, pane) in request.panes.iter().zip(provisional.drain(..)) {
+        let mut metadata = draft.metadata.clone();
+        metadata.id = pane.pane_id;
+        metadata.state = crate::protocol::BackgroundPaneState::Running;
+        metadata.exit = None;
+        summary.panes.push(metadata);
+        panes.push(Pane {
+            id: pane.pane_id,
+            pty: pane.pty,
+            #[cfg(windows)]
+            console_id: pane.console_id,
+            #[cfg(windows)]
+            child_events: pane.child_events,
+            attachment: Attachment::Shared(Vec::new()),
+            size: pane.size,
+            retained: retention.new_retained(pane.size.columns, pane.size.lines),
+            handed_over: None,
+            handover_waiters: 0,
+            exited: false,
+            exit_status: None,
+            pending_input: Vec::new(),
+        });
+    }
+
+    let mut state = crate::messages::SharedSessionState::new(
+        session_id,
+        summary.clone(),
+        serde_json::Value::Null,
+    );
+    state.last_operation_id = Some(request.operation_id.clone());
+    state.record_receipt(crate::messages::SharedOperationReceipt {
+        operation_id: request.operation_id,
+        draft_mappings,
+    });
+    summary = state.summary.clone();
+    let new_session = Session {
+        id: session_id,
+        summary,
+        state: serde_json::Value::Null,
+        shared_state: Some(state.clone()),
+        authentication,
+        key_envelope: None,
+        failed_authentications: 0,
+        refuse_until: None,
+        panes,
+        // A headless create has no window whose lifetime could keep it alive;
+        // it must outlive the CLI or remote picker that requested it.
+        keep: true,
+        offered: true,
+        owner: None,
+    };
+    #[cfg(feature = "session-persistence")]
+    if daemon.persistence_enabled.load(Ordering::Acquire) {
+        persist_session(daemon, &persisted_live_session(&new_session))?;
+    }
+    sessions.push(new_session);
+    drop(sessions);
+    publish(daemon);
+    wake_drain(daemon);
+    connection.send(&Response::SharedCreated { session_id, state })
+}
+
+fn validate_create_request(request: &crate::messages::CreateSharedRequest) -> Result<()> {
+    anyhow::ensure!(
+        !request.panes.is_empty(),
+        "a headless session must contain a pane"
+    );
+    ensure_draft_layout(&request.replacement)?;
+    let mut draft_ids = request
+        .panes
+        .iter()
+        .map(|pane| pane.draft_id)
+        .collect::<Vec<_>>();
+    draft_ids.sort_unstable();
+    anyhow::ensure!(
+        draft_ids.windows(2).all(|pair| pair[0] != pair[1]),
+        "headless draft pane IDs must be unique"
+    );
+    let draft_mapping = request
+        .panes
+        .iter()
+        .enumerate()
+        .map(|(index, pane)| (pane.draft_id, index as u64 + 1))
+        .collect::<HashMap<_, _>>();
+    let layout = resolve_draft_layout(&request.replacement, &draft_mapping)?;
+    let mut layout_ids = Vec::new();
+    layout_pane_ids(&layout, &mut layout_ids);
+    layout_ids.sort_unstable();
+    let expected = (1..=request.panes.len() as u64).collect::<Vec<_>>();
+    anyhow::ensure!(
+        layout_ids == expected,
+        "headless layout must contain every pane exactly once"
+    );
+    if let Some(active_pane) = request.active_pane {
+        match active_pane {
+            crate::messages::SharedPaneRef::Draft { draft_id } => anyhow::ensure!(
+                request.panes.iter().any(|pane| pane.draft_id == draft_id),
+                "active pane references unknown draft {draft_id}"
+            ),
+            crate::messages::SharedPaneRef::Existing { .. } => {
+                anyhow::bail!("a headless session cannot reference an existing pane")
+            }
+        }
+    }
+    let config_path = crate::paths::platform_config_dir().join("config.json");
+    for pane in &request.panes {
+        if let Some(command) = &pane.command {
+            anyhow::ensure!(
+                command
+                    .program
+                    .as_deref()
+                    .is_some_and(|program| !program.trim().is_empty()),
+                "headless command program must not be empty"
+            );
+        } else if !pane.profile.is_empty() {
+            anyhow::ensure!(
+                zetta_profiles::resolve(&config_path, &pane.profile).is_some(),
+                "profile {:?} is not available on the host running zmux",
+                pane.profile
+            );
+        }
+        anyhow::ensure!(
+            pane.size.columns > 0 && pane.size.lines > 0,
+            "headless pane size must have positive columns and lines"
+        );
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy)]

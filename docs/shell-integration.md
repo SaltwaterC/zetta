@@ -47,8 +47,9 @@ shell startup.
 `attach` targets from `~/.ssh/config` and remote numeric session IDs, and
 `attach`'s `--protocol` offers the two protocols its panes can travel over,
 `ssh` and `zosh`.
-The mux command list includes `list`, `stop`, `reconnect`, `attach`, `share`, `unshare`,
-`kill`, and `forget`; the session argument for `reconnect`, `share`, `unshare`,
+The mux command list includes `list`, `profiles`, `create`, `stop`, `reconnect`, `attach`, `share`, `unshare`,
+`kill`, and `forget`; `profiles` and `create` work without a Zetta window, and
+`create` completes its layout/profile options. The session argument for `reconnect`, `share`, `unshare`,
 `kill`, and `forget` is
 fetched dynamically from `zmux list`/`zetta mux list` in the full
 `PROCESS:RUNNER:SESSION` form. Bare numeric IDs remain accepted as a

@@ -173,6 +173,12 @@ pub(super) fn serve(daemon: &Arc<Daemon>, stream: Stream, token: &str) -> Result
                 message: format!("{error:#}"),
             }),
         },
+        Request::CreateShared(request) => match create_shared(daemon, request, &mut connection) {
+            Ok(()) => Ok(()),
+            Err(error) => connection.send(&Response::Error {
+                message: format!("{error:#}"),
+            }),
+        },
         Request::ApplyShared(request) => apply_shared(
             daemon,
             request,

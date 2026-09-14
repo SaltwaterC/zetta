@@ -16,6 +16,8 @@ use crate::protocol::{BackgroundPaneLayout, BackgroundSessionSummary, Restorable
 /// The wire format, and what a client and a multiplexer compare before they
 /// trust each other to understand one another.
 ///
+/// 8: a client can create a complete daemon-owned shared session without an
+///    existing Zetta tab or window.
 /// 7: a shared pane draft can name the pane whose directory to start in, and
 ///    ask the daemon to load the shell integration before anybody attaches.
 /// 6: a shared pane draft names its profile and lets the daemon's host resolve
@@ -25,7 +27,7 @@ use crate::protocol::{BackgroundPaneLayout, BackgroundSessionSummary, Restorable
 /// `SharedPaneDraft` rejects unknown fields, so a client that sends a newer
 /// shape to a daemon that predates it gets a parse failure rather than a
 /// version mismatch — which is why this has to move with every change to it.
-pub const PROTOCOL_VERSION: u32 = 7;
+pub const PROTOCOL_VERSION: u32 = 8;
 
 /// Version of the durable collaboration envelope. This is independent from
 /// [`PROTOCOL_VERSION`]: a daemon upgrade may keep a session state produced by
@@ -710,6 +712,25 @@ pub struct SharedSpawnBatchRequest {
     pub active_pane: Option<SharedPaneRef>,
 }
 
+/// Atomically creates a daemon-owned shared session from a complete layout.
+///
+/// Unlike [`SharedSpawnBatchRequest`], this request has no existing session to
+/// authorize or rebase against. The operation ID is retained in the canonical
+/// shared state so a client may safely retry after losing the response.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CreateSharedRequest {
+    pub operation_id: SharedOperationId,
+    pub title: String,
+    pub replacement: SharedDraftLayout,
+    pub panes: Vec<SharedPaneDraft>,
+    pub active_pane: Option<SharedPaneRef>,
+    /// An Argon2 verifier, never the plaintext secret. Empty means the new
+    /// session is unprotected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verifier: Option<String>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SharedPaneRef {
@@ -1120,6 +1141,9 @@ pub enum Request {
     /// The response is stream-free; callers attach every returned pane through
     /// the same shared path used by remote viewers.
     SpawnSharedBatch(SharedSpawnBatchRequest),
+    /// Creates a complete headless shared session. The response is stream-free;
+    /// callers attach its panes later through the ordinary shared attach path.
+    CreateShared(CreateSharedRequest),
     /// Takes over a pane's terminal from the multiplexer.
     ///
     /// `pane_id` is absent for the session's first pane, which is how an
@@ -1533,6 +1557,11 @@ pub enum Response {
     },
     SharedBatchSpawned {
         mappings: Vec<SharedDraftMapping>,
+        state: SharedSessionState,
+    },
+    /// A headless shared session was committed without attaching any client.
+    SharedCreated {
+        session_id: u64,
         state: SharedSessionState,
     },
     SharedOperationApplied {

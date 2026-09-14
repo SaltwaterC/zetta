@@ -46,6 +46,26 @@ zmux attach HOST 42   # attach a shared session through OpenSSH
 zmux list -H HOST -I  # print remote IDs, one per line
 ```
 
+Create a session without opening a Zetta window. The shorthand creates one
+pane from a host profile; a layout file describes a recursive split tree and
+can contain multiple panes:
+
+```sh
+zmux profiles --json
+zmux create --profile System
+zmux create --layout layout.json
+zmux create -H HOST --profile System
+```
+
+`zmux create` keeps the session in the standalone multiplexer, so a later
+`zmux attach` or Zetta remote-session dialog can open it. A remote create
+queries the host's available profiles and starts its `zmux` daemon on demand;
+ordinary remote listing and attach still require an existing daemon. Pass
+`--secret-stdin` to read an optional session secret from the first input line
+without exposing it in shell history or the process list. `--layout -` reads
+the JSON layout from standard input, and therefore cannot be combined with
+`--secret-stdin`.
+
 `SESSION_ID` accepts the short numeric session ID when it is unambiguous, and
 the stable `PROCESS:RUNNER:SESSION` identifier printed by `zmux list` in every
 case. The human-readable list shows both forms for an unambiguous session and

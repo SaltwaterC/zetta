@@ -10,6 +10,7 @@ use super::image_paste::{LocalPasteTarget, handler_for_pane};
 use super::shared_panes::SharedPaneWriter;
 use super::zosh_panes::{ZoshPaneBuild, build_zosh_pane};
 use crate::remote_pane_transport::{RemotePaneStreams, RemotePaneTransport};
+use crate::session_state::LayoutState;
 
 /// The result of the remote data phase. Authentication outcomes contain no
 /// partially attached pane, while a successful result owns every stream needed
@@ -109,25 +110,33 @@ fn load_attached_session_data(
         .map_or((state, summary), |state| {
             (state.state.clone(), state.summary.clone())
         });
-    anyhow::ensure!(
-        !state.is_null(),
-        "session {session_id} has not published a layout, so it cannot be attached; share or \
-         detach it from the window showing it first"
-    );
-    let mut state: crate::session_state::TabState =
-        serde_json::from_value(state).context("reading the session's tab state")?;
-    let recovered_empty_state = state.panes.is_empty();
-    if recovered_empty_state {
+    let state_was_null = state.is_null();
+    let mut recovered_empty_state = false;
+    let mut state: crate::session_state::TabState = if state_was_null {
+        anyhow::ensure!(
+            canonical_shared_state.is_some(),
+            "session {session_id} has not published a layout, so it cannot be attached; share or \
+             detach it from the window showing it first"
+        );
+        recovered_empty_state = true;
+        headless_tab_state(&summary)
+    } else {
+        serde_json::from_value(state).context("reading the session's tab state")?
+    };
+    if state.panes.is_empty() {
+        recovered_empty_state = true;
         log::error!(
-            "session {session_id} has an empty saved pane list while daemon pane {} remains; rebuilding a minimal tab state",
+            "session {session_id} has an empty saved pane list while daemon pane {} remains; rebuilding tab state from the canonical layout",
             first.pane_id()
         );
-        recover_empty_attached_tab_state(
-            &mut state,
-            first.pane_id(),
-            &summary,
-            shared_attachment || shared_state_flag,
-        );
+        if !state_was_null {
+            recover_empty_attached_tab_state(
+                &mut state,
+                first.pane_id(),
+                &summary,
+                shared_attachment || shared_state_flag,
+            );
+        }
     }
     let first_pane = attached_tab_pane_id(&state, first.pane_id(), session_id)?;
     let mut additional = Vec::new();
@@ -193,7 +202,7 @@ fn recover_empty_attached_tab_state(
     summary: &BackgroundSessionSummary,
     shared: bool,
 ) {
-    use crate::session_state::{LayoutState, PaneState};
+    use crate::session_state::PaneState;
 
     let profile = summary
         .panes
@@ -228,6 +237,95 @@ fn recover_empty_attached_tab_state(
         stack: Vec::new(),
         selected_stacked: None,
     });
+}
+
+/// Builds the opaque tab state Zetta needs when a standalone `zmux create`
+/// request has never had a window to publish one. The canonical shared summary
+/// is the authority for every pane and for the recursive layout.
+fn headless_tab_state(summary: &BackgroundSessionSummary) -> crate::session_state::TabState {
+    use crate::session_state::PaneState;
+
+    let panes = summary
+        .panes
+        .iter()
+        .enumerate()
+        .map(|(index, pane)| PaneState {
+            id: pane.id,
+            mux_pane_id: Some(pane.id),
+            label_number: index + 1,
+            generated_label: None,
+            custom_label: (!pane.label.is_empty()).then(|| pane.label.clone()),
+            profile: if pane.profile.is_empty() {
+                "System".to_owned()
+            } else {
+                pane.profile.clone()
+            },
+            theme_override: None,
+            environment_overrides: Default::default(),
+            overlay: None,
+            exit: pane.exit.clone(),
+            base_exited: matches!(
+                pane.state,
+                zmux::protocol::BackgroundPaneState::Exited
+                    | zmux::protocol::BackgroundPaneState::Failed
+            ),
+            pending_command: None,
+            active_command: None,
+            detected_worktree_title: None,
+            stack: Vec::new(),
+            selected_stacked: None,
+        })
+        .collect();
+    crate::session_state::TabState {
+        pane_theme_source: None,
+        attention_id: 0,
+        next_pane_label: summary.panes.len() + 1,
+        layout: headless_layout_state(&summary.layout),
+        active_pane: summary.active_pane,
+        focus_history: vec![summary.active_pane],
+        maximized_pane: None,
+        minimized_panes: Vec::new(),
+        selected_minimized_pane: None,
+        broadcast_input: false,
+        silent_mode: false,
+        keep_running: false,
+        shared: true,
+        custom_title: None,
+        worktree_seed_title: None,
+        process_title: None,
+        icon: None,
+        icon_override: None,
+        pinned: false,
+        panes,
+        theme_override: None,
+    }
+}
+
+fn headless_layout_state(
+    layout: &zmux::protocol::BackgroundPaneLayout,
+) -> crate::session_state::LayoutState {
+    use crate::session_state::{AxisState, LayoutState};
+
+    match layout {
+        zmux::protocol::BackgroundPaneLayout::Pane { pane_id } => {
+            LayoutState::Pane { pane_id: *pane_id }
+        }
+        zmux::protocol::BackgroundPaneLayout::Split {
+            axis,
+            first_ratio,
+            first,
+            second,
+        } => LayoutState::Split {
+            axis: if axis == "vertical" {
+                AxisState::Vertical
+            } else {
+                AxisState::Horizontal
+            },
+            first_ratio: *first_ratio,
+            first: Box::new(headless_layout_state(first)),
+            second: Box::new(headless_layout_state(second)),
+        },
+    }
 }
 
 /// Finds the local tab pane that corresponds to an attached multiplexer pane.

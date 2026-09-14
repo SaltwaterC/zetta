@@ -526,6 +526,8 @@ pub(crate) struct Zetta {
     pub(crate) remote_session_focus: gpui::FocusHandle,
     pub(crate) remote_session_picker: Option<crate::remote_session_ui::RemoteSessionPicker>,
     pub(crate) remote_session_target: Option<zmux::remote::RemoteTarget>,
+    #[cfg(feature = "zmux")]
+    pub(crate) remote_session_create: Option<crate::remote_session_ui::RemoteSessionCreate>,
     /// How the panes of the remote session currently being opened should
     /// travel. Kept beside the target because the two are chosen together and
     /// have to survive the authentication prompt that may come between
@@ -955,6 +957,8 @@ impl Zetta {
             remote_session_focus: cx.focus_handle(),
             remote_session_picker: None,
             remote_session_target: None,
+            #[cfg(feature = "zmux")]
+            remote_session_create: None,
             #[cfg(feature = "zmux")]
             remote_session_transport: crate::remote_pane_transport::RemotePaneTransport::default(),
             #[cfg(feature = "session-persistence")]

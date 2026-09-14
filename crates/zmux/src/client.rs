@@ -32,8 +32,8 @@ type Descriptors = Vec<()>;
 
 use crate::{
     messages::{
-        DetachRequest, Envelope, Event, MAX_IMAGE_BYTES, PROTOCOL_VERSION, PaneSnapshot,
-        PaneStateReport, Request, Response, SessionRevision, SharedOperationId,
+        CreateSharedRequest, DetachRequest, Envelope, Event, MAX_IMAGE_BYTES, PROTOCOL_VERSION,
+        PaneSnapshot, PaneStateReport, Request, Response, SessionRevision, SharedOperationId,
         SharedSessionOperation, SharedSessionOperationRequest, SharedSessionState,
         SharedSpawnBatchRequest, SharedSpawnRequest, SpawnRequest,
     },
@@ -991,6 +991,24 @@ impl Client {
         })
     }
 
+    /// Connects to a remote daemon for a headless create operation. The
+    /// standalone remote `zmux` is bootstrapped only here; ordinary remote
+    /// listing and attachment continue to require an already-running daemon.
+    pub fn connect_remote_for_creation(target: RemoteTarget) -> Result<Self> {
+        let remote = Arc::new(RemoteTransport::for_creation(target)?);
+        remote.ensure_daemon()?;
+        let endpoint = remote.refresh()?;
+        Ok(Self {
+            endpoint: Mutex::new(endpoint),
+            directory: PathBuf::new(),
+            client_id: ClientId::random()?,
+            stream_only: true,
+            remote: Some(remote),
+            session_secret: Arc::new(Mutex::new(None)),
+            operation_counter: Arc::new(AtomicU64::new(1)),
+        })
+    }
+
     /// Testable variant of [`Self::connect_remote`] that uses a supplied SSH
     /// executable.
     #[cfg(any(test, feature = "test-support"))]
@@ -1000,6 +1018,29 @@ impl Client {
     ) -> Result<Self> {
         let remote = Arc::new(RemoteTransport::with_ssh_program(target, ssh_program)?);
         let endpoint = remote.endpoint()?;
+        Ok(Self {
+            endpoint: Mutex::new(endpoint),
+            directory: PathBuf::new(),
+            client_id: ClientId::random()?,
+            stream_only: true,
+            remote: Some(remote),
+            session_secret: Arc::new(Mutex::new(None)),
+            operation_counter: Arc::new(AtomicU64::new(1)),
+        })
+    }
+
+    /// Testable variant of [`Self::connect_remote_for_creation`].
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn connect_remote_for_creation_with_ssh_program(
+        target: RemoteTarget,
+        ssh_program: impl Into<PathBuf>,
+    ) -> Result<Self> {
+        let remote = Arc::new(RemoteTransport::for_creation_with_ssh_program(
+            target,
+            ssh_program,
+        )?);
+        remote.ensure_daemon()?;
+        let endpoint = remote.refresh()?;
         Ok(Self {
             endpoint: Mutex::new(endpoint),
             directory: PathBuf::new(),
@@ -1754,6 +1795,40 @@ impl Client {
             Response::AuthenticationFailed => anyhow::bail!("shared session authentication failed"),
             Response::Error { message } => anyhow::bail!("{message}"),
             other => anyhow::bail!("unexpected response to shared spawn: {other:?}"),
+        }
+    }
+
+    /// Creates a complete daemon-owned shared session without attaching any
+    /// pane. A lost response is retried with the same operation ID, so the
+    /// daemon returns the first committed session instead of starting another
+    /// set of shells.
+    pub fn create_shared(&self, request: CreateSharedRequest) -> Result<SharedCreated> {
+        let secret = self.session_secret();
+        let mut retried = false;
+        loop {
+            let mut connection = match self
+                .open_with_session_secret(Request::CreateShared(request.clone()), secret.as_ref())
+            {
+                Ok(connection) => connection,
+                Err(error) if !retried && is_transport_error(&error) => {
+                    retried = true;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            match Self::receive(&mut connection) {
+                Ok((Response::SharedCreated { session_id, state }, _)) => {
+                    return Ok(SharedCreated { session_id, state });
+                }
+                Ok((Response::Error { message }, _)) => anyhow::bail!("{message}"),
+                Ok((other, _)) => {
+                    anyhow::bail!("unexpected response to headless create: {other:?}")
+                }
+                Err(error) if !retried && is_transport_error(&error) => {
+                    retried = true;
+                }
+                Err(error) => return Err(error),
+            }
         }
     }
 
@@ -2832,6 +2907,11 @@ pub struct SharedSpawnedPane {
 
 pub struct SharedBatchSpawned {
     pub mappings: Vec<crate::messages::SharedDraftMapping>,
+    pub state: SharedSessionState,
+}
+
+pub struct SharedCreated {
+    pub session_id: u64,
     pub state: SharedSessionState,
 }
 

@@ -1136,12 +1136,16 @@ _zetta_complete() {
                 if [[ ${ZETTA_NO_MUX:-0} == 1 ]]; then
                     _zetta_compgen 'list reconnect attach --json --ids-only --ssh-target --port --help --version'
                 else
-                    _zetta_compgen 'list stop reconnect attach resume share unshare kill forget --json --upgrade --ids-only --ssh-target --port --identity --help --version'
+                    _zetta_compgen 'list profiles create stop reconnect attach resume share unshare kill forget --json --upgrade --ids-only --ssh-target --port --identity --secret-stdin --layout --profile --title --working-directory --env --retention --help --version'
                 fi
             elif [[ ${ZETTA_NO_MUX:-0} == 1 && ${COMP_WORDS[2]} != reconnect && ${COMP_WORDS[2]} != list && ${COMP_WORDS[2]} != attach ]]; then
                 COMPREPLY=()
             elif [[ ${COMP_WORDS[2]} == stop ]]; then
                 _zetta_compgen '--force --help'
+            elif [[ ${COMP_WORDS[2]} == profiles ]]; then
+                _zetta_compgen '--json --ssh-target --port --help --version'
+            elif [[ ${COMP_WORDS[2]} == create ]]; then
+                _zetta_compgen '--json --secret-stdin --layout --profile --title --working-directory --env --retention --ssh-target --port --help --version'
             elif [[ ${COMP_WORDS[2]} == reconnect ]] && (( COMP_CWORD == 3 )); then
                 _zetta_complete_mux_session_ids
             elif [[ ${COMP_WORDS[2]} == attach ]]; then

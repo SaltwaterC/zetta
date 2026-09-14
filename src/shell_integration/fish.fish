@@ -1030,7 +1030,7 @@ function __zetta_long_options
             if test "$ZETTA_NO_MUX" = 1
                 printf '%s\t%s\n' --json 'Print machine-readable JSON' --ids-only 'Print one numeric session ID per line' --ssh-target 'OpenSSH destination' --port 'SSH port' --help 'Print help' --version 'Print version'
             else
-                printf '%s\t%s\n' --json 'Print machine-readable JSON' --ids-only 'Print one numeric session ID per line' --ssh-target 'OpenSSH destination' --port 'SSH port' --force 'Stop even while sessions are running' --upgrade 'Replace the multiplexer, keeping its sessions' --identity 'Age identity file for resume and reconnect' --help 'Print help' --version 'Print version'
+                printf '%s\t%s\n' --json 'Print machine-readable JSON' --ids-only 'Print one numeric session ID per line' --ssh-target 'OpenSSH destination' --port 'SSH port' --force 'Stop even while sessions are running' --upgrade 'Replace the multiplexer, keeping its sessions' --identity 'Age identity file for resume and reconnect' --secret-stdin 'Read an optional create secret from standard input' --layout 'Create from a headless layout JSON file' --profile 'Create one pane using a host profile' --title 'Title for a newly created headless session' --working-directory 'Starting directory for a single-pane create' --env 'Environment override for a single-pane create' --retention 'Retention mode for a local daemon' --help 'Print help' --version 'Print version'
             end
 # ZETTA_ZMUX_INTEGRATION_END
         case benchmark_output
@@ -1283,6 +1283,8 @@ if set -q __ZETTA_MOSH_WRAPPER
 end
 # ZETTA_ZMUX_INTEGRATION_BEGIN
 complete -c zetta -n '__zetta_at_subcommand mux' -a list -d 'List the sessions the multiplexer is holding'
+complete -c zetta -n '__zetta_at_subcommand mux; and __zetta_mux_daemon_commands' -a profiles -d 'List profiles available on the local or remote host'
+complete -c zetta -n '__zetta_at_subcommand mux; and __zetta_mux_daemon_commands' -a create -d 'Create a headless shared session'
 complete -c zetta -n '__zetta_at_subcommand mux; and __zetta_mux_daemon_commands' -a stop -d 'Stop the multiplexer'
 complete -c zetta -n '__zetta_at_subcommand mux' -a reconnect -d 'Open a session in a Zetta window'
 complete -c zetta -n '__zetta_at_subcommand mux' -a attach -d 'Open a shared remote session through OpenSSH'
@@ -1300,6 +1302,15 @@ complete -c zetta -n '__fish_seen_subcommand_from mux' -l json -d 'Print machine
 complete -c zetta -n '__fish_seen_subcommand_from mux' -l ids-only -d 'Print one numeric session ID per line'
 complete -c zetta -n '__fish_seen_subcommand_from mux' -l ssh-target -r -a '(__zetta_ssh_targets)' -d 'OpenSSH destination'
 complete -c zetta -n '__fish_seen_subcommand_from mux' -l port -r -d 'SSH port'
+complete -c zetta -n '__fish_seen_subcommand_from mux; and __zetta_mux_daemon_commands; and __fish_seen_subcommand_from profiles' -l json -d 'Print machine-readable JSON'
+complete -c zetta -n '__fish_seen_subcommand_from mux; and __zetta_mux_daemon_commands; and __fish_seen_subcommand_from create' -l secret-stdin -d 'Read an optional secret from the first line of standard input'
+complete -c zetta -s S -n '__fish_seen_subcommand_from mux; and __zetta_mux_daemon_commands; and __fish_seen_subcommand_from create; and __zetta_short_option -S' -d 'Read an optional secret from standard input'
+complete -c zetta -n '__fish_seen_subcommand_from mux; and __zetta_mux_daemon_commands; and __fish_seen_subcommand_from create' -l layout -r -F -d 'Headless layout JSON file, or - for standard input'
+complete -c zetta -n '__fish_seen_subcommand_from mux; and __zetta_mux_daemon_commands; and __fish_seen_subcommand_from create' -l profile -r -a '(__zetta_profiles)' -d 'Create one pane using a host profile'
+complete -c zetta -n '__fish_seen_subcommand_from mux; and __zetta_mux_daemon_commands; and __fish_seen_subcommand_from create' -l title -r -d 'Title for a newly created headless session'
+complete -c zetta -n '__fish_seen_subcommand_from mux; and __zetta_mux_daemon_commands; and __fish_seen_subcommand_from create' -l working-directory -r -F -d 'Starting directory for a single-pane create'
+complete -c zetta -n '__fish_seen_subcommand_from mux; and __zetta_mux_daemon_commands; and __fish_seen_subcommand_from create' -l env -r -d 'Environment override for a single-pane create'
+complete -c zetta -n '__fish_seen_subcommand_from mux; and __zetta_mux_daemon_commands; and __fish_seen_subcommand_from create' -l retention -r -a 'none memory disk' -d 'Retention mode for a local daemon'
 complete -c zetta -s H -r -a '(__zetta_ssh_targets)' -n '__fish_seen_subcommand_from mux; and __zetta_short_option -H' -d 'OpenSSH destination'
 complete -c zetta -s p -r -n '__fish_seen_subcommand_from mux; and __zetta_short_option -p' -d 'SSH port'
 complete -c zetta -n '__fish_seen_subcommand_from mux; and __fish_seen_subcommand_from attach' -l protocol -r -a 'ssh zosh' -d 'What carries the attached session\'s panes'
@@ -1504,6 +1515,8 @@ complete -c zwt -n '__zetta_worktree_sync_target' -a '(__zetta_worktree_commits)
 # ZETTA_ZMUX_INTEGRATION_BEGIN
 complete -c zmux -f
 complete -c zmux -n '__fish_use_subcommand' -a list -d 'List the sessions the multiplexer is holding'
+complete -c zmux -n '__fish_use_subcommand' -a profiles -d 'List profiles available on the local or remote host'
+complete -c zmux -n '__fish_use_subcommand' -a create -d 'Create a headless shared session'
 complete -c zmux -n '__fish_use_subcommand; and __zetta_mux_daemon_commands' -a stop -d 'Stop the multiplexer'
 complete -c zmux -n '__fish_use_subcommand' -a reconnect -d 'Open a session in a Zetta window'
 complete -c zmux -n '__fish_use_subcommand' -a attach -d 'Open a shared remote session through OpenSSH'
@@ -1521,6 +1534,15 @@ complete -c zmux -l json -d 'Print machine-readable JSON'
 complete -c zmux -l ids-only -d 'Print one numeric session ID per line'
 complete -c zmux -l ssh-target -r -a '(__zetta_ssh_targets)' -d 'OpenSSH destination'
 complete -c zmux -l port -r -d 'SSH port'
+complete -c zmux -n '__fish_seen_subcommand_from profiles' -l json -d 'Print machine-readable JSON'
+complete -c zmux -n '__fish_seen_subcommand_from create' -l secret-stdin -d 'Read an optional secret from the first line of standard input'
+complete -c zmux -s S -n '__fish_seen_subcommand_from create; and __zetta_short_option -S' -d 'Read an optional secret from standard input'
+complete -c zmux -n '__fish_seen_subcommand_from create' -l layout -r -F -d 'Headless layout JSON file, or - for standard input'
+complete -c zmux -n '__fish_seen_subcommand_from create' -l profile -r -a '(__zetta_profiles)' -d 'Create one pane using a host profile'
+complete -c zmux -n '__fish_seen_subcommand_from create' -l title -r -d 'Title for a newly created headless session'
+complete -c zmux -n '__fish_seen_subcommand_from create' -l working-directory -r -F -d 'Starting directory for a single-pane create'
+complete -c zmux -n '__fish_seen_subcommand_from create' -l env -r -d 'Environment override for a single-pane create'
+complete -c zmux -n '__fish_seen_subcommand_from create' -l retention -r -a 'none memory disk' -d 'Retention mode for a local daemon'
 complete -c zmux -s H -r -a '(__zetta_ssh_targets)' -n '__fish_seen_subcommand_from attach; and __zetta_short_option -H' -d 'OpenSSH destination'
 complete -c zmux -s p -r -n '__fish_seen_subcommand_from attach; and __zetta_short_option -p' -d 'SSH port'
 complete -c zmux -n '__fish_seen_subcommand_from attach' -l protocol -r -a 'ssh zosh' -d 'What carries the attached session\'s panes'

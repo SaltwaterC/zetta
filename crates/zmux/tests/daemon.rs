@@ -31,9 +31,10 @@ use zmux::{
     auth::SessionSecret,
     client::{AttachOutcome, Client},
     messages::{
-        ClientId, Envelope, Event, Request, Response, SessionRevision, SharedPaneDirection,
-        SharedRotationDirection, SharedSessionOperation, SharedSpawnBatchRequest,
-        SharedSpawnRequest, SpawnRequest, TerminalSize,
+        ClientId, CreateSharedRequest, Envelope, Event, Request, Response, SessionRevision,
+        SharedDraftLayout, SharedPaneDirection, SharedPaneRef, SharedRotationDirection,
+        SharedSessionOperation, SharedSpawnBatchRequest, SharedSpawnRequest, SpawnRequest,
+        TerminalSize,
     },
     protocol::{
         BackgroundPaneLayout, BackgroundPaneState, BackgroundPaneSummary, BackgroundSessionSummary,
@@ -3795,6 +3796,104 @@ fn shared_batch_spawns_commit_exact_geometry_and_rebase_same_target_additions() 
         panic!("a removed operation target did not return the canonical snapshot")
     };
     assert_eq!(conflict, closed);
+}
+
+#[test]
+fn headless_create_commits_a_recursive_layout_and_is_idempotent() {
+    let daemon = TestDaemon::start();
+    let client = daemon.client();
+    let draft = |draft_id: u64, label: &str| zmux::messages::SharedPaneDraft {
+        draft_id,
+        profile: "System".to_owned(),
+        command: Some(zetta_profiles::ProfileCommand::with_args(
+            "sh",
+            vec!["-c".to_owned(), "sleep 60".to_owned()],
+        )),
+        env: HashMap::new(),
+        working_directory: None,
+        inherit_working_directory_from: None,
+        load_shell_integration: false,
+        size: TerminalSize {
+            columns: 80,
+            lines: 24,
+            cell_width: 0,
+            cell_height: 0,
+        },
+        console_palette: ConsolePalette::default(),
+        metadata: BackgroundPaneSummary {
+            id: 0,
+            label: label.to_owned(),
+            profile: "System".to_owned(),
+            configured_command: String::new(),
+            application: "sh".to_owned(),
+            foreground_command: None,
+            terminal_title: None,
+            working_directory: None,
+            state: BackgroundPaneState::Starting,
+            exit: None,
+        },
+    };
+    let operation_id = client.next_shared_operation_id();
+    let request = CreateSharedRequest {
+        operation_id,
+        title: "headless".to_owned(),
+        replacement: SharedDraftLayout::Split {
+            axis: "horizontal".to_owned(),
+            first_ratio: 600,
+            first: Box::new(SharedDraftLayout::Draft { draft_id: 1 }),
+            second: Box::new(SharedDraftLayout::Split {
+                axis: "vertical".to_owned(),
+                first_ratio: 400,
+                first: Box::new(SharedDraftLayout::Draft { draft_id: 2 }),
+                second: Box::new(SharedDraftLayout::Draft { draft_id: 3 }),
+            }),
+        },
+        panes: vec![draft(1, "one"), draft(2, "two"), draft(3, "three")],
+        active_pane: Some(SharedPaneRef::Draft { draft_id: 3 }),
+        verifier: None,
+    };
+
+    let created = client.create_shared(request.clone()).unwrap();
+    assert_eq!(created.state.summary.title, "headless");
+    assert_eq!(created.state.summary.panes.len(), 3);
+    let active_pane = created.state.operation_receipts[0]
+        .draft_mappings
+        .iter()
+        .find(|mapping| mapping.draft_id == 3)
+        .expect("the active draft must be mapped")
+        .pane_id;
+    assert_eq!(created.state.summary.active_pane, active_pane);
+    assert!(matches!(
+        &created.state.presentation.layout,
+        BackgroundPaneLayout::Split {
+            axis,
+            first_ratio: 600,
+            second,
+            ..
+        } if axis == "horizontal"
+            && matches!(
+                second.as_ref(),
+                BackgroundPaneLayout::Split {
+                    axis,
+                    first_ratio: 400,
+                    ..
+                } if axis == "vertical"
+            )
+    ));
+    assert_eq!(created.state.operation_receipts.len(), 1);
+    assert_eq!(created.state.operation_receipts[0].draft_mappings.len(), 3);
+
+    let retried = client.create_shared(request).unwrap();
+    assert_eq!(retried.session_id, created.session_id);
+    assert_eq!(retried.state, created.state);
+    assert_eq!(client.list().unwrap().len(), 1);
+
+    let attached = client
+        .attach_shared_with_secret(created.session_id, active_pane, None)
+        .unwrap();
+    assert!(matches!(attached, AttachOutcome::SharedAttached { .. }));
+    drop(attached);
+    client.kill(created.session_id).unwrap();
 }
 
 /// A session that is both kept and shared stays shared when its window hands

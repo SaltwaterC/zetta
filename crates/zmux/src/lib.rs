@@ -13,6 +13,7 @@ pub mod auth;
 #[cfg(feature = "session-persistence")]
 pub mod auto_protect;
 pub mod catalog;
+pub mod headless;
 pub mod paths;
 #[cfg(feature = "session-persistence")]
 pub mod persistence;
@@ -101,6 +102,14 @@ fn usage(no_mux: bool) -> String {
         format_help_table([
             ("list", "List the sessions this multiplexer is holding"),
             (
+                "profiles",
+                "List the profiles available on this host, or on --ssh-target, without starting a daemon",
+            ),
+            (
+                "create",
+                "Create a headless shared session from a layout JSON file or a single profile",
+            ),
+            (
                 "endpoint --json",
                 "Print the running daemon endpoint as machine-readable JSON",
             ),
@@ -177,7 +186,24 @@ fn usage(no_mux: bool) -> String {
             ),
             (
                 "-S, --secret-stdin",
-                "Read a protected session's secret from the first line of standard\ninput (with relay-pane)",
+                "Read an optional create/relay secret from the first line of standard input",
+            ),
+            (
+                "--layout PATH",
+                "Create from a headless layout JSON file; use - for standard input",
+            ),
+            (
+                "--profile NAME",
+                "Create one pane using a host profile (create shorthand)",
+            ),
+            ("--title TEXT", "Title for a newly created headless session"),
+            (
+                "--working-directory PATH",
+                "Starting directory for a single-pane create",
+            ),
+            (
+                "--env KEY=VALUE",
+                "Environment override for a single-pane create; may be repeated",
             ),
             (
                 "-H, --ssh-target TARGET",
@@ -247,6 +273,19 @@ fn parse_keep_alive_interval(value: &str) -> Result<u64> {
         "--keep-alive must be between {KEEP_ALIVE_MIN_MS} and {KEEP_ALIVE_MAX_MS} milliseconds"
     );
     Ok(interval)
+}
+
+fn parse_environment_assignment(value: &str) -> Result<(String, String)> {
+    let (name, value) = value
+        .split_once('=')
+        .context("--env must be written as KEY=VALUE")?;
+    anyhow::ensure!(!name.is_empty(), "--env variable name must not be empty");
+    anyhow::ensure!(
+        name.chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '_'),
+        "--env variable names may contain only letters, numbers, and underscores"
+    );
+    Ok((name.to_owned(), value.to_owned()))
 }
 
 fn no_mux_environment() -> bool {
@@ -420,6 +459,108 @@ fn print_remote_sessions(sessions: &[protocol::BackgroundSessionSummary]) {
     }
 }
 
+fn print_profiles(profiles: &[String], json: bool) -> Result<()> {
+    if json {
+        println!("{}", serde_json::to_string(profiles)?);
+    } else if profiles.is_empty() {
+        println!("No profiles available.");
+    } else {
+        for profile in profiles {
+            println!("{profile}");
+        }
+    }
+    Ok(())
+}
+
+fn run_profiles(remote_target: Option<&str>, port: Option<u16>, json: bool) -> Result<()> {
+    let profiles = if let Some(target) = remote_target {
+        remote::RemoteTransport::for_creation(remote::RemoteTarget::new(target).with_port(port))?
+            .query_profiles()?
+    } else {
+        zetta_profiles::profiles(&paths::platform_config_dir().join("config.json"))
+            .into_iter()
+            .map(|profile| profile.name)
+            .collect()
+    };
+    print_profiles(&profiles, json)
+}
+
+struct CreateOptions<'a> {
+    layout_path: Option<std::path::PathBuf>,
+    profile: Option<String>,
+    title: Option<String>,
+    working_directory: Option<std::path::PathBuf>,
+    environment: std::collections::HashMap<String, String>,
+    secret_from_stdin: bool,
+    remote_target: Option<&'a str>,
+    port: Option<u16>,
+    retention: retention::Retention,
+    json: bool,
+}
+
+fn run_create(options: CreateOptions<'_>) -> Result<()> {
+    let CreateOptions {
+        layout_path,
+        profile,
+        title,
+        working_directory,
+        environment,
+        secret_from_stdin,
+        remote_target,
+        port,
+        retention,
+        json,
+    } = options;
+    let mut spec = if let Some(path) = layout_path {
+        headless::parse_path(&path)?
+    } else {
+        headless::single_pane(
+            title.clone().unwrap_or_default(),
+            profile,
+            working_directory,
+            environment,
+        )
+    };
+    if let Some(title) = title {
+        spec.title = title;
+    }
+    let secret = if secret_from_stdin {
+        secret_prompt::read_optional_secret_from_stdin()?
+    } else {
+        secret_prompt::prompt_for_optional_secret()?
+    };
+    let protection = secret
+        .as_ref()
+        .map(|secret| auth::SessionAuthentication::create(secret.expose()))
+        .transpose()?;
+    let client = if let Some(target) = remote_target {
+        client::Client::connect_remote_for_creation(
+            remote::RemoteTarget::new(target).with_port(port),
+        )?
+    } else {
+        client::Client::connect_with_retention(retention)?
+    };
+    let request = spec.request(
+        client.next_shared_operation_id(),
+        protection
+            .as_ref()
+            .map(|protection| protection.verifier().to_owned()),
+    );
+    let created = client.create_shared(request)?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({
+                "session_id": created.session_id,
+                "summary": created.state.summary,
+            }))?
+        );
+    } else {
+        println!("Created headless session {}.", created.session_id);
+    }
+    Ok(())
+}
+
 /// Client-side settings that only the caller can know.
 ///
 /// `zmux` is deliberately free of Zetta's configuration format — a session
@@ -482,6 +623,16 @@ pub fn run_with_defaults(arguments: &[OsString], defaults: ClientDefaults) -> Re
     let mut remote_protocol: Option<String> = None;
     let mut expect_remote_protocol = false;
     let mut remote_keep_alive: Option<u64> = None;
+    let mut create_layout: Option<std::path::PathBuf> = None;
+    let mut create_profile: Option<String> = None;
+    let mut create_title: Option<String> = None;
+    let mut create_working_directory: Option<std::path::PathBuf> = None;
+    let mut create_environment = std::collections::HashMap::new();
+    let mut expect_create_layout = false;
+    let mut expect_create_profile = false;
+    let mut expect_create_title = false;
+    let mut expect_create_working_directory = false;
+    let mut expect_create_environment = false;
 
     for argument in arguments {
         let argument = argument.to_string_lossy();
@@ -538,6 +689,49 @@ pub fn run_with_defaults(arguments: &[OsString], defaults: ClientDefaults) -> Re
             expect_port = false;
             continue;
         }
+        if expect_create_layout {
+            anyhow::ensure!(
+                create_layout.is_none(),
+                "--layout may only be specified once"
+            );
+            create_layout = Some(std::path::PathBuf::from(argument.as_ref()));
+            expect_create_layout = false;
+            continue;
+        }
+        if expect_create_profile {
+            anyhow::ensure!(
+                create_profile.is_none(),
+                "--profile may only be specified once"
+            );
+            anyhow::ensure!(!argument.trim().is_empty(), "--profile requires a name");
+            create_profile = Some(argument.into_owned());
+            expect_create_profile = false;
+            continue;
+        }
+        if expect_create_title {
+            anyhow::ensure!(create_title.is_none(), "--title may only be specified once");
+            create_title = Some(argument.into_owned());
+            expect_create_title = false;
+            continue;
+        }
+        if expect_create_working_directory {
+            anyhow::ensure!(
+                create_working_directory.is_none(),
+                "--working-directory may only be specified once"
+            );
+            create_working_directory = Some(std::path::PathBuf::from(argument.as_ref()));
+            expect_create_working_directory = false;
+            continue;
+        }
+        if expect_create_environment {
+            let (name, value) = parse_environment_assignment(&argument)?;
+            anyhow::ensure!(
+                create_environment.insert(name.clone(), value).is_none(),
+                "--env may not specify the same variable twice: {name}"
+            );
+            expect_create_environment = false;
+            continue;
+        }
         match argument.as_ref() {
             "--json" | "-j" => json = true,
             "--ids-only" | "-I" => ids_only = true,
@@ -576,6 +770,67 @@ pub fn run_with_defaults(arguments: &[OsString], defaults: ClientDefaults) -> Re
                 )?);
             }
             "--port" | "-p" => expect_port = true,
+            "--layout" => expect_create_layout = true,
+            "--profile" => expect_create_profile = true,
+            "--title" => expect_create_title = true,
+            "--working-directory" => expect_create_working_directory = true,
+            "--env" => expect_create_environment = true,
+            value if value.starts_with("--layout=") => {
+                anyhow::ensure!(
+                    create_layout.is_none(),
+                    "--layout may only be specified once"
+                );
+                let path = value
+                    .split_once('=')
+                    .map(|(_, path)| path)
+                    .unwrap_or_default();
+                anyhow::ensure!(!path.is_empty(), "--layout requires a path");
+                create_layout = Some(std::path::PathBuf::from(path));
+            }
+            value if value.starts_with("--profile=") => {
+                anyhow::ensure!(
+                    create_profile.is_none(),
+                    "--profile may only be specified once"
+                );
+                let profile = value
+                    .split_once('=')
+                    .map(|(_, profile)| profile)
+                    .unwrap_or_default();
+                anyhow::ensure!(!profile.is_empty(), "--profile requires a name");
+                create_profile = Some(profile.to_owned());
+            }
+            value if value.starts_with("--title=") => {
+                anyhow::ensure!(create_title.is_none(), "--title may only be specified once");
+                create_title = Some(
+                    value
+                        .split_once('=')
+                        .map(|(_, title)| title.to_owned())
+                        .unwrap_or_default(),
+                );
+            }
+            value if value.starts_with("--working-directory=") => {
+                anyhow::ensure!(
+                    create_working_directory.is_none(),
+                    "--working-directory may only be specified once"
+                );
+                let path = value
+                    .split_once('=')
+                    .map(|(_, path)| path)
+                    .unwrap_or_default();
+                anyhow::ensure!(!path.is_empty(), "--working-directory requires a path");
+                create_working_directory = Some(std::path::PathBuf::from(path));
+            }
+            value if value.starts_with("--env=") => {
+                let assignment = value
+                    .split_once('=')
+                    .map(|(_, assignment)| assignment)
+                    .unwrap_or_default();
+                let (name, value) = parse_environment_assignment(assignment)?;
+                anyhow::ensure!(
+                    create_environment.insert(name.clone(), value).is_none(),
+                    "--env may not specify the same variable twice: {name}"
+                );
+            }
             value if value.starts_with("--ssh-target=") => {
                 anyhow::ensure!(
                     remote_target.is_none(),
@@ -729,8 +984,9 @@ pub fn run_with_defaults(arguments: &[OsString], defaults: ClientDefaults) -> Re
                 );
                 return Ok(());
             }
-            value @ ("list" | "endpoint" | "attach" | "stop" | "reconnect" | "resume" | "share"
-            | "unshare" | "kill" | "forget" | "relay-pane")
+            value @ ("list" | "profiles" | "create" | "endpoint" | "attach" | "stop"
+            | "reconnect" | "resume" | "share" | "unshare" | "kill" | "forget"
+            | "relay-pane")
                 if command.is_none() =>
             {
                 command = Some(value.to_owned());
@@ -772,6 +1028,14 @@ pub fn run_with_defaults(arguments: &[OsString], defaults: ClientDefaults) -> Re
     anyhow::ensure!(!expect_identity, "--identity requires a path");
     anyhow::ensure!(!expect_remote_target, "--ssh-target requires a destination");
     anyhow::ensure!(!expect_remote_protocol, "--protocol requires ssh or zosh");
+    anyhow::ensure!(!expect_create_layout, "--layout requires a path");
+    anyhow::ensure!(!expect_create_profile, "--profile requires a name");
+    anyhow::ensure!(!expect_create_title, "--title requires text");
+    anyhow::ensure!(
+        !expect_create_working_directory,
+        "--working-directory requires a path"
+    );
+    anyhow::ensure!(!expect_create_environment, "--env requires KEY=VALUE");
     anyhow::ensure!(
         remote_protocol.is_none() || command.as_deref() == Some("attach"),
         "--protocol is only valid with attach"
@@ -791,7 +1055,16 @@ pub fn run_with_defaults(arguments: &[OsString], defaults: ClientDefaults) -> Re
             || (remote_target.is_some()
                 && matches!(
                     command.as_deref(),
-                    Some("list" | "attach" | "kill" | "share" | "unshare" | "forget")
+                    Some(
+                        "list"
+                            | "profiles"
+                            | "create"
+                            | "attach"
+                            | "kill"
+                            | "share"
+                            | "unshare"
+                            | "forget",
+                    )
                 )),
         "--identity is only valid with resume, reconnect, or remote commands"
     );
@@ -800,16 +1073,59 @@ pub fn run_with_defaults(arguments: &[OsString], defaults: ClientDefaults) -> Re
         "--ids-only is only valid with list"
     );
     anyhow::ensure!(
-        !relay_secret_stdin || command.as_deref() == Some("relay-pane"),
-        "--secret-stdin is only valid with relay-pane"
+        !relay_secret_stdin || matches!(command.as_deref(), Some("relay-pane" | "create")),
+        "--secret-stdin is only valid with relay-pane or create"
+    );
+    anyhow::ensure!(
+        create_layout.is_none() || command.as_deref() == Some("create"),
+        "--layout is only valid with create"
+    );
+    anyhow::ensure!(
+        create_profile.is_none() || command.as_deref() == Some("create"),
+        "--profile is only valid with create"
+    );
+    anyhow::ensure!(
+        create_title.is_none() || command.as_deref() == Some("create"),
+        "--title is only valid with create"
+    );
+    anyhow::ensure!(
+        create_working_directory.is_none() || command.as_deref() == Some("create"),
+        "--working-directory is only valid with create"
+    );
+    anyhow::ensure!(
+        create_environment.is_empty() || command.as_deref() == Some("create"),
+        "--env is only valid with create"
+    );
+    anyhow::ensure!(
+        create_layout.is_none()
+            || (create_profile.is_none()
+                && create_working_directory.is_none()
+                && create_environment.is_empty()),
+        "--layout cannot be combined with --profile, --working-directory, or --env"
+    );
+    anyhow::ensure!(
+        !(create_layout
+            .as_deref()
+            .is_some_and(|path| path.as_os_str() == "-")
+            && relay_secret_stdin),
+        "--layout - cannot be combined with --secret-stdin"
     );
     anyhow::ensure!(
         remote_target.is_none()
             || matches!(
                 command.as_deref(),
-                Some("list" | "attach" | "kill" | "share" | "unshare" | "forget")
+                Some(
+                    "list"
+                        | "profiles"
+                        | "create"
+                        | "attach"
+                        | "kill"
+                        | "share"
+                        | "unshare"
+                        | "forget",
+                )
             ),
-        "--ssh-target is only valid with list, attach, share, unshare, kill, or forget"
+        "--ssh-target is only valid with list, profiles, create, attach, share, unshare, kill, or forget"
     );
     anyhow::ensure!(
         port.is_none() || remote_target.is_some(),
@@ -876,6 +1192,19 @@ pub fn run_with_defaults(arguments: &[OsString], defaults: ClientDefaults) -> Re
     let _ = (retention, daemon_options, resume_from, resume_ready);
 
     match command.as_deref() {
+        Some("profiles") => run_profiles(remote_target.as_deref(), port, json),
+        Some("create") => run_create(CreateOptions {
+            layout_path: create_layout,
+            profile: create_profile,
+            title: create_title,
+            working_directory: create_working_directory,
+            environment: create_environment,
+            secret_from_stdin: relay_secret_stdin,
+            remote_target: remote_target.as_deref(),
+            port,
+            retention,
+            json,
+        }),
         Some("endpoint") => {
             anyhow::ensure!(
                 json,

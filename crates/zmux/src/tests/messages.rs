@@ -74,6 +74,77 @@ fn ping_requests_are_tagged_by_name_on_the_wire() {
 }
 
 #[test]
+fn headless_create_requests_round_trip_the_recursive_layout() {
+    let request = Request::CreateShared(CreateSharedRequest {
+        operation_id: SharedOperationId::new(ClientId::new("headless"), 4),
+        title: "remote shell".to_owned(),
+        replacement: SharedDraftLayout::Split {
+            axis: "horizontal".to_owned(),
+            first_ratio: 600,
+            first: Box::new(SharedDraftLayout::Draft { draft_id: 1 }),
+            second: Box::new(SharedDraftLayout::Draft { draft_id: 2 }),
+        },
+        panes: vec![
+            SharedPaneDraft {
+                draft_id: 1,
+                profile: "System".to_owned(),
+                command: Some(zetta_profiles::ProfileCommand::with_args(
+                    "sh",
+                    vec!["-l".to_owned()],
+                )),
+                env: HashMap::new(),
+                working_directory: None,
+                inherit_working_directory_from: None,
+                load_shell_integration: false,
+                size: TerminalSize {
+                    columns: 80,
+                    lines: 24,
+                    cell_width: 0,
+                    cell_height: 0,
+                },
+                console_palette: ConsolePalette::default(),
+                metadata: shared_summary().panes[0].clone(),
+            },
+            SharedPaneDraft {
+                draft_id: 2,
+                profile: "System".to_owned(),
+                command: None,
+                env: HashMap::new(),
+                working_directory: None,
+                inherit_working_directory_from: None,
+                load_shell_integration: false,
+                size: TerminalSize {
+                    columns: 80,
+                    lines: 24,
+                    cell_width: 0,
+                    cell_height: 0,
+                },
+                console_palette: ConsolePalette::default(),
+                metadata: shared_summary().panes[0].clone(),
+            },
+        ],
+        active_pane: Some(SharedPaneRef::Draft { draft_id: 2 }),
+        verifier: None,
+    });
+    let wire = serde_json::to_value(&request).unwrap();
+    assert_eq!(wire["request"], "create_shared");
+
+    let parsed: Request = serde_json::from_value(wire).unwrap();
+    assert!(matches!(
+        parsed,
+        Request::CreateShared(CreateSharedRequest {
+            title,
+            replacement: SharedDraftLayout::Split {
+                first_ratio: 600,
+                ..
+            },
+            active_pane: Some(SharedPaneRef::Draft { draft_id: 2 }),
+            ..
+        }) if title == "remote shell"
+    ));
+}
+
+#[test]
 fn image_store_messages_round_trip_with_the_raw_payload_length() {
     let request = Request::StoreImage {
         session_id: 7,

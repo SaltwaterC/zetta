@@ -9,6 +9,7 @@ use super::*;
 use crate::background_session_ui::{RemoteAttachOutcome, load_remote_attach};
 use crate::config::REMOTE_KEEP_ALIVE_DEFAULT_MS;
 use crate::remote_pane_transport::{RemotePaneTransport, parse_keep_alive_interval};
+use crate::session_auth_ui::SessionAuthenticationPromptMode;
 
 const REMOTE_SESSION_SUGGESTION_VIEWPORT_ROWS: usize = 6;
 const REMOTE_SESSION_SUGGESTION_VIEWPORT_HEIGHT: gpui::Rems =
@@ -20,7 +21,10 @@ pub(crate) enum RemoteSessionField {
     Port,
     Protocol,
     KeepAlive,
+    Profile,
+    Template,
     List,
+    Create,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -31,16 +35,33 @@ struct RemoteSessionSuggestionNavigation {
 
 /// What pressing Enter in the picker does.
 ///
-/// Deliberately decided from the loaded sessions rather than from which field
-/// is focused: every edit to the target or the port runs `invalidate_results`,
-/// so a non-empty list always belongs to the target currently in the field and
+/// Deliberately decided from the loaded sessions, or from the focused Create
+/// action: every edit to the target or the port runs `invalidate_results`, so a
+/// non-empty list always belongs to the target currently in the field and
 /// Enter can attach from anywhere in the picker. Explicit re-listing stays on
 /// the Load button.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RemoteSessionEnterAction {
     Attach(usize),
     Load,
+    Create,
     Ignore,
+}
+
+/// The complete request kept while the optional session-secret prompt is open.
+///
+/// The picker is dismissed before the prompt is shown, just as it is for a
+/// remote attach. Keeping the layout here means a protected create can finish
+/// without reconstructing the user's template choices after the prompt.
+pub(crate) struct RemoteSessionCreate {
+    pub(crate) target: zmux::remote::RemoteTarget,
+    pub(crate) transport: RemotePaneTransport,
+    pub(crate) spec: zmux::headless::CreateSpec,
+}
+
+struct RemoteSessionDiscovery {
+    profiles: anyhow::Result<Vec<String>>,
+    sessions: anyhow::Result<Vec<zmux::protocol::BackgroundSessionSummary>>,
 }
 
 pub(crate) struct RemoteSessionPicker {
@@ -57,6 +78,13 @@ pub(crate) struct RemoteSessionPicker {
     pub(crate) selected: usize,
     pub(crate) loading: bool,
     pub(crate) error: Option<String>,
+    pub(crate) profiles: Vec<String>,
+    pub(crate) selected_profile: usize,
+    pub(crate) profiles_loading: bool,
+    pub(crate) profile_error: Option<String>,
+    pub(crate) templates: Vec<String>,
+    pub(crate) selected_template: usize,
+    pub(crate) creating: bool,
     pub(crate) suggestions: Vec<String>,
     suggestion_navigation: Option<RemoteSessionSuggestionNavigation>,
     pub(crate) suggestion_scroll: UniformListScrollHandle,
@@ -78,6 +106,13 @@ impl Default for RemoteSessionPicker {
             selected: 0,
             loading: false,
             error: None,
+            profiles: Vec::new(),
+            selected_profile: 0,
+            profiles_loading: false,
+            profile_error: None,
+            templates: Vec::new(),
+            selected_template: 0,
+            creating: false,
             suggestions: Vec::new(),
             suggestion_navigation: None,
             suggestion_scroll: UniformListScrollHandle::new(),
@@ -102,6 +137,11 @@ impl RemoteSessionPicker {
         self.selected = 0;
         self.loading = false;
         self.error = None;
+        self.profiles.clear();
+        self.selected_profile = 0;
+        self.profiles_loading = false;
+        self.profile_error = None;
+        self.creating = false;
     }
 
     /// The fields in tab order.
@@ -114,13 +154,19 @@ impl RemoteSessionPicker {
             RemoteSessionField::Port,
             RemoteSessionField::Protocol,
             RemoteSessionField::KeepAlive,
+            RemoteSessionField::Profile,
+            RemoteSessionField::Template,
             RemoteSessionField::List,
+            RemoteSessionField::Create,
         ];
         const WITHOUT_KEEP_ALIVE: &[RemoteSessionField] = &[
             RemoteSessionField::Target,
             RemoteSessionField::Port,
             RemoteSessionField::Protocol,
+            RemoteSessionField::Profile,
+            RemoteSessionField::Template,
             RemoteSessionField::List,
+            RemoteSessionField::Create,
         ];
         if self.transport.is_zosh() {
             WITH_KEEP_ALIVE
@@ -167,6 +213,20 @@ impl RemoteSessionPicker {
         }
     }
 
+    fn cycle_profile(&mut self, reverse: bool) {
+        if self.profiles.is_empty() {
+            return;
+        }
+        self.selected_profile = cycle_index(self.selected_profile, self.profiles.len(), reverse);
+    }
+
+    fn cycle_template(&mut self, reverse: bool) {
+        if self.templates.is_empty() {
+            return;
+        }
+        self.selected_template = cycle_index(self.selected_template, self.templates.len(), reverse);
+    }
+
     fn reset_suggestion_navigation(&mut self) {
         self.suggestion_navigation = None;
         self.suggestion_scroll
@@ -191,13 +251,27 @@ impl RemoteSessionPicker {
     }
 
     fn enter_action(&self) -> RemoteSessionEnterAction {
-        if self.loading {
+        if self.loading || self.creating || self.profiles_loading {
             return RemoteSessionEnterAction::Ignore;
+        }
+        if self.field == RemoteSessionField::Create {
+            return if self.can_create() {
+                RemoteSessionEnterAction::Create
+            } else {
+                RemoteSessionEnterAction::Ignore
+            };
         }
         match self.sessions.len() {
             0 => RemoteSessionEnterAction::Load,
             count => RemoteSessionEnterAction::Attach(self.selected.min(count - 1)),
         }
+    }
+
+    fn can_create(&self) -> bool {
+        !self.profiles.is_empty()
+            && !self.templates.is_empty()
+            && self.selected_profile < self.profiles.len()
+            && self.selected_template < self.templates.len()
     }
 
     fn navigate_suggestions(&mut self, reverse: bool) -> bool {
@@ -230,6 +304,20 @@ impl RemoteSessionPicker {
     }
 }
 
+fn cycle_index(current: usize, count: usize, reverse: bool) -> usize {
+    if reverse {
+        current.saturating_add(count).saturating_sub(1) % count
+    } else {
+        current.saturating_add(1) % count
+    }
+}
+
+fn sorted_names(values: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut values = values.into_iter().collect::<Vec<_>>();
+    values.sort_unstable_by_key(|value| value.to_ascii_lowercase());
+    values
+}
+
 impl Zetta {
     pub(crate) fn next_remote_session_operation_generation(&mut self) -> u64 {
         self.remote_session_operation_generation =
@@ -257,10 +345,12 @@ impl Zetta {
             self.serial_console = None;
         }
         let remote = self.launch_config.sessions.remote.clone();
+        let templates = sorted_names(self.effective_config().pane_split_templates.keys().cloned());
         let picker = RemoteSessionPicker {
             suggestions: crate::multi_command::ssh_config_host_suggestions(),
             generation: operation_generation,
             transport: RemotePaneTransport::from_config(&remote),
+            templates,
             keep_alive: TextField::new(
                 remote
                     .keep_alive_ms
@@ -334,6 +424,195 @@ impl Zetta {
         Ok(RemotePaneTransport::Zosh { keep_alive_ms })
     }
 
+    pub(crate) fn create_remote_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (values, can_create) = {
+            let Some(picker) = self.remote_session_picker.as_ref() else {
+                return;
+            };
+            let values = Self::remote_target_from_picker(picker).and_then(|target| {
+                Ok((
+                    target,
+                    Self::remote_transport_from_picker(picker)?,
+                    picker
+                        .templates
+                        .get(picker.selected_template)
+                        .cloned()
+                        .context("select a remote session template")?,
+                    picker
+                        .profiles
+                        .get(picker.selected_profile)
+                        .cloned()
+                        .context("load remote profiles before creating a session")?,
+                    picker.profiles.clone(),
+                ))
+            });
+            (values, picker.can_create())
+        };
+        let (target, transport, template_name, profile_name, profiles) = match values {
+            Ok(values) if can_create => values,
+            Ok(_) => {
+                if let Some(picker) = self.remote_session_picker.as_mut() {
+                    picker.profile_error =
+                        Some("Load the remote profiles before creating a session.".to_owned());
+                }
+                self.remote_session_focus.focus(window, cx);
+                cx.notify();
+                return;
+            }
+            Err(error) => {
+                if let Some(picker) = self.remote_session_picker.as_mut() {
+                    picker.error = Some(format!("{error:#}"));
+                }
+                self.remote_session_focus.focus(window, cx);
+                cx.notify();
+                return;
+            }
+        };
+        let spec = match build_remote_create_spec(
+            self.effective_config(),
+            &template_name,
+            &profile_name,
+            &profiles,
+        ) {
+            Ok(spec) => spec,
+            Err(error) => {
+                if let Some(picker) = self.remote_session_picker.as_mut() {
+                    picker.error = Some(format!("{error:#}"));
+                }
+                self.remote_session_focus.focus(window, cx);
+                cx.notify();
+                return;
+            }
+        };
+        self.remote_session_target = Some(target.clone());
+        self.remote_session_transport = transport;
+        self.remote_session_create = Some(RemoteSessionCreate {
+            target,
+            transport,
+            spec,
+        });
+        self.remote_session_picker = None;
+        self.open_session_authentication_prompt(
+            SessionAuthenticationPromptMode::RemoteCreate,
+            window,
+            cx,
+        );
+    }
+
+    pub(crate) fn start_remote_session_create(
+        &mut self,
+        authentication: Option<SessionAuthentication>,
+        secret: Option<SessionSecret>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(create) = self.remote_session_create.take() else {
+            self.show_notice(
+                "The remote session create request is no longer available.",
+                cx,
+            );
+            self.remote_session_target = None;
+            self.focus_active(window, cx);
+            return;
+        };
+        let operation_generation = self.next_remote_session_operation_generation();
+        let RemoteSessionCreate {
+            target,
+            transport,
+            spec,
+        } = create;
+        cx.spawn_in(window, async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    let client = zmux::client::Client::connect_remote_for_creation(target.clone())
+                        .context("connecting to the remote multiplexer")?;
+                    let request = spec.request(
+                        client.next_shared_operation_id(),
+                        authentication.map(|authentication| {
+                            authentication.verifier().to_owned()
+                        }),
+                    );
+                    let created = client
+                        .create_shared(request)
+                        .context("creating the remote headless session")?;
+                    let session_id = created.session_id;
+                    let attached = load_remote_attach(
+                        target,
+                        session_id,
+                        secret,
+                        transport,
+                    )
+                    .map_err(|error| {
+                        anyhow::anyhow!(
+                            "created remote session {session_id}, but could not attach it: {error:#}"
+                        )
+                    })?;
+                    Ok::<_, anyhow::Error>((session_id, attached))
+                })
+                .await;
+            this.update_in(cx, |this, window, cx| {
+                this.apply_remote_create_result(
+                    operation_generation,
+                    result,
+                    window,
+                    cx,
+                );
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn apply_remote_create_result(
+        &mut self,
+        operation_generation: u64,
+        result: anyhow::Result<(u64, RemoteAttachOutcome)>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.remote_session_operation_is_current(operation_generation) {
+            return;
+        }
+        match result {
+            Ok((session_id, RemoteAttachOutcome::Attached(data))) => {
+                match self.finish_remote_multiplexer_session(*data, window, cx) {
+                    Ok(crate::background_session_ui::AttachOutcomeSummary::Attached) => {
+                        self.remote_session_target = None;
+                        self.focus_active(window, cx);
+                    }
+                    Ok(_) => self.show_notice(
+                        format!(
+                            "Created remote session {session_id}, but it could not be shown here."
+                        ),
+                        cx,
+                    ),
+                    Err(error) => self.show_notice(
+                        format!(
+                            "Created remote session {session_id}, but could not show it: {error:#}"
+                        ),
+                        cx,
+                    ),
+                }
+            }
+            Ok((session_id, RemoteAttachOutcome::AuthenticationRequired))
+            | Ok((session_id, RemoteAttachOutcome::AuthenticationFailed)) => {
+                self.show_notice(
+                    format!(
+                        "Created remote session {session_id}, but authentication failed while attaching."
+                    ),
+                    cx,
+                );
+                self.remote_session_target = None;
+            }
+            Err(error) => {
+                self.show_notice(format!("Could not create a remote session: {error:#}"), cx);
+                self.remote_session_target = None;
+            }
+        }
+        cx.notify();
+    }
+
     pub(crate) fn load_remote_sessions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(picker) = self.remote_session_picker.as_ref() else {
             return;
@@ -360,17 +639,25 @@ impl Zetta {
         picker.selected = 0;
         picker.loading = true;
         picker.error = None;
+        picker.profiles.clear();
+        picker.selected_profile = 0;
+        picker.profiles_loading = true;
+        picker.profile_error = None;
         let generation = picker.generation;
         let task = cx.spawn_in(window, async move |this, cx| {
             let result = cx
                 .background_spawn(async move {
-                    let client = zmux::client::Client::connect_remote(target)
-                        .context("connecting to the remote multiplexer")?;
-                    client.list().context("listing remote sessions")
+                    let profiles = zmux::remote::RemoteTransport::for_creation(target.clone())
+                        .and_then(|transport| transport.query_profiles())
+                        .context("discovering remote profiles");
+                    let sessions = zmux::client::Client::connect_remote(target)
+                        .and_then(|client| client.list())
+                        .context("listing remote sessions");
+                    RemoteSessionDiscovery { profiles, sessions }
                 })
                 .await;
             this.update_in(cx, |this, window, cx| {
-                this.apply_remote_session_result(generation, result, window, cx);
+                this.apply_remote_discovery_result(generation, result, window, cx);
             })
             .ok();
         });
@@ -378,6 +665,69 @@ impl Zetta {
         cx.notify();
     }
 
+    fn apply_remote_discovery_result(
+        &mut self,
+        generation: u64,
+        result: RemoteSessionDiscovery,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(picker) = self.remote_session_picker.as_mut() else {
+            return;
+        };
+        if picker.generation != generation {
+            return;
+        }
+        picker.loading = false;
+        picker.profiles_loading = false;
+        picker.task = None;
+        match result.profiles {
+            Ok(profiles) => {
+                let previous = picker
+                    .profiles
+                    .get(picker.selected_profile)
+                    .cloned()
+                    .unwrap_or_else(|| "System".to_owned());
+                picker.profiles = sorted_names(profiles);
+                picker.selected_profile = picker
+                    .profiles
+                    .iter()
+                    .position(|profile| profile.eq_ignore_ascii_case(&previous))
+                    .or_else(|| {
+                        picker
+                            .profiles
+                            .iter()
+                            .position(|profile| profile.eq_ignore_ascii_case("System"))
+                    })
+                    .unwrap_or(0);
+                picker.profile_error = None;
+            }
+            Err(error) => picker.profile_error = Some(format!("{error:#}")),
+        }
+        match result.sessions {
+            Ok(sessions) => {
+                picker.sessions = sessions;
+                picker.selected = 0;
+                if picker.sessions.is_empty() {
+                    picker.error = Some("The remote host has no shared sessions.".into());
+                    picker.field = RemoteSessionField::Target;
+                } else {
+                    // The sessions are what the user asked for, so the list is
+                    // what Enter and the arrow keys should act on; leaving the
+                    // picker on the target field made Enter open a second SSH
+                    // connection instead of attaching.
+                    picker.field = RemoteSessionField::List;
+                    picker.reset_suggestion_navigation();
+                    picker.scroll.scroll_to_item(0, ScrollStrategy::Top);
+                }
+            }
+            Err(error) => picker.error = Some(format!("{error:#}")),
+        }
+        self.remote_session_focus.focus(window, cx);
+        cx.notify();
+    }
+
+    #[cfg(test)]
     fn apply_remote_session_result(
         &mut self,
         generation: u64,
@@ -589,6 +939,7 @@ impl Zetta {
                     self.select_remote_session(selected, window, cx);
                 }
                 Some(RemoteSessionEnterAction::Load) => self.load_remote_sessions(window, cx),
+                Some(RemoteSessionEnterAction::Create) => self.create_remote_session(window, cx),
                 Some(RemoteSessionEnterAction::Ignore) | None => {}
             }
             cx.stop_propagation();
@@ -605,6 +956,14 @@ impl Zetta {
             }
             ("left" | "right" | "space", RemoteSessionField::Protocol) => {
                 picker.toggle_transport();
+                cx.notify();
+            }
+            ("left" | "up" | "right" | "down", RemoteSessionField::Profile) => {
+                picker.cycle_profile(matches!(event.keystroke.key.as_str(), "left" | "up"));
+                cx.notify();
+            }
+            ("left" | "up" | "right" | "down", RemoteSessionField::Template) => {
+                picker.cycle_template(matches!(event.keystroke.key.as_str(), "left" | "up"));
                 cx.notify();
             }
             ("up" | "down", RemoteSessionField::Target) => {
@@ -636,7 +995,11 @@ impl Zetta {
                     RemoteSessionField::Target => &mut picker.target,
                     RemoteSessionField::Port => &mut picker.port,
                     RemoteSessionField::KeepAlive => &mut picker.keep_alive,
-                    RemoteSessionField::Protocol | RemoteSessionField::List => unreachable!(),
+                    RemoteSessionField::Protocol
+                    | RemoteSessionField::Profile
+                    | RemoteSessionField::Template
+                    | RemoteSessionField::List
+                    | RemoteSessionField::Create => unreachable!(),
                 };
                 match apply_clipboard_shortcut(field, &event.keystroke, cx) {
                     ClipboardOutcome::Unchanged => {
@@ -719,11 +1082,32 @@ impl Zetta {
             .map(|navigation| navigation.selected);
         let suggestion_scroll = picker.suggestion_scroll.clone();
         let picker_scroll = picker.scroll.clone();
+        let profiles_loading = picker.profiles_loading;
+        let profile_value = picker
+            .profiles
+            .get(picker.selected_profile)
+            .cloned()
+            .unwrap_or_else(|| {
+                if profiles_loading {
+                    "Loading…".to_owned()
+                } else {
+                    "Load remote profiles".to_owned()
+                }
+            });
+        let template_value = picker
+            .templates
+            .get(picker.selected_template)
+            .cloned()
+            .unwrap_or_else(|| "No templates configured".to_owned());
+        let profile_error = picker.profile_error.clone();
+        let can_create = picker.can_create();
+        let creating = picker.creating;
         let rows = remote_session_rows(handle, colors, &picker_scroll, sessions, selected);
 
         let cancel_handle = handle.clone();
         let load_handle = handle.clone();
         let attach_handle = handle.clone();
+        let create_handle = handle.clone();
         let has_suggestions = !suggestions.is_empty();
         let suggestion_rows = remote_session_suggestion_rows(
             handle,
@@ -821,6 +1205,16 @@ impl Zetta {
                             field_widget: &field_widget,
                             handle,
                         }))
+                        .child(remote_session_create_options(RemoteSessionCreateOptions {
+                            profile: profile_value,
+                            template: template_value,
+                            profiles_loading,
+                            profile_error,
+                            field,
+                            colors,
+                            error_color,
+                            handle,
+                        }))
                         .when(
                             field == RemoteSessionField::Target && has_suggestions,
                             |panel| panel.child(suggestion_rows),
@@ -851,10 +1245,155 @@ impl Zetta {
                             cancel_handle,
                             load_handle,
                             attach_handle,
+                            create_handle,
+                            profiles_ready: can_create,
+                            creating,
                         })),
                 )
                 .into_any_element(),
         )
+    }
+}
+
+fn build_remote_create_spec(
+    config: &Config,
+    template_name: &str,
+    default_profile: &str,
+    remote_profiles: &[String],
+) -> anyhow::Result<zmux::headless::CreateSpec> {
+    let template = config
+        .pane_split_templates
+        .get(template_name)
+        .with_context(|| format!("remote template {template_name:?} is no longer available"))?;
+    let mut panes = Vec::with_capacity(template.pane_count());
+    let mut next_draft_id = 1;
+    let layout = build_remote_create_layout(
+        &template.layout,
+        &template.env,
+        default_profile,
+        remote_profiles,
+        &mut panes,
+        &mut next_draft_id,
+    )?;
+    let active_pane = panes
+        .first()
+        .map(|pane| zmux::messages::SharedPaneRef::Draft {
+            draft_id: pane.draft_id,
+        })
+        .context("remote session template has no panes")?;
+    Ok(zmux::headless::CreateSpec {
+        title: String::new(),
+        layout,
+        active_pane,
+        panes,
+    })
+}
+
+fn build_remote_create_layout(
+    node: &PaneSplitTemplate,
+    inherited_env: &HashMap<String, String>,
+    default_profile: &str,
+    remote_profiles: &[String],
+    panes: &mut Vec<zmux::messages::SharedPaneDraft>,
+    next_draft_id: &mut u64,
+) -> anyhow::Result<zmux::messages::SharedDraftLayout> {
+    match node {
+        PaneSplitTemplate::Split {
+            axis,
+            first,
+            second,
+        } => {
+            let first = build_remote_create_layout(
+                first,
+                inherited_env,
+                default_profile,
+                remote_profiles,
+                panes,
+                next_draft_id,
+            )?;
+            let second = build_remote_create_layout(
+                second,
+                inherited_env,
+                default_profile,
+                remote_profiles,
+                panes,
+                next_draft_id,
+            )?;
+            Ok(zmux::messages::SharedDraftLayout::Split {
+                axis: axis.as_str().to_owned(),
+                first_ratio: zmux::protocol::DEFAULT_BACKGROUND_PANE_SPLIT_RATIO,
+                first: Box::new(first),
+                second: Box::new(second),
+            })
+        }
+        PaneSplitTemplate::Pane(pane) => {
+            anyhow::ensure!(
+                pane.theme.is_none()
+                    && pane.dark_theme.is_none()
+                    && pane.overlay.is_none()
+                    && pane.stack.is_empty(),
+                "remote headless creation does not support pane themes, overlays, or stacked commands"
+            );
+            let draft_id = *next_draft_id;
+            *next_draft_id = next_draft_id.saturating_add(1);
+            let profile = pane.profile.as_ref().map_or_else(
+                || default_profile.to_owned(),
+                |profile| profile.name.clone(),
+            );
+            let command = pane.command.as_ref().map(|command| {
+                zetta_profiles::ProfileCommand::with_args(
+                    command.program.clone(),
+                    command.args.clone(),
+                )
+            });
+            if command.is_none() {
+                anyhow::ensure!(
+                    remote_profiles
+                        .iter()
+                        .any(|remote| remote.eq_ignore_ascii_case(&profile)),
+                    "profile {profile:?} is not available on the remote host"
+                );
+            }
+            let mut env = inherited_env.clone();
+            env.extend(pane.env.clone());
+            let label = pane
+                .label
+                .clone()
+                .unwrap_or_else(|| format!("pane-{draft_id}"));
+            let application = command
+                .as_ref()
+                .and_then(|command| command.program.clone())
+                .unwrap_or_else(|| profile.clone());
+            panes.push(zmux::messages::SharedPaneDraft {
+                draft_id,
+                profile: profile.clone(),
+                command,
+                env,
+                working_directory: None,
+                inherit_working_directory_from: None,
+                load_shell_integration: true,
+                size: zmux::messages::TerminalSize {
+                    columns: zmux::headless::DEFAULT_COLUMNS,
+                    lines: zmux::headless::DEFAULT_LINES,
+                    cell_width: 0,
+                    cell_height: 0,
+                },
+                console_palette: terminal::ConsolePalette::default(),
+                metadata: zmux::protocol::BackgroundPaneSummary {
+                    id: 0,
+                    label,
+                    profile,
+                    configured_command: String::new(),
+                    application,
+                    foreground_command: None,
+                    terminal_title: None,
+                    working_directory: None,
+                    state: zmux::protocol::BackgroundPaneState::Starting,
+                    exit: None,
+                },
+            });
+            Ok(zmux::messages::SharedDraftLayout::Draft { draft_id })
+        }
     }
 }
 
@@ -1271,28 +1810,166 @@ fn remote_session_fields(
         )))
 }
 
+/// The choices that turn the remote-session picker into a create form. They
+/// are still picker fields, so the same keyboard tab order and visible focus
+/// treatment work for both the list and the create action.
+struct RemoteSessionCreateOptions<'a> {
+    profile: String,
+    template: String,
+    profiles_loading: bool,
+    profile_error: Option<String>,
+    field: RemoteSessionField,
+    colors: &'a ThemeColors,
+    error_color: Hsla,
+    handle: &'a WeakEntity<Zetta>,
+}
+
+fn remote_session_create_options(options: RemoteSessionCreateOptions<'_>) -> impl IntoElement {
+    let RemoteSessionCreateOptions {
+        profile,
+        template,
+        profiles_loading,
+        profile_error,
+        field,
+        colors,
+        error_color,
+        handle,
+    } = options;
+    div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .child(
+            div()
+                .text_xs()
+                .text_color(colors.text_muted)
+                .child("Create a new session")
+                .when(profiles_loading, |label| {
+                    label.child(" · discovering profiles…")
+                }),
+        )
+        .child(
+            h_flex()
+                .w_full()
+                .gap_2()
+                .child(remote_session_choice(RemoteSessionChoice {
+                    id: "remote-session-profile",
+                    label: "Profile",
+                    value: profile,
+                    field: RemoteSessionField::Profile,
+                    focused: field == RemoteSessionField::Profile,
+                    colors,
+                    handle: handle.clone(),
+                }))
+                .child(remote_session_choice(RemoteSessionChoice {
+                    id: "remote-session-template",
+                    label: "Template",
+                    value: template,
+                    field: RemoteSessionField::Template,
+                    focused: field == RemoteSessionField::Template,
+                    colors,
+                    handle: handle.clone(),
+                })),
+        )
+        .when_some(profile_error, |panel, error| {
+            panel.child(div().text_xs().text_color(error_color).child(error))
+        })
+}
+
+struct RemoteSessionChoice<'a> {
+    id: &'static str,
+    label: &'static str,
+    value: String,
+    field: RemoteSessionField,
+    focused: bool,
+    colors: &'a ThemeColors,
+    handle: WeakEntity<Zetta>,
+}
+
+fn remote_session_choice(choice: RemoteSessionChoice<'_>) -> impl IntoElement {
+    let RemoteSessionChoice {
+        id,
+        label,
+        value,
+        field,
+        focused,
+        colors,
+        handle,
+    } = choice;
+    div()
+        .id(id)
+        .flex_1()
+        .min_w_0()
+        .h_10()
+        .px_2()
+        .flex()
+        .flex_col()
+        .justify_center()
+        .rounded(px(4.))
+        .border_1()
+        .border_color(if focused {
+            colors.border_focused
+        } else {
+            colors.border
+        })
+        .cursor_pointer()
+        .hover(|style| style.bg(colors.element_hover))
+        .on_click(move |_, _, cx| {
+            handle
+                .update(cx, |this, cx| {
+                    let Some(picker) = this.remote_session_picker.as_mut() else {
+                        return;
+                    };
+                    picker.field = field;
+                    match field {
+                        RemoteSessionField::Profile => picker.cycle_profile(false),
+                        RemoteSessionField::Template => picker.cycle_template(false),
+                        _ => {}
+                    }
+                    cx.notify();
+                })
+                .ok();
+        })
+        .child(div().text_xs().text_color(colors.text_muted).child(label))
+        .child(
+            div()
+                .min_w_0()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .text_sm()
+                .child(value),
+        )
+}
+
 /// What the picker's action row needs to decide which buttons are live.
 struct RemoteSessionActions<'a> {
     loading: bool,
     session_count: usize,
     selected: usize,
+    profiles_ready: bool,
+    creating: bool,
     colors: &'a ThemeColors,
     cancel_handle: WeakEntity<Zetta>,
     load_handle: WeakEntity<Zetta>,
     attach_handle: WeakEntity<Zetta>,
+    create_handle: WeakEntity<Zetta>,
 }
 
-/// Cancel, Refresh and Attach, with Attach live only once a session is
-/// selected.
+/// Cancel, Refresh, Create and Attach, with the two session actions live only
+/// while their respective background operations are available.
 fn remote_session_actions(actions: RemoteSessionActions<'_>) -> impl IntoElement {
     let RemoteSessionActions {
         loading,
         session_count,
         selected,
+        profiles_ready,
+        creating,
         colors,
         cancel_handle,
         load_handle,
         attach_handle,
+        create_handle,
     } = actions;
     div()
         .flex()
@@ -1302,7 +1979,7 @@ fn remote_session_actions(actions: RemoteSessionActions<'_>) -> impl IntoElement
             div()
                 .text_xs()
                 .text_color(colors.text_muted)
-                .child("Tab next · ↑↓ choose · Enter load/attach · Esc cancel"),
+                .child("Tab next · ↑↓ choose · ←→ change · Enter load/attach/create · Esc cancel"),
         )
         .child(
             h_flex()
@@ -1331,6 +2008,22 @@ fn remote_session_actions(actions: RemoteSessionActions<'_>) -> impl IntoElement
                         load_handle
                             .update(cx, |this, cx| {
                                 this.load_remote_sessions(window, cx);
+                            })
+                            .ok();
+                    }),
+                )
+                .child(
+                    Button::new(
+                        "create-remote-session",
+                        if creating { "Creating…" } else { "Create" },
+                    )
+                    .style(ButtonStyle::Filled)
+                    .color(Color::Custom(colors.text))
+                    .disabled(loading || creating || !profiles_ready)
+                    .on_click(move |_, window, cx| {
+                        create_handle
+                            .update(cx, |this, cx| {
+                                this.create_remote_session(window, cx);
                             })
                             .ok();
                     }),

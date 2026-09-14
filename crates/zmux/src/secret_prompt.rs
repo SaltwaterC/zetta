@@ -29,6 +29,27 @@ pub fn prompt_for_optional_secret() -> Result<Option<SessionSecret>> {
     confirmed(secret, &confirmation).map(Some)
 }
 
+/// Reads one optional session secret from standard input for scripts.
+///
+/// Interactive callers should use [`prompt_for_optional_secret`] so the
+/// secret is masked and confirmed. This path is intentionally one-line and
+/// deterministic: an empty line leaves the session unprotected.
+pub fn read_optional_secret_from_stdin() -> Result<Option<SessionSecret>> {
+    use std::io::BufRead as _;
+
+    let mut line = Zeroizing::new(String::new());
+    std::io::stdin()
+        .lock()
+        .read_line(&mut line)
+        .context("reading the session secret from standard input")?;
+    strip_line_ending(&mut line);
+    if line.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(SessionSecret::from_zeroizing(line)))
+    }
+}
+
 /// Asks for the secret needed to open a protected session.
 ///
 /// Reconnect is different from sharing: an empty answer is not a choice to
@@ -59,7 +80,6 @@ fn confirmed(secret: Zeroizing<String>, confirmation: &str) -> Result<SessionSec
 ///
 /// Both endings, and repeatedly: a `\r\n` terminal would otherwise make the
 /// secret differ from the same characters typed anywhere else.
-#[cfg(test)]
 fn strip_line_ending(line: &mut String) {
     while line.ends_with('\n') || line.ends_with('\r') {
         line.pop();

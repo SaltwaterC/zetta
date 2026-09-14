@@ -1020,13 +1020,17 @@ _zetta() {
                     compadd -S ' ' -- list reconnect attach
                     _zetta_options --json --ids-only --ssh-target --port --help --version
                 else
-                    compadd -S ' ' -- list stop reconnect attach resume share unshare kill forget
-                    _zetta_options --json --ids-only --ssh-target --port --upgrade --identity --help --version
+                    compadd -S ' ' -- list profiles create stop reconnect attach resume share unshare kill forget
+                    _zetta_options --json --ids-only --ssh-target --port --upgrade --identity --secret-stdin --layout --profile --title --working-directory --env --retention --help --version
                 fi
             elif [[ ${ZETTA_NO_MUX:-0} == 1 && ${words[3]} != reconnect && ${words[3]} != list && ${words[3]} != attach ]]; then
                 return
             elif [[ ${words[3]} == stop ]]; then
                 _zetta_options --force --help
+            elif [[ ${words[3]} == profiles ]]; then
+                _zetta_options --json --ssh-target --port --help --version
+            elif [[ ${words[3]} == create ]]; then
+                _zetta_options --json --secret-stdin --layout --profile --title --working-directory --env --retention --ssh-target --port --help --version
             elif [[ ${words[3]} == reconnect && $words[CURRENT] != -* ]]; then
                 if [[ $words[CURRENT-1] == --identity ]]; then
                     _files

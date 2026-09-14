@@ -98,6 +98,24 @@ fn draft(
     }
 }
 
+#[test]
+fn a_headless_create_rejects_existing_layout_panes() {
+    let request = crate::messages::CreateSharedRequest {
+        operation_id: crate::messages::SharedOperationId::new(
+            crate::messages::ClientId::new("headless"),
+            1,
+        ),
+        title: String::new(),
+        replacement: crate::messages::SharedDraftLayout::Existing { pane_id: 1 },
+        panes: vec![draft("System", None)],
+        active_pane: Some(crate::messages::SharedPaneRef::Draft { draft_id: 1 }),
+        verifier: None,
+    };
+
+    let error = validate_create_request(&request).expect_err("existing panes must be rejected");
+    assert!(error.to_string().contains("existing pane"));
+}
+
 /// A daemon has no `TERM` of its own — it is a background process — so a pane
 /// it starts inherits none. That is what left a shell in a shared session
 /// drawing a monochrome prompt beside identical panes that had colour.
