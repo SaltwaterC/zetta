@@ -633,7 +633,8 @@ impl Zetta {
             keep_alive_ms,
             forward_agent,
         } = request;
-        let target = zmux::remote::RemoteTarget::new(target).with_port(port);
+        let forward_agent =
+            forward_agent.unwrap_or(self.launch_config.sessions.remote.forward_agent);
         // A protocol the command line named beats the configured default; a
         // command that named none asks for the default itself, rather than for
         // whatever this window's picker was last left on — a `zmux attach`
@@ -643,7 +644,7 @@ impl Zetta {
                 match crate::remote_pane_transport::RemotePaneTransport::parse(
                     &protocol,
                     keep_alive_ms,
-                    forward_agent.unwrap_or(false),
+                    forward_agent,
                 ) {
                     Ok(transport) => transport,
                     Err(error) => {
@@ -657,6 +658,9 @@ impl Zetta {
                 &self.launch_config.sessions.remote,
             ),
         };
+        let target = zmux::remote::RemoteTarget::new(target)
+            .with_port(port)
+            .with_forward_agent(forward_agent && !transport.is_zosh());
         self.remote_session_transport = transport;
         let operation_generation = self.next_remote_session_operation_generation();
         let mut completion = ReconnectCompletion::new(completion);

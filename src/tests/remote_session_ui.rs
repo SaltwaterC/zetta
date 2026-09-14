@@ -629,6 +629,181 @@ fn remote_dropdown_triggers_render_an_anchored_popup_and_commit_selection(cx: &m
 }
 
 #[gpui::test]
+fn remote_description_reserves_two_lines_for_every_transport(cx: &mut TestAppContext) {
+    cx.update(|cx| theme_settings::init(theme::LoadThemes::JustBase, cx));
+    let (harness, cx) = cx.add_window_view(move |window, cx| {
+        let mut config = Config::defaults(None, None);
+        config.profiles.clear();
+        let zetta = cx.new(|cx| {
+            let mut zetta = Zetta::new(
+                config,
+                None,
+                ZettaLaunchOptions {
+                    no_mux: true,
+                    ..Default::default()
+                },
+                window,
+                cx,
+            );
+            zetta.remote_session_picker = Some(RemoteSessionPicker::default());
+            zetta
+        });
+        RemoteSessionDropdownHarness { zetta }
+    });
+    cx.simulate_resize(size(px(720.), px(600.)));
+    cx.run_until_parked();
+
+    assert!(
+        cx.debug_bounds("remote-session-forward-agent").is_some(),
+        "SSH should show the agent-forwarding control"
+    );
+    let ssh_description_height = cx
+        .debug_bounds("remote-session-description")
+        .expect("the SSH description should be rendered")
+        .size
+        .height;
+    let ssh_target_y = cx
+        .debug_bounds("remote-session-target")
+        .expect("the SSH target should be rendered")
+        .origin
+        .y;
+
+    let zetta = harness.update(cx, |harness, _| harness.zetta.clone());
+    zetta.update(cx, |zetta, cx| {
+        zetta
+            .remote_session_picker
+            .as_mut()
+            .expect("the picker should remain open")
+            .toggle_transport();
+        cx.notify();
+    });
+    cx.run_until_parked();
+
+    let zosh_description_height = cx
+        .debug_bounds("remote-session-description")
+        .expect("the Zosh description should be rendered")
+        .size
+        .height;
+    let zosh_target_y = cx
+        .debug_bounds("remote-session-target")
+        .expect("the Zosh target should be rendered")
+        .origin
+        .y;
+
+    assert_eq!(ssh_description_height, px(45.));
+    assert_eq!(zosh_description_height, px(45.));
+    assert_eq!(ssh_target_y, zosh_target_y);
+}
+
+#[gpui::test]
+fn hiding_host_suggestions_does_not_resize_the_remote_picker(cx: &mut TestAppContext) {
+    cx.update(|cx| theme_settings::init(theme::LoadThemes::JustBase, cx));
+    let (harness, cx) = cx.add_window_view(move |window, cx| {
+        let mut config = Config::defaults(None, None);
+        config.profiles.clear();
+        let zetta = cx.new(|cx| {
+            let mut zetta = Zetta::new(
+                config,
+                None,
+                ZettaLaunchOptions {
+                    no_mux: true,
+                    ..Default::default()
+                },
+                window,
+                cx,
+            );
+            zetta.remote_session_picker = Some(picker_with_suggestions(""));
+            zetta
+        });
+        RemoteSessionDropdownHarness { zetta }
+    });
+    cx.simulate_resize(size(px(720.), px(600.)));
+    cx.run_until_parked();
+
+    let target_focused_bounds = cx
+        .debug_bounds("remote-session-picker")
+        .expect("the picker should be rendered");
+    let picker_right = target_focused_bounds.origin.x + target_focused_bounds.size.width;
+    for selector in [
+        "remote-session-cancel-action",
+        "remote-session-load-action",
+        "remote-session-create-action",
+        "remote-session-attach-action",
+    ] {
+        let action = cx
+            .debug_bounds(selector)
+            .unwrap_or_else(|| panic!("{selector} should be rendered"));
+        assert!(
+            action.origin.x + action.size.width <= picker_right,
+            "{selector} should stay inside the picker"
+        );
+    }
+
+    let zetta = harness.update(cx, |harness, _| harness.zetta.clone());
+    zetta.update(cx, |zetta, cx| {
+        let picker = zetta
+            .remote_session_picker
+            .as_mut()
+            .expect("the picker should remain open");
+        picker.toggle_transport();
+        picker.field = RemoteSessionField::Protocol;
+        cx.notify();
+    });
+    cx.run_until_parked();
+
+    let protocol_focused_bounds = cx
+        .debug_bounds("remote-session-picker")
+        .expect("the picker should remain rendered");
+    assert_eq!(target_focused_bounds, protocol_focused_bounds);
+}
+
+#[gpui::test]
+fn remote_transport_controls_have_the_same_height(cx: &mut TestAppContext) {
+    cx.update(|cx| theme_settings::init(theme::LoadThemes::JustBase, cx));
+    let (_harness, cx) = cx.add_window_view(move |window, cx| {
+        let mut config = Config::defaults(None, None);
+        config.profiles.clear();
+        let zetta = cx.new(|cx| {
+            let mut zetta = Zetta::new(
+                config,
+                None,
+                ZettaLaunchOptions {
+                    no_mux: true,
+                    ..Default::default()
+                },
+                window,
+                cx,
+            );
+            zetta.remote_session_picker = Some(RemoteSessionPicker {
+                transport: RemotePaneTransport::Zosh {
+                    keep_alive_ms: Some(REMOTE_KEEP_ALIVE_DEFAULT_MS),
+                    forward_agent: false,
+                },
+                keep_alive: TextField::new(REMOTE_KEEP_ALIVE_DEFAULT_MS.to_string()),
+                ..Default::default()
+            });
+            zetta
+        });
+        RemoteSessionDropdownHarness { zetta }
+    });
+    cx.simulate_resize(size(px(720.), px(600.)));
+    cx.run_until_parked();
+
+    let heights = [
+        "remote-session-protocol",
+        "remote-session-keep-alive-control",
+        "remote-session-forward-agent",
+    ]
+    .map(|selector| {
+        cx.debug_bounds(selector)
+            .unwrap_or_else(|| panic!("{selector} should be rendered"))
+            .size
+            .height
+    });
+    assert_eq!(heights, [px(36.); 3]);
+}
+
+#[gpui::test]
 fn remote_action_buttons_follow_keyboard_focus_in_the_real_overlay(cx: &mut TestAppContext) {
     cx.update(|cx| theme_settings::init(theme::LoadThemes::JustBase, cx));
     let (harness, cx) = cx.add_window_view(move |window, cx| {
@@ -1140,6 +1315,19 @@ fn remote_picker_parses_optional_ports_and_rejects_invalid_values() {
     assert_eq!(target.destination(), "dev.example");
     assert_eq!(target.port(), None);
 
+    picker.forward_agent = true;
+    assert_eq!(
+        Zetta::remote_target_from_picker(&picker).unwrap(),
+        zmux::remote::RemoteTarget::new("dev.example").with_forward_agent(true)
+    );
+    picker.toggle_transport();
+    assert_eq!(
+        Zetta::remote_target_from_picker(&picker).unwrap(),
+        zmux::remote::RemoteTarget::new("dev.example").with_forward_agent(false),
+        "Zosh uses its pane bridge instead of native OpenSSH forwarding"
+    );
+    picker.toggle_transport();
+
     picker.port = TextField::new("2200");
     assert_eq!(
         Zetta::remote_target_from_picker(&picker).unwrap().port(),
@@ -1165,6 +1353,7 @@ fn the_keep_alive_field_is_only_in_the_tab_order_under_zosh() {
         vec![
             RemoteSessionField::Port,
             RemoteSessionField::Protocol,
+            RemoteSessionField::ForwardAgent,
             RemoteSessionField::Profile,
             RemoteSessionField::Template,
             RemoteSessionField::List,
@@ -1183,8 +1372,8 @@ fn the_keep_alive_field_is_only_in_the_tab_order_under_zosh() {
         vec![
             RemoteSessionField::Port,
             RemoteSessionField::Protocol,
-            RemoteSessionField::KeepAlive,
             RemoteSessionField::ForwardAgent,
+            RemoteSessionField::KeepAlive,
             RemoteSessionField::Profile,
             RemoteSessionField::Template,
             RemoteSessionField::List,
@@ -1208,6 +1397,7 @@ fn action_tab_order_is_dynamic_and_reverse_wraps() {
         vec![
             RemoteSessionField::Port,
             RemoteSessionField::Protocol,
+            RemoteSessionField::ForwardAgent,
             RemoteSessionField::Profile,
             RemoteSessionField::Template,
             RemoteSessionField::List,

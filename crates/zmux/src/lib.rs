@@ -222,7 +222,7 @@ fn usage(no_mux: bool) -> String {
             ),
             (
                 "--forward-agent / --no-forward-agent",
-                "Opt in to forwarding the local SSH agent through Zosh panes; needs --protocol zosh",
+                "Enable or disable SSH-agent forwarding for attached remote panes",
             ),
             (
                 "-r, --retention MODE",
@@ -1061,8 +1061,8 @@ pub fn run_with_defaults(arguments: &[OsString], defaults: ClientDefaults) -> Re
         "--keep-alive holds a Zosh link open, so it needs --protocol zosh"
     );
     anyhow::ensure!(
-        remote_forward_agent.is_none() || remote_protocol.as_deref() == Some(REMOTE_PROTOCOL_ZOSH),
-        "--forward-agent needs --protocol zosh"
+        remote_forward_agent.is_none() || command.as_deref() == Some("attach"),
+        "agent-forwarding options are only valid with attach"
     );
     anyhow::ensure!(!expect_port, "--port requires a value");
     anyhow::ensure!(

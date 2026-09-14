@@ -54,6 +54,33 @@ fn remote_target_does_not_override_open_ssh_identity_selection() {
 }
 
 #[test]
+fn remote_targets_explicitly_control_native_agent_forwarding() {
+    let enabled = RemoteTarget::new("alias").with_forward_agent(true);
+    let disabled = RemoteTarget::new("alias").with_forward_agent(false);
+
+    for arguments in [
+        endpoint_arguments(&enabled),
+        program_arguments(&enabled),
+        profiles_arguments(&enabled),
+        start_daemon_arguments(&enabled, Path::new("/tmp/zmux")),
+        forward_arguments(&enabled, "/tmp/local.sock:/run/zmux.sock"),
+    ] {
+        assert!(arguments.iter().any(|argument| argument == "-A"));
+        assert!(!arguments.iter().any(|argument| argument == "-a"));
+    }
+    for arguments in [
+        endpoint_arguments(&disabled),
+        program_arguments(&disabled),
+        profiles_arguments(&disabled),
+        start_daemon_arguments(&disabled, Path::new("/tmp/zmux")),
+        forward_arguments(&disabled, "/tmp/local.sock:/run/zmux.sock"),
+    ] {
+        assert!(arguments.iter().any(|argument| argument == "-a"));
+        assert!(!arguments.iter().any(|argument| argument == "-A"));
+    }
+}
+
+#[test]
 fn forwards_are_stream_local_and_do_not_request_a_shell() {
     let target = RemoteTarget::new("alias").with_port(Some(2200));
 

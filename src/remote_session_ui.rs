@@ -268,19 +268,17 @@ impl RemoteSessionPicker {
     /// The controls in tab order.
     ///
     /// Keep-alive is only reachable while Zosh is the protocol: it holds a
-    /// Mosh link open, and SSH-agent forwarding is only meaningful on that
-    /// transport. An SSH session has neither of those controls.
+    /// Mosh link open. Agent forwarding follows the protocol choice: OpenSSH
+    /// provides it natively, while Zosh uses its authenticated pane bridge.
     fn field_order(&self) -> Vec<RemoteSessionField> {
         let mut order = vec![
             RemoteSessionField::Target,
             RemoteSessionField::Port,
             RemoteSessionField::Protocol,
+            RemoteSessionField::ForwardAgent,
         ];
         if self.transport.is_zosh() {
-            order.extend([
-                RemoteSessionField::KeepAlive,
-                RemoteSessionField::ForwardAgent,
-            ]);
+            order.push(RemoteSessionField::KeepAlive);
         }
         order.extend([
             RemoteSessionField::Profile,
@@ -346,12 +344,7 @@ impl RemoteSessionPicker {
                 forward_agent: self.forward_agent,
             }
         };
-        if !self.transport.is_zosh()
-            && matches!(
-                self.field,
-                RemoteSessionField::KeepAlive | RemoteSessionField::ForwardAgent
-            )
-        {
+        if !self.transport.is_zosh() && self.field == RemoteSessionField::KeepAlive {
             self.field = RemoteSessionField::Protocol;
         }
         self.move_unavailable_focus_to_cancel();
@@ -660,7 +653,9 @@ impl Zetta {
                 anyhow::ensure!(port != 0, "SSH port must be between 1 and 65535");
                 Some(port)
             };
-        let target = zmux::remote::RemoteTarget::new(destination).with_port(port);
+        let target = zmux::remote::RemoteTarget::new(destination)
+            .with_port(port)
+            .with_forward_agent(picker.forward_agent && !picker.transport.is_zosh());
         target.validate()?;
         Ok(target)
     }
@@ -1572,6 +1567,7 @@ impl Zetta {
                 .child(
                     div()
                         .id("remote-session-picker")
+                        .debug_selector(|| "remote-session-picker".to_owned())
                         .track_focus(&self.remote_session_focus)
                         .w_full()
                         .max_w(px(680.))
@@ -1590,8 +1586,10 @@ impl Zetta {
                         .child(Label::new("Open remote session").size(LabelSize::Large))
                         .child(
                             div()
+                                .min_h(px(45.))
                                 .text_sm()
                                 .text_color(colors.text_muted)
+                                .debug_selector(|| "remote-session-description".to_owned())
                                 .child(remote_session_description(transport)),
                         )
                         .child(remote_session_fields(&field_widget, target, port, handle))
@@ -1615,10 +1613,14 @@ impl Zetta {
                             error_color,
                             handle,
                         }))
-                        .when(
-                            field == RemoteSessionField::Target && has_suggestions,
-                            |panel| panel.child(suggestion_rows),
-                        )
+                        .when(has_suggestions, |panel| {
+                            panel.child(
+                                suggestion_rows
+                                    .when(field != RemoteSessionField::Target, |suggestions| {
+                                        suggestions.invisible()
+                                    }),
+                            )
+                        })
                         .child(
                             div()
                                 .flex()
@@ -2042,6 +2044,7 @@ fn remote_session_field(
     let focused = field == selected_field;
     let (before, after) = value.split_at_cursor();
     field_box(id, focused, colors)
+        .debug_selector(move || id.to_owned())
         .flex_1()
         .min_w_0()
         .cursor_text()
@@ -2161,6 +2164,12 @@ where
             colors,
             handle,
         ))
+        .child(remote_session_agent_control(
+            forward_agent,
+            field == RemoteSessionField::ForwardAgent,
+            colors,
+            handle,
+        ))
         .when(transport.is_zosh(), |row| {
             row.child(
                 div()
@@ -2169,13 +2178,19 @@ where
                     .text_color(colors.text_muted)
                     .child("Keep-alive"),
             )
-            .child(div().flex_none().w(px(120.)).child(field_widget(
-                "remote-session-keep-alive",
-                keep_alive,
-                RemoteSessionField::KeepAlive,
-                KEEP_ALIVE_PLACEHOLDER,
-                handle.clone(),
-            )))
+            .child(
+                div()
+                    .flex_none()
+                    .w(px(120.))
+                    .debug_selector(|| "remote-session-keep-alive-control".to_owned())
+                    .child(field_widget(
+                        "remote-session-keep-alive",
+                        keep_alive,
+                        RemoteSessionField::KeepAlive,
+                        KEEP_ALIVE_PLACEHOLDER,
+                        handle.clone(),
+                    )),
+            )
             .child(
                 div()
                     .flex_none()
@@ -2183,12 +2198,6 @@ where
                     .text_color(colors.text_muted)
                     .child("ms"),
             )
-            .child(remote_session_agent_control(
-                forward_agent,
-                field == RemoteSessionField::ForwardAgent,
-                colors,
-                handle,
-            ))
         })
 }
 
@@ -2203,8 +2212,10 @@ fn remote_session_agent_control(
         .id("remote-session-forward-agent")
         .debug_selector(|| "remote-session-forward-agent".to_owned())
         .flex_none()
+        .h_9()
         .px_2()
-        .py_1()
+        .flex()
+        .items_center()
         .rounded(px(4.))
         .border_1()
         .border_color(if focused {
@@ -2214,6 +2225,9 @@ fn remote_session_agent_control(
         })
         .text_xs()
         .cursor_pointer()
+        .tooltip(Tooltip::text(
+            "Enable SSH agent forwarding for remote panes",
+        ))
         .hover(|style| style.bg(colors.element_hover))
         .on_click(move |_, _, cx| {
             handle
@@ -2242,6 +2256,8 @@ fn remote_session_protocol_control(
 ) -> impl IntoElement {
     h_flex()
         .flex_none()
+        .h_9()
+        .debug_selector(|| "remote-session-protocol".to_owned())
         .rounded(px(4.))
         .border_1()
         .border_color(if focused {
@@ -2258,8 +2274,10 @@ fn remote_session_protocol_control(
                         "remote-session-protocol-{name}"
                     )))
                     .debug_selector(move || format!("remote-session-protocol-{name}"))
+                    .h_full()
                     .px_3()
-                    .py_1()
+                    .flex()
+                    .items_center()
                     .text_xs()
                     .cursor_pointer()
                     .when(selected, |option| {
@@ -2578,12 +2596,23 @@ fn remote_session_actions(actions: RemoteSessionActions<'_>) -> impl IntoElement
     let create_focused = field == RemoteSessionField::Create;
     let attach_focused = field == RemoteSessionField::Attach;
     div()
+        .w_full()
         .flex()
+        .gap_3()
         .justify_between()
         .items_center()
-        .child(div().text_xs().text_color(colors.text_muted).child(footer))
+        .child(
+            div()
+                .min_w_0()
+                .flex_1()
+                .truncate()
+                .text_xs()
+                .text_color(colors.text_muted)
+                .child(footer),
+        )
         .child(
             h_flex()
+                .flex_none()
                 .gap_2()
                 .child(
                     div()

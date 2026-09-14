@@ -136,7 +136,7 @@ pub struct RemoteSessionConfig {
     /// How long a Zosh link may go without sending before it holds itself
     /// open, or `None` for Mosh's own three-second heartbeat.
     pub keep_alive_ms: Option<u64>,
-    /// Whether Zosh panes may forward the local SSH agent. Off by default.
+    /// Whether remote panes may forward the local SSH agent. Off by default.
     pub forward_agent: bool,
 }
 

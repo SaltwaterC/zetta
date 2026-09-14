@@ -421,7 +421,7 @@ fn configuration_session_rows(
         ),
         setting_row(
             "Forward SSH agent",
-            "Opt in to forwarding the local SSH agent through Zosh panes; remote processes can use the forwarded socket",
+            "Opt in to forwarding the local SSH agent through OpenSSH or Zosh; remote processes can use the forwarded socket",
             SettingsControl::Toggle(SettingsToggle::RemoteSessionForwardAgent),
             setting_toggle(
                 "settings-remote-session-forward-agent",

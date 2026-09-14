@@ -55,6 +55,7 @@ const REMOTE_PROFILES_COMMAND: &str = r#"/bin/sh -c 'exec 3>&1 1>/dev/null; exec
 pub struct RemoteTarget {
     destination: String,
     port: Option<u16>,
+    forward_agent: Option<bool>,
 }
 
 impl RemoteTarget {
@@ -62,11 +63,18 @@ impl RemoteTarget {
         Self {
             destination: destination.into(),
             port: None,
+            forward_agent: None,
         }
     }
 
     pub fn with_port(mut self, port: Option<u16>) -> Self {
         self.port = port;
+        self
+    }
+
+    /// Explicitly enables or disables OpenSSH's native agent forwarding.
+    pub fn with_forward_agent(mut self, forward_agent: bool) -> Self {
+        self.forward_agent = Some(forward_agent);
         self
     }
 
@@ -522,10 +530,7 @@ struct SshOutput {
 
 fn endpoint_arguments(target: &RemoteTarget) -> Vec<String> {
     let mut arguments = vec!["-T".to_owned()];
-    if let Some(port) = target.port {
-        arguments.push("-p".to_owned());
-        arguments.push(port.to_string());
-    }
+    push_target_options(&mut arguments, target);
     arguments.extend([
         target.destination.clone(),
         REMOTE_ENDPOINT_COMMAND.to_owned(),
@@ -535,10 +540,7 @@ fn endpoint_arguments(target: &RemoteTarget) -> Vec<String> {
 
 fn program_arguments(target: &RemoteTarget) -> Vec<String> {
     let mut arguments = vec!["-T".to_owned()];
-    if let Some(port) = target.port {
-        arguments.push("-p".to_owned());
-        arguments.push(port.to_string());
-    }
+    push_target_options(&mut arguments, target);
     arguments.extend([
         target.destination.clone(),
         REMOTE_PROGRAM_COMMAND.to_owned(),
@@ -548,10 +550,7 @@ fn program_arguments(target: &RemoteTarget) -> Vec<String> {
 
 fn profiles_arguments(target: &RemoteTarget) -> Vec<String> {
     let mut arguments = vec!["-T".to_owned()];
-    if let Some(port) = target.port {
-        arguments.push("-p".to_owned());
-        arguments.push(port.to_string());
-    }
+    push_target_options(&mut arguments, target);
     arguments.extend([
         target.destination.clone(),
         REMOTE_PROFILES_COMMAND.to_owned(),
@@ -561,10 +560,7 @@ fn profiles_arguments(target: &RemoteTarget) -> Vec<String> {
 
 fn start_daemon_arguments(target: &RemoteTarget, program: &Path) -> Vec<String> {
     let mut arguments = vec!["-T".to_owned()];
-    if let Some(port) = target.port {
-        arguments.push("-p".to_owned());
-        arguments.push(port.to_string());
-    }
+    push_target_options(&mut arguments, target);
     let program = shell_escape_double_quoted(&program.to_string_lossy());
     let command = format!(
         r#"/bin/sh -c 'exec "${{SHELL:-/bin/sh}}" -lic "nohup \"{program}\" --daemon >/dev/null 2>&1 </dev/null &"'"#
@@ -588,16 +584,23 @@ fn forward_arguments(target: &RemoteTarget, forwarding: &str) -> Vec<String> {
         "-o".to_owned(),
         "ExitOnForwardFailure=yes".to_owned(),
     ];
-    if let Some(port) = target.port {
-        arguments.push("-p".to_owned());
-        arguments.push(port.to_string());
-    }
+    push_target_options(&mut arguments, target);
     arguments.extend([
         "-L".to_owned(),
         forwarding.to_owned(),
         target.destination.clone(),
     ]);
     arguments
+}
+
+fn push_target_options(arguments: &mut Vec<String>, target: &RemoteTarget) {
+    if let Some(forward_agent) = target.forward_agent {
+        arguments.push(if forward_agent { "-A" } else { "-a" }.to_owned());
+    }
+    if let Some(port) = target.port {
+        arguments.push("-p".to_owned());
+        arguments.push(port.to_string());
+    }
 }
 
 /// `Child` does not terminate a process when it is dropped. Every failed
