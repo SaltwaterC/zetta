@@ -1,5 +1,8 @@
 use super::*;
-use gpui::{Context, FocusHandle, TestAppContext, UniformListScrollHandle, px, red, size};
+use gpui::{
+    Context, FocusHandle, KeyDownEvent, Keystroke, Modifiers, TestAppContext,
+    UniformListScrollHandle, px, red, size,
+};
 use std::{cell::Cell, rc::Rc};
 
 struct RemoteSessionEscapeHarness {
@@ -66,6 +69,40 @@ impl Render for RemoteSessionDropdownHarness {
     }
 }
 
+struct RemoteSessionKeyboardHarness {
+    zetta: Entity<Zetta>,
+    picker_focus: FocusHandle,
+}
+
+impl Render for RemoteSessionKeyboardHarness {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let handle = self.zetta.downgrade();
+        let picker_focus = self.picker_focus.clone();
+        let overlay = self
+            .zetta
+            .update(cx, |zetta, zetta_cx| {
+                zetta.render_remote_session_overlay(
+                    &ThemeColors::light(),
+                    red(),
+                    &handle,
+                    window,
+                    zetta_cx,
+                )
+            })
+            .expect("the remote picker should be open");
+        div()
+            .track_focus(&picker_focus)
+            .capture_key_down(move |event, window, cx| {
+                handle
+                    .update(cx, |zetta, cx| {
+                        zetta.remote_session_key_down(event, window, cx);
+                    })
+                    .ok();
+            })
+            .child(overlay)
+    }
+}
+
 struct RemoteSessionSuggestionsHarness {
     suggestions: Vec<String>,
     scroll: UniformListScrollHandle,
@@ -119,6 +156,18 @@ fn remote_session_summary(
         held: false,
         scoped_to: None,
         key_envelope: None,
+    }
+}
+
+fn remote_key_event(key: &str, modifiers: Modifiers) -> KeyDownEvent {
+    KeyDownEvent {
+        keystroke: Keystroke {
+            modifiers,
+            key: key.to_owned(),
+            key_char: None,
+        },
+        is_held: false,
+        prefer_character_input: false,
     }
 }
 
@@ -580,6 +629,68 @@ fn remote_dropdown_triggers_render_an_anchored_popup_and_commit_selection(cx: &m
 }
 
 #[gpui::test]
+fn remote_action_buttons_follow_keyboard_focus_in_the_real_overlay(cx: &mut TestAppContext) {
+    cx.update(|cx| theme_settings::init(theme::LoadThemes::JustBase, cx));
+    let (harness, cx) = cx.add_window_view(move |window, cx| {
+        let mut config = Config::defaults(None, None);
+        config.profiles.clear();
+        let zetta = cx.new(|cx| {
+            let mut zetta = Zetta::new(
+                config,
+                None,
+                ZettaLaunchOptions {
+                    no_mux: true,
+                    ..Default::default()
+                },
+                window,
+                cx,
+            );
+            zetta.remote_session_picker = Some(RemoteSessionPicker {
+                target: TextField::new("dev.example"),
+                profiles: vec!["System".to_owned()],
+                sessions: vec![remote_session_summary(4, false)],
+                field: RemoteSessionField::List,
+                ..Default::default()
+            });
+            zetta
+        });
+        RemoteSessionKeyboardHarness {
+            picker_focus: zetta.read(cx).remote_session_focus.clone(),
+            zetta,
+        }
+    });
+    cx.simulate_resize(size(px(720.), px(600.)));
+    harness.update_in(cx, |harness, window, cx| {
+        harness.picker_focus.focus(window, cx);
+    });
+    cx.run_until_parked();
+
+    for (expected, selector) in [
+        (RemoteSessionField::Cancel, "remote-session-cancel-action"),
+        (RemoteSessionField::Load, "remote-session-load-action"),
+        (RemoteSessionField::Create, "remote-session-create-action"),
+        (RemoteSessionField::Attach, "remote-session-attach-action"),
+    ] {
+        cx.simulate_keystrokes("tab");
+        cx.run_until_parked();
+        let field = harness.update(cx, |harness, cx| {
+            harness
+                .zetta
+                .read(cx)
+                .remote_session_picker
+                .as_ref()
+                .expect("the picker should remain open")
+                .field
+        });
+        assert_eq!(field, expected);
+        assert!(
+            cx.debug_bounds(selector).is_some(),
+            "the focused action should remain rendered"
+        );
+    }
+}
+
+#[gpui::test]
 fn a_dismissed_remote_attach_cannot_fill_a_reopened_picker(cx: &mut TestAppContext) {
     cx.update(|cx| theme_settings::init(theme::LoadThemes::JustBase, cx));
     let (harness, cx) = cx.add_window_view(move |window, cx| {
@@ -688,6 +799,83 @@ fn enter_clamps_a_selection_past_the_end_of_the_list() {
     };
 
     assert_eq!(picker.enter_action(), RemoteSessionEnterAction::Attach(1));
+}
+
+#[test]
+fn focused_actions_map_enter_to_their_own_actions() {
+    let mut picker = RemoteSessionPicker {
+        profiles: vec!["System".to_owned()],
+        sessions: vec![remote_session_summary(4, false)],
+        ..Default::default()
+    };
+
+    picker.field = RemoteSessionField::Cancel;
+    assert_eq!(picker.enter_action(), RemoteSessionEnterAction::Cancel);
+    picker.field = RemoteSessionField::Load;
+    assert_eq!(picker.enter_action(), RemoteSessionEnterAction::Load);
+    picker.field = RemoteSessionField::Create;
+    assert_eq!(picker.enter_action(), RemoteSessionEnterAction::Create);
+    picker.field = RemoteSessionField::Attach;
+    assert_eq!(picker.enter_action(), RemoteSessionEnterAction::Attach(0));
+
+    picker.loading = true;
+    picker.field = RemoteSessionField::Cancel;
+    assert_eq!(picker.enter_action(), RemoteSessionEnterAction::Cancel);
+    picker.field = RemoteSessionField::Load;
+    assert_eq!(picker.enter_action(), RemoteSessionEnterAction::Ignore);
+    picker.field = RemoteSessionField::Create;
+    assert_eq!(picker.enter_action(), RemoteSessionEnterAction::Ignore);
+    picker.field = RemoteSessionField::Attach;
+    assert_eq!(picker.enter_action(), RemoteSessionEnterAction::Ignore);
+}
+
+#[test]
+fn primary_and_alt_enter_map_to_create_and_attach_only_when_available() {
+    let primary = Modifiers::secondary_key();
+    let mut picker = RemoteSessionPicker {
+        profiles: vec!["System".to_owned()],
+        sessions: vec![
+            remote_session_summary(4, false),
+            remote_session_summary(9, false),
+        ],
+        selected: 1,
+        ..Default::default()
+    };
+
+    assert_eq!(
+        picker.shortcut_action(&remote_key_event("enter", primary)),
+        Some(RemoteSessionEnterAction::Create)
+    );
+    assert_eq!(
+        picker.shortcut_action(&remote_key_event("enter", Modifiers::alt())),
+        Some(RemoteSessionEnterAction::Attach(1))
+    );
+    assert_eq!(
+        picker.shortcut_action(&remote_key_event("enter", Modifiers::default())),
+        None
+    );
+
+    picker.profiles.clear();
+    assert_eq!(
+        picker.shortcut_action(&remote_key_event("enter", primary)),
+        Some(RemoteSessionEnterAction::Ignore)
+    );
+    picker.sessions.clear();
+    assert_eq!(
+        picker.shortcut_action(&remote_key_event("enter", Modifiers::alt())),
+        Some(RemoteSessionEnterAction::Ignore)
+    );
+    assert_eq!(
+        picker.shortcut_action(&remote_key_event(
+            "enter",
+            Modifiers {
+                alt: true,
+                shift: true,
+                ..Default::default()
+            },
+        )),
+        None
+    );
 }
 
 #[gpui::test]
@@ -980,7 +1168,8 @@ fn the_keep_alive_field_is_only_in_the_tab_order_under_zosh() {
             RemoteSessionField::Profile,
             RemoteSessionField::Template,
             RemoteSessionField::List,
-            RemoteSessionField::Create,
+            RemoteSessionField::Cancel,
+            RemoteSessionField::Load,
             RemoteSessionField::Target,
         ]
     );
@@ -998,10 +1187,56 @@ fn the_keep_alive_field_is_only_in_the_tab_order_under_zosh() {
             RemoteSessionField::Profile,
             RemoteSessionField::Template,
             RemoteSessionField::List,
-            RemoteSessionField::Create,
+            RemoteSessionField::Cancel,
+            RemoteSessionField::Load,
             RemoteSessionField::Target,
         ]
     );
+}
+
+#[test]
+fn action_tab_order_is_dynamic_and_reverse_wraps() {
+    let mut picker = RemoteSessionPicker {
+        profiles: vec!["System".to_owned()],
+        sessions: vec![remote_session_summary(4, false)],
+        ..Default::default()
+    };
+
+    assert_eq!(
+        collect_tab_order(&mut picker),
+        vec![
+            RemoteSessionField::Port,
+            RemoteSessionField::Protocol,
+            RemoteSessionField::Profile,
+            RemoteSessionField::Template,
+            RemoteSessionField::List,
+            RemoteSessionField::Cancel,
+            RemoteSessionField::Load,
+            RemoteSessionField::Create,
+            RemoteSessionField::Attach,
+            RemoteSessionField::Target,
+        ]
+    );
+
+    picker.field = RemoteSessionField::Target;
+    picker.cycle_field(true);
+    assert_eq!(picker.field, RemoteSessionField::Attach);
+    picker.cycle_field(true);
+    assert_eq!(picker.field, RemoteSessionField::Create);
+
+    picker.loading = true;
+    picker.field = RemoteSessionField::Load;
+    picker.move_unavailable_focus_to_cancel();
+    assert_eq!(picker.field, RemoteSessionField::Cancel);
+    assert!(!picker.field_order().contains(&RemoteSessionField::Load));
+    assert!(!picker.field_order().contains(&RemoteSessionField::Create));
+    assert!(!picker.field_order().contains(&RemoteSessionField::Attach));
+
+    picker.loading = false;
+    picker.sessions.clear();
+    picker.field = RemoteSessionField::Attach;
+    picker.move_unavailable_focus_to_cancel();
+    assert_eq!(picker.field, RemoteSessionField::Cancel);
 }
 
 /// Turning Zosh back off while the keep-alive field has the focus would leave
@@ -1067,11 +1302,12 @@ fn the_protocol_decides_what_the_picker_asks_for() {
 /// Walks the tab order from wherever the picker is, once round.
 fn collect_tab_order(picker: &mut RemoteSessionPicker) -> Vec<RemoteSessionField> {
     let started = picker.field;
+    let expected_len = picker.field_order().len();
     let mut visited = Vec::new();
     loop {
         picker.cycle_field(false);
         visited.push(picker.field);
-        if picker.field == started || visited.len() > 8 {
+        if picker.field == started || visited.len() > expected_len {
             return visited;
         }
     }

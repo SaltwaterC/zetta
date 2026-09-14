@@ -111,7 +111,10 @@ pub(crate) enum RemoteSessionField {
     Profile,
     Template,
     List,
+    Cancel,
+    Load,
     Create,
+    Attach,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -143,14 +146,15 @@ struct RemoteSessionSuggestionNavigation {
 
 /// What pressing Enter in the picker does.
 ///
-/// Deliberately decided from the loaded sessions, or from the focused Create
-/// action: every edit to the target or the port runs `invalidate_results`, so a
+/// Deliberately decided from the loaded sessions, or from the focused action:
+/// every edit to the target or the port runs `invalidate_results`, so a
 /// non-empty list always belongs to the target currently in the field and
 /// Enter can attach from anywhere in the picker. Explicit re-listing stays on
 /// the Load button.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RemoteSessionEnterAction {
     Attach(usize),
+    Cancel,
     Load,
     Create,
     Ignore,
@@ -255,41 +259,45 @@ impl RemoteSessionPicker {
         self.profile_error = None;
         self.close_dropdown();
         self.creating = false;
+        self.move_unavailable_focus_to_cancel();
     }
 
-    /// The fields in tab order.
+    /// The controls in tab order.
     ///
     /// Keep-alive is only reachable while Zosh is the protocol: it holds a
     /// Mosh link open, and an SSH session has no link of that kind to hold.
-    fn field_order(&self) -> &'static [RemoteSessionField] {
-        const WITH_KEEP_ALIVE: &[RemoteSessionField] = &[
+    fn field_order(&self) -> Vec<RemoteSessionField> {
+        let mut order = vec![
             RemoteSessionField::Target,
             RemoteSessionField::Port,
             RemoteSessionField::Protocol,
-            RemoteSessionField::KeepAlive,
-            RemoteSessionField::Profile,
-            RemoteSessionField::Template,
-            RemoteSessionField::List,
-            RemoteSessionField::Create,
-        ];
-        const WITHOUT_KEEP_ALIVE: &[RemoteSessionField] = &[
-            RemoteSessionField::Target,
-            RemoteSessionField::Port,
-            RemoteSessionField::Protocol,
-            RemoteSessionField::Profile,
-            RemoteSessionField::Template,
-            RemoteSessionField::List,
-            RemoteSessionField::Create,
         ];
         if self.transport.is_zosh() {
-            WITH_KEEP_ALIVE
-        } else {
-            WITHOUT_KEEP_ALIVE
+            order.push(RemoteSessionField::KeepAlive);
         }
+        order.extend([
+            RemoteSessionField::Profile,
+            RemoteSessionField::Template,
+            RemoteSessionField::List,
+            RemoteSessionField::Cancel,
+        ]);
+        if self.can_load() {
+            order.push(RemoteSessionField::Load);
+        }
+        if self.can_create_action() {
+            order.push(RemoteSessionField::Create);
+        }
+        if self.can_attach() {
+            order.push(RemoteSessionField::Attach);
+        }
+        order
     }
 
     fn cycle_field(&mut self, reverse: bool) {
         let order = self.field_order();
+        if !order.contains(&self.field) {
+            self.field = RemoteSessionField::Cancel;
+        }
         let current = order
             .iter()
             .position(|field| *field == self.field)
@@ -300,6 +308,15 @@ impl RemoteSessionPicker {
             (current + 1) % order.len()
         };
         self.field = order[next];
+    }
+
+    /// Keep the manual focus state on a control that is still rendered and
+    /// actionable. A load, attach, or profile-discovery transition can make
+    /// an action disappear from the tab order while it is focused.
+    fn move_unavailable_focus_to_cancel(&mut self) {
+        if !self.field_order().contains(&self.field) {
+            self.field = RemoteSessionField::Cancel;
+        }
     }
 
     /// Switches between carrying the panes over SSH and over Zosh.
@@ -324,6 +341,7 @@ impl RemoteSessionPicker {
         if !self.transport.is_zosh() && self.field == RemoteSessionField::KeepAlive {
             self.field = RemoteSessionField::Protocol;
         }
+        self.move_unavailable_focus_to_cancel();
     }
 
     fn reset_suggestion_navigation(&mut self) {
@@ -350,20 +368,75 @@ impl RemoteSessionPicker {
     }
 
     fn enter_action(&self) -> RemoteSessionEnterAction {
+        match self.field {
+            RemoteSessionField::Cancel => return RemoteSessionEnterAction::Cancel,
+            RemoteSessionField::Load => {
+                return if self.can_load() {
+                    RemoteSessionEnterAction::Load
+                } else {
+                    RemoteSessionEnterAction::Ignore
+                };
+            }
+            RemoteSessionField::Create => {
+                return if self.can_create_action() {
+                    RemoteSessionEnterAction::Create
+                } else {
+                    RemoteSessionEnterAction::Ignore
+                };
+            }
+            RemoteSessionField::Attach => {
+                return if self.can_attach() {
+                    RemoteSessionEnterAction::Attach(self.selected.min(self.sessions.len() - 1))
+                } else {
+                    RemoteSessionEnterAction::Ignore
+                };
+            }
+            _ => {}
+        }
         if self.loading || self.creating || self.profiles_loading {
             return RemoteSessionEnterAction::Ignore;
-        }
-        if self.field == RemoteSessionField::Create {
-            return if self.can_create() {
-                RemoteSessionEnterAction::Create
-            } else {
-                RemoteSessionEnterAction::Ignore
-            };
         }
         match self.sessions.len() {
             0 => RemoteSessionEnterAction::Load,
             count => RemoteSessionEnterAction::Attach(self.selected.min(count - 1)),
         }
+    }
+
+    fn shortcut_action(&self, event: &KeyDownEvent) -> Option<RemoteSessionEnterAction> {
+        if event.keystroke.key != "enter" {
+            return None;
+        }
+        let modifiers = event.keystroke.modifiers;
+        if modifiers.number_of_modifiers() != 1 {
+            return None;
+        }
+        if modifiers.secondary() {
+            return Some(if self.can_create_action() {
+                RemoteSessionEnterAction::Create
+            } else {
+                RemoteSessionEnterAction::Ignore
+            });
+        }
+        if modifiers.alt {
+            return Some(if self.can_attach() {
+                RemoteSessionEnterAction::Attach(self.selected.min(self.sessions.len() - 1))
+            } else {
+                RemoteSessionEnterAction::Ignore
+            });
+        }
+        None
+    }
+
+    fn can_load(&self) -> bool {
+        !self.loading
+    }
+
+    fn can_attach(&self) -> bool {
+        !self.loading && !self.sessions.is_empty()
+    }
+
+    fn can_create_action(&self) -> bool {
+        !self.loading && !self.creating && !self.profiles_loading && self.can_create()
     }
 
     fn can_create(&self) -> bool {
@@ -818,11 +891,13 @@ impl Zetta {
         picker.sessions.clear();
         picker.selected = 0;
         picker.loading = true;
+        picker.attach_generation = None;
         picker.error = None;
         picker.profiles.clear();
         picker.selected_profile = 0;
         picker.profiles_loading = true;
         picker.profile_error = None;
+        picker.move_unavailable_focus_to_cancel();
         let generation = picker.generation;
         let task = cx.spawn_in(window, async move |this, cx| {
             let result = cx
@@ -903,6 +978,7 @@ impl Zetta {
             }
             Err(error) => picker.error = Some(remote_error_message(&error)),
         }
+        picker.move_unavailable_focus_to_cancel();
         self.remote_session_focus.focus(window, cx);
         cx.notify();
     }
@@ -941,6 +1017,7 @@ impl Zetta {
             }
             Err(error) => picker.error = Some(remote_error_message(&error)),
         }
+        picker.move_unavailable_focus_to_cancel();
         self.remote_session_focus.focus(window, cx);
         cx.notify();
     }
@@ -977,9 +1054,11 @@ impl Zetta {
             .remote_session_picker
             .as_mut()
             .expect("the remote session picker was checked above");
+        picker.selected = index;
         picker.attach_generation = Some(operation_generation);
         picker.loading = true;
         picker.error = None;
+        picker.move_unavailable_focus_to_cancel();
         let background_target = target.clone();
         let task = cx.spawn_in(window, async move |this, cx| {
             let result = cx
@@ -1024,6 +1103,7 @@ impl Zetta {
         if let Some(picker) = self.remote_session_picker.as_mut() {
             picker.loading = false;
             picker.task = None;
+            picker.attach_generation = None;
         }
         match result {
             Ok(RemoteAttachOutcome::Attached(data)) => {
@@ -1106,6 +1186,9 @@ impl Zetta {
         if self.remote_session_picker.is_none() {
             return false;
         }
+        if self.remote_session_shortcut(event, window, cx) {
+            return true;
+        }
         if self.remote_session_dropdown_key_down(event, window, cx) {
             return true;
         }
@@ -1125,6 +1208,9 @@ impl Zetta {
             match action {
                 Some(RemoteSessionEnterAction::Attach(selected)) => {
                     self.select_remote_session(selected, window, cx);
+                }
+                Some(RemoteSessionEnterAction::Cancel) => {
+                    self.dismiss_remote_session_picker(window, cx);
                 }
                 Some(RemoteSessionEnterAction::Load) => self.load_remote_sessions(window, cx),
                 Some(RemoteSessionEnterAction::Create) => self.create_remote_session(window, cx),
@@ -1179,7 +1265,10 @@ impl Zetta {
                     | RemoteSessionField::Profile
                     | RemoteSessionField::Template
                     | RemoteSessionField::List
-                    | RemoteSessionField::Create => unreachable!(),
+                    | RemoteSessionField::Cancel
+                    | RemoteSessionField::Load
+                    | RemoteSessionField::Create
+                    | RemoteSessionField::Attach => unreachable!(),
                 };
                 match apply_clipboard_shortcut(field, &event.keystroke, cx) {
                     ClipboardOutcome::Unchanged => {
@@ -1219,6 +1308,32 @@ impl Zetta {
                 cx.notify();
             }
             _ => {}
+        }
+        cx.stop_propagation();
+        true
+    }
+
+    fn remote_session_shortcut(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let action = self
+            .remote_session_picker
+            .as_ref()
+            .and_then(|picker| picker.shortcut_action(event));
+        let Some(action) = action else {
+            return false;
+        };
+        match action {
+            RemoteSessionEnterAction::Create => self.create_remote_session(window, cx),
+            RemoteSessionEnterAction::Attach(selected) => {
+                self.select_remote_session(selected, window, cx);
+            }
+            RemoteSessionEnterAction::Cancel
+            | RemoteSessionEnterAction::Load
+            | RemoteSessionEnterAction::Ignore => {}
         }
         cx.stop_propagation();
         true
@@ -1374,8 +1489,9 @@ impl Zetta {
             |template| template.label().to_owned(),
         );
         let profile_error = picker.profile_error.clone();
-        let can_create = picker.can_create();
+        let can_create = picker.can_create_action();
         let creating = picker.creating;
+        let attaching = picker.loading && picker.attach_generation.is_some();
         let dropdown_popup = open_dropdown.map(|dropdown| {
             remote_session_dropdown_popup(dropdown, colors.clone(), dropdown_state, handle.clone())
         });
@@ -1500,14 +1616,16 @@ impl Zetta {
                         .child(session_list)
                         .child(remote_session_actions(RemoteSessionActions {
                             loading,
+                            attaching,
                             session_count,
                             selected,
+                            field,
                             colors,
                             cancel_handle,
                             load_handle,
                             attach_handle,
                             create_handle,
-                            profiles_ready: can_create,
+                            create_available: can_create,
                             creating,
                         })),
                 )
@@ -1546,7 +1664,10 @@ fn remote_session_list_panel(
                     .justify_center()
                     .text_sm()
                     .text_color(colors.text_muted)
-                    .child("Enter a target and press Enter to load sessions."),
+                    .child(format!(
+                        "Enter a target and press Enter or Load to load sessions. {} creates a new session.",
+                        remote_session_primary_shortcut(),
+                    )),
             )
         })
         .when_some(error, |panel, error| {
@@ -1770,6 +1891,10 @@ fn remote_session_rows(
                         .on_click(move |_, window, cx| {
                             row_handle
                                 .update(cx, |this, cx| {
+                                    if let Some(picker) = this.remote_session_picker.as_mut() {
+                                        picker.field = RemoteSessionField::List;
+                                        picker.selected = index;
+                                    }
                                     this.select_remote_session(index, window, cx);
                                 })
                                 .ok();
@@ -1953,6 +2078,14 @@ fn remote_session_description(transport: RemotePaneTransport) -> &'static str {
          carried over Zosh. Remote sessions must be shared."
     } else {
         "Connect through your normal OpenSSH configuration. Remote sessions must be shared."
+    }
+}
+
+fn remote_session_primary_shortcut() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "Cmd+Enter"
+    } else {
+        "Ctrl+Enter"
     }
 }
 
@@ -2315,9 +2448,11 @@ fn remote_session_dropdown_popup(
 /// What the picker's action row needs to decide which buttons are live.
 struct RemoteSessionActions<'a> {
     loading: bool,
+    attaching: bool,
     session_count: usize,
     selected: usize,
-    profiles_ready: bool,
+    field: RemoteSessionField,
+    create_available: bool,
     creating: bool,
     colors: &'a ThemeColors,
     cancel_handle: WeakEntity<Zetta>,
@@ -2326,14 +2461,28 @@ struct RemoteSessionActions<'a> {
     create_handle: WeakEntity<Zetta>,
 }
 
-/// Cancel, Refresh, Create and Attach, with the two session actions live only
+fn remote_session_action_style(
+    default: ButtonStyle,
+    focused: bool,
+    colors: &ThemeColors,
+) -> ButtonStyle {
+    if focused {
+        ButtonStyle::OutlinedCustom(colors.border_focused)
+    } else {
+        default
+    }
+}
+
+/// Cancel, Load, Create and Attach, with the session actions live only
 /// while their respective background operations are available.
 fn remote_session_actions(actions: RemoteSessionActions<'_>) -> impl IntoElement {
     let RemoteSessionActions {
         loading,
+        attaching,
         session_count,
         selected,
-        profiles_ready,
+        field,
+        create_available,
         creating,
         colors,
         cancel_handle,
@@ -2341,75 +2490,137 @@ fn remote_session_actions(actions: RemoteSessionActions<'_>) -> impl IntoElement
         attach_handle,
         create_handle,
     } = actions;
+    let instruction = if creating {
+        "Creating remote session…".to_owned()
+    } else if attaching {
+        "Attaching the selected session…".to_owned()
+    } else if loading {
+        "Loading remote sessions…".to_owned()
+    } else if session_count == 0 {
+        "Enter or Load loads sessions".to_owned()
+    } else {
+        "Enter or Attach attaches the selected session".to_owned()
+    };
+    let footer = format!(
+        "Tab next · ↑↓ choose · ←→ change · {instruction} · {} create · Alt+Enter attach · Esc cancel",
+        remote_session_primary_shortcut(),
+    );
+    let cancel_focused = field == RemoteSessionField::Cancel;
+    let load_focused = field == RemoteSessionField::Load;
+    let create_focused = field == RemoteSessionField::Create;
+    let attach_focused = field == RemoteSessionField::Attach;
     div()
         .flex()
         .justify_between()
         .items_center()
-        .child(
-            div()
-                .text_xs()
-                .text_color(colors.text_muted)
-                .child("Tab next · ↑↓ choose · ←→ change · Enter load/attach/create · Esc cancel"),
-        )
+        .child(div().text_xs().text_color(colors.text_muted).child(footer))
         .child(
             h_flex()
                 .gap_2()
                 .child(
-                    Button::new("cancel-remote-session", "Cancel")
-                        .style(ButtonStyle::Outlined)
-                        .color(Color::Custom(colors.text))
-                        .on_click(move |_, window, cx| {
-                            cancel_handle
-                                .update(cx, |this, cx| {
-                                    this.dismiss_remote_session_picker(window, cx);
-                                })
-                                .ok();
-                        }),
+                    div()
+                        .debug_selector(|| "remote-session-cancel-action".to_owned())
+                        .child(
+                            Button::new("cancel-remote-session", "Cancel")
+                                .style(remote_session_action_style(
+                                    ButtonStyle::Outlined,
+                                    cancel_focused,
+                                    colors,
+                                ))
+                                .color(Color::Custom(colors.text))
+                                .on_click(move |_, window, cx| {
+                                    cancel_handle
+                                        .update(cx, |this, cx| {
+                                            if let Some(picker) =
+                                                this.remote_session_picker.as_mut()
+                                            {
+                                                picker.field = RemoteSessionField::Cancel;
+                                            }
+                                            this.dismiss_remote_session_picker(window, cx);
+                                        })
+                                        .ok();
+                                }),
+                        ),
                 )
                 .child(
-                    Button::new(
-                        "load-remote-sessions",
-                        if loading { "Loading…" } else { "Load" },
-                    )
-                    .style(ButtonStyle::Outlined)
-                    .color(Color::Custom(colors.text))
-                    .disabled(loading)
-                    .on_click(move |_, window, cx| {
-                        load_handle
-                            .update(cx, |this, cx| {
-                                this.load_remote_sessions(window, cx);
-                            })
-                            .ok();
-                    }),
+                    div()
+                        .debug_selector(|| "remote-session-load-action".to_owned())
+                        .child(
+                            Button::new(
+                                "load-remote-sessions",
+                                if loading { "Loading…" } else { "Load" },
+                            )
+                            .style(remote_session_action_style(
+                                ButtonStyle::Outlined,
+                                load_focused,
+                                colors,
+                            ))
+                            .color(Color::Custom(colors.text))
+                            .disabled(loading)
+                            .on_click(move |_, window, cx| {
+                                load_handle
+                                    .update(cx, |this, cx| {
+                                        if let Some(picker) = this.remote_session_picker.as_mut() {
+                                            picker.field = RemoteSessionField::Load;
+                                        }
+                                        this.load_remote_sessions(window, cx);
+                                    })
+                                    .ok();
+                            }),
+                        ),
                 )
                 .child(
-                    Button::new(
-                        "create-remote-session",
-                        if creating { "Creating…" } else { "Create" },
-                    )
-                    .style(ButtonStyle::Filled)
-                    .color(Color::Custom(colors.text))
-                    .disabled(loading || creating || !profiles_ready)
-                    .on_click(move |_, window, cx| {
-                        create_handle
-                            .update(cx, |this, cx| {
-                                this.create_remote_session(window, cx);
-                            })
-                            .ok();
-                    }),
+                    div()
+                        .debug_selector(|| "remote-session-create-action".to_owned())
+                        .child(
+                            Button::new(
+                                "create-remote-session",
+                                if creating { "Creating…" } else { "Create" },
+                            )
+                            .style(remote_session_action_style(
+                                ButtonStyle::Filled,
+                                create_focused,
+                                colors,
+                            ))
+                            .color(Color::Custom(colors.text))
+                            .disabled(!create_available)
+                            .on_click(move |_, window, cx| {
+                                create_handle
+                                    .update(cx, |this, cx| {
+                                        if let Some(picker) = this.remote_session_picker.as_mut() {
+                                            picker.field = RemoteSessionField::Create;
+                                        }
+                                        this.create_remote_session(window, cx);
+                                    })
+                                    .ok();
+                            }),
+                        ),
                 )
                 .child(
-                    Button::new("attach-remote-session", "Attach")
-                        .style(ButtonStyle::Filled)
-                        .color(Color::Custom(colors.text))
-                        .disabled(loading || session_count == 0)
-                        .on_click(move |_, window, cx| {
-                            attach_handle
-                                .update(cx, |this, cx| {
-                                    this.select_remote_session(selected, window, cx);
-                                })
-                                .ok();
-                        }),
+                    div()
+                        .debug_selector(|| "remote-session-attach-action".to_owned())
+                        .child(
+                            Button::new("attach-remote-session", "Attach")
+                                .style(remote_session_action_style(
+                                    ButtonStyle::Filled,
+                                    attach_focused,
+                                    colors,
+                                ))
+                                .color(Color::Custom(colors.text))
+                                .disabled(loading || session_count == 0)
+                                .on_click(move |_, window, cx| {
+                                    attach_handle
+                                        .update(cx, |this, cx| {
+                                            if let Some(picker) =
+                                                this.remote_session_picker.as_mut()
+                                            {
+                                                picker.field = RemoteSessionField::Attach;
+                                            }
+                                            this.select_remote_session(selected, window, cx);
+                                        })
+                                        .ok();
+                                }),
+                        ),
                 ),
         )
 }
