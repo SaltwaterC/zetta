@@ -164,6 +164,9 @@ impl Zetta {
                 .is_some_and(|profile| !profile.hidden),
             #[cfg(target_os = "macos")]
             SettingsToggle::TitleBarMenus => editor.configuration.hide_title_bar_menus,
+            SettingsToggle::RemoteSessionForwardAgent => {
+                editor.configuration.remote_session_forward_agent
+            }
             SettingsToggle::ProjectOpacityOverride => editor
                 .project
                 .as_ref()
@@ -496,6 +499,9 @@ impl Zetta {
             }
             #[cfg(target_os = "macos")]
             SettingsToggle::TitleBarMenus => editor.configuration.hide_title_bar_menus = value,
+            SettingsToggle::RemoteSessionForwardAgent => {
+                editor.configuration.remote_session_forward_agent = value;
+            }
             SettingsToggle::ProjectOpacityOverride => {
                 if let Some(project) = editor.project.as_mut() {
                     // Turning the override on starts from whatever the user

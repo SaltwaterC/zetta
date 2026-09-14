@@ -159,6 +159,9 @@ pub struct MoshSession<S: Screen> {
     /// Query IDs already handed to the outer terminal. Host states are
     /// cumulative, so the same query can arrive in several accepted states.
     seen_terminal_queries: HashSet<u64>,
+    /// Agent record IDs already handed to the forwarding bridge. Host states
+    /// are cumulative for these records too.
+    seen_agent_records: HashSet<u64>,
 }
 
 impl<S: Screen> MoshSession<S> {
@@ -192,6 +195,7 @@ impl<S: Screen> MoshSession<S> {
             last_roundtrip_success: 0,
             peer_shut_down: false,
             seen_terminal_queries: HashSet::new(),
+            seen_agent_records: HashSet::new(),
         })
     }
 
@@ -232,6 +236,25 @@ impl<S: Screen> MoshSession<S> {
     /// UserStream, so a retransmitted state cannot write one twice remotely.
     pub fn send_terminal_response(&mut self, bytes: &[u8]) {
         self.sender.state_mut().push_terminal_response(bytes);
+    }
+
+    /// Announce the Zosh agent-forwarding protocol. A stock Mosh server
+    /// ignores this unknown extension and continues as a normal terminal.
+    pub fn request_agent_forwarding(&mut self, version: u32) {
+        self.sender.state_mut().push_agent_hello(version);
+    }
+
+    /// Queue a complete SSH-agent response for the remote Zosh server.
+    pub fn send_agent_response(
+        &mut self,
+        connection_id: u64,
+        request_id: u64,
+        frame: &[u8],
+        closed: bool,
+    ) {
+        self.sender
+            .state_mut()
+            .push_agent_response(connection_id, request_id, frame, closed);
     }
 
     /// Ask the server to carry the rows that scroll off the top of its
@@ -713,6 +736,7 @@ impl<S: Screen> MoshSession<S> {
                 Vec::new()
             };
             self.deduplicate_terminal_queries(&mut events);
+            self.deduplicate_agent_records(&mut events);
 
             // EVERY state gets a screen, including one whose diff
             // changed nothing on it: the server is free to compute
@@ -743,6 +767,9 @@ impl<S: Screen> MoshSession<S> {
                         self.prediction.set_local_frame_late_acked(*num);
                     }
                     HostEvent::TerminalQuery { .. } => {}
+                    HostEvent::AgentReady { .. }
+                    | HostEvent::AgentRequest { .. }
+                    | HostEvent::AgentClose { .. } => {}
                 }
             }
             // The diff belongs to the state it was computed FROM,
@@ -759,6 +786,16 @@ impl<S: Screen> MoshSession<S> {
     fn deduplicate_terminal_queries(&mut self, events: &mut Vec<HostEvent>) {
         events.retain(|event| match event {
             HostEvent::TerminalQuery { id, .. } => self.seen_terminal_queries.insert(*id),
+            _ => true,
+        });
+    }
+
+    fn deduplicate_agent_records(&mut self, events: &mut Vec<HostEvent>) {
+        events.retain(|event| match event {
+            HostEvent::AgentRequest { id, .. } | HostEvent::AgentClose { id, .. } => {
+                self.seen_agent_records.insert(*id)
+            }
+            HostEvent::AgentReady { .. } => true,
             _ => true,
         });
     }
@@ -934,6 +971,68 @@ mod tests {
         }];
         session.deduplicate_terminal_queries(&mut retransmission);
         assert!(retransmission.is_empty());
+    }
+
+    #[test]
+    fn retransmitted_agent_records_are_deduplicated_by_record_id() {
+        let mut session = offline_session();
+        let mut events = vec![
+            HostEvent::AgentReady {
+                supported: true,
+                error: None,
+            },
+            HostEvent::AgentRequest {
+                id: 2,
+                connection_id: 9,
+                frame: vec![0, 0, 0, 1, 6],
+            },
+            HostEvent::AgentRequest {
+                id: 1,
+                connection_id: 8,
+                frame: vec![0, 0, 0, 1, 6],
+            },
+            HostEvent::AgentRequest {
+                id: 2,
+                connection_id: 9,
+                frame: vec![0, 0, 0, 1, 6],
+            },
+            HostEvent::AgentClose {
+                id: 3,
+                connection_id: 8,
+                error: None,
+            },
+            HostEvent::AgentClose {
+                id: 3,
+                connection_id: 8,
+                error: None,
+            },
+        ];
+
+        session.deduplicate_agent_records(&mut events);
+        assert_eq!(
+            events,
+            vec![
+                HostEvent::AgentReady {
+                    supported: true,
+                    error: None,
+                },
+                HostEvent::AgentRequest {
+                    id: 2,
+                    connection_id: 9,
+                    frame: vec![0, 0, 0, 1, 6],
+                },
+                HostEvent::AgentRequest {
+                    id: 1,
+                    connection_id: 8,
+                    frame: vec![0, 0, 0, 1, 6],
+                },
+                HostEvent::AgentClose {
+                    id: 3,
+                    connection_id: 8,
+                    error: None,
+                },
+            ]
+        );
     }
 
     #[test]

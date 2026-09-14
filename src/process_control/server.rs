@@ -376,6 +376,7 @@ fn apply_session_command(
             secret,
             protocol,
             keep_alive_ms,
+            forward_agent,
         } => dispatch_reconnect_command(dispatch.commands, dispatch.stopping, |completion| {
             ProcessControlCommand::OpenRemoteSession {
                 target,
@@ -384,6 +385,7 @@ fn apply_session_command(
                 secret,
                 protocol,
                 keep_alive_ms,
+                forward_agent,
                 completion,
             }
         }),

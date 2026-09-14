@@ -89,6 +89,7 @@ pub fn run_reconnect_session(identifier: &str, identity_paths: &[PathBuf]) -> Re
 pub struct RemoteProtocolRequest {
     pub protocol: Option<String>,
     pub keep_alive_ms: Option<u64>,
+    pub forward_agent: Option<bool>,
 }
 
 pub fn run_remote_attach(
@@ -654,6 +655,7 @@ fn send_resume_disk_session_request(
         ssh_port: None,
         remote_protocol: None,
         remote_keep_alive_ms: None,
+        remote_forward_agent: None,
         icon: None,
         pane_theme: None,
         pane_overlay: None,
@@ -711,6 +713,7 @@ fn send_reconnect_session_request(
         ssh_port: None,
         remote_protocol: None,
         remote_keep_alive_ms: None,
+        remote_forward_agent: None,
         icon: None,
         pane_theme: None,
         pane_overlay: None,
@@ -818,6 +821,7 @@ fn send_remote_attach_request(
         ssh_port: port,
         remote_protocol: protocol.protocol.clone(),
         remote_keep_alive_ms: protocol.keep_alive_ms,
+        remote_forward_agent: protocol.forward_agent,
         icon: None,
         pane_theme: None,
         pane_overlay: None,
@@ -934,6 +938,8 @@ struct ControlRequest {
     remote_protocol: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     remote_keep_alive_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    remote_forward_agent: Option<bool>,
     icon: Option<String>,
     pane_theme: Option<String>,
     pane_overlay: Option<String>,

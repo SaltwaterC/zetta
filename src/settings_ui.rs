@@ -93,6 +93,7 @@ pub(crate) enum SettingsToggle {
     SessionAutoProtect,
     #[cfg(target_os = "macos")]
     TitleBarMenus,
+    RemoteSessionForwardAgent,
     ProjectOpacityOverride,
     ProjectProfileVisibility(usize),
 }

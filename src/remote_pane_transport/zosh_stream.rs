@@ -103,10 +103,20 @@ impl PtyControl for ZoshPtyControl {
 pub(super) fn bootstrap(
     client: &zmux::client::Client,
     keep_alive_ms: Option<u64>,
+    forward_agent: bool,
     session_id: u64,
     secret: Option<&SessionSecret>,
     mux_pane_ids: &[u64],
 ) -> (HashMap<u64, ZoshPaneStream>, Vec<String>) {
+    if forward_agent {
+        return (
+            HashMap::new(),
+            vec![
+                "SSH-agent forwarding is unavailable for existing zmux relay panes; their shells already exist, so those panes stayed on SSH."
+                    .to_owned(),
+            ],
+        );
+    }
     let Some(target) = client.remote_target().cloned() else {
         return (
             HashMap::new(),
@@ -132,6 +142,7 @@ pub(super) fn bootstrap(
         program,
         session_id,
         keep_alive_ms,
+        forward_agent,
         secret: secret.map(|secret| secret.expose().to_owned()),
     };
 
@@ -171,6 +182,7 @@ struct PaneRequest {
     program: PathBuf,
     session_id: u64,
     keep_alive_ms: Option<u64>,
+    forward_agent: bool,
     /// Held as plain text only while the bootstrap runs, and sent to the relay
     /// inside the established Mosh link rather than on a remote command line
     /// every account on that host can read.
@@ -196,6 +208,7 @@ fn bootstrap_one(request: &PaneRequest, mux_pane_id: u64) -> Result<ZoshPaneStre
         INITIAL_PANE_SIZE.1,
         zosh::PaneSessionSettings {
             keep_alive: request.keep_alive_ms,
+            forward_agent: request.forward_agent,
             // A pane is scrolled, so the history a Mosh state cannot describe
             // is exactly what it is for. The remote relay's own replay comes
             // through the same screen, so without this a reattached pane would
@@ -237,6 +250,7 @@ fn bootstrap_endpoint(
         ssh_port: request.target.port(),
         remote_command: relay_command(request, mux_pane_id),
         keep_alive: request.keep_alive_ms,
+        forward_agent: request.forward_agent,
         proxy_program: bundled_zosh_program(),
     });
     match bootstrap {

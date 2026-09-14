@@ -57,6 +57,7 @@ pub(crate) struct RemoteSessionRequest {
     /// this window is configured for.
     pub(crate) protocol: Option<String>,
     pub(crate) keep_alive_ms: Option<u64>,
+    pub(crate) forward_agent: Option<bool>,
 }
 
 impl Zetta {
@@ -630,6 +631,7 @@ impl Zetta {
             secret,
             protocol,
             keep_alive_ms,
+            forward_agent,
         } = request;
         let target = zmux::remote::RemoteTarget::new(target).with_port(port);
         // A protocol the command line named beats the configured default; a
@@ -641,6 +643,7 @@ impl Zetta {
                 match crate::remote_pane_transport::RemotePaneTransport::parse(
                     &protocol,
                     keep_alive_ms,
+                    forward_agent.unwrap_or(false),
                 ) {
                     Ok(transport) => transport,
                     Err(error) => {

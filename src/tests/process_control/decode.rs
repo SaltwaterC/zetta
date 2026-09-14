@@ -1052,6 +1052,7 @@ fn reconnect_requests_carry_a_session_target_and_optional_secret() {
         ssh_port: None,
         remote_protocol: None,
         remote_keep_alive_ms: None,
+        remote_forward_agent: None,
         icon: None,
         pane_theme: None,
         pane_theme_revision: None,
@@ -1147,6 +1148,7 @@ fn remote_session_requests_validate_the_ssh_destination_and_session_target() {
             secret: Some(SessionSecret::new("session-secret".to_owned())),
             protocol: Some("zosh".to_owned()),
             keep_alive_ms: Some(500),
+            forward_agent: None,
         })
     );
     assert!(remote.secret.is_none());
@@ -1166,6 +1168,7 @@ fn remote_session_requests_validate_the_ssh_destination_and_session_target() {
             // this field did.
             protocol: None,
             keep_alive_ms: None,
+            forward_agent: None,
         })
     );
 

@@ -1,3 +1,4 @@
+mod agent;
 mod args;
 mod lifecycle;
 mod protocol;

@@ -1184,6 +1184,7 @@ fn the_keep_alive_field_is_only_in_the_tab_order_under_zosh() {
             RemoteSessionField::Port,
             RemoteSessionField::Protocol,
             RemoteSessionField::KeepAlive,
+            RemoteSessionField::ForwardAgent,
             RemoteSessionField::Profile,
             RemoteSessionField::Template,
             RemoteSessionField::List,
@@ -1271,7 +1272,8 @@ fn the_protocol_decides_what_the_picker_asks_for() {
     assert_eq!(
         Zetta::remote_transport_from_picker(&picker).unwrap(),
         RemotePaneTransport::Zosh {
-            keep_alive_ms: Some(REMOTE_KEEP_ALIVE_DEFAULT_MS)
+            keep_alive_ms: Some(REMOTE_KEEP_ALIVE_DEFAULT_MS),
+            forward_agent: false,
         }
     );
 
@@ -1279,7 +1281,8 @@ fn the_protocol_decides_what_the_picker_asks_for() {
     assert_eq!(
         Zetta::remote_transport_from_picker(&picker).unwrap(),
         RemotePaneTransport::Zosh {
-            keep_alive_ms: None
+            keep_alive_ms: None,
+            forward_agent: false,
         },
         "an empty interval leaves the link on Mosh's own heartbeat"
     );

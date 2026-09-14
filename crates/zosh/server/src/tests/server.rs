@@ -196,11 +196,11 @@ fn coalesced_screen_update_retains_echo_ack() {
     let mut client = Transport::new_client(Ocb::new(&key).unwrap());
     let mut terminal = TerminalState::new(24, 80);
     terminal.process(b"x");
-    server.set_pending(host_update(&terminal, 7).unwrap());
+    server.set_pending(host_update(&terminal, 7, &[]).unwrap());
     // A second PTY chunk arrives before tick sends the first update. The SSP
     // transport discards that unsent state, including its echo instruction.
     terminal.process(b"y");
-    server.set_pending(host_update(&terminal, 7).unwrap());
+    server.set_pending(host_update(&terminal, 7, &[]).unwrap());
     let datagrams = server.tick();
     assert!(!datagrams.is_empty());
     let payload = datagrams

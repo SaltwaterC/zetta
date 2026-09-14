@@ -2,6 +2,7 @@ use super::*;
 
 fn request(secret: Option<&str>) -> PaneRequest {
     PaneRequest {
+        forward_agent: false,
         target: zmux::remote::RemoteTarget::new("dev.example").with_port(Some(2222)),
         program: PathBuf::from("/home/user/.local/bin/zmux"),
         session_id: 7,

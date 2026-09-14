@@ -112,6 +112,7 @@ impl Zetta {
                     SettingsControl::Numeric(NumericSetting::SessionRingBytes),
                     SettingsControl::Dropdown(SettingsDropdown::RemoteSessionProtocol),
                     SettingsControl::Numeric(NumericSetting::RemoteSessionKeepAlive),
+                    SettingsControl::Toggle(SettingsToggle::RemoteSessionForwardAgent),
                     #[cfg(feature = "session-persistence")]
                     SettingsControl::Input(SettingsInput::Configuration(
                         ConfigTextField::SessionPersistenceRecipients,

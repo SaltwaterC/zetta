@@ -51,8 +51,38 @@ pub struct ResizeMessage {
     pub height: Option<i32>,
 }
 
+/// The hello carried by the agent extension.
+#[derive(Clone, Copy, PartialEq, Eq, prost::Message)]
+pub struct AgentHelloMessage {
+    #[prost(uint32, optional, tag = "1")]
+    pub version: Option<u32>,
+}
+
+/// One response carried by the agent extension. The frame is a complete
+/// length-prefixed SSH-agent message; it is never decoded by Mosh.
+#[derive(Clone, PartialEq, Eq, prost::Message)]
+pub struct AgentResponseMessage {
+    #[prost(uint64, optional, tag = "1")]
+    pub connection_id: Option<u64>,
+    #[prost(uint64, optional, tag = "2")]
+    pub request_id: Option<u64>,
+    #[prost(bytes = "vec", optional, tag = "3")]
+    pub frame: Option<Vec<u8>>,
+    #[prost(bool, optional, tag = "4")]
+    pub closed: Option<bool>,
+}
+
+#[derive(Clone, PartialEq, Eq, prost::Message)]
+pub struct AgentUserInstruction {
+    #[prost(message, optional, tag = "1")]
+    pub hello: Option<AgentHelloMessage>,
+    #[prost(message, optional, tag = "2")]
+    pub response: Option<AgentResponseMessage>,
+}
+
 /// One user instruction. In the `.proto` these fields are extensions of
-/// an empty message; on the wire they are just fields 2, 3, 20, 21 and 22.
+/// an empty message; on the wire they are just fields 2, 3, 20, 21, 22 and
+/// 23.
 ///
 /// Field 20 is not mosh's. It is Zetta's keep-alive extension, and it
 /// is deliberately a bare varint rather than a nested message so the
@@ -89,6 +119,10 @@ pub struct UserInstruction {
     /// the server hold for it and send. Zero asks for none.
     #[prost(uint32, optional, tag = "22")]
     pub zosh_scrollback_kib: Option<u32>,
+    /// Zosh's authenticated SSH-agent forwarding extension. Stock Mosh
+    /// ignores this unknown field.
+    #[prost(message, optional, tag = "23")]
+    pub agent: Option<AgentUserInstruction>,
 }
 
 #[derive(Clone, PartialEq, Eq, prost::Message)]
@@ -146,6 +180,16 @@ pub enum UserEvent {
     /// it is acknowledged, so the announcement arrives exactly once without
     /// anything having to repeat or confirm it.
     ScrollbackRequest(u32),
+    /// Ask a Zosh server to negotiate agent forwarding.
+    AgentHello(u32),
+    /// A response to one complete SSH-agent request, or a close marker when
+    /// `closed` is true.
+    AgentResponse {
+        connection_id: u64,
+        request_id: u64,
+        frame: Vec<u8>,
+        closed: bool,
+    },
 }
 
 /// The client's state: everything the user has done, in order.
@@ -197,6 +241,25 @@ impl UserStream {
         self.events.push(UserEvent::ScrollbackRequest(budget_kib));
     }
 
+    pub fn push_agent_hello(&mut self, version: u32) {
+        self.events.push(UserEvent::AgentHello(version));
+    }
+
+    pub fn push_agent_response(
+        &mut self,
+        connection_id: u64,
+        request_id: u64,
+        frame: &[u8],
+        closed: bool,
+    ) {
+        self.events.push(UserEvent::AgentResponse {
+            connection_id,
+            request_id,
+            frame: frame.to_vec(),
+            closed,
+        });
+    }
+
     pub fn is_empty(&self) -> bool {
         self.events.is_empty()
     }
@@ -245,6 +308,7 @@ impl UserStream {
                             zosh_keepalive_ms: None,
                             terminal_response: None,
                             zosh_scrollback_kib: None,
+                            agent: None,
                         }),
                     }
                 }
@@ -258,6 +322,7 @@ impl UserStream {
                         zosh_keepalive_ms: None,
                         terminal_response: None,
                         zosh_scrollback_kib: None,
+                        agent: None,
                     });
                 }
                 // Its own instruction, like a resize: a keep-alive
@@ -271,6 +336,7 @@ impl UserStream {
                         zosh_keepalive_ms: Some(*interval_ms),
                         terminal_response: None,
                         zosh_scrollback_kib: None,
+                        agent: None,
                     });
                 }
                 UserEvent::TerminalResponse(bytes) => {
@@ -280,6 +346,7 @@ impl UserStream {
                         zosh_keepalive_ms: None,
                         terminal_response: Some(bytes.clone()),
                         zosh_scrollback_kib: None,
+                        agent: None,
                     });
                 }
                 // Its own instruction for the same reason a keep-alive is:
@@ -292,6 +359,45 @@ impl UserStream {
                         zosh_keepalive_ms: None,
                         terminal_response: None,
                         zosh_scrollback_kib: Some(*budget_kib),
+                        agent: None,
+                    });
+                }
+                UserEvent::AgentHello(version) => {
+                    msg.instruction.push(UserInstruction {
+                        keystroke: None,
+                        resize: None,
+                        zosh_keepalive_ms: None,
+                        terminal_response: None,
+                        zosh_scrollback_kib: None,
+                        agent: Some(AgentUserInstruction {
+                            hello: Some(AgentHelloMessage {
+                                version: Some(*version),
+                            }),
+                            response: None,
+                        }),
+                    });
+                }
+                UserEvent::AgentResponse {
+                    connection_id,
+                    request_id,
+                    frame,
+                    closed,
+                } => {
+                    msg.instruction.push(UserInstruction {
+                        keystroke: None,
+                        resize: None,
+                        zosh_keepalive_ms: None,
+                        terminal_response: None,
+                        zosh_scrollback_kib: None,
+                        agent: Some(AgentUserInstruction {
+                            hello: None,
+                            response: Some(AgentResponseMessage {
+                                connection_id: Some(*connection_id),
+                                request_id: Some(*request_id),
+                                frame: Some(frame.clone()),
+                                closed: Some(*closed),
+                            }),
+                        }),
                     });
                 }
             }
@@ -328,6 +434,24 @@ impl UserStream {
             }
             if let Some(budget_kib) = inst.zosh_scrollback_kib {
                 self.push_scrollback_request(budget_kib);
+            }
+            if let Some(agent) = inst.agent {
+                if let Some(hello) = agent.hello
+                    && let Some(version) = hello.version
+                {
+                    self.push_agent_hello(version);
+                }
+                if let Some(response) = agent.response
+                    && let (Some(connection_id), Some(request_id)) =
+                        (response.connection_id, response.request_id)
+                {
+                    self.push_agent_response(
+                        connection_id,
+                        request_id,
+                        response.frame.as_deref().unwrap_or_default(),
+                        response.closed.unwrap_or(false),
+                    );
+                }
             }
         }
         Ok(())
@@ -378,6 +502,44 @@ pub struct TerminalQuery {
 }
 
 #[derive(Clone, PartialEq, Eq, prost::Message)]
+pub struct AgentReadyMessage {
+    #[prost(bool, optional, tag = "1")]
+    pub supported: Option<bool>,
+    #[prost(string, optional, tag = "2")]
+    pub error: Option<String>,
+}
+
+#[derive(Clone, PartialEq, Eq, prost::Message)]
+pub struct AgentRequestMessage {
+    #[prost(uint64, optional, tag = "1")]
+    pub id: Option<u64>,
+    #[prost(uint64, optional, tag = "2")]
+    pub connection_id: Option<u64>,
+    #[prost(bytes = "vec", optional, tag = "3")]
+    pub frame: Option<Vec<u8>>,
+}
+
+#[derive(Clone, PartialEq, Eq, prost::Message)]
+pub struct AgentCloseMessage {
+    #[prost(uint64, optional, tag = "1")]
+    pub id: Option<u64>,
+    #[prost(uint64, optional, tag = "2")]
+    pub connection_id: Option<u64>,
+    #[prost(string, optional, tag = "3")]
+    pub error: Option<String>,
+}
+
+#[derive(Clone, PartialEq, Eq, prost::Message)]
+pub struct AgentHostInstruction {
+    #[prost(message, optional, tag = "1")]
+    pub ready: Option<AgentReadyMessage>,
+    #[prost(message, optional, tag = "2")]
+    pub request: Option<AgentRequestMessage>,
+    #[prost(message, optional, tag = "3")]
+    pub close: Option<AgentCloseMessage>,
+}
+
+#[derive(Clone, PartialEq, Eq, prost::Message)]
 pub struct HostInstruction {
     #[prost(message, optional, tag = "2")]
     pub hostbytes: Option<HostBytes>,
@@ -387,6 +549,8 @@ pub struct HostInstruction {
     pub echoack: Option<EchoAck>,
     #[prost(message, optional, tag = "20")]
     pub terminal_query: Option<TerminalQuery>,
+    #[prost(message, optional, tag = "21")]
+    pub agent: Option<AgentHostInstruction>,
 }
 
 #[derive(Clone, PartialEq, Eq, prost::Message)]
@@ -409,6 +573,20 @@ pub enum HostEvent {
     TerminalQuery {
         id: u64,
         bytes: Vec<u8>,
+    },
+    AgentReady {
+        supported: bool,
+        error: Option<String>,
+    },
+    AgentRequest {
+        id: u64,
+        connection_id: u64,
+        frame: Vec<u8>,
+    },
+    AgentClose {
+        id: u64,
+        connection_id: u64,
+        error: Option<String>,
     },
 }
 
@@ -438,6 +616,33 @@ pub fn parse_host_diff(diff: &[u8]) -> Result<Vec<HostEvent>> {
             && !bytes.is_empty()
         {
             out.push(HostEvent::TerminalQuery { id, bytes });
+        }
+        if let Some(agent) = inst.agent {
+            if let Some(ready) = agent.ready {
+                out.push(HostEvent::AgentReady {
+                    supported: ready.supported.unwrap_or(false),
+                    error: ready.error,
+                });
+            }
+            if let Some(request) = agent.request
+                && let (Some(id), Some(connection_id), Some(frame)) =
+                    (request.id, request.connection_id, request.frame)
+            {
+                out.push(HostEvent::AgentRequest {
+                    id,
+                    connection_id,
+                    frame,
+                });
+            }
+            if let Some(close) = agent.close
+                && let (Some(id), Some(connection_id)) = (close.id, close.connection_id)
+            {
+                out.push(HostEvent::AgentClose {
+                    id,
+                    connection_id,
+                    error: close.error,
+                });
+            }
         }
     }
     Ok(out)
@@ -642,6 +847,7 @@ mod tests {
                         echo_ack_num: Some(7),
                     }),
                     terminal_query: None,
+                    agent: None,
                 },
                 HostInstruction {
                     hostbytes: Some(HostBytes {
@@ -653,6 +859,7 @@ mod tests {
                     }),
                     echoack: None,
                     terminal_query: None,
+                    agent: None,
                 },
             ],
         };
@@ -682,6 +889,7 @@ mod tests {
                 resize: None,
                 echoack: None,
                 terminal_query: None,
+                agent: None,
             }],
         };
         assert!(parse_host_diff(&msg.encode_to_vec()).unwrap().is_empty());
@@ -698,6 +906,7 @@ mod tests {
                     id: Some(42),
                     bytes: Some(b"\x1b]11;?\x1b\\".to_vec()),
                 }),
+                agent: None,
             }],
         };
 
@@ -707,6 +916,110 @@ mod tests {
                 id: 42,
                 bytes: b"\x1b]11;?\x1b\\".to_vec(),
             }]
+        );
+    }
+
+    #[test]
+    fn agent_user_events_round_trip_without_affecting_keystrokes() {
+        let mut stream = UserStream::new();
+        stream.push_bytes(b"a");
+        stream.push_agent_hello(1);
+        let frame = vec![0, 0, 0, 1, 6];
+        stream.push_agent_response(9, 10, &frame, false);
+        stream.push_bytes(b"b");
+
+        let diff = stream.init_diff();
+        let message = UserMessage::decode(diff.as_slice()).unwrap();
+        assert_eq!(message.instruction.len(), 4);
+        assert_eq!(
+            message.instruction[1].agent.as_ref().unwrap().hello,
+            Some(AgentHelloMessage { version: Some(1) })
+        );
+        assert_eq!(
+            message.instruction[2].agent.as_ref().unwrap().response,
+            Some(AgentResponseMessage {
+                connection_id: Some(9),
+                request_id: Some(10),
+                frame: Some(frame),
+                closed: Some(false),
+            })
+        );
+        assert_eq!(UserMessage::keystrokes_of(&diff).unwrap(), b"ab");
+
+        let mut rebuilt = UserStream::new();
+        rebuilt.apply_string(&diff).unwrap();
+        assert_eq!(rebuilt, stream);
+    }
+
+    #[test]
+    fn agent_host_records_decode_in_wire_order() {
+        let msg = HostMessage {
+            instruction: vec![
+                HostInstruction {
+                    hostbytes: None,
+                    resize: None,
+                    echoack: None,
+                    terminal_query: None,
+                    agent: Some(AgentHostInstruction {
+                        ready: Some(AgentReadyMessage {
+                            supported: Some(true),
+                            error: None,
+                        }),
+                        request: None,
+                        close: None,
+                    }),
+                },
+                HostInstruction {
+                    hostbytes: None,
+                    resize: None,
+                    echoack: None,
+                    terminal_query: None,
+                    agent: Some(AgentHostInstruction {
+                        ready: None,
+                        request: Some(AgentRequestMessage {
+                            id: Some(1),
+                            connection_id: Some(7),
+                            frame: Some(vec![0, 0, 0, 1, 6]),
+                        }),
+                        close: None,
+                    }),
+                },
+                HostInstruction {
+                    hostbytes: None,
+                    resize: None,
+                    echoack: None,
+                    terminal_query: None,
+                    agent: Some(AgentHostInstruction {
+                        ready: None,
+                        request: None,
+                        close: Some(AgentCloseMessage {
+                            id: Some(2),
+                            connection_id: Some(7),
+                            error: Some("closed".to_owned()),
+                        }),
+                    }),
+                },
+            ],
+        };
+
+        assert_eq!(
+            parse_host_diff(&msg.encode_to_vec()).unwrap(),
+            vec![
+                HostEvent::AgentReady {
+                    supported: true,
+                    error: None,
+                },
+                HostEvent::AgentRequest {
+                    id: 1,
+                    connection_id: 7,
+                    frame: vec![0, 0, 0, 1, 6],
+                },
+                HostEvent::AgentClose {
+                    id: 2,
+                    connection_id: 7,
+                    error: Some("closed".to_owned()),
+                },
+            ]
         );
     }
 }

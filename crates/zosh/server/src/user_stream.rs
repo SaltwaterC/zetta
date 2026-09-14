@@ -15,8 +15,28 @@ use moshcatty::pb::UserInstruction;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UserEvent {
     Byte(u8),
-    Resize { cols: u16, rows: u16 },
+    Resize {
+        cols: u16,
+        rows: u16,
+    },
     TerminalResponse(Vec<u8>),
+    AgentHello {
+        version: u32,
+    },
+    AgentResponse {
+        connection_id: u64,
+        request_id: u64,
+        frame: Vec<u8>,
+        closed: bool,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentResponse {
+    pub connection_id: u64,
+    pub request_id: u64,
+    pub frame: Vec<u8>,
+    pub closed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -194,6 +214,9 @@ const KEEP_ALIVE_FIELD: u64 = 20;
 const TERMINAL_RESPONSE_FIELD: u64 = 21;
 /// Zosh's scrollback request on `ClientBuffers.Instruction`; see `PROTOCOL.md`.
 const SCROLLBACK_FIELD: u64 = 22;
+/// Zosh's SSH-agent extension on `ClientBuffers.Instruction`.
+const AGENT_FIELD: u64 = 23;
+const MAX_AGENT_FRAME: usize = 256 * 1024;
 const WIRE_VARINT: u64 = 0;
 const WIRE_FIXED64: u64 = 1;
 const WIRE_BYTES: u64 = 2;
@@ -345,6 +368,17 @@ fn decode_events(diff: &[u8]) -> Result<Vec<UserEvent>> {
         {
             events.push(UserEvent::TerminalResponse(response));
         }
+        if let Some(version) = decoded.agent_hello {
+            events.push(UserEvent::AgentHello { version });
+        }
+        if let Some(response) = decoded.agent_response {
+            events.push(UserEvent::AgentResponse {
+                connection_id: response.connection_id,
+                request_id: response.request_id,
+                frame: response.frame,
+                closed: response.closed,
+            });
+        }
     }
 
     Ok(events)
@@ -356,6 +390,8 @@ struct DecodedInstruction {
     width: i32,
     height: i32,
     terminal_response: Option<Vec<u8>>,
+    agent_hello: Option<u32>,
+    agent_response: Option<AgentResponse>,
 }
 
 fn decode_instruction(mut rest: &[u8]) -> Result<DecodedInstruction> {
@@ -368,10 +404,78 @@ fn decode_instruction(mut rest: &[u8]) -> Result<DecodedInstruction> {
             (TERMINAL_RESPONSE_FIELD, WIRE_BYTES) => {
                 decoded.terminal_response = Some(read_bytes_strict(&mut rest)?.to_vec());
             }
+            (AGENT_FIELD, WIRE_BYTES) => {
+                let agent = decode_agent(read_bytes_strict(&mut rest)?)?;
+                decoded.agent_hello = agent.hello;
+                decoded.agent_response = agent.response;
+            }
             _ => skip_field_strict(&mut rest, wire)?,
         }
     }
     Ok(decoded)
+}
+
+#[derive(Default)]
+struct DecodedAgent {
+    hello: Option<u32>,
+    response: Option<AgentResponse>,
+}
+
+fn decode_agent(mut rest: &[u8]) -> Result<DecodedAgent> {
+    let mut decoded = DecodedAgent::default();
+    while !rest.is_empty() {
+        let (field, wire) = read_tag_strict(&mut rest)?;
+        match (field, wire) {
+            (1, WIRE_BYTES) => {
+                let mut hello = read_bytes_strict(&mut rest)?;
+                let mut version = None;
+                while !hello.is_empty() {
+                    let (nested_field, nested_wire) = read_tag_strict(&mut hello)?;
+                    if (nested_field, nested_wire) == (1, WIRE_VARINT) {
+                        version = Some(u32::try_from(read_varint_strict(&mut hello)?)?);
+                    } else {
+                        skip_field_strict(&mut hello, nested_wire)?;
+                    }
+                }
+                decoded.hello = version;
+            }
+            (2, WIRE_BYTES) => {
+                decoded.response = Some(decode_agent_response(read_bytes_strict(&mut rest)?)?);
+            }
+            _ => skip_field_strict(&mut rest, wire)?,
+        }
+    }
+    Ok(decoded)
+}
+
+fn decode_agent_response(mut rest: &[u8]) -> Result<AgentResponse> {
+    let mut connection_id = None;
+    let mut request_id = None;
+    let mut frame = Vec::new();
+    let mut closed = false;
+    while !rest.is_empty() {
+        let (field, wire) = read_tag_strict(&mut rest)?;
+        match (field, wire) {
+            (1, WIRE_VARINT) => connection_id = Some(read_varint_strict(&mut rest)?),
+            (2, WIRE_VARINT) => request_id = Some(read_varint_strict(&mut rest)?),
+            (3, WIRE_BYTES) => {
+                let bytes = read_bytes_strict(&mut rest)?;
+                if bytes.len() > MAX_AGENT_FRAME {
+                    bail!("SSH-agent response exceeds {MAX_AGENT_FRAME} bytes");
+                }
+                frame = bytes.to_vec();
+            }
+            (4, WIRE_VARINT) => closed = read_varint_strict(&mut rest)? != 0,
+            _ => skip_field_strict(&mut rest, wire)?,
+        }
+    }
+    Ok(AgentResponse {
+        connection_id: connection_id
+            .ok_or_else(|| anyhow!("agent response lacks connection ID"))?,
+        request_id: request_id.ok_or_else(|| anyhow!("agent response lacks request ID"))?,
+        frame,
+        closed,
+    })
 }
 
 fn decode_keystroke(rest: &mut &[u8], keys: &mut Vec<u8>) -> Result<()> {
@@ -697,5 +801,92 @@ mod tests {
                 rows: 40
             }]
         );
+    }
+
+    fn varint(mut value: u64) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        loop {
+            let byte = (value & 0x7f) as u8;
+            value >>= 7;
+            bytes.push(if value == 0 { byte } else { byte | 0x80 });
+            if value == 0 {
+                break;
+            }
+        }
+        bytes
+    }
+
+    fn field_varint(field: u64, value: u64) -> Vec<u8> {
+        let mut bytes = varint(field << 3);
+        bytes.extend(varint(value));
+        bytes
+    }
+
+    fn field_bytes(field: u64, value: &[u8]) -> Vec<u8> {
+        let mut bytes = varint((field << 3) | WIRE_BYTES);
+        bytes.extend(varint(value.len() as u64));
+        bytes.extend_from_slice(value);
+        bytes
+    }
+
+    fn agent_hello(version: u32) -> Vec<u8> {
+        let hello = field_varint(1, u64::from(version));
+        let user_agent = field_bytes(1, &hello);
+        let instruction = field_bytes(AGENT_FIELD, &user_agent);
+        field_bytes(INSTRUCTION_FIELD, &instruction)
+    }
+
+    fn agent_response(connection_id: u64, request_id: u64, frame: &[u8], closed: bool) -> Vec<u8> {
+        let mut response = field_varint(1, connection_id);
+        response.extend(field_varint(2, request_id));
+        response.extend(field_bytes(3, frame));
+        response.extend(field_varint(4, u64::from(closed)));
+        let user_agent = field_bytes(2, &response);
+        let instruction = field_bytes(AGENT_FIELD, &user_agent);
+        field_bytes(INSTRUCTION_FIELD, &instruction)
+    }
+
+    #[test]
+    fn agent_extensions_are_cumulative_and_unknown_to_stock_mosh() {
+        let hello = agent_hello(1);
+        let frame = [0, 0, 0, 1, 6];
+        let mut cumulative = hello.clone();
+        cumulative.extend(agent_response(7, 9, &frame, false));
+
+        let stock = UserInstruction::decode_message(&hello).unwrap();
+        assert_eq!(stock, vec![UserInstruction::default()]);
+
+        let mut tracker = UserStreamTracker::new();
+        assert_eq!(
+            tracker.accept(&state(0, 1, 0, hello)).unwrap().events,
+            vec![UserEvent::AgentHello { version: 1 }]
+        );
+        assert_eq!(
+            tracker
+                .accept(&state(0, 2, 0, cumulative.clone()))
+                .unwrap()
+                .events,
+            vec![UserEvent::AgentResponse {
+                connection_id: 7,
+                request_id: 9,
+                frame: frame.to_vec(),
+                closed: false,
+            }]
+        );
+        assert!(
+            tracker
+                .accept(&state(0, 2, 0, cumulative))
+                .unwrap()
+                .events
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn agent_response_frames_have_a_hard_size_limit() {
+        let oversized = vec![0_u8; MAX_AGENT_FRAME + 1];
+        let _error = UserStreamTracker::new()
+            .accept(&state(0, 1, 0, agent_response(1, 1, &oversized, false)))
+            .expect_err("oversized agent frames must be rejected");
     }
 }

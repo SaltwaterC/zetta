@@ -56,6 +56,7 @@ mod field {
     pub(super) const SSH_PORT: u32 = 1 << 4;
     pub(super) const REMOTE_PROTOCOL: u32 = 1 << 25;
     pub(super) const REMOTE_KEEP_ALIVE: u32 = 1 << 26;
+    pub(super) const REMOTE_FORWARD_AGENT: u32 = 1 << 27;
     pub(super) const ICON: u32 = 1 << 5;
     pub(super) const PANE_THEME: u32 = 1 << 6;
     pub(super) const PANE_ID: u32 = 1 << 7;
@@ -112,6 +113,10 @@ fn control_request_fields(request: &ControlRequest) -> ControlFields {
             | bit(
                 request.remote_keep_alive_ms.is_some(),
                 field::REMOTE_KEEP_ALIVE,
+            )
+            | bit(
+                request.remote_forward_agent.is_some(),
+                field::REMOTE_FORWARD_AGENT,
             )
             | bit(request.icon.is_some(), field::ICON)
             | bit(request.pane_theme.is_some(), field::PANE_THEME)
@@ -180,7 +185,13 @@ fn allowed_control_fields(command: &str) -> Option<ControlFields> {
         "open_command" => CONFIG_PATH | PANE_REQUEST,
         "list_panes" => ATTENTION_ID,
         "open_remote_session" => {
-            SESSION_ID | SECRET | SSH_TARGET | SSH_PORT | REMOTE_PROTOCOL | REMOTE_KEEP_ALIVE
+            SESSION_ID
+                | SECRET
+                | SSH_TARGET
+                | SSH_PORT
+                | REMOTE_PROTOCOL
+                | REMOTE_KEEP_ALIVE
+                | REMOTE_FORWARD_AGENT
         }
         "reconnect_session" => RUNNER_ID | SESSION_ID | SECRET | ATTENTION_ID,
         "resume_disk_session" => SESSION_ID | SECRET | CONFIG_PATH,
@@ -447,6 +458,7 @@ fn decode_session_command(request: &mut ControlRequest) -> Option<ControlRequest
                 .take()
                 .filter(|protocol| !protocol.is_empty() && protocol.len() <= 32);
             let keep_alive_ms = request.remote_keep_alive_ms.take();
+            let forward_agent = request.remote_forward_agent.take();
             Some(ControlRequestCommand::OpenRemoteSession {
                 target,
                 port,
@@ -454,6 +466,7 @@ fn decode_session_command(request: &mut ControlRequest) -> Option<ControlRequest
                 secret: secret.map(SessionSecret::new),
                 protocol,
                 keep_alive_ms,
+                forward_agent,
             })
         }
         "reconnect_session" => {

@@ -121,7 +121,9 @@ pub(crate) use server::ProcessControlServer;
 /// 5 adds the protocol a remote session's panes travel over, and the keep-alive
 /// interval that goes with it, to `open_remote_session`. A client that does not
 /// send them asks for the same SSH byte stream every earlier client did.
-pub(crate) const CONTROL_VERSION: u32 = 5;
+/// 6 adds an optional SSH-agent forwarding override, whose absence preserves
+/// the configured default.
+pub(crate) const CONTROL_VERSION: u32 = 6;
 // A 64 KiB argv payload can expand substantially when it contains many
 // one-character arguments and each value is represented as JSON. Keep enough
 // framing headroom for that worst case as well as the endpoint token.
@@ -280,6 +282,7 @@ pub(crate) enum ProcessControlCommand {
         /// carry a pane over.
         protocol: Option<String>,
         keep_alive_ms: Option<u64>,
+        forward_agent: Option<bool>,
         completion: Sender<ReconnectSessionResult>,
     },
     ResumeDiskSession {
@@ -395,6 +398,7 @@ enum ControlRequestCommand {
         /// carry a pane over.
         protocol: Option<String>,
         keep_alive_ms: Option<u64>,
+        forward_agent: Option<bool>,
     },
     ResumeDiskSession {
         session_id: u64,
@@ -477,6 +481,8 @@ struct ControlRequest {
     remote_protocol: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     remote_keep_alive_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    remote_forward_agent: Option<bool>,
     icon: Option<String>,
     pane_theme: Option<String>,
     /// The pane-theme revision the client already knows, so an unchanged theme

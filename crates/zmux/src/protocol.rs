@@ -57,9 +57,10 @@ pub struct RestorableSessionRecord {
 /// payload-free tab-icon resets.
 ///
 /// 5 added the protocol a remote session's panes travel over, and the
-/// keep-alive interval that goes with it. Zetta's own copy of this number, in
+/// keep-alive interval that goes with it. 6 adds an optional SSH-agent
+/// forwarding override. Zetta's own copy of this number, in
 /// `src/process_control.rs`, carries the same history.
-pub const CONTROL_VERSION: u32 = 5;
+pub const CONTROL_VERSION: u32 = 6;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BackgroundSessionCatalog {

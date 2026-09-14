@@ -15,6 +15,7 @@ pub struct Config {
     pub command: Vec<OsString>,
     pub verbose: u8,
     pub foreground: bool,
+    pub forward_agent: bool,
     #[cfg_attr(
         not(windows),
         expect(
@@ -36,6 +37,7 @@ impl Default for Config {
             command: Vec::new(),
             verbose: 0,
             foreground: false,
+            forward_agent: false,
             internal_child: false,
         }
     }
@@ -81,6 +83,7 @@ pub fn parse(raw: Vec<OsString>) -> Result<ParseOutcome> {
     };
 
     let mut i = 0usize;
+    let mut seen_forward_agent = false;
     let option_mode = filtered.first().is_some_and(|s| s == "new");
     if option_mode {
         i += 1;
@@ -113,6 +116,14 @@ pub fn parse(raw: Vec<OsString>) -> Result<ParseOutcome> {
             }
             "-h" | "--help" => return Ok(ParseOutcome::Help),
             "--version" => return Ok(ParseOutcome::Version),
+            "--forward-agent" | "--no-forward-agent" => {
+                if seen_forward_agent {
+                    bail!("duplicate agent-forwarding option");
+                }
+                seen_forward_agent = true;
+                cfg.forward_agent = arg == "--forward-agent";
+                i += 1;
+            }
             "-s" => {
                 let value = std::env::var("SSH_CONNECTION")
                     .context("-s requires SSH_CONNECTION in the environment")?;
@@ -225,6 +236,8 @@ Options:\n\
   -c COLORS        Advertise terminal color capability (default 256)\n\
   -l NAME=VALUE   Add an environment variable to the child session\n\
   -v              Increase diagnostics (repeatable)\n\
+  --forward-agent  Forward the local SSH agent over a Zosh peer\n\
+  --no-forward-agent  Disable agent forwarding (the default)\n\
   --foreground    Do not detach; useful for debugging and service managers\n\
   -- COMMAND...   Run a command instead of the default shell\n"
 }
@@ -269,5 +282,35 @@ mod tests {
         };
         assert_eq!(cfg.port_low, 60001);
         assert_eq!(cfg.command.len(), 3);
+    }
+
+    #[test]
+    fn agent_forwarding_is_opt_in_and_duplicate_flags_are_rejected() {
+        let ParseOutcome::Run(cfg) = parse(vec![
+            OsString::from("new"),
+            OsString::from("--forward-agent"),
+        ])
+        .unwrap() else {
+            panic!("expected config")
+        };
+        assert!(cfg.forward_agent);
+        assert!(!Config::default().forward_agent);
+
+        let ParseOutcome::Run(cfg) = parse(vec![
+            OsString::from("new"),
+            OsString::from("--no-forward-agent"),
+        ])
+        .unwrap() else {
+            panic!("expected config")
+        };
+        assert!(!cfg.forward_agent);
+        assert!(
+            parse(vec![
+                OsString::from("new"),
+                OsString::from("--forward-agent"),
+                OsString::from("--no-forward-agent"),
+            ])
+            .is_err()
+        );
     }
 }

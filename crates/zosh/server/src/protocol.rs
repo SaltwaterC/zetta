@@ -36,13 +36,42 @@ pub struct ReceiveOutcome {
     pub state: Option<ReceivedState>,
 }
 
+/// One cumulative Zosh agent record to append to a host state. The record ID
+/// is what lets the client suppress a retransmitted request or close notice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentHostRecord {
+    Ready {
+        supported: bool,
+        error: Option<String>,
+    },
+    Request {
+        id: u64,
+        connection_id: u64,
+        frame: Vec<u8>,
+    },
+    Close {
+        id: u64,
+        connection_id: u64,
+        error: Option<String>,
+    },
+}
+
 /// Encode the standard host instructions together with zosh's optional
 /// terminal-query extension. MoshCatty's host protobuf intentionally only
 /// knows stock fields, so extension instructions are appended as ordinary
 /// repeated `HostMessage.instruction` fields. Stock clients skip field 20.
+#[cfg(test)]
 pub(crate) fn encode_host_message(
     instructions: &[HostInstruction],
     queries: &[TerminalQuery],
+) -> Vec<u8> {
+    encode_host_message_with_agent(instructions, queries, &[])
+}
+
+pub(crate) fn encode_host_message_with_agent(
+    instructions: &[HostInstruction],
+    queries: &[TerminalQuery],
+    agent_records: &[AgentHostRecord],
 ) -> Vec<u8> {
     let mut message = HostInstruction::encode_message(instructions);
     for query in queries {
@@ -52,6 +81,46 @@ pub(crate) fn encode_host_message(
 
         let mut instruction = Vec::new();
         append_tag_bytes(&mut instruction, 20, &query_message);
+        append_tag_bytes(&mut message, 1, &instruction);
+    }
+    for record in agent_records {
+        let mut agent = Vec::new();
+        match record {
+            AgentHostRecord::Ready { supported, error } => {
+                let mut ready = Vec::new();
+                append_tag_varint(&mut ready, 1, u64::from(*supported));
+                if let Some(error) = error {
+                    append_tag_bytes(&mut ready, 2, error.as_bytes());
+                }
+                append_tag_bytes(&mut agent, 1, &ready);
+            }
+            AgentHostRecord::Request {
+                id,
+                connection_id,
+                frame,
+            } => {
+                let mut request = Vec::new();
+                append_tag_varint(&mut request, 1, *id);
+                append_tag_varint(&mut request, 2, *connection_id);
+                append_tag_bytes(&mut request, 3, frame);
+                append_tag_bytes(&mut agent, 2, &request);
+            }
+            AgentHostRecord::Close {
+                id,
+                connection_id,
+                error,
+            } => {
+                let mut close = Vec::new();
+                append_tag_varint(&mut close, 1, *id);
+                append_tag_varint(&mut close, 2, *connection_id);
+                if let Some(error) = error {
+                    append_tag_bytes(&mut close, 3, error.as_bytes());
+                }
+                append_tag_bytes(&mut agent, 3, &close);
+            }
+        }
+        let mut instruction = Vec::new();
+        append_tag_bytes(&mut instruction, 21, &agent);
         append_tag_bytes(&mut message, 1, &instruction);
     }
     message
@@ -307,5 +376,34 @@ mod tests {
         assert_eq!(stock[0].width, 0);
         assert_eq!(stock[0].height, 0);
         assert_eq!(stock[0].echo_ack_num, -1);
+    }
+
+    #[test]
+    fn agent_host_extension_is_ignored_by_stock_host_decoder() {
+        let encoded = encode_host_message_with_agent(
+            &[],
+            &[],
+            &[
+                AgentHostRecord::Ready {
+                    supported: true,
+                    error: None,
+                },
+                AgentHostRecord::Request {
+                    id: 4,
+                    connection_id: 8,
+                    frame: vec![0, 0, 0, 1, 6],
+                },
+            ],
+        );
+
+        let stock = HostInstruction::decode_message(&encoded).unwrap();
+        assert_eq!(stock.len(), 2);
+        assert!(stock.iter().all(|instruction| {
+            instruction.hoststring.is_empty()
+                && instruction.width == 0
+                && instruction.height == 0
+                && instruction.echo_ack_num == -1
+        }));
+        assert!(encoded.windows(2).any(|tag| tag == [0xAA, 0x01]));
     }
 }

@@ -147,6 +147,8 @@ struct MoshCommand {
     /// `-s`/`--scrollback`: KiB of scrolled-off history to ask the server to
     /// carry, or zero for none. See `PROTOCOL.md`.
     scrollback_kib: u32,
+    /// Opt in to the authenticated Zosh SSH-agent forwarding extension.
+    forward_agent: bool,
     family: AddressFamily,
     port: Option<PortRequest>,
     bind_server: BindServer,
@@ -180,6 +182,7 @@ impl Default for MoshCommand {
             predict_overwrite_explicit: false,
             keep_alive: None,
             scrollback_kib: client::SCROLLBACK_DEFAULT_KIB,
+            forward_agent: false,
             family: AddressFamily::default(),
             port: None,
             bind_server: BindServer::default(),
@@ -247,6 +250,8 @@ pub struct PaneBootstrapRequest {
     /// The keep-alive interval in milliseconds, or `None` for Mosh's own
     /// three-second heartbeat.
     pub keep_alive: Option<u64>,
+    /// Request SSH-agent forwarding for this embedded Zosh endpoint.
+    pub forward_agent: bool,
     /// The `zosh` executable OpenSSH should use to discover the server's
     /// address. An embedder is not `zosh`, so it has to say where that is;
     /// without it the address discovery falls back to resolving the
@@ -322,6 +327,7 @@ fn embedded_command(request: &PaneBootstrapRequest) -> Result<MoshCommand> {
     }
     let mut command = MoshCommand {
         keep_alive: request.keep_alive,
+        forward_agent: request.forward_agent,
         remote_command: request.remote_command.clone(),
         proxy_program: request.proxy_program.clone(),
         ..MoshCommand::default()
@@ -744,6 +750,7 @@ fn endpoint_settings(command: &MoshCommand) -> SessionSettings {
         initialize_terminal: command.init,
         keep_alive: command.keep_alive,
         scrollback_kib: command.scrollback_kib,
+        forward_agent: command.forward_agent,
     }
 }
 
@@ -775,6 +782,11 @@ fn launch_external_client(
     // reject the argument but ignores an environment variable it has never
     // heard of.
     process.env(client::SCROLLBACK_ENV, command.scrollback_kib.to_string());
+    if command.forward_agent {
+        process.env(client::FORWARD_AGENT_ENV, "yes");
+    } else {
+        process.env_remove(client::FORWARD_AGENT_ENV);
+    }
     if !command.init {
         process.env("MOSH_NO_TERM_INIT", "1");
     } else {
@@ -838,7 +850,7 @@ fn client_color_count(client: &Path) -> u16 {
 
 fn run_plain_ssh(command: &MoshCommand, target: &str, bootstrap_status: Option<i32>) -> Result<()> {
     eprintln!("zosh: no usable remote Mosh server; falling back to SSH");
-    let (program, mut arguments) = ssh_base_command(command);
+    let (program, mut arguments) = ssh_base_command(command, command.forward_agent);
     arguments.push(target.to_owned());
     if !command.remote_command.is_empty() {
         arguments.push(shell_quote_words(&command.remote_command));
@@ -934,7 +946,7 @@ fn ordered_socket_addresses(
     (!ordered.is_empty()).then_some(ordered)
 }
 
-fn ssh_base_command(command: &MoshCommand) -> (String, Vec<String>) {
+fn ssh_base_command(command: &MoshCommand, forward_agent: bool) -> (String, Vec<String>) {
     let mut ssh = command.ssh.clone();
     let program = ssh
         .drain(..1)
@@ -948,7 +960,33 @@ fn ssh_base_command(command: &MoshCommand) -> (String, Vec<String>) {
     } else {
         "-T".to_owned()
     });
+    if forward_agent {
+        ssh.push("-A".to_owned());
+    }
     (program, ssh)
+}
+
+fn without_native_agent_forwarding(arguments: Vec<String>) -> Vec<String> {
+    let mut filtered = Vec::with_capacity(arguments.len());
+    let mut index = 0;
+    while index < arguments.len() {
+        let argument = &arguments[index];
+        if argument == "-A" || argument.eq_ignore_ascii_case("-oforwardagent=yes") {
+            index += 1;
+            continue;
+        }
+        if argument == "-o"
+            && arguments
+                .get(index + 1)
+                .is_some_and(|value| value.eq_ignore_ascii_case("ForwardAgent=yes"))
+        {
+            index += 2;
+            continue;
+        }
+        filtered.push(argument.clone());
+        index += 1;
+    }
+    filtered
 }
 
 #[cfg(test)]
@@ -962,7 +1000,17 @@ fn ssh_bootstrap_command_with_colors(
     target: &str,
     colors: u16,
 ) -> Result<(String, Vec<String>)> {
-    let (program, mut arguments) = ssh_base_command(command);
+    // Agent forwarding over Zosh is carried by the authenticated Mosh state,
+    // so the SSH bootstrap must not leave a native agent channel behind.
+    let (program, arguments) = ssh_base_command(command, false);
+    let mut arguments = if command.forward_agent {
+        without_native_agent_forwarding(arguments)
+    } else {
+        arguments
+    };
+    if command.forward_agent {
+        arguments.extend(["-o".to_owned(), "ForwardAgent=no".to_owned()]);
+    }
     if command.remote_ip == RemoteIpMode::Proxy {
         arguments.extend([
             "-S".to_owned(),
@@ -1008,7 +1056,11 @@ fn remote_server_invocation(command: &MoshCommand, colors: u16) -> Result<String
 
 fn server_invocation_for(command: &MoshCommand, server: &str, colors: u16) -> String {
     let mut arguments = vec![server.to_owned()];
-    arguments.extend(server_options_with_colors(command, colors));
+    arguments.extend(server_options_with_colors(
+        command,
+        colors,
+        server == DEFAULT_SERVER,
+    ));
     shell_quote_words(&arguments)
 }
 
@@ -1052,11 +1104,24 @@ fn server_arguments(command: &MoshCommand) -> Vec<String> {
 
 fn server_arguments_with_colors(command: &MoshCommand, colors: u16) -> Result<Vec<String>> {
     let mut arguments = parse_server_command(&command.server)?;
-    arguments.extend(server_options_with_colors(command, colors));
+    let zosh_server = is_zosh_server_command(&arguments);
+    arguments.extend(server_options_with_colors(command, colors, zosh_server));
     Ok(arguments)
 }
 
-fn server_options_with_colors(command: &MoshCommand, colors: u16) -> Vec<String> {
+fn is_zosh_server_command(arguments: &[String]) -> bool {
+    arguments.iter().any(|argument| {
+        Path::new(argument)
+            .file_name()
+            .is_some_and(|name| name == DEFAULT_SERVER)
+    })
+}
+
+fn server_options_with_colors(
+    command: &MoshCommand,
+    colors: u16,
+    zosh_server: bool,
+) -> Vec<String> {
     let mut arguments = vec!["new".to_owned()];
     arguments.extend(["-c".to_owned(), colors.to_string()]);
     for variable in LOCALE_VARIABLES {
@@ -1076,6 +1141,9 @@ fn server_options_with_colors(command: &MoshCommand, colors: u16) -> Vec<String>
     if let Some(port) = &command.port {
         arguments.extend(["-p".to_owned(), port.as_argument()]);
     }
+    if zosh_server && command.forward_agent {
+        arguments.push("--forward-agent".to_owned());
+    }
     if !command.remote_command.is_empty() {
         arguments.push("--".to_owned());
         arguments.extend(command.remote_command.iter().cloned());
@@ -1084,7 +1152,7 @@ fn server_options_with_colors(command: &MoshCommand, colors: u16) -> Vec<String>
 }
 
 fn local_server_arguments(command: &MoshCommand, colors: u16) -> Vec<String> {
-    server_options_with_colors(command, colors)
+    server_options_with_colors(command, colors, command.server == DEFAULT_SERVER)
 }
 
 fn parse_server_command(value: &str) -> Result<Vec<String>> {
@@ -1212,6 +1280,7 @@ struct SeenOptions {
     remote_ip: bool,
     keep_alive: bool,
     scrollback: bool,
+    forward_agent: bool,
 }
 
 fn parse_args(arguments: impl IntoIterator<Item = std::ffi::OsString>) -> Result<MoshCommand> {
@@ -1291,6 +1360,8 @@ fn parse_flag(
             set_scrollback(command, seen, client::SCROLLBACK_DEFAULT_KIB)?;
         }
         "--no-scrollback" => set_scrollback(command, seen, 0)?,
+        "--forward-agent" => set_forward_agent(command, seen, true)?,
+        "--no-forward-agent" => set_forward_agent(command, seen, false)?,
         "-4" => set_family(command, seen, AddressFamily::Inet)?,
         "-6" => set_family(command, seen, AddressFamily::Inet6)?,
         "--ssh-pty" => {
@@ -1451,6 +1522,17 @@ fn set_keep_alive(command: &mut MoshCommand, seen: &mut SeenOptions, interval: u
     anyhow::ensure!(!seen.keep_alive, "duplicate --keep-alive");
     seen.keep_alive = true;
     command.keep_alive = Some(interval);
+    Ok(())
+}
+
+fn set_forward_agent(
+    command: &mut MoshCommand,
+    seen: &mut SeenOptions,
+    enabled: bool,
+) -> Result<()> {
+    anyhow::ensure!(!seen.forward_agent, "duplicate agent-forwarding option");
+    seen.forward_agent = true;
+    command.forward_agent = enabled;
     Ok(())
 }
 
@@ -1661,6 +1743,10 @@ pub(crate) fn help_text() -> &'static str {
         --scrollback=KIB        hold KIB kibibytes in flight instead (16-2048)
         --no-scrollback         keep only what is on the screen, as stock
                                 Mosh does
+
+        --forward-agent         forward SSH-agent connections when both ends
+                                are Zosh (disabled by default)
+        --no-forward-agent      disable SSH-agent forwarding
 
 -4      --family=inet           use IPv4 only
 -6      --family=inet6           use IPv6 only

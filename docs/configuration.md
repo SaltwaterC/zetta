@@ -262,7 +262,8 @@ What carries a remote session's panes, and how hard its link is held open:
   "sessions": {
     "remote": {
       "protocol": "zosh",
-      "keep_alive_ms": 500
+      "keep_alive_ms": 500,
+      "forward_agent": false
     }
   }
 }
@@ -273,13 +274,22 @@ attaching and administering a remote session is OpenSSH either way; `zosh`
 gives each attached pane a Mosh link of its own, which survives roaming and
 suspend. `keep_alive_ms` is how long such a link may go without sending before
 it holds itself open, between 20 and 3000 milliseconds; `null` leaves it on
-Mosh's own three-second heartbeat. It has no effect under `ssh`.
+Mosh's own three-second heartbeat. `forward_agent` opts in to forwarding the
+local SSH agent through Zosh panes; it is off by default and has no effect
+under `ssh`. Remote processes that can open the forwarded socket can use the
+agent, as with OpenSSH `ForwardAgent`.
 
-Both are defaults for the remote-session picker, which can change either before
-connecting, and both are overridden by `zmux attach --protocol` and
-`--keep-alive`. See
+These are defaults for the remote-session picker, which can change them before
+connecting, and they are overridden by `zmux attach --protocol`,
+`--keep-alive`, and `--forward-agent`. See
 [Background sessions](background-sessions.md#carrying-panes-over-zosh) for what
 moves onto the Mosh link and what stays on SSH.
+
+The command-line equivalent is `zmux attach HOST ID --protocol zosh
+--forward-agent`; use `--no-forward-agent` to override a configured default.
+The Zosh launcher uses the same `--forward-agent`/`--no-forward-agent` flags.
+Forwarding is best-effort: stock or old Mosh/Zosh peers keep the terminal
+working and produce a warning, while plain SSH fallback uses native `ssh -A`.
 
 ## Git worktree root
 

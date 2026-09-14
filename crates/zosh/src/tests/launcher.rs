@@ -64,6 +64,25 @@ fn launcher_parser_rejects_invalid_and_duplicate_options() {
     assert!(parse_args(args(&["--port", "60001", "--port", "60002", "host"])).is_err());
     assert!(parse_args(args(&["-k", "--keep-alive=250", "host"])).is_err());
     assert!(parse_args(args(&["--keep-alive=0", "host"])).is_err());
+    assert!(parse_args(args(&["--forward-agent", "--no-forward-agent", "host"])).is_err());
+}
+
+#[test]
+fn launcher_forwarding_is_off_by_default_and_reaches_the_bundled_endpoint() {
+    assert!(!MoshCommand::default().forward_agent);
+    assert!(
+        parse_args(args(&["--forward-agent", "host"]))
+            .unwrap()
+            .forward_agent
+    );
+    assert!(
+        !parse_args(args(&["--no-forward-agent", "host"]))
+            .unwrap()
+            .forward_agent
+    );
+    assert!(
+        endpoint_settings(&parse_args(args(&["--forward-agent", "host"])).unwrap()).forward_agent
+    );
 }
 
 #[test]
@@ -318,6 +337,77 @@ fn ssh_bootstrap_preserves_target_and_remote_command() {
 }
 
 #[test]
+fn forwarding_disables_native_bootstrap_forwarding_but_plain_ssh_gets_a() {
+    let command = MoshCommand {
+        forward_agent: true,
+        ..MoshCommand::default()
+    };
+    let (_, bootstrap) = ssh_bootstrap_command(&command, "host");
+    assert!(
+        bootstrap
+            .windows(2)
+            .any(|pair| pair == ["-o", "ForwardAgent=no"])
+    );
+    assert!(!bootstrap.iter().any(|argument| argument == "-A"));
+
+    let native_bootstrap = MoshCommand {
+        ssh: vec!["ssh".into(), "-A".into()],
+        ..MoshCommand::default()
+    };
+    let (_, bootstrap) = ssh_bootstrap_command(&native_bootstrap, "host");
+    assert!(bootstrap.iter().any(|argument| argument == "-A"));
+
+    let (_, ssh) = ssh_base_command(&command, true);
+    assert!(ssh.windows(2).any(|pair| pair == ["-tt", "-A"]));
+    let (_, no_pty_ssh) = ssh_base_command(
+        &MoshCommand {
+            ssh_pty: false,
+            ..command
+        },
+        true,
+    );
+    assert!(no_pty_ssh.windows(2).any(|pair| pair == ["-T", "-A"]));
+
+    let custom_ssh = MoshCommand {
+        forward_agent: true,
+        ssh: vec![
+            "ssh".into(),
+            "-A".into(),
+            "-o".into(),
+            "ForwardAgent=yes".into(),
+        ],
+        ..MoshCommand::default()
+    };
+    let (_, bootstrap) = ssh_bootstrap_command(&custom_ssh, "host");
+    assert!(!bootstrap.iter().any(|argument| argument == "-A"));
+    assert!(
+        !bootstrap
+            .windows(2)
+            .any(|pair| pair == ["-o", "ForwardAgent=yes"])
+    );
+    assert!(
+        bootstrap
+            .windows(2)
+            .any(|pair| pair == ["-o", "ForwardAgent=no"])
+    );
+}
+
+#[test]
+fn the_bundled_server_gets_forwarding_only_when_requested() {
+    let command = MoshCommand {
+        forward_agent: true,
+        ..MoshCommand::default()
+    };
+    assert!(server_arguments(&command).contains(&"--forward-agent".to_owned()));
+    let stock = MoshCommand {
+        server: "mosh-server".to_owned(),
+        forward_agent: true,
+        ..MoshCommand::default()
+    };
+    assert!(!server_arguments(&stock).contains(&"--forward-agent".to_owned()));
+}
+
+#[test]
 fn default_remote_server_prefers_zosh_server_then_falls_back_to_stock_mosh() {
     let command = MoshCommand::default();
     let remote = remote_server_command(&command, 256).unwrap();
@@ -416,6 +506,8 @@ fn launcher_help_has_the_stock_mosh_surface() {
         "--local",
         "--experimental-remote-ip",
         "--keep-alive",
+        "--forward-agent",
+        "--no-forward-agent",
         "--help",
         "--version",
     ] {
@@ -449,6 +541,7 @@ fn an_embedded_bootstrap_runs_its_command_and_names_the_bundled_zosh() {
             "42".to_owned(),
         ],
         keep_alive: Some(250),
+        forward_agent: false,
         proxy_program: Some(PathBuf::from("/opt/zetta/zosh")),
     };
     let command = embedded_command(&request).expect("a valid request");

@@ -136,6 +136,8 @@ pub struct RemoteSessionConfig {
     /// How long a Zosh link may go without sending before it holds itself
     /// open, or `None` for Mosh's own three-second heartbeat.
     pub keep_alive_ms: Option<u64>,
+    /// Whether Zosh panes may forward the local SSH agent. Off by default.
+    pub forward_agent: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -630,6 +632,7 @@ struct RemoteSessionFile {
     /// number: leaving it out and asking for no keep-alive are the same thing,
     /// and both have to be expressible.
     keep_alive_ms: Setting<Option<u64>>,
+    forward_agent: Setting<bool>,
 }
 
 #[derive(Default, Deserialize)]
@@ -938,6 +941,9 @@ impl RemoteSessionFile {
                     Ok(interval)
                 })
                 .transpose()?;
+        }
+        if let Some(forward_agent) = self.forward_agent.get() {
+            remote.forward_agent = forward_agent;
         }
         Ok(())
     }

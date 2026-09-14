@@ -108,6 +108,7 @@ pub(crate) enum RemoteSessionField {
     Port,
     Protocol,
     KeepAlive,
+    ForwardAgent,
     Profile,
     Template,
     List,
@@ -185,6 +186,7 @@ pub(crate) struct RemoteSessionPicker {
     /// The keep-alive interval, as typed. Empty means Mosh's own heartbeat;
     /// what it parses to is only asked for when Zosh is the protocol.
     pub(crate) keep_alive: TextField,
+    pub(crate) forward_agent: bool,
     pub(crate) field: RemoteSessionField,
     pub(crate) sessions: Vec<zmux::protocol::BackgroundSessionSummary>,
     pub(crate) selected: usize,
@@ -215,6 +217,7 @@ impl Default for RemoteSessionPicker {
             port: TextField::default(),
             transport: RemotePaneTransport::default(),
             keep_alive: TextField::default(),
+            forward_agent: false,
             field: RemoteSessionField::Target,
             sessions: Vec::new(),
             selected: 0,
@@ -265,7 +268,8 @@ impl RemoteSessionPicker {
     /// The controls in tab order.
     ///
     /// Keep-alive is only reachable while Zosh is the protocol: it holds a
-    /// Mosh link open, and an SSH session has no link of that kind to hold.
+    /// Mosh link open, and SSH-agent forwarding is only meaningful on that
+    /// transport. An SSH session has neither of those controls.
     fn field_order(&self) -> Vec<RemoteSessionField> {
         let mut order = vec![
             RemoteSessionField::Target,
@@ -273,7 +277,10 @@ impl RemoteSessionPicker {
             RemoteSessionField::Protocol,
         ];
         if self.transport.is_zosh() {
-            order.push(RemoteSessionField::KeepAlive);
+            order.extend([
+                RemoteSessionField::KeepAlive,
+                RemoteSessionField::ForwardAgent,
+            ]);
         }
         order.extend([
             RemoteSessionField::Profile,
@@ -336,9 +343,15 @@ impl RemoteSessionPicker {
             }
             RemotePaneTransport::Zosh {
                 keep_alive_ms: None,
+                forward_agent: self.forward_agent,
             }
         };
-        if !self.transport.is_zosh() && self.field == RemoteSessionField::KeepAlive {
+        if !self.transport.is_zosh()
+            && matches!(
+                self.field,
+                RemoteSessionField::KeepAlive | RemoteSessionField::ForwardAgent
+            )
+        {
             self.field = RemoteSessionField::Protocol;
         }
         self.move_unavailable_focus_to_cancel();
@@ -603,6 +616,7 @@ impl Zetta {
                     .map(|interval| interval.to_string())
                     .unwrap_or_default(),
             ),
+            forward_agent: remote.forward_agent,
             ..Default::default()
         };
         self.remote_session_picker = Some(picker);
@@ -667,7 +681,10 @@ impl Zetta {
         } else {
             Some(parse_keep_alive_interval(keep_alive)?)
         };
-        Ok(RemotePaneTransport::Zosh { keep_alive_ms })
+        Ok(RemotePaneTransport::Zosh {
+            keep_alive_ms,
+            forward_agent: picker.forward_agent,
+        })
     }
 
     pub(crate) fn create_remote_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1232,6 +1249,10 @@ impl Zetta {
                 picker.toggle_transport();
                 cx.notify();
             }
+            ("left" | "right" | "space", RemoteSessionField::ForwardAgent) => {
+                picker.forward_agent = !picker.forward_agent;
+                cx.notify();
+            }
             ("up" | "down", RemoteSessionField::Target) => {
                 picker.navigate_suggestions(event.keystroke.key == "up");
                 cx.notify();
@@ -1262,6 +1283,7 @@ impl Zetta {
                     RemoteSessionField::Port => &mut picker.port,
                     RemoteSessionField::KeepAlive => &mut picker.keep_alive,
                     RemoteSessionField::Protocol
+                    | RemoteSessionField::ForwardAgent
                     | RemoteSessionField::Profile
                     | RemoteSessionField::Template
                     | RemoteSessionField::List
@@ -1576,6 +1598,7 @@ impl Zetta {
                         .child(remote_session_transport_row(RemoteSessionTransportRow {
                             transport,
                             keep_alive,
+                            forward_agent: picker.forward_agent,
                             field,
                             colors,
                             field_widget: &field_widget,
@@ -2094,6 +2117,7 @@ fn remote_session_primary_shortcut() -> &'static str {
 struct RemoteSessionTransportRow<'a, F> {
     transport: RemotePaneTransport,
     keep_alive: TextField,
+    forward_agent: bool,
     field: RemoteSessionField,
     colors: &'a ThemeColors,
     field_widget: &'a F,
@@ -2114,6 +2138,7 @@ where
     let RemoteSessionTransportRow {
         transport,
         keep_alive,
+        forward_agent,
         field,
         colors,
         field_widget,
@@ -2158,7 +2183,50 @@ where
                     .text_color(colors.text_muted)
                     .child("ms"),
             )
+            .child(remote_session_agent_control(
+                forward_agent,
+                field == RemoteSessionField::ForwardAgent,
+                colors,
+                handle,
+            ))
         })
+}
+
+fn remote_session_agent_control(
+    enabled: bool,
+    focused: bool,
+    colors: &ThemeColors,
+    handle: &WeakEntity<Zetta>,
+) -> impl IntoElement {
+    let handle = handle.clone();
+    div()
+        .id("remote-session-forward-agent")
+        .debug_selector(|| "remote-session-forward-agent".to_owned())
+        .flex_none()
+        .px_2()
+        .py_1()
+        .rounded(px(4.))
+        .border_1()
+        .border_color(if focused {
+            colors.border_focused
+        } else {
+            colors.border
+        })
+        .text_xs()
+        .cursor_pointer()
+        .hover(|style| style.bg(colors.element_hover))
+        .on_click(move |_, _, cx| {
+            handle
+                .update(cx, |this, cx| {
+                    if let Some(picker) = this.remote_session_picker.as_mut() {
+                        picker.forward_agent = !picker.forward_agent;
+                        picker.field = RemoteSessionField::ForwardAgent;
+                        cx.notify();
+                    }
+                })
+                .ok();
+        })
+        .child(if enabled { "Agent: On" } else { "Agent: Off" })
 }
 
 /// The placeholder names what an empty field means, which is not "nothing":

@@ -221,6 +221,10 @@ fn usage(no_mux: bool) -> String {
                 ),
             ),
             (
+                "--forward-agent / --no-forward-agent",
+                "Opt in to forwarding the local SSH agent through Zosh panes; needs --protocol zosh",
+            ),
+            (
                 "-r, --retention MODE",
                 "What to keep of a detached pane's output:\nnone, memory (default), or disk",
             ),
@@ -623,6 +627,7 @@ pub fn run_with_defaults(arguments: &[OsString], defaults: ClientDefaults) -> Re
     let mut remote_protocol: Option<String> = None;
     let mut expect_remote_protocol = false;
     let mut remote_keep_alive: Option<u64> = None;
+    let mut remote_forward_agent: Option<bool> = None;
     let mut create_layout: Option<std::path::PathBuf> = None;
     let mut create_profile: Option<String> = None;
     let mut create_title: Option<String> = None;
@@ -768,6 +773,13 @@ pub fn run_with_defaults(arguments: &[OsString], defaults: ClientDefaults) -> Re
                 remote_keep_alive = Some(parse_keep_alive_interval(
                     value.split_once('=').map(|(_, value)| value).unwrap_or(""),
                 )?);
+            }
+            "--forward-agent" | "--no-forward-agent" => {
+                anyhow::ensure!(
+                    remote_forward_agent.is_none(),
+                    "agent-forwarding options may only be specified once"
+                );
+                remote_forward_agent = Some(argument == "--forward-agent");
             }
             "--port" | "-p" => expect_port = true,
             "--layout" => expect_create_layout = true,
@@ -1048,6 +1060,10 @@ pub fn run_with_defaults(arguments: &[OsString], defaults: ClientDefaults) -> Re
         remote_keep_alive.is_none() || remote_protocol.as_deref() == Some(REMOTE_PROTOCOL_ZOSH),
         "--keep-alive holds a Zosh link open, so it needs --protocol zosh"
     );
+    anyhow::ensure!(
+        remote_forward_agent.is_none() || remote_protocol.as_deref() == Some(REMOTE_PROTOCOL_ZOSH),
+        "--forward-agent needs --protocol zosh"
+    );
     anyhow::ensure!(!expect_port, "--port requires a value");
     anyhow::ensure!(
         identity_paths.len() == configured_identity_count
@@ -1234,6 +1250,7 @@ pub fn run_with_defaults(arguments: &[OsString], defaults: ClientDefaults) -> Re
                 &reconnect::RemoteProtocolRequest {
                     protocol: remote_protocol,
                     keep_alive_ms: remote_keep_alive,
+                    forward_agent: remote_forward_agent,
                 },
             )
         }

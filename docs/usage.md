@@ -173,6 +173,13 @@ protocol in the remote-session picker, with `zmux attach HOST ID --protocol
 zosh`, or by default with `sessions.remote.protocol`. See
 [Background sessions](background-sessions.md#carrying-panes-over-zosh).
 
+SSH-agent forwarding is a separate opt-in: use `--forward-agent` with Zosh or
+`zmux attach --protocol zosh --forward-agent`. The bundled Zosh pair proxies
+the authenticated agent protocol over Mosh; stock or older peers keep the
+terminal alive and report that forwarding is unavailable. Existing remote
+`zmux` panes retain their SSH byte-stream fallback because their shells already
+exist before the Zosh relay starts.
+
 ## CLI command panes
 
 Run a command in the active pane, a pane selected by label, or a newly created

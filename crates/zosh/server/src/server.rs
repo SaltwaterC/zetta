@@ -1,6 +1,7 @@
+use crate::agent::AgentServer;
 use crate::args::Config;
 use crate::lifecycle;
-use crate::protocol::{ServerTransport, encode_host_message};
+use crate::protocol::{AgentHostRecord, ServerTransport, encode_host_message_with_agent};
 use crate::terminal_state::{QueryResponder, TerminalState};
 use crate::timing;
 use crate::user_stream::{UserEvent, UserStreamTracker};
@@ -13,6 +14,7 @@ use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use std::collections::VecDeque;
 use std::io::{Read, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
+use std::path::Path;
 use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -51,6 +53,14 @@ const KEEP_ALIVE_LINGER: Duration = Duration::from_secs(10);
 // Matching KEEP_ALIVE_LINGER is deliberate: it is the same judgement about
 // when a peer has stopped being a peer.
 const SCROLLBACK_STALL: Duration = KEEP_ALIVE_LINGER;
+
+struct PtySession {
+    child: Box<dyn portable_pty::Child + Send + Sync>,
+    master: Box<dyn portable_pty::MasterPty>,
+    event_rx: Receiver<PtyEvent>,
+    write_tx: SyncSender<PtyWrite>,
+    exited: bool,
+}
 
 pub fn run(mut cfg: Config) -> Result<()> {
     let timing_file = timing::open()?;
@@ -93,41 +103,13 @@ pub fn run(mut cfg: Config) -> Result<()> {
 }
 
 fn serve_session(cfg: Config, socket: UdpSocket, mut transport: ServerTransport) -> Result<()> {
-    let pty_system = native_pty_system();
-    let pair = pty_system
-        .openpty(PtySize {
-            rows: INITIAL_ROWS,
-            cols: INITIAL_COLS,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .context("opening native PTY/ConPTY")?;
-
-    let mut command = build_command(&cfg);
-    configure_child_environment(&mut command, &cfg);
-
-    let mut child = pair
-        .slave
-        .spawn_command(command)
-        .context("spawning shell/command in PTY")?;
-    drop(pair.slave);
-
-    let reader = pair
-        .master
-        .try_clone_reader()
-        .context("cloning PTY reader")?;
-    let writer = pair.master.take_writer().context("taking PTY writer")?;
-    let master = pair.master;
-
-    let (pty_event_tx, pty_event_rx) = mpsc::sync_channel::<PtyEvent>(PTY_QUEUE_DEPTH);
-    let pty_event_tx = PtyEventSender {
-        sender: pty_event_tx,
-        consumer: thread::current(),
-    };
-    let (pty_write_tx, pty_write_rx) = mpsc::sync_channel::<PtyWrite>(PTY_QUEUE_DEPTH);
-    spawn_pty_reader(reader, pty_event_tx.clone());
-    spawn_pty_writer(writer, pty_write_rx, pty_event_tx);
-
+    // The first authenticated user state decides whether this is a Zosh peer
+    // that negotiated forwarding. Until then no child, PTY, or agent socket
+    // exists, so an inherited bootstrap SSH_AUTH_SOCK cannot leak into a
+    // stock-Mosh session.
+    let mut pty: Option<PtySession> = None;
+    let mut agent_server: Option<AgentServer> = None;
+    let mut agent_decided = false;
     let mut terminal = TerminalState::new(INITIAL_ROWS, INITIAL_COLS);
     // Until the first client state arrives the server does not know whether it
     // is talking to something that can take scrolled-off rows, and it is
@@ -146,7 +128,6 @@ fn serve_session(cfg: Config, socket: UdpSocket, mut transport: ServerTransport)
     let mut enqueued_echo: u64 = 0;
     let mut local_shutdown = false;
     let mut remote_shutdown = false;
-    let mut child_exited = false;
     let mut loop_timing = timing::LoopTiming::new();
     // The interval a client has asked this session to be held to, once it has
     // announced one, and when this side last put a datagram on the wire.
@@ -172,20 +153,26 @@ fn serve_session(cfg: Config, socket: UdpSocket, mut transport: ServerTransport)
         } else {
             false
         };
-        let pty = if hold_for_scrollback {
+        let pty_progress = if hold_for_scrollback {
             PtyProgress::default()
-        } else {
+        } else if let Some(session) = pty.as_mut() {
             drain_pty_events(
-                &pty_event_rx,
+                &session.event_rx,
                 &mut terminal,
                 &mut responder,
-                &pty_write_tx,
+                &session.write_tx,
                 &mut echo,
                 cfg.verbose > 0,
             )?
+        } else {
+            PtyProgress::default()
         };
-        dirty |= pty.dirty;
-        child_exited |= pty.ended;
+        dirty |= pty_progress.dirty;
+        if pty_progress.ended
+            && let Some(session) = pty.as_mut()
+        {
+            session.exited = true;
+        }
         timing::slow("pty_drain_slow", phase);
 
         let confirmed_echo = echo.advance(Instant::now());
@@ -258,14 +245,58 @@ fn serve_session(cfg: Config, socket: UdpSocket, mut transport: ServerTransport)
                                 terminal.forget_scrollback();
                                 scrollback_settled = true;
                             }
-                            apply_user_events(
-                                accepted.events,
-                                accepted.frame,
-                                master.as_ref(),
-                                &mut terminal,
-                                &pty_write_tx,
-                                &mut dirty,
-                            )?;
+                            if !agent_decided {
+                                let requested = accepted
+                                    .events
+                                    .iter()
+                                    .any(|event| matches!(event, UserEvent::AgentHello { .. }));
+                                agent_decided = true;
+                                if cfg.forward_agent && requested {
+                                    agent_server = Some(AgentServer::new());
+                                }
+                                pty = Some(spawn_pty_session(
+                                    &cfg,
+                                    agent_server.as_ref().and_then(|agent| agent.socket_path()),
+                                )?);
+                            }
+                            let events = accepted.events;
+                            for event in &events {
+                                if let UserEvent::AgentResponse {
+                                    connection_id,
+                                    request_id,
+                                    frame,
+                                    closed,
+                                } = event
+                                    && let Some(agent) = agent_server.as_mut()
+                                {
+                                    agent.apply_response(
+                                        *connection_id,
+                                        *request_id,
+                                        frame,
+                                        *closed,
+                                    );
+                                }
+                            }
+                            let terminal_events = events
+                                .into_iter()
+                                .filter(|event| {
+                                    !matches!(
+                                        event,
+                                        UserEvent::AgentHello { .. }
+                                            | UserEvent::AgentResponse { .. }
+                                    )
+                                })
+                                .collect();
+                            if let Some(session) = pty.as_ref() {
+                                apply_user_events(
+                                    terminal_events,
+                                    accepted.frame,
+                                    session.master.as_ref(),
+                                    &mut terminal,
+                                    &session.write_tx,
+                                    &mut dirty,
+                                )?;
+                            }
                         }
                     }
                 }
@@ -281,16 +312,23 @@ fn serve_session(cfg: Config, socket: UdpSocket, mut transport: ServerTransport)
         timing::slow("input_drain_slow", phase);
         let associated = peer.is_some() && transport.has_received_authenticated();
         if !associated && Instant::now() >= association_deadline {
-            let _ = child.kill();
+            kill_pty(&mut pty, false);
             bail!("no Mosh client associated within 60 seconds");
         }
 
         if associated {
+            if let Some(agent) = agent_server.as_mut() {
+                agent.acknowledge(transport.acked_by_remote());
+                if agent.poll() {
+                    dirty = true;
+                    transport.force_next_send();
+                }
+            }
             if network_timeout.is_some_and(|timeout| transport.last_recv().elapsed() >= timeout) {
                 if cfg.verbose > 0 {
                     eprintln!("zosh-server-rs: network timeout expired");
                 }
-                let _ = child.kill();
+                kill_pty(&mut pty, false);
                 break;
             }
 
@@ -300,10 +338,16 @@ fn serve_session(cfg: Config, socket: UdpSocket, mut transport: ServerTransport)
             // visual base. SSP may discard an unsent intermediate state; every
             // newer state is independently valid from the acknowledged base.
             if !local_shutdown && !remote_shutdown && (dirty || confirmed_echo > enqueued_echo) {
-                if let Some(payload) = host_update(&terminal, confirmed_echo) {
+                let agent_records = agent_server
+                    .as_ref()
+                    .map_or_else(Vec::new, AgentServer::records);
+                if let Some(payload) = host_update(&terminal, confirmed_echo, &agent_records) {
                     let state_num = transport.set_pending(payload);
                     timing::record("host_update", state_num, confirmed_echo);
                     terminal.snapshot_for_state(state_num);
+                    if let Some(agent) = agent_server.as_mut() {
+                        agent.snapshot_for_state(state_num);
+                    }
                     enqueued_echo = enqueued_echo.max(confirmed_echo);
                 }
                 dirty = false;
@@ -332,12 +376,12 @@ fn serve_session(cfg: Config, socket: UdpSocket, mut transport: ServerTransport)
             }
 
             if transport.crypto_exhausted() {
-                let _ = child.kill();
+                kill_pty(&mut pty, false);
                 bail!("Mosh OCB per-key block limit exhausted; refusing nonce/key reuse");
             }
 
             if remote_shutdown && transport.counterparty_shutdown_ack_sent() {
-                let _ = child.kill();
+                kill_pty(&mut pty, false);
                 break;
             }
 
@@ -349,13 +393,20 @@ fn serve_session(cfg: Config, socket: UdpSocket, mut transport: ServerTransport)
         }
 
         let phase = timing::begin();
-        if !child_exited && child.try_wait().context("polling PTY child")?.is_some() {
+        if let Some(session) = pty.as_mut()
+            && !session.exited
+            && session
+                .child
+                .try_wait()
+                .context("polling PTY child")?
+                .is_some()
+        {
             timing::record("child_exited", 0, 0);
-            child_exited = true;
+            session.exited = true;
         }
         timing::slow("child_poll_slow", phase);
 
-        if child_exited && !local_shutdown {
+        if pty.as_ref().is_some_and(|session| session.exited) && !local_shutdown {
             if associated && !remote_shutdown {
                 local_shutdown = true;
                 transport.start_shutdown();
@@ -373,15 +424,12 @@ fn serve_session(cfg: Config, socket: UdpSocket, mut transport: ServerTransport)
         // A producer unparks after publishing an event. The park token also
         // covers events published between draining the queue and this wait.
         // Never wait when a bounded drain may have left work queued.
-        if !pty.budget_exhausted && !udp_budget_exhausted {
+        if !pty_progress.budget_exhausted && !udp_budget_exhausted {
             thread::park_timeout(LOOP_SLEEP);
         }
     }
 
-    if !child_exited {
-        let _ = child.kill();
-        let _ = child.wait();
-    }
+    kill_pty(&mut pty, true);
     Ok(())
 }
 
@@ -527,7 +575,11 @@ fn drain_pty_events(
     Ok(progress)
 }
 
-fn host_update(terminal: &TerminalState, confirmed_echo: u64) -> Option<Vec<u8>> {
+fn host_update(
+    terminal: &TerminalState,
+    confirmed_echo: u64,
+    agent_records: &[AgentHostRecord],
+) -> Option<Vec<u8>> {
     let phase = timing::begin();
     let mut instructions = Vec::with_capacity(3);
     // Stock CompleteTerminal applies distinct instructions with an else-if
@@ -559,7 +611,8 @@ fn host_update(terminal: &TerminalState, confirmed_echo: u64) -> Option<Vec<u8>>
             echo_ack_num: -1,
         });
     }
-    let update = encode_host_message(&instructions, terminal.queries_from_ack());
+    let update =
+        encode_host_message_with_agent(&instructions, terminal.queries_from_ack(), agent_records);
     timing::slow("host_diff_slow", phase);
     (!update.is_empty()).then_some(update)
 }
@@ -616,6 +669,10 @@ fn apply_user_events(
                 // UserStream order and do not attach an echo acknowledgement.
                 flush_keys(&mut keys)?;
                 queue_pty_write(pty_write_tx, bytes)?;
+            }
+            UserEvent::AgentHello { .. } | UserEvent::AgentResponse { .. } => {
+                // Negotiation and agent frames are consumed by the session
+                // loop before terminal events reach this function.
             }
         }
     }
@@ -706,6 +763,58 @@ fn spawn_pty_writer(
     });
 }
 
+fn spawn_pty_session(cfg: &Config, agent_socket: Option<&Path>) -> Result<PtySession> {
+    let pty_system = native_pty_system();
+    let pair = pty_system
+        .openpty(PtySize {
+            rows: INITIAL_ROWS,
+            cols: INITIAL_COLS,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .context("opening native PTY/ConPTY")?;
+    let mut command = build_command(cfg);
+    configure_child_environment(&mut command, cfg, agent_socket);
+    let child = pair
+        .slave
+        .spawn_command(command)
+        .context("spawning shell/command in PTY")?;
+    drop(pair.slave);
+    let reader = pair
+        .master
+        .try_clone_reader()
+        .context("cloning PTY reader")?;
+    let writer = pair.master.take_writer().context("taking PTY writer")?;
+    let master = pair.master;
+    let (event_tx, event_rx) = mpsc::sync_channel::<PtyEvent>(PTY_QUEUE_DEPTH);
+    let event_sender = PtyEventSender {
+        sender: event_tx,
+        consumer: thread::current(),
+    };
+    let (write_tx, write_rx) = mpsc::sync_channel::<PtyWrite>(PTY_QUEUE_DEPTH);
+    spawn_pty_reader(reader, event_sender.clone());
+    spawn_pty_writer(writer, write_rx, event_sender);
+    Ok(PtySession {
+        child,
+        master,
+        event_rx,
+        write_tx,
+        exited: false,
+    })
+}
+
+fn kill_pty(pty: &mut Option<PtySession>, wait: bool) {
+    if let Some(session) = pty.as_mut()
+        && !session.exited
+    {
+        let _ = session.child.kill();
+        if wait {
+            let _ = session.child.wait();
+        }
+        session.exited = true;
+    }
+}
+
 fn build_command(cfg: &Config) -> CommandBuilder {
     if cfg.command.is_empty() {
         CommandBuilder::new_default_prog()
@@ -714,7 +823,18 @@ fn build_command(cfg: &Config) -> CommandBuilder {
     }
 }
 
-fn configure_child_environment(command: &mut CommandBuilder, cfg: &Config) {
+fn configure_child_environment(
+    command: &mut CommandBuilder,
+    cfg: &Config,
+    agent_socket: Option<&Path>,
+) {
+    // SSH bootstrap may have supplied an agent socket for native `ssh -A`.
+    // It is not valid after the bootstrap connection closes, so always remove
+    // it and add the private Zosh socket only after negotiation.
+    command.env_remove("SSH_AUTH_SOCK");
+    if let Some(agent_socket) = agent_socket {
+        command.env("SSH_AUTH_SOCK", agent_socket.as_os_str());
+    }
     let term = if cfg.colors >= 256 {
         "xterm-256color"
     } else {

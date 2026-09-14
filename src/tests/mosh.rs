@@ -131,6 +131,19 @@ fn mosh_parser_accepts_aliases_and_terminal_modes() {
     assert!(initialized.init);
     assert!(initialized.init_explicit);
 
+    let forwarding = parse_mosh(&["--forward-agent", "host"]);
+    assert!(forwarding.forward_agent);
+    let no_forwarding = parse_mosh(&["--no-forward-agent", "host"]);
+    assert!(!no_forwarding.forward_agent);
+    assert!(
+        parse_mosh_args(&[
+            OsString::from("--forward-agent"),
+            OsString::from("--no-forward-agent"),
+            OsString::from("host"),
+        ])
+        .is_err()
+    );
+
     let help = parse_mosh_args(&[OsString::from("--help")]).unwrap();
     assert!(help.help);
     let version = parse_mosh_args(&[OsString::from("--version")]).unwrap();

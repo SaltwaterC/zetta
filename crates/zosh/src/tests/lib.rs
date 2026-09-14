@@ -12,6 +12,7 @@ fn endpoint_arguments_require_host_and_nonzero_port() {
             colors: false,
             keep_alive: None,
             scrollback_kib: None,
+            forward_agent: None,
         }
     );
     assert!(client::parse_args(["host".into()]).is_err());
@@ -87,6 +88,26 @@ fn endpoint_help_and_version_do_not_require_mosh_key() {
     assert!(client::parse_args(["--help".into()]).unwrap().help);
     assert!(client::parse_args(["--version".into()]).unwrap().version);
     assert!(client::parse_args(["-c".into()]).unwrap().colors);
+}
+
+#[test]
+fn endpoint_parser_treats_agent_forwarding_as_an_explicit_optional_override() {
+    let enabled =
+        client::parse_args(["--forward-agent".into(), "host".into(), "60001".into()]).unwrap();
+    assert_eq!(enabled.forward_agent, Some(true));
+
+    let disabled =
+        client::parse_args(["--no-forward-agent".into(), "host".into(), "60001".into()]).unwrap();
+    assert_eq!(disabled.forward_agent, Some(false));
+    assert!(
+        client::parse_args([
+            "--forward-agent".into(),
+            "--no-forward-agent".into(),
+            "host".into(),
+            "60001".into(),
+        ])
+        .is_err()
+    );
 }
 
 #[test]

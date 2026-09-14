@@ -88,6 +88,8 @@ pub(crate) struct MoshCommand {
     /// `-k`/`--keep-alive`, in milliseconds. Validated here and forwarded
     /// verbatim; `zosh` owns what it does with it.
     pub(crate) keep_alive: Option<u64>,
+    /// Opt in to Zosh's authenticated SSH-agent forwarding extension.
+    pub(crate) forward_agent: bool,
     pub(crate) family: AddressFamily,
     pub(crate) port: Option<PortRequest>,
     pub(crate) bind_server: BindServer,
@@ -117,6 +119,7 @@ impl Default for MoshCommand {
             prediction_explicit: false,
             predict_overwrite: false,
             keep_alive: None,
+            forward_agent: false,
             family: AddressFamily::PreferInet,
             port: None,
             bind_server: BindServer::Ssh,
@@ -343,6 +346,7 @@ struct SeenOptions {
     init: bool,
     remote_ip: bool,
     keep_alive: bool,
+    forward_agent: bool,
 }
 
 fn parse_flag(
@@ -371,6 +375,8 @@ fn parse_flag(
         "--keep-alive" | "-k" => {
             set_keep_alive(command, seen, KEEP_ALIVE_DEFAULT_MS)?;
         }
+        "--forward-agent" => set_forward_agent(command, seen, true)?,
+        "--no-forward-agent" => set_forward_agent(command, seen, false)?,
         "-4" => {
             set_family(command, seen, AddressFamily::Inet)?;
         }
@@ -524,6 +530,17 @@ fn set_keep_alive(command: &mut MoshCommand, seen: &mut SeenOptions, interval: u
     anyhow::ensure!(!seen.keep_alive, "duplicate --keep-alive");
     seen.keep_alive = true;
     command.keep_alive = Some(interval);
+    Ok(())
+}
+
+fn set_forward_agent(
+    command: &mut MoshCommand,
+    seen: &mut SeenOptions,
+    enabled: bool,
+) -> Result<()> {
+    anyhow::ensure!(!seen.forward_agent, "duplicate agent-forwarding option");
+    seen.forward_agent = true;
+    command.forward_agent = enabled;
     Ok(())
 }
 

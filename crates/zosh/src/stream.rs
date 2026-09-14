@@ -30,6 +30,7 @@ use anyhow::{Context as _, Result};
 use mosh_rs::{Base64Key, DisplayPreference, MoshSession};
 
 use crate::{
+    agent::{AGENT_PROTOCOL_VERSION, AgentBridge, AgentClientCommand},
     client::{ProxiedInput, TerminalQueryProxy, forward_terminal_queries},
     display::DisplayScreen,
     frame::{self, ClientSession, Frame},
@@ -67,6 +68,8 @@ pub struct PaneSessionSettings {
     /// without. `Default` asks for none, because a default has to be the inert
     /// one; [`crate::SCROLLBACK_DEFAULT_KIB`] is what to pass.
     pub scrollback_kib: u32,
+    /// Request the opt-in Zosh SSH-agent extension.
+    pub forward_agent: bool,
 }
 
 /// A live Mosh session rendered into a byte stream.
@@ -133,7 +136,14 @@ impl PaneSession {
                 let finished = finished.clone();
                 let error = error.clone();
                 move || {
-                    let result = drive(session, (columns, rows), &command_receiver, &wake, &output);
+                    let result = drive(
+                        session,
+                        (columns, rows),
+                        settings.forward_agent,
+                        &command_receiver,
+                        &wake,
+                        &output,
+                    );
                     if let Err(failure) = result {
                         *error
                             .lock()
@@ -265,6 +275,7 @@ impl Write for PaneWriter {
 fn drive(
     mut session: ClientSession,
     size: (u16, u16),
+    forward_agent: bool,
     commands: &Receiver<Command>,
     wake: &Wake,
     output: &Arc<OutputPipe>,
@@ -274,6 +285,10 @@ fn drive(
     };
     let mut pending_resize = None;
     let mut query_proxy = TerminalQueryProxy::default();
+    let mut agent = AgentBridge::new(forward_agent);
+    if agent.enabled() {
+        session.request_agent_forwarding(AGENT_PROTOCOL_VERSION);
+    }
     session.send_resize(i32::from(size.0), i32::from(size.1));
     loop {
         let wait = session.wait_time_ms().min(IDLE_WAIT_MS);
@@ -286,6 +301,10 @@ fn drive(
             &mut pending_resize,
         );
         let events = session.pump_ready().context("pumping the Mosh session")?;
+        for command in agent.handle_events(&events) {
+            apply_agent_command(&mut session, command);
+        }
+        agent.negotiation_timed_out();
         forward_terminal_queries(&events, &mut query_proxy, &mut sink)
             .context("forwarding a terminal query")?;
         match frame::next_frame(&session, &events, pending_resize) {
@@ -309,6 +328,17 @@ fn drive(
         if session.finished() {
             return Ok(());
         }
+    }
+}
+
+fn apply_agent_command(session: &mut ClientSession, command: AgentClientCommand) {
+    match command {
+        AgentClientCommand::Response {
+            connection_id,
+            request_id,
+            frame,
+            closed,
+        } => session.send_agent_response(connection_id, request_id, &frame, closed),
     }
 }
 

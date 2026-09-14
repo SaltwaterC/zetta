@@ -43,6 +43,7 @@ impl ZoshPaneStream {
 pub(super) fn bootstrap(
     _client: &zmux::client::Client,
     _keep_alive_ms: Option<u64>,
+    _forward_agent: bool,
     _session_id: u64,
     _secret: Option<&SessionSecret>,
     _mux_pane_ids: &[u64],

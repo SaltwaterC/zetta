@@ -211,6 +211,7 @@ fn dispatch(command: ProcessControlCommand, cx: &mut AsyncApp) {
             secret,
             protocol,
             keep_alive_ms,
+            forward_agent,
             completion,
         } => open_remote_session(
             crate::background_session_ui::RemoteSessionRequest {
@@ -220,6 +221,7 @@ fn dispatch(command: ProcessControlCommand, cx: &mut AsyncApp) {
                 secret,
                 protocol,
                 keep_alive_ms,
+                forward_agent,
             },
             completion,
             cx,

@@ -11,8 +11,8 @@ answering them promptly), and `crates/vt100` (the eviction queue the server's
 emulator keeps so that the rows leaving the top of the screen can be carried at
 all).
 
-Three extensions are specified here: the keep-alive, terminal color-query
-forwarding, and scrollback.
+Four extensions are specified here: the keep-alive, terminal color-query
+forwarding, scrollback, and opt-in SSH-agent forwarding.
 
 ## The problem
 
@@ -335,6 +335,12 @@ since its last send). See "Proving it" below.
 | `zosh` without `-k`, or stock `mosh-client` | zosh `zosh-server` | No keep-alives; the server behaves exactly as before. |
 | zosh client | zosh `zosh-server` | OSC 10/11 color queries are forwarded to the local terminal and their responses are written to the remote PTY. |
 | zosh client | stock `mosh-server` | The host query extension is ignored; ordinary terminal traffic remains compatible. |
+| `zosh --forward-agent` | zosh `zosh-server --forward-agent` | The authenticated Zosh agent extension is negotiated and complete SSH-agent frames are proxied. |
+| `zosh --forward-agent` | stock `mosh-server` | The terminal works; the unknown hello is ignored and the client emits one warning after negotiation times out. |
+| stock `mosh-client` | zosh `zosh-server --forward-agent` | The terminal works; no agent socket is created because stock Mosh sends no hello. |
+| new Zosh client | old Zosh server | The terminal works; unknown agent fields are ignored and forwarding is unavailable with one warning. |
+| `zosh --forward-agent` | plain SSH fallback | The launcher uses native `ssh -A`. |
+| `zmux attach --protocol zosh --forward-agent` | existing remote `zmux` pane | The pane stays on its existing SSH byte stream; forwarding is unavailable because its shell already exists before `zosh-server` starts the relay. |
 | `zosh` (default) | zosh `zosh-server` | Scrolled-off rows are carried and written into the local terminal's history. Measured on loopback, a 100 000-line burst arrives complete; without it, 23 lines of it do. |
 | `zosh` (default) | stock `mosh-server` | Field 22 is skipped, no rows are ever carried, and the client falls back to inferring scrolls from the screen — exactly what stock Mosh does. |
 | `zosh --no-scrollback`, or stock `mosh-client` | zosh `zosh-server` | The server settles the question on the first state it accepts, forgets what it had collected, and behaves exactly as a stock server for the rest of the session. |
@@ -397,22 +403,59 @@ thing from either end, `-ttt` printing the gap between packets.
 -s, --scrollback        keep the output that scrolls off the screen [default]
     --scrollback=KIB    hold KIB kibibytes of it in flight (16-2048)
     --no-scrollback     keep only what is on the screen, as stock Mosh does
+    --forward-agent      opt in to forwarding the local SSH agent over Zosh
+    --no-forward-agent   disable agent forwarding (the default)
 ```
 
 Accepted by `zosh`, by `zetta mosh` (which forwards its arguments
 verbatim), and by the bundled endpoint client (`zosh HOST PORT`). The
 short form takes no separate value, so `-k host` still names a target.
 
+### SSH-agent forwarding
+
+Agent forwarding is deliberately off unless `--forward-agent` is present.
+The launcher passes `--forward-agent` only to the bundled `zosh-server`, and
+adds `-o ForwardAgent=no` to the SSH bootstrap so OpenSSH cannot leave a
+second, stale native agent channel behind when Mosh switches to UDP. If the
+bootstrap cannot start a usable Mosh endpoint and the launcher falls back to
+plain SSH, the same request becomes native `ssh -A` instead.
+
+After the first authenticated Mosh state, a Zosh server that received the
+hello creates a private per-session Unix socket, or an OpenSSH-compatible
+private named pipe on Windows. The PTY child is created only after that
+decision. Its inherited `SSH_AUTH_SOCK` is removed in all cases; it is set to
+the private socket only after a successful negotiation. A stock Mosh client,
+an old Zosh server, a missing local agent, a failed socket, or a negotiation
+timeout leaves a normal terminal alive and produces at most one diagnostic.
+
+The agent extension uses user field 23 and host field 21. User field 23
+contains either a versioned hello or one response; host field 21 contains a
+ready record, one complete request frame, or a close/error record. Requests
+and responses carry connection and record IDs. Host records are cumulative,
+so Mosh retransmission is safe; the client deduplicates request and close IDs
+and preserves ordering separately for each connection. Frames retain the
+SSH-agent four-byte big-endian length prefix and are capped at 256 KiB. At
+most 16 agent connections and 64 frames are outstanding; private key bytes
+never enter the Zosh protocol.
+
+This has the same access model as OpenSSH `ForwardAgent`: any process on the
+remote side that can open the forwarded socket can ask the local agent to
+sign. The socket is removed when the session ends. Existing remote `zmux`
+panes are intentionally not retrofitted, because their shells predate the
+relay; those panes retain the SSH byte-stream fallback and report that agent
+forwarding is unavailable.
+
 The interval is bounded by Mosh's own minimum frame interval below and
 its unassisted heartbeat above: outside that range there is nothing to
 ask for.
 
-There is **no server-side flag**, and there must not be one. The
-reference `mosh-server` rejects an unknown option outright, so anything
-the launcher added to the remote command line would break every stock
-server. The extension is in-band or it is nothing.
+Only the bundled `zosh-server` accepts the server-side `--forward-agent`
+flag. The launcher never adds it to a stock `mosh-server` command, because
+the reference server rejects unknown options; stock peers remain compatible
+through the in-band hello and warning-based fallback.
 
 `--client=PATH` runs an external endpoint client, which is not
-necessarily zosh, so the settings travel to it as `MOSH_KEEPALIVE=<ms>` and
-`MOSH_SCROLLBACK=<kib>` in the environment alongside Mosh's own `MOSH_*`
-settings rather than as arguments stock `mosh-client` would reject.
+necessarily zosh, so the settings travel to it as `MOSH_KEEPALIVE=<ms>`,
+`MOSH_SCROLLBACK=<kib>`, and (when requested) `MOSH_FORWARD_AGENT=yes` in the
+environment alongside Mosh's own `MOSH_*` settings rather than as arguments
+stock `mosh-client` would reject.

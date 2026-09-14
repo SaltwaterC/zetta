@@ -71,6 +71,8 @@ pub struct ConfigurationForm {
     /// The Zosh keep-alive interval in milliseconds. Empty leaves the link on
     /// Mosh's own heartbeat.
     pub remote_session_keep_alive: TextField,
+    /// Whether a Zosh pane may forward the local SSH agent.
+    pub remote_session_forward_agent: bool,
     pub session_persistence_recipients: TextField,
     pub session_persistence_identity: TextField,
     /// Whether background sessions are protected with the configured age key
@@ -260,6 +262,7 @@ impl ConfigurationForm {
                     .map(|interval| interval.to_string())
                     .unwrap_or_default(),
             ),
+            remote_session_forward_agent: config.sessions.remote.forward_agent,
             session_persistence_recipients: TextField::new(session_persistence_recipients),
             session_persistence_identity: TextField::new(session_persistence_identity),
             session_persistence_auto_protect: config.sessions.persistence.auto_protect,
@@ -427,6 +430,7 @@ impl ConfigurationForm {
                 "remote": {
                     "protocol": self.remote_session_protocol.name(),
                     "keep_alive_ms": remote_keep_alive,
+                    "forward_agent": self.remote_session_forward_agent,
                 },
                 "persistence": {
                     "recipients": recipients,
@@ -584,6 +588,7 @@ fn strip_default_configuration_values(
                 "remote": {
                     "protocol": crate::config::RemoteSessionProtocol::default().name(),
                     "keep_alive_ms": null,
+                    "forward_agent": false,
                 },
                 "persistence": {
                     "recipients": [],

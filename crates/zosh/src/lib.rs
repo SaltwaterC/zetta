@@ -11,6 +11,7 @@
 //! emulator. Zetta uses the pair to carry a remote pane's output over Mosh
 //! while its control traffic stays on SSH.
 
+mod agent;
 mod client;
 mod display;
 mod escape;

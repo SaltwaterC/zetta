@@ -81,7 +81,10 @@ pub(crate) enum RemotePaneTransport {
     #[default]
     Ssh,
     /// A Mosh session per pane, in front of a relay on the remote host.
-    Zosh { keep_alive_ms: Option<u64> },
+    Zosh {
+        keep_alive_ms: Option<u64>,
+        forward_agent: bool,
+    },
 }
 
 impl RemotePaneTransport {
@@ -90,10 +93,17 @@ impl RemotePaneTransport {
     pub(crate) const SSH: &'static str = "ssh";
     pub(crate) const ZOSH: &'static str = "zosh";
 
-    pub(crate) fn parse(value: &str, keep_alive_ms: Option<u64>) -> anyhow::Result<Self> {
+    pub(crate) fn parse(
+        value: &str,
+        keep_alive_ms: Option<u64>,
+        forward_agent: bool,
+    ) -> anyhow::Result<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
             Self::SSH => Ok(Self::Ssh),
-            Self::ZOSH => Ok(Self::Zosh { keep_alive_ms }),
+            Self::ZOSH => Ok(Self::Zosh {
+                keep_alive_ms,
+                forward_agent,
+            }),
             other => anyhow::bail!(
                 "unknown remote session protocol {other:?}; expected {:?} or {:?}",
                 Self::SSH,
@@ -108,6 +118,7 @@ impl RemotePaneTransport {
             crate::config::RemoteSessionProtocol::Ssh => Self::Ssh,
             crate::config::RemoteSessionProtocol::Zosh => Self::Zosh {
                 keep_alive_ms: remote.keep_alive_ms,
+                forward_agent: remote.forward_agent,
             },
         }
     }
@@ -129,7 +140,7 @@ impl RemotePaneTransport {
     pub(crate) fn keep_alive_ms(self) -> Option<u64> {
         match self {
             Self::Ssh => None,
-            Self::Zosh { keep_alive_ms } => keep_alive_ms,
+            Self::Zosh { keep_alive_ms, .. } => keep_alive_ms,
         }
     }
 }
@@ -183,14 +194,24 @@ pub(crate) fn bootstrap_remote_pane_streams(
     secret: Option<&SessionSecret>,
     mux_pane_ids: &[u64],
 ) -> RemotePaneStreams {
-    let RemotePaneTransport::Zosh { keep_alive_ms } = transport else {
+    let RemotePaneTransport::Zosh {
+        keep_alive_ms,
+        forward_agent,
+    } = transport
+    else {
         return RemotePaneStreams::default();
     };
     if mux_pane_ids.is_empty() {
         return RemotePaneStreams::default();
     }
-    let (streams, fallbacks) =
-        zosh_stream::bootstrap(client, keep_alive_ms, session_id, secret, mux_pane_ids);
+    let (streams, fallbacks) = zosh_stream::bootstrap(
+        client,
+        keep_alive_ms,
+        forward_agent,
+        session_id,
+        secret,
+        mux_pane_ids,
+    );
     RemotePaneStreams { streams, fallbacks }
 }
 

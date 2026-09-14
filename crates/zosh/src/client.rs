@@ -23,6 +23,7 @@ use std::{io::IsTerminal as _, sync::mpsc, thread, time::Duration};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use crate::{
+    agent::{AGENT_PROTOCOL_VERSION, AgentBridge, AgentClientCommand},
     display::{self, DisplayScreen},
     escape::{EscapeAction, EscapeKey, EscapeState},
     frame::{self, ClientSession, Frame},
@@ -244,6 +245,7 @@ pub(crate) const KEEP_ALIVE_MAX_MS: u64 = 3000;
 /// endpoint client, alongside Mosh's own `MOSH_*` settings.
 pub(crate) const KEEP_ALIVE_ENV: &str = "MOSH_KEEPALIVE";
 pub(crate) const SCROLLBACK_ENV: &str = "MOSH_SCROLLBACK";
+pub(crate) const FORWARD_AGENT_ENV: &str = "MOSH_FORWARD_AGENT";
 
 /// How much scrolled-off history a session asks its server to hold for it, in
 /// KiB, when nothing says otherwise.
@@ -272,6 +274,7 @@ pub struct ClientArgs {
     pub keep_alive: Option<u64>,
     /// KiB of scrolled-off history to ask the server for, or zero for none.
     pub scrollback_kib: Option<u32>,
+    pub forward_agent: Option<bool>,
 }
 
 /// The part of the Mosh launcher contract that is consumed by the bundled
@@ -288,6 +291,7 @@ pub(crate) struct SessionSettings {
     /// KiB of scrolled-off history to ask the server to carry, or zero to ask
     /// for none and be an ordinary Mosh client.
     pub(crate) scrollback_kib: u32,
+    pub(crate) forward_agent: bool,
 }
 
 impl SessionSettings {
@@ -314,6 +318,7 @@ impl SessionSettings {
             initialize_terminal: false,
             keep_alive: keep_alive_from_environment(),
             scrollback_kib: scrollback_from_environment(),
+            forward_agent: std::env::var(FORWARD_AGENT_ENV).is_ok_and(|value| value == "yes"),
         }
     }
 }
@@ -424,6 +429,7 @@ pub(crate) fn parse_args(arguments: impl IntoIterator<Item = OsString>) -> Resul
     let mut colors = false;
     let mut keep_alive = None;
     let mut scrollback_kib = None;
+    let mut forward_agent = None;
     let mut positional = Vec::new();
     for argument in arguments {
         let value = argument.to_string_lossy().into_owned();
@@ -438,6 +444,11 @@ pub(crate) fn parse_args(arguments: impl IntoIterator<Item = OsString>) -> Resul
         if let Some(kib) = scrollback_argument(&value)? {
             anyhow::ensure!(scrollback_kib.is_none(), "duplicate --scrollback");
             scrollback_kib = Some(kib);
+            continue;
+        }
+        if matches!(value.as_str(), "--forward-agent" | "--no-forward-agent") {
+            anyhow::ensure!(forward_agent.is_none(), "duplicate agent-forwarding option");
+            forward_agent = Some(value == "--forward-agent");
             continue;
         }
         match value.as_str() {
@@ -469,6 +480,7 @@ pub(crate) fn parse_args(arguments: impl IntoIterator<Item = OsString>) -> Resul
             colors,
             keep_alive,
             scrollback_kib,
+            forward_agent,
         });
     }
     anyhow::ensure!(positional.len() == 2, "usage: zosh SERVER_IP UDP_PORT");
@@ -484,6 +496,7 @@ pub(crate) fn parse_args(arguments: impl IntoIterator<Item = OsString>) -> Resul
         colors,
         keep_alive,
         scrollback_kib,
+        forward_agent,
     })
 }
 
@@ -502,7 +515,7 @@ fn scrollback_argument(value: &str) -> Result<Option<u32>> {
 
 fn print_help() {
     println!(
-        "Zosh client\n\nUsage: zosh SERVER_IP UDP_PORT\n       zosh -c\n\nReads the session key from MOSH_KEY. `-c` prints the terminal color count for the Mosh bootstrap.\n\nOptions:\n  -c                 Print terminal color count\n  -k, --keep-alive   Hold the link to a packet every {KEEP_ALIVE_DEFAULT_MS} ms (=MS to change, {KEEP_ALIVE_MIN_MS}-{KEEP_ALIVE_MAX_MS})\n  -s, --scrollback   Keep scrolled-off history, {SCROLLBACK_DEFAULT_KIB} KiB in flight (=KIB to change, {SCROLLBACK_MIN_KIB}-{SCROLLBACK_MAX_KIB})\n      --no-scrollback  Do not keep it, the way stock Mosh cannot\n  -h, --help         Print help\n  -V, --version      Print version"
+        "Zosh client\n\nUsage: zosh SERVER_IP UDP_PORT\n       zosh -c\n\nReads the session key from MOSH_KEY. `-c` prints the terminal color count for the Mosh bootstrap.\n\nOptions:\n  -c                 Print terminal color count\n  -k, --keep-alive   Hold the link to a packet every {KEEP_ALIVE_DEFAULT_MS} ms (=MS to change, {KEEP_ALIVE_MIN_MS}-{KEEP_ALIVE_MAX_MS})\n  -s, --scrollback   Keep scrolled-off history, {SCROLLBACK_DEFAULT_KIB} KiB in flight (=KIB to change, {SCROLLBACK_MIN_KIB}-{SCROLLBACK_MAX_KIB})\n      --no-scrollback  Do not keep it, the way stock Mosh cannot\n      --forward-agent  Forward SSH-agent connections when the peer is Zosh\n      --no-forward-agent  Disable SSH-agent forwarding (the default)\n  -h, --help         Print help\n  -V, --version      Print version"
     );
 }
 
@@ -516,6 +529,9 @@ fn run_session(args: &ClientArgs, key: &Base64Key) -> Result<()> {
     }
     if let Some(kib) = args.scrollback_kib {
         settings.scrollback_kib = kib;
+    }
+    if let Some(forward_agent) = args.forward_agent {
+        settings.forward_agent = forward_agent;
     }
     run_session_with_settings(&args.host, args.port, key, settings)
 }
@@ -545,6 +561,7 @@ pub(crate) fn run_session_with_settings(
         &mut terminal_guard,
         (cols, rows),
         settings.initialize_terminal,
+        settings.forward_agent,
     );
     terminal_guard.restore();
     if result.is_ok() {
@@ -590,7 +607,12 @@ fn session_loop(
     terminal_guard: &mut terminal::TerminalGuard,
     mut size: (u16, u16),
     initialize_terminal: bool,
+    forward_agent: bool,
 ) -> Result<()> {
+    let mut agent = AgentBridge::new(forward_agent);
+    if agent.enabled() {
+        session.request_agent_forwarding(AGENT_PROTOCOL_VERSION);
+    }
     session.send_resize(i32::from(size.0), i32::from(size.1));
     let escape = EscapeKey::from_env(std::env::var("MOSH_ESCAPE_KEY").ok().as_deref());
     let mut escape_state = EscapeState::new(escape);
@@ -738,6 +760,10 @@ fn session_loop(
         }
 
         let events = session.pump_ready().context("pumping the Mosh session")?;
+        for command in agent.handle_events(&events) {
+            apply_agent_command(session, command);
+        }
+        agent.negotiation_timed_out();
         forward_terminal_queries(&events, &mut query_proxy, &mut stdout)
             .context("forwarding a terminal query")?;
         match frame::next_frame(session, &events, pending_resize) {
@@ -882,6 +908,17 @@ pub(crate) fn forward_terminal_queries<W: Write>(
         stdout.flush()?;
     }
     Ok(())
+}
+
+fn apply_agent_command(session: &mut ClientSession, command: AgentClientCommand) {
+    match command {
+        AgentClientCommand::Response {
+            connection_id,
+            request_id,
+            frame,
+            closed,
+        } => session.send_agent_response(connection_id, request_id, &frame, closed),
+    }
 }
 
 fn process_input_bytes(escape: &mut EscapeState, bytes: &[u8]) -> (Vec<u8>, Option<EscapeAction>) {
