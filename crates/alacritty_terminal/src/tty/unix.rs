@@ -217,10 +217,15 @@ impl Pty {
         &self.file
     }
 
-    /// Polls an owned child. An attached one belongs to the multiplexer, which
-    /// reports its exit over [`AttachedChildEvents`] instead.
-    #[cfg(test)]
-    fn try_wait(&mut self) -> Result<Option<ExitStatus>> {
+    /// Polls a child this process owns. An attached one belongs to the
+    /// multiplexer, which reports its exit over [`AttachedChildEvents`].
+    ///
+    /// This deliberately does not consume the PTY's signal pipe. The signal
+    /// pipe is a wakeup mechanism, not a source of truth: a `SIGCHLD` can be
+    /// observed before `waitpid` reports the child, and a later child exit may
+    /// not produce another notification. Callers that need a reliable status
+    /// check should use this method after being woken by a signal or a timer.
+    pub fn try_wait(&mut self) -> Result<Option<ExitStatus>> {
         match &mut self.child {
             PtyChild::Owned(child) => child.try_wait(),
             PtyChild::Attached { .. } => Ok(None),

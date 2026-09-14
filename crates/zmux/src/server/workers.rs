@@ -8,8 +8,9 @@ use super::*;
 
 /// Reaps children and tells whoever is holding their terminals.
 ///
-/// Every `Pty` registers its own `SIGCHLD` pipe, so on any child's exit each
-/// pane is asked in turn and only the one that actually exited answers.
+/// The global `SIGCHLD` pipe is only a wakeup. Each pane's owned child is
+/// polled directly, so a notification consumed before the child is waitable
+/// cannot strand it without a later signal.
 #[cfg(unix)]
 pub(super) fn start_reaper(daemon: Arc<Daemon>) -> Result<()> {
     spawn_worker("zmux reaper", move || {
@@ -78,13 +79,7 @@ pub(super) fn observe_pane_exit(
     if pane.exited {
         return None;
     }
-    let raw_status = match pane.pty.next_child_event() {
-        Some(ChildEvent::Exited(status)) => exit_status_raw(status),
-        // The child ended but its status could not be obtained. Still an exit:
-        // whoever is showing the pane has to be told, or it waits forever.
-        Some(_) => None,
-        None => return None,
-    };
+    let raw_status = pane_exit_status(pane)?;
     pane.exited = true;
     pane.exit_status = raw_status;
     Some((
@@ -93,6 +88,41 @@ pub(super) fn observe_pane_exit(
         raw_status,
         shared_input_sent(&pane.attachment),
     ))
+}
+
+/// Checks whether a pane's child has ended.
+///
+/// Unix uses `Pty::try_wait` rather than `next_child_event`: the latter gates
+/// `waitpid` on a per-PTY signal byte, so a signal consumed while the child was
+/// still running can strand the child forever when no subsequent `SIGCHLD` is
+/// delivered. The reaper and liveness sweep already provide the wakeups; the
+/// status check itself must be unconditional.
+#[cfg(unix)]
+fn pane_exit_status(pane: &mut Pane) -> Option<Option<i32>> {
+    match pane.pty.try_wait() {
+        Ok(Some(status)) => Some(exit_status_raw(status)),
+        Ok(None) => None,
+        Err(error) if error.kind() == std::io::ErrorKind::Interrupted => None,
+        Err(error) => {
+            log::debug!(
+                "could not retrieve pane {}'s exit status: {error:#}",
+                pane.id
+            );
+            Some(None)
+        }
+    }
+}
+
+/// Checks whether a pane's child has ended through the platform watcher.
+#[cfg(not(unix))]
+fn pane_exit_status(pane: &mut Pane) -> Option<Option<i32>> {
+    match pane.pty.next_child_event() {
+        Some(ChildEvent::Exited(status)) => Some(exit_status_raw(status)),
+        // The child ended but its status could not be obtained. Still an exit:
+        // whoever is showing the pane has to be told, or it waits forever.
+        Some(_) => Some(None),
+        None => None,
+    }
 }
 
 /// Whether any shared client typed into a pane. Only the shared data plane
@@ -152,13 +182,11 @@ pub(super) fn drain_loop(daemon: Arc<Daemon>, mut waker: Stream) {
         // the terminal's buffer fills. Checking periodically rather than
         // per iteration keeps this off the hot path.
         // The same cadence covers a second recovery. The reaper is woken by
-        // `SIGCHLD` and then asks each pane whether it was the one that ended,
-        // which needs that pane's own signal byte to have been written already —
-        // and that write is not ordered against the reaper's wake. So an exit
-        // can be missed, and with a single pane there is no later signal to
-        // notice it on, leaving a terminal waiting forever for an exit that had
-        // already happened. Sweeping on a timer is what stops the exit path
-        // depending on winning that race.
+        // `SIGCHLD` and polls each owned child directly, so its check does not
+        // depend on a per-PTY signal byte arriving in a particular order. The
+        // sweep still matters if the reaper itself misses a wakeup or is
+        // temporarily unable to run: an exit must not depend on another child
+        // event arriving later.
         //
         // Deliberately not every drain tick: this costs a syscall per pane and
         // the drain runs at fifty hertz, whereas recovering a rare missed signal

@@ -22,6 +22,9 @@ Retain these Zetta changes when synchronizing:
 - Unix PTY teardown reaps owned and reclaimed children, escalating from SIGHUP
   to SIGKILL after a short grace period. A shell that ignores hangup
   must not block the multiplexer session lock or application shutdown.
+- Unix `Pty::try_wait` exposes a direct status poll for the multiplexer daemon;
+  its `SIGCHLD` pipes remain wakeup mechanisms rather than prerequisites for
+  calling `waitpid`, so a notification race cannot strand a pane's exit.
 - attached PTYs (`tty::unix::attach`), where the master file descriptor is
   passed in by the `zmux` multiplexer and the child belongs to that process.
   Upstream's `Pty` assumes it spawned the child, so four things diverge and

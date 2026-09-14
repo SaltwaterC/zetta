@@ -25,9 +25,11 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(windows)]
+use alacritty_terminal::tty::{ChildEvent, EventedPty as _};
 use alacritty_terminal::{
     event::WindowSize,
-    tty::{self, ChildEvent, ConsolePalette, EventedPty as _},
+    tty::{self, ConsolePalette},
 };
 use anyhow::{Context as _, Result};
 
