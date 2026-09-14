@@ -28,10 +28,10 @@ pub(crate) struct RemoteAttachData {
     first: AttachedPaneKind,
     additional: Vec<(u64, AttachedPaneKind)>,
     canonical_shared_state: Option<zmux::messages::SharedSessionState>,
-    /// The daemon still held a pane but its opaque tab state had been
-    /// overwritten with an empty pane list. The foreground builder republishes
-    /// the minimal recovered state once its local mapping is installed.
-    recovered_empty_state: bool,
+    /// The opaque tab state was synthesized or repaired against the canonical
+    /// live pane set. The foreground builder republishes it once its local
+    /// mapping is installed.
+    repaired_state: bool,
     runtime: MuxRuntime,
     /// The Mosh sessions the background phase brought up, by multiplexer pane
     /// ID. Empty for an SSH session, and missing an entry for any pane whose
@@ -56,6 +56,10 @@ impl Zetta {
         self.show_notice(first.clone(), cx);
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/background_session_ui/multiplexer.rs"]
+mod tests;
 
 /// Performs all remote I/O needed before a tab can be built. This function is
 /// deliberately free of GPUI state so callers can run it on the background
@@ -105,31 +109,30 @@ fn load_attached_session_data(
     let canonical_shared_state = (shared_attachment || shared_state_flag)
         .then(|| runtime.client().shared_snapshot(session_id))
         .transpose()?;
-    let (state, summary) = canonical_shared_state
+    let (saved_state, summary) = canonical_shared_state
         .as_ref()
         .map_or((state, summary), |state| {
             (state.state.clone(), state.summary.clone())
         });
-    let state_was_null = state.is_null();
-    let mut recovered_empty_state = false;
+    let state_was_null = saved_state.is_null();
+    let mut repaired_state = state_was_null;
     let mut state: crate::session_state::TabState = if state_was_null {
         anyhow::ensure!(
             canonical_shared_state.is_some(),
             "session {session_id} has not published a layout, so it cannot be attached; share or \
              detach it from the window showing it first"
         );
-        recovered_empty_state = true;
         headless_tab_state(&summary)
     } else {
-        serde_json::from_value(state).context("reading the session's tab state")?
+        serde_json::from_value(saved_state).context("reading the session's tab state")?
     };
     if state.panes.is_empty() {
-        recovered_empty_state = true;
+        repaired_state = true;
         log::error!(
             "session {session_id} has an empty saved pane list while daemon pane {} remains; rebuilding tab state from the canonical layout",
             first.pane_id()
         );
-        if !state_was_null {
+        if canonical_shared_state.is_none() {
             recover_empty_attached_tab_state(
                 &mut state,
                 first.pane_id(),
@@ -138,12 +141,26 @@ fn load_attached_session_data(
             );
         }
     }
+    if let Some(canonical) = canonical_shared_state.as_ref() {
+        let (reconciled, changed) = reconcile_shared_attach_state(state, canonical)?;
+        state = reconciled;
+        repaired_state |= changed;
+    }
     let first_pane = attached_tab_pane_id(&state, first.pane_id(), session_id)?;
+    let live_mux_pane_ids = canonical_shared_state
+        .as_ref()
+        .map(|state| state.pane_ids().collect::<HashSet<_>>());
     let mut additional = Vec::new();
     for pane_state in state.panes.iter().filter(|pane| pane.id != first_pane) {
         let Some(mux_pane_id) = pane_state.mux_pane_id else {
             continue;
         };
+        if live_mux_pane_ids
+            .as_ref()
+            .is_some_and(|live| !live.contains(&mux_pane_id))
+        {
+            continue;
+        }
         match runtime
             .client()
             .attach_with_secret(session_id, Some(mux_pane_id), secret)?
@@ -186,16 +203,144 @@ fn load_attached_session_data(
         first,
         additional,
         canonical_shared_state,
-        recovered_empty_state,
+        repaired_state,
         runtime: runtime.clone(),
         pane_streams,
     })))
 }
 
+/// Reconciles the opaque tab payload with the daemon's canonical shared pane
+/// set before any pane-specific attach requests are made.
+///
+/// The daemon intentionally does not understand the payload, so a close can
+/// advance its canonical pane list while leaving old `PaneState` entries in
+/// the blob. Stable multiplexer ids are the only safe join key: local pane ids
+/// belong to the process that published the blob and pane order changes as
+/// panes are closed or added.
+fn reconcile_shared_attach_state(
+    mut state: crate::session_state::TabState,
+    canonical: &zmux::messages::SharedSessionState,
+) -> anyhow::Result<(crate::session_state::TabState, bool)> {
+    let original = state.clone();
+    let old_panes = std::mem::take(&mut state.panes);
+    let old_local_to_mux = old_panes
+        .iter()
+        .filter_map(|pane| pane.mux_pane_id.map(|mux_id| (pane.id, mux_id)))
+        .collect::<HashMap<_, _>>();
+    let old_selected_minimized = state
+        .selected_minimized_pane
+        .and_then(|pane_id| old_local_to_mux.get(&pane_id).copied());
+    let mut panes_by_mux = HashMap::new();
+    for pane in old_panes {
+        let Some(mux_pane_id) = pane.mux_pane_id else {
+            continue;
+        };
+        panes_by_mux.entry(mux_pane_id).or_insert(pane);
+    }
+
+    let live_mux_pane_ids = canonical.pane_ids().collect::<HashSet<_>>();
+    anyhow::ensure!(
+        !live_mux_pane_ids.is_empty(),
+        "shared session {} has no live panes to attach",
+        canonical.session_id
+    );
+    state.panes = canonical
+        .summary
+        .panes
+        .iter()
+        .enumerate()
+        .map(|(index, summary)| {
+            let mut pane = panes_by_mux
+                .remove(&summary.id)
+                .unwrap_or_else(|| synthesized_shared_pane_state(summary, index + 1));
+            // The state is about to be rebuilt from the canonical presentation,
+            // so use stable ids for its temporary self-consistent namespace.
+            // `Tab::reassign_ids` gives the pane a process-local id later.
+            pane.id = summary.id;
+            pane.mux_pane_id = Some(summary.id);
+            pane
+        })
+        .collect();
+
+    let active_pane = canonical.presentation.active_pane;
+    anyhow::ensure!(
+        live_mux_pane_ids.contains(&active_pane),
+        "shared session {} has no live active pane {}",
+        canonical.session_id,
+        active_pane
+    );
+    state.layout = headless_layout_state(&canonical.presentation.layout);
+    state.active_pane = active_pane;
+    state.focus_history = state
+        .focus_history
+        .iter()
+        .filter_map(|pane_id| old_local_to_mux.get(pane_id).copied())
+        .filter(|pane_id| live_mux_pane_ids.contains(pane_id))
+        .filter(|pane_id| *pane_id != active_pane)
+        .chain(std::iter::once(active_pane))
+        .collect();
+    state.maximized_pane = canonical
+        .presentation
+        .maximized_pane
+        .filter(|pane_id| live_mux_pane_ids.contains(pane_id));
+    state.minimized_panes = canonical
+        .presentation
+        .minimized_panes
+        .iter()
+        .copied()
+        .filter(|pane_id| live_mux_pane_ids.contains(pane_id))
+        .collect();
+    state.selected_minimized_pane =
+        old_selected_minimized.filter(|pane_id| state.minimized_panes.contains(pane_id));
+    state.shared = true;
+    let next_pane_label = state
+        .panes
+        .iter()
+        .map(|pane| pane.label_number.saturating_add(1))
+        .max()
+        .unwrap_or(1);
+    state.next_pane_label = state.next_pane_label.max(next_pane_label);
+
+    let changed = state != original;
+    Ok((state, changed))
+}
+
+fn synthesized_shared_pane_state(
+    summary: &BackgroundPaneSummary,
+    label_number: usize,
+) -> crate::session_state::PaneState {
+    crate::session_state::PaneState {
+        id: summary.id,
+        mux_pane_id: Some(summary.id),
+        label_number,
+        generated_label: (!summary.label.is_empty()).then(|| summary.label.clone()),
+        custom_label: None,
+        profile: if summary.profile.is_empty() {
+            "System".to_owned()
+        } else {
+            summary.profile.clone()
+        },
+        theme_override: None,
+        environment_overrides: Default::default(),
+        overlay: None,
+        exit: summary.exit.clone(),
+        base_exited: matches!(
+            summary.state,
+            zmux::protocol::BackgroundPaneState::Exited
+                | zmux::protocol::BackgroundPaneState::Failed
+        ),
+        pending_command: None,
+        active_command: None,
+        detected_worktree_title: None,
+        stack: Vec::new(),
+        selected_stacked: None,
+    }
+}
+
 /// Rebuilds just enough opaque tab metadata to show an attached daemon pane
-/// after an interrupted publication erased the saved pane list. The canonical
-/// shared presentation remains the authority for any further panes, which the
-/// normal snapshot attachment path will add after this initial tab exists.
+/// after an interrupted publication erased the saved pane list. Shared
+/// sessions use [`reconcile_shared_attach_state`] instead, because their
+/// canonical snapshot contains the complete live pane set and presentation.
 fn recover_empty_attached_tab_state(
     state: &mut crate::session_state::TabState,
     mux_pane_id: u64,
@@ -564,7 +709,7 @@ impl Zetta {
             first: pane,
             additional,
             canonical_shared_state,
-            recovered_empty_state,
+            repaired_state,
             runtime,
             mut pane_streams,
         } = data;
@@ -664,7 +809,7 @@ impl Zetta {
         }
         if has_canonical_shared_state {
             self.watch_shared_session(session_id, runtime, window, cx);
-            if recovered_empty_state {
+            if repaired_state {
                 self.sync_shared_tab_state(tab_id, cx);
             }
         }

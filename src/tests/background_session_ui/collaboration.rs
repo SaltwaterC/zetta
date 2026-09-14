@@ -745,6 +745,38 @@ fn queued_shared_operations_collapse_onto_equivalent_work() {
 }
 
 #[test]
+fn canonical_pane_removal_schedules_one_publication_for_the_survivor() {
+    let mut coordinator = SharedSessionCoordinator::default();
+    coordinator
+        .bind(9, 100, two_pane_state(9, 1, 41), [(41, 7), (42, 8)])
+        .unwrap();
+    let mut tab = two_pane_tab();
+
+    let removed = coordinator
+        .accept_pane_removed(9, shared_state(9, 2), 42)
+        .unwrap()
+        .expect("the removed pane was mapped locally");
+    detach_pane_from_tab(&mut tab, removed);
+
+    assert!(tab.pane(7).is_some());
+    assert!(tab.pane(8).is_none());
+    assert_eq!(tab.layout, PaneLayout::Pane(7));
+    assert!(
+        coordinator.schedule_publication(9),
+        "removing a canonical pane must request a durable-state sync"
+    );
+    assert!(
+        !coordinator.schedule_publication(9),
+        "several removals before the debounce fires share one publication"
+    );
+    coordinator.enqueue(9, SharedOperation::PublishState { attempts: 0 });
+    assert_eq!(
+        coordinator.take_next_operation(9),
+        Some(SharedOperation::PublishState { attempts: 0 })
+    );
+}
+
+#[test]
 fn a_snapshot_older_than_the_bound_state_is_stale() {
     let mut coordinator = SharedSessionCoordinator::default();
     coordinator

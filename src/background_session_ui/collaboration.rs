@@ -1813,8 +1813,9 @@ impl Zetta {
         local_pane_id: u64,
         cx: &mut Context<Self>,
     ) {
+        let tab_id = self.shared_collaboration.tab_id(session_id);
         self.drop_shared_pane(local_pane_id, cx);
-        if let Some(tab_id) = self.shared_collaboration.tab_id(session_id)
+        if let Some(tab_id) = tab_id
             && let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id)
         {
             detach_pane_from_tab(tab, local_pane_id);
@@ -1823,6 +1824,9 @@ impl Zetta {
         self.mux_panes.forget_pane(local_pane_id);
         self.shared_collaboration
             .remove_local_pane(session_id, local_pane_id);
+        if let Some(tab_id) = tab_id {
+            self.sync_shared_tab_state(tab_id, cx);
+        }
     }
 
     fn replace_shared_pane_stream(
@@ -2015,6 +2019,7 @@ impl Zetta {
             }
             self.mux_panes.forget_pane(local_pane_id);
         }
+        self.sync_shared_tab_state(tab_id, cx);
         self.apply_shared_snapshot(session_id, state, window, cx);
         cx.notify();
     }
