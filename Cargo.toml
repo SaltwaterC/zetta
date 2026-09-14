@@ -173,6 +173,8 @@ vt100 = { version = "0.16.2", optional = true }
 zwt = { path = "crates/zwt", optional = true }
 
 [target.'cfg(windows)'.dependencies]
+# async-tar's Windows symlink path uses async-std's unstable filesystem API.
+async-std = { version = "1.13", features = ["unstable"] }
 uds_windows = "1.2"
 windows-registry = "0.5"
 windows = { version = "0.61", features = [
