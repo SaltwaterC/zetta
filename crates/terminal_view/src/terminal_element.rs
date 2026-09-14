@@ -5,8 +5,8 @@ use gpui::{
     Interactivity, IntoElement, LayoutId, Length, ModifiersChangedEvent, MouseButton,
     MouseMoveEvent, MouseUpEvent, Pixels, Point as GpuiPoint, ShapedLine, SharedString,
     StatefulInteractiveElement, StrikethroughStyle, Styled, TextAlign, TextRun, TextStyle,
-    UTF16Selection, UnderlineStyle, WhiteSpace, Window, div, fill, outline, point, px, quad,
-    relative, size, transparent_black,
+    UTF16Selection, UnderlineStyle, WeakEntity, WhiteSpace, Window, div, fill, outline, point, px,
+    quad, relative, size, transparent_black,
 };
 use itertools::Itertools;
 use std::time::Instant;
@@ -2004,7 +2004,7 @@ impl Element for TerminalElement {
             };
 
             let terminal_input_handler = TerminalInputHandler {
-                terminal_view: self.terminal_view.clone(),
+                terminal_view: self.terminal_view.downgrade(),
                 cursor_bounds: layout.ime_cursor_bounds.map(|bounds| bounds + origin),
             };
 
@@ -2243,7 +2243,9 @@ impl IntoElement for TerminalElement {
 }
 
 struct TerminalInputHandler {
-    terminal_view: Entity<TerminalView>,
+    // The platform can retain the input handler while the window is being
+    // torn down. It must not keep the terminal view alive through that gap.
+    terminal_view: WeakEntity<TerminalView>,
     cursor_bounds: Option<Bounds<Pixels>>,
 }
 
@@ -2254,7 +2256,11 @@ impl InputHandler for TerminalInputHandler {
         _: &mut Window,
         cx: &mut App,
     ) -> Option<UTF16Selection> {
-        if !ignore_disabled_input && !self.terminal_view.read(cx).input_enabled() {
+        let input_enabled = self
+            .terminal_view
+            .read_with(cx, |view, _| view.input_enabled())
+            .ok()?;
+        if !ignore_disabled_input && !input_enabled {
             return None;
         }
         // Always return a valid selection for IME positioning,
@@ -2271,7 +2277,10 @@ impl InputHandler for TerminalInputHandler {
         _window: &mut Window,
         cx: &mut App,
     ) -> Option<std::ops::Range<usize>> {
-        self.terminal_view.read(cx).marked_text_range()
+        self.terminal_view
+            .read_with(cx, |view, _| view.marked_text_range())
+            .ok()
+            .flatten()
     }
 
     fn text_for_range(
@@ -2291,7 +2300,7 @@ impl InputHandler for TerminalInputHandler {
         _window: &mut Window,
         cx: &mut App,
     ) {
-        self.terminal_view.update(cx, |view, view_cx| {
+        let _ = self.terminal_view.update(cx, |view, view_cx| {
             view.clear_marked_text(view_cx);
             view.commit_text(text, view_cx);
         });
@@ -2305,13 +2314,13 @@ impl InputHandler for TerminalInputHandler {
         _window: &mut Window,
         cx: &mut App,
     ) {
-        self.terminal_view.update(cx, |view, view_cx| {
+        let _ = self.terminal_view.update(cx, |view, view_cx| {
             view.set_marked_text(new_text.to_string(), view_cx);
         });
     }
 
     fn unmark_text(&mut self, _window: &mut Window, cx: &mut App) {
-        self.terminal_view.update(cx, |view, view_cx| {
+        let _ = self.terminal_view.update(cx, |view, view_cx| {
             view.clear_marked_text(view_cx);
         });
     }
@@ -2322,7 +2331,10 @@ impl InputHandler for TerminalInputHandler {
         _window: &mut Window,
         cx: &mut App,
     ) -> Option<Bounds<Pixels>> {
-        let term_bounds = self.terminal_view.read(cx).terminal_bounds(cx);
+        let term_bounds = self
+            .terminal_view
+            .read_with(cx, |view, app| view.terminal_bounds(app))
+            .ok()?;
 
         let mut bounds = self.cursor_bounds?;
         let offset_x = term_bounds.cell_width * range_utf16.start as f32;

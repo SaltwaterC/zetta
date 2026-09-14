@@ -840,6 +840,17 @@ fn remote_action_buttons_follow_keyboard_focus_in_the_real_overlay(cx: &mut Test
     });
     cx.run_until_parked();
 
+    let help = cx
+        .debug_bounds("remote-session-action-help")
+        .expect("remote-session action help should be rendered");
+    let actions = cx
+        .debug_bounds("remote-session-actions")
+        .expect("remote-session actions should be rendered");
+    assert!(
+        help.bottom() <= actions.top(),
+        "remote-session action help should be above the buttons: {help:?} vs {actions:?}"
+    );
+
     for (expected, selector) in [
         (RemoteSessionField::Cancel, "remote-session-cancel-action"),
         (RemoteSessionField::Load, "remote-session-load-action"),

@@ -1529,15 +1529,8 @@ impl Zetta {
         let suggestion_rows =
             remote_session_suggestion_list(suggestion_rows, &suggestion_scroll, window, cx);
 
-        let session_list = remote_session_list_panel(
-            field,
-            colors,
-            error_color,
-            error,
-            loading,
-            session_count,
-            rows,
-        );
+        let session_list =
+            remote_session_list_panel(field, colors, error_color, error, session_count, rows);
 
         let field_widget = |id: &'static str,
                             value: TextField,
@@ -1665,7 +1658,6 @@ fn remote_session_list_panel(
     colors: &ThemeColors,
     error_color: Hsla,
     error: Option<String>,
-    loading: bool,
     session_count: usize,
     rows: gpui::UniformList,
 ) -> impl IntoElement {
@@ -1680,21 +1672,6 @@ fn remote_session_list_panel(
             transparent_black()
         })
         .when(session_count > 0, |panel| panel.child(rows))
-        .when(session_count == 0 && !loading && error.is_none(), |panel| {
-            panel.child(
-                div()
-                    .h_16()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .text_sm()
-                    .text_color(colors.text_muted)
-                    .child(format!(
-                        "Enter a target and press Enter or Load to load sessions. {} creates a new session.",
-                        remote_session_primary_shortcut(),
-                    )),
-            )
-        })
         .when_some(error, |panel, error| {
             panel.child(div().p_2().min_w_0().child(remote_session_error(
                 error,
@@ -2598,22 +2575,25 @@ fn remote_session_actions(actions: RemoteSessionActions<'_>) -> impl IntoElement
     div()
         .w_full()
         .flex()
-        .gap_3()
-        .justify_between()
-        .items_center()
+        .flex_col()
+        .gap_2()
         .child(
             div()
+                .w_full()
                 .min_w_0()
-                .flex_1()
-                .truncate()
                 .text_xs()
                 .text_color(colors.text_muted)
+                .whitespace_normal()
+                .debug_selector(|| "remote-session-action-help".to_owned())
                 .child(footer),
         )
         .child(
             h_flex()
+                .w_full()
                 .flex_none()
+                .justify_end()
                 .gap_2()
+                .debug_selector(|| "remote-session-actions".to_owned())
                 .child(
                     div()
                         .debug_selector(|| "remote-session-cancel-action".to_owned())
