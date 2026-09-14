@@ -379,6 +379,123 @@ fn a_transient_notice_does_not_take_layout_space(cx: &mut TestAppContext) {
     assert_eq!(in_column, without - NOTICE_HEIGHT);
 }
 
+struct PersistentErrorHarness {
+    configuration_error: Option<String>,
+    pane_output_error: Option<String>,
+}
+
+impl PersistentErrorHarness {
+    fn dismiss_configuration_error(&mut self, cx: &mut Context<Self>) {
+        self.configuration_error = None;
+        cx.notify();
+    }
+
+    fn dismiss_pane_output_error(&mut self, cx: &mut Context<Self>) {
+        self.pane_output_error = None;
+        cx.notify();
+    }
+}
+
+impl Render for PersistentErrorHarness {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = cx.theme().colors().clone();
+        let handle = cx.entity().downgrade();
+        let configuration_actions = self.configuration_error.as_ref().map(|_| {
+            let handle = handle.clone();
+            Zetta::configuration_error_actions(&colors, move |_, _, cx| {
+                handle
+                    .update(cx, |this, cx| this.dismiss_configuration_error(cx))
+                    .ok();
+            })
+        });
+        let pane_error_actions = self.pane_output_error.as_ref().map(|_| {
+            Zetta::pane_error_actions(&colors, move |_, _, cx| {
+                handle
+                    .update(cx, |this, cx| this.dismiss_pane_output_error(cx))
+                    .ok();
+            })
+        });
+        Zetta::render_persistent_error_banners(
+            div().size_full().flex().flex_col(),
+            &colors,
+            self.configuration_error.clone(),
+            configuration_actions,
+            self.pane_output_error.clone(),
+            pane_error_actions,
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_h_0()
+                .w_full()
+                .debug_selector(|| "tab-body".to_owned()),
+        )
+    }
+}
+
+fn click_feedback_control(cx: &mut gpui::VisualTestContext, selector: &'static str) {
+    let position = cx
+        .debug_bounds(selector)
+        .expect("feedback control should be laid out")
+        .center();
+    cx.simulate_click(position, Default::default());
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+fn persistent_error_banners_expose_dismiss_controls_and_restore_body_height(
+    cx: &mut TestAppContext,
+) {
+    cx.update(|cx| {
+        theme_settings::init(theme::LoadThemes::All(Box::new(ZettaAssets)), cx);
+        let registry = ThemeRegistry::global(cx);
+        GlobalTheme::update_theme(cx, registry.get("One Light").unwrap());
+    });
+    let (root, cx) = cx.add_window_view(|_, _| PersistentErrorHarness {
+        configuration_error: Some("Could not load configuration".to_owned()),
+        pane_output_error: Some("Could not attach session".to_owned()),
+    });
+    cx.simulate_resize(size(px(520.), px(320.)));
+
+    let with_banners = cx
+        .debug_bounds("tab-body")
+        .expect("the tab body is always laid out")
+        .size
+        .height;
+    assert!(with_banners < px(320.));
+    assert!(cx.debug_bounds("reload-invalid-configuration").is_some());
+    assert!(cx.debug_bounds("dismiss-invalid-configuration").is_some());
+    assert!(cx.debug_bounds("dismiss-pane-output-error").is_some());
+
+    click_feedback_control(cx, "dismiss-invalid-configuration");
+    cx.update_entity(&root, |view, _| {
+        assert!(view.configuration_error.is_none());
+        assert!(view.pane_output_error.is_some());
+    });
+    let with_one_banner = cx
+        .debug_bounds("tab-body")
+        .expect("the tab body is always laid out")
+        .size
+        .height;
+    assert!(with_one_banner > with_banners);
+    assert!(cx.debug_bounds("reload-invalid-configuration").is_none());
+    assert!(cx.debug_bounds("dismiss-invalid-configuration").is_none());
+    assert!(cx.debug_bounds("dismiss-pane-output-error").is_some());
+
+    click_feedback_control(cx, "dismiss-pane-output-error");
+    cx.update_entity(&root, |view, _| {
+        assert!(view.configuration_error.is_none());
+        assert!(view.pane_output_error.is_none());
+    });
+    let without_banners = cx
+        .debug_bounds("tab-body")
+        .expect("the tab body is always laid out")
+        .size
+        .height;
+    assert!(without_banners > with_one_banner);
+    assert!(cx.debug_bounds("tab-body").is_some());
+}
+
 struct ProjectOfferBannerHarness;
 
 impl Render for ProjectOfferBannerHarness {

@@ -60,6 +60,62 @@ impl Zetta {
             .action_slot(action_slot)
     }
 
+    fn configuration_error_actions(
+        colors: &ThemeColors,
+        on_dismiss: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
+    ) -> AnyElement {
+        h_flex()
+            .flex_none()
+            .gap_1()
+            .child(
+                div()
+                    .debug_selector(|| "reload-invalid-configuration".to_owned())
+                    .child(
+                        IconButton::new("reload-invalid-configuration", IconName::RotateCw)
+                            .shape(IconButtonShape::Square)
+                            .icon_size(IconSize::Small)
+                            .icon_color(Color::Custom(colors.icon))
+                            .aria_label("Reload configuration")
+                            .tooltip(Tooltip::text("Reload configuration"))
+                            .on_click(|_, window, cx| {
+                                window.dispatch_action(Box::new(ReloadConfiguration), cx);
+                            }),
+                    ),
+            )
+            .child(
+                div()
+                    .debug_selector(|| "dismiss-invalid-configuration".to_owned())
+                    .child(
+                        IconButton::new("dismiss-invalid-configuration", IconName::Close)
+                            .shape(IconButtonShape::Square)
+                            .icon_size(IconSize::Small)
+                            .icon_color(Color::Custom(colors.icon))
+                            .aria_label("Dismiss configuration error")
+                            .tooltip(Tooltip::text("Dismiss configuration error"))
+                            .on_click(on_dismiss),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn pane_error_actions(
+        colors: &ThemeColors,
+        on_dismiss: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
+    ) -> AnyElement {
+        div()
+            .debug_selector(|| "dismiss-pane-output-error".to_owned())
+            .child(
+                IconButton::new("dismiss-pane-output-error", IconName::Close)
+                    .shape(IconButtonShape::Square)
+                    .icon_size(IconSize::Small)
+                    .icon_color(Color::Custom(colors.icon))
+                    .aria_label("Dismiss pane error")
+                    .tooltip(Tooltip::text("Dismiss pane error"))
+                    .on_click(on_dismiss),
+            )
+            .into_any_element()
+    }
+
     fn render_overlays(
         &mut self,
         colors: &ThemeColors,
@@ -277,11 +333,6 @@ impl Zetta {
         colors: &ThemeColors,
         handle: &WeakEntity<Zetta>,
     ) -> gpui::Div {
-        let banner = |error: String| {
-            Banner::new()
-                .severity(Severity::Error)
-                .child(Label::new(error).size(LabelSize::Small).line_clamp(3))
-        };
         let feedback_row = |banner: Banner| {
             div()
                 .px_2()
@@ -289,7 +340,9 @@ impl Zetta {
                 .when(cfg!(linux_like), |row| row.bg(colors.editor_background))
                 .child(banner)
         };
-        content
+        let dismiss_configuration_handle = handle.clone();
+        let dismiss_pane_error_handle = handle.clone();
+        let content = content
             .when_some(self.projects.offer.clone(), |content, offer| {
                 let add_handle = handle.clone();
                 let dismiss_handle = handle.clone();
@@ -328,25 +381,65 @@ impl Zetta {
                         Label::new(CONFIGURATION_RELOAD_SUCCESS_MESSAGE).size(LabelSize::Small),
                     ),
                 ))
+            });
+        let configuration_actions = self.configuration_error.as_ref().map(|_| {
+            let dismiss_handle = dismiss_configuration_handle.clone();
+            Self::configuration_error_actions(colors, move |_, _, cx| {
+                dismiss_handle
+                    .update(cx, |this, cx| this.dismiss_configuration_error(cx))
+                    .ok();
             })
-            .when_some(self.configuration_error.clone(), |content, error| {
-                content.child(feedback_row(
-                    banner(error).action_slot(
-                        IconButton::new("reload-invalid-configuration", IconName::RotateCw)
-                            .shape(IconButtonShape::Square)
-                            .icon_size(IconSize::Small)
-                            .icon_color(Color::Custom(colors.icon))
-                            .aria_label("Reload configuration")
-                            .tooltip(Tooltip::text("Reload configuration"))
-                            .on_click(|_, window, cx| {
-                                window.dispatch_action(Box::new(ReloadConfiguration), cx);
-                            }),
-                    ),
-                ))
+        });
+        let pane_error_actions = self.pane_output_error.as_ref().map(|_| {
+            let dismiss_handle = dismiss_pane_error_handle.clone();
+            Self::pane_error_actions(colors, move |_, _, cx| {
+                dismiss_handle
+                    .update(cx, |this, cx| this.dismiss_pane_output_error(cx))
+                    .ok();
             })
-            .when_some(self.pane_output_error.clone(), |content, error| {
-                content.child(feedback_row(banner(error)))
-            })
+        });
+        Self::render_persistent_error_banners(
+            content,
+            colors,
+            self.configuration_error.clone(),
+            configuration_actions,
+            self.pane_output_error.clone(),
+            pane_error_actions,
+        )
+    }
+
+    fn render_persistent_error_banners(
+        mut content: gpui::Div,
+        colors: &ThemeColors,
+        configuration_error: Option<String>,
+        configuration_actions: Option<AnyElement>,
+        pane_output_error: Option<String>,
+        pane_error_actions: Option<AnyElement>,
+    ) -> gpui::Div {
+        let banner = |error: String| {
+            Banner::new()
+                .severity(Severity::Error)
+                .child(Label::new(error).size(LabelSize::Small).line_clamp(3))
+        };
+        let feedback_row = |banner: Banner| {
+            div()
+                .px_2()
+                .py_1()
+                .when(cfg!(linux_like), |row| row.bg(colors.editor_background))
+                .child(banner)
+        };
+        if let Some(error) = configuration_error {
+            content = content
+                .child(feedback_row(banner(error).action_slot(
+                    configuration_actions.expect("configuration error action"),
+                )));
+        }
+        if let Some(error) = pane_output_error {
+            content = content.child(feedback_row(
+                banner(error).action_slot(pane_error_actions.expect("pane error action")),
+            ));
+        }
+        content
     }
 
     /// The chrome and the tab body, in the column they share.

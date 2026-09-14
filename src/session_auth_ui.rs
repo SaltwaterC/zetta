@@ -387,13 +387,7 @@ impl Zetta {
             cx.notify();
             return ReconnectSessionResult::AuthenticationFailed;
         }
-        let result = self.resume_disk_session(session_id, None, None, window, cx);
-        if result == ReconnectSessionResult::Rejected
-            && let Some(error) = self.pane_output_error.take()
-        {
-            self.show_notice(error, cx);
-        }
-        result
+        self.resume_disk_session(session_id, None, None, window, cx)
     }
 
     /// Asks for the passphrase of the encrypted identity file, so an
@@ -472,11 +466,9 @@ impl Zetta {
         } else if let Some(prompt) = self.session_authentication.as_mut() {
             prompt.working = false;
             prompt.secret = TextField::default();
-            prompt.error = Some(
-                self.pane_output_error
-                    .take()
-                    .unwrap_or_else(|| "Could not open the identity file.".to_owned()),
-            );
+            if prompt.error.is_none() {
+                prompt.error = Some("Could not open the identity file.".to_owned());
+            }
         }
         cx.notify();
     }
@@ -547,6 +539,24 @@ impl Zetta {
         self.session_authentication = Some(SessionAuthenticationPrompt::new(mode));
         self.session_authentication_focus.focus(window, cx);
         cx.notify();
+    }
+
+    /// Keeps an operation failure in the authentication prompt when one is
+    /// active; an attach or resume attempted from elsewhere is only a transient
+    /// notice. This prevents an internal prompt error from briefly appearing in
+    /// the window's persistent feedback column before the prompt consumes it.
+    pub(crate) fn show_session_operation_error(
+        &mut self,
+        message: impl Into<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let message = message.into();
+        if let Some(prompt) = self.session_authentication.as_mut() {
+            prompt.error = Some(message);
+            cx.notify();
+        } else {
+            self.show_notice(message, cx);
+        }
     }
 
     /// Carries out the action with the session left unprotected, which is what
@@ -1099,18 +1109,17 @@ impl Zetta {
         if result == ReconnectSessionResult::Reconnected {
             self.session_authentication = None;
         } else {
-            let error = self.pane_output_error.take().unwrap_or_else(|| {
-                if protected {
-                    "Authentication failed.".to_owned()
-                } else {
-                    "Could not decrypt the identity file.".to_owned()
-                }
-            });
             if let Some(prompt) = self.session_authentication.as_mut() {
                 prompt.working = false;
                 prompt.secret = TextField::default();
                 prompt.confirmation = TextField::default();
-                prompt.error = Some(error);
+                if prompt.error.is_none() {
+                    prompt.error = Some(if protected {
+                        "Authentication failed.".to_owned()
+                    } else {
+                        "Could not decrypt the identity file.".to_owned()
+                    });
+                }
             }
         }
         cx.notify();

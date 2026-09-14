@@ -1034,10 +1034,13 @@ impl crate::Zetta {
             // The terminal opened locally instead, so it works but cannot be
             // backgrounded. Say so once rather than letting the difference
             // surface later as a session that mysteriously will not detach.
-            self.pane_output_error = Some(format!(
-                "This terminal is running outside the session multiplexer, so it cannot be \
+            self.show_notice(
+                format!(
+                    "This terminal is running outside the session multiplexer, so it cannot be \
                  backgrounded: {error}"
-            ));
+                ),
+                cx,
+            );
         }
         let Some(opened) = provider.opened() else {
             return;

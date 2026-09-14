@@ -391,23 +391,30 @@ impl Zetta {
                 };
                 #[cfg(not(feature = "zmux"))]
                 let setup: anyhow::Result<()> = Ok(());
-                if let Err(error) = setup {
-                    self.pane_output_error = Some(format!(
-                        "Could not initialize shared tab collaboration: {error:#}"
-                    ));
-                }
+                let setup_succeeded = match setup {
+                    Ok(()) => true,
+                    Err(error) => {
+                        self.show_notice(
+                            format!("Could not initialize shared tab collaboration: {error:#}"),
+                            cx,
+                        );
+                        false
+                    }
+                };
                 self.finish_background_session_change(cx);
                 // Nothing about the tab changes when it is shared, so without
                 // saying so the toggle has no visible effect at all beyond a
                 // checkmark in a menu that has already closed.
-                self.show_notice(
-                    if offered {
-                        "This tab can now be joined from another Zetta window."
-                    } else {
-                        "This tab is no longer shared, and belongs to this window again."
-                    },
-                    cx,
-                );
+                if setup_succeeded {
+                    self.show_notice(
+                        if offered {
+                            "This tab can now be joined from another Zetta window."
+                        } else {
+                            "This tab is no longer shared, and belongs to this window again."
+                        },
+                        cx,
+                    );
+                }
             }
             Ok(false) => {
                 self.tabs[index].shared = previous_shared;
@@ -425,7 +432,7 @@ impl Zetta {
             }
             Err(error) => {
                 self.tabs[index].shared = previous_shared;
-                self.pane_output_error = Some(format!("Could not share this tab: {error:#}"));
+                self.show_notice(format!("Could not share this tab: {error:#}"), cx);
             }
         }
         cx.notify();
@@ -686,10 +693,13 @@ impl Zetta {
                 if let Some(runtime) = runtime
                     && let Err(error) = self.bind_shared_session(tab_id, runtime, window, cx)
                 {
-                    self.pane_output_error = Some(format!(
-                        "Could not restore shared tab collaboration after the failed handoff: \
-                         {error:#}"
-                    ));
+                    self.show_notice(
+                        format!(
+                            "Could not restore shared tab collaboration after the failed handoff: \
+                             {error:#}"
+                        ),
+                        cx,
+                    );
                 }
             }
             #[cfg(not(feature = "zmux"))]
@@ -745,17 +755,21 @@ impl Zetta {
             Ok(false) => {}
             Err(error) => {
                 if !self.no_mux {
-                    self.pane_output_error = Some(format!(
-                        "Could not hand the session to the multiplexer; it remains in this window: {error:#}"
-                    ));
-                    cx.notify();
+                    self.show_notice(
+                        format!(
+                            "Could not hand the session to the multiplexer; it remains in this window: {error:#}"
+                        ),
+                        cx,
+                    );
                     return Some(tab);
                 }
-                self.pane_output_error = Some(format!(
-                    "Could not hand the session to the multiplexer, so it is being kept in this \
-                     window instead: {error:#}"
-                ));
-                cx.notify();
+                self.show_notice(
+                    format!(
+                        "Could not hand the session to the multiplexer, so it is being kept in this \
+                         window instead: {error:#}"
+                    ),
+                    cx,
+                );
             }
         }
 

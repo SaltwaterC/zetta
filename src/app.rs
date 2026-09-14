@@ -231,10 +231,9 @@ pub(crate) const TRANSIENT_NOTICE_DURATION: Duration = Duration::from_secs(8);
 /// A short-lived informational banner, shown and then taken away again.
 ///
 /// Separate from `configuration_error` and `pane_output_error`, which stay until
-/// something replaces them: those report a state the user has to act on, whereas
-/// this reports something that has just happened, or advice about what to do
-/// instead. Leaving that kind of message on screen makes it read as an unresolved
-/// error and gives the user no way to clear it.
+/// dismissed: those report a state the user may have to act on, whereas this
+/// reports something that has just happened, or advice about what to do instead.
+/// Leaving that kind of message on screen makes it read as an unresolved error.
 ///
 /// The generation is what stops an earlier notice's timer from taking a later
 /// notice away with it.
@@ -329,6 +328,18 @@ impl Zetta {
         })
         .detach();
         cx.notify();
+    }
+
+    pub(crate) fn dismiss_configuration_error(&mut self, cx: &mut Context<Self>) {
+        if self.configuration_error.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn dismiss_pane_output_error(&mut self, cx: &mut Context<Self>) {
+        if self.pane_output_error.take().is_some() {
+            cx.notify();
+        }
     }
 }
 

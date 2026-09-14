@@ -124,10 +124,10 @@ impl Zetta {
                     return ReconnectSessionResult::AuthenticationFailed;
                 }
                 Err(error) => {
-                    self.pane_output_error = Some(format!(
-                        "Could not open that session with your age identity: {error:#}"
-                    ));
-                    cx.notify();
+                    self.show_session_operation_error(
+                        format!("Could not open that session with your age identity: {error:#}"),
+                        cx,
+                    );
                     return ReconnectSessionResult::Rejected;
                 }
             };
@@ -139,9 +139,10 @@ impl Zetta {
                     ReconnectSessionResult::AuthenticationFailed
                 }
                 Err(error) => {
-                    self.pane_output_error =
-                        Some(format!("Could not attach that session: {error:#}"));
-                    cx.notify();
+                    self.show_session_operation_error(
+                        format!("Could not attach that session: {error:#}"),
+                        cx,
+                    );
                     ReconnectSessionResult::Rejected
                 }
             };
@@ -169,11 +170,11 @@ impl Zetta {
                 .read(cx)
                 .background_session_is_transferable(session_id)
             {
-                self.pane_output_error = Some(
+                self.show_session_operation_error(
                     "That background session is still starting. Try attaching it again shortly."
                         .to_owned(),
+                    cx,
                 );
-                cx.notify();
                 return ReconnectSessionResult::StillStarting;
             }
             let verifier = source
@@ -270,10 +271,10 @@ impl Zetta {
             let runtime = match MuxRuntime::connect_for_disk_resume() {
                 Ok(runtime) => runtime,
                 Err(error) => {
-                    self.pane_output_error = Some(format!(
-                        "Could not reach the session multiplexer: {error:#}"
-                    ));
-                    cx.notify();
+                    self.show_session_operation_error(
+                        format!("Could not reach the session multiplexer: {error:#}"),
+                        cx,
+                    );
                     return ReconnectSessionResult::Rejected;
                 }
             };
@@ -294,10 +295,10 @@ impl Zetta {
             ) {
             Ok(persisted) => persisted,
             Err(error) => {
-                self.pane_output_error = Some(format!(
-                    "Could not resume encrypted session {session_id}: {error:#}"
-                ));
-                cx.notify();
+                self.show_session_operation_error(
+                    format!("Could not resume encrypted session {session_id}: {error:#}"),
+                    cx,
+                );
                 return ReconnectSessionResult::Rejected;
             }
         };
@@ -330,10 +331,10 @@ impl Zetta {
             match serde_json::from_value(persisted.state).context("reading restored tab state") {
                 Ok(state) => state,
                 Err(error) => {
-                    self.pane_output_error = Some(format!(
-                        "Could not restore disk session {session_id}: {error:#}"
-                    ));
-                    cx.notify();
+                    self.show_session_operation_error(
+                        format!("Could not restore disk session {session_id}: {error:#}"),
+                        cx,
+                    );
                     return ReconnectSessionResult::Rejected;
                 }
             };
@@ -394,10 +395,10 @@ impl Zetta {
         }) {
             Ok(tab) => tab,
             Err(error) => {
-                self.pane_output_error = Some(format!(
-                    "Could not restore disk session {session_id}: {error:#}"
-                ));
-                cx.notify();
+                self.show_session_operation_error(
+                    format!("Could not restore disk session {session_id}: {error:#}"),
+                    cx,
+                );
                 return ReconnectSessionResult::Rejected;
             }
         };
@@ -525,11 +526,6 @@ impl Zetta {
     ) {
         let mut completion = ReconnectCompletion::new(completion);
         let result = self.resume_disk_session(session_id, secret, Some(identities), window, cx);
-        if result == ReconnectSessionResult::Rejected
-            && let Some(error) = self.pane_output_error.take()
-        {
-            self.show_notice(error, cx);
-        }
         completion.send(result);
     }
 
@@ -554,9 +550,10 @@ impl Zetta {
                     ReconnectSessionResult::AuthenticationFailed
                 }
                 Err(error) => {
-                    self.pane_output_error =
-                        Some(format!("Could not attach that session: {error:#}"));
-                    cx.notify();
+                    self.show_session_operation_error(
+                        format!("Could not attach that session: {error:#}"),
+                        cx,
+                    );
                     ReconnectSessionResult::Rejected
                 }
             };
@@ -860,11 +857,11 @@ impl Zetta {
                 .read(cx)
                 .background_session_is_transferable(session_id)
             {
-                self.pane_output_error = Some(
+                self.show_session_operation_error(
                     "That background session is still starting. Try attaching it again shortly."
                         .to_owned(),
+                    cx,
                 );
-                cx.notify();
                 return ReconnectSessionResult::StillStarting;
             }
             let tab = source.update(cx, |source, cx| {

@@ -31,3 +31,77 @@ fn partial_or_mismatched_session_authentication_is_incomplete() {
         );
     }
 }
+
+fn empty_test_zetta(window: &mut Window, cx: &mut Context<Zetta>) -> Zetta {
+    let mut config = Config::defaults(None, None);
+    config.profiles.clear();
+    Zetta::new(
+        config,
+        None,
+        ZettaLaunchOptions {
+            no_mux: true,
+            ..Default::default()
+        },
+        window,
+        cx,
+    )
+}
+
+fn init_test_theme(cx: &mut gpui::TestAppContext) {
+    cx.update(|cx| {
+        theme_settings::init(theme::LoadThemes::All(Box::new(ZettaAssets)), cx);
+        let registry = ThemeRegistry::global(cx);
+        GlobalTheme::update_theme(cx, registry.get("One Light").unwrap());
+    });
+}
+
+#[gpui::test]
+fn a_session_operation_failure_becomes_a_transient_notice_without_a_prompt(
+    cx: &mut gpui::TestAppContext,
+) {
+    init_test_theme(cx);
+    let (zetta, cx) = cx.add_window_view(empty_test_zetta);
+    cx.update_entity(&zetta, |zetta, cx| {
+        zetta.show_session_operation_error("Could not attach that session", cx);
+    });
+
+    cx.read_entity(&zetta, |zetta, _| {
+        assert_eq!(
+            zetta.transient_notice.message(),
+            Some("Could not attach that session")
+        );
+        assert!(zetta.pane_output_error.is_none());
+    });
+}
+
+#[gpui::test]
+fn a_session_operation_failure_stays_in_the_authentication_prompt(cx: &mut gpui::TestAppContext) {
+    init_test_theme(cx);
+    let (zetta, cx) = cx.add_window_view(|window, cx| {
+        let mut zetta = empty_test_zetta(window, cx);
+        zetta.open_session_authentication_prompt(
+            SessionAuthenticationPromptMode::Reconnect {
+                runner_id: 1,
+                session_id: 2,
+            },
+            window,
+            cx,
+        );
+        zetta
+    });
+    cx.update_entity(&zetta, |zetta, cx| {
+        zetta.show_session_operation_error("Could not open the session", cx);
+    });
+
+    cx.read_entity(&zetta, |zetta, _| {
+        assert_eq!(
+            zetta
+                .session_authentication
+                .as_ref()
+                .and_then(|prompt| prompt.error.as_deref()),
+            Some("Could not open the session")
+        );
+        assert!(zetta.transient_notice.message().is_none());
+        assert!(zetta.pane_output_error.is_none());
+    });
+}

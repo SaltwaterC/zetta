@@ -693,8 +693,7 @@ impl Zetta {
         self.projects.forget_pane(pane_id);
         self.forget_pane_controls([pane_id]);
         self.closing_shared_panes.remove(&pane_id);
-        self.pane_output_error = Some(reason);
-        cx.notify();
+        self.show_notice(reason, cx);
     }
 
     /// Drops this window's view of any pane the session no longer holds.
@@ -1257,10 +1256,9 @@ impl Zetta {
         log::warn!(
             "shared session {session_id} would not close pane {local_pane_id}; leaving it open"
         );
-        self.pane_output_error = Some(format!(
+        self.show_notice(format!(
             "The session's multiplexer would not close pane {label}. It is still running for every viewer."
-        ));
-        cx.notify();
+        ), cx);
     }
 
     /// The next request a publication owes the daemon, and — when that request
