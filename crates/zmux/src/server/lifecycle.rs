@@ -737,17 +737,7 @@ fn commit_shared_batch(
         "shared session {} is not authorized for this client",
         request.session_id
     );
-    let mut state = session
-        .shared_state
-        .clone()
-        .unwrap_or_else(|| {
-            crate::messages::SharedSessionState::new(
-                session.id,
-                session.summary.clone(),
-                session.state.clone(),
-            )
-        })
-        .migrate()?;
+    let mut state = normalize_shared_state(daemon, session)?;
     if let Some(receipt) = state.receipt(&request.operation_id) {
         return Ok(SharedBatchCommit::Retry {
             state: state.clone(),
@@ -916,18 +906,6 @@ pub(super) fn spawn(
             "session {} is not offered for shared collaboration",
             shared_request.session_id
         );
-        let mut state = session.shared_state.clone().unwrap_or_else(|| {
-            crate::messages::SharedSessionState::new(
-                session.id,
-                session.summary.clone(),
-                session.state.clone(),
-            )
-        });
-        anyhow::ensure!(
-            state.version == crate::messages::SHARED_SESSION_STATE_VERSION,
-            "unsupported shared session state version {}",
-            state.version
-        );
         // Check the authorization without consuming the lock needed by the
         // actual spawn. The revision is checked again immediately before the
         // new pane is committed, closing the race with another mutation.
@@ -942,13 +920,7 @@ pub(super) fn spawn(
             "shared session {} is not authorized for this client",
             shared_request.session_id
         );
-        state = session.shared_state.clone().unwrap_or_else(|| {
-            crate::messages::SharedSessionState::new(
-                session.id,
-                session.summary.clone(),
-                session.state.clone(),
-            )
-        });
+        let state = normalize_shared_state(daemon, session)?;
         if state.revision != shared_request.base_revision {
             return Ok(SpawnOutcome::SharedConflict(Box::new(state)));
         }
@@ -1125,13 +1097,11 @@ pub(super) fn spawn(
         .expect("the session was just located or created");
 
     if let Some(shared_request) = &shared_request {
-        let state = session.shared_state.clone().unwrap_or_else(|| {
-            crate::messages::SharedSessionState::new(
-                session.id,
-                session.summary.clone(),
-                session.state.clone(),
-            )
-        });
+        anyhow::ensure!(
+            session.offered,
+            "session {session_id} is not offered for shared collaboration"
+        );
+        let state = normalize_shared_state(daemon, session)?;
         if state.revision != shared_request.base_revision {
             // The revision can change while the daemon is starting the child.
             // Nothing has been recorded in the session yet, so explicitly drop
@@ -1142,10 +1112,6 @@ pub(super) fn spawn(
             let _ = daemon.pty_host.close(console_id);
             return Ok(SpawnOutcome::SharedConflict(Box::new(state)));
         }
-        anyhow::ensure!(
-            session.offered,
-            "session {session_id} is not offered for shared collaboration"
-        );
     }
 
     // Record the pane before answering. A handover that fails after the
@@ -1374,17 +1340,7 @@ pub(super) fn spawn_shared_batch(
             "shared session {} is not authorized for this client",
             request.session_id
         );
-        let state = session
-            .shared_state
-            .clone()
-            .unwrap_or_else(|| {
-                crate::messages::SharedSessionState::new(
-                    session.id,
-                    session.summary.clone(),
-                    session.state.clone(),
-                )
-            })
-            .migrate()?;
+        let state = normalize_shared_state(daemon, session)?;
         if let Some(receipt) = state.receipt(&request.operation_id) {
             return connection.send(&Response::SharedBatchSpawned {
                 mappings: receipt.draft_mappings.clone(),
@@ -1736,7 +1692,7 @@ pub(super) fn detach(
     }
     session.summary.authentication_required = session.authentication.is_some();
     if session.offered {
-        let mut state = session.shared_state.take().unwrap_or_else(|| {
+        let mut state = session.shared_state.clone().unwrap_or_else(|| {
             crate::messages::SharedSessionState::new(
                 session.id,
                 session.summary.clone(),
@@ -1747,6 +1703,7 @@ pub(super) fn detach(
         state.summary.id = session.id;
         state.state = session.state.clone();
         session.shared_state = Some(state);
+        normalize_shared_state(daemon, session)?;
     }
     for pane in &mut session.panes {
         // Only this client lets go. Clearing every attachment evicted whichever
@@ -1949,7 +1906,7 @@ pub(super) fn share(
         }
     }
     session.shared_state = request.offered.then(|| {
-        let mut state = session.shared_state.take().unwrap_or_else(|| {
+        let mut state = session.shared_state.clone().unwrap_or_else(|| {
             crate::messages::SharedSessionState::new(
                 session.id,
                 session.summary.clone(),
@@ -1961,6 +1918,9 @@ pub(super) fn share(
         state.state = session.state.clone();
         state
     });
+    if request.offered {
+        normalize_shared_state(daemon, session)?;
+    }
     #[cfg(feature = "session-persistence")]
     if request.offered {
         persist_session(daemon, &persisted_live_session(session))?;
@@ -2001,14 +1961,7 @@ pub(super) fn shared_snapshot(
         session_control_authorized(session, peer_process_id, session_secret),
         "shared session {session_id} is not authorized for this client"
     );
-    let state = session.shared_state.get_or_insert_with(|| {
-        crate::messages::SharedSessionState::new(
-            session.id,
-            session.summary.clone(),
-            session.state.clone(),
-        )
-    });
-    let state = state.clone();
+    let state = normalize_shared_state(daemon, session)?;
     drop(sessions);
     connection.send(&Response::SharedSnapshot { state })
 }
@@ -2048,17 +2001,7 @@ pub(super) fn apply_shared(
             "shared session {} is not authorized for this client",
             request.session_id
         );
-        let mut state = session
-            .shared_state
-            .clone()
-            .unwrap_or_else(|| {
-                crate::messages::SharedSessionState::new(
-                    session.id,
-                    session.summary.clone(),
-                    session.state.clone(),
-                )
-            })
-            .migrate()?;
+        let mut state = normalize_shared_state(daemon, session)?;
         if state.receipt(&request.operation_id).is_some() {
             drop(sessions);
             return connection.send(&Response::SharedOperationApplied { state });
@@ -2230,7 +2173,7 @@ pub(super) fn set_session_scope(
     }
     session.offered = shared;
     if shared {
-        let mut state = session.shared_state.take().unwrap_or_else(|| {
+        let mut state = session.shared_state.clone().unwrap_or_else(|| {
             crate::messages::SharedSessionState::new(
                 session.id,
                 session.summary.clone(),
@@ -2241,6 +2184,7 @@ pub(super) fn set_session_scope(
         state.summary.id = session.id;
         state.state = session.state.clone();
         session.shared_state = Some(state);
+        normalize_shared_state(daemon, session)?;
     } else if !shared {
         session.shared_state = None;
     }

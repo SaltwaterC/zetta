@@ -324,6 +324,36 @@ fn shared_state_rejects_stale_layout_references_and_removes_a_pane() {
 }
 
 #[test]
+fn shared_state_normalization_reconciles_stale_presentation_panes() {
+    let mut summary = shared_summary();
+    summary.active_pane = 5;
+    summary.layout = BackgroundPaneLayout::Split {
+        axis: "horizontal".to_owned(),
+        first_ratio: crate::protocol::DEFAULT_BACKGROUND_PANE_SPLIT_RATIO,
+        first: Box::new(BackgroundPaneLayout::Pane { pane_id: 4 }),
+        second: Box::new(BackgroundPaneLayout::Pane { pane_id: 5 }),
+    };
+    summary.panes[0].id = 4;
+    summary.panes[1].id = 5;
+
+    let mut state =
+        SharedSessionState::new(4, summary.clone(), serde_json::json!({"opaque": true}));
+    state.presentation.layout = BackgroundPaneLayout::Pane { pane_id: 3 };
+    state.presentation.active_pane = 3;
+    state.presentation.maximized_pane = Some(3);
+    state.presentation.minimized_panes = vec![3, 4, 99];
+    let opaque = state.state.clone();
+
+    assert!(state.normalize().unwrap());
+    assert_eq!(state.presentation.layout, summary.layout);
+    assert_eq!(state.presentation.active_pane, 5);
+    assert_eq!(state.presentation.maximized_pane, None);
+    assert_eq!(state.presentation.minimized_panes, vec![4]);
+    assert_eq!(state.state, opaque);
+    assert!(!state.normalize().unwrap());
+}
+
+#[test]
 fn shared_messages_round_trip_revision_and_operation_id() {
     let request = Request::ApplyShared(SharedSessionOperationRequest {
         session_id: 4,

@@ -318,7 +318,7 @@ fn summary(session_id: u64, pane_id: u64) -> BackgroundSessionSummary {
         authentication_required: false,
         active_pane: pane_id,
         layout: BackgroundPaneLayout::Pane { pane_id },
-        panes: Vec::new(),
+        panes: vec![pane_summary(pane_id)],
         held: false,
         scoped_to: None,
         key_envelope: None,
@@ -3276,6 +3276,181 @@ fn a_live_session_is_only_offered_once_its_window_shares_it() {
     assert_terminal_echoes(&descriptor, "still-here");
 }
 
+/// A window can republish a live tab after its daemon pane set changed. The
+/// daemon's catalog must then be the authority over the old presentation, so a
+/// reconnect cannot be sent back to a pane that is no longer in the tab.
+#[test]
+fn republishing_a_changed_pane_set_repairs_shared_reconnect_state() {
+    let daemon = TestDaemon::start();
+    let client = daemon.client();
+
+    // Consume two IDs so the stale presentation and the replacement panes have
+    // the same shape as the real handoff that exposed this bug.
+    let first = client.spawn(spawn_request(None, "sleep 60")).unwrap();
+    assert_eq!(first.pane_id, 1);
+    client.kill(first.session_id).unwrap();
+    drop(first);
+    let second = client.spawn(spawn_request(None, "sleep 60")).unwrap();
+    assert_eq!(second.pane_id, 2);
+    client.kill(second.session_id).unwrap();
+    drop(second);
+
+    let initial = client
+        .spawn(spawn_request(None, "sleep 60"))
+        .expect("spawning the initial shared pane");
+    assert_eq!(initial.pane_id, 3);
+    client
+        .share(
+            initial.session_id,
+            summary(initial.session_id, initial.pane_id),
+            serde_json::json!({"before": true}),
+            None,
+            true,
+        )
+        .unwrap();
+
+    let spawn_shared = |base_revision, operation_id| {
+        let request = spawn_request(Some(initial.session_id), "sleep 60");
+        SharedSpawnRequest {
+            session_id: initial.session_id,
+            base_revision,
+            operation_id,
+            program: request.program,
+            args: request.args,
+            env: request.env,
+            working_directory: request.working_directory,
+            size: request.size,
+            console_palette: request.console_palette,
+        }
+    };
+    let fourth = client
+        .spawn_shared(spawn_shared(
+            SessionRevision::INITIAL,
+            client.next_shared_operation_id(),
+        ))
+        .unwrap();
+    assert_eq!(fourth.pane.pane_id(), 4);
+    let fifth = client
+        .spawn_shared(spawn_shared(
+            fourth.state.revision,
+            client.next_shared_operation_id(),
+        ))
+        .unwrap();
+    assert_eq!(fifth.pane.pane_id(), 5);
+
+    // Leave the old pane in the canonical presentation and make its visibility
+    // references point at it as well. Republishing the current live summary is
+    // the handoff that must repair all of those references in one revision.
+    let maximized = match client
+        .apply_shared(
+            initial.session_id,
+            fifth.state.revision,
+            SharedSessionOperation::SetMaximized {
+                pane_id: Some(initial.pane_id),
+            },
+        )
+        .unwrap()
+    {
+        zmux::client::SharedOperationResult::Applied(state) => state,
+        zmux::client::SharedOperationResult::Conflict(_) => {
+            panic!("maximizing the existing pane conflicted")
+        }
+    };
+    let stale = match client
+        .apply_shared(
+            initial.session_id,
+            maximized.revision,
+            SharedSessionOperation::SetMinimized {
+                pane_id: initial.pane_id,
+                minimized: true,
+            },
+        )
+        .unwrap()
+    {
+        zmux::client::SharedOperationResult::Applied(state) => state,
+        zmux::client::SharedOperationResult::Conflict(_) => {
+            panic!("minimizing the existing pane conflicted")
+        }
+    };
+    assert_eq!(stale.presentation.maximized_pane, Some(initial.pane_id));
+    assert_eq!(stale.presentation.minimized_panes, vec![initial.pane_id]);
+
+    let mut republished = summary(initial.session_id, fifth.pane.pane_id());
+    republished.title = "recovered".to_owned();
+    republished.layout = BackgroundPaneLayout::Split {
+        axis: "horizontal".to_owned(),
+        first_ratio: zmux::protocol::DEFAULT_BACKGROUND_PANE_SPLIT_RATIO,
+        first: Box::new(BackgroundPaneLayout::Pane {
+            pane_id: fourth.pane.pane_id(),
+        }),
+        second: Box::new(BackgroundPaneLayout::Pane {
+            pane_id: fifth.pane.pane_id(),
+        }),
+    };
+    republished.panes = vec![
+        pane_summary(fourth.pane.pane_id()),
+        pane_summary(fifth.pane.pane_id()),
+    ];
+    let observer = daemon.client();
+    let subscription = observer.subscribe().unwrap();
+    let events = subscription.shared.register(initial.session_id);
+    client
+        .share(
+            initial.session_id,
+            republished.clone(),
+            serde_json::json!({"after": true}),
+            None,
+            true,
+        )
+        .unwrap();
+    match recv_timeout(&events, Duration::from_secs(10)).expect("the repair must be broadcast") {
+        zmux::client::SharedSessionEvent::Updated(state) => {
+            assert_eq!(state.summary, republished);
+            assert_eq!(state.presentation.layout, republished.layout);
+            assert_eq!(state.presentation.active_pane, fifth.pane.pane_id());
+            assert_eq!(state.presentation.maximized_pane, None);
+            assert!(state.presentation.minimized_panes.is_empty());
+        }
+        other => panic!("unexpected repair event: {other:?}"),
+    }
+
+    let listed = client.list().unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].active_pane, fifth.pane.pane_id());
+    assert_eq!(
+        listed[0]
+            .panes
+            .iter()
+            .map(|pane| pane.id)
+            .collect::<Vec<_>>(),
+        vec![fourth.pane.pane_id(), fifth.pane.pane_id()]
+    );
+
+    let repaired = client.shared_snapshot(initial.session_id).unwrap();
+    assert!(repaired.revision > stale.revision);
+    assert_eq!(repaired.summary, republished);
+    assert_eq!(repaired.presentation.layout, republished.layout);
+    assert_eq!(repaired.presentation.active_pane, fifth.pane.pane_id());
+    assert_eq!(repaired.presentation.maximized_pane, None);
+    assert!(repaired.presentation.minimized_panes.is_empty());
+    assert_eq!(repaired.state, serde_json::json!({"after": true}));
+
+    let repeated = client.shared_snapshot(initial.session_id).unwrap();
+    assert_eq!(repeated, repaired, "a second repair must be idempotent");
+
+    let attached = observer
+        .attach_shared_with_secret(initial.session_id, fourth.pane.pane_id(), None)
+        .expect("a reconnect must attach to a live replacement pane");
+    assert!(matches!(attached, AttachOutcome::SharedAttached { .. }));
+    drop(attached);
+
+    let session_id = initial.session_id;
+    drop(fourth);
+    drop(fifth);
+    drop(initial);
+    client.kill(session_id).unwrap();
+}
+
 /// Shared spawning uses the same canonical operation path for a local viewer
 /// and a stream-only viewer. The local stream must retain its grant capability,
 /// while both requests must produce an event and an exact revisioned snapshot.
@@ -3293,8 +3468,7 @@ fn shared_spawns_publish_events_and_preserve_local_grants() {
         .unwrap();
     let descriptor = std::fs::File::from(pane.descriptor);
     read_until(&descriptor, "ready");
-    let mut offered = summary(pane.session_id, pane.pane_id);
-    offered.panes.push(pane_summary(pane.pane_id));
+    let offered = summary(pane.session_id, pane.pane_id);
     client
         .share(
             pane.session_id,
@@ -3472,8 +3646,7 @@ fn a_published_tab_state_reaches_another_viewer_and_geometry_leaves_it_alone() {
         .unwrap();
     let descriptor = std::fs::File::from(pane.descriptor);
     read_until(&descriptor, "ready");
-    let mut offered = summary(pane.session_id, pane.pane_id);
-    offered.panes.push(pane_summary(pane.pane_id));
+    let offered = summary(pane.session_id, pane.pane_id);
     let shared_at_first = serde_json::json!({ "icon": "pin" });
     client
         .share(
@@ -3550,8 +3723,7 @@ fn shared_batch_spawns_commit_exact_geometry_and_rebase_same_target_additions() 
         .unwrap();
     let descriptor = std::fs::File::from(pane.descriptor);
     read_until(&descriptor, "ready");
-    let mut offered = summary(pane.session_id, pane.pane_id);
-    offered.panes.push(pane_summary(pane.pane_id));
+    let offered = summary(pane.session_id, pane.pane_id);
     client
         .share(
             pane.session_id,
@@ -4401,8 +4573,7 @@ fn a_stalled_subscription_cannot_block_another_shared_panes_input() {
         .spawn(spawn_request(None, "sleep 60"))
         .expect("spawning the exclusive pane");
     let held_descriptor = std::fs::File::from(held.descriptor);
-    let mut offered = summary(held.session_id, held.pane_id);
-    offered.panes.push(pane_summary(held.pane_id));
+    let offered = summary(held.session_id, held.pane_id);
     holder
         .share(
             held.session_id,
@@ -6549,8 +6720,7 @@ fn splitting_a_pane_created_by_an_earlier_split_is_accepted() {
         .unwrap();
     let descriptor = std::fs::File::from(pane.descriptor);
     read_until(&descriptor, "ready");
-    let mut offered = summary(pane.session_id, pane.pane_id);
-    offered.panes.push(pane_summary(pane.pane_id));
+    let offered = summary(pane.session_id, pane.pane_id);
     client
         .share(
             pane.session_id,
@@ -6644,8 +6814,7 @@ fn pruning_an_exited_shared_pane_keeps_the_next_split_valid() {
         .unwrap();
     let descriptor = std::fs::File::from(pane.descriptor);
     read_until(&descriptor, "ready");
-    let mut offered = summary(pane.session_id, pane.pane_id);
-    offered.panes.push(pane_summary(pane.pane_id));
+    let offered = summary(pane.session_id, pane.pane_id);
     client
         .share(
             pane.session_id,
@@ -6771,7 +6940,6 @@ fn an_offered_summary_describing_panes_the_daemon_lacks_is_refused() {
     // A window's local pane id that this daemon has never issued.
     let foreign = pane.pane_id + 9_000;
     let mut offered = summary(pane.session_id, foreign);
-    offered.panes.push(pane_summary(foreign));
     offered.layout = BackgroundPaneLayout::Pane { pane_id: foreign };
 
     let error = client
@@ -6803,8 +6971,7 @@ fn a_daemon_loaded_shell_integration_leaves_nothing_for_viewers_to_replay() {
         .unwrap();
     let descriptor = std::fs::File::from(pane.descriptor);
     read_until(&descriptor, "ready");
-    let mut offered = summary(pane.session_id, pane.pane_id);
-    offered.panes.push(pane_summary(pane.pane_id));
+    let offered = summary(pane.session_id, pane.pane_id);
     client
         .share(
             pane.session_id,
@@ -6907,8 +7074,7 @@ fn a_handover_that_is_abandoned_leaves_the_pane_readable() {
         .unwrap();
     let descriptor = std::fs::File::from(pane.descriptor);
     read_until(&descriptor, "ready");
-    let mut offered = summary(pane.session_id, pane.pane_id);
-    offered.panes.push(pane_summary(pane.pane_id));
+    let offered = summary(pane.session_id, pane.pane_id);
     client
         .share(
             pane.session_id,
@@ -7086,8 +7252,7 @@ fn a_pane_the_client_could_not_show_can_be_given_back() {
         .unwrap();
     let descriptor = std::fs::File::from(pane.descriptor);
     read_until(&descriptor, "ready");
-    let mut offered = summary(pane.session_id, pane.pane_id);
-    offered.panes.push(pane_summary(pane.pane_id));
+    let offered = summary(pane.session_id, pane.pane_id);
     client
         .share(
             pane.session_id,
@@ -7173,8 +7338,7 @@ fn a_viewer_that_stops_reading_does_not_wedge_the_pane_for_the_others() {
         .unwrap();
     let descriptor = std::fs::File::from(pane.descriptor);
     read_until(&descriptor, "ready");
-    let mut offered = summary(pane.session_id, pane.pane_id);
-    offered.panes.push(pane_summary(pane.pane_id));
+    let offered = summary(pane.session_id, pane.pane_id);
     client
         .share(
             pane.session_id,
@@ -7271,8 +7435,7 @@ fn a_pane_never_starts_in_the_daemons_own_directory() {
 
     // And a shared draft whose inherit cannot be resolved: pane 999 does not
     // exist, which is the same dead end as a pane whose process is gone.
-    let mut offered = summary(pane.session_id, pane.pane_id);
-    offered.panes.push(pane_summary(pane.pane_id));
+    let offered = summary(pane.session_id, pane.pane_id);
     client
         .share(
             pane.session_id,
@@ -7362,8 +7525,7 @@ fn a_draft_inherits_the_working_directory_of_the_pane_it_names() {
     let pane = client.spawn(source).expect("spawning the source pane");
     let descriptor = std::fs::File::from(pane.descriptor);
     read_until(&descriptor, "ready");
-    let mut offered = summary(pane.session_id, pane.pane_id);
-    offered.panes.push(pane_summary(pane.pane_id));
+    let offered = summary(pane.session_id, pane.pane_id);
     client
         .share(
             pane.session_id,
@@ -7471,8 +7633,7 @@ fn relay_pane_copies_a_shared_pane_between_the_daemon_and_its_own_stdio() {
         .unwrap();
     let descriptor = std::fs::File::from(pane.descriptor);
     read_until(&descriptor, "ready");
-    let mut offered = summary(pane.session_id, pane.pane_id);
-    offered.panes.push(pane_summary(pane.pane_id));
+    let offered = summary(pane.session_id, pane.pane_id);
     client
         .share(
             pane.session_id,
@@ -7649,8 +7810,7 @@ fn shared_pane_for_image_paste(
         .unwrap();
     let descriptor = std::fs::File::from(pane.descriptor);
     read_until(&descriptor, "ready");
-    let mut offered = summary(pane.session_id, pane.pane_id);
-    offered.panes.push(pane_summary(pane.pane_id));
+    let offered = summary(pane.session_id, pane.pane_id);
     client
         .share(
             pane.session_id,

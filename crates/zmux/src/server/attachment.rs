@@ -108,6 +108,10 @@ pub(super) fn attach(
         session.refuse_until = None;
     }
 
+    if session.offered {
+        normalize_shared_state(daemon, session)?;
+    }
+
     let state = session.state.clone();
     let summary = Box::new(session.summary.clone());
     // Resolved only now, after the secret has been checked: which panes a

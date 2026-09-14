@@ -278,8 +278,64 @@ impl SharedSessionState {
             }
             version => anyhow::bail!("unsupported shared session state version {version}"),
         }
-        self.sync_summary_presentation();
         Ok(self)
+    }
+
+    /// Restores the presentation fields that are derived from the daemon's
+    /// live summary.
+    ///
+    /// The summary is the source of truth for the panes a session currently
+    /// owns. A handoff can update that summary while leaving the presentation
+    /// from an older snapshot behind, so copying the layout and focus here is
+    /// what makes an already-persisted session attachable again. Visibility
+    /// references are also pruned because they are allowed to outlive a pane's
+    /// removal. The opaque tab payload is deliberately not inspected or
+    /// changed.
+    ///
+    /// Returns whether any presentation field changed. Callers that are
+    /// repairing a persisted session use that result to advance its shared
+    /// revision and publish the repaired snapshot.
+    pub fn normalize(&mut self) -> anyhow::Result<bool> {
+        validate_summary_panes(&self.summary)?;
+        anyhow::ensure!(
+            self.summary
+                .panes
+                .iter()
+                .any(|pane| pane.id == self.summary.active_pane),
+            "shared active pane {} is not in the live pane set",
+            self.summary.active_pane
+        );
+
+        let mut changed = false;
+        if self.presentation.layout != self.summary.layout {
+            self.presentation.layout = self.summary.layout.clone();
+            changed = true;
+        }
+        if self.presentation.active_pane != self.summary.active_pane {
+            self.presentation.active_pane = self.summary.active_pane;
+            changed = true;
+        }
+
+        let live_pane_ids = self
+            .summary
+            .panes
+            .iter()
+            .map(|pane| pane.id)
+            .collect::<Vec<_>>();
+        let before_minimized = self.presentation.minimized_panes.len();
+        self.presentation
+            .minimized_panes
+            .retain(|pane_id| live_pane_ids.contains(pane_id));
+        changed |= self.presentation.minimized_panes.len() != before_minimized;
+        if self
+            .presentation
+            .maximized_pane
+            .is_some_and(|pane_id| !live_pane_ids.contains(&pane_id))
+        {
+            self.presentation.maximized_pane = None;
+            changed = true;
+        }
+        Ok(changed)
     }
 
     fn sync_summary_presentation(&mut self) {

@@ -279,7 +279,7 @@ fn prune_exited_panes(daemon: &Arc<Daemon>) -> bool {
         changed |= session.panes.len() != before;
         if !removed.is_empty()
             && !session.panes.is_empty()
-            && let Some(state) = remove_pruned_shared_panes(session, &removed)
+            && let Some(state) = remove_pruned_shared_panes(daemon, session, &removed)
         {
             shared_removals.push((session.id, removed, state));
         }
@@ -342,9 +342,19 @@ fn exited_pane_is_unread(pane: &Pane) -> bool {
 /// canonical tree, so leaving an exited node in that tree makes every later
 /// split name a pane the daemon no longer owns.
 fn remove_pruned_shared_panes(
+    daemon: &Arc<Daemon>,
     session: &mut Session,
     removed: &[u64],
 ) -> Option<crate::messages::SharedSessionState> {
+    if session.shared_state.is_some()
+        && let Err(error) = normalize_shared_state(daemon, session)
+    {
+        log::warn!(
+            "could not normalize shared session {} before pruning panes: {error:#}",
+            session.id
+        );
+        return None;
+    }
     let state = session.shared_state.as_mut()?;
     let mut changed = false;
     for pane_id in removed {
@@ -429,6 +439,53 @@ struct Session {
     ///
     /// `None` only for a session nobody has held yet.
     owner: Option<u32>,
+}
+
+/// Ensures an offered session's collaboration snapshot describes the panes the
+/// daemon currently owns.
+///
+/// The summary is deliberately copied before normalization: it is the live
+/// session record used by `list`, while `presentation` is the view shared by
+/// attachers. If an older handoff left those two out of step, the repair gets a
+/// new revision, is persisted, and is sent to subscribers before the caller
+/// continues with its request.
+fn normalize_shared_state(
+    daemon: &Arc<Daemon>,
+    session: &mut Session,
+) -> Result<crate::messages::SharedSessionState> {
+    let had_shared_state = session.shared_state.is_some();
+    let mut state = session.shared_state.clone().unwrap_or_else(|| {
+        crate::messages::SharedSessionState::new(
+            session.id,
+            session.summary.clone(),
+            session.state.clone(),
+        )
+    });
+    state = state.migrate()?;
+
+    let mut live_summary = session.summary.clone();
+    live_summary.id = session.id;
+    let summary_changed = state.summary != live_summary;
+    state.summary = live_summary;
+    let presentation_changed = state.normalize()?;
+    let repaired = had_shared_state && (summary_changed || presentation_changed);
+    if repaired {
+        state.revision = state.revision.next();
+    }
+    session.shared_state = Some(state.clone());
+
+    if repaired {
+        #[cfg(feature = "session-persistence")]
+        persist_session(daemon, &persisted_live_session(session))?;
+        broadcast(
+            daemon,
+            &Event::SharedSessionUpdated {
+                state: state.clone(),
+            },
+        );
+    }
+
+    Ok(state)
 }
 
 #[cfg(feature = "session-persistence")]
