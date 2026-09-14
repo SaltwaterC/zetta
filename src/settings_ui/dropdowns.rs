@@ -8,7 +8,7 @@
 
 use super::*;
 
-use super::controls::{dropdown_snapshot_rows, scroll_open_dropdown_to_selection};
+use super::controls::scroll_open_dropdown_to_selection;
 
 impl Zetta {
     pub(crate) fn settings_dropdown_options(
@@ -229,10 +229,7 @@ impl Zetta {
         editor: &mut SettingsEditor,
         options: Arc<[String]>,
     ) {
-        let (rows, widest_row) = dropdown_snapshot_rows(&options, &editor.dropdown_query);
-        editor.open_dropdown_options = options;
-        editor.open_dropdown_rows = rows;
-        editor.open_dropdown_widest_row = widest_row;
+        editor.dropdown.set_options(options);
     }
 
     pub(crate) fn open_settings_dropdown(
@@ -248,14 +245,11 @@ impl Zetta {
         if options.is_empty() {
             return;
         }
-        editor.dropdown_index = options
+        let selected_index = options
             .iter()
             .position(|option| option == &selected)
             .unwrap_or(0);
-        editor.dropdown_query.clear();
-        Self::refresh_open_dropdown_snapshot(editor, options);
-        scroll_open_dropdown_to_selection(editor);
-        editor.dropdown_anchor = anchor;
+        editor.dropdown.open(options, selected_index, anchor);
         editor.open_dropdown = Some(dropdown);
         cx.notify();
     }
@@ -271,78 +265,23 @@ impl Zetta {
         if editor.open_dropdown.is_none() {
             return false;
         }
-        let matching_indices = editor.open_dropdown_rows.clone();
-        if matching_indices.is_empty() {
-            return false;
+        let moved = editor.dropdown.move_selection(direction);
+        if moved {
+            cx.notify();
         }
-        let current = matching_indices
-            .iter()
-            .position(|index| *index == editor.dropdown_index)
-            .unwrap_or(0);
-        let next = if direction < 0 {
-            current.checked_sub(1).unwrap_or(matching_indices.len() - 1)
-        } else {
-            (current + 1) % matching_indices.len()
-        };
-        editor.dropdown_index = matching_indices[next];
-        scroll_open_dropdown_to_selection(editor);
-        cx.notify();
-        true
+        moved
     }
 
-    pub(crate) fn type_into_open_settings_dropdown(
+    pub(crate) fn commit_open_settings_dropdown_value(
         &mut self,
-        event: &KeyDownEvent,
-        command: bool,
+        value: String,
         cx: &mut Context<Self>,
     ) -> bool {
-        let Some(editor) = self.settings_editor.as_mut() else {
-            return false;
-        };
-        let Some(dropdown) = editor.open_dropdown else {
-            return false;
-        };
-
-        let changed = if event.keystroke.key == "backspace" {
-            editor.dropdown_query.pop().is_some()
-        } else if !command
-            && !event.keystroke.modifiers.alt
-            && let Some(text) = event.keystroke.key_char.as_ref()
-            && !text.chars().any(char::is_control)
-        {
-            editor.dropdown_query.push_str(text);
-            true
-        } else {
-            false
-        };
-        if !changed {
-            return false;
-        }
-
-        let (_, options) = Self::settings_dropdown_options(editor, dropdown);
-        let query = editor.dropdown_query.clone();
-        if let Some(index) = fuzzy_match_index(&options, &query) {
-            editor.dropdown_index = index;
-        }
-        Self::refresh_open_dropdown_snapshot(editor, options);
-        scroll_open_dropdown_to_selection(editor);
-        cx.notify();
-        true
-    }
-
-    pub(crate) fn commit_open_settings_dropdown(&mut self, cx: &mut Context<Self>) -> bool {
-        let Some((dropdown, value)) = self.settings_editor.as_mut().and_then(|editor| {
-            let dropdown = editor.open_dropdown.take()?;
-            if !editor.dropdown_query.is_empty() && editor.open_dropdown_rows.is_empty() {
-                editor.open_dropdown = Some(dropdown);
-                return None;
-            }
-            editor
-                .open_dropdown_options
-                .get(editor.dropdown_index)
-                .cloned()
-                .map(|value| (dropdown, value))
-        }) else {
+        let Some(dropdown) = self
+            .settings_editor
+            .as_ref()
+            .and_then(|editor| editor.open_dropdown)
+        else {
             return false;
         };
         self.set_settings_dropdown(dropdown, value, cx);

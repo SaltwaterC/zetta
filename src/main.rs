@@ -40,6 +40,7 @@ mod project_cli;
 mod project_commands;
 mod project_form;
 mod run_command;
+mod searchable_dropdown;
 #[cfg(feature = "serial-console")]
 mod serial_console;
 #[cfg(servers_enabled)]
@@ -387,6 +388,7 @@ mod settings_ui;
 mod settings_view;
 #[cfg(feature = "http-server")]
 use http_server::*;
+use searchable_dropdown::*;
 #[cfg(feature = "serial-console")]
 use serial_console::*;
 use settings_ui::*;

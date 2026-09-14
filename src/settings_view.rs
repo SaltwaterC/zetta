@@ -306,13 +306,7 @@ impl Zetta {
             _ => None,
         };
         let dropdown_state = DropdownRenderState {
-            dropdown_index: editor.dropdown_index,
-            dropdown_query: editor.dropdown_query.clone(),
-            options: editor.open_dropdown_options.clone(),
-            rows: editor.open_dropdown_rows.clone(),
-            widest_row: editor.open_dropdown_widest_row,
-            dropdown_scroll: editor.dropdown_scroll.clone(),
-            dropdown_anchor: editor.dropdown_anchor,
+            dropdown: editor.dropdown.render_state(),
             profile_icon_automatic,
         };
 

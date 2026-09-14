@@ -19,42 +19,8 @@ pub(crate) fn adjacent_settings_control_index(
     })
 }
 
-/// The rows an open dropdown displays for `query` — every option, or its fuzzy
-/// matches, in display order — paired with the row `uniform_list` has to measure.
-///
-/// `uniform_list` derives the whole list's width from a single measured row, so
-/// that row has to be the longest option; measuring the first one instead leaves
-/// every longer option wrapping inside a row whose height is pinned to the
-/// measured row's single line.
-pub(crate) fn dropdown_snapshot_rows(
-    options: &[String],
-    query: &str,
-) -> (Arc<[usize]>, Option<usize>) {
-    let rows: Arc<[usize]> = if query.is_empty() {
-        (0..options.len()).collect::<Vec<_>>().into()
-    } else {
-        fuzzy_match_indices(options, query).into()
-    };
-    let widest_row = rows
-        .iter()
-        .enumerate()
-        .max_by_key(|(_, index)| options[**index].chars().count())
-        .map(|(row, _)| row);
-    (rows, widest_row)
-}
-
-pub(super) fn dropdown_row_for_option(rows: &[usize], option_index: usize) -> Option<usize> {
-    rows.iter().position(|index| *index == option_index)
-}
-
 pub(super) fn scroll_open_dropdown_to_selection(editor: &mut SettingsEditor) {
-    let Some(row) = dropdown_row_for_option(&editor.open_dropdown_rows, editor.dropdown_index)
-    else {
-        return;
-    };
-    editor
-        .dropdown_scroll
-        .scroll_to_item(row, ScrollStrategy::Nearest);
+    editor.dropdown.scroll_to_selection();
 }
 
 /// How many controls at the front of the tab order live in the dialog's fixed

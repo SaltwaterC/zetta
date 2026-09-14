@@ -114,6 +114,12 @@ pub(crate) enum RemoteSessionField {
     Create,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RemoteSessionDropdown {
+    Profile,
+    Template,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum RemoteSessionTemplate {
     SinglePane,
@@ -186,6 +192,8 @@ pub(crate) struct RemoteSessionPicker {
     pub(crate) profile_error: Option<String>,
     pub(crate) templates: Vec<RemoteSessionTemplate>,
     pub(crate) selected_template: usize,
+    open_dropdown: Option<RemoteSessionDropdown>,
+    dropdown: SearchableDropdown,
     pub(crate) creating: bool,
     pub(crate) suggestions: Vec<String>,
     suggestion_navigation: Option<RemoteSessionSuggestionNavigation>,
@@ -214,6 +222,8 @@ impl Default for RemoteSessionPicker {
             profile_error: None,
             templates: vec![RemoteSessionTemplate::SinglePane],
             selected_template: 0,
+            open_dropdown: None,
+            dropdown: SearchableDropdown::default(),
             creating: false,
             suggestions: Vec::new(),
             suggestion_navigation: None,
@@ -243,6 +253,7 @@ impl RemoteSessionPicker {
         self.selected_profile = 0;
         self.profiles_loading = false;
         self.profile_error = None;
+        self.close_dropdown();
         self.creating = false;
     }
 
@@ -313,20 +324,6 @@ impl RemoteSessionPicker {
         if !self.transport.is_zosh() && self.field == RemoteSessionField::KeepAlive {
             self.field = RemoteSessionField::Protocol;
         }
-    }
-
-    fn cycle_profile(&mut self, reverse: bool) {
-        if self.profiles.is_empty() {
-            return;
-        }
-        self.selected_profile = cycle_index(self.selected_profile, self.profiles.len(), reverse);
-    }
-
-    fn cycle_template(&mut self, reverse: bool) {
-        if self.templates.is_empty() {
-            return;
-        }
-        self.selected_template = cycle_index(self.selected_template, self.templates.len(), reverse);
     }
 
     fn reset_suggestion_navigation(&mut self) {
@@ -403,13 +400,78 @@ impl RemoteSessionPicker {
             .scroll_to_item(selected, ScrollStrategy::Nearest);
         true
     }
-}
 
-fn cycle_index(current: usize, count: usize, reverse: bool) -> usize {
-    if reverse {
-        current.saturating_add(count).saturating_sub(1) % count
-    } else {
-        current.saturating_add(1) % count
+    fn remote_dropdown_options(&self, dropdown: RemoteSessionDropdown) -> (Arc<[String]>, usize) {
+        match dropdown {
+            RemoteSessionDropdown::Profile => (
+                self.profiles.clone().into(),
+                self.selected_profile
+                    .min(self.profiles.len().saturating_sub(1)),
+            ),
+            RemoteSessionDropdown::Template => (
+                self.templates
+                    .iter()
+                    .map(RemoteSessionTemplate::label)
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+                    .into(),
+                self.selected_template
+                    .min(self.templates.len().saturating_sub(1)),
+            ),
+        }
+    }
+
+    fn open_dropdown(&mut self, dropdown: RemoteSessionDropdown, anchor: Point<Pixels>) -> bool {
+        if dropdown == RemoteSessionDropdown::Profile
+            && (self.profiles_loading || self.profiles.is_empty())
+        {
+            return false;
+        }
+        let (options, selected) = self.remote_dropdown_options(dropdown);
+        if !self.dropdown.open(options, selected, anchor) {
+            return false;
+        }
+        self.open_dropdown = Some(dropdown);
+        self.field = match dropdown {
+            RemoteSessionDropdown::Profile => RemoteSessionField::Profile,
+            RemoteSessionDropdown::Template => RemoteSessionField::Template,
+        };
+        true
+    }
+
+    fn close_dropdown(&mut self) -> bool {
+        let was_open = self.open_dropdown.take().is_some();
+        if was_open {
+            self.dropdown.close();
+        }
+        was_open
+    }
+
+    fn commit_dropdown(&mut self, value: String) -> bool {
+        let Some(dropdown) = self.open_dropdown else {
+            return false;
+        };
+        let option_index = match dropdown {
+            RemoteSessionDropdown::Profile => {
+                self.profiles.iter().position(|profile| profile == &value)
+            }
+            RemoteSessionDropdown::Template => self
+                .templates
+                .iter()
+                .position(|template| template.label() == value),
+        };
+        let Some(option_index) = option_index else {
+            return false;
+        };
+        if !self.dropdown.query.is_empty() && !self.dropdown.rows.contains(&option_index) {
+            return false;
+        }
+        match dropdown {
+            RemoteSessionDropdown::Profile => self.selected_profile = option_index,
+            RemoteSessionDropdown::Template => self.selected_template = option_index,
+        }
+        self.close_dropdown();
+        true
     }
 }
 
@@ -1044,9 +1106,15 @@ impl Zetta {
         if self.remote_session_picker.is_none() {
             return false;
         }
+        if self.remote_session_dropdown_key_down(event, window, cx) {
+            return true;
+        }
         if event.keystroke.key == "escape" {
             self.dismiss_remote_session_picker(window, cx);
             cx.stop_propagation();
+            return true;
+        }
+        if self.open_remote_dropdown_from_key(event, window, cx) {
             return true;
         }
         if event.keystroke.key == "enter" {
@@ -1076,14 +1144,6 @@ impl Zetta {
             }
             ("left" | "right" | "space", RemoteSessionField::Protocol) => {
                 picker.toggle_transport();
-                cx.notify();
-            }
-            ("left" | "up" | "right" | "down", RemoteSessionField::Profile) => {
-                picker.cycle_profile(matches!(event.keystroke.key.as_str(), "left" | "up"));
-                cx.notify();
-            }
-            ("left" | "up" | "right" | "down", RemoteSessionField::Template) => {
-                picker.cycle_template(matches!(event.keystroke.key.as_str(), "left" | "up"));
                 cx.notify();
             }
             ("up" | "down", RemoteSessionField::Target) => {
@@ -1164,14 +1224,106 @@ impl Zetta {
         true
     }
 
+    fn remote_session_dropdown_key_down(
+        &mut self,
+        event: &KeyDownEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self
+            .remote_session_picker
+            .as_ref()
+            .is_none_or(|picker| picker.open_dropdown.is_none())
+        {
+            return false;
+        }
+        let action = self.remote_session_picker.as_mut().map(|picker| {
+            let command = event.keystroke.modifiers.control || event.keystroke.modifiers.platform;
+            picker.dropdown.key_down(event, command)
+        });
+        match action {
+            Some(SearchableDropdownAction::Close) => {
+                if let Some(picker) = self.remote_session_picker.as_mut() {
+                    picker.close_dropdown();
+                }
+                cx.notify();
+            }
+            Some(SearchableDropdownAction::Commit(Some(value))) => {
+                if let Some(picker) = self.remote_session_picker.as_mut() {
+                    picker.commit_dropdown(value);
+                }
+                cx.notify();
+            }
+            Some(SearchableDropdownAction::Tab { reverse }) => {
+                if let Some(picker) = self.remote_session_picker.as_mut() {
+                    picker.close_dropdown();
+                    picker.cycle_field(reverse);
+                    picker.reset_suggestion_navigation();
+                }
+                cx.notify();
+            }
+            Some(SearchableDropdownAction::Commit(None))
+            | Some(SearchableDropdownAction::Handled)
+            | None => cx.notify(),
+        }
+        cx.stop_propagation();
+        true
+    }
+
+    fn open_remote_dropdown_from_key(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(picker) = self.remote_session_picker.as_ref() else {
+            return false;
+        };
+        let dropdown = match picker.field {
+            RemoteSessionField::Profile => RemoteSessionDropdown::Profile,
+            RemoteSessionField::Template => RemoteSessionDropdown::Template,
+            _ => return false,
+        };
+        let direction = match event.keystroke.key.as_str() {
+            "up" | "left" => Some(-1),
+            "down" | "right" => Some(1),
+            "enter" | "space" => Some(0),
+            _ => None,
+        };
+        let Some(direction) = direction else {
+            return false;
+        };
+        let opened = self
+            .remote_session_picker
+            .as_mut()
+            .is_some_and(|picker| picker.open_dropdown(dropdown, window.mouse_position()));
+        if !opened {
+            return false;
+        }
+        if direction != 0
+            && let Some(picker) = self.remote_session_picker.as_mut()
+        {
+            picker.dropdown.move_selection(direction);
+        }
+        cx.notify();
+        cx.stop_propagation();
+        true
+    }
+
     pub(crate) fn remote_session_key_down_capture(
         &mut self,
         event: &KeyDownEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.remote_session_picker.is_some() && event.keystroke.key == "escape" {
-            self.dismiss_remote_session_picker(window, cx);
+        if event.keystroke.key == "escape"
+            && let Some(picker) = self.remote_session_picker.as_mut()
+        {
+            if picker.close_dropdown() {
+                cx.notify();
+            } else {
+                self.dismiss_remote_session_picker(window, cx);
+            }
             cx.stop_propagation();
         }
     }
@@ -1182,7 +1334,7 @@ impl Zetta {
         error_color: Hsla,
         handle: &WeakEntity<Self>,
         window: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &mut App,
     ) -> Option<AnyElement> {
         let picker = self.remote_session_picker.as_ref()?;
         let target = picker.target.clone();
@@ -1203,6 +1355,9 @@ impl Zetta {
         let suggestion_scroll = picker.suggestion_scroll.clone();
         let picker_scroll = picker.scroll.clone();
         let profiles_loading = picker.profiles_loading;
+        let profile_available = !profiles_loading && !picker.profiles.is_empty();
+        let open_dropdown = picker.open_dropdown;
+        let dropdown_state = picker.dropdown.render_state();
         let profile_value = picker
             .profiles
             .get(picker.selected_profile)
@@ -1221,6 +1376,9 @@ impl Zetta {
         let profile_error = picker.profile_error.clone();
         let can_create = picker.can_create();
         let creating = picker.creating;
+        let dropdown_popup = open_dropdown.map(|dropdown| {
+            remote_session_dropdown_popup(dropdown, colors.clone(), dropdown_state, handle.clone())
+        });
         let rows = remote_session_rows(handle, colors, &picker_scroll, sessions, selected);
 
         let cancel_handle = handle.clone();
@@ -1238,36 +1396,15 @@ impl Zetta {
         let suggestion_rows =
             remote_session_suggestion_list(suggestion_rows, &suggestion_scroll, window, cx);
 
-        let session_list = div()
-            .id("remote-session-list-panel")
-            .w_full()
-            .rounded(px(4.))
-            .border_1()
-            .border_color(if field == RemoteSessionField::List {
-                colors.border_focused
-            } else {
-                transparent_black()
-            })
-            .when(session_count > 0, |panel| panel.child(rows))
-            .when(session_count == 0 && !loading && error.is_none(), |panel| {
-                panel.child(
-                    div()
-                        .h_16()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .text_sm()
-                        .text_color(colors.text_muted)
-                        .child("Enter a target and press Enter to load sessions."),
-                )
-            })
-            .when_some(error, |panel, error| {
-                panel.child(div().p_2().min_w_0().child(remote_session_error(
-                    error,
-                    error_color,
-                    LabelSize::Small,
-                )))
-            });
+        let session_list = remote_session_list_panel(
+            field,
+            colors,
+            error_color,
+            error,
+            loading,
+            session_count,
+            rows,
+        );
 
         let field_widget = |id: &'static str,
                             value: TextField,
@@ -1332,6 +1469,7 @@ impl Zetta {
                             profile: profile_value,
                             template: template_value,
                             profiles_loading,
+                            profile_available,
                             profile_error,
                             field,
                             colors,
@@ -1373,9 +1511,51 @@ impl Zetta {
                             creating,
                         })),
                 )
+                .when_some(dropdown_popup, |backdrop, popup| backdrop.child(popup))
                 .into_any_element(),
         )
     }
+}
+
+fn remote_session_list_panel(
+    field: RemoteSessionField,
+    colors: &ThemeColors,
+    error_color: Hsla,
+    error: Option<String>,
+    loading: bool,
+    session_count: usize,
+    rows: gpui::UniformList,
+) -> impl IntoElement {
+    div()
+        .id("remote-session-list-panel")
+        .w_full()
+        .rounded(px(4.))
+        .border_1()
+        .border_color(if field == RemoteSessionField::List {
+            colors.border_focused
+        } else {
+            transparent_black()
+        })
+        .when(session_count > 0, |panel| panel.child(rows))
+        .when(session_count == 0 && !loading && error.is_none(), |panel| {
+            panel.child(
+                div()
+                    .h_16()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_sm()
+                    .text_color(colors.text_muted)
+                    .child("Enter a target and press Enter to load sessions."),
+            )
+        })
+        .when_some(error, |panel, error| {
+            panel.child(div().p_2().min_w_0().child(remote_session_error(
+                error,
+                error_color,
+                LabelSize::Small,
+            )))
+        })
 }
 
 fn build_remote_create_spec(
@@ -1950,6 +2130,7 @@ struct RemoteSessionCreateOptions<'a> {
     profile: String,
     template: String,
     profiles_loading: bool,
+    profile_available: bool,
     profile_error: Option<String>,
     field: RemoteSessionField,
     colors: &'a ThemeColors,
@@ -1962,6 +2143,7 @@ fn remote_session_create_options(options: RemoteSessionCreateOptions<'_>) -> imp
         profile,
         template,
         profiles_loading,
+        profile_available,
         profile_error,
         field,
         colors,
@@ -1985,19 +2167,21 @@ fn remote_session_create_options(options: RemoteSessionCreateOptions<'_>) -> imp
             h_flex()
                 .w_full()
                 .gap_2()
-                .child(remote_session_choice(RemoteSessionChoice {
+                .child(remote_session_dropdown(RemoteSessionDropdownChoice {
                     id: "remote-session-profile",
                     label: "Profile",
                     value: profile,
+                    disabled: !profile_available,
                     field: RemoteSessionField::Profile,
                     focused: field == RemoteSessionField::Profile,
                     colors,
                     handle: handle.clone(),
                 }))
-                .child(remote_session_choice(RemoteSessionChoice {
+                .child(remote_session_dropdown(RemoteSessionDropdownChoice {
                     id: "remote-session-template",
                     label: "Template",
                     value: template,
+                    disabled: false,
                     field: RemoteSessionField::Template,
                     focused: field == RemoteSessionField::Template,
                     colors,
@@ -2018,70 +2202,114 @@ fn remote_session_error(error: String, error_color: Hsla, size: LabelSize) -> im
     )
 }
 
-struct RemoteSessionChoice<'a> {
+struct RemoteSessionDropdownChoice<'a> {
     id: &'static str,
     label: &'static str,
     value: String,
+    disabled: bool,
     field: RemoteSessionField,
     focused: bool,
     colors: &'a ThemeColors,
     handle: WeakEntity<Zetta>,
 }
 
-fn remote_session_choice(choice: RemoteSessionChoice<'_>) -> impl IntoElement {
-    let RemoteSessionChoice {
+fn remote_session_dropdown(choice: RemoteSessionDropdownChoice<'_>) -> impl IntoElement {
+    let RemoteSessionDropdownChoice {
         id,
         label,
         value,
+        disabled,
         field,
         focused,
         colors,
         handle,
     } = choice;
-    div()
-        .id(id)
-        .flex_1()
-        .min_w_0()
-        .h_10()
-        .px_2()
-        .flex()
-        .flex_col()
-        .justify_center()
-        .rounded(px(4.))
-        .border_1()
-        .border_color(if focused {
-            colors.border_focused
-        } else {
-            colors.border
-        })
-        .cursor_pointer()
-        .hover(|style| style.bg(colors.element_hover))
-        .on_click(move |_, _, cx| {
-            handle
+    let dropdown = match field {
+        RemoteSessionField::Profile => RemoteSessionDropdown::Profile,
+        RemoteSessionField::Template => RemoteSessionDropdown::Template,
+        _ => unreachable!(),
+    };
+    let menu_handle = handle;
+    let button = ButtonLike::new(id)
+        .style(ButtonStyle::Outlined)
+        .toggle_state(focused)
+        .selected_style(ButtonStyle::OutlinedCustom(colors.border_focused))
+        .full_width()
+        .height(px(40.).into())
+        .disabled(disabled)
+        .aria_value(value.clone())
+        .aria_expanded(focused)
+        .child(
+            h_flex()
+                .w_full()
+                .justify_between()
+                .child(
+                    div()
+                        .min_w_0()
+                        .flex_1()
+                        .flex()
+                        .flex_col()
+                        .items_start()
+                        .child(div().text_xs().text_color(colors.text_muted).child(label))
+                        .child(
+                            div()
+                                .min_w_0()
+                                .max_w_full()
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis()
+                                .text_sm()
+                                .child(value),
+                        ),
+                )
+                .child(
+                    Icon::new(IconName::ChevronDown)
+                        .size(IconSize::XSmall)
+                        .color(Color::Custom(colors.text_muted)),
+                ),
+        )
+        .on_click(move |event, _window, cx| {
+            menu_handle
                 .update(cx, |this, cx| {
-                    let Some(picker) = this.remote_session_picker.as_mut() else {
-                        return;
-                    };
-                    picker.field = field;
-                    match field {
-                        RemoteSessionField::Profile => picker.cycle_profile(false),
-                        RemoteSessionField::Template => picker.cycle_template(false),
-                        _ => {}
+                    if let Some(picker) = this.remote_session_picker.as_mut()
+                        && picker.open_dropdown(dropdown, event.position())
+                    {
+                        cx.notify();
                     }
-                    cx.notify();
                 })
                 .ok();
-        })
-        .child(div().text_xs().text_color(colors.text_muted).child(label))
-        .child(
-            div()
-                .min_w_0()
-                .overflow_hidden()
-                .whitespace_nowrap()
-                .text_ellipsis()
-                .text_sm()
-                .child(value),
-        )
+        });
+    div()
+        .flex_1()
+        .min_w_0()
+        .debug_selector(move || format!("{id}-trigger"))
+        .child(button)
+}
+
+fn remote_session_dropdown_popup(
+    dropdown: RemoteSessionDropdown,
+    colors: ThemeColors,
+    state: SearchableDropdownRenderState,
+    handle: WeakEntity<Zetta>,
+) -> AnyElement {
+    let menu_handle = handle;
+    let on_select = move |value: String, cx: &mut App| {
+        menu_handle
+            .update(cx, |this, cx| {
+                if let Some(picker) = this.remote_session_picker.as_mut() {
+                    picker.commit_dropdown(value);
+                }
+                cx.notify();
+            })
+            .ok();
+    };
+    searchable_dropdown_popup(
+        format!("remote-session-dropdown-{dropdown:?}"),
+        colors,
+        state,
+        |_, _| None,
+        on_select,
+    )
 }
 
 /// What the picker's action row needs to decide which buttons are live.

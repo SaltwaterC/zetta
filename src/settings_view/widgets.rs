@@ -1,4 +1,7 @@
 use super::*;
+pub(crate) use crate::searchable_dropdown::{
+    SearchableDropdownRenderState, searchable_dropdown_popup,
+};
 use crate::settings_ui::keymap::GLOBAL_CONTEXT_LABEL;
 
 /// Owned snapshot of the state needed to render the currently open dropdown's option
@@ -8,15 +11,7 @@ use crate::settings_ui::keymap::GLOBAL_CONTEXT_LABEL;
 /// row (the keymap bindings list) does not paint correctly.
 #[derive(Clone)]
 pub(crate) struct DropdownRenderState {
-    pub(crate) dropdown_index: usize,
-    pub(crate) dropdown_query: String,
-    /// The options, display rows, and measurement row snapshotted when the
-    /// dropdown opened or its query last changed (see `SettingsEditor`).
-    pub(crate) options: Arc<[String]>,
-    pub(crate) rows: Arc<[usize]>,
-    pub(crate) widest_row: Option<usize>,
-    pub(crate) dropdown_scroll: UniformListScrollHandle,
-    pub(crate) dropdown_anchor: Point<Pixels>,
+    pub(crate) dropdown: SearchableDropdownRenderState,
     pub(crate) profile_icon_automatic: Option<ProfileIcon>,
 }
 
@@ -28,12 +23,6 @@ pub(crate) const KEYMAP_ROW_HEIGHT: f32 = 56.;
 /// Width of the settings dialog's custom scrollbar track. Lists that draw the track over
 /// their own rows reserve this much trailing padding so the two never overlap.
 pub(crate) const SETTINGS_SCROLLBAR_WIDTH: f32 = 10.;
-
-/// Seven dropdown rows plus the list's two 4px padding edges fit exactly in
-/// the 260px viewport, so the virtualized list never paints a partial row.
-const DROPDOWN_OPTION_ROW_HEIGHT: Pixels = px(36.);
-const DROPDOWN_OPTIONS_MAX_HEIGHT: Pixels = px(260.);
-const DROPDOWN_LIST_VIEWPORT_HEIGHT: Pixels = px(252.);
 
 /// Owned snapshot of everything a keymap row needs to render, cloned once into
 /// the `uniform_list` row closure (see [`DropdownRenderState`] for why this
@@ -317,141 +306,24 @@ impl Zetta {
         state: DropdownRenderState,
     ) -> gpui::AnyElement {
         let id = format!("settings-dropdown-popup-{selection:?}");
-        let options = state.options.clone();
-        let active_index = state.dropdown_index.min(options.len().saturating_sub(1));
-        let dropdown_query = state.dropdown_query.clone();
         let profile_icon_automatic = state.profile_icon_automatic.clone();
-        let option_handle = handle.clone();
-        // Row indices into `options`, in display order; virtualized below so only the
-        // visible rows are ever built regardless of how many options exist.
-        let row_indices = state.rows.clone();
-        let no_matches = row_indices.is_empty();
-        let widest_row = state.widest_row;
-        let option_rows = {
-            let row_indices = row_indices.clone();
-            let list_colors = colors.clone();
-            let list_id = id.clone();
-            uniform_list(
-                format!("{id}-options-list"),
-                row_indices.len(),
-                move |range, _, _| {
-                    range
-                        .map(|row| {
-                            let index = row_indices[row];
-                            let value = options[index].clone();
-                            let selected = index == active_index;
-                            let icon = Self::profile_icon_dropdown_option(
-                                selection,
-                                &value,
-                                profile_icon_automatic.as_ref(),
-                            );
-                            let handle = option_handle.clone();
-                            div()
-                                .id(format!("{list_id}-option-{index}"))
-                                .h(DROPDOWN_OPTION_ROW_HEIGHT)
-                                .px_2()
-                                .py_1()
-                                .rounded(px(3.))
-                                .cursor_pointer()
-                                .overflow_hidden()
-                                .whitespace_nowrap()
-                                .text_ellipsis()
-                                .when(selected, |row| row.bg(list_colors.element_selected))
-                                .hover(|style| style.bg(list_colors.element_hover))
-                                .child(
-                                    h_flex()
-                                        .gap_2()
-                                        .when_some(icon, |row, icon| {
-                                            row.child(icon.render(IconSize::Small))
-                                        })
-                                        .child(value.clone()),
-                                )
-                                .on_click(move |_, _, cx| {
-                                    handle
-                                        .update(cx, |this, cx| {
-                                            this.set_settings_dropdown(
-                                                selection,
-                                                value.clone(),
-                                                cx,
-                                            );
-                                            if let Some(editor) = this.settings_editor.as_mut() {
-                                                editor.clear_dropdown();
-                                            }
-                                            cx.notify();
-                                        })
-                                        .ok();
-                                })
-                        })
-                        .collect::<Vec<_>>()
-                },
-            )
-            // The popover is content-sized, so the list has to derive its own height
-            // from its items; the default `Auto` behaviour only works when a parent
-            // hands the list a definite height, and here it collapses the list to zero.
-            .with_sizing_behavior(ListSizingBehavior::Infer)
-            .with_width_from_item(widest_row)
-            .max_h(DROPDOWN_LIST_VIEWPORT_HEIGHT)
-            .track_scroll(&state.dropdown_scroll)
+        let leading = move |value: &str, _colors: &ThemeColors| {
+            Self::profile_icon_dropdown_option(selection, value, profile_icon_automatic.as_ref())
+                .map(|icon| icon.render(IconSize::Small).into_any_element())
         };
-        // Keep the measured list inside its own capped flex item. Letting the
-        // UniformList itself be the popup's flex item can make its intrinsic
-        // height escape the cap in the unfiltered state. The padding belongs
-        // outside the list so its scroll viewport is an exact multiple of a
-        // row height at both ends of the scroll range.
-        let options_region = div()
-            .flex_none()
-            .max_h(DROPDOWN_OPTIONS_MAX_HEIGHT)
-            .p_1()
-            .child(option_rows.on_scroll_wheel(|_, _, cx| cx.stop_propagation()));
-        deferred(
-            anchored()
-                .position(state.dropdown_anchor)
-                .snap_to_window_with_margin(px(8.))
-                .child(
-                    div()
-                        .id(format!("{id}-options"))
-                        .min_w(px(180.))
-                        .max_w(px(560.))
-                        .rounded(px(4.))
-                        .border_1()
-                        .border_color(colors.border_focused)
-                        .bg(colors.elevated_surface_background)
-                        .text_color(colors.text)
-                        .shadow_lg()
-                        .flex()
-                        .flex_col()
-                        .overflow_hidden()
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .when(!dropdown_query.is_empty(), |menu| {
-                            menu.child(
-                                div()
-                                    .flex_none()
-                                    .px_2()
-                                    .py_1()
-                                    .text_xs()
-                                    .text_color(colors.text_muted)
-                                    .child(format!("Search: {dropdown_query}")),
-                            )
-                        })
-                        .child(if no_matches {
-                            div()
-                                .flex_none()
-                                .p_1()
-                                .child(
-                                    div()
-                                        .px_2()
-                                        .py_1()
-                                        .text_color(colors.text_muted)
-                                        .child("No matches"),
-                                )
-                                .into_any_element()
-                        } else {
-                            options_region.into_any_element()
-                        }),
-                ),
-        )
-        .with_priority(crate::app_render::MODAL_POPUP_PAINT_PRIORITY)
-        .into_any_element()
+        let menu_handle = handle.clone();
+        let on_select = move |value: String, cx: &mut App| {
+            menu_handle
+                .update(cx, |this, cx| {
+                    this.set_settings_dropdown(selection, value, cx);
+                    if let Some(editor) = this.settings_editor.as_mut() {
+                        editor.clear_dropdown();
+                    }
+                    cx.notify();
+                })
+                .ok();
+        };
+        searchable_dropdown_popup(id, colors, state.dropdown, leading, on_select)
     }
 
     fn profile_icon_dropdown_option(

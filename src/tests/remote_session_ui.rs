@@ -1,5 +1,5 @@
 use super::*;
-use gpui::{Context, FocusHandle, TestAppContext, UniformListScrollHandle, px, size};
+use gpui::{Context, FocusHandle, TestAppContext, UniformListScrollHandle, px, red, size};
 use std::{cell::Cell, rc::Rc};
 
 struct RemoteSessionEscapeHarness {
@@ -42,6 +42,27 @@ impl Render for RemoteSessionEscapeHarness {
                         }),
                 ),
             )
+    }
+}
+
+struct RemoteSessionDropdownHarness {
+    zetta: Entity<Zetta>,
+}
+
+impl Render for RemoteSessionDropdownHarness {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let handle = self.zetta.downgrade();
+        self.zetta
+            .update(cx, |zetta, zetta_cx| {
+                zetta.render_remote_session_overlay(
+                    &ThemeColors::light(),
+                    red(),
+                    &handle,
+                    window,
+                    zetta_cx,
+                )
+            })
+            .expect("the remote picker should be open")
     }
 }
 
@@ -152,7 +173,7 @@ fn single_pane_precedes_sorted_configured_templates() {
 }
 
 #[test]
-fn template_cycling_wraps_between_single_pane_and_configured_templates() {
+fn opening_a_remote_dropdown_does_not_change_its_selection() {
     let mut picker = RemoteSessionPicker {
         templates: vec![
             RemoteSessionTemplate::SinglePane,
@@ -162,14 +183,90 @@ fn template_cycling_wraps_between_single_pane_and_configured_templates() {
         ..Default::default()
     };
 
-    picker.cycle_template(false);
-    assert_eq!(picker.selected_template, 1);
-    picker.cycle_template(false);
-    assert_eq!(picker.selected_template, 2);
-    picker.cycle_template(false);
+    assert!(picker.open_dropdown(RemoteSessionDropdown::Template, Point::default()));
+
     assert_eq!(picker.selected_template, 0);
-    picker.cycle_template(true);
+    assert_eq!(picker.dropdown.selected_index, 0);
+}
+
+#[test]
+fn searching_and_committing_a_remote_template_updates_the_selection() {
+    let mut picker = RemoteSessionPicker {
+        templates: vec![
+            RemoteSessionTemplate::SinglePane,
+            RemoteSessionTemplate::Configured("one-right".to_owned()),
+            RemoteSessionTemplate::Configured("two-right".to_owned()),
+        ],
+        ..Default::default()
+    };
+
+    picker.open_dropdown(RemoteSessionDropdown::Template, Point::default());
+    picker.dropdown.set_query("two");
+
+    assert!(picker.commit_dropdown("two-right".to_owned()));
     assert_eq!(picker.selected_template, 2);
+    assert_eq!(picker.open_dropdown, None);
+}
+
+#[test]
+fn searching_and_committing_a_remote_profile_updates_the_selection() {
+    let mut picker = RemoteSessionPicker {
+        profiles: vec!["System".to_owned(), "Remote shell".to_owned()],
+        ..Default::default()
+    };
+
+    picker.open_dropdown(RemoteSessionDropdown::Profile, Point::default());
+    picker.dropdown.set_query("shell");
+
+    assert!(picker.commit_dropdown("Remote shell".to_owned()));
+    assert_eq!(picker.selected_profile, 1);
+    assert_eq!(picker.open_dropdown, None);
+}
+
+#[test]
+fn a_no_match_remote_query_cannot_commit() {
+    let mut picker = RemoteSessionPicker {
+        templates: vec![
+            RemoteSessionTemplate::SinglePane,
+            RemoteSessionTemplate::Configured("one".to_owned()),
+        ],
+        ..Default::default()
+    };
+
+    picker.open_dropdown(RemoteSessionDropdown::Template, Point::default());
+    picker.dropdown.set_query("missing");
+
+    assert!(!picker.commit_dropdown("one".to_owned()));
+    assert_eq!(picker.selected_template, 0);
+    assert_eq!(picker.open_dropdown, Some(RemoteSessionDropdown::Template));
+}
+
+#[test]
+fn remote_dropdown_escape_closes_without_dismissing_the_picker() {
+    let mut picker = RemoteSessionPicker {
+        profiles: vec!["System".to_owned()],
+        ..Default::default()
+    };
+
+    picker.open_dropdown(RemoteSessionDropdown::Profile, Point::default());
+
+    assert!(picker.close_dropdown());
+    assert_eq!(picker.open_dropdown, None);
+    assert_eq!(picker.field, RemoteSessionField::Profile);
+}
+
+#[test]
+fn remote_profile_dropdown_cannot_open_while_loading_or_without_options() {
+    let mut picker = RemoteSessionPicker {
+        profiles_loading: true,
+        profiles: vec!["System".to_owned()],
+        ..Default::default()
+    };
+    assert!(!picker.open_dropdown(RemoteSessionDropdown::Profile, Point::default()));
+
+    picker.profiles_loading = false;
+    picker.profiles.clear();
+    assert!(!picker.open_dropdown(RemoteSessionDropdown::Profile, Point::default()));
 }
 
 #[test]
@@ -369,6 +466,29 @@ fn remote_picker_capture_escape_dismisses_error_and_ignores_stale_results(cx: &m
     assert!(zetta.update(cx, |zetta, _| zetta.remote_session_picker.is_none()));
 
     zetta.update(cx, |zetta, _| {
+        let mut picker = RemoteSessionPicker {
+            field: RemoteSessionField::Profile,
+            profiles: vec!["System".to_owned()],
+            ..Default::default()
+        };
+        assert!(picker.open_dropdown(RemoteSessionDropdown::Profile, Point::default()));
+        zetta.remote_session_picker = Some(picker);
+    });
+    harness.update_in(cx, |harness, window, cx| {
+        harness.child_focus.focus(window, cx);
+    });
+    cx.run_until_parked();
+    cx.simulate_keystrokes("escape");
+    assert!(zetta.update(cx, |zetta, _| {
+        zetta
+            .remote_session_picker
+            .as_ref()
+            .is_some_and(|picker| picker.open_dropdown.is_none())
+    }));
+    cx.simulate_keystrokes("escape");
+    assert!(zetta.update(cx, |zetta, _| zetta.remote_session_picker.is_none()));
+
+    zetta.update(cx, |zetta, _| {
         zetta.remote_session_picker = Some(RemoteSessionPicker {
             generation: 7,
             ..Default::default()
@@ -390,6 +510,73 @@ fn remote_picker_capture_escape_dismisses_error_and_ignores_stale_results(cx: &m
         "a result for a dismissed picker must not restore its focus"
     );
     assert!(zetta.update(cx, |zetta, _| zetta.remote_session_picker.is_none()));
+}
+
+#[gpui::test]
+fn remote_dropdown_triggers_render_an_anchored_popup_and_commit_selection(cx: &mut TestAppContext) {
+    cx.update(|cx| theme_settings::init(theme::LoadThemes::JustBase, cx));
+    let (harness, cx) = cx.add_window_view(move |window, cx| {
+        let mut config = Config::defaults(None, None);
+        config.profiles.clear();
+        let zetta = cx.new(|cx| {
+            let mut zetta = Zetta::new(
+                config,
+                None,
+                ZettaLaunchOptions {
+                    no_mux: true,
+                    ..Default::default()
+                },
+                window,
+                cx,
+            );
+            zetta.remote_session_picker = Some(RemoteSessionPicker {
+                field: RemoteSessionField::Profile,
+                profiles: vec!["System".to_owned(), "Remote shell".to_owned()],
+                templates: vec![
+                    RemoteSessionTemplate::SinglePane,
+                    RemoteSessionTemplate::Configured("one-right".to_owned()),
+                ],
+                ..Default::default()
+            });
+            zetta
+        });
+        RemoteSessionDropdownHarness { zetta }
+    });
+    cx.simulate_resize(size(px(720.), px(600.)));
+    cx.run_until_parked();
+
+    assert!(cx.debug_bounds("remote-session-profile-trigger").is_some());
+    let template_trigger = cx
+        .debug_bounds("remote-session-template-trigger")
+        .expect("the template trigger should be laid out");
+    cx.simulate_click(template_trigger.center(), Default::default());
+    cx.run_until_parked();
+
+    let popup = cx
+        .debug_bounds("remote-session-dropdown-Template-options")
+        .expect("the template popup should be anchored and visible");
+    assert!(
+        cx.debug_bounds("dropdown-first-option").is_some(),
+        "the popup should render visible option rows"
+    );
+    let configured_option = cx
+        .debug_bounds("dropdown-second-option")
+        .expect("the configured template row should be visible");
+    assert!(configured_option.origin.x >= popup.origin.x);
+    cx.simulate_click(configured_option.center(), Default::default());
+    cx.run_until_parked();
+
+    let (selected_template, popup_closed) = harness.update(cx, |harness, cx| {
+        let picker = harness
+            .zetta
+            .read(cx)
+            .remote_session_picker
+            .as_ref()
+            .expect("the picker should remain open after selection");
+        (picker.selected_template, picker.open_dropdown.is_none())
+    });
+    assert_eq!(selected_template, 1);
+    assert!(popup_closed);
 }
 
 #[gpui::test]

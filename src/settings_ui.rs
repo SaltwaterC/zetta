@@ -214,7 +214,7 @@ pub(crate) struct SettingsEditor {
     pub(crate) keymap_search: TextField,
     pub(crate) settings_scroll: ScrollHandle,
     pub(crate) profile_draft_scroll: ScrollHandle,
-    pub(crate) dropdown_scroll: UniformListScrollHandle,
+    pub(crate) dropdown: SearchableDropdown,
     pub(crate) font_scroll: UniformListScrollHandle,
     pub(crate) keymap_scroll: UniformListScrollHandle,
     pub(crate) numeric_repeat_generation: u64,
@@ -228,14 +228,6 @@ pub(crate) struct SettingsEditor {
     pub(crate) focus_scroll_request: Option<(SettingsControl, Pixels)>,
     pub(crate) keymap_capture: Option<KeymapCapture>,
     pub(crate) open_dropdown: Option<SettingsDropdown>,
-    pub(crate) dropdown_index: usize,
-    pub(crate) dropdown_query: String,
-    /// Window-space point the open dropdown's option popover is anchored to, captured from
-    /// the click (or, for keyboard activation, the cursor position) that opened it. The popover
-    /// renders as a sibling of the settings dialog rather than nested in place, because a
-    /// `deferred`+`anchored` popover positioned inline inside a virtualized `uniform_list` row
-    /// (the keymap bindings list) does not paint correctly.
-    pub(crate) dropdown_anchor: Point<Pixels>,
     pub(crate) configuration_dirty: bool,
     pub(crate) keymap_dirty: bool,
     pub(crate) message: Option<(bool, String)>,
@@ -252,15 +244,6 @@ pub(crate) struct SettingsEditor {
     /// changes so rendering never rebuilds them per frame.
     pub(crate) keymap_rows_cache: Option<Arc<[KeymapRow]>>,
     pub(crate) keymap_row_data_cache: Option<Arc<[KeymapRowData]>>,
-    /// Render-ready snapshot of the open dropdown's option popover: every option,
-    /// the rows to display (all of them, or the query's fuzzy matches, in display
-    /// order), and the row `uniform_list` must measure to size the popover. Only
-    /// one dropdown is ever open at a time, and rendering it must not rebuild
-    /// these per frame, so they are refreshed when it opens and when its query
-    /// changes.
-    pub(crate) open_dropdown_options: Arc<[String]>,
-    pub(crate) open_dropdown_rows: Arc<[usize]>,
-    pub(crate) open_dropdown_widest_row: Option<usize>,
     pub(crate) font_filtered_indices: Option<Arc<[usize]>>,
     pub(crate) font_search_query_cache: String,
 
@@ -299,7 +282,7 @@ fn prepare_settings_save(
 impl SettingsEditor {
     pub(crate) fn clear_dropdown(&mut self) {
         self.open_dropdown = None;
-        self.dropdown_query.clear();
+        self.dropdown.close();
     }
 
     /// Refresh the global configuration form after an external configuration
@@ -394,69 +377,6 @@ fn matching_font_position(
     matching_font_indices(normalized_fonts, query)
         .iter()
         .position(|index| *index == font_index)
-}
-
-fn fuzzy_score(candidate: &str, query: &str) -> Option<i32> {
-    let candidate = candidate.to_lowercase();
-    let query = query.to_lowercase();
-    if query.is_empty() {
-        return Some(0);
-    }
-
-    let mut characters = query.chars();
-    let mut wanted = characters.next()?;
-    let mut score = 0;
-    let mut previous_match = None;
-    for (index, character) in candidate.char_indices() {
-        if character != wanted {
-            continue;
-        }
-        score += 10;
-        if previous_match.is_some_and(|previous| previous + character.len_utf8() == index) {
-            score += 8;
-        }
-        if index == 0
-            || candidate[..index]
-                .chars()
-                .next_back()
-                .is_some_and(|previous| matches!(previous, ' ' | ':' | '_' | '-'))
-        {
-            score += 5;
-        }
-        previous_match = Some(index);
-        match characters.next() {
-            Some(next) => wanted = next,
-            None => return Some(score - candidate.len() as i32 / 8),
-        }
-    }
-    None
-}
-
-fn fuzzy_match_index(options: &[String], query: &str) -> Option<usize> {
-    if query.is_empty() {
-        return (!options.is_empty()).then_some(0);
-    }
-    options
-        .iter()
-        .enumerate()
-        .filter_map(|(index, option)| fuzzy_score(option, query).map(|score| (index, score)))
-        .max_by(|(left_index, left_score), (right_index, right_score)| {
-            left_score
-                .cmp(right_score)
-                .then_with(|| right_index.cmp(left_index))
-        })
-        .map(|(index, _)| index)
-}
-
-pub(crate) fn fuzzy_match_indices(options: &[String], query: &str) -> Vec<usize> {
-    if query.is_empty() {
-        return (0..options.len()).collect();
-    }
-    options
-        .iter()
-        .enumerate()
-        .filter_map(|(index, option)| fuzzy_score(option, query).map(|_| index))
-        .collect()
 }
 
 pub(crate) fn adjusted_scroll_history(current: u64, direction: i32, maximum: u64) -> u64 {
@@ -637,7 +557,7 @@ impl Zetta {
             keymap_search: TextField::new(""),
             settings_scroll: ScrollHandle::new(),
             profile_draft_scroll: ScrollHandle::new(),
-            dropdown_scroll: UniformListScrollHandle::new(),
+            dropdown: SearchableDropdown::default(),
             font_scroll: UniformListScrollHandle::new(),
             keymap_scroll: UniformListScrollHandle::new(),
             numeric_repeat_generation: 0,
@@ -647,9 +567,6 @@ impl Zetta {
             focus_scroll_request: None,
             keymap_capture: None,
             open_dropdown: None,
-            dropdown_index: 0,
-            dropdown_query: String::new(),
-            dropdown_anchor: Point::default(),
             configuration_dirty: false,
             keymap_dirty: false,
             message: None,
@@ -663,9 +580,6 @@ impl Zetta {
             keymap_filtered_bindings: HashMap::new(),
             keymap_rows_cache: None,
             keymap_row_data_cache: None,
-            open_dropdown_options: Arc::from([]),
-            open_dropdown_rows: Arc::from([]),
-            open_dropdown_widest_row: None,
             font_filtered_indices: None,
             font_search_query_cache: String::new(),
             controls_cache: None,
@@ -1041,50 +955,30 @@ impl Zetta {
             .and_then(|editor| editor.open_dropdown)
             .is_some()
         {
-            match event.keystroke.key.as_str() {
-                "escape" => {
-                    if let Some(editor) = self.settings_editor.as_mut() {
-                        editor.clear_dropdown();
-                        cx.notify();
-                    }
-                }
-                "up" => {
-                    self.move_open_settings_dropdown(-1, cx);
-                }
-                "down" => {
-                    self.move_open_settings_dropdown(1, cx);
-                }
-                "left" => {
-                    self.move_open_settings_dropdown(-1, cx);
-                }
-                "right" => {
-                    self.move_open_settings_dropdown(1, cx);
-                }
-                "enter" | "space" => {
-                    self.commit_open_settings_dropdown(cx);
-                }
-                "backspace" => {
-                    self.type_into_open_settings_dropdown(event, command, cx);
-                }
-                "tab" => {
+            let action = self
+                .settings_editor
+                .as_mut()
+                .map(|editor| editor.dropdown.key_down(event, command));
+            match action {
+                Some(SearchableDropdownAction::Close) => {
                     if let Some(editor) = self.settings_editor.as_mut() {
                         editor.clear_dropdown();
                     }
-                    self.focus_adjacent_settings_control(
-                        event.keystroke.modifiers.shift,
-                        window,
-                        cx,
-                    );
+                    cx.notify();
                 }
-                _ if !command
-                    && !event.keystroke.modifiers.alt
-                    && event.keystroke.key_char.is_some() =>
-                {
-                    self.type_into_open_settings_dropdown(event, command, cx);
+                Some(SearchableDropdownAction::Commit(Some(value))) => {
+                    self.commit_open_settings_dropdown_value(value, cx);
                 }
-                _ => {
-                    cx.stop_propagation();
-                    return true;
+                Some(SearchableDropdownAction::Tab { reverse }) => {
+                    if let Some(editor) = self.settings_editor.as_mut() {
+                        editor.clear_dropdown();
+                    }
+                    self.focus_adjacent_settings_control(reverse, window, cx);
+                }
+                Some(SearchableDropdownAction::Commit(None))
+                | Some(SearchableDropdownAction::Handled)
+                | None => {
+                    cx.notify();
                 }
             }
             cx.stop_propagation();

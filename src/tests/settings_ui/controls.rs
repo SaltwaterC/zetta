@@ -55,25 +55,25 @@ fn dropdown_snapshot_is_empty_when_nothing_matches() {
 fn filtered_dropdown_selection_scrolls_to_its_visible_row() {
     let config = Config::parse("{}", None, None).unwrap();
     let mut editor = configuration_editor(&config);
-    editor.open_dropdown_rows = Arc::from([1usize, 4, 9]);
-    editor.dropdown_index = 4;
+    editor.dropdown.rows = Arc::from([1usize, 4, 9]);
+    editor.dropdown.selected_index = 4;
 
     scroll_open_dropdown_to_selection(&mut editor);
 
-    assert_eq!(editor.dropdown_index, 4);
-    assert_eq!(editor.dropdown_scroll.logical_scroll_top_index(), 1);
+    assert_eq!(editor.dropdown.selected_index, 4);
+    assert_eq!(editor.dropdown.scroll.logical_scroll_top_index(), 1);
 }
 
 #[test]
 fn dropdown_scroll_uses_the_filtered_row_index() {
     let config = Config::parse("{}", None, None).unwrap();
     let mut editor = configuration_editor(&config);
-    editor.open_dropdown_rows = Arc::from([4, 17, 29]);
-    editor.dropdown_index = 29;
+    editor.dropdown.rows = Arc::from([4, 17, 29]);
+    editor.dropdown.selected_index = 29;
 
     scroll_open_dropdown_to_selection(&mut editor);
 
-    assert_eq!(editor.dropdown_scroll.logical_scroll_top_index(), 2);
+    assert_eq!(editor.dropdown.scroll.logical_scroll_top_index(), 2);
 }
 
 #[test]
@@ -179,13 +179,13 @@ fn dismissing_the_profile_modal_clears_each_draft_dropdown() {
             detected: false,
         });
         editor.open_dropdown = Some(dropdown);
-        editor.dropdown_query = "profile".to_owned();
+        editor.dropdown.query = "profile".to_owned();
 
         editor.dismiss_profile_draft();
 
         assert!(editor.profile_draft.is_none());
         assert_eq!(editor.open_dropdown, None);
-        assert!(editor.dropdown_query.is_empty());
+        assert!(editor.dropdown.query.is_empty());
     }
 }
 
@@ -252,7 +252,7 @@ pub(crate) fn configuration_editor(config: &Config) -> SettingsEditor {
         keymap_search: TextField::default(),
         settings_scroll: ScrollHandle::new(),
         profile_draft_scroll: ScrollHandle::new(),
-        dropdown_scroll: UniformListScrollHandle::new(),
+        dropdown: SearchableDropdown::default(),
         font_scroll: UniformListScrollHandle::new(),
         keymap_scroll: UniformListScrollHandle::new(),
         numeric_repeat_generation: 0,
@@ -262,9 +262,6 @@ pub(crate) fn configuration_editor(config: &Config) -> SettingsEditor {
         focus_scroll_request: None,
         keymap_capture: None,
         open_dropdown: None,
-        dropdown_index: 0,
-        dropdown_query: String::new(),
-        dropdown_anchor: Point::default(),
         configuration_dirty: false,
         keymap_dirty: false,
         message: None,
@@ -276,9 +273,6 @@ pub(crate) fn configuration_editor(config: &Config) -> SettingsEditor {
         keymap_filtered_bindings: std::collections::HashMap::new(),
         keymap_rows_cache: None,
         keymap_row_data_cache: None,
-        open_dropdown_options: Arc::from([]),
-        open_dropdown_rows: Arc::from([]),
-        open_dropdown_widest_row: None,
         font_filtered_indices: None,
         font_search_query_cache: String::new(),
         controls_cache: None,

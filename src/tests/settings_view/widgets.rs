@@ -1,77 +1,19 @@
 use super::*;
-use gpui::{Bounds, TestAppContext, UniformListScrollHandle, point, px};
+use gpui::{Bounds, TestAppContext, point, px};
 
 struct DropdownMenuHarness {
-    query: &'static str,
-    option_count: usize,
-    scroll: UniformListScrollHandle,
+    dropdown: SearchableDropdown,
 }
 
 impl Render for DropdownMenuHarness {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        let option_count = self.option_count;
-        let scroll = self.scroll.clone();
-        let option_rows =
-            uniform_list("dropdown-options-list", option_count, move |range, _, _| {
-                range
-                    .map(|index| {
-                        div()
-                            .id(format!("dropdown-option-{index}"))
-                            .h(DROPDOWN_OPTION_ROW_HEIGHT)
-                            .px_2()
-                            .py_1()
-                            .when(index == 0, |row| {
-                                row.debug_selector(|| "dropdown-first-option".to_owned())
-                            })
-                            .when(index == 6, |row| {
-                                row.debug_selector(|| "dropdown-seventh-option".to_owned())
-                            })
-                            .when(index == 7, |row| {
-                                row.debug_selector(|| "dropdown-eighth-option".to_owned())
-                            })
-                            .child(format!("Option {index}"))
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .with_sizing_behavior(ListSizingBehavior::Infer)
-            .max_h(DROPDOWN_LIST_VIEWPORT_HEIGHT)
-            .track_scroll(&scroll)
-            .into_any_element();
-        let options_region = div()
-            .flex_none()
-            .max_h(DROPDOWN_OPTIONS_MAX_HEIGHT)
-            .p_1()
-            .debug_selector(|| "dropdown-options-region".to_owned())
-            .child(option_rows);
-        let no_matches = option_count == 0;
-
-        let menu = div()
-            .id("dropdown-menu")
-            .w(px(320.))
-            .flex()
-            .flex_col()
-            .overflow_hidden()
-            .when(!self.query.is_empty(), |menu| {
-                menu.child(
-                    div()
-                        .flex_none()
-                        .debug_selector(|| "dropdown-search-banner".to_owned())
-                        .px_2()
-                        .py_1()
-                        .child(format!("Search: {}", self.query)),
-                )
-            })
-            .child(if no_matches {
-                div()
-                    .flex_none()
-                    .debug_selector(|| "dropdown-no-matches".to_owned())
-                    .p_1()
-                    .child("No matches")
-                    .into_any_element()
-            } else {
-                options_region.into_any_element()
-            });
-
+        let popup = searchable_dropdown_popup(
+            "dropdown".to_owned(),
+            ThemeColors::light(),
+            self.dropdown.render_state(),
+            |_value, _colors| None,
+            |_value: String, _cx: &mut App| {},
+        );
         div()
             .size_full()
             .relative()
@@ -86,16 +28,12 @@ impl Render for DropdownMenuHarness {
                     .flex()
                     .flex_col()
                     .overflow_hidden()
-                    .child(div().flex_none().h(px(48.)))
-                    .child(div().flex_none().h(px(36.)))
-                    .child(div().flex_1())
-                    .child(deferred(
-                        anchored().position(point(px(24.), px(24.))).child(menu),
-                    )),
+                    .child(popup),
             )
     }
 }
 
+#[derive(Debug)]
 struct DropdownMenuGeometry {
     search: Option<Bounds<Pixels>>,
     first_option: Option<Bounds<Pixels>>,
@@ -111,13 +49,14 @@ fn render_dropdown_menu(
     option_count: usize,
     cx: &mut TestAppContext,
 ) -> DropdownMenuGeometry {
-    let scroll = UniformListScrollHandle::new();
-    let scroll_for_view = scroll.clone();
-    let (_view, cx) = cx.add_window_view(move |_, _| DropdownMenuHarness {
-        query,
-        option_count,
-        scroll: scroll_for_view,
-    });
+    let options = (0..option_count)
+        .map(|index| format!("Option {index}"))
+        .collect::<Vec<_>>();
+    let mut dropdown = SearchableDropdown::default();
+    dropdown.open(options.into(), 0, point(px(24.), px(24.)));
+    dropdown.set_query(query);
+    let scroll = dropdown.scroll.clone();
+    let (_view, cx) = cx.add_window_view(move |_, _| DropdownMenuHarness { dropdown });
     cx.run_until_parked();
 
     DropdownMenuGeometry {
@@ -176,7 +115,7 @@ fn dropdown_search_layout_handles_no_search_and_no_matches(cx: &mut TestAppConte
     );
     assert!(
         no_search.first_option.is_some(),
-        "options must still render without a search query"
+        "options must still render without a search query: {no_search:?}"
     );
     assert!(
         no_search
