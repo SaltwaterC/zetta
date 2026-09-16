@@ -228,6 +228,15 @@ pub trait EventedPty: EventedReadWrite {
         false
     }
 
+    /// Requests a full repaint from the foreground process without changing
+    /// the PTY geometry.
+    ///
+    /// This is needed when a terminal emulator takes over an existing PTY at
+    /// the size it already has. Reapplying that size does not produce a
+    /// `SIGWINCH` on Unix, so a differential TUI would otherwise keep drawing
+    /// against the old emulator's screen.
+    fn redraw(&mut self) {}
+
     /// Updates legacy console colors where the platform exposes them.
     fn set_console_palette(&mut self, _palette: ConsolePalette) {}
 }

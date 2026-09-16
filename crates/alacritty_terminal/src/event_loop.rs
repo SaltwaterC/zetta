@@ -82,6 +82,10 @@ pub enum Msg {
     /// Instruction to resize the PTY.
     Resize(WindowSize),
 
+    /// Asks the foreground process to repaint even when the PTY's dimensions
+    /// did not change.
+    Redraw,
+
     /// Updates the legacy Win32 colors associated with the pseudoconsole.
     #[cfg(windows)]
     SetConsolePalette(tty::ConsolePalette),
@@ -236,6 +240,7 @@ where
             match msg {
                 Msg::Input(input) => state.write_list.push_back(input),
                 Msg::Resize(window_size) => self.pty.on_resize(window_size),
+                Msg::Redraw => self.pty.redraw(),
                 #[cfg(windows)]
                 Msg::SetConsolePalette(palette) => self.pty.set_console_palette(palette),
                 Msg::Shutdown => return false,

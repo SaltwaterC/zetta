@@ -17,6 +17,7 @@ pub mod headless;
 pub mod paths;
 #[cfg(feature = "session-persistence")]
 pub mod persistence;
+mod process_status;
 pub mod protocol;
 pub mod reconnect;
 #[cfg(unix)]

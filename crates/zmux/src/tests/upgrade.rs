@@ -15,6 +15,7 @@ fn handover() -> Handover {
         generation: 17,
         next_session_id: 5,
         next_pane_id: 9,
+        retention: crate::retention::Retention::Disk,
         sessions: vec![SessionHandover {
             id: 1,
             summary: crate::protocol::BackgroundSessionSummary {
@@ -65,6 +66,7 @@ fn handover() -> Handover {
                         input_sent: true,
                     }],
                 },
+                attachment_client_id: None,
                 columns: 100,
                 lines: 30,
                 exited: false,
@@ -81,6 +83,7 @@ fn a_handover_round_trips_through_its_anonymous_file() {
     let restored = read_handover(file.into_raw_fd()).unwrap();
 
     assert_eq!(restored.next_session_id, 5);
+    assert_eq!(restored.retention, crate::retention::Retention::Disk);
     assert_eq!(restored.sessions[0].panes[0].descriptor, 7);
     assert_eq!(restored.sessions[0].panes[0].retained, b"output");
     assert_eq!(
@@ -144,6 +147,45 @@ fn a_panes_mode_and_size_survive_the_handover() {
     }
     // Restarting from a default silently resized every adopted pane.
     assert_eq!((pane.columns, pane.lines), (100, 30));
+}
+
+#[test]
+fn an_exclusive_attachment_identity_survives_the_handover() {
+    let mut exclusive = handover();
+    exclusive.sessions[0].panes[0].attachment = AttachmentHandover::Exclusive { holder: 4321 };
+    exclusive.sessions[0].panes[0].attachment_client_id =
+        Some(crate::messages::ClientId::new("exclusive-lease"));
+    let file = write_handover(&exclusive).unwrap();
+    let restored = read_handover(file.into_raw_fd()).unwrap();
+
+    assert_eq!(
+        restored.sessions[0].panes[0]
+            .attachment_client_id
+            .as_ref()
+            .map(crate::messages::ClientId::as_str),
+        Some("exclusive-lease")
+    );
+}
+
+#[test]
+fn a_handover_from_before_attachment_identity_is_still_accepted() {
+    let mut encoded = serde_json::to_value(handover()).unwrap();
+    encoded["sessions"][0]["panes"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("attachment_client_id");
+
+    let restored: Handover = serde_json::from_value(encoded).unwrap();
+    assert!(restored.sessions[0].panes[0].attachment_client_id.is_none());
+}
+
+#[test]
+fn a_handover_from_before_unix_retention_is_still_accepted() {
+    let mut encoded = serde_json::to_value(handover()).unwrap();
+    encoded.as_object_mut().unwrap().remove("retention");
+
+    let restored: Handover = serde_json::from_value(encoded).unwrap();
+    assert_eq!(restored.retention, crate::retention::Retention::default());
 }
 
 #[test]

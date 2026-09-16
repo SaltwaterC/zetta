@@ -1017,6 +1017,59 @@ fn an_opaque_listing_leaves_a_record_alone_while_its_daemon_answers() {
 
 #[cfg(feature = "session-persistence")]
 #[test]
+fn cli_listing_never_offers_a_disk_record_for_a_live_catalog_session() {
+    let identity = age::x25519::Identity::generate();
+    let daemon = TestDaemon::start_with_recipient(&identity.to_public().to_string());
+    let client = daemon.client();
+    let pane = client
+        .spawn(spawn_request(None, "printf ready; sleep 60"))
+        .unwrap();
+    let descriptor = std::fs::File::from(pane.descriptor);
+    read_until(&descriptor, "ready");
+    drop(descriptor);
+    client
+        .detach(
+            pane.session_id,
+            summary(pane.session_id, pane.pane_id),
+            serde_json::Value::Null,
+            None,
+            Vec::new(),
+        )
+        .unwrap();
+
+    // Model the bad state left by the old Unix upgrade: the live catalog and
+    // the cleartext manifest name the same session, but the manifest claims it
+    // is recoverable. Listing must resolve that disagreement toward the live
+    // process rather than offering a destructive duplicate restore.
+    let manifest_path = daemon.sessions_dir().join("persistence/manifest.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+    manifest["records"][0]["restorable"] = serde_json::Value::Bool(true);
+    std::fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+
+    let output = Command::new(daemon_binary())
+        .args(["list", "--json"])
+        .env("XDG_CONFIG_HOME", &daemon.config)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let listed: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(listed["catalogs"][0]["sessions"][0]["id"], pane.session_id);
+    assert_eq!(listed["restorable"], serde_json::json!([]));
+
+    client.kill(pane.session_id).unwrap();
+}
+
+#[cfg(feature = "session-persistence")]
+#[test]
 fn reconfiguring_to_disk_keeps_an_existing_process_and_creates_encrypted_persistence() {
     let identity = age::x25519::Identity::generate();
     let daemon = TestDaemon::start();
@@ -2094,6 +2147,67 @@ fn an_upgrade_keeps_the_sessions_and_their_processes() {
     }
 }
 
+#[cfg(feature = "session-persistence")]
+#[test]
+fn an_upgrade_keeps_live_disk_records_unrestorable() {
+    let _upgrade_test_guard = upgrade_test_guard();
+    let identity = age::x25519::Identity::generate();
+    let daemon = TestDaemon::start_with_recipient(&identity.to_public().to_string());
+    let client = daemon.client();
+    let pane = client
+        .spawn(spawn_request(None, "printf ready; sleep 60"))
+        .unwrap();
+    let descriptor = std::fs::File::from(pane.descriptor);
+    read_until(&descriptor, "ready");
+    drop(descriptor);
+    client
+        .detach(
+            pane.session_id,
+            summary(pane.session_id, pane.pane_id),
+            serde_json::Value::Null,
+            None,
+            Vec::new(),
+        )
+        .unwrap();
+    assert!(client.list_with_restorable().unwrap().1.is_empty());
+
+    client.upgrade().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let client = loop {
+        if let Ok(Some(connected)) = Client::connect_ready_at(&daemon.sessions_dir())
+            && connected.list().is_ok()
+        {
+            break connected;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the replacement never came back; daemon log:\n{}",
+            daemon.log()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    };
+
+    let (sessions, records) = client.list_with_restorable().unwrap();
+    assert!(
+        sessions.iter().any(|session| session.id == pane.session_id),
+        "the live session was lost during the upgrade: {sessions:?}"
+    );
+    assert!(
+        records
+            .iter()
+            .all(|record| record.id != pane.session_id || !record.restorable),
+        "the live session was also offered from disk: {records:?}"
+    );
+    let manifest =
+        std::fs::read_to_string(daemon.sessions_dir().join("persistence/manifest.json")).unwrap();
+    assert!(
+        manifest.contains(r#""restorable": false"#),
+        "manifest after upgrade: {manifest}"
+    );
+
+    client.kill(pane.session_id).unwrap();
+}
+
 #[test]
 fn a_dead_multiplexers_endpoint_does_not_block_starting_a_new_one() {
     // An endpoint outlives the daemon that wrote it. Judging the version
@@ -2338,6 +2452,143 @@ fn a_detached_session_is_drained_again_when_its_client_dies() {
             .any(|session| session.id == pane.session_id),
         "a held session must stay available after its window dies"
     );
+}
+
+/// A liveness sweep must never turn a live exclusive attachment into a second
+/// PTY reader.
+///
+/// On macOS, asking `sysinfo` for one PID still enumerated every process. If
+/// the process count changed between its sizing and fill calls, that complete
+/// enumeration was discarded and the live holder was reported missing. The
+/// daemon then reclaimed the pane and raced the window for output, leaving
+/// full-screen applications with arbitrary holes in their escape sequences.
+#[test]
+fn a_live_exclusive_attachment_survives_liveness_sweeps() {
+    let daemon = TestDaemon::start();
+    let client = daemon.client();
+    let pane = client
+        .spawn(spawn_request(None, "printf ready; cat"))
+        .unwrap();
+    let descriptor = std::fs::File::from(pane.descriptor);
+    read_until(&descriptor, "ready");
+
+    client
+        .detach(
+            pane.session_id,
+            summary(pane.session_id, pane.pane_id),
+            serde_json::Value::Null,
+            None,
+            Vec::new(),
+        )
+        .unwrap();
+    drop(descriptor);
+
+    let AttachOutcome::Attached { pane, .. } = client
+        .attach(pane.session_id, Some(pane.pane_id), None)
+        .unwrap()
+    else {
+        panic!("the detached pane was not attached exclusively")
+    };
+    let descriptor = std::fs::File::from(pane.descriptor);
+
+    // Cross two sweeps before producing output. If either one falsely
+    // reclaims this process, the daemon's poll wakes on the marker and drains
+    // it during the deliberate pause before this descriptor reads.
+    std::thread::sleep(Duration::from_millis(4_250));
+    let mut writer = &descriptor;
+    writer.write_all(b"exclusive-reader-marker\n").unwrap();
+    std::thread::sleep(Duration::from_millis(250));
+    read_until(&descriptor, "exclusive-reader-marker");
+
+    assert!(
+        client.list().unwrap().is_empty(),
+        "a private session held by this live process must not be listed as detached"
+    );
+}
+
+#[test]
+fn every_pane_in_a_restored_layout_keeps_its_exclusive_reader() {
+    let daemon = TestDaemon::start();
+    let client = daemon.client();
+    let first = client
+        .spawn(spawn_request(None, "printf first-ready; cat"))
+        .unwrap();
+    let second = client
+        .spawn(spawn_request(
+            Some(first.session_id),
+            "printf second-ready; cat",
+        ))
+        .unwrap();
+    let first_descriptor = std::fs::File::from(first.descriptor);
+    let second_descriptor = std::fs::File::from(second.descriptor);
+    read_until(&first_descriptor, "first-ready");
+    read_until(&second_descriptor, "second-ready");
+
+    let mut published = summary(first.session_id, first.pane_id);
+    let mut second_summary = published.panes[0].clone();
+    second_summary.id = second.pane_id;
+    second_summary.label = "Pane 2".to_owned();
+    published.panes.push(second_summary);
+    published.active_pane = second.pane_id;
+    published.layout = BackgroundPaneLayout::Split {
+        axis: "vertical".to_owned(),
+        first_ratio: zmux::protocol::DEFAULT_BACKGROUND_PANE_SPLIT_RATIO,
+        first: Box::new(BackgroundPaneLayout::Pane {
+            pane_id: first.pane_id,
+        }),
+        second: Box::new(BackgroundPaneLayout::Pane {
+            pane_id: second.pane_id,
+        }),
+    };
+    client
+        .detach(
+            first.session_id,
+            published,
+            serde_json::Value::Null,
+            None,
+            Vec::new(),
+        )
+        .unwrap();
+    drop(first_descriptor);
+    drop(second_descriptor);
+
+    let AttachOutcome::Attached {
+        pane: first_attached,
+        ..
+    } = client
+        .attach(first.session_id, Some(first.pane_id), None)
+        .unwrap()
+    else {
+        panic!("the first pane did not attach exclusively")
+    };
+    let AttachOutcome::Attached {
+        pane: second_attached,
+        ..
+    } = client
+        .attach(first.session_id, Some(second.pane_id), None)
+        .unwrap()
+    else {
+        panic!("the second pane did not attach exclusively")
+    };
+    let first_descriptor = std::fs::File::from(first_attached.descriptor);
+    let second_descriptor = std::fs::File::from(second_attached.descriptor);
+
+    // Cross more than two liveness sweeps. A pane reclaimed behind the
+    // window's back gains a second reader in the daemon; the pause after each
+    // write then lets that reader steal the marker before this descriptor can
+    // consume it.
+    std::thread::sleep(Duration::from_millis(4_250));
+    let mut first_writer = &first_descriptor;
+    first_writer.write_all(b"first-exclusive-marker\n").unwrap();
+    let mut second_writer = &second_descriptor;
+    second_writer
+        .write_all(b"second-exclusive-marker\n")
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(250));
+    read_until(&first_descriptor, "first-exclusive-marker");
+    read_until(&second_descriptor, "second-exclusive-marker");
+
+    client.kill(first.session_id).unwrap();
 }
 
 #[test]
@@ -3276,11 +3527,11 @@ fn a_live_session_is_only_offered_once_its_window_shares_it() {
     assert_terminal_echoes(&descriptor, "still-here");
 }
 
-/// A window can republish a live tab after its daemon pane set changed. The
-/// daemon's catalog must then be the authority over the old presentation, so a
-/// reconnect cannot be sent back to a pane that is no longer in the tab.
+/// A window can republish a tab state that names a pane the daemon no longer
+/// owns. The daemon's PTY registry must repair the catalog and presentation
+/// together, so reconnect never tries to attach the advertised missing pane.
 #[test]
-fn republishing_a_changed_pane_set_repairs_shared_reconnect_state() {
+fn republishing_an_unattachable_pane_set_repairs_shared_reconnect_state() {
     let daemon = TestDaemon::start();
     let client = daemon.client();
 
@@ -3330,21 +3581,55 @@ fn republishing_a_changed_pane_set_repairs_shared_reconnect_state() {
         ))
         .unwrap();
     assert_eq!(fourth.pane.pane_id(), 4);
-    let fifth = client
-        .spawn_shared(spawn_shared(
+    let vertical_layout = BackgroundPaneLayout::Split {
+        axis: "vertical".to_owned(),
+        first_ratio: zmux::protocol::DEFAULT_BACKGROUND_PANE_SPLIT_RATIO,
+        first: Box::new(BackgroundPaneLayout::Pane {
+            pane_id: initial.pane_id,
+        }),
+        second: Box::new(BackgroundPaneLayout::Pane {
+            pane_id: fourth.pane.pane_id(),
+        }),
+    };
+    let vertical = match client
+        .apply_shared(
+            initial.session_id,
             fourth.state.revision,
-            client.next_shared_operation_id(),
-        ))
-        .unwrap();
-    assert_eq!(fifth.pane.pane_id(), 5);
-
+            SharedSessionOperation::SetLayout {
+                layout: vertical_layout.clone(),
+            },
+        )
+        .unwrap()
+    {
+        zmux::client::SharedOperationResult::Applied(state) => state,
+        zmux::client::SharedOperationResult::Conflict(_) => {
+            panic!("setting the original shared layout conflicted")
+        }
+    };
+    let focused = match client
+        .apply_shared(
+            initial.session_id,
+            vertical.revision,
+            SharedSessionOperation::SetFocus {
+                pane_id: initial.pane_id,
+            },
+        )
+        .unwrap()
+    {
+        zmux::client::SharedOperationResult::Applied(state) => state,
+        zmux::client::SharedOperationResult::Conflict(_) => {
+            panic!("focusing the original shared pane conflicted")
+        }
+    };
     // Leave the old pane in the canonical presentation and make its visibility
-    // references point at it as well. Republishing the current live summary is
-    // the handoff that must repair all of those references in one revision.
+    // references point at it as well. The handoff below also advertises pane 5,
+    // which was never created by this daemon. Repairing against only the
+    // catalog used to leave that phantom pane in the presentation, producing
+    // the reconnect failure this test covers.
     let maximized = match client
         .apply_shared(
             initial.session_id,
-            fifth.state.revision,
+            focused.revision,
             SharedSessionOperation::SetMaximized {
                 pane_id: Some(initial.pane_id),
             },
@@ -3375,7 +3660,8 @@ fn republishing_a_changed_pane_set_repairs_shared_reconnect_state() {
     assert_eq!(stale.presentation.maximized_pane, Some(initial.pane_id));
     assert_eq!(stale.presentation.minimized_panes, vec![initial.pane_id]);
 
-    let mut republished = summary(initial.session_id, fifth.pane.pane_id());
+    let phantom_pane_id = 5;
+    let mut republished = summary(initial.session_id, phantom_pane_id);
     republished.title = "recovered".to_owned();
     republished.layout = BackgroundPaneLayout::Split {
         axis: "horizontal".to_owned(),
@@ -3384,12 +3670,12 @@ fn republishing_a_changed_pane_set_repairs_shared_reconnect_state() {
             pane_id: fourth.pane.pane_id(),
         }),
         second: Box::new(BackgroundPaneLayout::Pane {
-            pane_id: fifth.pane.pane_id(),
+            pane_id: phantom_pane_id,
         }),
     };
     republished.panes = vec![
         pane_summary(fourth.pane.pane_id()),
-        pane_summary(fifth.pane.pane_id()),
+        pane_summary(phantom_pane_id),
     ];
     let observer = daemon.client();
     let subscription = observer.subscribe().unwrap();
@@ -3405,48 +3691,89 @@ fn republishing_a_changed_pane_set_repairs_shared_reconnect_state() {
         .unwrap();
     match recv_timeout(&events, Duration::from_secs(10)).expect("the repair must be broadcast") {
         zmux::client::SharedSessionEvent::Updated(state) => {
-            assert_eq!(state.summary, republished);
-            assert_eq!(state.presentation.layout, republished.layout);
-            assert_eq!(state.presentation.active_pane, fifth.pane.pane_id());
-            assert_eq!(state.presentation.maximized_pane, None);
-            assert!(state.presentation.minimized_panes.is_empty());
+            assert_eq!(state.summary.title, republished.title);
+            assert_eq!(state.summary.active_pane, initial.pane_id);
+            assert_eq!(
+                state.summary.layout,
+                BackgroundPaneLayout::Split {
+                    axis: "vertical".to_owned(),
+                    first_ratio: zmux::protocol::DEFAULT_BACKGROUND_PANE_SPLIT_RATIO,
+                    first: Box::new(BackgroundPaneLayout::Pane {
+                        pane_id: initial.pane_id,
+                    }),
+                    second: Box::new(BackgroundPaneLayout::Pane {
+                        pane_id: fourth.pane.pane_id(),
+                    }),
+                }
+            );
+            assert_eq!(
+                state
+                    .summary
+                    .panes
+                    .iter()
+                    .map(|pane| pane.id)
+                    .collect::<Vec<_>>(),
+                vec![fourth.pane.pane_id(), initial.pane_id]
+            );
+            assert_eq!(state.presentation.layout, state.summary.layout);
+            assert_eq!(state.presentation.active_pane, initial.pane_id);
+            assert_eq!(state.presentation.maximized_pane, Some(initial.pane_id));
+            assert_eq!(state.presentation.minimized_panes, vec![initial.pane_id]);
         }
         other => panic!("unexpected repair event: {other:?}"),
     }
 
     let listed = client.list().unwrap();
     assert_eq!(listed.len(), 1);
-    assert_eq!(listed[0].active_pane, fifth.pane.pane_id());
+    assert_eq!(listed[0].active_pane, initial.pane_id);
     assert_eq!(
         listed[0]
             .panes
             .iter()
             .map(|pane| pane.id)
             .collect::<Vec<_>>(),
-        vec![fourth.pane.pane_id(), fifth.pane.pane_id()]
+        vec![fourth.pane.pane_id(), initial.pane_id]
     );
 
     let repaired = client.shared_snapshot(initial.session_id).unwrap();
     assert!(repaired.revision > stale.revision);
-    assert_eq!(repaired.summary, republished);
-    assert_eq!(repaired.presentation.layout, republished.layout);
-    assert_eq!(repaired.presentation.active_pane, fifth.pane.pane_id());
-    assert_eq!(repaired.presentation.maximized_pane, None);
-    assert!(repaired.presentation.minimized_panes.is_empty());
+    assert_eq!(repaired.summary.active_pane, listed[0].active_pane);
+    assert_eq!(repaired.summary.layout, listed[0].layout);
+    assert_eq!(
+        repaired
+            .summary
+            .panes
+            .iter()
+            .map(|pane| pane.id)
+            .collect::<Vec<_>>(),
+        listed[0]
+            .panes
+            .iter()
+            .map(|pane| pane.id)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(repaired.presentation.layout, repaired.summary.layout);
+    assert_eq!(repaired.presentation.active_pane, initial.pane_id);
+    assert_eq!(repaired.presentation.maximized_pane, Some(initial.pane_id));
+    assert_eq!(repaired.presentation.minimized_panes, vec![initial.pane_id]);
     assert_eq!(repaired.state, serde_json::json!({"after": true}));
 
     let repeated = client.shared_snapshot(initial.session_id).unwrap();
     assert_eq!(repeated, repaired, "a second repair must be idempotent");
 
-    let attached = observer
-        .attach_shared_with_secret(initial.session_id, fourth.pane.pane_id(), None)
-        .expect("a reconnect must attach to a live replacement pane");
-    assert!(matches!(attached, AttachOutcome::SharedAttached { .. }));
-    drop(attached);
+    for pane_id in [fourth.pane.pane_id(), initial.pane_id] {
+        let attached = observer
+            .attach(initial.session_id, Some(pane_id), None)
+            .expect("every pane advertised by a repaired snapshot must attach");
+        assert!(matches!(
+            attached,
+            AttachOutcome::Attached { .. } | AttachOutcome::SharedAttached { .. }
+        ));
+        drop(attached);
+    }
 
     let session_id = initial.session_id;
     drop(fourth);
-    drop(fifth);
     drop(initial);
     client.kill(session_id).unwrap();
 }
@@ -6916,19 +7243,17 @@ fn pruning_an_exited_shared_pane_keeps_the_next_split_valid() {
     }
 }
 
-/// An offered summary describes the session's geometry, and the daemon keeps
-/// it as the canonical layout every later proposal is validated against. It
-/// therefore has to be written in the daemon's pane ids.
+/// An offered summary is client-supplied metadata, while the daemon's PTY
+/// registry is what determines the panes a reconnect can actually attach.
+/// A summary written in another id space is repaired to the latter.
 ///
 /// A window numbers its panes from its own counter, so a summary taken
 /// straight from a tab is written in *that* space. The two agree only while a
 /// fresh daemon and a single window have happened to count the same number of
-/// panes; once they diverge, the canonical layout names panes the daemon does
-/// not hold and no pane can ever be added to the session again — the failure
-/// looked like "shared layout references a pane the daemon does not hold" on
-/// every split, with the session otherwise working.
+/// panes. The recovery must retain the daemon-issued pane rather than
+/// advertising the foreign one to an attacher.
 #[test]
-fn an_offered_summary_describing_panes_the_daemon_lacks_is_refused() {
+fn an_offered_summary_describing_panes_the_daemon_lacks_is_repaired() {
     let daemon = TestDaemon::start();
     let client = daemon.client();
     let pane = client
@@ -6942,19 +7267,33 @@ fn an_offered_summary_describing_panes_the_daemon_lacks_is_refused() {
     let mut offered = summary(pane.session_id, foreign);
     offered.layout = BackgroundPaneLayout::Pane { pane_id: foreign };
 
-    let error = client
+    client
         .share(
             pane.session_id,
             offered,
             serde_json::json!({"shared": true}),
-            Some(&test_verifier()),
+            None,
             true,
         )
-        .expect_err("a summary in another id space cannot describe this session");
+        .expect("a stale offered summary must be recovered in place");
 
-    assert!(
-        format!("{error:#}").contains("does not hold"),
-        "unexpected error: {error:#}"
+    let repaired = client.shared_snapshot(pane.session_id).unwrap();
+    assert_eq!(repaired.summary.active_pane, pane.pane_id);
+    assert_eq!(repaired.presentation.active_pane, pane.pane_id);
+    assert_eq!(
+        repaired
+            .summary
+            .panes
+            .iter()
+            .map(|pane| pane.id)
+            .collect::<Vec<_>>(),
+        vec![pane.pane_id]
+    );
+    assert_eq!(
+        repaired.presentation.layout,
+        BackgroundPaneLayout::Pane {
+            pane_id: pane.pane_id
+        }
     );
 }
 
@@ -7285,10 +7624,11 @@ fn a_pane_the_client_could_not_show_can_be_given_back() {
     let taken = client
         .take_exclusive(pane.session_id, shared_pane_id)
         .unwrap();
+    let attachment_client_id = taken.attachment_client_id().clone();
     drop(spawned);
     drop(taken);
     client
-        .release_exclusive(pane.session_id, shared_pane_id)
+        .release_exclusive(pane.session_id, shared_pane_id, &attachment_client_id)
         .unwrap();
 
     let deadline = Instant::now() + Duration::from_secs(20);
@@ -7321,6 +7661,90 @@ fn a_pane_the_client_could_not_show_can_be_given_back() {
         );
         std::thread::sleep(Duration::from_millis(100));
     }
+}
+
+/// A delayed failure report belongs to one descriptor handover, not to every
+/// pane attachment ever made by the same long-lived Zetta process.
+///
+/// Clearing the newer attachment makes the daemon and the window read the same
+/// PTY. Full-screen programs expose that immediately: each reader gets arbitrary
+/// pieces of their escape sequences, leaving both screens full of holes.
+#[test]
+fn stale_handover_cleanup_cannot_release_a_newer_attachment() {
+    let daemon = TestDaemon::start();
+    let client = daemon.client();
+    let first = client
+        .spawn(spawn_request(None, "printf first-ready; sleep 60"))
+        .unwrap();
+    let session_id = first.session_id;
+    let first_pane_id = first.pane_id;
+    let descriptor = std::fs::File::from(first.descriptor);
+    read_until(&descriptor, "first-ready");
+    drop(descriptor);
+    client
+        .share(
+            session_id,
+            summary(session_id, first_pane_id),
+            serde_json::Value::Null,
+            None,
+            true,
+        )
+        .unwrap();
+    let request = spawn_request(Some(session_id), "printf ready; cat");
+    let shared = client
+        .spawn_shared(SharedSpawnRequest {
+            session_id,
+            base_revision: SessionRevision::INITIAL,
+            operation_id: client.next_shared_operation_id(),
+            program: request.program,
+            args: request.args,
+            env: request.env,
+            working_directory: request.working_directory,
+            size: request.size,
+            console_palette: request.console_palette,
+        })
+        .unwrap();
+    let pane_id = shared.pane.pane_id();
+    // Leave no other exclusive pane that could make the session-level `held`
+    // assertion pass after this pane was wrongly released.
+    client.close_pane(session_id, first_pane_id).unwrap();
+
+    let older = client.take_exclusive(session_id, pane_id).unwrap();
+    let older_attachment = older.attachment_client_id().clone();
+    drop(shared);
+    drop(older);
+
+    let AttachOutcome::Attached { pane: newer, .. } =
+        client.attach(session_id, Some(pane_id), None).unwrap()
+    else {
+        panic!("the replacement attachment was not exclusive")
+    };
+    assert_ne!(older_attachment, *newer.attachment_client_id());
+    let mut descriptor = std::fs::File::from(newer.descriptor);
+
+    let error = client
+        .release_exclusive(session_id, pane_id, &older_attachment)
+        .expect_err("an old attachment must not release a newer one");
+    assert!(
+        error.to_string().contains("newer attachment"),
+        "unexpected stale-release error: {error:#}"
+    );
+    let listed = client
+        .list()
+        .unwrap()
+        .into_iter()
+        .find(|session| session.id == session_id)
+        .expect("the attached session remains listed");
+    assert!(listed.held, "the newer attachment was cleared");
+
+    // Give a wrongly awakened daemon drain loop time to enter its poll before
+    // producing output. With the bug it consumes the marker; with the newer
+    // attachment intact, this descriptor remains the pane's only reader.
+    std::thread::sleep(Duration::from_millis(100));
+    descriptor
+        .write_all(b"new-attachment-still-owns-output\n")
+        .unwrap();
+    read_until(&descriptor, "new-attachment-still-owns-output");
 }
 
 /// Does one viewer that stops reading wedge the pane for everybody?

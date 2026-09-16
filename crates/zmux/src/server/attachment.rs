@@ -47,7 +47,7 @@ pub(super) fn attach(
         // Two different situations, and the way out differs: that window can
         // share the session itself, but a window that has exited cannot, so say
         // which one this is rather than suggesting something impossible.
-        let route = if process_is_running(owner) {
+        let route = if crate::process_status::is_running(owner) {
             format!("share it from that window, or with `zmux share {session_id}`")
         } else {
             format!(
@@ -147,6 +147,7 @@ pub(super) fn attach(
     // a remote request fall through to descriptor handover.
     if (stream_only || force_shared) && matches!(pane.attachment, Attachment::None) {
         pane.attachment = Attachment::Shared(Vec::new());
+        pane.attachment_client_id = None;
     }
     if (stream_only || force_shared) && matches!(pane.attachment, Attachment::Shared(_)) {
         return attach_shared(
@@ -180,6 +181,7 @@ pub(super) fn attach(
             session_id,
             pane_id,
             client_process_id,
+            &client_id,
             state,
             summary,
             connection,
@@ -299,6 +301,7 @@ pub(super) fn attach(
                 finish_handover_waiter(pane, true);
                 if stream_only {
                     pane.attachment = Attachment::Shared(Vec::new());
+                    pane.attachment_client_id = None;
                     return attach_shared(
                         daemon,
                         sessions,
@@ -319,6 +322,7 @@ pub(super) fn attach(
                     session_id,
                     pane_id,
                     client_process_id,
+                    &client_id,
                     state,
                     summary,
                     connection,
@@ -340,6 +344,7 @@ pub(super) fn attach(
                         session_id,
                         pane_id,
                         client_process_id,
+                        &client_id,
                         state,
                         summary,
                         connection,
@@ -357,9 +362,10 @@ pub(super) fn attach(
             // A grant whose taker died leaves nobody holding the descriptor: the
             // reply either never went out or went to a process that has gone.
             Attachment::Granting { holder } | Attachment::Revoking { holder }
-                if !process_is_running(holder) =>
+                if !crate::process_status::is_running(holder) =>
             {
                 pane.attachment = Attachment::None;
+                pane.attachment_client_id = None;
                 finish_handover_waiter(pane, true);
                 return attach_exclusive(
                     daemon,
@@ -367,6 +373,7 @@ pub(super) fn attach(
                     session_id,
                     pane_id,
                     client_process_id,
+                    &client_id,
                     state,
                     summary,
                     connection,
@@ -385,6 +392,7 @@ pub(super) fn finish_handover_waiter(pane: &mut Pane, collapse_empty_shared: boo
         && matches!(&pane.attachment, Attachment::Shared(clients) if clients.is_empty())
     {
         pane.attachment = Attachment::None;
+        pane.attachment_client_id = None;
         pane.handed_over = None;
     }
 }
@@ -410,6 +418,7 @@ pub(super) fn attach_exclusive(
     session_id: u64,
     pane_id: u64,
     client_process_id: u32,
+    client_id: &ClientId,
     state: serde_json::Value,
     summary: Box<BackgroundSessionSummary>,
     connection: &mut Connection,
@@ -430,6 +439,7 @@ pub(super) fn attach_exclusive(
         });
     }
     pane.attachment = exclusive_attachment(client_process_id);
+    pane.attachment_client_id = (client_process_id != 0).then(|| client_id.clone());
     // The screen, and then nothing: the client reads the terminal itself from
     // here, so what the daemon holds stops describing this pane and must not be
     // served to a later attach as though it did.
@@ -445,7 +455,7 @@ pub(super) fn attach_exclusive(
     if let Err(error) = forget_persisted_session(daemon, session_id) {
         log::warn!("could not remove the attached session's persisted record: {error:#}");
     }
-    connection.send_with(
+    if let Err(error) = connection.send_with(
         &Response::Attached {
             pane_id,
             child_pid,
@@ -455,7 +465,16 @@ pub(super) fn attach_exclusive(
             handles: handles.values,
         },
         &handles.attachments,
-    )?;
+    ) {
+        release_failed_handover(
+            daemon,
+            daemon.sessions.lock().unwrap(),
+            session_id,
+            pane_id,
+            client_id,
+        );
+        return Err(error);
+    }
     if !replay.is_empty() {
         connection.write_all(&replay)?;
     }
@@ -934,6 +953,7 @@ pub(super) fn take_exclusive(
             ) else {
                 unreachable!("the attachment was just matched as shared");
             };
+            pane.attachment_client_id = Some(client_id.clone());
             clients.pop().expect("exactly one client was matched")
         }
         _ => {
@@ -979,6 +999,7 @@ pub(super) fn take_exclusive(
         // trusted to read the terminal either. Leave the pane unheld rather than
         // handing the descriptor to a client that is not reading.
         pane.attachment = Attachment::None;
+        pane.attachment_client_id = None;
         #[cfg(windows)]
         pane.pty.resume_reader();
         drop(sessions);
@@ -990,6 +1011,7 @@ pub(super) fn take_exclusive(
         });
     }
     pane.attachment = exclusive_attachment(client_process_id);
+    pane.attachment_client_id = Some(client_id.clone());
     // Deliberately no replay. Everything read so far went to this client over the
     // relay; sending it again would print the pane's recent output twice. What is
     // left is still in the terminal, which the client now reads itself.
@@ -999,7 +1021,7 @@ pub(super) fn take_exclusive(
     let handles = match handover_handles(daemon, pane, client_process_id) {
         Ok(handles) => handles,
         Err(error) => {
-            release_failed_handover(daemon, sessions, session_id, pane_id);
+            release_failed_handover(daemon, sessions, session_id, pane_id, &client_id);
             return Err(error);
         }
     };
@@ -1023,7 +1045,13 @@ pub(super) fn take_exclusive(
         },
         &handles.attachments,
     ) {
-        release_failed_handover(daemon, daemon.sessions.lock().unwrap(), session_id, pane_id);
+        release_failed_handover(
+            daemon,
+            daemon.sessions.lock().unwrap(),
+            session_id,
+            pane_id,
+            &client_id,
+        );
         return Err(error);
     }
     daemon.sessions_condvar.notify_all();
@@ -1046,6 +1074,7 @@ pub(super) fn release_exclusive(
     session_id: u64,
     pane_id: u64,
     client_process_id: u32,
+    client_id: ClientId,
     peer_process_id: Option<u32>,
     connection: &mut Connection,
 ) -> Result<()> {
@@ -1082,7 +1111,17 @@ pub(super) fn release_exclusive(
             message: format!("session {session_id} pane {pane_id} is held by another client"),
         });
     }
-    release_failed_handover(daemon, sessions, session_id, pane_id);
+    if pane
+        .attachment_client_id
+        .as_ref()
+        .is_some_and(|attachment_client_id| attachment_client_id != &client_id)
+    {
+        drop(sessions);
+        return connection.send(&Response::Error {
+            message: format!("session {session_id} pane {pane_id} is held by a newer attachment"),
+        });
+    }
+    release_failed_handover(daemon, sessions, session_id, pane_id, &client_id);
     connection.send(&Response::Ok)
 }
 
@@ -1102,13 +1141,20 @@ fn release_failed_handover(
     mut sessions: std::sync::MutexGuard<'_, Vec<Session>>,
     session_id: u64,
     pane_id: u64,
+    attachment_client_id: &ClientId,
 ) {
     if let Some(pane) = sessions
         .iter_mut()
         .find(|session| session.id == session_id)
         .and_then(|session| session.panes.iter_mut().find(|pane| pane.id == pane_id))
+        .filter(|pane| {
+            pane.attachment_client_id
+                .as_ref()
+                .is_none_or(|current| current == attachment_client_id)
+        })
     {
         pane.attachment = Attachment::None;
+        pane.attachment_client_id = None;
         #[cfg(windows)]
         pane.pty.resume_reader();
     }
@@ -1217,6 +1263,7 @@ pub(super) fn remove_shared_client(
         clients.retain(|client| &client.client_id != client_id);
         if clients.is_empty() && pane.handover_waiters == 0 {
             pane.attachment = Attachment::None;
+            pane.attachment_client_id = None;
             // Nobody is left to claim the handover, and the next one records
             // its own.
             pane.handed_over = None;
@@ -1328,6 +1375,7 @@ pub(super) fn snapshot(
     });
     seed_retained_screen_with_fallback(pane, bytes, (columns, lines));
     pane.attachment = Attachment::Shared(Vec::new());
+    pane.attachment_client_id = None;
     #[cfg(feature = "session-persistence")]
     let persisted = session.offered.then(|| persisted_live_session(session));
     drop(sessions);

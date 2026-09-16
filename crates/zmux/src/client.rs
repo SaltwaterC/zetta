@@ -145,6 +145,10 @@ pub struct AttachedPane {
     pub session_id: u64,
     pub pane_id: u64,
     pub child_pid: u32,
+    /// Identifies this particular acquisition of the pane, not merely the
+    /// process that acquired it. A delayed cleanup for an older acquisition
+    /// must not release a newer one from the same process.
+    attachment_client_id: ClientId,
     /// The PTY master. The holder reads and writes it directly, so an attached
     /// pane costs exactly what a locally spawned one costs.
     #[cfg(unix)]
@@ -158,6 +162,12 @@ pub struct AttachedPane {
     /// Output produced while the pane was detached, to be replayed into a
     /// fresh terminal before it is shown.
     pub replay: Vec<u8>,
+}
+
+impl AttachedPane {
+    pub fn attachment_client_id(&self) -> &ClientId {
+        &self.attachment_client_id
+    }
 }
 
 /// A pane attached in shared mode.
@@ -1206,6 +1216,7 @@ impl Client {
                             session_id,
                             pane_id,
                             child_pid,
+                            attachment_client_id: self.client_id.clone(),
                             #[cfg(unix)]
                             descriptor: terminal,
                             #[cfg(windows)]
@@ -1874,6 +1885,7 @@ impl Client {
                     session_id,
                     pane_id,
                     child_pid,
+                    attachment_client_id: self.client_id.clone(),
                     #[cfg(unix)]
                     descriptor: terminal,
                     #[cfg(windows)]
@@ -2506,7 +2518,9 @@ impl Client {
     /// is how this client knows it has everything before it starts reading the
     /// terminal itself.
     pub fn take_exclusive(&self, session_id: u64, pane_id: u64) -> Result<AttachedPane> {
-        let mut connection = self.open(Request::TakeExclusive {
+        let mut client = self.reconnect_client();
+        client.client_id = ClientId::random()?;
+        let mut connection = client.open(Request::TakeExclusive {
             session_id,
             pane_id,
         })?;
@@ -2531,6 +2545,7 @@ impl Client {
                     session_id,
                     pane_id,
                     child_pid,
+                    attachment_client_id: client.client_id.clone(),
                     #[cfg(unix)]
                     descriptor: terminal,
                     #[cfg(windows)]
@@ -2553,8 +2568,15 @@ impl Client {
     /// on. A client that took one and could not adopt it has to say so, or the
     /// pane is read by nobody: its pty fills and the program on the other end
     /// of it stops reading input for every viewer, not just this one.
-    pub fn release_exclusive(&self, session_id: u64, pane_id: u64) -> Result<()> {
-        let mut connection = self.open(Request::ReleaseExclusive {
+    pub fn release_exclusive(
+        &self,
+        session_id: u64,
+        pane_id: u64,
+        attachment_client_id: &ClientId,
+    ) -> Result<()> {
+        let mut client = self.reconnect_client();
+        client.client_id = attachment_client_id.clone();
+        let mut connection = client.open(Request::ReleaseExclusive {
             session_id,
             pane_id,
         })?;

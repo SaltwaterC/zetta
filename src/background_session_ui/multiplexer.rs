@@ -846,7 +846,7 @@ enum AttachedPaneRegistration {
     Shared(Arc<zmux::client::SharedPane>),
     /// A pty descriptor this window owns, which the multiplexer may ask it to
     /// hand over.
-    Exclusive,
+    Exclusive(zmux::messages::ClientId),
     /// A pane carried over Mosh. This window holds no descriptor for it and no
     /// stream from the multiplexer, only the session that renders it.
     Relayed(Arc<crate::remote_pane_transport::ZoshPaneHandle>),
@@ -1052,20 +1052,40 @@ impl Zetta {
             let (mux_pane_id, built, child_events, registration) = match attached {
                 AttachedPaneKind::Exclusive(attached) => {
                     let mux_pane_id = attached.pane_id;
+                    let attachment_client_id = attached.attachment_client_id().clone();
                     let paste_target = local_paste_target();
                     match build_exclusive_pane(&build, attached, options, paste_target) {
                         Ok(built) => (
                             mux_pane_id,
                             Some(built.builder),
                             Some(built.child_events),
-                            AttachedPaneRegistration::Exclusive,
+                            AttachedPaneRegistration::Exclusive(attachment_client_id),
                         ),
                         Err(error) => {
                             if let Some(pane) = tab.pane_mut(pane_id) {
                                 pane.error =
                                     Some(format!("Could not reattach the terminal: {error:#}"));
                             }
-                            (mux_pane_id, None, None, AttachedPaneRegistration::Exclusive)
+                            let client = runtime.client().clone();
+                            let release_client_id = attachment_client_id.clone();
+                            cx.background_spawn(async move {
+                                if let Err(error) = client.release_exclusive(
+                                    session_id,
+                                    mux_pane_id,
+                                    &release_client_id,
+                                ) {
+                                    log::warn!(
+                                        "could not give pane {mux_pane_id} back to the multiplexer: {error:#}"
+                                    );
+                                }
+                            })
+                            .detach();
+                            (
+                                mux_pane_id,
+                                None,
+                                None,
+                                AttachedPaneRegistration::Exclusive(attachment_client_id),
+                            )
                         }
                     }
                 }
@@ -1110,8 +1130,8 @@ impl Zetta {
                 // multiplexer will ask to hand the pane over when a third
                 // window attaches. Without this the request went nowhere and
                 // that attach waited out the whole handover timeout.
-                AttachedPaneRegistration::Exclusive => {
-                    self.watch_for_revoke(ids, runtime, window, cx);
+                AttachedPaneRegistration::Exclusive(attachment_client_id) => {
+                    self.watch_for_revoke(ids, attachment_client_id, runtime, window, cx);
                 }
             }
 

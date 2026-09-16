@@ -147,6 +147,12 @@ impl PtySender {
         }
     }
 
+    pub(super) fn redraw(&self) {
+        if let Err(error) = self.notifier.0.send(Msg::Redraw) {
+            log::debug!("failed to request an attached terminal redraw: {error}");
+        }
+    }
+
     #[cfg(windows)]
     pub(super) fn set_console_palette(&self, palette: tty::ConsolePalette) {
         if let Err(error) = self.notifier.0.send(Msg::SetConsolePalette(palette)) {

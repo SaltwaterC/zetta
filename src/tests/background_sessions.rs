@@ -86,6 +86,23 @@ fn mux_held_sessions_skip_another_processes_scoped_sessions() {
 }
 
 #[test]
+#[cfg(feature = "session-persistence")]
+fn disk_recovery_sees_scoped_sessions_that_this_process_cannot_attach() {
+    let catalogs = [
+        scoped_catalog(1000, 7, &[1], Some(9999)),
+        scoped_catalog(1000, 8, &[2], None),
+        // An in-process fallback catalog is not daemon-owned and must not
+        // suppress an unrelated encrypted record with the same numeric ID.
+        scoped_catalog(2000, 9, &[3], Some(4242)),
+    ];
+
+    let live = multiplexer_catalog_session_ids(&catalogs, |process_id| process_id == 2000)
+        .collect::<Vec<_>>();
+
+    assert_eq!(live, vec![1, 2]);
+}
+
+#[test]
 fn reconnects_most_recently_detached_session_first() {
     let mut runner = BackgroundSessionRunner::default();
     runner.detach("build", None);

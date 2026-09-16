@@ -354,6 +354,12 @@ fn multiplexer_session_entries() -> Vec<ProcessBackgroundSessionEntry> {
             return Vec::new();
         }
     };
+    #[cfg(feature = "session-persistence")]
+    let live_mux_ids = crate::background_sessions::multiplexer_catalog_session_ids(
+        &catalogs,
+        crate::background_sessions::process_is_zetta,
+    )
+    .collect::<std::collections::HashSet<_>>();
     // Only the multiplexer's own catalog counts: a Zetta process that kept a
     // session in memory because the multiplexer was unreachable publishes one
     // too, and those sessions are this process's to transfer, not the daemon's
@@ -394,12 +400,10 @@ fn multiplexer_session_entries() -> Vec<ProcessBackgroundSessionEntry> {
     if let Ok(records) =
         zmux::persistence::read_opaque_records(&crate::background_sessions::session_catalog_dir())
     {
-        let live_ids = entries.iter().map(|(_, session_id, _, _)| *session_id);
-        let live_ids = live_ids.collect::<std::collections::HashSet<_>>();
         entries.extend(
             records
                 .into_iter()
-                .filter(|record| record.restorable && !live_ids.contains(&record.id))
+                .filter(|record| record.restorable && !live_mux_ids.contains(&record.id))
                 .map(|record| {
                     (
                         crate::background_sessions::RESTORABLE_RUNNER_ID,

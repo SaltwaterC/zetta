@@ -886,12 +886,7 @@ fn control_endpoint_path(process_id: u32) -> PathBuf {
 
 #[cfg(any(unix, windows))]
 fn process_is_running(process_id: u32) -> bool {
-    use sysinfo::{Pid, ProcessesToUpdate, System};
-
-    let process_id = Pid::from_u32(process_id);
-    let mut system = System::new();
-    system.refresh_processes(ProcessesToUpdate::Some(&[process_id]), true);
-    system.process(process_id).is_some()
+    crate::process_status::is_running(process_id)
 }
 
 #[cfg(any(unix, windows))]

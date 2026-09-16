@@ -592,6 +592,7 @@ pub(super) fn create_shared(
             #[cfg(windows)]
             child_events: pane.child_events,
             attachment: Attachment::Shared(Vec::new()),
+            attachment_client_id: None,
             size: pane.size,
             retained: retention.new_retained(pane.size.columns, pane.size.lines),
             handed_over: None,
@@ -820,6 +821,7 @@ fn commit_shared_batch(
             #[cfg(windows)]
             child_events: pane.child_events,
             attachment: Attachment::Shared(Vec::new()),
+            attachment_client_id: None,
             size: pane.size,
             retained: retention.new_retained(pane.size.columns, pane.size.lines),
             handed_over: None,
@@ -1131,6 +1133,8 @@ pub(super) fn spawn(
         } else {
             exclusive_attachment(request.client_process_id)
         },
+        attachment_client_id: (shared_request.is_none() && client_process_id != 0)
+            .then(|| client_id.clone()),
         size: request.size,
         retained: {
             let retained = retention.new_retained(request.size.columns, request.size.lines);
@@ -1716,6 +1720,7 @@ pub(super) fn detach(
                 if holder == client_process_id =>
             {
                 pane.attachment = Attachment::None;
+                pane.attachment_client_id = None;
                 #[cfg(windows)]
                 pane.pty.resume_reader();
             }
@@ -1876,35 +1881,6 @@ pub(super) fn share(
         session.refuse_until = None;
     }
     session.summary.authentication_required = session.authentication.is_some();
-    // An offered summary seeds the session's canonical geometry, so it has to
-    // describe panes this daemon actually holds — every later proposal is
-    // validated against that geometry, and one written in another id space
-    // makes every one of them fail with no way to recover. Checked here rather
-    // than trusted, the way `apply_shared` checks a `ReplaceTab`: the two
-    // requests write the same field and had different rules.
-    if request.offered {
-        let held = session
-            .panes
-            .iter()
-            .map(|pane| pane.id)
-            .collect::<std::collections::HashSet<_>>();
-        if let Some(pane) = session
-            .summary
-            .panes
-            .iter()
-            .find(|pane| !held.contains(&pane.id))
-        {
-            let pane_id = pane.id;
-            let session_id = session.id;
-            drop(sessions);
-            return connection.send(&Response::Error {
-                message: format!(
-                    "the offered summary for session {session_id} describes pane {pane_id}, \
-                     which this multiplexer does not hold"
-                ),
-            });
-        }
-    }
     session.shared_state = request.offered.then(|| {
         let mut state = session.shared_state.clone().unwrap_or_else(|| {
             crate::messages::SharedSessionState::new(
@@ -2020,11 +1996,8 @@ pub(super) fn apply_shared(
             &request.operation
         {
             anyhow::ensure!(
-                summary
-                    .panes
-                    .iter()
-                    .all(|pane| { session.panes.iter().any(|current| current.id == pane.id) }),
-                "shared tab state referenced a pane the daemon does not hold"
+                summary_matches_daemon_panes(summary, session),
+                "shared tab state must describe exactly the daemon pane set"
             );
         }
         if state.validate_operation(&request.operation).is_err() {
@@ -2094,6 +2067,7 @@ pub(super) fn leave_shared(
             clients.retain(|client| client.client_id != client_id);
             if clients.is_empty() {
                 pane.attachment = Attachment::None;
+                pane.attachment_client_id = None;
             }
         }
     }
@@ -2161,7 +2135,10 @@ pub(super) fn set_session_scope(
         session.summary.authentication_required = true;
     }
     if !shared {
-        let Some(owner) = session.owner.filter(|owner| process_is_running(*owner)) else {
+        let Some(owner) = session
+            .owner
+            .filter(|owner| crate::process_status::is_running(*owner))
+        else {
             return connection.send(&Response::Error {
                 message: format!(
                     "session {session_id} has no window to scope it back to; attach it first, \
@@ -2240,7 +2217,7 @@ pub(super) fn stranded_session_may_be_offered(
     shared: bool,
     replaces_verifier: bool,
 ) -> bool {
-    shared && !replaces_verifier && !session.owner.is_some_and(process_is_running)
+    shared && !replaces_verifier && !session.owner.is_some_and(crate::process_status::is_running)
 }
 
 pub(super) fn session_control_authorized(
@@ -2745,6 +2722,7 @@ pub(super) fn close_pane(
             if holder == client_process_id =>
         {
             pane.attachment = Attachment::None;
+            pane.attachment_client_id = None;
         }
         // A shared client leaves by closing its own data-plane connection,
         // which is what `remove_shared_client` acts on; releasing the whole

@@ -17,7 +17,10 @@ use std::{
 use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
 
-/// Bumped whenever the private Windows handover changes shape.
+use crate::messages::ClientId;
+
+/// Bumped whenever the private Windows handover changes incompatibly. Optional
+/// defaulted fields keep the version so an older daemon can upgrade into them.
 pub const HANDOVER_VERSION: u32 = 3;
 
 const READY_TIMEOUT: Duration = Duration::from_secs(10);
@@ -70,6 +73,8 @@ pub struct PaneHandover {
     pub console_id: u64,
     pub child_pid: u32,
     pub attachment: AttachmentHandover,
+    #[serde(default)]
+    pub attachment_client_id: Option<ClientId>,
     pub columns: u16,
     pub lines: u16,
     pub exited: bool,

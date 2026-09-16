@@ -29,8 +29,13 @@ const SHARED_SIZE_REPORT_DEBOUNCE: Duration = Duration::from_millis(100);
 /// on the far end of it stops reading input for every viewer.
 ///
 /// Blocking, and called from a background task for that reason.
-fn give_pane_back(client: &zmux::client::Client, session_id: u64, mux_pane_id: u64) {
-    if let Err(error) = client.release_exclusive(session_id, mux_pane_id) {
+fn give_pane_back(
+    client: &zmux::client::Client,
+    session_id: u64,
+    mux_pane_id: u64,
+    attachment_client_id: &zmux::messages::ClientId,
+) {
+    if let Err(error) = client.release_exclusive(session_id, mux_pane_id, attachment_client_id) {
         log::warn!("could not give pane {mux_pane_id} back to the multiplexer: {error:#}");
     }
 }
@@ -525,10 +530,18 @@ impl Zetta {
                     return;
                 }
             };
+            let attachment_client_id = attached.attachment_client_id().clone();
             let shown = this
                 .update_in(cx, |this, window, cx| {
                     this.complete_grant_conversion(
-                        ids, attached, terminal, options, &runtime, window, cx,
+                        ids,
+                        attached,
+                        attachment_client_id.clone(),
+                        terminal,
+                        options,
+                        &runtime,
+                        window,
+                        cx,
                     )
                 })
                 .unwrap_or(false);
@@ -540,7 +553,7 @@ impl Zetta {
                 // pane goes dead for every viewer of it and not just this one.
                 let client = runtime.client().clone();
                 cx.background_spawn(async move {
-                    give_pane_back(&client, session_id, mux_pane_id);
+                    give_pane_back(&client, session_id, mux_pane_id, &attachment_client_id);
                 })
                 .await;
             }
@@ -563,6 +576,7 @@ impl Zetta {
         &mut self,
         ids: MuxPaneIds,
         attached: zmux::client::AttachedPane,
+        attachment_client_id: zmux::messages::ClientId,
         terminal: Entity<Terminal>,
         options: terminal::AttachedOptions,
         runtime: &MuxRuntime,
@@ -599,7 +613,7 @@ impl Zetta {
         // Exits now arrive through the pty's own child-event channel again, and a
         // pane holding the descriptor has to be able to answer a future revoke.
         runtime.reporters().register(ids.mux_pane_id, child_events);
-        self.watch_for_revoke(ids, runtime, window, cx);
+        self.watch_for_revoke(ids, attachment_client_id, runtime, window, cx);
         cx.notify();
         true
     }
@@ -614,6 +628,7 @@ impl Zetta {
     pub(crate) fn handle_pane_revoke(
         &mut self,
         ids: MuxPaneIds,
+        attachment_client_id: zmux::messages::ClientId,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -645,7 +660,7 @@ impl Zetta {
         else {
             let client = runtime.client().clone();
             cx.background_spawn(async move {
-                give_pane_back(&client, session_id, mux_pane_id);
+                give_pane_back(&client, session_id, mux_pane_id, &attachment_client_id);
             })
             .detach();
             return;
@@ -658,7 +673,7 @@ impl Zetta {
         {
             let client = runtime.client().clone();
             cx.background_spawn(async move {
-                give_pane_back(&client, session_id, mux_pane_id);
+                give_pane_back(&client, session_id, mux_pane_id, &attachment_client_id);
             })
             .detach();
             return;
@@ -706,7 +721,7 @@ impl Zetta {
                 log::debug!("the multiplexer handover of pane {mux_pane_id} did not complete");
                 let client = runtime.client().clone();
                 cx.background_spawn(async move {
-                    give_pane_back(&client, session_id, mux_pane_id);
+                    give_pane_back(&client, session_id, mux_pane_id, &attachment_client_id);
                 })
                 .await;
                 return;

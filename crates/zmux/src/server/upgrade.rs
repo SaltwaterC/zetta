@@ -102,6 +102,7 @@ pub(super) fn prepare_upgrade(daemon: &Arc<Daemon>) -> Result<(PathBuf, std::fs:
         generation: daemon.catalog.lock().unwrap().runner_id(),
         next_session_id: daemon.next_session_id.load(Ordering::SeqCst),
         next_pane_id: daemon.next_pane_id.load(Ordering::SeqCst),
+        retention: *daemon.retention.lock().unwrap(),
         sessions: sessions
             .iter_mut()
             .map(|session| {
@@ -134,6 +135,7 @@ pub(super) fn prepare_upgrade(daemon: &Arc<Daemon>) -> Result<(PathBuf, std::fs:
                                 descriptor: pane.pty.file().as_raw_fd(),
                                 child_pid: pane.pty.child_pid(),
                                 attachment: attachment_handover(&pane.attachment),
+                                attachment_client_id: pane.attachment_client_id.clone(),
                                 columns,
                                 lines,
                                 exited: pane.exited,
@@ -257,6 +259,7 @@ pub(super) fn prepare_upgrade(daemon: &Arc<Daemon>) -> Result<(PathBuf, PathBuf,
                             console_id: pane.console_id,
                             child_pid: pane.pty.child_pid(),
                             attachment: attachment_handover(&pane.attachment),
+                            attachment_client_id: pane.attachment_client_id.clone(),
                             columns,
                             lines,
                             exited: pane.exited,
@@ -411,6 +414,7 @@ pub(super) fn adopt_handover(
                 id: pane.id,
                 pty,
                 attachment: adopt_attachment(pane.attachment),
+                attachment_client_id: pane.attachment_client_id,
                 // The size the pane is actually running at, carried across so
                 // arbitration continues from what its viewers are showing.
                 // Restarting from a default silently resized every adopted pane.
@@ -519,6 +523,7 @@ pub(super) fn adopt_handover(
                 console_id: pane.console_id,
                 child_events,
                 attachment: adopt_attachment(pane.attachment),
+                attachment_client_id: pane.attachment_client_id,
                 size: TerminalSize {
                     columns: pane.columns,
                     lines: pane.lines,

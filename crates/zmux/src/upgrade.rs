@@ -31,9 +31,11 @@ use std::{
 use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
 
-/// Bumped whenever [`Handover`] changes shape. The replacement refuses a
-/// version it does not know rather than guessing at the layout of a session it
-/// is about to take responsibility for.
+use crate::messages::ClientId;
+
+/// Bumped whenever [`Handover`] changes incompatibly. Optional fields with a
+/// serde default deliberately keep the version so an older running daemon can
+/// hand its state to the build that introduced them.
 pub const HANDOVER_VERSION: u32 = 8;
 
 /// Everything the next image needs to carry on.
@@ -50,6 +52,13 @@ pub struct Handover {
     pub generation: u64,
     pub next_session_id: u64,
     pub next_pane_id: u64,
+    /// The policy the replaced daemon was actually using.
+    ///
+    /// Older Unix handovers omitted it and therefore resume as the historical
+    /// in-memory default. New handovers must carry it: resuming a disk daemon
+    /// as memory recovery marks its still-live records restorable.
+    #[serde(default)]
+    pub retention: crate::retention::Retention,
     pub sessions: Vec<SessionHandover>,
 }
 
@@ -114,6 +123,11 @@ pub struct PaneHandover {
     /// client that dies across the upgrade is then still noticed by the
     /// liveness reclaim, and a pane mid-handover can still complete it.
     pub attachment: AttachmentHandover,
+    /// The exact logical request that acquired an exclusive attachment.
+    /// Older daemon images did not carry this, so an in-place upgrade accepts
+    /// its absence and falls back to PID ownership until the next attach.
+    #[serde(default)]
+    pub attachment_client_id: Option<ClientId>,
     /// The size the pane is running at, so arbitration continues from what
     /// every viewer is showing rather than restarting from a default.
     pub columns: u16,

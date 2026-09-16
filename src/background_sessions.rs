@@ -284,6 +284,24 @@ pub(crate) fn multiplexer_held_catalog_sessions(
         })
 }
 
+/// Every session ID owned by a live multiplexer catalog, including sessions
+/// scoped to a different Zetta process.
+///
+/// Scope controls whether this process may attach; it does not make the
+/// session cease to exist. Disk recovery must use this wider set or a record
+/// with the same ID as another process's live session is offered as though the
+/// daemon had died.
+#[cfg(feature = "session-persistence")]
+pub(crate) fn multiplexer_catalog_session_ids<'a>(
+    catalogs: &'a [BackgroundSessionCatalog],
+    is_zetta: impl Fn(u32) -> bool + 'a,
+) -> impl Iterator<Item = u64> + 'a {
+    catalogs
+        .iter()
+        .filter(move |catalog| !is_zetta(catalog.process_id))
+        .flat_map(|catalog| catalog.sessions.iter().map(|session| session.id))
+}
+
 #[cfg(test)]
 #[path = "tests/background_sessions.rs"]
 mod tests;

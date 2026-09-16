@@ -304,9 +304,14 @@ pub fn read_session_catalogs(directory: &Path) -> Result<Vec<BackgroundSessionCa
 pub fn print_session_catalogs(directory: &Path, json: bool) -> Result<()> {
     let catalogs = read_session_catalogs(directory)?;
     #[cfg(feature = "session-persistence")]
+    let live_session_ids = catalogs
+        .iter()
+        .flat_map(|catalog| catalog.sessions.iter().map(|session| session.id))
+        .collect::<HashSet<_>>();
+    #[cfg(feature = "session-persistence")]
     let restorable = crate::persistence::read_opaque_records(directory)?
         .into_iter()
-        .filter(|record| record.restorable)
+        .filter(|record| record.restorable && !live_session_ids.contains(&record.id))
         .collect::<Vec<_>>();
     if json {
         #[cfg(feature = "session-persistence")]

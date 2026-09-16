@@ -1,6 +1,20 @@
 use super::*;
 
 #[test]
+fn closing_a_replaced_handover_watcher_is_not_a_handover_signal() {
+    let signals = PaneSignals::default();
+    let (old_sender, old_receiver) = async_channel::unbounded();
+    let (replacement_sender, _replacement_receiver) = async_channel::unbounded();
+    signals.register(17, old_sender);
+    signals.register(17, replacement_sender);
+
+    assert!(
+        !futures::executor::block_on(pane_handover_signal_received(old_receiver)),
+        "a superseded watcher must retire without revoking the replacement attachment"
+    );
+}
+
+#[test]
 fn a_tabs_panes_join_one_session() {
     // A tab is a session: the first pane to reach the multiplexer creates it
     // and the rest join, or a split tab would come back as several sessions.

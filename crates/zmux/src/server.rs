@@ -13,7 +13,7 @@
 //! leaves; only then does an exclusive attach become possible again.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     io::{Read as _, Write as _},
     path::{Path, PathBuf},
     sync::{
@@ -79,6 +79,13 @@ struct Pane {
     /// while a revoke is outstanding: the holder still has the descriptor
     /// until its snapshot arrives.
     attachment: Attachment,
+    /// The logical request that acquired the current exclusive attachment.
+    ///
+    /// A process can reattach a pane while an older handover cleanup is still
+    /// in flight. Its PID is therefore not an attachment identity: accepting
+    /// that stale cleanup makes the daemon read a PTY the newer attachment is
+    /// already reading, splitting terminal escape sequences between them.
+    attachment_client_id: Option<ClientId>,
     /// The size the daemon last applied. Shared clients report their own sizes
     /// over [`Request::Resize`], which is what size arbitration starts from.
     size: TerminalSize,
@@ -442,13 +449,14 @@ struct Session {
 }
 
 /// Ensures an offered session's collaboration snapshot describes the panes the
-/// daemon currently owns.
+/// daemon can actually attach.
 ///
-/// The summary is deliberately copied before normalization: it is the live
-/// session record used by `list`, while `presentation` is the view shared by
-/// attachers. If an older handoff left those two out of step, the repair gets a
-/// new revision, is persisted, and is sent to subscribers before the caller
-/// continues with its request.
+/// `Session::panes` owns the PTYs and is therefore the final authority: the
+/// catalog summary is only a client-supplied description of them. Rebuilding
+/// that description before normalizing prevents `list` from advertising a
+/// pane that the attachment path cannot open. If an older handoff left those
+/// two out of step, the repair gets a new revision, is persisted, and is sent
+/// to subscribers before the caller continues with its request.
 fn normalize_shared_state(
     daemon: &Arc<Daemon>,
     session: &mut Session,
@@ -463,12 +471,13 @@ fn normalize_shared_state(
     });
     state = state.migrate()?;
 
-    let mut live_summary = session.summary.clone();
-    live_summary.id = session.id;
+    let live_summary = summary_from_daemon_panes(session, &state)?;
+    let catalog_changed = session.summary != live_summary;
+    session.summary = live_summary.clone();
     let summary_changed = state.summary != live_summary;
     state.summary = live_summary;
     let presentation_changed = state.normalize()?;
-    let repaired = had_shared_state && (summary_changed || presentation_changed);
+    let repaired = had_shared_state && (catalog_changed || summary_changed || presentation_changed);
     if repaired {
         state.revision = state.revision.next();
     }
@@ -486,6 +495,185 @@ fn normalize_shared_state(
     }
 
     Ok(state)
+}
+
+/// Reconciles catalog metadata and geometry with the daemon-owned PTYs.
+///
+/// Metadata for a surviving pane remains intact. A pane which was never
+/// published is given a deliberately minimal entry so that it remains visible
+/// and attachable; the next ordinary publication will fill in its richer
+/// client-owned metadata. Geometry preserves the layout that accounts for the
+/// most daemon-owned panes, collapses dead branches, and appends unpublished
+/// panes.
+fn summary_from_daemon_panes(
+    session: &Session,
+    previous_state: &crate::messages::SharedSessionState,
+) -> Result<BackgroundSessionSummary> {
+    let live_pane_ids = session
+        .panes
+        .iter()
+        .map(|pane| pane.id)
+        .collect::<HashSet<_>>();
+    anyhow::ensure!(
+        !live_pane_ids.is_empty(),
+        "session {} has no daemon-owned panes",
+        session.id
+    );
+
+    let mut included = HashSet::new();
+    let mut panes = Vec::new();
+    for summary in [&session.summary, &previous_state.summary] {
+        panes.extend(
+            summary
+                .panes
+                .iter()
+                .filter(|pane| live_pane_ids.contains(&pane.id) && included.insert(pane.id))
+                .cloned(),
+        );
+    }
+    for pane in &session.panes {
+        if included.insert(pane.id) {
+            panes.push(unpublished_pane_summary(pane));
+        }
+    }
+
+    let summary_coverage = live_layout_coverage(&session.summary.layout, &live_pane_ids);
+    let presentation_coverage =
+        live_layout_coverage(&previous_state.presentation.layout, &live_pane_ids);
+    let source_layout = if presentation_coverage > summary_coverage {
+        &previous_state.presentation.layout
+    } else {
+        &session.summary.layout
+    };
+    let mut laid_out = HashSet::new();
+    let mut layout = retain_daemon_panes_in_layout(source_layout, &live_pane_ids, &mut laid_out);
+    for pane in &panes {
+        if laid_out.insert(pane.id) {
+            layout = Some(match layout {
+                Some(layout) => BackgroundPaneLayout::Split {
+                    axis: "horizontal".to_owned(),
+                    first_ratio: crate::protocol::DEFAULT_BACKGROUND_PANE_SPLIT_RATIO,
+                    first: Box::new(layout),
+                    second: Box::new(BackgroundPaneLayout::Pane { pane_id: pane.id }),
+                },
+                None => BackgroundPaneLayout::Pane { pane_id: pane.id },
+            });
+        }
+    }
+    let layout = layout.expect("a daemon-owned pane is always placed in the layout");
+    let active_pane = if live_pane_ids.contains(&session.summary.active_pane) {
+        session.summary.active_pane
+    } else if live_pane_ids.contains(&previous_state.presentation.active_pane) {
+        previous_state.presentation.active_pane
+    } else {
+        first_layout_pane_id(&layout)
+    };
+
+    Ok(BackgroundSessionSummary {
+        id: session.id,
+        title: session.summary.title.clone(),
+        authentication_required: session.summary.authentication_required,
+        active_pane,
+        layout,
+        panes,
+        held: session.summary.held,
+        scoped_to: session.summary.scoped_to,
+        key_envelope: session.summary.key_envelope.clone(),
+    })
+}
+
+fn unpublished_pane_summary(pane: &Pane) -> crate::protocol::BackgroundPaneSummary {
+    crate::protocol::BackgroundPaneSummary {
+        id: pane.id,
+        label: format!("pane-{}", pane.id),
+        profile: String::new(),
+        configured_command: String::new(),
+        application: String::new(),
+        foreground_command: None,
+        terminal_title: None,
+        working_directory: None,
+        state: if pane.exited {
+            crate::protocol::BackgroundPaneState::Exited
+        } else {
+            crate::protocol::BackgroundPaneState::Running
+        },
+        exit: None,
+    }
+}
+
+/// Retains each live leaf once, collapsing a split whose other child no
+/// longer exists. `seen` also repairs a malformed layout that repeated a pane.
+fn retain_daemon_panes_in_layout(
+    layout: &BackgroundPaneLayout,
+    live_pane_ids: &HashSet<u64>,
+    seen: &mut HashSet<u64>,
+) -> Option<BackgroundPaneLayout> {
+    match layout {
+        BackgroundPaneLayout::Pane { pane_id }
+            if live_pane_ids.contains(pane_id) && seen.insert(*pane_id) =>
+        {
+            Some(BackgroundPaneLayout::Pane { pane_id: *pane_id })
+        }
+        BackgroundPaneLayout::Pane { .. } => None,
+        BackgroundPaneLayout::Split {
+            axis,
+            first_ratio,
+            first,
+            second,
+        } => match (
+            retain_daemon_panes_in_layout(first, live_pane_ids, seen),
+            retain_daemon_panes_in_layout(second, live_pane_ids, seen),
+        ) {
+            (Some(first), Some(second)) => Some(BackgroundPaneLayout::Split {
+                axis: axis.clone(),
+                first_ratio: *first_ratio,
+                first: Box::new(first),
+                second: Box::new(second),
+            }),
+            (Some(layout), None) | (None, Some(layout)) => Some(layout),
+            (None, None) => None,
+        },
+    }
+}
+
+/// Counts the distinct daemon-owned leaves a layout can preserve.
+fn live_layout_coverage(layout: &BackgroundPaneLayout, live_pane_ids: &HashSet<u64>) -> usize {
+    let mut seen = HashSet::new();
+    count_live_layout_panes(layout, live_pane_ids, &mut seen);
+    seen.len()
+}
+
+fn count_live_layout_panes(
+    layout: &BackgroundPaneLayout,
+    live_pane_ids: &HashSet<u64>,
+    seen: &mut HashSet<u64>,
+) {
+    match layout {
+        BackgroundPaneLayout::Pane { pane_id } => {
+            if live_pane_ids.contains(pane_id) {
+                seen.insert(*pane_id);
+            }
+        }
+        BackgroundPaneLayout::Split { first, second, .. } => {
+            count_live_layout_panes(first, live_pane_ids, seen);
+            count_live_layout_panes(second, live_pane_ids, seen);
+        }
+    }
+}
+
+fn first_layout_pane_id(layout: &BackgroundPaneLayout) -> u64 {
+    match layout {
+        BackgroundPaneLayout::Pane { pane_id } => *pane_id,
+        BackgroundPaneLayout::Split { first, .. } => first_layout_pane_id(first),
+    }
+}
+
+fn summary_matches_daemon_panes(summary: &BackgroundSessionSummary, session: &Session) -> bool {
+    let mut summary_pane_ids = summary.panes.iter().map(|pane| pane.id).collect::<Vec<_>>();
+    summary_pane_ids.sort_unstable();
+    let mut daemon_pane_ids = session.panes.iter().map(|pane| pane.id).collect::<Vec<_>>();
+    daemon_pane_ids.sort_unstable();
+    summary_pane_ids == daemon_pane_ids
 }
 
 #[cfg(feature = "session-persistence")]
@@ -769,6 +957,11 @@ pub fn run(
         .as_ref()
         .map(|handover| handover.generation)
         .unwrap_or(new_generation()?);
+    #[cfg(unix)]
+    let retention = resumed_handover
+        .as_ref()
+        .map(|handover| handover.retention)
+        .unwrap_or(retention);
     #[cfg(windows)]
     let generation = resumed_handover
         .as_ref()

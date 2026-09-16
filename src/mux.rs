@@ -71,6 +71,15 @@ fn mux_recovery_generation_matches(
         && current_configuration_generation == expected_configuration_generation
 }
 
+/// Waits for an actual pane handover signal.
+///
+/// Replacing or forgetting a reporter closes its old channel. That is lifecycle
+/// cleanup, not a revoke or grant: treating it as one lets a stale watcher act
+/// on a pane after the same session has been attached again.
+async fn pane_handover_signal_received(receiver: async_channel::Receiver<()>) -> bool {
+    receiver.recv().await.is_ok()
+}
+
 /// The connection shared by every pane in this process.
 #[derive(Clone)]
 pub(crate) struct MuxRuntime {
@@ -417,19 +426,20 @@ pub(crate) struct MuxPtyProvider {
     restore_replay: Mutex<Option<Vec<u8>>>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(crate) struct OpenedPane {
     pub(crate) session_id: u64,
     pub(crate) pane_id: u64,
+    pub(crate) attachment_client_id: Option<zmux::messages::ClientId>,
 }
 
 impl MuxPtyProvider {
     /// What the multiplexer created, once [`PtyProvider::open`] has returned.
     pub(crate) fn opened(&self) -> Option<OpenedPane> {
-        *self
-            .opened
+        self.opened
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
 
     pub(crate) fn runtime(&self) -> &MuxRuntime {
@@ -444,6 +454,7 @@ impl MuxPtyProvider {
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(OpenedPane {
             session_id,
             pane_id,
+            attachment_client_id: None,
         });
     }
 
@@ -476,12 +487,14 @@ impl PtyProvider for MuxPtyProvider {
             console_palette: request.console_palette,
         })?;
         self.session.set_id(pane.session_id);
+        let attachment_client_id = pane.attachment_client_id().clone();
         *self
             .opened
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(OpenedPane {
             session_id: pane.session_id,
             pane_id: pane.pane_id,
+            attachment_client_id: Some(attachment_client_id),
         });
         let mut handover = attached_pane_handover(pane, self.runtime.client().clone());
         if let Some(replay) = self
@@ -1057,17 +1070,20 @@ impl crate::Zetta {
                 .reporters()
                 .register(opened.pane_id, events);
         }
-        self.watch_for_revoke(
-            MuxPaneIds {
-                tab_id,
-                pane_id,
-                session_id: opened.session_id,
-                mux_pane_id: opened.pane_id,
-            },
-            provider.runtime(),
-            window,
-            cx,
-        );
+        if let Some(attachment_client_id) = opened.attachment_client_id {
+            self.watch_for_revoke(
+                MuxPaneIds {
+                    tab_id,
+                    pane_id,
+                    session_id: opened.session_id,
+                    mux_pane_id: opened.pane_id,
+                },
+                attachment_client_id,
+                provider.runtime(),
+                window,
+                cx,
+            );
+        }
     }
 
     /// Hands a closed pane back to the multiplexer.
@@ -1211,10 +1227,12 @@ impl crate::Zetta {
             .grant_reporters()
             .register(ids.mux_pane_id, grant_tx);
         cx.spawn_in(window, async move |this, cx| {
-            let _ = grant_rx.recv().await;
-            this.update_in(cx, |this, window, cx| {
+            if !pane_handover_signal_received(grant_rx).await {
+                return;
+            }
+            let _ = this.update_in(cx, |this, window, cx| {
                 this.handle_pane_grant(ids, window, cx);
-            })
+            });
         })
         .detach();
     }
@@ -1234,6 +1252,7 @@ impl crate::Zetta {
     pub(crate) fn watch_for_revoke(
         &mut self,
         ids: MuxPaneIds,
+        attachment_client_id: zmux::messages::ClientId,
         runtime: &MuxRuntime,
         window: &mut gpui::Window,
         cx: &mut gpui::Context<Self>,
@@ -1246,10 +1265,12 @@ impl crate::Zetta {
             // The daemon waits only so long for the answer, so the handover
             // has to start promptly. Nothing is ever sent here; the channel
             // is just the arrival of the revoke.
-            let _ = revoke_rx.recv().await;
-            this.update_in(cx, |this, window, cx| {
-                this.handle_pane_revoke(ids, window, cx);
-            })
+            if !pane_handover_signal_received(revoke_rx).await {
+                return;
+            }
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.handle_pane_revoke(ids, attachment_client_id, window, cx);
+            });
         })
         .detach();
     }

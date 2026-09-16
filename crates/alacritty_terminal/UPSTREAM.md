@@ -55,6 +55,10 @@ Retain these Zetta changes when synchronizing:
 - The event loop accepts a `ReplayBarrier` supplied by Zetta. Attached PTY
   readers wait behind retained-screen replay until the first real layout, and
   an abort wakes them when a terminal is dropped or its backend is replaced.
+- `EventedPty::redraw` and the event loop's `Redraw` message let an attached
+  Unix PTY signal its foreground process after replay. Reapplying an unchanged
+  PTY size does not emit `SIGWINCH`, but a differential TUI must still discard
+  the screen it drew into the previous terminal emulator.
 - The event loop reports a child exit only after its configured final PTY
   drain. Zetta releases an exited PTY as soon as it receives that report, so
   reporting first could abort the drain and discard the child process's final

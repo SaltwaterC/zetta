@@ -629,6 +629,15 @@ impl EventedPty for Pty {
         matches!(self.child, PtyChild::Attached { .. })
     }
 
+    fn redraw(&mut self) {
+        let process_group = unsafe { libc::tcgetpgrp(self.file.as_raw_fd()) };
+        if process_group > 0 {
+            // SAFETY: `process_group` came from this PTY's foreground process
+            // group and SIGWINCH is the terminal redraw notification.
+            unsafe { libc::killpg(process_group, libc::SIGWINCH) };
+        }
+    }
+
     #[inline]
     fn next_child_event(&mut self) -> Option<ChildEvent> {
         match &mut self.child {

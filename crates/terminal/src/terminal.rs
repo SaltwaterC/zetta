@@ -2206,6 +2206,7 @@ impl TerminalBuilder {
             child_is_the_multiplexers: false,
             pending_replay: None,
             replay_barrier: ReplayBarrier::open(),
+            redraw_attached_on_first_layout: false,
             // Explicit bounds are an initialized display-only layout even when
             // they happen to equal the default 100x6 dimensions. The no-bounds
             // constructor resets this after calling us above.
@@ -2312,6 +2313,7 @@ impl TerminalBuilder {
         } else {
             ReplayBarrier::open()
         };
+        builder.terminal.redraw_attached_on_first_layout = true;
 
         let control = handover.control.clone();
         #[cfg(unix)]
@@ -3048,6 +3050,7 @@ impl TerminalBuilder {
                 child_is_the_multiplexers: false,
                 pending_replay,
                 replay_barrier,
+                redraw_attached_on_first_layout: false,
                 terminal_size_initialized: false,
                 size_initialization_queued: false,
                 fresh_shell_restore: false,
@@ -3347,6 +3350,10 @@ pub struct Terminal {
     /// Keeps backend readers from parsing live output until `pending_replay` has
     /// been applied at the first real layout.
     replay_barrier: ReplayBarrier,
+    /// An existing foreground process still believes the previous terminal
+    /// emulator's screen is intact. Its first layout must request a complete
+    /// repaint even when the kernel PTY already has exactly that geometry.
+    redraw_attached_on_first_layout: bool,
     /// Whether a real pane layout has supplied the terminal's grid size. The
     /// constructor's debug bounds are only a placeholder for PTYs.
     terminal_size_initialized: bool,
@@ -3759,6 +3766,23 @@ impl Terminal {
         self.replay_barrier.release();
     }
 
+    fn redraw_attached_after_first_layout(&mut self) {
+        if !self.redraw_attached_on_first_layout {
+            return;
+        }
+        self.redraw_attached_on_first_layout = false;
+        if let TerminalType::Pty {
+            pty_tx: Some(pty_tx),
+            ..
+        } = &self.terminal_type
+        {
+            // Queued behind the resize above on the PTY event loop. On Unix a
+            // same-size TIOCSWINSZ emits no SIGWINCH, but the application still
+            // has to invalidate the screen that belonged to the old emulator.
+            pty_tx.redraw();
+        }
+    }
+
     fn process_terminal_event(
         &mut self,
         event: &InternalEvent,
@@ -3816,6 +3840,7 @@ impl Terminal {
                 // first moment a restored screen can be written without being
                 // wrapped at the wrong width.
                 self.replay_pending(term);
+                self.redraw_attached_after_first_layout();
                 if grid_size_changed || !was_size_initialized {
                     cx.emit(Event::GridSizeChanged);
                 }
@@ -3838,6 +3863,7 @@ impl Terminal {
                 self.terminal_size_initialized = true;
                 self.size_initialization_queued = false;
                 self.replay_pending(term);
+                self.redraw_attached_after_first_layout();
                 cx.emit(Event::GridSizeChanged);
             }
             InternalEvent::ReplayFreshShell => self.replay_pending(term),
@@ -7983,6 +8009,90 @@ mod tests {
         // The process is untouched by any of this, which is the point.
         assert!(unsafe { libc::kill(child_pid as libc::pid_t, 0) } == 0);
         unsafe { libc::kill(-(child_pid as libc::pid_t), libc::SIGKILL) };
+    }
+
+    /// A full-screen program paints differentially against the terminal it
+    /// previously drew. Attaching a new emulator at the PTY's existing size
+    /// does not make the kernel emit SIGWINCH, so replay alone can leave any
+    /// snapshot omissions as permanent holes until the program happens to
+    /// repaint those rows.
+    #[cfg(unix)]
+    #[gpui::test]
+    async fn an_attached_terminal_requests_a_redraw_at_an_unchanged_pty_size(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+        cx.executor().allow_parking();
+
+        let shell = (
+            "/bin/sh".to_owned(),
+            vec![
+                "-c".to_owned(),
+                r#"trap 'printf "\r\nredraw-after-attach\r\n"' WINCH; \
+                 printf 'ready-before-attach\r\n'; while :; do sleep 1; done"#
+                    .to_owned(),
+            ],
+        );
+        let options = pty_options(
+            Some(shell),
+            None,
+            std::iter::empty::<(String, String)>(),
+            None,
+        );
+        let pty = alacritty_terminal::tty::new(
+            &options,
+            alacritty_terminal::event::WindowSize {
+                num_lines: 24,
+                num_cols: 80,
+                cell_width: 8,
+                cell_height: 10,
+            },
+            0,
+        )
+        .unwrap();
+        let child_pid = pty.child_pid();
+        // Let the child install its trap before the attached reader and its
+        // first-layout redraw are started.
+        std::thread::sleep(Duration::from_millis(100));
+
+        let attached = TerminalBuilder::new_attached(
+            PtyHandover {
+                descriptor: pty.file().try_clone().unwrap().into(),
+                child_pid,
+                replay: b"screen-from-the-previous-emulator".to_vec(),
+                control: Arc::new(NoopPtyControl),
+            },
+            AttachedOptions {
+                shell: Shell::System,
+                env: HashMap::default(),
+                cursor_shape: SettingsCursorShape::default(),
+                alternate_scroll: AlternateScroll::On,
+                max_scroll_history_lines: None,
+                path_hyperlink_regexes: Vec::new(),
+                path_hyperlink_timeout_ms: 0,
+                window_id: 0,
+            },
+            &cx.background_executor,
+            PathStyle::local(),
+        )
+        .unwrap();
+        let first_window = cx.add_empty_window();
+        let terminal = first_window.new(|cx| attached.builder.subscribe(cx));
+        first_window.update_window_entity(&terminal, |terminal, window, cx| {
+            terminal.set_size(TerminalBounds::new(
+                Pixels::from(10.),
+                Pixels::from(8.),
+                bounds(
+                    GpuiPoint::default(),
+                    size(Pixels::from(80. * 8.), Pixels::from(24. * 10.)),
+                ),
+            ));
+            terminal.sync(window, cx);
+        });
+
+        assert_content_eventually(&terminal, "redraw-after-attach", cx).await;
+        unsafe { libc::killpg(child_pid as libc::pid_t, libc::SIGKILL) };
+        unsafe { libc::waitpid(child_pid as libc::pid_t, std::ptr::null_mut(), 0) };
     }
 
     #[cfg(unix)]

@@ -746,6 +746,28 @@ impl Zetta {
                         ));
                     }
                 }
+                #[cfg(feature = "zmux")]
+                {
+                    // Retire the foreground tab's event routes before forgetting
+                    // its pane mappings. Registering the same daemon pane after a
+                    // reconnect replaces these senders; leaving them behind made
+                    // their old watchers wake on channel closure and mistake that
+                    // lifecycle event for a real revoke or grant.
+                    if let Some(runtime) = self
+                        .mux_panes
+                        .runtime_for_tab(tab_id)
+                        .or_else(|| self.mux.clone())
+                    {
+                        for pane in &tab.panes {
+                            let Some(mux_pane_id) = self.mux_panes.mux_pane_id(pane.id) else {
+                                continue;
+                            };
+                            runtime.reporters().forget(mux_pane_id);
+                            runtime.revoke_reporters().forget(mux_pane_id);
+                            runtime.grant_reporters().forget(mux_pane_id);
+                        }
+                    }
+                }
                 self.mux_panes.forget_tab(tab_id);
                 for pane in &tab.panes {
                     self.mux_panes.forget_pane(pane.id);

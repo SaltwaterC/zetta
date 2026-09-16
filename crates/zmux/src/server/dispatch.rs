@@ -331,6 +331,7 @@ pub(super) fn serve(daemon: &Arc<Daemon>, stream: Stream, token: &str) -> Result
             session_id,
             pane_id,
             envelope.client_process_id,
+            client_id,
             peer_process_id,
             &mut connection,
         ),
@@ -388,7 +389,7 @@ pub(super) fn serve(daemon: &Arc<Daemon>, stream: Stream, token: &str) -> Result
             // authenticates the channel, not a session: listing must not reveal
             // the commands, titles or directories of a session whose whole
             // point is that they stay private until its secret is presented.
-            let sessions = daemon
+            let sessions: Vec<_> = daemon
                 .sessions
                 .lock()
                 .unwrap()
@@ -396,6 +397,11 @@ pub(super) fn serve(daemon: &Arc<Daemon>, stream: Stream, token: &str) -> Result
                 .filter(|session| session.is_available() && (!stream_only || session.offered))
                 .map(|session| catalog_summary(session).for_public_catalog())
                 .collect();
+            #[cfg(feature = "session-persistence")]
+            let live_session_ids = sessions
+                .iter()
+                .map(|session| session.id)
+                .collect::<std::collections::HashSet<_>>();
             #[cfg(feature = "session-persistence")]
             let mut restorable: Vec<crate::protocol::RestorableSessionRecord> = daemon
                 .persistence
@@ -406,7 +412,9 @@ pub(super) fn serve(daemon: &Arc<Daemon>, stream: Stream, token: &str) -> Result
                     persistence
                         .records()
                         .iter()
-                        .filter(|record| record.restorable)
+                        .filter(|record| {
+                            record.restorable && !live_session_ids.contains(&record.id)
+                        })
                         .cloned()
                         .collect()
                 })
@@ -635,12 +643,11 @@ pub(super) fn configure_daemon(
                 .context("flushing encrypted scrollback before changing retention")?;
         }
         if matches!(retention, Retention::Disk) && !persistence_recipients.is_empty() {
-            // Configure is the normal path used when a client brings an
-            // already-running daemon onto disk persistence. It is not an
-            // in-process executable handoff, so any records left by an earlier
-            // daemon must become restorable: their restorability follows that
-            // daemon no longer answering, full stop. Live sessions are written
-            // below as non-restorable again.
+            // Recover the store into a local handle first. Live sessions are
+            // rewritten as non-restorable below before the handle is exposed
+            // through `daemon.persistence`, while records this memory-fallback
+            // daemon does not own must become recoverable now that disk mode is
+            // available again.
             PersistenceStore::open_with_recovery_state(
                 &session_catalog_dir(),
                 Some(&persistence_recipients),

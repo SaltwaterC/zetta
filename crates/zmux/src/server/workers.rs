@@ -585,7 +585,7 @@ pub(super) fn reclaim_panes_from_departed_clients(daemon: &Arc<Daemon>) {
 
     let departed = holders
         .into_iter()
-        .filter(|pid| !process_is_running(*pid))
+        .filter(|pid| !crate::process_status::is_running(*pid))
         .collect::<std::collections::BTreeSet<_>>();
     if departed.is_empty() {
         return;
@@ -616,6 +616,7 @@ pub(super) fn reclaim_panes_from_departed_clients(daemon: &Arc<Daemon>) {
                     }
                 );
                 pane.attachment = Attachment::None;
+                pane.attachment_client_id = None;
                 #[cfg(windows)]
                 pane.pty.resume_reader();
                 reclaimed = true;
@@ -681,13 +682,6 @@ pub(super) fn dispose_sessions(daemon: &Daemon, sessions: Vec<Session>) {
             close_host_console(daemon, console_id);
         }
     }
-}
-
-pub(super) fn process_is_running(process_id: u32) -> bool {
-    let process_id = sysinfo::Pid::from_u32(process_id);
-    let mut system = sysinfo::System::new();
-    system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[process_id]), true);
-    system.process(process_id).is_some()
 }
 
 pub(super) fn wake_drain(daemon: &Arc<Daemon>) {
