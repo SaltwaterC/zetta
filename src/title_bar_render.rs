@@ -297,8 +297,11 @@ pub(crate) fn title_bar_app_label_visible(compact_mode: bool) -> bool {
     !compact_mode
 }
 
-pub(crate) fn title_bar_menus_visible(hide_menus: bool) -> bool {
-    cfg!(not(target_os = "macos")) || !hide_menus
+/// Whether the custom application and profile menus are visible in the title bar.
+/// macOS fullscreen temporarily overrides the configured hidden state so the
+/// menus remain reachable while the native menu bar is unavailable.
+pub(crate) fn title_bar_menus_visible(hide_menus: bool, is_macos_fullscreen: bool) -> bool {
+    cfg!(not(target_os = "macos")) || !hide_menus || is_macos_fullscreen
 }
 
 pub(crate) fn reconnect_control_label(show_label: bool) -> &'static str {
@@ -816,6 +819,7 @@ impl Zetta {
                 right_title_bar_controls,
                 show_title_bar_menus: title_bar_menus_visible(
                     self.launch_config.hide_title_bar_menus,
+                    is_macos_fullscreen,
                 ),
                 application_menu: self.render_application_menu(
                     show_title_bar_control_labels,

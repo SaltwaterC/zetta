@@ -172,10 +172,19 @@ fn zetta_title_bar_label_is_visible_only_outside_compact_mode() {
 #[test]
 fn title_bar_menu_visibility_is_platform_specific() {
     assert_eq!(
-        title_bar_menus_visible(true),
+        title_bar_menus_visible(true, false),
         cfg!(not(target_os = "macos"))
     );
-    assert!(title_bar_menus_visible(false));
+    assert!(title_bar_menus_visible(false, false));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_fullscreen_temporarily_shows_hidden_title_bar_menus() {
+    assert!(!title_bar_menus_visible(true, false));
+    assert!(title_bar_menus_visible(true, true));
+    assert!(title_bar_menus_visible(false, true));
+    assert!(!title_bar_menus_visible(true, false));
 }
 
 #[test]
