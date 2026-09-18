@@ -36,6 +36,31 @@ pub const PROTOCOL_VERSION: u32 = 9;
 /// an older binary even when the live wire protocol has moved on.
 pub const SHARED_SESSION_STATE_VERSION: u32 = 2;
 
+/// The opening of the refusal a multiplexer sends a client whose protocol
+/// version it does not speak.
+///
+/// Fixed wording, and deliberately not reworded: the two sides of this message
+/// are different builds by definition, and the side that has to *recognize* one
+/// is always the older. A refusal is an ordinary [`Response::Error`] — giving
+/// it a variant of its own would only be understood by a client new enough to
+/// parse the variant, which is never the client being refused.
+const PROTOCOL_MISMATCH_PREFIX: &str = "this multiplexer speaks protocol version";
+
+/// How a multiplexer says it does not speak a client's protocol version.
+pub fn protocol_mismatch_message(speaks: u32, spoken: u32) -> String {
+    format!("{PROTOCOL_MISMATCH_PREFIX} {speaks}, not {spoken}")
+}
+
+/// Whether a refusal is that message, including one from a daemon built before
+/// [`protocol_mismatch_message`] existed.
+///
+/// `contains` rather than an exact match, because by the time a client tests
+/// this the message has usually been wrapped in the context of whatever request
+/// it refused.
+pub fn is_protocol_mismatch_message(message: &str) -> bool {
+    message.contains(PROTOCOL_MISMATCH_PREFIX)
+}
+
 /// Maximum encoded image size accepted by the image-paste request.
 pub const MAX_IMAGE_BYTES: usize = 64 * 1024 * 1024;
 

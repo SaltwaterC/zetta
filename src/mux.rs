@@ -80,6 +80,26 @@ async fn pane_handover_signal_received(receiver: async_channel::Receiver<()>) ->
     receiver.recv().await.is_ok()
 }
 
+/// What a window says once the multiplexer it was talking to has been replaced
+/// by one speaking a protocol this build does not.
+///
+/// It names both versions when the replacement published one, because the
+/// person reading it is almost always the one who just installed it and wants
+/// to know which side moved.
+fn superseded_multiplexer_message(protocol_version: Option<u32>) -> String {
+    let versions = protocol_version.map_or_else(String::new, |version| {
+        format!(
+            " (it speaks protocol {version}; this window speaks {})",
+            zmux::messages::PROTOCOL_VERSION
+        )
+    });
+    format!(
+        "The session multiplexer has been replaced by a newer build{versions}. The terminals in \
+         this window keep working, but sessions cannot be started, detached or reattached until \
+         Zetta is restarted."
+    )
+}
+
 /// The connection shared by every pane in this process.
 #[derive(Clone)]
 pub(crate) struct MuxRuntime {
@@ -95,6 +115,7 @@ pub(crate) struct MuxRuntime {
     revoke_reporters: Arc<PaneSignals>,
     grant_reporters: Arc<PaneSignals>,
     shared_reports: Arc<zmux::client::SharedSessionReports>,
+    superseded: Arc<zmux::client::SupersededMultiplexer>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -136,6 +157,7 @@ impl MuxRuntime {
             revoke_reporters: subscription.revokes,
             grant_reporters: subscription.grants,
             shared_reports: subscription.shared,
+            superseded: subscription.superseded,
         })
     }
 
@@ -170,6 +192,7 @@ impl MuxRuntime {
             revoke_reporters: subscription.revokes,
             grant_reporters: subscription.grants,
             shared_reports: subscription.shared,
+            superseded: subscription.superseded,
         })
     }
 
@@ -191,6 +214,7 @@ impl MuxRuntime {
             revoke_reporters: subscription.revokes,
             grant_reporters: subscription.grants,
             shared_reports: subscription.shared,
+            superseded: subscription.superseded,
         })
     }
 
@@ -227,6 +251,7 @@ impl MuxRuntime {
             revoke_reporters: subscription.revokes,
             grant_reporters: subscription.grants,
             shared_reports: subscription.shared,
+            superseded: subscription.superseded,
         })
     }
 
@@ -366,6 +391,12 @@ impl MuxRuntime {
 
     pub(crate) fn shared_reports(&self) -> &Arc<zmux::client::SharedSessionReports> {
         &self.shared_reports
+    }
+
+    /// Where the subscription says the multiplexer has been replaced by one
+    /// this build cannot talk to.
+    pub(crate) fn superseded(&self) -> &Arc<zmux::client::SupersededMultiplexer> {
+        &self.superseded
     }
 
     /// A provider for one pane of `session`.
@@ -817,6 +848,7 @@ impl crate::Zetta {
         cx: &mut gpui::Context<Self>,
     ) {
         self.mux = Some(runtime);
+        self.watch_for_superseded_multiplexer(cx);
         self.start_mux_recovery_if_needed(cx);
     }
 
@@ -831,8 +863,45 @@ impl crate::Zetta {
     }
 
     #[cfg(not(feature = "session-persistence"))]
-    pub(crate) fn install_mux_runtime(&mut self, runtime: MuxRuntime, _: &mut gpui::Context<Self>) {
+    pub(crate) fn install_mux_runtime(
+        &mut self,
+        runtime: MuxRuntime,
+        cx: &mut gpui::Context<Self>,
+    ) {
         self.mux = Some(runtime);
+        self.watch_for_superseded_multiplexer(cx);
+    }
+
+    /// Says, once, that the multiplexer has been replaced by a build this
+    /// window cannot talk to — which `make install` does whenever the new build
+    /// bumped the protocol.
+    ///
+    /// A persistent banner rather than a transient notice, because it does not
+    /// stop being true: every session operation is refused from here until
+    /// Zetta is restarted. It is deliberately not louder than that. The panes
+    /// are not affected — each holds its own descriptor — so the one thing the
+    /// user has to know is that the window is now the old build, and that the
+    /// terminals in front of them are fine.
+    fn watch_for_superseded_multiplexer(&mut self, cx: &mut gpui::Context<Self>) {
+        let Some(superseded) = self
+            .mux
+            .as_ref()
+            .map(|runtime| runtime.superseded().clone())
+        else {
+            return;
+        };
+        let replaced = superseded.watch();
+        cx.spawn(async move |this, cx| {
+            let Ok(protocol_version) = replaced.recv().await else {
+                return;
+            };
+            this.update(cx, |this, cx| {
+                this.configuration_error = Some(superseded_multiplexer_message(protocol_version));
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     #[cfg(feature = "session-persistence")]

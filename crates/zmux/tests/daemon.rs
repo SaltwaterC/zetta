@@ -2287,6 +2287,15 @@ fn a_client_from_a_newer_build_is_told_why_rather_than_dropped() {
         response.contains("protocol version"),
         "expected a version error, got {response:?}"
     );
+    // And told in the wording a refused client recognises. This is the coupling
+    // that decides what an open window does when `make install` replaces the
+    // daemon under it: recognised, it stops and says so; unrecognised, it waits
+    // out the resubscribe grace and then reports every attached pane's terminal
+    // as ended.
+    assert!(
+        zmux::messages::is_protocol_mismatch_message(&response),
+        "the refusal is no longer one a refused client can recognise: {response:?}"
+    );
 }
 
 /// Replacing the multiplexer has to work across a protocol version boundary,

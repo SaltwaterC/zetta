@@ -1334,10 +1334,7 @@ fn read_request(connection: &mut Connection, token: &str) -> Result<Envelope> {
     // and `Response::Error`, whose shapes are fixed.
     if envelope.version != PROTOCOL_VERSION && !matches!(envelope.request, Request::Upgrade) {
         connection.send(&Response::Error {
-            message: format!(
-                "this multiplexer speaks protocol version {PROTOCOL_VERSION}, not {}",
-                envelope.version
-            ),
+            message: crate::messages::protocol_mismatch_message(PROTOCOL_VERSION, envelope.version),
         })?;
         anyhow::bail!("refused a client speaking protocol {}", envelope.version);
     }

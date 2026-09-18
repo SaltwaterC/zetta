@@ -625,6 +625,18 @@ fn is_transport_error(error: &anyhow::Error) -> bool {
     })
 }
 
+/// Whether a refusal is the multiplexer saying it does not speak this build's
+/// protocol.
+///
+/// Unlike every other failure a client retries, this one is permanent for the
+/// life of the process: no replacement is coming that this build could talk to,
+/// because the replacement has already happened.
+fn is_protocol_mismatch_error(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .any(|cause| crate::messages::is_protocol_mismatch_message(&cause.to_string()))
+}
+
 fn is_unsupported_configure(error: &anyhow::Error) -> bool {
     error.chain().any(|cause| {
         let message = cause.to_string();
@@ -1288,6 +1300,21 @@ impl Client {
 
     fn open(&self, request: Request) -> Result<Connection> {
         self.open_as(request, std::process::id())
+    }
+
+    /// The protocol version the local multiplexer publishes right now.
+    ///
+    /// Re-read rather than taken from the cached endpoint, because the only
+    /// caller asks precisely when a replacement has published a different one.
+    /// A remote client has no local endpoint file to read, and the answer is
+    /// only ever used to phrase a message, so `None` is a fine answer.
+    fn published_protocol_version(&self) -> Option<u32> {
+        if self.remote.is_some() {
+            return None;
+        }
+        Endpoint::read(&endpoint_path(&self.directory))
+            .ok()
+            .map(|endpoint| endpoint.protocol_version)
     }
 
     fn endpoint_snapshot(&self) -> Endpoint {
@@ -2542,11 +2569,13 @@ impl Client {
         let revokes = Arc::new(PaneSignals::default());
         let grants = Arc::new(PaneSignals::default());
         let shared = Arc::new(SharedSessionReports::default());
+        let superseded = Arc::new(SupersededMultiplexer::default());
         let subscription = Subscription {
             exits,
             revokes,
             grants,
             shared,
+            superseded,
         };
         let dispatch = subscription.clone();
         let client = self.reconnect_client();
@@ -2674,6 +2703,79 @@ pub struct Subscription {
     pub revokes: Arc<PaneSignals>,
     pub grants: Arc<PaneSignals>,
     pub shared: Arc<SharedSessionReports>,
+    pub superseded: Arc<SupersededMultiplexer>,
+}
+
+/// Says, once, that the multiplexer has been replaced by one speaking a
+/// protocol this build does not.
+///
+/// It is not a lost multiplexer, and the difference is the whole reason this
+/// exists. A lost one may come back, so the panes are held open for it and told
+/// only after the grace period that nothing is coming. A superseded one is
+/// already back, answering, and refusing this build for good: retrying cannot
+/// help, and reporting the panes disconnected would end terminals that are
+/// working perfectly well — an exclusively attached pane reads its own
+/// descriptor and needs the multiplexer for nothing but its eventual exit
+/// status. So the subscription stops here and says so, and whoever holds the
+/// window turns that into something the user can act on.
+#[derive(Default)]
+pub struct SupersededMultiplexer {
+    state: Mutex<SupersededState>,
+}
+
+#[derive(Default)]
+struct SupersededState {
+    superseded: bool,
+    /// The protocol the replacement published, when it could be read.
+    protocol_version: Option<u32>,
+    watchers: Vec<async_channel::Sender<Option<u32>>>,
+}
+
+impl SupersededMultiplexer {
+    /// A channel that carries the replacement's protocol version, immediately
+    /// if the replacement has already been found.
+    ///
+    /// Late watchers are the normal case rather than a race to lose: a window
+    /// registers one when it installs its runtime, which can be after a
+    /// subscription that was already superseded has given up.
+    pub fn watch(&self) -> async_channel::Receiver<Option<u32>> {
+        let (sender, receiver) = async_channel::unbounded();
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.superseded {
+            let _ = sender.try_send(state.protocol_version);
+        } else {
+            state.watchers.push(sender);
+        }
+        receiver
+    }
+
+    pub fn is_superseded(&self) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .superseded
+    }
+
+    fn report(&self, protocol_version: Option<u32>) {
+        let watchers = {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if state.superseded {
+                return;
+            }
+            state.superseded = true;
+            state.protocol_version = protocol_version;
+            state.watchers.drain(..).collect::<Vec<_>>()
+        };
+        for watcher in watchers {
+            let _ = watcher.try_send(protocol_version);
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -2782,14 +2884,17 @@ const RESUBSCRIBE_MAX_DELAY: Duration = Duration::from_millis(500);
 
 /// Reads events for as long as any multiplexer is reachable.
 ///
-/// Returns only once the grace period has passed with nothing to talk to, at
-/// which point the panes really are unreportable and are told so.
+/// Returns once the grace period has passed with nothing to talk to, at which
+/// point the panes really are unreportable and are told so — or as soon as a
+/// multiplexer answers that it does not speak this build's protocol, which is
+/// unreportable in a different way and must not be confused with it.
 fn subscription_loop(client: Client, first: Connection, subscription: Subscription) {
     let Subscription {
         exits: reporters,
         revokes,
         grants,
         shared,
+        superseded,
     } = subscription;
     let mut connection = first;
     loop {
@@ -2879,6 +2984,19 @@ fn subscription_loop(client: Client, first: Connection, subscription: Subscripti
             // Nobody is left to tell. Reporting a disconnect here would be
             // writing into registries that no longer have an owner.
             Some(Resubscribed::Abandoned) => return,
+            // A multiplexer answered, and refused this build. Every pane keeps
+            // its terminal — the descriptors are held here — so the registries
+            // are left exactly as they are, and the one thing that has actually
+            // been lost is said once, to the window rather than to the panes.
+            Some(Resubscribed::Superseded(protocol_version)) => {
+                log::error!(
+                    "the multiplexer was replaced by one speaking a protocol this build does \
+                     not; terminals keep working, but nothing can be started, detached or \
+                     reattached until this process restarts"
+                );
+                superseded.report(protocol_version);
+                return;
+            }
             None => {
                 // Only now, with no multiplexer to ask, is a pane's exit truly
                 // unobservable. Saying so is what lets its terminal stop
@@ -2898,6 +3016,9 @@ enum Resubscribed {
     Connection(Connection),
     /// The registries' owner is gone, so this subscription has no purpose left.
     Abandoned,
+    /// A multiplexer answered and refused this build's protocol, carrying the
+    /// version it published if that could be read.
+    Superseded(Option<u32>),
 }
 
 /// Whether anything outside this thread still holds the registries.
@@ -2934,15 +3055,25 @@ fn resubscribe(
         if subscription_is_abandoned(reporters, revokes, grants, shared) {
             return Some(Resubscribed::Abandoned);
         }
-        if let Ok(connection) = client.open_subscription() {
-            log::info!("re-established the multiplexer's event stream");
-            // Subscribe first, then reconcile: an exit that happens between the
-            // two arrives on the new subscription, whereas one reported between
-            // a reconcile and a subscribe would fall down the same gap this is
-            // closing.
-            reconcile_missed_exits(client, reporters);
-            reconcile_shared_snapshots(client, shared);
-            return Some(Resubscribed::Connection(connection));
+        match client.open_subscription() {
+            Ok(connection) => {
+                log::info!("re-established the multiplexer's event stream");
+                // Subscribe first, then reconcile: an exit that happens between
+                // the two arrives on the new subscription, whereas one reported
+                // between a reconcile and a subscribe would fall down the same
+                // gap this is closing.
+                reconcile_missed_exits(client, reporters);
+                reconcile_shared_snapshots(client, shared);
+                return Some(Resubscribed::Connection(connection));
+            }
+            // Answered, and refused: waiting out the deadline would achieve
+            // nothing but spend it, and what it spends it on is the panes.
+            Err(error) if is_protocol_mismatch_error(&error) => {
+                return Some(Resubscribed::Superseded(
+                    client.published_protocol_version(),
+                ));
+            }
+            Err(_) => {}
         }
         if Instant::now() >= deadline {
             return None;

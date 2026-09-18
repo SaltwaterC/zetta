@@ -138,3 +138,31 @@ fn mux_recovery_generation_rejects_old_runtime_or_configuration_tasks() {
     assert!(!mux_recovery_generation_matches(5, 9, 4, 9));
     assert!(!mux_recovery_generation_matches(4, 10, 4, 9));
 }
+
+/// What the window says when the multiplexer has been replaced by a build it
+/// cannot talk to.
+///
+/// Two things it must not lose: that the terminals on screen are unaffected —
+/// they read their own descriptors and a user who reads "lost the multiplexer"
+/// reasonably assumes otherwise — and that a restart is what fixes it, since
+/// nothing this window can do will.
+#[test]
+fn a_superseded_multiplexer_says_the_terminals_are_fine_and_a_restart_is_not() {
+    let message = superseded_multiplexer_message(Some(zmux::messages::PROTOCOL_VERSION + 1));
+    assert!(message.contains("keep working"), "{message}");
+    assert!(message.contains("restarted"), "{message}");
+    assert!(
+        message.contains(&(zmux::messages::PROTOCOL_VERSION + 1).to_string()),
+        "{message}"
+    );
+    assert!(
+        message.contains(&zmux::messages::PROTOCOL_VERSION.to_string()),
+        "{message}"
+    );
+
+    // A replacement whose endpoint could not be read is still worth saying.
+    let unknown = superseded_multiplexer_message(None);
+    assert!(unknown.contains("keep working"), "{unknown}");
+    assert!(unknown.contains("restarted"), "{unknown}");
+    assert!(!unknown.contains("protocol"), "{unknown}");
+}

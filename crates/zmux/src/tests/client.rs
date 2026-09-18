@@ -745,3 +745,87 @@ fn a_daemon_from_an_earlier_protocol_is_refused_by_version_not_by_parse_failure(
         "and say how to replace it without losing its sessions: {error}"
     );
 }
+
+/// A multiplexer that answers and refuses this build's protocol is not a lost
+/// multiplexer, and the subscription must not treat it as one.
+///
+/// `make install` replaces the daemon in place, so a window that was already
+/// open finds itself refused for good the moment the new build bumped the
+/// protocol. Spending the resubscribe grace on it and then reporting every pane
+/// disconnected ended terminals that were working: the descriptors are held
+/// here, so nothing about them had stopped working — only the exit status they
+/// can eventually be told about is lost.
+#[cfg(unix)]
+#[test]
+fn a_multiplexer_that_refuses_this_protocol_stops_the_subscription_without_ending_the_panes() {
+    use std::os::unix::net::UnixListener;
+
+    let directory = tempfile::tempdir().unwrap();
+    let socket_path = directory.path().join("zmux.sock");
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    Endpoint {
+        version: crate::transport::ENDPOINT_VERSION,
+        protocol_version: PROTOCOL_VERSION,
+        process_id: 4242,
+        socket_path,
+        token: "test-token".to_owned(),
+    }
+    .write(&directory.path().join("zmux.json"))
+    .unwrap();
+
+    // Answers everything until the event stream has been established once, and
+    // is a replacement speaking another protocol from then on — which is what
+    // an upgrade across a protocol bump leaves an open window talking to.
+    let server = std::thread::spawn(move || {
+        let mut replaced = false;
+        for stream in listener.incoming().flatten() {
+            let mut connection = Connection::new(stream);
+            let Ok((envelope, _)) = connection.receive::<Envelope>() else {
+                // The liveness probe, which sends nothing.
+                continue;
+            };
+            if replaced {
+                connection
+                    .send(&Response::Error {
+                        message: crate::messages::protocol_mismatch_message(
+                            PROTOCOL_VERSION + 1,
+                            envelope.version,
+                        ),
+                    })
+                    .unwrap();
+                return;
+            }
+            connection.send(&Response::Ok).unwrap();
+            if matches!(envelope.request, Request::Subscribe) {
+                // The exec. Dropping this connection ends the event stream, and
+                // the next request reaches the replacement.
+                replaced = true;
+            }
+        }
+    });
+
+    let client = Client::connect_ready_at(directory.path()).unwrap().unwrap();
+    let subscription = client.subscribe().unwrap();
+    let (exits, pane_exits) = async_channel::unbounded();
+    subscription.exits.register_shared(7, exits);
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !subscription.superseded.is_superseded() {
+        assert!(
+            Instant::now() < deadline,
+            "the subscription never noticed it had been refused; \
+             it is waiting out the {RESUBSCRIBE_GRACE:?} grace instead"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+
+    // The pane keeps its reporter: nothing has been said about its process, and
+    // nothing should be.
+    assert_eq!(subscription.exits.registered(), vec![7]);
+    assert!(
+        pane_exits.try_recv().is_err(),
+        "a refused protocol was reported to the pane as its terminal ending"
+    );
+    assert!(!pane_exits.is_closed());
+    server.join().unwrap();
+}

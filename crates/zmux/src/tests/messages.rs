@@ -494,3 +494,34 @@ fn shared_batch_wire_carries_exact_layout_and_draft_mapping() {
         })
     ));
 }
+
+/// The refusal a daemon sends a client whose protocol it does not speak has to
+/// stay recognisable to the client being refused, which is by definition the
+/// older build. Reworded, it stops being recognised and the client spends its
+/// resubscribe grace on a multiplexer that will never accept it — and then
+/// reports every attached pane's terminal as gone.
+///
+/// The literal here is the wording as shipped, not a call to the formatter: the
+/// point is that a daemon built before the formatter existed is still
+/// recognised.
+#[test]
+fn a_protocol_refusal_stays_recognisable_to_the_client_it_refuses() {
+    assert_eq!(
+        protocol_mismatch_message(9, 10),
+        "this multiplexer speaks protocol version 9, not 10"
+    );
+    assert!(is_protocol_mismatch_message(
+        "this multiplexer speaks protocol version 9, not 10"
+    ));
+    assert!(is_protocol_mismatch_message(&protocol_mismatch_message(
+        PROTOCOL_VERSION,
+        PROTOCOL_VERSION + 1
+    )));
+    // As it reaches a client: wrapped in the context of the request it refused.
+    assert!(is_protocol_mismatch_message(&format!(
+        "subscribing to multiplexer events: {}",
+        protocol_mismatch_message(11, 9)
+    )));
+    assert!(!is_protocol_mismatch_message("invalid multiplexer token"));
+    assert!(!is_protocol_mismatch_message("no multiplexer is running"));
+}
