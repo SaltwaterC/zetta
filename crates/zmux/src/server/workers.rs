@@ -41,6 +41,7 @@ pub(super) fn reaper_loop(daemon: Arc<Daemon>, mut reader: Stream) {
                 }
             }
         }
+        let observed_exit = !exits.is_empty();
         for (session_id, pane_id, raw_status, input_sent) in exits {
             broadcast(
                 &daemon,
@@ -56,7 +57,8 @@ pub(super) fn reaper_loop(daemon: Arc<Daemon>, mut reader: Stream) {
         // end the session rather than keep offering a dead terminal. A
         // pane a client is still reading is kept until it lets go, which
         // the reclaim and detach paths then prune.
-        if prune_exited_panes(&daemon) {
+        let pruned = prune_exited_panes(&daemon);
+        if observed_exit || pruned {
             publish(&daemon);
         }
     }
@@ -302,9 +304,8 @@ pub(super) fn drain_loop(daemon: Arc<Daemon>, mut waker: Stream) {
                     },
                 );
             }
-            if prune_exited_panes(&daemon) {
-                publish(&daemon);
-            }
+            prune_exited_panes(&daemon);
+            publish(&daemon);
             continue;
         }
         if idle {

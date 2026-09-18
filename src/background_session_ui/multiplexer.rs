@@ -141,24 +141,34 @@ fn load_attached_session_data(
             );
         }
     }
-    if let Some(canonical) = canonical_shared_state.as_ref() {
-        let (reconciled, changed) = reconcile_shared_attach_state(state, canonical)?;
+    let live_mux_pane_ids = if let Some(canonical) = canonical_shared_state.as_ref() {
+        let (reconciled, changed) = reconcile_attached_state(state, canonical, true)?;
         state = reconciled;
         repaired_state |= changed;
-    }
+        canonical.pane_ids().collect::<HashSet<_>>()
+    } else {
+        // The saved payload is deliberately opaque to the daemon, so it can
+        // still describe a pane whose process ended while its last viewer was
+        // unwinding. The summary is the daemon's attachable pane set. Repair
+        // the payload against it before requesting any pane, just as a shared
+        // session is repaired against its canonical snapshot.
+        let canonical = zmux::messages::SharedSessionState::new(
+            session_id,
+            summary.clone(),
+            serde_json::Value::Null,
+        );
+        let (reconciled, changed) = reconcile_attached_state(state, &canonical, false)?;
+        state = reconciled;
+        repaired_state |= changed;
+        canonical.pane_ids().collect::<HashSet<_>>()
+    };
     let first_pane = attached_tab_pane_id(&state, first.pane_id(), session_id)?;
-    let live_mux_pane_ids = canonical_shared_state
-        .as_ref()
-        .map(|state| state.pane_ids().collect::<HashSet<_>>());
     let mut additional = Vec::new();
     for pane_state in state.panes.iter().filter(|pane| pane.id != first_pane) {
         let Some(mux_pane_id) = pane_state.mux_pane_id else {
             continue;
         };
-        if live_mux_pane_ids
-            .as_ref()
-            .is_some_and(|live| !live.contains(&mux_pane_id))
-        {
+        if !live_mux_pane_ids.contains(&mux_pane_id) {
             continue;
         }
         match runtime
@@ -217,9 +227,10 @@ fn load_attached_session_data(
 /// the blob. Stable multiplexer ids are the only safe join key: local pane ids
 /// belong to the process that published the blob and pane order changes as
 /// panes are closed or added.
-fn reconcile_shared_attach_state(
+fn reconcile_attached_state(
     mut state: crate::session_state::TabState,
     canonical: &zmux::messages::SharedSessionState,
+    shared: bool,
 ) -> anyhow::Result<(crate::session_state::TabState, bool)> {
     let original = state.clone();
     let old_panes = std::mem::take(&mut state.panes);
@@ -292,7 +303,7 @@ fn reconcile_shared_attach_state(
         .collect();
     state.selected_minimized_pane =
         old_selected_minimized.filter(|pane_id| state.minimized_panes.contains(pane_id));
-    state.shared = true;
+    state.shared = shared;
     let next_pane_label = state
         .panes
         .iter()
@@ -303,6 +314,16 @@ fn reconcile_shared_attach_state(
 
     let changed = state != original;
     Ok((state, changed))
+}
+
+/// Reconciles a shared attach against the daemon's canonical collaboration
+/// state. Kept as the narrow test surface for the shared-session rules.
+#[cfg(test)]
+fn reconcile_shared_attach_state(
+    state: crate::session_state::TabState,
+    canonical: &zmux::messages::SharedSessionState,
+) -> anyhow::Result<(crate::session_state::TabState, bool)> {
+    reconcile_attached_state(state, canonical, true)
 }
 
 fn synthesized_shared_pane_state(

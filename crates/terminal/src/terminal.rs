@@ -3812,6 +3812,16 @@ impl Terminal {
                 self.size_initialization_queued = false;
 
                 if effective_resize {
+                    // A byte-stream terminal has no local PTY event loop, so
+                    // its supplied controller is the only resize route.
+                    if matches!(self.terminal_type, TerminalType::DisplayOnly)
+                        && let Some(control) = &self.pty_control
+                    {
+                        control.resize(
+                            new_bounds.num_columns() as u16,
+                            new_bounds.num_lines() as u16,
+                        );
+                    }
                     #[cfg(windows)]
                     if let TerminalType::Pty { pty_tx, .. } = &self.terminal_type {
                         if let Some(control) = &self.pty_control {
@@ -7355,19 +7365,54 @@ mod tests {
         fn set_console_palette(&self, _: ConsolePalette) {}
     }
 
-    #[cfg(windows)]
     #[derive(Default)]
     struct RecordingPtyControl {
-        palettes: std::sync::Mutex<Vec<ConsolePalette>>,
+        resizes: Mutex<Vec<(u16, u16)>>,
+        #[cfg(windows)]
+        palettes: Mutex<Vec<ConsolePalette>>,
     }
 
-    #[cfg(windows)]
     impl PtyControl for RecordingPtyControl {
-        fn resize(&self, _: u16, _: u16) {}
+        fn resize(&self, columns: u16, lines: u16) {
+            self.resizes.lock().push((columns, lines));
+        }
 
         fn set_console_palette(&self, palette: ConsolePalette) {
-            self.palettes.lock().unwrap().push(palette);
+            #[cfg(windows)]
+            self.palettes.lock().push(palette);
+            #[cfg(not(windows))]
+            let _ = palette;
         }
+    }
+
+    #[gpui::test]
+    async fn an_external_pty_control_receives_display_only_layout_resizes(cx: &mut TestAppContext) {
+        let control = Arc::new(RecordingPtyControl::default());
+        // `new_byte_stream` starts from this same terminal type, but its I/O
+        // workers are deliberately omitted: GPUI's test scheduler rejects
+        // background threads waking it during a deterministic test.
+        let builder = TerminalBuilder::new_display_only(
+            SettingsCursorShape::default(),
+            AlternateScroll::On,
+            None,
+            0,
+            &cx.background_executor,
+            PathStyle::local(),
+        )
+        .with_pty_control(control.clone());
+        let window = cx.add_empty_window();
+        let terminal = window.new(|cx| builder.subscribe(cx));
+
+        window.update_window_entity(&terminal, |terminal, window, cx| {
+            terminal.set_size(TerminalBounds {
+                cell_width: px(10.),
+                line_height: px(10.),
+                bounds: bounds(GpuiPoint::default(), size(px(1000.), px(300.))),
+            });
+            terminal.sync(window, cx);
+        });
+
+        assert_eq!(control.resizes.lock().last(), Some(&(100, 30)));
     }
 
     fn make_display_only_terminal(cx: &mut TestAppContext) -> Terminal {
@@ -7541,8 +7586,8 @@ mod tests {
         first_terminal.set_console_palette(palette);
         second_terminal.set_console_palette(palette);
 
-        assert_eq!(first.palettes.lock().unwrap().as_slice(), &[palette]);
-        assert_eq!(second.palettes.lock().unwrap().as_slice(), &[palette]);
+        assert_eq!(first.palettes.lock().as_slice(), &[palette]);
+        assert_eq!(second.palettes.lock().as_slice(), &[palette]);
     }
 
     #[test]

@@ -507,14 +507,16 @@ fn normalize_shared_state(
     Ok(state)
 }
 
-/// Reconciles catalog metadata and geometry with the daemon-owned PTYs.
+/// Reconciles catalog metadata and geometry with the daemon-owned live PTYs.
 ///
 /// Metadata for a surviving pane remains intact. A pane which was never
 /// published is given a deliberately minimal entry so that it remains visible
 /// and attachable; the next ordinary publication will fill in its richer
-/// client-owned metadata. Geometry preserves the layout that accounts for the
-/// most daemon-owned panes, collapses dead branches, and appends unpublished
-/// panes.
+/// client-owned metadata. An exited pane can remain daemon-owned while its last
+/// viewer is still unwinding, but it is no longer attachable and must not be in
+/// the summary a new viewer receives. Geometry preserves the layout that
+/// accounts for the most live panes, collapses dead branches, and appends
+/// unpublished panes.
 fn summary_from_daemon_panes(
     session: &Session,
     previous_state: &crate::messages::SharedSessionState,
@@ -522,11 +524,12 @@ fn summary_from_daemon_panes(
     let live_pane_ids = session
         .panes
         .iter()
+        .filter(|pane| !pane.exited)
         .map(|pane| pane.id)
         .collect::<HashSet<_>>();
     anyhow::ensure!(
         !live_pane_ids.is_empty(),
-        "session {} has no daemon-owned panes",
+        "session {} has no live daemon-owned panes",
         session.id
     );
 
@@ -541,7 +544,7 @@ fn summary_from_daemon_panes(
                 .cloned(),
         );
     }
-    for pane in &session.panes {
+    for pane in session.panes.iter().filter(|pane| !pane.exited) {
         if included.insert(pane.id) {
             panes.push(unpublished_pane_summary(pane));
         }
@@ -570,7 +573,7 @@ fn summary_from_daemon_panes(
             });
         }
     }
-    let layout = layout.expect("a daemon-owned pane is always placed in the layout");
+    let layout = layout.expect("a live daemon-owned pane is always placed in the layout");
     let active_pane = if live_pane_ids.contains(&session.summary.active_pane) {
         session.summary.active_pane
     } else if live_pane_ids.contains(&previous_state.presentation.active_pane) {
@@ -681,7 +684,12 @@ fn first_layout_pane_id(layout: &BackgroundPaneLayout) -> u64 {
 fn summary_matches_daemon_panes(summary: &BackgroundSessionSummary, session: &Session) -> bool {
     let mut summary_pane_ids = summary.panes.iter().map(|pane| pane.id).collect::<Vec<_>>();
     summary_pane_ids.sort_unstable();
-    let mut daemon_pane_ids = session.panes.iter().map(|pane| pane.id).collect::<Vec<_>>();
+    let mut daemon_pane_ids = session
+        .panes
+        .iter()
+        .filter(|pane| !pane.exited)
+        .map(|pane| pane.id)
+        .collect::<Vec<_>>();
     daemon_pane_ids.sort_unstable();
     summary_pane_ids == daemon_pane_ids
 }
@@ -1345,7 +1353,20 @@ fn read_request(connection: &mut Connection, token: &str) -> Result<Envelope> {
 /// reported the client's stored value, which is always `false`, so anything
 /// asking directly was told a live session was free.
 fn catalog_summary(session: &Session) -> BackgroundSessionSummary {
-    let mut summary = session.summary.clone();
+    let previous_state = session.shared_state.clone().unwrap_or_else(|| {
+        crate::messages::SharedSessionState::new(
+            session.id,
+            session.summary.clone(),
+            session.state.clone(),
+        )
+    });
+    let mut summary = summary_from_daemon_panes(session, &previous_state).unwrap_or_else(|error| {
+        log::warn!(
+            "could not reconcile session {} with its live panes: {error:#}",
+            session.id
+        );
+        session.summary.clone()
+    });
     summary.held = session.is_held();
     // Taken from the session rather than trusted from the stored summary, so it
     // follows the verifier: a share or scope request that republishes a summary

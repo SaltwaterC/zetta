@@ -114,12 +114,12 @@ pub(super) fn attach(
     }
 
     let state = session.state.clone();
-    let summary = Box::new(session.summary.clone());
+    let summary = Box::new(catalog_summary(session));
     // Resolved only now, after the secret has been checked: which panes a
     // protected session has is part of what its secret protects.
     let pane_id = match pane_id {
         Some(pane_id) => pane_id,
-        None => match session.panes.first() {
+        None => match session.panes.iter().find(|pane| !pane.exited) {
             Some(pane) => pane.id,
             None => {
                 return connection.send(&Response::Error {
@@ -271,7 +271,7 @@ pub(super) fn attach(
         // was first offered. Using the stale copy handed a joining client the
         // layout as of whenever sharing was switched on.
         let state = session.state.clone();
-        let summary = Box::new(session.summary.clone());
+        let summary = Box::new(catalog_summary(session));
         let Some(pane) = session.panes.iter_mut().find(|pane| pane.id == pane_id) else {
             return connection.send(&Response::Error {
                 message: format!("session {session_id} has no pane {pane_id}"),

@@ -127,6 +127,39 @@ fn stale_four_pane_blob_is_reduced_to_the_one_live_pane() {
 }
 
 #[test]
+fn detached_attach_drops_an_ended_pane_and_keeps_the_survivor() {
+    let mut stale = tab_state(vec![pane_state(101, Some(11)), pane_state(102, Some(12))]);
+    stale.shared = false;
+    stale.layout = LayoutState::Split {
+        axis: AxisState::Vertical,
+        first_ratio: 500,
+        first: Box::new(LayoutState::Pane { pane_id: 101 }),
+        second: Box::new(LayoutState::Pane { pane_id: 102 }),
+    };
+    stale.active_pane = 101;
+    let live = canonical(
+        vec![12],
+        BackgroundPaneLayout::Pane { pane_id: 12 },
+        12,
+        stale,
+    );
+
+    let (repaired, changed) = reconcile_attached_state(
+        serde_json::from_value(live.state.clone()).unwrap(),
+        &live,
+        false,
+    )
+    .unwrap();
+
+    assert!(changed);
+    assert!(!repaired.shared);
+    assert_eq!(repaired.panes.len(), 1);
+    assert_eq!(repaired.panes[0].mux_pane_id, Some(12));
+    assert_eq!(repaired.layout, LayoutState::Pane { pane_id: 12 });
+    assert_eq!(repaired.active_pane, 12);
+}
+
+#[test]
 fn surviving_metadata_and_durable_tab_fields_are_preserved_by_mux_id() {
     let mut stale_survivor = pane_state(204, Some(24));
     stale_survivor.custom_label = Some("kept label".to_owned());

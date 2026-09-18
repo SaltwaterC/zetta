@@ -2591,6 +2591,101 @@ fn every_pane_in_a_restored_layout_keeps_its_exclusive_reader() {
     client.kill(first.session_id).unwrap();
 }
 
+/// One pane may exit while its viewer still owns the descriptor. That delay
+/// before release must not leave the public catalog claiming it is attachable,
+/// and must not make the daemon start reading from a live sibling behind its
+/// exclusive viewer.
+#[test]
+fn an_exited_held_pane_is_unpublished_without_stalling_its_live_sibling() {
+    let daemon = TestDaemon::start();
+    let client = daemon.client();
+    let first = client
+        .spawn(spawn_request(None, "printf first-ready; read line"))
+        .unwrap();
+    let second = client
+        .spawn(spawn_request(
+            Some(first.session_id),
+            "printf second-ready; cat",
+        ))
+        .unwrap();
+    let first_descriptor = std::fs::File::from(first.descriptor);
+    let second_descriptor = std::fs::File::from(second.descriptor);
+    read_until(&first_descriptor, "first-ready");
+    read_until(&second_descriptor, "second-ready");
+
+    let mut published = summary(first.session_id, first.pane_id);
+    let mut second_summary = published.panes[0].clone();
+    second_summary.id = second.pane_id;
+    second_summary.label = "Pane 2".to_owned();
+    published.panes.push(second_summary);
+    published.layout = BackgroundPaneLayout::Split {
+        axis: "vertical".to_owned(),
+        first_ratio: zmux::protocol::DEFAULT_BACKGROUND_PANE_SPLIT_RATIO,
+        first: Box::new(BackgroundPaneLayout::Pane {
+            pane_id: first.pane_id,
+        }),
+        second: Box::new(BackgroundPaneLayout::Pane {
+            pane_id: second.pane_id,
+        }),
+    };
+    client
+        .share(
+            first.session_id,
+            published,
+            serde_json::Value::Null,
+            None,
+            true,
+        )
+        .unwrap();
+
+    // End it while the exclusive viewer still owns its descriptor. This is
+    // the interval in which pruning deliberately waits for that viewer, while
+    // the catalog still has to stop offering the pane immediately.
+    unsafe { libc::kill(first.child_pid as i32, libc::SIGKILL) };
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let states = client.pane_states(vec![first.pane_id]).unwrap();
+        if states.first().is_some_and(|state| state.exited) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the first pane did not exit; daemon log:\n{}",
+            daemon.log()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let catalogs = zmux::catalog::read_session_catalogs(&daemon.sessions_dir()).unwrap();
+        let panes = catalogs
+            .iter()
+            .flat_map(|catalog| &catalog.sessions)
+            .find(|session| session.id == first.session_id)
+            .map(|session| session.panes.iter().map(|pane| pane.id).collect::<Vec<_>>());
+        if panes.as_deref() == Some(&[second.pane_id]) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the catalog kept advertising the exited pane: {panes:?}; daemon log:\n{}",
+            daemon.log()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    // The surviving descriptor remains its one reader. If the exit path made
+    // the daemon consume from it too, the pause gives that reader time to steal
+    // the marker and this read cannot find it.
+    let mut second_writer = &second_descriptor;
+    second_writer.write_all(b"survivor-still-live\n").unwrap();
+    std::thread::sleep(Duration::from_millis(250));
+    read_until(&second_descriptor, "survivor-still-live");
+
+    client.kill(first.session_id).unwrap();
+}
+
 #[test]
 fn a_session_nobody_detached_ends_with_the_window_that_had_it() {
     // Detaching is explicit. A window that dies without detaching leaves
