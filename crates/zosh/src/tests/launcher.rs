@@ -337,18 +337,18 @@ fn ssh_bootstrap_preserves_target_and_remote_command() {
 }
 
 #[test]
-fn forwarding_disables_native_bootstrap_forwarding_but_plain_ssh_gets_a() {
+fn forwarding_temporarily_enables_native_bootstrap_forwarding() {
     let command = MoshCommand {
         forward_agent: true,
         ..MoshCommand::default()
     };
     let (_, bootstrap) = ssh_bootstrap_command(&command, "host");
+    assert!(bootstrap.iter().any(|argument| argument == "-A"));
     assert!(
-        bootstrap
+        !bootstrap
             .windows(2)
             .any(|pair| pair == ["-o", "ForwardAgent=no"])
     );
-    assert!(!bootstrap.iter().any(|argument| argument == "-A"));
 
     let native_bootstrap = MoshCommand {
         ssh: vec!["ssh".into(), "-A".into()],
@@ -379,16 +379,17 @@ fn forwarding_disables_native_bootstrap_forwarding_but_plain_ssh_gets_a() {
         ..MoshCommand::default()
     };
     let (_, bootstrap) = ssh_bootstrap_command(&custom_ssh, "host");
-    assert!(!bootstrap.iter().any(|argument| argument == "-A"));
+    assert_eq!(
+        bootstrap
+            .iter()
+            .filter(|argument| argument.as_str() == "-A")
+            .count(),
+        1
+    );
     assert!(
         !bootstrap
             .windows(2)
             .any(|pair| pair == ["-o", "ForwardAgent=yes"])
-    );
-    assert!(
-        bootstrap
-            .windows(2)
-            .any(|pair| pair == ["-o", "ForwardAgent=no"])
     );
 }
 

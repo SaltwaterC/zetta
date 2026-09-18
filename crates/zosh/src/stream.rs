@@ -53,7 +53,7 @@ const OUTPUT_CAPACITY: usize = 1024 * 1024;
 /// What the session is configured with. The launcher's other settings
 /// (`--init`, the escape key, the prediction *display* the user asked for on
 /// the command line) belong to a terminal, and have no meaning here.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct PaneSessionSettings {
     /// How long the session may go without sending before it emits a
     /// keep-alive, or `None` for Mosh's own three-second heartbeat.
@@ -70,6 +70,8 @@ pub struct PaneSessionSettings {
     pub scrollback_kib: u32,
     /// Request the opt-in Zosh SSH-agent extension.
     pub forward_agent: bool,
+    /// The native SSH forwarding binding captured during bootstrap, if any.
+    pub agent_binding: Option<Vec<u8>>,
 }
 
 /// A live Mosh session rendered into a byte stream.
@@ -104,22 +106,28 @@ impl PaneSession {
         rows: u16,
         settings: PaneSessionSettings,
     ) -> Result<Self> {
+        let PaneSessionSettings {
+            keep_alive,
+            prediction,
+            predict_overwrite,
+            scrollback_kib,
+            forward_agent,
+            agent_binding,
+        } = settings;
         let columns = columns.max(1);
         let rows = rows.max(1);
         let mut session =
             MoshSession::connect_with_screen(host, port, key, DisplayScreen::new(rows, columns))
                 .context("connecting to the Mosh UDP endpoint")?;
-        session
-            .prediction_mut()
-            .set_display_preference(settings.prediction);
-        if settings.predict_overwrite {
+        session.prediction_mut().set_display_preference(prediction);
+        if predict_overwrite {
             session.prediction_mut().set_predict_overwrite(true);
         }
-        session.set_keep_alive(settings.keep_alive);
-        if settings.scrollback_kib > 0 {
+        session.set_keep_alive(keep_alive);
+        if scrollback_kib > 0 {
             // Before the loop starts, so it rides the first instruction and
             // the server carries history from the first row that scrolls.
-            session.request_scrollback(settings.scrollback_kib);
+            session.request_scrollback(scrollback_kib);
         }
 
         let wake = Arc::new(Wake::new().context("creating the session wake-up pipe")?);
@@ -139,7 +147,8 @@ impl PaneSession {
                     let result = drive(
                         session,
                         (columns, rows),
-                        settings.forward_agent,
+                        forward_agent,
+                        agent_binding,
                         &command_receiver,
                         &wake,
                         &output,
@@ -276,6 +285,7 @@ fn drive(
     mut session: ClientSession,
     size: (u16, u16),
     forward_agent: bool,
+    agent_binding: Option<Vec<u8>>,
     commands: &Receiver<Command>,
     wake: &Wake,
     output: &Arc<OutputPipe>,
@@ -285,7 +295,11 @@ fn drive(
     };
     let mut pending_resize = None;
     let mut query_proxy = TerminalQueryProxy::default();
-    let mut agent = AgentBridge::new(forward_agent);
+    let mut agent = if agent_binding.is_some() {
+        AgentBridge::with_binding(forward_agent, agent_binding)
+    } else {
+        AgentBridge::new(forward_agent)
+    };
     if agent.enabled() {
         session.request_agent_forwarding(AGENT_PROTOCOL_VERSION);
     }

@@ -280,7 +280,7 @@ pub struct ClientArgs {
 /// The part of the Mosh launcher contract that is consumed by the bundled
 /// endpoint client. Keeping this explicit lets `zosh` launch its own session
 /// without round-tripping through an environment-mutating child process.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct SessionSettings {
     pub(crate) prediction: DisplayPreference,
     pub(crate) predict_overwrite: bool,
@@ -292,6 +292,7 @@ pub(crate) struct SessionSettings {
     /// for none and be an ordinary Mosh client.
     pub(crate) scrollback_kib: u32,
     pub(crate) forward_agent: bool,
+    pub(crate) agent_binding: Option<Vec<u8>>,
 }
 
 impl SessionSettings {
@@ -319,6 +320,7 @@ impl SessionSettings {
             keep_alive: keep_alive_from_environment(),
             scrollback_kib: scrollback_from_environment(),
             forward_agent: std::env::var(FORWARD_AGENT_ENV).is_ok_and(|value| value == "yes"),
+            agent_binding: None,
         }
     }
 }
@@ -548,7 +550,7 @@ pub(crate) fn run_session_with_settings(
     let mut session =
         MoshSession::connect_with_screen(host, port, key, DisplayScreen::new(rows, cols))
             .context("connecting to the Mosh UDP endpoint")?;
-    configure_session(&mut session, settings);
+    configure_session(&mut session, &settings);
     let mut terminal_guard =
         terminal::TerminalGuard::enter_with_initialization(settings.initialize_terminal)?;
     if terminal_guard.is_initialized() {
@@ -556,12 +558,15 @@ pub(crate) fn run_session_with_settings(
         display::open(&mut stdout).context("initializing the Mosh display")?;
     }
     install_panic_cleanup(&terminal_guard);
+    let forward_agent = settings.forward_agent;
+    let agent_binding = settings.agent_binding;
     let result = session_loop(
         &mut session,
         &mut terminal_guard,
         (cols, rows),
         settings.initialize_terminal,
-        settings.forward_agent,
+        forward_agent,
+        agent_binding,
     );
     terminal_guard.restore();
     if result.is_ok() {
@@ -581,7 +586,7 @@ fn install_panic_cleanup(terminal_guard: &terminal::TerminalGuard) {
     }
 }
 
-fn configure_session(session: &mut ClientSession, settings: SessionSettings) {
+fn configure_session(session: &mut ClientSession, settings: &SessionSettings) {
     session
         .prediction_mut()
         .set_display_preference(settings.prediction);
@@ -608,8 +613,9 @@ fn session_loop(
     mut size: (u16, u16),
     initialize_terminal: bool,
     forward_agent: bool,
+    agent_binding: Option<Vec<u8>>,
 ) -> Result<()> {
-    let mut agent = AgentBridge::new(forward_agent);
+    let mut agent = AgentBridge::with_binding(forward_agent, agent_binding);
     if agent.enabled() {
         session.request_agent_forwarding(AGENT_PROTOCOL_VERSION);
     }

@@ -25,6 +25,24 @@ fn agent_frame_validation_requires_a_matching_bounded_length() {
 
 #[cfg(unix)]
 #[test]
+fn bootstrap_probe_requests_identities_once() {
+    use std::os::unix::net::UnixStream;
+
+    let (mut client, mut agent) = UnixStream::pair().unwrap();
+    let server_thread = std::thread::spawn(move || {
+        let mut request = [0; 5];
+        agent.read_exact(&mut request).unwrap();
+        assert_eq!(request, [0, 0, 0, 1, 11]);
+        agent.write_all(&[0, 0, 0, 5, 12, 0, 0, 0, 0]).unwrap();
+        agent.flush().unwrap();
+    });
+
+    prime_agent_stream(&mut client).unwrap();
+    server_thread.join().unwrap();
+}
+
+#[cfg(unix)]
+#[test]
 fn unix_agent_socket_bridges_ordered_frames_and_cleans_up() {
     use std::fs;
     use std::os::unix::fs::PermissionsExt;

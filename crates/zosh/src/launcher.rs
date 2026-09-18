@@ -20,6 +20,7 @@ use anyhow::{Context as _, Result};
 use mosh_rs::{Base64Key, DisplayPreference, sender::KEEP_ALIVE_DEFAULT_MS};
 
 use crate::{
+    agent::BootstrapAgentRelay,
     client::{self, SessionSettings},
     terminal,
 };
@@ -211,6 +212,7 @@ pub(crate) struct BootstrapEndpoint {
     pub(crate) key: String,
     pub(crate) ip: Option<String>,
     pub(crate) diagnostics: Vec<String>,
+    pub(crate) agent_binding: Option<Vec<u8>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -265,6 +267,9 @@ pub struct PaneEndpoint {
     pub host: String,
     pub port: u16,
     pub key: String,
+    /// The native SSH forwarding binding captured while the endpoint was
+    /// bootstrapped, when agent forwarding was requested and available.
+    pub agent_binding: Option<Vec<u8>>,
     /// Anything the remote side printed alongside the endpoint. `zosh` writes
     /// these to its stderr; an embedder has somewhere else to put them.
     pub diagnostics: Vec<String>,
@@ -302,6 +307,7 @@ pub fn bootstrap_pane_endpoint(request: &PaneBootstrapRequest) -> Result<PaneBoo
                 host,
                 port: endpoint.port,
                 key: endpoint.key,
+                agent_binding: endpoint.agent_binding,
                 diagnostics: endpoint.diagnostics,
             }))
         }
@@ -418,10 +424,16 @@ fn run_local(command: &MoshCommand, target: &str, colors: u16) -> Result<()> {
         local_command.bind_server = BindServer::Address(fallback_host.clone());
     }
     let server = parse_server_command(&local_command.server)?;
-    let output = Command::new(&server[0])
+    let relay = create_bootstrap_agent_relay(&local_command);
+    let mut server_process = Command::new(&server[0]);
+    server_process
         .args(&server[1..])
         .args(local_server_arguments(&local_command, colors))
-        .stdin(Stdio::null())
+        .stdin(Stdio::null());
+    if let Some(relay) = relay.as_ref() {
+        server_process.env("SSH_AUTH_SOCK", relay.path());
+    }
+    let output = server_process
         .output()
         .with_context(|| format!("starting local Mosh server {:?}", local_command.server))?;
     let bootstrap = BootstrapOutput {
@@ -431,6 +443,7 @@ fn run_local(command: &MoshCommand, target: &str, colors: u16) -> Result<()> {
     };
     ensure_success(bootstrap.status, "local Mosh server")?;
     let mut endpoint = parse_bootstrap_output(&bootstrap.combined())?;
+    endpoint.agent_binding = relay.as_ref().and_then(BootstrapAgentRelay::binding);
     endpoint.diagnostics.retain(|line| !line.is_empty());
     forward_diagnostics(&endpoint.diagnostics.join("\n"));
     let host = endpoint.ip.as_deref().unwrap_or(&fallback_host);
@@ -589,6 +602,19 @@ enum BootstrapStdin {
     None,
 }
 
+fn create_bootstrap_agent_relay(command: &MoshCommand) -> Option<BootstrapAgentRelay> {
+    if !command.forward_agent {
+        return None;
+    }
+    match BootstrapAgentRelay::new() {
+        Ok(relay) => relay,
+        Err(error) => {
+            eprintln!("zosh: native agent bootstrap relay unavailable: {error}");
+            None
+        }
+    }
+}
+
 fn run_ssh_bootstrap(
     command: &MoshCommand,
     target: &str,
@@ -596,6 +622,7 @@ fn run_ssh_bootstrap(
     stdin: BootstrapStdin,
 ) -> Result<BootstrapResult> {
     let (program, arguments) = ssh_bootstrap_command_with_colors(command, target, colors)?;
+    let relay = create_bootstrap_agent_relay(command);
     let mut ssh = Command::new(&program);
     // `-n` already makes the bootstrap non-consuming; this only decides whose
     // terminal, if any, sizes the remote PTY.
@@ -603,6 +630,9 @@ fn run_ssh_bootstrap(
         BootstrapStdin::Terminal => Stdio::inherit(),
         BootstrapStdin::None => Stdio::null(),
     });
+    if let Some(relay) = relay.as_ref() {
+        ssh.env("SSH_AUTH_SOCK", relay.path());
+    }
     if command.remote_ip == RemoteIpMode::Proxy {
         ssh.env("SHELL", "/bin/sh");
     }
@@ -636,6 +666,8 @@ fn run_ssh_bootstrap(
                     // mode; starting Zosh as soon as MOSH CONNECT arrives
                     // races SSH and drops TUI input into the wrong process.
                     wait_bootstrap_child(child, readers)?;
+                    let mut endpoint = endpoint;
+                    endpoint.agent_binding = relay.as_ref().and_then(BootstrapAgentRelay::binding);
                     return Ok(BootstrapResult::Endpoint(endpoint));
                 }
                 Err(error) if line.starts_with("MOSH CONNECT ") => {
@@ -738,12 +770,25 @@ fn launch_endpoint(command: &MoshCommand, host: &str, endpoint: &BootstrapEndpoi
         return launch_external_client(command, Path::new(client_path), host, endpoint);
     }
     let key = Base64Key::from_printable(&endpoint.key).context("invalid MOSH CONNECT key")?;
-    client::run_session_with_settings(host, endpoint.port, &key, endpoint_settings(command))
+    client::run_session_with_settings(
+        host,
+        endpoint.port,
+        &key,
+        endpoint_settings_with_binding(command, endpoint.agent_binding.clone()),
+    )
 }
 
 /// The launcher options the bundled endpoint client consumes. Named so
 /// it can be asserted without opening a socket.
+#[cfg(test)]
 fn endpoint_settings(command: &MoshCommand) -> SessionSettings {
+    endpoint_settings_with_binding(command, None)
+}
+
+fn endpoint_settings_with_binding(
+    command: &MoshCommand,
+    agent_binding: Option<Vec<u8>>,
+) -> SessionSettings {
     SessionSettings {
         prediction: command.prediction.display_preference(),
         predict_overwrite: command.predict_overwrite,
@@ -751,6 +796,7 @@ fn endpoint_settings(command: &MoshCommand) -> SessionSettings {
         keep_alive: command.keep_alive,
         scrollback_kib: command.scrollback_kib,
         forward_agent: command.forward_agent,
+        agent_binding,
     }
 }
 
@@ -971,14 +1017,18 @@ fn without_native_agent_forwarding(arguments: Vec<String>) -> Vec<String> {
     let mut index = 0;
     while index < arguments.len() {
         let argument = &arguments[index];
-        if argument == "-A" || argument.eq_ignore_ascii_case("-oforwardagent=yes") {
+        if argument == "-A"
+            || argument.eq_ignore_ascii_case("-oforwardagent=yes")
+            || argument.eq_ignore_ascii_case("-oforwardagent=no")
+        {
             index += 1;
             continue;
         }
         if argument == "-o"
-            && arguments
-                .get(index + 1)
-                .is_some_and(|value| value.eq_ignore_ascii_case("ForwardAgent=yes"))
+            && arguments.get(index + 1).is_some_and(|value| {
+                value.eq_ignore_ascii_case("ForwardAgent=yes")
+                    || value.eq_ignore_ascii_case("ForwardAgent=no")
+            })
         {
             index += 2;
             continue;
@@ -1000,8 +1050,9 @@ fn ssh_bootstrap_command_with_colors(
     target: &str,
     colors: u16,
 ) -> Result<(String, Vec<String>)> {
-    // Agent forwarding over Zosh is carried by the authenticated Mosh state,
-    // so the SSH bootstrap must not leave a native agent channel behind.
+    // Native forwarding is temporary: zosh-server opens the inherited socket
+    // once so OpenSSH emits its forwarding session binding. Subsequent agent
+    // traffic travels over the authenticated Zosh state instead.
     let (program, arguments) = ssh_base_command(command, false);
     let mut arguments = if command.forward_agent {
         without_native_agent_forwarding(arguments)
@@ -1009,7 +1060,7 @@ fn ssh_bootstrap_command_with_colors(
         arguments
     };
     if command.forward_agent {
-        arguments.extend(["-o".to_owned(), "ForwardAgent=no".to_owned()]);
+        arguments.push("-A".to_owned());
     }
     if command.remote_ip == RemoteIpMode::Proxy {
         arguments.extend([
@@ -1647,6 +1698,7 @@ pub(crate) fn parse_bootstrap_output(output: &str) -> Result<BootstrapEndpoint> 
         key,
         ip,
         diagnostics,
+        agent_binding: None,
     })
 }
 

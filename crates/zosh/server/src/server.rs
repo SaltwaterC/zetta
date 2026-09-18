@@ -75,6 +75,10 @@ pub fn run(mut cfg: Config) -> Result<()> {
     let ocb = Ocb::new(&key).context("initializing AES-128-OCB3")?;
     key.fill(0);
 
+    if cfg.forward_agent {
+        crate::agent::prime_forwarded_agent(cfg.verbose > 1);
+    }
+
     // This is the bootstrap contract parsed by the stock mosh wrapper.
     println!("MOSH CONNECT {port} {key_text}");
     std::io::stdout().flush().context("flushing MOSH CONNECT")?;

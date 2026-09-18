@@ -12,18 +12,101 @@ use std::{
     path::{Path, PathBuf},
     sync::mpsc::{self, Receiver, SyncSender, TryRecvError},
     thread,
+    time::Duration,
 };
 
 #[cfg(unix)]
 use std::fs;
+#[cfg(windows)]
+use std::fs::OpenOptions;
 
 pub const MAX_FRAME: usize = 256 * 1024;
 const MAX_CONNECTIONS: usize = 16;
 const MAX_OUTSTANDING: usize = 64;
 const EVENT_QUEUE_DEPTH: usize = 64;
+const REQUEST_IDENTITIES: u8 = 11;
+const PRIME_TIMEOUT: Duration = Duration::from_secs(1);
 
 #[cfg(unix)]
 use std::os::unix::{fs::PermissionsExt, net::UnixListener};
+
+/// Give a native SSH agent-forwarding channel one bounded request before the
+/// bootstrap announces its Mosh endpoint. OpenSSH sends its forwarding
+/// session binding on that channel before the identities response, which is
+/// the context agents such as 1Password require for constrained keys.
+pub fn prime_forwarded_agent(verbose: bool) {
+    let Some(path) = std::env::var_os("SSH_AUTH_SOCK").map(PathBuf::from) else {
+        return;
+    };
+    match prime_agent_path(&path) {
+        Ok(()) if verbose => eprintln!("zosh-server-rs: native agent forwarding primed"),
+        Ok(()) | Err(_) => {}
+    }
+}
+
+fn prime_agent_path(path: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::net::UnixStream;
+
+        let mut stream = UnixStream::connect(path)?;
+        stream.set_read_timeout(Some(PRIME_TIMEOUT))?;
+        stream.set_write_timeout(Some(PRIME_TIMEOUT))?;
+        prime_agent_stream(&mut stream)
+    }
+    #[cfg(windows)]
+    {
+        let path = path.to_owned();
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        thread::spawn(move || {
+            let result = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(path)
+                .and_then(|mut stream| prime_agent_stream(&mut stream));
+            let _ = sender.send(result);
+        });
+        receiver.recv_timeout(PRIME_TIMEOUT).unwrap_or_else(|_| {
+            Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "timed out priming the forwarded SSH agent",
+            ))
+        })
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = path;
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "SSH-agent forwarding is unsupported on this platform",
+        ))
+    }
+}
+
+fn prime_agent_stream(stream: &mut (impl Read + Write)) -> io::Result<()> {
+    let request = [0, 0, 0, 1, REQUEST_IDENTITIES];
+    stream.write_all(&request)?;
+    stream.flush()?;
+    let _ = read_agent_frame(stream)?;
+    Ok(())
+}
+
+fn read_agent_frame(stream: &mut impl Read) -> io::Result<Vec<u8>> {
+    let mut length = [0_u8; 4];
+    stream.read_exact(&mut length)?;
+    let body_len = u32::from_be_bytes(length) as usize;
+    if body_len == 0 || body_len > MAX_FRAME - 4 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "SSH-agent response exceeds the frame limit",
+        ));
+    }
+    let mut frame = Vec::with_capacity(body_len + 4);
+    frame.extend_from_slice(&length);
+    frame.resize(body_len + 4, 0);
+    stream.read_exact(&mut frame[4..])?;
+    Ok(frame)
+}
 
 enum LocalEvent {
     Request {

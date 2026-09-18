@@ -414,11 +414,17 @@ short form takes no separate value, so `-k host` still names a target.
 ### SSH-agent forwarding
 
 Agent forwarding is deliberately off unless `--forward-agent` is present.
-The launcher passes `--forward-agent` only to the bundled `zosh-server`, and
-adds `-o ForwardAgent=no` to the SSH bootstrap so OpenSSH cannot leave a
-second, stale native agent channel behind when Mosh switches to UDP. If the
-bootstrap cannot start a usable Mosh endpoint and the launcher falls back to
-plain SSH, the same request becomes native `ssh -A` instead.
+The launcher passes `--forward-agent` only to the bundled `zosh-server`. During
+that bootstrap it temporarily enables native `ssh -A` through a private local
+agent relay. Before printing `MOSH CONNECT`, `zosh-server` opens the inherited
+forwarded socket and makes one bounded identities request. OpenSSH puts the
+authenticated `session-bind@openssh.com` forwarding frame on that connection;
+the relay records that opaque frame, then shuts down with the bootstrap SSH
+process. The bundled Zosh client replays the captured binding as the first
+frame on each fresh local agent connection and carries all later requests over
+the authenticated Zosh state. If the bootstrap cannot start a usable Mosh
+endpoint and the launcher falls back to plain SSH, the same request becomes
+native `ssh -A` instead.
 
 After the first authenticated Mosh state, a Zosh server that received the
 hello creates a private per-session Unix socket, or an OpenSSH-compatible
