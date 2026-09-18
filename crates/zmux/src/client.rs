@@ -2611,10 +2611,19 @@ impl Client {
         // idle for hours. Keep the write deadline from `open_as`, but remove
         // the request read deadline before handing the connection to the
         // event loop.
-        connection
-            .stream()
-            .set_read_timeout(None)
-            .context("clearing the multiplexer subscription read timeout")?;
+        let timeout_cleared = connection.stream().set_read_timeout(None);
+        if matches!(
+            &timeout_cleared,
+            Err(error) if error.kind() == std::io::ErrorKind::InvalidInput
+        ) {
+            // Darwin refuses every SO_RCVTIMEO update with EINVAL after the
+            // peer has closed an AF_UNIX socket. The next read will observe
+            // EOF immediately, so the leftover deadline cannot affect this
+            // connection and the subscription loop still needs to receive it
+            // in order to run its reconnect path.
+            return Ok(connection);
+        }
+        timeout_cleared.context("clearing the multiplexer subscription read timeout")?;
         Ok(connection)
     }
 
