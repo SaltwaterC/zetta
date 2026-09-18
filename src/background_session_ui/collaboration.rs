@@ -1634,6 +1634,29 @@ impl Zetta {
         }
     }
 
+    /// Whether a failed shared stream is one this window can put back.
+    ///
+    /// Only a pane this window is actually reading the multiplexer's stream for.
+    /// A pane carried over Mosh is not: the stream it was attached with is
+    /// released as soon as its link is up, because reading the remote host's
+    /// output twice would pay for it twice — and the daemon cannot tell that
+    /// release from a broken relay, so it reports it as a failure either way
+    /// (`releasing_a_shared_stream_is_reported_to_its_own_client_as_a_failure`).
+    ///
+    /// Answering that report with a replacement is not merely useless, it is a
+    /// loop that feeds itself: the replacement has nowhere to go, so it is
+    /// dropped, and dropping it is another release the daemon reports the same
+    /// way. Every attempt attached a stream, was sent the pane's whole retained
+    /// screen over the session's one SSH forward, and dropped it again — and
+    /// because these reports share a queue with the session's snapshot, pane-
+    /// added and pane-removed events, the tab stopped being told anything about
+    /// the session at all.
+    fn shared_stream_is_replaceable(&self, session_id: u64, mux_pane_id: u64) -> bool {
+        self.shared_collaboration
+            .local_pane_id(session_id, mux_pane_id)
+            .is_some_and(|local_pane_id| self.shared_panes.contains_key(&local_pane_id))
+    }
+
     fn handle_shared_stream_failure(
         &mut self,
         session_id: u64,
@@ -1642,6 +1665,9 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Task<()> {
+        if !self.shared_stream_is_replaceable(session_id, pane_id) {
+            return Task::ready(());
+        }
         let executor = cx.background_executor().clone();
         cx.spawn_in(window, async move |this, cx| {
             for delay in [
@@ -1692,9 +1718,20 @@ impl Zetta {
                         replaced
                     })
                     .unwrap_or(false);
-                if replaced {
-                    break;
+                if !replaced {
+                    log::debug!(
+                        "shared pane {pane_id} of session {session_id} had nowhere to put a \
+                         replacement stream; leaving it as it is"
+                    );
                 }
+                // Either way, an attach that succeeded ends this. A replacement
+                // the pane refused is one it has nowhere to put, and waiting
+                // does not change that — while the refused stream has just been
+                // dropped, which the daemon reports as one more failure.
+                // Retrying is what turns one report into a loop. Only an attach
+                // that *failed* is worth coming back for, which is the
+                // `continue` above.
+                break;
             }
         })
     }

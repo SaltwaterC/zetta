@@ -931,3 +931,60 @@ fn applying_a_snapshot_mid_split_leaves_the_new_pane_in_the_layout() {
     );
     assert!(tab.layout.contains_pane(7));
 }
+
+/// A pane this window carries over Mosh holds no stream from the multiplexer:
+/// the one it was attached with was released as soon as its link came up.
+///
+/// The daemon cannot tell that release from a broken relay and reports it as a
+/// failure, so the window is asked to replace a stream it deliberately does not
+/// have. It must decline. Answering with a replacement attaches one, finds
+/// nowhere to put it, and drops it — which is another release, reported as
+/// another failure, on the same queue that carries the session's snapshot,
+/// pane-added and pane-removed events. The tab then stops hearing about the
+/// session at all, and the daemon is asked for the pane's whole retained screen
+/// every few hundred milliseconds for as long as the window is open.
+#[gpui::test]
+fn a_pane_carried_over_mosh_has_no_shared_stream_to_replace(cx: &mut gpui::TestAppContext) {
+    cx.update(|cx| {
+        theme_settings::init(
+            theme::LoadThemes::All(Box::new(crate::zetta_assets::ZettaAssets)),
+            cx,
+        );
+        let registry = theme::ThemeRegistry::global(cx);
+        theme::GlobalTheme::update_theme(cx, registry.get("One Light").unwrap());
+    });
+    let (zetta, cx) = cx.add_window_view(|window, cx| {
+        let mut config = crate::config::Config::defaults(None, None);
+        config.profiles.clear();
+        Zetta::new(
+            config,
+            None,
+            crate::ZettaLaunchOptions {
+                no_mux: true,
+                ..Default::default()
+            },
+            window,
+            cx,
+        )
+    });
+
+    cx.update_entity(&zetta, |zetta, _| {
+        // Bound and mapped, exactly as a Mosh-carried pane is: the window knows
+        // which local pane the multiplexer's id means. What it does not have is
+        // an entry in `shared_panes`, because nothing here reads that stream.
+        zetta
+            .shared_collaboration
+            .bind(9, 100, shared_state(9, 1), [(41, 7)])
+            .unwrap();
+
+        assert_eq!(zetta.shared_collaboration.local_pane_id(9, 41), Some(7));
+        assert!(
+            !zetta.shared_stream_is_replaceable(9, 41),
+            "a pane with no multiplexer stream in this window has none to put back"
+        );
+        assert!(
+            !zetta.shared_stream_is_replaceable(9, 42),
+            "and neither has a pane this window does not hold at all"
+        );
+    });
+}

@@ -13,6 +13,15 @@
 //!   the line discipline neither echoes the remote program's input back nor
 //!   rewrites its bytes, and `Ctrl-C` arrives as the byte `0x03` for the pane
 //!   rather than as a signal for this process.
+//! - **The screen is blanked once the prelude has been read**, because raw mode
+//!   cannot be on before this process exists and the prelude arrives on a Mosh
+//!   link that was established before it was started. Whatever the line
+//!   discipline echoed in between is on the screen and is not the pane's. The
+//!   race cannot be won from here — `zosh-server` opens the PTY, and the
+//!   remote server may be a stock `mosh-server` that takes no say in the
+//!   matter — so what is on the screen is discarded rather than prevented. An
+//!   echo can therefore still be painted for the frame it arrived in; it
+//!   cannot survive into the pane.
 //! - **The replay goes out first**, so the emulator in front of it holds the
 //!   screen as it stands before the first live frame arrives.
 //! - **`SIGWINCH` is a resize.** Mosh sizes the PTY from the client's own
@@ -20,6 +29,8 @@
 //!   under a terminal does. It is reported at the session's current geometry
 //!   revision, because the daemon refuses a size that belongs to an older one:
 //!   a viewport from before a split says nothing about the layout after it.
+//!   That revision is asked of the daemon as each report is sent — see
+//!   [`SizeReports`] for why remembering it is not enough.
 //! - **A protected session's secret is read from stdin**, never from `argv`:
 //!   the command line of this process is visible to every account on the host,
 //!   and the session key would be in it. By the time this runs, stdin is the
@@ -80,7 +91,9 @@ pub struct RelayOptions {
 /// of it and, in turn, the pane in the viewer's window.
 pub fn run(options: RelayOptions) -> Result<()> {
     // Raw mode first: the secret below must not be echoed back into the
-    // terminal that is about to display this pane.
+    // terminal that is about to display this pane. It is not enough on its own
+    // — the prelude can arrive before this process does — which is what
+    // [`blank_the_screen`] is for.
     let raw_mode = RawMode::enter().context("putting the relay's terminal in raw mode")?;
     // In this order, because it is the order the viewer writes them and neither
     // line is self-describing.
@@ -93,16 +106,32 @@ pub fn run(options: RelayOptions) -> Result<()> {
         .then(read_viewer_line)
         .transpose()?;
 
-    let (pane, revision) = attach(options, secret.as_ref(), viewer)?;
+    let mut stdout = io::stdout();
+    blank_the_screen(&mut stdout)?;
+
+    let client = Client::connect_existing()
+        .context("connecting to this host's multiplexer")?
+        .context("no multiplexer is running on this host")?;
+    // Kept on the client, so the snapshot each size report is stamped from is
+    // authorized on a protected session the same way the attach was.
+    client.set_session_secret(secret.as_ref());
+    let (pane, revision) = attach(&client, options, secret.as_ref(), viewer)?;
     let pane = Arc::new(pane);
 
-    let mut stdout = io::stdout();
     stdout
         .write_all(&pane.replay)
         .and_then(|()| stdout.flush())
         .context("writing the pane's retained output")?;
 
-    let mut revision = revision;
+    let mut sizes = SizeReports {
+        client: &client,
+        pane: &pane,
+        session_id: options.session_id,
+        revision,
+    };
+    // Sent from here rather than through [`SizeReports::report_terminal_size`]:
+    // the attach just read this revision, and a relay that cannot report a size
+    // at all has nothing to relay, so this one is fatal where a later one is not.
     if let Some((columns, lines)) = terminal_size() {
         pane.send_resize_for_revision(revision, columns, lines)
             .context("reporting the pane's initial size")?;
@@ -112,21 +141,37 @@ pub fn run(options: RelayOptions) -> Result<()> {
         .context("watching for terminal size changes")?;
 
     forward_input(Arc::clone(&pane));
-    let result = forward_output(&pane, &resized, &mut revision, &mut stdout);
+    let result = forward_output(&mut sizes, &resized, &mut stdout);
     drop(raw_mode);
     result
 }
 
+/// Discards everything on the terminal this relay was given.
+///
+/// The prelude travels inside an established Mosh link, so it can reach this
+/// PTY before this process has run at all — and until [`RawMode::enter`] has,
+/// the line discipline echoes whatever arrives. Losing that race put the
+/// viewer's client ID on the first line of the pane, above its first prompt.
+/// The race cannot be won from this side, but the screen does not have to be
+/// kept: nothing on it belongs to the pane, whose every byte is written below.
+fn blank_the_screen(output: &mut impl io::Write) -> Result<()> {
+    output
+        .write_all(BLANK_SCREEN)
+        .and_then(|()| output.flush())
+        .context("clearing the relay's terminal")
+}
+
+/// Erase the screen, erase what has scrolled off it, and home the cursor.
+const BLANK_SCREEN: &[u8] = b"\x1b[2J\x1b[3J\x1b[H";
+
 /// Attaches the pane, and reads the session's geometry revision, which is what
 /// a size report has to name.
 fn attach(
+    client: &Client,
     options: RelayOptions,
     secret: Option<&SessionSecret>,
     viewer: Option<ClientId>,
 ) -> Result<(SharedPane, SessionRevision)> {
-    let client = Client::connect_existing()
-        .context("connecting to this host's multiplexer")?
-        .context("no multiplexer is running on this host")?;
     let attached = match viewer {
         Some(viewer) => {
             client.attach_shared_relaying_for(options.session_id, options.pane_id, secret, viewer)
@@ -174,36 +219,94 @@ fn forward_input(pane: Arc<SharedPane>) {
     });
 }
 
-/// Copies the pane's output to this process's terminal until the pane closes,
-/// reporting a size change whenever one arrives.
-fn forward_output(
-    pane: &SharedPane,
-    resized: &AtomicBool,
-    revision: &mut SessionRevision,
-    stdout: &mut impl io::Write,
-) -> Result<()> {
-    let mut reader = pane.reader();
-    let mut bytes = [0_u8; 16 * 1024];
-    loop {
-        // Every size the daemon arbitrates carries the revision it arbitrated
-        // at, which is how this side learns that the layout moved on. Nothing
-        // is done with the size itself: Mosh owns this terminal's geometry.
-        if let Some((arbitrated, columns, lines)) = pane.take_revisioned_sizes().last() {
-            *revision = *arbitrated;
-            // Unlike the GUI terminal, this relay writes directly to a real
-            // terminal whose geometry Mosh owns. It has still observed the
-            // size boundary, so let the shared reader continue to the redraw
-            // queued after it.
-            pane.finish_size_application((*arbitrated, *columns, *lines));
-        }
-        if resized.swap(false, Ordering::SeqCst)
-            && let Some((columns, lines)) = terminal_size()
-            && let Err(error) = pane.send_resize_for_revision(*revision, columns, lines)
+/// Keeps the pane's size in step with the terminal Mosh gives this relay.
+///
+/// The revision is the difficulty. The daemon drops a size report that does not
+/// name the revision it is on, and says nothing about having done so; this side
+/// hears about a revision at all only when an arbitrated size happens to be
+/// broadcast to it, which for a pane whose one viewer is this relay never
+/// happens. So the revision an attach started from was the only one this relay
+/// ever reported at: adding a second pane to the session moved the session on,
+/// and from then on every resize of the pane this relay carries was discarded
+/// in silence. The window showed 98 columns while the shell inside it went on
+/// wrapping at 198.
+///
+/// The revision is therefore asked of the daemon as each report is sent, which
+/// is what the windowed client does too — it reads the revision at the moment
+/// it sends rather than the one the layout it measured was for. A remembered
+/// revision is still the fallback, so a daemon that cannot answer leaves the
+/// reporting no worse than it was.
+struct SizeReports<'a> {
+    client: &'a Client,
+    pane: &'a SharedPane,
+    session_id: u64,
+    revision: SessionRevision,
+}
+
+impl SizeReports<'_> {
+    /// Records the revision an arbitrated size arrived at, and releases the
+    /// output held behind it.
+    ///
+    /// Nothing is done with the size itself: unlike the GUI terminal, this
+    /// relay writes to a real terminal whose geometry Mosh owns. It has still
+    /// observed the size boundary, so the shared reader may continue to the
+    /// redraw queued after it.
+    fn observe_arbitrated(&mut self) {
+        let Some(&(arbitrated, columns, lines)) = self.pane.take_revisioned_sizes().last() else {
+            return;
+        };
+        self.revision = arbitrated;
+        self.pane
+            .finish_size_application((arbitrated, columns, lines));
+    }
+
+    /// Reports the terminal's current size at the session's current revision.
+    fn report_terminal_size(&mut self) {
+        let Some((columns, lines)) = terminal_size() else {
+            return;
+        };
+        self.revision = self.current_revision();
+        if let Err(error) = self
+            .pane
+            .send_resize_for_revision(self.revision, columns, lines)
         {
             // A report can lose a race with a layout change, and the next one
             // carries the newer revision. Losing the pane over it would be
             // worse than the size being briefly wrong.
             eprintln!("zmux relay-pane: could not report the terminal size: {error:#}");
+        }
+    }
+
+    fn current_revision(&self) -> SessionRevision {
+        match self.client.shared_snapshot(self.session_id) {
+            Ok(state) => state.revision,
+            Err(error) => {
+                log::debug!(
+                    "relaying pane {} of session {}: could not read the current revision, \
+                     reporting at {}: {error:#}",
+                    self.pane.pane_id(),
+                    self.session_id,
+                    self.revision.0
+                );
+                self.revision
+            }
+        }
+    }
+}
+
+/// Copies the pane's output to this process's terminal until the pane closes,
+/// reporting a size change whenever one arrives.
+fn forward_output(
+    sizes: &mut SizeReports<'_>,
+    resized: &AtomicBool,
+    stdout: &mut impl io::Write,
+) -> Result<()> {
+    let mut reader = sizes.pane.reader();
+    let mut bytes = [0_u8; 16 * 1024];
+    loop {
+        sizes.observe_arbitrated();
+        if resized.swap(false, Ordering::SeqCst) {
+            sizes.report_terminal_size();
         }
         match reader.read(&mut bytes) {
             Ok(0) => return Ok(()),

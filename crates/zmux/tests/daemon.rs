@@ -9,7 +9,13 @@ use std::{
     collections::HashMap,
     io::{Read, Write as _},
     net::Shutdown,
-    os::unix::net::{UnixListener, UnixStream},
+    os::{
+        fd::{AsRawFd as _, FromRawFd as _},
+        unix::{
+            net::{UnixListener, UnixStream},
+            process::CommandExt as _,
+        },
+    },
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::{
@@ -8203,11 +8209,235 @@ fn relay_pane_copies_a_shared_pane_between_the_daemon_and_its_own_stdio() {
     writeln!(relay_input, "{TEST_SECRET}").expect("sending the session secret");
     wait_for_output(&relayed, "relayed", &relay);
 
+    // The prelude reaches the PTY over a Mosh link established before this
+    // process existed, so the line discipline can echo it before raw mode is
+    // on. That echo is not the pane's, and blanking the screen before the
+    // pane's first byte is what keeps it from being the first line a viewer
+    // sees — which is where the viewer's client ID used to appear.
+    assert!(
+        relayed
+            .lock()
+            .unwrap()
+            .starts_with("\u{1b}[2J\u{1b}[3J\u{1b}[H"),
+        "the relay must blank its screen before writing the pane: {:?}",
+        relayed.lock().unwrap()
+    );
+
     write!(relay_input, "typed\r").expect("sending pane input");
     wait_for_output(&relayed, "typed", &relay);
 
     let _ = relay.kill();
     let _ = relay.wait();
+}
+
+/// A relay reports its size at the revision the session is on *now*.
+///
+/// The daemon drops a size report naming any other revision, and says nothing
+/// about having done so. A relay learns a revision only from an arbitrated size
+/// broadcast to it, which never happens for a pane whose one viewer it is — so
+/// the revision it attached at was the only one it ever reported at. Adding a
+/// pane to the session moves the revision on, which used to leave the pane the
+/// relay carries frozen at its pre-split size for good: the window showed 98
+/// columns while the shell inside it went on wrapping at 198.
+#[test]
+fn a_relay_reports_its_size_after_the_session_revision_moves_on() {
+    let daemon = TestDaemon::start();
+    let client = daemon.client();
+    let pane = client
+        .spawn(spawn_request(None, "printf ready; sleep 60"))
+        .unwrap();
+    let descriptor = std::fs::File::from(pane.descriptor);
+    read_until(&descriptor, "ready");
+    let offered = summary(pane.session_id, pane.pane_id);
+    client
+        .share(
+            pane.session_id,
+            offered,
+            serde_json::Value::Null,
+            None,
+            true,
+        )
+        .unwrap();
+
+    let request = spawn_request(Some(pane.session_id), "printf relayed; cat");
+    let spawned = client
+        .spawn_shared(SharedSpawnRequest {
+            session_id: pane.session_id,
+            base_revision: SessionRevision::INITIAL,
+            operation_id: client.next_shared_operation_id(),
+            program: request.program,
+            args: request.args,
+            env: request.env,
+            working_directory: request.working_directory,
+            size: request.size,
+            console_palette: request.console_palette,
+        })
+        .unwrap();
+    let relayed_pane = spawned.pane.pane_id();
+    drop(spawned);
+
+    // A second viewer of the same pane: the arbitrated size is broadcast to
+    // every shared client, and this one reports no size of its own, so what it
+    // is told is what the relay asked for.
+    let observer = match client
+        .attach_shared_with_secret(pane.session_id, relayed_pane, None)
+        .unwrap()
+    {
+        AttachOutcome::SharedAttached { pane, .. } => pane,
+        _other => panic!("the observer must attach as shared"),
+    };
+    let mut observer_reader = observer.reader();
+
+    let terminal = TestPty::open(120, 40);
+    let mut relay = relay_command(&daemon, pane.session_id, relayed_pane, &terminal)
+        .spawn()
+        .expect("starting the relay");
+    // Drained so a PTY that fills cannot block the relay's own writes.
+    let _relayed = collect_output(terminal.master().expect("the terminal's master side"));
+
+    assert_eq!(
+        wait_for_shared_size(&mut observer_reader, &observer, (120, 40)).last(),
+        Some(&(120, 40)),
+        "a relay's first report is at the revision it attached at"
+    );
+
+    // Anything that edits the session moves it on, exactly as adding a pane
+    // does. The relay is told nothing about it.
+    let revision = client.shared_snapshot(pane.session_id).unwrap().revision;
+    client
+        .apply_shared(
+            pane.session_id,
+            revision,
+            SharedSessionOperation::SetFocus {
+                pane_id: relayed_pane,
+            },
+        )
+        .unwrap();
+    assert_ne!(
+        client.shared_snapshot(pane.session_id).unwrap().revision,
+        revision,
+        "the edit has to have moved the revision on for this test to mean anything"
+    );
+
+    terminal.resize(60, 20);
+    assert_eq!(
+        wait_for_shared_size(&mut observer_reader, &observer, (60, 20)).last(),
+        Some(&(60, 20)),
+        "a resize after the session moved on must still reach the pane"
+    );
+
+    let _ = relay.kill();
+    let _ = relay.wait();
+}
+
+/// `zmux relay-pane` reading the pane whose viewer is `terminal`.
+fn relay_command(
+    daemon: &TestDaemon,
+    session_id: u64,
+    pane_id: u64,
+    terminal: &TestPty,
+) -> Command {
+    let mut command = Command::new(daemon_binary());
+    command
+        .args(["relay-pane", &session_id.to_string(), &pane_id.to_string()])
+        .env("XDG_CONFIG_HOME", &daemon.config)
+        .stdin(terminal.stdio())
+        .stdout(terminal.stdio())
+        .stderr(terminal.stdio());
+    // SAFETY: the closure runs between `fork` and `exec` and calls only
+    // async-signal-safe functions.
+    unsafe {
+        command.pre_exec(|| {
+            // A terminal's size change is signalled to the foreground process
+            // group of the session that owns it, so a relay that is neither
+            // never hears about one.
+            if libc::setsid() < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if libc::ioctl(0, libc::TIOCSCTTY as _, 0) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    command
+}
+
+/// A PTY pair for a child that has to be under a terminal rather than a pipe:
+/// a relay reads its size from one and is signalled by it, and neither happens
+/// through a pipe.
+struct TestPty {
+    master: std::fs::File,
+    slave: std::fs::File,
+}
+
+impl TestPty {
+    fn open(columns: u16, lines: u16) -> Self {
+        let mut master = 0;
+        let mut slave = 0;
+        let size = winsize(columns, lines);
+        // SAFETY: `openpty` writes both descriptors, and `size` is the window
+        // the new terminal is opened with.
+        let opened = unsafe {
+            libc::openpty(
+                &raw mut master,
+                &raw mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                &raw const size,
+            )
+        };
+        assert_eq!(
+            opened,
+            0,
+            "opening a PTY: {}",
+            std::io::Error::last_os_error()
+        );
+        // SAFETY: `openpty` succeeded, so both descriptors are open and ours.
+        unsafe {
+            Self {
+                master: std::fs::File::from_raw_fd(master),
+                slave: std::fs::File::from_raw_fd(slave),
+            }
+        }
+    }
+
+    /// Stdio for the child: one handle per stream, because `Stdio` consumes it.
+    fn stdio(&self) -> Stdio {
+        Stdio::from(self.slave.try_clone().expect("cloning the PTY slave"))
+    }
+
+    fn master(&self) -> std::io::Result<std::fs::File> {
+        self.master.try_clone()
+    }
+
+    fn resize(&self, columns: u16, lines: u16) {
+        let size = winsize(columns, lines);
+        // SAFETY: the descriptor is this pair's master side and `size` is the
+        // window it is being given.
+        let resized = unsafe {
+            libc::ioctl(
+                self.master.as_raw_fd(),
+                libc::TIOCSWINSZ as _,
+                &raw const size,
+            )
+        };
+        assert_eq!(
+            resized,
+            0,
+            "resizing the PTY: {}",
+            std::io::Error::last_os_error()
+        );
+    }
+}
+
+fn winsize(columns: u16, lines: u16) -> libc::winsize {
+    libc::winsize {
+        ws_row: lines,
+        ws_col: columns,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    }
 }
 
 /// Reads a child's pipe on its own thread: a blocking read cannot be given a
@@ -8433,6 +8663,85 @@ fn subscribing_is_answered_before_any_event_is_delivered() {
             "the event after the acknowledgement was lost: {error:#}\ndaemon log:\n{}",
             daemon.log()
         ),
+    }
+
+    client.kill(session_id).unwrap();
+}
+
+/// A client that lets go of a shared stream is told the stream failed.
+///
+/// The daemon cannot tell a viewer that closed its socket from one whose
+/// transport broke, so it reports both the same way. That matters to whoever
+/// receives it: a window that releases a pane's stream on purpose — which is
+/// what it does for a pane it has taken over Mosh — gets a failure report for
+/// it, and must not answer by attaching a replacement it will release again.
+/// Doing so is a loop that feeds itself one report per attempt.
+#[test]
+fn releasing_a_shared_stream_is_reported_to_its_own_client_as_a_failure() {
+    let daemon = TestDaemon::start();
+    let client = daemon.client();
+    let (session_id, spawned) = shared_pane_for_image_paste(&daemon, &client, None);
+    let pane_id = spawned.pane.pane_id();
+    drop(spawned);
+
+    let endpoint: zmux::transport::Endpoint =
+        serde_json::from_slice(&std::fs::read(daemon.sessions_dir().join("zmux.json")).unwrap())
+            .unwrap();
+    let mut subscription = Connection::new(Stream::connect(&endpoint.socket_path).unwrap());
+    subscription
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    subscription
+        .send(&Envelope {
+            version: zmux::messages::PROTOCOL_VERSION,
+            token: endpoint.token,
+            client_process_id: std::process::id(),
+            // The window subscribes and attaches as one client, which is what
+            // makes the report reach it: a failure goes only to the client
+            // whose stream it was.
+            client_id: client.client_id().clone(),
+            stream_only: false,
+            session_secret: None,
+            request: Request::Subscribe,
+        })
+        .expect("opening the subscription");
+    assert!(
+        matches!(subscription.receive::<Response>(), Ok((Response::Ok, _))),
+        "the subscription has to be acknowledged before anything is delivered"
+    );
+
+    match client
+        .attach_shared_with_secret(session_id, pane_id, None)
+        .expect("attaching the pane's stream")
+    {
+        AttachOutcome::SharedAttached { pane, .. } => drop(pane),
+        _other => panic!("a shared pane must attach as shared"),
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        match subscription.receive::<Event>() {
+            Ok((
+                Event::SharedStreamFailed {
+                    session_id: failed_session,
+                    pane_id: failed_pane,
+                },
+                _,
+            )) => {
+                assert_eq!((failed_session, failed_pane), (session_id, pane_id));
+                break;
+            }
+            Ok(_) => {}
+            Err(error) => panic!(
+                "the released stream was never reported: {error:#}\ndaemon log:\n{}",
+                daemon.log()
+            ),
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the released stream was never reported\ndaemon log:\n{}",
+            daemon.log()
+        );
     }
 
     client.kill(session_id).unwrap();

@@ -176,9 +176,122 @@ fn a_pane_carried_over_mosh_shows_its_output_and_takes_its_input() {
     second_frames.wait_for("second-pane-is-live");
     frames.wait_for_answer(&mut writer, "30 100");
 
+    // The added pane moved the session's revision on, and the multiplexer drops
+    // a size report that does not name the revision it is on — without a word
+    // to whoever sent it. A relay that reported at the revision it attached at
+    // therefore went deaf to every later resize, which is exactly what a split
+    // is: the window shrank its first pane while the shell inside it went on
+    // wrapping at the width it had before the split.
+    session.resize(60, 20);
+    let after_split = frames.wait_for_answer(&mut writer, "20 60");
+    assert!(
+        after_split.contains("20 60"),
+        "a pane added to the session must not stop its neighbour from resizing: {after_split:?}"
+    );
+
     drop(second);
     drop(session);
     server.stop();
+}
+
+/// One pane of a split quitting must leave the other one usable.
+///
+/// The pane's program ending is not the same as its link going away: the
+/// multiplexer reaps the process, prunes the pane from the session and
+/// republishes it, all while the other pane's relay is attached to the same
+/// session. Typing `exit` in one half of a split tab left the other half taking
+/// no further input.
+#[test]
+#[ignore = "drives separately built zmux and zosh-server binaries; see the module docs"]
+fn quitting_one_relayed_pane_leaves_its_neighbour_taking_input() {
+    let daemon = TestDaemon::start();
+    let client = daemon.client();
+    let pane = shared_protected_session(&client);
+
+    // The survivor answers every line it is sent, with a marker its own pty's
+    // echo of the input cannot be mistaken for.
+    let mut survivor = spawn_relayed_pane(
+        &client,
+        pane.session_id,
+        concat!(
+            "printf 'survivor-is-live\n'; ",
+            r#"while IFS= read -r line; do printf 'answered:%s\n' "$line"; done"#,
+        ),
+        &daemon.config,
+        None,
+    );
+    let survivor_frames = Frames::collect(
+        survivor
+            .session
+            .take_reader()
+            .expect("the survivor's reader"),
+    );
+    survivor_frames.wait_for("survivor-is-live");
+    let mut survivor_writer = survivor.session.writer();
+    use std::io::Write as _;
+    write!(survivor_writer, "before-the-quit\r").expect("sending the survivor input");
+    survivor_frames.wait_for("answered:before-the-quit");
+
+    let mut quitting = spawn_relayed_pane(
+        &client,
+        pane.session_id,
+        "printf 'quitting-is-live\n'; cat",
+        &daemon.config,
+        None,
+    );
+    let quitting_frames = Frames::collect(
+        quitting
+            .session
+            .take_reader()
+            .expect("the quitting pane's reader"),
+    );
+    quitting_frames.wait_for("quitting-is-live");
+
+    // End-of-file, which is what typing `exit` into a pane's shell amounts to:
+    // the program ends, and the multiplexer reaps and prunes the pane.
+    let mut quitting_writer = quitting.session.writer();
+    write!(quitting_writer, "\u{4}").expect("ending the quitting pane's program");
+    wait_for_pruned_pane(&client, pane.session_id, quitting.mux_pane_id);
+
+    write!(survivor_writer, "after-the-quit\r").expect("sending the survivor input");
+    let answered = survivor_frames.wait_for("answered:after-the-quit");
+    assert!(
+        answered.contains("answered:after-the-quit"),
+        "a pane whose neighbour quit has to keep taking input: {answered:?}"
+    );
+
+    // And after the layout change that closing a pane is: the survivor grows
+    // into the space, which reports a size at a revision the prune moved on.
+    survivor.session.resize(60, 20);
+    write!(survivor_writer, "after-the-regrow\r").expect("sending the survivor input");
+    let regrown = survivor_frames.wait_for("answered:after-the-regrow");
+    assert!(
+        regrown.contains("answered:after-the-regrow"),
+        "a pane resized after its neighbour quit has to keep taking input: {regrown:?}"
+    );
+
+    drop(quitting);
+    drop(survivor);
+}
+
+/// Waits until the multiplexer no longer offers `pane_id`, which is how a
+/// reaped pane's removal is observed from outside the daemon.
+fn wait_for_pruned_pane(client: &Client, session_id: u64, pane_id: u64) {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let state = client
+            .shared_snapshot(session_id)
+            .expect("the session's current state");
+        if !state.pane_ids().any(|id| id == pane_id) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "pane {pane_id} was never pruned; the session still has {:?}",
+            state.pane_ids().collect::<Vec<_>>()
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 /// Pasting an image into a Mosh-carried pane, over the same relay the pane's

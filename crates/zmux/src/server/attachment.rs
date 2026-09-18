@@ -841,6 +841,17 @@ pub(super) fn serve_shared(
                         state.revision
                     });
                 if revision != Some(current_revision) {
+                    // Dropped rather than refused: the reporter has no reply
+                    // channel here, and the size it measured belongs to a
+                    // layout this session has moved on from. It is logged
+                    // because nothing else says so, and a client that never
+                    // learns the new revision goes silently deaf to resizing.
+                    log::debug!(
+                        "dropping a size report for pane {pane_id} of session {session_id} at \
+                         revision {:?}; the session is on {}",
+                        revision.map(|revision| revision.0),
+                        current_revision.0
+                    );
                     continue;
                 }
                 let Some(pane) = session.panes.iter_mut().find(|pane| pane.id == pane_id) else {
