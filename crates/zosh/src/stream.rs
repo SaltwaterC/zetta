@@ -18,6 +18,7 @@
 use std::{
     collections::VecDeque,
     io::{self, Read, Write},
+    path::PathBuf,
     sync::{
         Arc, Condvar, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -72,6 +73,15 @@ pub struct PaneSessionSettings {
     pub forward_agent: bool,
     /// The native SSH forwarding binding captured during bootstrap, if any.
     pub agent_binding: Option<Vec<u8>>,
+    /// The local agent OpenSSH selected for this destination. This can differ
+    /// from `SSH_AUTH_SOCK` when `IdentityAgent` is set in SSH configuration.
+    pub agent_path: Option<PathBuf>,
+}
+
+struct AgentSettings {
+    forward: bool,
+    binding: Option<Vec<u8>>,
+    path: Option<PathBuf>,
 }
 
 /// A live Mosh session rendered into a byte stream.
@@ -113,9 +123,15 @@ impl PaneSession {
             scrollback_kib,
             forward_agent,
             agent_binding,
+            agent_path,
         } = settings;
         let columns = columns.max(1);
         let rows = rows.max(1);
+        let agent_settings = AgentSettings {
+            forward: forward_agent,
+            binding: agent_binding,
+            path: agent_path,
+        };
         let mut session =
             MoshSession::connect_with_screen(host, port, key, DisplayScreen::new(rows, columns))
                 .context("connecting to the Mosh UDP endpoint")?;
@@ -147,8 +163,7 @@ impl PaneSession {
                     let result = drive(
                         session,
                         (columns, rows),
-                        forward_agent,
-                        agent_binding,
+                        agent_settings,
                         &command_receiver,
                         &wake,
                         &output,
@@ -284,8 +299,7 @@ impl Write for PaneWriter {
 fn drive(
     mut session: ClientSession,
     size: (u16, u16),
-    forward_agent: bool,
-    agent_binding: Option<Vec<u8>>,
+    agent_settings: AgentSettings,
     commands: &Receiver<Command>,
     wake: &Wake,
     output: &Arc<OutputPipe>,
@@ -295,11 +309,11 @@ fn drive(
     };
     let mut pending_resize = None;
     let mut query_proxy = TerminalQueryProxy::default();
-    let mut agent = if agent_binding.is_some() {
-        AgentBridge::with_binding(forward_agent, agent_binding)
-    } else {
-        AgentBridge::new(forward_agent)
-    };
+    let mut agent = AgentBridge::with_agent(
+        agent_settings.forward,
+        agent_settings.binding,
+        agent_settings.path,
+    );
     if agent.enabled() {
         session.request_agent_forwarding(AGENT_PROTOCOL_VERSION);
     }

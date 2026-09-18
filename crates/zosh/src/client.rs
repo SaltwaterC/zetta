@@ -4,6 +4,7 @@ use std::{
     collections::VecDeque,
     ffi::OsString,
     io::{self, Read as _, Write},
+    path::PathBuf,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -293,6 +294,7 @@ pub(crate) struct SessionSettings {
     pub(crate) scrollback_kib: u32,
     pub(crate) forward_agent: bool,
     pub(crate) agent_binding: Option<Vec<u8>>,
+    pub(crate) agent_path: Option<PathBuf>,
 }
 
 impl SessionSettings {
@@ -321,6 +323,7 @@ impl SessionSettings {
             scrollback_kib: scrollback_from_environment(),
             forward_agent: std::env::var(FORWARD_AGENT_ENV).is_ok_and(|value| value == "yes"),
             agent_binding: None,
+            agent_path: None,
         }
     }
 }
@@ -560,6 +563,7 @@ pub(crate) fn run_session_with_settings(
     install_panic_cleanup(&terminal_guard);
     let forward_agent = settings.forward_agent;
     let agent_binding = settings.agent_binding;
+    let agent_path = settings.agent_path;
     let result = session_loop(
         &mut session,
         &mut terminal_guard,
@@ -567,6 +571,7 @@ pub(crate) fn run_session_with_settings(
         settings.initialize_terminal,
         forward_agent,
         agent_binding,
+        agent_path,
     );
     terminal_guard.restore();
     if result.is_ok() {
@@ -614,8 +619,9 @@ fn session_loop(
     initialize_terminal: bool,
     forward_agent: bool,
     agent_binding: Option<Vec<u8>>,
+    agent_path: Option<PathBuf>,
 ) -> Result<()> {
-    let mut agent = AgentBridge::with_binding(forward_agent, agent_binding);
+    let mut agent = AgentBridge::with_agent(forward_agent, agent_binding, agent_path);
     if agent.enabled() {
         session.request_agent_forwarding(AGENT_PROTOCOL_VERSION);
     }

@@ -394,6 +394,19 @@ fn forwarding_temporarily_enables_native_bootstrap_forwarding() {
 }
 
 #[test]
+fn identity_agent_config_preserves_paths_with_spaces() {
+    assert_eq!(
+        parse_identity_agent(
+            "host pi\nidentityagent /Users/me/Library/Group Containers/1Password/agent.sock\n"
+        ),
+        Some(PathBuf::from(
+            "/Users/me/Library/Group Containers/1Password/agent.sock"
+        ))
+    );
+    assert_eq!(parse_identity_agent("identityagent none\n"), None);
+}
+
+#[test]
 fn the_bundled_server_gets_forwarding_only_when_requested() {
     let command = MoshCommand {
         forward_agent: true,

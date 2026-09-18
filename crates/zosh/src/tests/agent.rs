@@ -164,7 +164,7 @@ fn bootstrap_relay_captures_binding_and_forwards_the_probe() {
         }
     });
 
-    let relay = BootstrapAgentRelay::for_agent_path(&path).unwrap();
+    let relay = BootstrapAgentRelay::for_test_agent_path(&path).unwrap();
     let mut forwarded = UnixStream::connect(relay.path()).unwrap();
     let mut requests = binding.clone();
     requests.extend_from_slice(&frame(&[11]));

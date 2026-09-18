@@ -97,13 +97,14 @@ pub(crate) struct AgentBridge {
 }
 
 impl AgentBridge {
-    pub(crate) fn new(requested: bool) -> Self {
-        Self::with_binding(requested, None)
-    }
-
-    pub(crate) fn with_binding(requested: bool, binding: Option<Vec<u8>>) -> Self {
+    pub(crate) fn with_agent(
+        requested: bool,
+        binding: Option<Vec<u8>>,
+        agent_path: Option<PathBuf>,
+    ) -> Self {
         let (result_tx, results) = mpsc::sync_channel(MAX_OUTSTANDING);
-        let path = requested.then(|| std::env::var_os("SSH_AUTH_SOCK").map(PathBuf::from));
+        let path = requested
+            .then(|| agent_path.or_else(|| std::env::var_os("SSH_AUTH_SOCK").map(PathBuf::from)));
         let path = path
             .flatten()
             .filter(|path| !path.as_os_str().is_empty())
@@ -505,6 +506,8 @@ pub(crate) struct BootstrapAgentRelay {
     #[cfg(any(unix, windows))]
     path: PathBuf,
     #[cfg(any(unix, windows))]
+    agent_path: PathBuf,
+    #[cfg(any(unix, windows))]
     binding: Arc<Mutex<Option<Vec<u8>>>>,
     #[cfg(any(unix, windows))]
     stop: Arc<AtomicBool>,
@@ -513,21 +516,17 @@ pub(crate) struct BootstrapAgentRelay {
 }
 
 impl BootstrapAgentRelay {
-    pub(crate) fn new() -> io::Result<Option<Self>> {
-        #[cfg(any(unix, windows))]
-        {
-            let Some(path) = std::env::var_os("SSH_AUTH_SOCK").map(PathBuf::from) else {
-                return Ok(None);
-            };
-            if !local_agent_path_exists(&path) {
-                return Ok(None);
-            }
-            Self::from_agent_path(path).map(Some)
+    #[cfg(any(unix, windows))]
+    pub(crate) fn for_agent_path(path: PathBuf) -> io::Result<Option<Self>> {
+        if path.as_os_str().is_empty() || !local_agent_path_exists(&path) {
+            return Ok(None);
         }
-        #[cfg(not(any(unix, windows)))]
-        {
-            Ok(None)
-        }
+        Self::from_agent_path(path).map(Some)
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    pub(crate) fn for_agent_path(_path: PathBuf) -> io::Result<Option<Self>> {
+        Ok(None)
     }
 
     #[cfg(unix)]
@@ -555,6 +554,7 @@ impl BootstrapAgentRelay {
             })?;
         Ok(Self {
             path: socket_path,
+            agent_path,
             binding,
             stop,
             thread: Some(thread),
@@ -577,6 +577,7 @@ impl BootstrapAgentRelay {
             })?;
         Ok(Self {
             path,
+            agent_path,
             binding,
             stop,
             thread: Some(thread),
@@ -585,13 +586,23 @@ impl BootstrapAgentRelay {
 
     #[cfg(test)]
     #[cfg(any(unix, windows))]
-    fn for_agent_path(agent_path: &Path) -> io::Result<Self> {
+    fn for_test_agent_path(agent_path: &Path) -> io::Result<Self> {
         Self::from_agent_path(agent_path.to_owned())
     }
 
     #[cfg(any(unix, windows))]
     pub(crate) fn path(&self) -> &Path {
         &self.path
+    }
+
+    #[cfg(any(unix, windows))]
+    pub(crate) fn agent_path(&self) -> &Path {
+        &self.agent_path
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    pub(crate) fn agent_path(&self) -> &Path {
+        Path::new("")
     }
 
     #[cfg(not(any(unix, windows)))]

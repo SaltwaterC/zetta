@@ -210,6 +210,7 @@ fn bootstrap_one(request: &PaneRequest, mux_pane_id: u64) -> Result<ZoshPaneStre
             keep_alive: request.keep_alive_ms,
             forward_agent: request.forward_agent,
             agent_binding: endpoint.agent_binding,
+            agent_path: endpoint.agent_path,
             // A pane is scrolled, so the history a Mosh state cannot describe
             // is exactly what it is for. The remote relay's own replay comes
             // through the same screen, so without this a reattached pane would
