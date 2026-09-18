@@ -26,6 +26,15 @@ const INITIAL_PANE_SIZE: (u16, u16) = (80, 24);
 /// Mosh session, which is what closing the pane should do.
 pub(crate) type ZoshPaneHandle = zosh::PaneSession;
 
+/// Ends a pane session without waiting for the last holder to be dropped.
+///
+/// The terminal's reader, writer and resize control all hold the session, so
+/// removing the pane registry entry alone cannot wake a reader that is being
+/// joined after the multiplexer reports the remote process's exit.
+pub(super) fn shutdown(session: &ZoshPaneHandle) {
+    session.shutdown();
+}
+
 /// Configuration is parsed in builds that have no bundled Zosh client, so the
 /// bounds it enforces are written in `config.rs`. These are the same numbers
 /// seen from the other side: if the protocol's ever move, this stops the build

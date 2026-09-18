@@ -321,17 +321,30 @@ impl Zetta {
             .find(|tab| tab.id == tab_id)
             .and_then(|tab| tab.pane(pane_id))
             .and_then(|pane| pane.terminal.clone());
-        if let Some(terminal) = terminal.as_ref() {
-            terminal.update(cx, |terminal, _| terminal.stop_byte_stream());
-        }
         let entry = self.shared_panes.remove(&pane_id);
-        let (mux_pane_id, runtime) = entry.as_ref().map_or((None, None), |entry| {
-            (Some(entry.mux_pane_id), Some(entry.runtime.clone()))
-        });
+        let zosh_entry = self.zosh_panes.remove(&pane_id);
+        // A Zosh terminal's byte-stream reader cannot finish while its Mosh
+        // session is still live. Its other terminal parts retain the session,
+        // so explicitly stop it before joining that reader below.
+        if let Some(entry) = zosh_entry.as_ref() {
+            entry.shutdown();
+        }
+        let (mux_pane_id, runtime) = entry
+            .as_ref()
+            .map(|entry| (entry.mux_pane_id, entry.runtime.clone()))
+            .or_else(|| {
+                zosh_entry
+                    .as_ref()
+                    .map(|entry| (entry.mux_pane_id, entry.runtime.clone()))
+            })
+            .unzip();
         if let Some(runtime) = runtime.as_ref()
             && let Some(mux_pane_id) = mux_pane_id
         {
             runtime.reporters().forget_shared(mux_pane_id);
+        }
+        if let Some(terminal) = terminal.as_ref() {
+            terminal.update(cx, |terminal, _| terminal.stop_byte_stream());
         }
         let Some(terminal) = terminal else {
             return;

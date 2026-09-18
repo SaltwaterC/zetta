@@ -923,7 +923,6 @@ where
     I: IntoIterator<Item = (String, String)>,
 {
     let mux_pane_id = pane.pane_id();
-    let initial_viewport = pane.take_initial_viewport();
     if let Some(stream) = stream {
         let (built, session) = build_zosh_pane(
             ZoshPaneBuild {
@@ -940,11 +939,12 @@ where
             },
             stream,
         );
-        return (
-            built.with_shared_viewport(initial_viewport),
-            AttachedPaneRegistration::Relayed(session),
-        );
+        // Mosh owns this terminal's grid. Clamping it to the attachment's
+        // bootstrap viewport would leave it there forever because arbitrated
+        // shared-stream size frames deliberately terminate at the relay.
+        return (built, AttachedPaneRegistration::Relayed(session));
     }
+    let initial_viewport = pane.take_initial_viewport();
     // The replay goes to `with_replay` below and *only* there. Prefixing the
     // reader with it as well wrote the restored screen twice: once here, into a
     // grid still at its placeholder size, where all but the last few lines were

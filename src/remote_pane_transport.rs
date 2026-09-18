@@ -61,17 +61,22 @@ pub(crate) use zosh_stream::{
 /// pane has to end the Mosh session, and because the pane's identity in the
 /// multiplexer outlives the terminal that displays it.
 pub(crate) struct ZoshPaneEntry {
-    /// Held, not read: the session ends when the last handle to it goes, and
-    /// that is exactly what closing the pane should do.
-    #[expect(
-        dead_code,
-        reason = "the handle's lifetime is the pane's; nothing asks it anything"
-    )]
+    /// Held for the pane's lifetime and explicitly stopped when its process
+    /// exits, before the terminal waits for its reader to finish.
     pub(crate) session: std::sync::Arc<ZoshPaneHandle>,
     pub(crate) mux_pane_id: u64,
     /// The runtime the pane's control traffic goes through, so closing the
     /// pane can forget what was registered for it.
     pub(crate) runtime: crate::mux::MuxRuntime,
+}
+
+impl ZoshPaneEntry {
+    /// Stops the Mosh loop even though the terminal still holds its reader,
+    /// writer and resize control. This makes the reader reach EOF before the
+    /// terminal waits for its byte-stream worker to finish.
+    pub(crate) fn shutdown(&self) {
+        zosh_stream::shutdown(&self.session);
+    }
 }
 
 /// How a remote session's panes travel.

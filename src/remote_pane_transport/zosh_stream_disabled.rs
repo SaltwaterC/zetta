@@ -30,6 +30,10 @@ pub(crate) struct ZoshTerminalParts {
 /// feature predicate to be written down.
 pub(crate) type ZoshPaneHandle = ZoshPaneStream;
 
+pub(super) fn shutdown(session: &ZoshPaneHandle) {
+    match *session {}
+}
+
 pub(crate) fn parse_keep_alive_interval(_value: &str) -> anyhow::Result<u64> {
     anyhow::bail!("this build has no bundled Zosh client, so it holds no link open")
 }
