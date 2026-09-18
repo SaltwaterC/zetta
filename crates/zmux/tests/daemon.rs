@@ -8375,16 +8375,16 @@ impl TestPty {
     fn open(columns: u16, lines: u16) -> Self {
         let mut master = 0;
         let mut slave = 0;
-        let size = winsize(columns, lines);
-        // SAFETY: `openpty` writes both descriptors, and `size` is the window
-        // the new terminal is opened with.
+        let mut size = winsize(columns, lines);
+        // SAFETY: `openpty` writes both descriptors and reads `size` while the
+        // pointer remains valid. Apple declares the input pointer mutable.
         let opened = unsafe {
             libc::openpty(
                 &raw mut master,
                 &raw mut slave,
                 std::ptr::null_mut(),
-                std::ptr::null(),
-                &raw const size,
+                std::ptr::null_mut(),
+                &raw mut size,
             )
         };
         assert_eq!(
