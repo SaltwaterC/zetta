@@ -49,6 +49,33 @@ fn a_secret_longer_than_the_bound_is_refused() {
     );
 }
 
+/// The prelude is positional, because neither line is self-describing: the
+/// secret first, then the viewer's client ID, then the pane's own input. A
+/// relay that read them the other way round would attach with the secret as an
+/// identity and the identity as a secret.
+#[test]
+fn the_viewer_follows_the_secret_and_the_pane_keeps_what_follows_both() {
+    let mut remaining: &[u8] = b"passphrase\r\n9f0a1b2c\r\nls -l\r";
+    let secret = read_secret_from(&mut remaining).expect("a complete secret line");
+    let viewer = read_viewer_from(&mut remaining).expect("a complete viewer line");
+
+    assert_eq!(secret.expose(), "passphrase");
+    assert_eq!(viewer.as_str(), "9f0a1b2c");
+    assert_eq!(
+        remaining, b"ls -l\r",
+        "input typed after the prelude belongs to the pane"
+    );
+}
+
+/// An empty line is not an identity. Accepting it would put a client ID that
+/// cannot exist into the pane's shared set, where it would be indistinguishable
+/// from a relay that had declared a real one.
+#[test]
+fn an_empty_viewer_line_is_refused() {
+    assert!(read_viewer_from(&mut b"\n".as_slice()).is_err());
+    assert!(read_viewer_from(&mut b"   \n".as_slice()).is_err());
+}
+
 /// The relay's own parsing, exercised without a terminal: this is
 /// [`read_secret_from`] against a fixed input, which is what the real read
 /// does once its bytes have arrived.

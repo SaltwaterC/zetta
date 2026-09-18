@@ -16,6 +16,8 @@ use crate::protocol::{BackgroundPaneLayout, BackgroundSessionSummary, Restorable
 /// The wire format, and what a client and a multiplexer compare before they
 /// trust each other to understand one another.
 ///
+/// 9: a pane's relay can name the viewer it is relaying to, so a window whose
+///    panes travel over Mosh is recognized as watching them.
 /// 8: a client can create a complete daemon-owned shared session without an
 ///    existing Zetta tab or window.
 /// 7: a shared pane draft can name the pane whose directory to start in, and
@@ -27,7 +29,7 @@ use crate::protocol::{BackgroundPaneLayout, BackgroundSessionSummary, Restorable
 /// `SharedPaneDraft` rejects unknown fields, so a client that sends a newer
 /// shape to a daemon that predates it gets a parse failure rather than a
 /// version mismatch — which is why this has to move with every change to it.
-pub const PROTOCOL_VERSION: u32 = 8;
+pub const PROTOCOL_VERSION: u32 = 9;
 
 /// Version of the durable collaboration envelope. This is independent from
 /// [`PROTOCOL_VERSION`]: a daemon upgrade may keep a session state produced by
@@ -1214,6 +1216,29 @@ pub enum Request {
         /// relay path.
         #[serde(default)]
         force_shared: bool,
+        /// The client this attachment is a *relay* for, when it is one.
+        ///
+        /// `zmux relay-pane` attaches a pane on the daemon's own host so its
+        /// bytes can travel to a window over Mosh instead of over the SSH
+        /// forward. That window is therefore not in the pane's shared set, and
+        /// a control request of its own — image paste — has no way to show it
+        /// is looking at the pane. This is that way: the relay names the viewer
+        /// it is showing the pane to, and the daemon treats that viewer as
+        /// present for exactly as long as the relay's own attachment lasts.
+        ///
+        /// It grants nothing the declaring client does not already have: a
+        /// client that can attach this pane is a viewer of it and can paste
+        /// into it itself.
+        ///
+        /// A [`PROTOCOL_VERSION`] change, unlike [`Request::ReleaseExclusive`],
+        /// even though a daemon that predates the field would merely ignore it.
+        /// What cannot be ignored is the relay that sets it: Zetta starts it as
+        /// `zmux relay-pane --viewer-stdin`, and a remote executable that
+        /// predates the option refuses to run at all, so the pane would close
+        /// the instant it opened. The version is what turns that into a
+        /// mismatch the user is told how to fix, before any pane is brought up.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        relaying_for: Option<ClientId>,
     },
     /// Gives the multiplexer a screen checkpoint from the client that is
     /// showing a pane. During a revoke handover this is the screen that lets

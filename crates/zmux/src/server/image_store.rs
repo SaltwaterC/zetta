@@ -4,6 +4,11 @@
 //! proves that it is an active viewer, then sends a bounded PNG payload over a
 //! fresh request connection. The returned path is valid in the environment
 //! where the session's child process runs.
+//!
+//! A window whose panes travel over Mosh is an active viewer without holding an
+//! attachment: the relay does that on this host, and names the window it is
+//! relaying to. Both are the same claim — somebody is looking at this pane —
+//! and both are checked here.
 
 use std::{collections::HashSet, fs};
 
@@ -57,15 +62,22 @@ pub(super) fn store_image(
             });
         };
         let active_viewer = match &pane.attachment {
-            Attachment::Shared(clients) => clients
-                .iter()
-                .find(|client| {
-                    client.client_id == client_id
-                        && (stream_only
-                            || client.process_id
-                                == control_process_id(client_process_id, peer_process_id))
-                })
-                .is_some(),
+            Attachment::Shared(clients) => clients.iter().any(|client| {
+                // Either the requester is watching the pane itself, or a relay
+                // in the shared set is showing it to the requester. The second
+                // is how a pane carried over Mosh looks from here: the relay
+                // holds the stream on this host and names the window it is
+                // relaying to, which is not in any pane's shared set. A relay
+                // is on this host and reports no viewer process of its own, so
+                // only the identity is matched for it.
+                if client.relaying_for.as_ref() == Some(&client_id) {
+                    return true;
+                }
+                client.client_id == client_id
+                    && (stream_only
+                        || client.process_id
+                            == control_process_id(client_process_id, peer_process_id))
+            }),
             Attachment::None
             | Attachment::Exclusive(_)
             | Attachment::Revoking { .. }

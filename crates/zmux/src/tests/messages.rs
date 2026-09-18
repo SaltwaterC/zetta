@@ -59,6 +59,7 @@ fn requests_are_tagged_by_name_on_the_wire() {
         pane_id: Some(4),
         secret: None,
         force_shared: false,
+        relaying_for: None,
     })
     .unwrap();
     assert_eq!(attach["request"], "attach");

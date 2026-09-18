@@ -1086,6 +1086,16 @@ impl Client {
         self.stream_only
     }
 
+    /// This client's logical identity, which every request it makes carries and
+    /// which the daemon matches a pane's viewers against.
+    ///
+    /// Needed by a caller that has to name this client to something running
+    /// elsewhere: a Mosh pane's relay attaches on the daemon's host and has to
+    /// say whose view of the pane it is.
+    pub fn client_id(&self) -> &ClientId {
+        &self.client_id
+    }
+
     pub fn remote_target(&self) -> Option<&RemoteTarget> {
         self.remote.as_ref().map(|remote| remote.target())
     }
@@ -1149,7 +1159,14 @@ impl Client {
         // address the other one.
         let mut client = self.reconnect_client();
         client.client_id = ClientId::random()?;
-        client.attach_as_process(session_id, Some(pane_id), secret, client_process_id, false)
+        client.attach_as_process(
+            session_id,
+            Some(pane_id),
+            secret,
+            client_process_id,
+            false,
+            None,
+        )
     }
 
     /// Joins a pane through the shared relay on behalf of another process.
@@ -1168,7 +1185,14 @@ impl Client {
     ) -> Result<AttachOutcome> {
         let mut client = self.reconnect_client();
         client.client_id = ClientId::random()?;
-        client.attach_as_process(session_id, Some(pane_id), secret, client_process_id, true)
+        client.attach_as_process(
+            session_id,
+            Some(pane_id),
+            secret,
+            client_process_id,
+            true,
+            None,
+        )
     }
 
     fn attach_as_process(
@@ -1178,6 +1202,7 @@ impl Client {
         secret: Option<String>,
         client_process_id: u32,
         force_shared: bool,
+        relaying_for: Option<ClientId>,
     ) -> Result<AttachOutcome> {
         let deadline = Instant::now() + STARTUP_TIMEOUT;
         let request = Request::Attach {
@@ -1185,6 +1210,7 @@ impl Client {
             pane_id,
             secret,
             force_shared,
+            relaying_for,
         };
         loop {
             self.ping_until_ready(deadline)?;
@@ -1910,7 +1936,7 @@ impl Client {
         pane_id: Option<u64>,
         secret: Option<String>,
     ) -> Result<AttachOutcome> {
-        self.attach_as_process(session_id, pane_id, secret, std::process::id(), false)
+        self.attach_as_process(session_id, pane_id, secret, std::process::id(), false, None)
     }
 
     /// Attaches with a secret kept in zeroizing memory by the caller. The
@@ -1927,6 +1953,7 @@ impl Client {
             secret.map(|secret| secret.expose().to_owned()),
             std::process::id(),
             false,
+            None,
         )
     }
 
@@ -1944,6 +1971,32 @@ impl Client {
             secret.map(|secret| secret.expose().to_owned()),
             std::process::id(),
             true,
+            None,
+        )
+    }
+
+    /// Joins a pane as a relay showing it to `viewer`, which is a client
+    /// somewhere else entirely: `zmux relay-pane` runs on the daemon's own host
+    /// and copies the pane onto a Mosh link, so the window at the other end of
+    /// that link never joins the pane's shared set itself.
+    ///
+    /// The daemon needs to be told, because a control request from that window
+    /// — pasting an image — otherwise looks like one from a client that is not
+    /// watching the pane at all. It holds for as long as this attachment does.
+    pub fn attach_shared_relaying_for(
+        &self,
+        session_id: u64,
+        pane_id: u64,
+        secret: Option<&SessionSecret>,
+        viewer: ClientId,
+    ) -> Result<AttachOutcome> {
+        self.attach_as_process(
+            session_id,
+            Some(pane_id),
+            secret.map(|secret| secret.expose().to_owned()),
+            std::process::id(),
+            true,
+            Some(viewer),
         )
     }
 
@@ -2484,15 +2537,7 @@ impl Client {
     /// terminal across a daemon replacement, and the one thing that would ruin
     /// it is treating the lost connection as the pane's process ending.
     pub fn subscribe(&self) -> Result<Subscription> {
-        let connection = self.open_ready(Request::Subscribe)?;
-        // Subscription connections are intentionally long-lived and may be
-        // idle for hours. Keep the write deadline from `open_as`, but remove
-        // the request read deadline before handing the connection to the
-        // event loop.
-        connection
-            .stream()
-            .set_read_timeout(None)
-            .context("clearing the multiplexer subscription read timeout")?;
+        let connection = self.open_subscription()?;
         let exits = Arc::new(ExitReporters::default());
         let revokes = Arc::new(PaneSignals::default());
         let grants = Arc::new(PaneSignals::default());
@@ -2509,6 +2554,39 @@ impl Client {
             subscription_loop(client, connection, dispatch);
         });
         Ok(subscription)
+    }
+
+    /// Opens the event stream's connection, and does not return until the
+    /// multiplexer has said the subscription is registered.
+    ///
+    /// The wait is the point. Subscribing used to be one-way, so a caller that
+    /// subscribed and then acted — attached a pane, shared a session — could
+    /// have the event that followed broadcast before its handle was in the
+    /// multiplexer's table, and the event went nowhere. The window is short,
+    /// which is why it was reached only on a loaded machine, and why what it
+    /// produced was an event that simply never arrived.
+    ///
+    /// One function because the reconnect path needs both halves of this too,
+    /// and had drifted from the first: it left the request read deadline on a
+    /// connection that is then read for the lifetime of the subscription, so
+    /// every quiet fifteen seconds looked like a lost multiplexer and cost
+    /// another reconnect and two reconciling round trips.
+    fn open_subscription(&self) -> Result<Connection> {
+        let mut connection = self.open_ready(Request::Subscribe)?;
+        match Self::receive(&mut connection)?.0 {
+            Response::Ok => {}
+            Response::Error { message } => anyhow::bail!("{message}"),
+            other => anyhow::bail!("unexpected response to subscribe: {other:?}"),
+        }
+        // Subscription connections are intentionally long-lived and may be
+        // idle for hours. Keep the write deadline from `open_as`, but remove
+        // the request read deadline before handing the connection to the
+        // event loop.
+        connection
+            .stream()
+            .set_read_timeout(None)
+            .context("clearing the multiplexer subscription read timeout")?;
+        Ok(connection)
     }
 
     /// Takes a shared pane's terminal back, in answer to [`Event::Grant`].
@@ -2856,7 +2934,7 @@ fn resubscribe(
         if subscription_is_abandoned(reporters, revokes, grants, shared) {
             return Some(Resubscribed::Abandoned);
         }
-        if let Ok(connection) = client.open_ready(Request::Subscribe) {
+        if let Ok(connection) = client.open_subscription() {
             log::info!("re-established the multiplexer's event stream");
             // Subscribe first, then reconcile: an exit that happens between the
             // two arrives on the new subscription, whereas one reported between

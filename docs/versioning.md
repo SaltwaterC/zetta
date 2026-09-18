@@ -8,7 +8,7 @@ installation:
 Zetta 0.1.0
 CONTROL_VERSION=5
 CATALOG_VERSION=1
-ZMUX_PROTOCOL_VERSION=8
+ZMUX_PROTOCOL_VERSION=9
 ```
 
 The package version identifies the executable. The three following values
@@ -24,7 +24,7 @@ current source tree.
 | `CARGO_PKG_VERSION` | package version | Zetta and `zmux` | User-facing executable release | Identifies the build; it is not a wire-protocol negotiation value. |
 | `CONTROL_VERSION` | `5` | `crates/zmux/src/protocol.rs` | The Zetta-to-Zetta process-control endpoint and request meanings, including remote session attach and the protocol its panes travel over, disk-session resume, managed-worktree project opening, the explicit fresh-window launch, `zetta pane wait`, registered project shell commands, and payload-free tab-icon resets | Endpoints with another version are skipped. |
 | `zmux::protocol::CATALOG_VERSION` | `1` | `crates/zmux/src/protocol.rs` | The public background-session catalog JSON | A catalog with another version is ignored until its owner publishes the current schema. |
-| `zmux::messages::PROTOCOL_VERSION` | `8` | `crates/zmux/src/messages.rs` | The client/daemon message protocol, including logical client IDs, stream-only SSH attach, session-secret envelopes, revisioned shared-session collaboration, shared-pane lifecycle events, headless session creation, disk-session resume, and length-prefixed transport framing | Normal requests require an exact match. `zmux --upgrade` is the compatibility path for replacing an older daemon. Debug session directories are namespaced by this value. |
+| `zmux::messages::PROTOCOL_VERSION` | `9` | `crates/zmux/src/messages.rs` | The client/daemon message protocol, including logical client IDs, stream-only SSH attach, session-secret envelopes, revisioned shared-session collaboration, shared-pane lifecycle events, headless session creation, disk-session resume, the viewer a pane's relay declares itself to be showing the pane to, and length-prefixed transport framing | Normal requests require an exact match. `zmux --upgrade` is the compatibility path for replacing an older daemon. Debug session directories are namespaced by this value. |
 | `zmux::messages::SHARED_SESSION_STATE_VERSION` | `2` | `crates/zmux/src/messages.rs` | The versioned durable envelope containing a shared session's canonical revision, pane summary, layout/focus state, and opaque tab payload, including sessions created without a Zetta window | A daemon preserves and validates this envelope across persistence and upgrade; an unknown state version is not interpreted as a different collaboration schema. |
 | `zmux::transport::ENDPOINT_VERSION` | `2` | `crates/zmux/src/transport.rs` | The `zmux.json` endpoint descriptor (`socket_path`, token, process ID, and protocol advertisement) | An endpoint with an unknown shape is rejected, causing the client to recover by starting or finding a usable daemon. |
 | `zmux::upgrade::HANDOVER_VERSION` | `8` on Unix, `3` on Windows | `crates/zmux/src/upgrade.rs`, `crates/zmux/src/upgrade_windows.rs` | The private state handed from one daemon image to the next during `--upgrade`, including logical shared-client routing metadata and canonical shared-session state | Unix carries descriptors through `execv`; Windows carries session metadata while `zmux-pty.exe` retains the consoles. The replacement is preflighted and refuses an unknown handover shape before the old daemon stops. |

@@ -92,6 +92,11 @@ pub(crate) fn build_zosh_pane(
     // directly rather than chosen by `handler_for_pane`, because a pane that
     // travels over Mosh is a remote pane by construction and there is no local
     // target to fall back to.
+    //
+    // The daemon authorizes it by this window watching the pane, which over
+    // Mosh the relay does instead — so the relay declares this window as the
+    // viewer it is relaying to. See `remote_pane_transport`; without that
+    // declaration every paste here is refused.
     .with_image_paste_handler(Arc::new(
         crate::background_session_ui::image_paste::RemoteImagePasteHandler::new(
             runtime,

@@ -190,6 +190,10 @@ fn usage(no_mux: bool) -> String {
                 "Read an optional create/relay secret from the first line of standard input",
             ),
             (
+                "-w, --viewer-stdin",
+                "Read the client ID of the window a pane is being relayed to\nfrom standard input, after the secret when one is also read\n(with relay-pane)",
+            ),
+            (
                 "--layout PATH",
                 "Create from a headless layout JSON file; use - for standard input",
             ),
@@ -625,6 +629,7 @@ pub fn run_with_defaults(arguments: &[OsString], defaults: ClientDefaults) -> Re
     let mut force = false;
     let mut relay_pane: Option<u64> = None;
     let mut relay_secret_stdin = false;
+    let mut relay_viewer_stdin = false;
     let mut remote_protocol: Option<String> = None;
     let mut expect_remote_protocol = false;
     let mut remote_keep_alive: Option<u64> = None;
@@ -742,6 +747,7 @@ pub fn run_with_defaults(arguments: &[OsString], defaults: ClientDefaults) -> Re
             "--json" | "-j" => json = true,
             "--ids-only" | "-I" => ids_only = true,
             "--secret-stdin" | "-S" => relay_secret_stdin = true,
+            "--viewer-stdin" | "-w" => relay_viewer_stdin = true,
             "--force" | "-f" => force = true,
             "--retention" | "-r" => expect_retention = true,
             "--identity" | "-i" => expect_identity = true,
@@ -1094,6 +1100,10 @@ pub fn run_with_defaults(arguments: &[OsString], defaults: ClientDefaults) -> Re
         "--secret-stdin is only valid with relay-pane or create"
     );
     anyhow::ensure!(
+        !relay_viewer_stdin || command.as_deref() == Some("relay-pane"),
+        "--viewer-stdin is only valid with relay-pane"
+    );
+    anyhow::ensure!(
         create_layout.is_none() || command.as_deref() == Some("create"),
         "--layout is only valid with create"
     );
@@ -1267,11 +1277,12 @@ pub fn run_with_defaults(arguments: &[OsString], defaults: ClientDefaults) -> Re
                     session_id,
                     pane_id,
                     secret_from_stdin: relay_secret_stdin,
+                    viewer_from_stdin: relay_viewer_stdin,
                 })
             }
             #[cfg(not(unix))]
             {
-                let _ = (session_id, pane_id, relay_secret_stdin);
+                let _ = (session_id, pane_id, relay_secret_stdin, relay_viewer_stdin);
                 anyhow::bail!("relaying a pane needs a POSIX terminal, which this host is not")
             }
         }

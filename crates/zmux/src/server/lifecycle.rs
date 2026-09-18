@@ -1230,6 +1230,9 @@ pub(super) fn spawn(
             client_process_id,
             client_id,
             stream_only,
+            // A spawn is the client asking for a pane of its own, never a relay
+            // standing in for somebody else's view of one.
+            None,
             response_state.state.clone(),
             response_summary,
             connection,

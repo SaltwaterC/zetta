@@ -8,6 +8,7 @@ fn request(secret: Option<&str>) -> PaneRequest {
         session_id: 7,
         keep_alive_ms: Some(500),
         secret: secret.map(str::to_owned),
+        viewer: "c0ffee".to_owned(),
     }
 }
 
@@ -24,6 +25,7 @@ fn the_relay_command_names_the_remote_multiplexer_by_absolute_path() {
             "relay-pane".to_owned(),
             "7".to_owned(),
             "42".to_owned(),
+            "--viewer-stdin".to_owned(),
         ]
     );
 }
@@ -40,6 +42,28 @@ fn a_protected_session_asks_for_its_secret_on_stdin_and_never_in_argv() {
         !command.iter().any(|word| word.contains("open-sesame")),
         "the session secret must not reach the remote command line: {command:?}"
     );
+}
+
+/// The viewer's client ID is what the daemon matches this window's own control
+/// requests against — pasting an image into a relayed pane is refused without
+/// it — so it travels inside the Mosh link exactly as the secret does, and the
+/// relay is always told to expect it.
+#[test]
+fn the_relayed_viewer_is_asked_for_on_stdin_and_never_in_argv() {
+    for secret in [None, Some("open-sesame")] {
+        let command = relay_command(&request(secret), 42);
+
+        assert!(
+            command.contains(&"--viewer-stdin".to_owned()),
+            "a relay that is not told which window it serves leaves that window \
+             unable to paste an image: {command:?}"
+        );
+        assert!(
+            !command.iter().any(|word| word.contains("c0ffee")),
+            "the viewer's client ID authorizes its control requests, so it must not \
+             reach the remote command line: {command:?}"
+        );
+    }
 }
 
 /// The reason a fallback reports is the remote host's first word on the

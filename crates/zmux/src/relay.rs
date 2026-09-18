@@ -23,7 +23,11 @@
 //! - **A protected session's secret is read from stdin**, never from `argv`:
 //!   the command line of this process is visible to every account on the host,
 //!   and the session key would be in it. By the time this runs, stdin is the
-//!   inside of an established Mosh link.
+//!   inside of an established Mosh link. The viewer's client ID travels the
+//!   same way and for the same reason: it is what the daemon matches a control
+//!   request against, so on a command line it would let any account on this
+//!   host pose as the window this relay serves. When both are read, the secret
+//!   is the first line and the viewer the second.
 
 use std::{
     io::{self, Read as _, Write as _},
@@ -41,7 +45,7 @@ use anyhow::{Context as _, Result};
 use crate::{
     auth::SessionSecret,
     client::{AttachOutcome, Client, SharedPane},
-    messages::SessionRevision,
+    messages::{ClientId, SessionRevision},
 };
 
 /// How long a stalled output read waits before the loop looks at everything
@@ -62,6 +66,12 @@ pub struct RelayOptions {
     /// Read the session secret from the first line of stdin before relaying
     /// anything. Needed only for a protected session.
     pub secret_from_stdin: bool,
+    /// Read the client ID of the window this pane is being relayed to from the
+    /// next line of stdin, and declare it to the daemon as the viewer this
+    /// attachment stands in for. Without it that window is nowhere in the
+    /// pane's shared set, and its own control requests — pasting an image — are
+    /// refused as coming from a client that is not watching the pane.
+    pub viewer_from_stdin: bool,
 }
 
 /// Relays one pane between this host's multiplexer and this process's stdio.
@@ -72,12 +82,18 @@ pub fn run(options: RelayOptions) -> Result<()> {
     // Raw mode first: the secret below must not be echoed back into the
     // terminal that is about to display this pane.
     let raw_mode = RawMode::enter().context("putting the relay's terminal in raw mode")?;
+    // In this order, because it is the order the viewer writes them and neither
+    // line is self-describing.
     let secret = options
         .secret_from_stdin
         .then(read_secret_line)
         .transpose()?;
+    let viewer = options
+        .viewer_from_stdin
+        .then(read_viewer_line)
+        .transpose()?;
 
-    let (pane, revision) = attach(options, secret.as_ref())?;
+    let (pane, revision) = attach(options, secret.as_ref(), viewer)?;
     let pane = Arc::new(pane);
 
     let mut stdout = io::stdout();
@@ -106,14 +122,18 @@ pub fn run(options: RelayOptions) -> Result<()> {
 fn attach(
     options: RelayOptions,
     secret: Option<&SessionSecret>,
+    viewer: Option<ClientId>,
 ) -> Result<(SharedPane, SessionRevision)> {
     let client = Client::connect_existing()
         .context("connecting to this host's multiplexer")?
         .context("no multiplexer is running on this host")?;
-    match client
-        .attach_shared_with_secret(options.session_id, options.pane_id, secret)
-        .context("attaching the pane")?
-    {
+    let attached = match viewer {
+        Some(viewer) => {
+            client.attach_shared_relaying_for(options.session_id, options.pane_id, secret, viewer)
+        }
+        None => client.attach_shared_with_secret(options.session_id, options.pane_id, secret),
+    };
+    match attached.context("attaching the pane")? {
         AttachOutcome::SharedAttached { pane, .. } => {
             let revision = client
                 .shared_snapshot(options.session_id)
@@ -205,6 +225,29 @@ fn forward_output(
 /// the newline itself rather than relying on the line discipline.
 fn read_secret_line() -> Result<SessionSecret> {
     read_secret_from(&mut io::stdin())
+}
+
+/// Reads the viewer's client ID from the next line of stdin.
+///
+/// Read with the secret's reader because it has the same two requirements: the
+/// terminal is in raw mode, so the line's end has to be found here, and a peer
+/// that never sends one must not be able to make this allocate without bound.
+/// Everything typed after it belongs to the pane.
+fn read_viewer_line() -> Result<ClientId> {
+    read_viewer_from(&mut io::stdin())
+}
+
+fn read_viewer_from(input: &mut impl io::Read) -> Result<ClientId> {
+    let line = read_secret_from(input).context("reading the relayed viewer's client ID")?;
+    let viewer = line.expose().trim();
+    // An empty line is not an identity, and treating it as one would name a
+    // client that cannot exist — while looking, in the daemon's state, exactly
+    // like a relay that had declared a real one.
+    anyhow::ensure!(
+        !viewer.is_empty(),
+        "the relayed viewer's client ID was not supplied"
+    );
+    Ok(ClientId::new(viewer))
 }
 
 fn read_secret_from(input: &mut impl io::Read) -> Result<SessionSecret> {

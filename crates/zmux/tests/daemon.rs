@@ -3204,6 +3204,7 @@ fn shared_clients_are_sized_to_the_smallest_of_them() {
                 pane_id: Some(pane.pane_id),
                 secret: Some(TEST_SECRET.to_owned()),
                 force_shared: false,
+                relaying_for: None,
             },
         })
         .unwrap();
@@ -3919,6 +3920,7 @@ fn shared_spawns_publish_events_and_preserve_local_grants() {
                 pane_id: Some(local.pane.pane_id()),
                 secret: Some(TEST_SECRET.to_owned()),
                 force_shared: false,
+                relaying_for: None,
             },
         })
         .unwrap();
@@ -8267,6 +8269,80 @@ fn shared_pane_for_image_paste(
     (pane.session_id, shared)
 }
 
+/// Subscribing is answered before anything is delivered on the connection, and
+/// the answer is what says the subscription is in the daemon's table.
+///
+/// Without it registration was one-way: a client that subscribed and then acted
+/// could have the event its own action produced broadcast while its handle was
+/// not yet published, and that event was simply lost. The window is short, so
+/// what it produced was a test that passed on an idle machine and failed on a
+/// loaded one — which is the same thing a window does when it misses the first
+/// exit report after subscribing.
+#[test]
+fn subscribing_is_answered_before_any_event_is_delivered() {
+    let daemon = TestDaemon::start();
+    let client = daemon.client();
+    let (session_id, _shared) = shared_pane_for_image_paste(&daemon, &client, None);
+
+    let endpoint: zmux::transport::Endpoint =
+        serde_json::from_slice(&std::fs::read(daemon.sessions_dir().join("zmux.json")).unwrap())
+            .unwrap();
+    let mut subscription = Connection::new(Stream::connect(&endpoint.socket_path).unwrap());
+    subscription
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    subscription
+        .send(&Envelope {
+            version: zmux::messages::PROTOCOL_VERSION,
+            token: endpoint.token,
+            client_process_id: std::process::id(),
+            client_id: ClientId::new("acknowledged-subscriber"),
+            stream_only: false,
+            session_secret: None,
+            request: Request::Subscribe,
+        })
+        .expect("opening the subscription");
+
+    match subscription.receive::<Response>() {
+        Ok((Response::Ok, _)) => {}
+        Ok((other, _)) => panic!(
+            "a subscription is acknowledged before anything else reaches it, not {other:?}\ndaemon log:\n{}",
+            daemon.log()
+        ),
+        Err(error) => panic!(
+            "the subscription was never acknowledged: {error:#}\ndaemon log:\n{}",
+            daemon.log()
+        ),
+    }
+
+    // And the acknowledgement is not an event standing in for one: what follows
+    // on the same connection is the broadcast for something done afterwards,
+    // which is exactly what a client that has the acknowledgement may rely on.
+    let revision = client
+        .shared_snapshot(session_id)
+        .expect("the session's current revision")
+        .revision;
+    client
+        .apply_shared(
+            session_id,
+            revision,
+            SharedSessionOperation::SetTabState {
+                state: serde_json::json!({"after": "the acknowledgement"}),
+            },
+        )
+        .expect("changing the shared session");
+    match subscription.receive::<Event>() {
+        Ok((Event::SharedSessionUpdated { .. }, _)) => {}
+        Ok((other, _)) => panic!("unexpected first event: {other:?}"),
+        Err(error) => panic!(
+            "the event after the acknowledgement was lost: {error:#}\ndaemon log:\n{}",
+            daemon.log()
+        ),
+    }
+
+    client.kill(session_id).unwrap();
+}
+
 /// Image paste in a remote session is exactly this request: the window uploads
 /// a PNG and pastes back a path the pane's own process can open. Nothing
 /// exercised the round trip on either side, so the whole feature rested on a
@@ -8449,6 +8525,7 @@ fn a_remote_shaped_viewer_uploads_over_its_own_request_connection() {
                 pane_id: Some(pane_id),
                 secret: Some(TEST_SECRET.to_owned()),
                 force_shared: false,
+                relaying_for: None,
             },
         })
         .unwrap();
@@ -8493,5 +8570,81 @@ fn a_remote_shaped_viewer_uploads_over_its_own_request_connection() {
     }
 
     drop(attach);
+    client.kill(session_id).unwrap();
+}
+
+/// The shape a window whose panes travel over Mosh uses, which has no
+/// attachment of its own at all: `zmux relay-pane` holds the pane's stream here
+/// on the daemon's host and copies it onto the Mosh link, so the window is in
+/// no pane's shared set and its image paste used to be refused outright — every
+/// time, for every Mosh-carried pane.
+///
+/// What makes it authorized is the relay naming the window it is relaying to,
+/// and the authorization lasts exactly as long as that relay does.
+#[test]
+fn a_window_a_relay_is_showing_a_pane_to_may_store_an_image() {
+    let daemon = TestDaemon::start();
+    let client = daemon.client();
+    let (session_id, shared) = shared_pane_for_image_paste(&daemon, &client, None);
+    let pane_id = shared.pane.pane_id();
+    let png = test_png();
+
+    // A second logical client, with no attachment: this is the window at the
+    // far end of the Mosh link.
+    let window = daemon.client();
+    let viewer = window.client_id().clone();
+    let refusal = |error: anyhow::Error| {
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("not an active shared viewer"),
+            "a window no relay is serving must be refused as a viewer: {message}"
+        );
+    };
+    refusal(
+        window
+            .store_image(session_id, pane_id, png.clone())
+            .expect_err("a window nothing is relaying to is not a viewer"),
+    );
+
+    let relay = daemon.client();
+    let relayed = match relay
+        .attach_shared_relaying_for(session_id, pane_id, None, viewer)
+        .unwrap_or_else(|error| {
+            panic!(
+                "attaching the pane as a relay: {error:#}\ndaemon log:\n{}",
+                daemon.log()
+            )
+        }) {
+        zmux::client::AttachOutcome::SharedAttached { pane, .. } => pane,
+        _ => panic!("a relay attaches as a shared stream, and got something else"),
+    };
+
+    let path = window
+        .store_image(session_id, pane_id, png.clone())
+        .unwrap_or_else(|error| {
+            panic!(
+                "storing an image for the window the relay is serving: {error:#}\ndaemon log:\n{}",
+                daemon.log()
+            )
+        });
+    assert_eq!(std::fs::read(&path).expect("the stored image"), png);
+
+    // The declaration is the relay's, so it goes when the relay does: a window
+    // whose Mosh pane has ended is not still a viewer of it.
+    drop(relayed);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let error = loop {
+        match window.store_image(session_id, pane_id, png.clone()) {
+            Err(error) => break error,
+            Ok(_) => assert!(
+                Instant::now() < deadline,
+                "the window stayed authorized after its relay left\ndaemon log:\n{}",
+                daemon.log()
+            ),
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    refusal(error);
+
     client.kill(session_id).unwrap();
 }

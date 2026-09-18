@@ -221,3 +221,25 @@ fn the_protocol_options_are_documented() {
     assert!(help.contains("-k, --keep-alive"), "{help}");
     assert!(help.contains("relay-pane SESSION_ID PANE_ID"), "{help}");
 }
+
+/// The viewer a pane is relayed to is a `relay-pane` matter only. Naming it
+/// anywhere else would read as a way to act as another client, which it is not.
+#[test]
+fn the_relayed_viewer_belongs_to_relay_pane() {
+    for arguments in [
+        args(&["list", "--viewer-stdin"]),
+        args(&["create", "-w"]),
+        args(&["attach", "dev.example", "7", "--viewer-stdin"]),
+    ] {
+        let error = run(&arguments).unwrap_err().to_string();
+        assert!(
+            error.contains("--viewer-stdin is only valid with relay-pane"),
+            "{error}"
+        );
+    }
+    assert!(
+        usage(false).contains("-w, --viewer-stdin"),
+        "{}",
+        usage(false)
+    );
+}

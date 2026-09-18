@@ -153,6 +153,7 @@ pub(super) fn bootstrap(
         keep_alive_ms,
         forward_agent,
         secret: secret.map(|secret| secret.expose().to_owned()),
+        viewer: client.client_id().as_str().to_owned(),
     };
 
     let mut streams = HashMap::new();
@@ -196,6 +197,16 @@ struct PaneRequest {
     /// inside the established Mosh link rather than on a remote command line
     /// every account on that host can read.
     secret: Option<String>,
+    /// This window's multiplexer client ID, which the relay declares as the
+    /// viewer it is showing the pane to. Without it the window is in no pane's
+    /// shared set — the relay is — and a control request of its own is refused
+    /// as coming from a client that is not watching the pane, which is what
+    /// image paste into a Mosh-carried pane used to be.
+    ///
+    /// Sent inside the Mosh link for the same reason the secret is: the daemon
+    /// matches a control request against it, so on the remote command line it
+    /// would let any account on that host pose as this window.
+    viewer: String,
 }
 
 /// Brings up one pane, or says why it could not be.
@@ -237,13 +248,19 @@ fn bootstrap_one(request: &PaneRequest, mux_pane_id: u64) -> Result<ZoshPaneStre
     let reader = session
         .take_reader()
         .expect("a session hands out its reader once, and this is that once");
-    // The relay is waiting on its first line before it attaches anything, and
-    // this is the only path a secret travels: inside the Mosh link, never in
-    // the remote command line.
-    if let Some(secret) = &request.secret {
+    // The relay is waiting on its prelude before it attaches anything, and this
+    // is the only path either line travels: inside the Mosh link, never in the
+    // remote command line. The secret comes first because that is the order the
+    // relay reads them in — neither line is self-describing.
+    {
         let mut writer = session.writer();
-        writeln!(writer, "{secret}").map_err(|error| {
-            format!("Could not authenticate pane {mux_pane_id} over Zosh: {error}")
+        if let Some(secret) = &request.secret {
+            writeln!(writer, "{secret}").map_err(|error| {
+                format!("Could not authenticate pane {mux_pane_id} over Zosh: {error}")
+            })?;
+        }
+        writeln!(writer, "{}", request.viewer).map_err(|error| {
+            format!("Could not identify this window to pane {mux_pane_id}'s relay: {error}")
         })?;
     }
     Ok(ZoshPaneStream {
@@ -297,6 +314,10 @@ fn relay_command(request: &PaneRequest, mux_pane_id: u64) -> Vec<String> {
     if request.secret.is_some() {
         command.push("--secret-stdin".to_owned());
     }
+    // Always: a relay that does not know which window it is serving leaves that
+    // window unable to paste an image into the pane, and every pane here has a
+    // window.
+    command.push("--viewer-stdin".to_owned());
     command
 }
 

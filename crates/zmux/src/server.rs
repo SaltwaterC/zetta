@@ -165,6 +165,16 @@ struct SharedClient {
     process_id: u32,
     client_id: ClientId,
     stream_only: bool,
+    /// The client this one is relaying the pane to, when it is a relay rather
+    /// than the viewer itself. Set by `zmux relay-pane`, which reads a pane on
+    /// this host and copies it onto a Mosh link; the window at the far end of
+    /// that link is the viewer named here and is in no pane's shared set.
+    ///
+    /// Its whole purpose is to let that window's own control requests — image
+    /// paste — be recognized as coming from somebody looking at the pane. It
+    /// lives and dies with this attachment, so a window whose relay has gone
+    /// is no longer treated as present.
+    relaying_for: Option<ClientId>,
     /// Frames queued for this client, written by its own relay thread.
     ///
     /// Deliberately not the connection itself. Writing to a viewer's socket from
@@ -818,6 +828,26 @@ impl SubscriberRelay {
                 run_subscriber_relay(daemon, client_id, id, closed, connection, receiver);
             })
         });
+    }
+
+    /// Tells the client that its subscription is live, on the connection the
+    /// relay has taken over but not yet started delivering on.
+    ///
+    /// Sent from here rather than before the relay is built because *when* it
+    /// goes out is the whole point: a client that has this reply is one whose
+    /// handle is already in [`Daemon::subscribers`], so anything broadcast from
+    /// the moment it acts is queued for it. Sending it any earlier would leave
+    /// the gap it closes — small, and therefore reached only under load, which
+    /// is where a missed first event is hardest to explain.
+    fn acknowledge(&self) -> Result<()> {
+        let mut connection = self
+            .connection
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        connection
+            .as_mut()
+            .context("the subscription connection was already claimed")?
+            .send(&Response::Ok)
     }
 
     /// Queues an event without waiting for the remote socket.  A full queue is

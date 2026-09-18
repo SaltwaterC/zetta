@@ -45,22 +45,7 @@ fn a_pane_carried_over_mosh_shows_its_output_and_takes_its_input() {
     let daemon = TestDaemon::start();
     let client = daemon.client();
 
-    // A session with one pane, shared and protected, which is the shape a
-    // remote session has by the time Zetta attaches it.
-    let pane = client
-        .spawn(spawn_request(None, "printf ready; sleep 60"))
-        .expect("spawning the session's first pane");
-    let mut offered = summary(pane.session_id, pane.pane_id);
-    offered.panes.push(pane_summary(pane.pane_id));
-    client
-        .share(
-            pane.session_id,
-            offered,
-            serde_json::Value::Null,
-            Some(&SessionAuthentication::create(TEST_SECRET).expect("a verifier")),
-            true,
-        )
-        .expect("sharing the session");
+    let pane = shared_protected_session(&client);
     // The pane reports the size its own pty is at whenever it is sent a line,
     // which is how the resize below is checked all the way through rather than
     // only as far as the frame it produces.
@@ -180,6 +165,7 @@ fn a_pane_carried_over_mosh_shows_its_output_and_takes_its_input() {
         pane.session_id,
         "printf second-pane-is-live; cat",
         &daemon.config,
+        None,
     );
     let second_frames = Frames::collect(
         second
@@ -195,18 +181,139 @@ fn a_pane_carried_over_mosh_shows_its_output_and_takes_its_input() {
     server.stop();
 }
 
+/// Pasting an image into a Mosh-carried pane, over the same relay the pane's
+/// bytes travel through.
+///
+/// It is the one thing such a pane does over the control connection rather than
+/// over its link, and it is the thing the link makes hard: this window holds no
+/// attachment to the pane at all — the relay does — so the multiplexer had no
+/// way to tell the paste apart from one by a client that is not looking at the
+/// pane, and refused every one of them. The relay naming the window it serves
+/// is what closes that, and only a real relay can show it.
+#[test]
+#[ignore = "drives separately built zmux and zosh-server binaries; see the module docs"]
+fn a_window_pastes_an_image_into_a_pane_its_relay_is_carrying() {
+    let daemon = TestDaemon::start();
+    let client = daemon.client();
+    let pane = shared_protected_session(&client);
+
+    // The window: a client of its own, with no attachment, exactly as Zetta is
+    // for a pane whose bytes arrive over Mosh.
+    let window = daemon.client();
+    let png = test_png();
+
+    // The refusal first, and against a relay that has *attached*: its output is
+    // what proves that, because a relay reads the pane only once it has joined
+    // the shared set. Asked any earlier, the paste would be refused for having
+    // no relay yet rather than for the relay naming nobody, and the assertion
+    // would hold for the wrong reason.
+    let mut undeclared = spawn_relayed_pane(
+        &client,
+        pane.session_id,
+        "printf undeclared-pane-is-live; cat",
+        &daemon.config,
+        None,
+    );
+    Frames::collect(
+        undeclared
+            .session
+            .take_reader()
+            .expect("the undeclared pane's reader"),
+    )
+    .wait_for("undeclared-pane-is-live");
+    let error = window
+        .store_image(pane.session_id, undeclared.mux_pane_id, png.clone())
+        .expect_err("a pane whose relay names nobody");
+    assert!(
+        format!("{error:#}").contains("not an active shared viewer"),
+        "this is the refusal every paste into a Mosh pane used to get: {error:#}"
+    );
+
+    let relayed = spawn_relayed_pane(
+        &client,
+        pane.session_id,
+        "cat",
+        &daemon.config,
+        Some(window.client_id()),
+    );
+    // Polled, because the relay reads its prelude and attaches on the far side
+    // of a Mosh link: the declaration exists from the moment it attaches, which
+    // is after the bootstrap above has returned.
+    let path = {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            match window.store_image(pane.session_id, relayed.mux_pane_id, png.clone()) {
+                Ok(path) => break path,
+                Err(error) => assert!(
+                    Instant::now() < deadline,
+                    "the relay never declared the window it serves: {error:#}"
+                ),
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    };
+    assert_eq!(
+        std::fs::read(&path).expect("the staged image"),
+        png,
+        "the pane's own process has to be able to open what was pasted"
+    );
+
+    drop(undeclared);
+    drop(relayed);
+}
+
+/// The smallest valid PNG: an 8-byte signature, an IHDR for a 1x1 greyscale
+/// image, and IEND. The daemon checks the signature, so the payload cannot be
+/// arbitrary bytes.
+fn test_png() -> Vec<u8> {
+    let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+    png.extend([0, 0, 0, 13]);
+    png.extend(b"IHDR");
+    png.extend([0, 0, 0, 1, 0, 0, 0, 1, 8, 0, 0, 0, 0]);
+    png.extend([0x3a, 0x7e, 0x9b, 0x55]);
+    png.extend([0, 0, 0, 0]);
+    png.extend(b"IEND");
+    png.extend([0xae, 0x42, 0x60, 0x82]);
+    png
+}
+
+/// A session with one pane, shared and protected, which is the shape a remote
+/// session has by the time Zetta attaches it.
+fn shared_protected_session(client: &Client) -> zmux::client::AttachedPane {
+    let pane = client
+        .spawn(spawn_request(None, "printf ready; sleep 60"))
+        .expect("spawning the session's first pane");
+    let mut offered = summary(pane.session_id, pane.pane_id);
+    offered.panes.push(pane_summary(pane.pane_id));
+    client
+        .share(
+            pane.session_id,
+            offered,
+            serde_json::Value::Null,
+            Some(&SessionAuthentication::create(TEST_SECRET).expect("a verifier")),
+            true,
+        )
+        .expect("sharing the session");
+    pane
+}
+
 /// A pane added to a session that is already open, carried over a link of its
 /// own — the shape a split takes, from whichever side asks for it.
 struct RelayedPane {
     session: zosh::PaneSession,
+    mux_pane_id: u64,
     _server: MoshServer,
 }
 
+/// `viewer` is the window the relay is to declare itself as showing the pane
+/// to, which is what lets that window's own control requests be recognized.
+/// `None` is the shape that leaves it declaring nobody.
 fn spawn_relayed_pane(
     client: &Client,
     session_id: u64,
     command: &str,
     config: &Path,
+    viewer: Option<&zmux::messages::ClientId>,
 ) -> RelayedPane {
     let request = spawn_request(Some(session_id), command);
     let spawned = client
@@ -228,16 +335,20 @@ fn spawn_relayed_pane(
     let mux_pane_id = spawned.pane.pane_id();
     drop(spawned);
 
-    let server = MoshServer::start(
-        config,
-        &[
-            &binary("zmux").to_string_lossy(),
-            "relay-pane",
-            &session_id.to_string(),
-            &mux_pane_id.to_string(),
-            "--secret-stdin",
-        ],
-    );
+    let program = binary("zmux").to_string_lossy().into_owned();
+    let session_argument = session_id.to_string();
+    let pane_argument = mux_pane_id.to_string();
+    let mut command = vec![
+        program.as_str(),
+        "relay-pane",
+        &session_argument,
+        &pane_argument,
+        "--secret-stdin",
+    ];
+    if viewer.is_some() {
+        command.push("--viewer-stdin");
+    }
+    let server = MoshServer::start(config, &command);
     let session = zosh::PaneSession::connect(
         "127.0.0.1",
         server.port,
@@ -249,9 +360,16 @@ fn spawn_relayed_pane(
     .expect("connecting the added pane's Mosh endpoint");
     let mut writer = session.writer();
     use std::io::Write as _;
+    // The prelude, in the order the relay reads it: the secret, then the
+    // window it is relaying to. Neither line is self-describing, so the order
+    // is the contract.
     writeln!(writer, "{TEST_SECRET}").expect("sending the session secret");
+    if let Some(viewer) = viewer {
+        writeln!(writer, "{}", viewer.as_str()).expect("sending the relayed viewer");
+    }
     RelayedPane {
         session,
+        mux_pane_id,
         _server: server,
     }
 }

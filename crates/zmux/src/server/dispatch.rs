@@ -92,8 +92,13 @@ pub(super) fn serve(daemon: &Arc<Daemon>, stream: Stream, token: &str) -> Result
                         relay: Arc::clone(&relay),
                     },
                 );
+            // Only now, with the handle published: the reply is what tells the
+            // client that an event broadcast after it acts has somewhere to go.
+            // Delivery starts after it so the acknowledgement cannot be
+            // interleaved with the first event.
+            let acknowledged = relay.acknowledge();
             relay.start(daemon);
-            Ok(())
+            acknowledged
         }
         Request::Spawn(request) => {
             if stream_only {
@@ -206,6 +211,7 @@ pub(super) fn serve(daemon: &Arc<Daemon>, stream: Stream, token: &str) -> Result
             pane_id,
             secret,
             force_shared,
+            relaying_for,
         } => attach(
             daemon,
             session_id,
@@ -215,6 +221,7 @@ pub(super) fn serve(daemon: &Arc<Daemon>, stream: Stream, token: &str) -> Result
             client_id.clone(),
             stream_only,
             force_shared,
+            relaying_for,
             &mut connection,
         ),
         // A screen checkpoint from the client showing the pane. Its own

@@ -34,7 +34,12 @@
 //!   multiplexer's byte stream for it — paying for the same output twice would
 //!   defeat the point, and a pane that no longer needs the SSH forward should
 //!   not die with it. The relay is the multiplexer's viewer for that pane, and
-//!   the size it reports is the size this window asked for through Mosh.
+//!   the size it reports is the size this window asked for through Mosh. So
+//!   this window is in no pane's shared set, and a control request that is
+//!   authorized by watching a pane — image paste — has nothing to show. The
+//!   relay names this window to the daemon as the viewer it is relaying to,
+//!   which is what makes those requests recognizable; it travels inside the
+//!   Mosh link, like a protected session's secret and for the same reason.
 //!
 //! The one thing that costs: arbitrated sizes reach the relay rather than this
 //! window, so when a second viewer with a smaller window joins, the remote
