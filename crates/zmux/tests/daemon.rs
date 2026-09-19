@@ -8288,8 +8288,12 @@ fn a_relay_reports_its_size_after_the_session_revision_moves_on() {
     // A second viewer of the same pane: the arbitrated size is broadcast to
     // every shared client, and this one reports no size of its own, so what it
     // is told is what the relay asked for.
+    // Give the observer its own logical identity. The spawning stream above
+    // closes asynchronously; if this attachment reused its client ID, that
+    // stream's delayed cleanup could remove the new observer along with the
+    // old connection and leave this test waiting on a dead relay.
     let observer = match client
-        .attach_shared_with_secret(pane.session_id, relayed_pane, None)
+        .attach_shared_as(pane.session_id, relayed_pane, std::process::id(), None)
         .unwrap()
     {
         AttachOutcome::SharedAttached { pane, .. } => pane,
