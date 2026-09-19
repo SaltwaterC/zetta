@@ -121,7 +121,7 @@ fn a_headless_create_rejects_existing_layout_panes() {
 /// drawing a monochrome prompt beside identical panes that had colour.
 #[test]
 fn a_shared_draft_is_given_zettas_terminal_environment() {
-    let (_, env) = shared_draft_process(&draft("System", None));
+    let (_, env) = shared_draft_process(&draft("System", None), 17);
 
     assert_eq!(env["TERM"], "xterm-256color");
     assert_eq!(env["COLORTERM"], "truecolor");
@@ -129,9 +129,39 @@ fn a_shared_draft_is_given_zettas_terminal_environment() {
     assert_eq!(env["ZETTA_TERM"], "true");
 }
 
+#[cfg(unix)]
+#[test]
+fn a_shared_draft_uses_the_stable_forwarded_agent_socket() {
+    let (_, env) = shared_draft_process(&draft("System", None), 17);
+
+    assert_eq!(
+        env["SSH_AUTH_SOCK"],
+        crate::paths::pane_forwarded_agent_socket(17).to_string_lossy()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_local_agent_remains_the_panes_fallback() {
+    let local = HashMap::from([(
+        "SSH_AUTH_SOCK".to_owned(),
+        "/tmp/local-agent.sock".to_owned(),
+    )]);
+    let remote = HashMap::new();
+
+    assert_eq!(
+        pane_agent_fallback(&local),
+        Path::new("/tmp/local-agent.sock")
+    );
+    assert_eq!(
+        pane_agent_fallback(&remote),
+        crate::paths::forwarded_agent_socket()
+    );
+}
+
 #[test]
 fn a_shared_draft_keeps_the_requesters_routing_identity() {
-    let (_, env) = shared_draft_process(&draft("System", None));
+    let (_, env) = shared_draft_process(&draft("System", None), 17);
 
     assert_eq!(
         env.get("ZETTA_PANE_ROUTING_ID").map(String::as_str),
@@ -145,7 +175,8 @@ fn a_shared_draft_keeps_the_requesters_routing_identity() {
 /// leave the viewer with a pane that never starts.
 #[test]
 fn an_unknown_profile_falls_back_to_the_hosts_login_shell() {
-    let (command, _) = shared_draft_process(&draft("A Profile This Host Has Never Heard Of", None));
+    let (command, _) =
+        shared_draft_process(&draft("A Profile This Host Has Never Heard Of", None), 17);
 
     assert_eq!(command, zetta_profiles::ProfileCommand::system());
 }
@@ -160,7 +191,7 @@ fn a_command_resolved_on_this_host_is_used_as_it_was_sent() {
         vec!["/c".to_owned(), "msys2_shell.cmd".to_owned()],
     );
 
-    let (command, _) = shared_draft_process(&draft("MSYS2", Some(wrapped.clone())));
+    let (command, _) = shared_draft_process(&draft("MSYS2", Some(wrapped.clone())), 17);
 
     assert_eq!(command, wrapped);
 }

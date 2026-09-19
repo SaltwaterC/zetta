@@ -91,11 +91,14 @@ zmux kill -H HOST SESSION_ID
 
 `HOST` is passed to OpenSSH unchanged, so aliases, `user@host`, the SSH agent,
 `ProxyJump`, and `ControlMaster` settings from `~/.ssh/config` continue to
-apply. `ssh -T -N -L` keeps one stream-local forward alive for all panes; the
-remote daemon must expose its Unix socket to the SSH account and the SSH server
-must allow stream-local forwarding (`AllowStreamLocalForwarding`). The remote
-`zmux` must speak the same mux, endpoint, and process-control compatibility
-versions; Zetta queries it with `zmux endpoint --json` before forwarding.
+apply. `ssh -T -N -L` normally keeps one stream-local forward alive for all
+panes. With agent forwarding enabled, the same connection also keeps a remote
+session channel open and publishes its forwarded agent at the stable socket
+name inherited by daemon-owned shells. The remote daemon must expose its Unix
+socket to the SSH account and the SSH server must allow stream-local forwarding
+(`AllowStreamLocalForwarding`). The remote `zmux` must speak the same mux,
+endpoint, and process-control compatibility versions; Zetta queries it with
+`zmux endpoint --json` before forwarding.
 
 A tab attached to a remote daemon is marked in the tab bar: it carries a
 coloured stripe along its lower edge, its tooltip names the SSH destination
@@ -136,6 +139,10 @@ What moves and what does not:
   tab never has half its panes on one transport and half on the other.
 - **A protected session's secret travels inside the link**, never in the remote
   command line, which every account on that host can read.
+- **Agent forwarding stays with the pane transport.** With `--forward-agent`,
+  the relay publishes Zosh's negotiated private agent socket at the stable name
+  the daemon put in the pane shell's environment. A pane created by an older
+  `zmux` build must be recreated once to inherit that name.
 - **Titles cross, so the working directory does.** Zetta's shell integration
   reports a pane's directory as a window title, and a title is terminal state
   that a screen diff does not carry; the bundled `zosh-server` restates it in

@@ -41,8 +41,11 @@
 //!   is the first line and the viewer the second.
 
 use std::{
+    ffi::OsString,
+    fs,
     io::{self, Read as _, Write as _},
     os::fd::AsRawFd as _,
+    path::{Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -95,6 +98,18 @@ pub fn run(options: RelayOptions) -> Result<()> {
     // — the prelude can arrive before this process does — which is what
     // [`blank_the_screen`] is for.
     let raw_mode = RawMode::enter().context("putting the relay's terminal in raw mode")?;
+    // The Zosh server gives this relay its private forwarded-agent socket. A
+    // pane shell predates the relay, so it inherits a stable name owned by the
+    // daemon instead; point that name at this session for as long as the relay
+    // lives. Failure is deliberately non-fatal: pane transport must continue
+    // when agent forwarding is unavailable.
+    let _agent_link = match ForwardedAgentLink::install(options.pane_id) {
+        Ok(link) => link,
+        Err(error) => {
+            log::debug!("could not publish the relayed SSH agent: {error:#}");
+            None
+        }
+    };
     // In this order, because it is the order the viewer writes them and neither
     // line is self-describing.
     let secret = options
@@ -144,6 +159,79 @@ pub fn run(options: RelayOptions) -> Result<()> {
     let result = forward_output(&mut sizes, &resized, &mut stdout);
     drop(raw_mode);
     result
+}
+
+/// A stable daemon path pointing at this relay's private Zosh agent socket.
+///
+/// Replacement is atomic, so a reconnect never exposes a half-written link.
+/// Cleanup restores the pane's native-SSH fallback only when this relay still
+/// owns the link; an overlapping newer relay is left alone.
+struct ForwardedAgentLink {
+    path: PathBuf,
+    target: PathBuf,
+    fallback: PathBuf,
+}
+
+impl ForwardedAgentLink {
+    fn install(pane_id: u64) -> Result<Option<Self>> {
+        let Some(target) = std::env::var_os("SSH_AUTH_SOCK").map(PathBuf::from) else {
+            return Ok(None);
+        };
+        Self::install_from(
+            target,
+            crate::paths::pane_forwarded_agent_socket(pane_id),
+            crate::paths::pane_forwarded_agent_fallback(pane_id),
+        )
+    }
+
+    fn install_from(target: PathBuf, path: PathBuf, fallback: PathBuf) -> Result<Option<Self>> {
+        use std::os::unix::fs::FileTypeExt as _;
+
+        if target == path
+            || !fs::metadata(&target)
+                .map(|metadata| metadata.file_type().is_socket())
+                .unwrap_or(false)
+        {
+            return Ok(None);
+        }
+        Self::publish(target, path, fallback).map(Some)
+    }
+
+    fn publish(target: PathBuf, path: PathBuf, fallback: PathBuf) -> Result<Self> {
+        replace_link(&target, &path).context("publishing the forwarded-agent link")?;
+        Ok(Self {
+            path,
+            target,
+            fallback,
+        })
+    }
+}
+
+impl Drop for ForwardedAgentLink {
+    fn drop(&mut self) {
+        if fs::read_link(&self.path).is_ok_and(|target| target == self.target) {
+            let _ = replace_link(&self.fallback, &self.path);
+        }
+    }
+}
+
+fn replace_link(target: &Path, path: &Path) -> io::Result<()> {
+    use std::os::unix::fs::symlink;
+
+    let mut temporary: OsString = path.as_os_str().to_owned();
+    temporary.push(format!(".{}", std::process::id()));
+    let temporary = PathBuf::from(temporary);
+    match fs::remove_file(&temporary) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    symlink(target, &temporary)?;
+    if let Err(error) = fs::rename(&temporary, path) {
+        let _ = fs::remove_file(&temporary);
+        return Err(error);
+    }
+    Ok(())
 }
 
 /// Discards everything on the terminal this relay was given.

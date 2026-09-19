@@ -340,7 +340,7 @@ since its last send). See "Proving it" below.
 | stock `mosh-client` | zosh `zosh-server --forward-agent` | The terminal works; no agent socket is created because stock Mosh sends no hello. |
 | new Zosh client | old Zosh server | The terminal works; unknown agent fields are ignored and forwarding is unavailable with one warning. |
 | `zosh --forward-agent` | plain SSH fallback | The launcher uses native `ssh -A`. |
-| `zmux attach --protocol zosh --forward-agent` | existing remote `zmux` pane | The pane stays on its existing SSH byte stream; forwarding is unavailable because its shell already exists before `zosh-server` starts the relay. |
+| `zmux attach --protocol zosh --forward-agent` | remote `zmux` pane created by the current daemon | The pane stays on Zosh and its relay publishes the negotiated private agent at the stable socket name the existing shell inherited. |
 | `zosh` (default) | zosh `zosh-server` | Scrolled-off rows are carried and written into the local terminal's history. Measured on loopback, a 100 000-line burst arrives complete; without it, 23 lines of it do. |
 | `zosh` (default) | stock `mosh-server` | Field 22 is skipped, no rows are ever carried, and the client falls back to inferring scrolls from the screen — exactly what stock Mosh does. |
 | `zosh --no-scrollback`, or stock `mosh-client` | zosh `zosh-server` | The server settles the question on the first state it accepts, forgets what it had collected, and behaves exactly as a stock server for the rest of the session. |
@@ -449,10 +449,11 @@ never enter the Zosh protocol.
 
 This has the same access model as OpenSSH `ForwardAgent`: any process on the
 remote side that can open the forwarded socket can ask the local agent to
-sign. The socket is removed when the session ends. Existing remote `zmux`
-panes are intentionally not retrofitted, because their shells predate the
-relay; those panes retain the SSH byte-stream fallback and report that agent
-forwarding is unavailable.
+sign. A remote `zmux` shell inherits a stable socket name when the daemon
+creates it. The Zosh relay atomically points that name at its negotiated
+private socket and restores its native-SSH fallback when the relay ends, unless
+a newer relay has already replaced it. Panes created by an older `zmux` build
+must be recreated once so their shells inherit the stable name.
 
 The interval is bounded by Mosh's own minimum frame interval below and
 its unassisted heartbeat above: outside that range there is nothing to

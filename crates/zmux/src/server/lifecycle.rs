@@ -167,6 +167,7 @@ fn read_until(file: &mut std::fs::File, needle: &str, deadline: Instant) -> Resu
 /// came up believing its terminal had no colour.
 fn shared_draft_process(
     draft: &crate::messages::SharedPaneDraft,
+    #[cfg_attr(not(unix), expect(unused_variables))] pane_id: u64,
 ) -> (zetta_profiles::ProfileCommand, HashMap<String, String>) {
     let command = draft
         .command
@@ -202,6 +203,13 @@ fn shared_draft_process(
         env.entry("LANG".to_owned())
             .or_insert_with(|| zetta_profiles::FALLBACK_LANG.to_owned());
     }
+    #[cfg(unix)]
+    env.insert(
+        "SSH_AUTH_SOCK".to_owned(),
+        crate::paths::pane_forwarded_agent_socket(pane_id)
+            .to_string_lossy()
+            .into_owned(),
+    );
     (command, env)
 }
 
@@ -270,7 +278,12 @@ fn start_shared_draft(
     daemon: &Arc<Daemon>,
     draft: &crate::messages::SharedPaneDraft,
 ) -> Result<ProvisionalSharedPane> {
-    let (command, env) = shared_draft_process(draft);
+    let pane_id = daemon.next_pane_id.fetch_add(1, Ordering::Relaxed);
+    #[cfg(unix)]
+    let agent_fallback = pane_agent_fallback(&draft.env);
+    let (command, env) = shared_draft_process(draft, pane_id);
+    #[cfg(unix)]
+    prepare_pane_agent_links(pane_id, &agent_fallback);
     #[cfg(unix)]
     let bootstrap_command = command.clone();
     let working_directory = pane_start_directory(draft.working_directory.clone().or_else(|| {
@@ -333,7 +346,7 @@ fn start_shared_draft(
         }
     };
     Ok(ProvisionalSharedPane {
-        pane_id: daemon.next_pane_id.fetch_add(1, Ordering::Relaxed),
+        pane_id,
         pty,
         #[cfg(windows)]
         console_id,
@@ -341,6 +354,30 @@ fn start_shared_draft(
         child_events,
         size: draft.size,
     })
+}
+
+#[cfg(unix)]
+fn pane_agent_fallback(env: &HashMap<String, String>) -> PathBuf {
+    env.get("SSH_AUTH_SOCK")
+        .filter(|path| !path.is_empty())
+        .map_or_else(crate::paths::forwarded_agent_socket, PathBuf::from)
+}
+
+#[cfg(unix)]
+fn prepare_pane_agent_links(pane_id: u64, fallback_target: &Path) {
+    use std::os::unix::fs::symlink;
+
+    let path = crate::paths::pane_forwarded_agent_socket(pane_id);
+    let fallback = crate::paths::pane_forwarded_agent_fallback(pane_id);
+    let install = |target: &Path, path: &Path| {
+        let temporary = path.with_extension(format!("new.{}", std::process::id()));
+        let _ = std::fs::remove_file(&temporary);
+        symlink(target, &temporary).and_then(|()| std::fs::rename(&temporary, path))
+    };
+    let result = install(fallback_target, &fallback).and_then(|()| install(&fallback, &path));
+    if let Err(error) = result {
+        log::debug!("could not prepare pane {pane_id}'s forwarded-agent links: {error}");
+    }
 }
 
 fn close_provisional_shared_panes(daemon: &Arc<Daemon>, panes: Vec<ProvisionalSharedPane>) {

@@ -74,3 +74,28 @@ fn the_session_directory_sits_inside_the_configuration_directory() {
         platform_config_dir().join(expected_name)
     );
 }
+
+#[test]
+fn the_forwarded_agent_socket_sits_inside_the_session_directory() {
+    assert_eq!(
+        forwarded_agent_socket(),
+        session_catalog_dir().join("forwarded-agent.sock")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn every_pane_gets_a_distinct_agent_socket_name() {
+    assert_eq!(
+        pane_forwarded_agent_socket(42),
+        session_catalog_dir().join("forwarded-agent-42.sock")
+    );
+    assert_ne!(
+        pane_forwarded_agent_socket(42),
+        pane_forwarded_agent_socket(43)
+    );
+    assert_eq!(
+        pane_forwarded_agent_fallback(42),
+        session_catalog_dir().join("forwarded-agent-42.fallback")
+    );
+}

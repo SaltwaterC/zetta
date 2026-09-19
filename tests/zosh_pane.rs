@@ -194,6 +194,82 @@ fn a_pane_carried_over_mosh_shows_its_output_and_takes_its_input() {
     server.stop();
 }
 
+/// Agent negotiation and terminal input share the same cumulative Mosh state.
+/// Keep a real agent request in flight while exercising pane input so a change
+/// that lets agent records starve or deadlock terminal states cannot hide
+/// behind the ordinary no-agent pane test above.
+#[test]
+#[ignore = "drives separately built zmux and zosh-server binaries; see the module docs"]
+fn an_agent_forwarded_pane_keeps_taking_input() {
+    let daemon = TestDaemon::start();
+    let client = daemon.client();
+    let pane = shared_protected_session(&client);
+    let agent = FakeAgent::start();
+    let request = spawn_request(
+        Some(pane.session_id),
+        concat!(
+            "while ! test -S \"$SSH_AUTH_SOCK\"; do sleep 0.01; done; ",
+            "ssh-add -L >/dev/null 2>&1; printf 'agent-request-finished\\n'; ",
+            "while IFS= read -r line; do printf 'answered:%s\\n' \"$line\"; done",
+        ),
+    );
+    let spawned = client
+        .spawn_shared(SharedSpawnRequest {
+            session_id: pane.session_id,
+            base_revision: SessionRevision::INITIAL,
+            operation_id: client.next_shared_operation_id(),
+            program: request.program,
+            args: request.args,
+            env: request.env,
+            working_directory: request.working_directory,
+            size: request.size,
+            console_palette: request.console_palette,
+        })
+        .expect("spawning the agent-aware pane");
+    let relayed_pane = spawned.pane.pane_id();
+    drop(spawned);
+
+    let mut server = MoshServer::start_with_agent(
+        &daemon.config,
+        &[
+            &binary("zmux").to_string_lossy(),
+            "relay-pane",
+            &pane.session_id.to_string(),
+            &relayed_pane.to_string(),
+            "--secret-stdin",
+        ],
+        agent.path(),
+    );
+    let mut session = zosh::PaneSession::connect(
+        "127.0.0.1",
+        server.port,
+        &server.key,
+        80,
+        24,
+        zosh::PaneSessionSettings {
+            forward_agent: true,
+            agent_path: Some(agent.path().to_owned()),
+            ..zosh::PaneSessionSettings::default()
+        },
+    )
+    .expect("connecting the agent-forwarded pane");
+    let frames = Frames::collect(session.take_reader().expect("the session's reader"));
+    let mut writer = session.writer();
+    use std::io::Write as _;
+    writeln!(writer, "{TEST_SECRET}").expect("sending the session secret");
+
+    frames.wait_for("agent-request-finished");
+    write!(writer, "typed-with-agent\r").expect("sending input with agent forwarding active");
+    let answered = frames.wait_for("answered:typed-with-agent");
+    assert!(
+        answered.contains("answered:typed-with-agent"),
+        "agent forwarding must not stall pane input: {answered:?}"
+    );
+
+    drop(session);
+    server.stop();
+}
+
 /// One pane of a split quitting must leave the other one usable.
 ///
 /// The pane's program ending is not the same as its link going away: the
@@ -564,18 +640,33 @@ struct MoshServer {
 
 impl MoshServer {
     fn start(config: &Path, command: &[&str]) -> Self {
-        let mut arguments = vec!["new", "-i", "127.0.0.1", "-c", "256", "--foreground", "--"];
+        Self::start_inner(config, command, None)
+    }
+
+    fn start_with_agent(config: &Path, command: &[&str], agent: &Path) -> Self {
+        Self::start_inner(config, command, Some(agent))
+    }
+
+    fn start_inner(config: &Path, command: &[&str], agent: Option<&Path>) -> Self {
+        let mut arguments = vec!["new", "-i", "127.0.0.1", "-c", "256", "--foreground"];
+        if agent.is_some() {
+            arguments.push("--forward-agent");
+        }
+        arguments.push("--");
         arguments.extend_from_slice(command);
-        let mut process = Command::new(binary("zosh-server"))
+        let mut command = Command::new(binary("zosh-server"));
+        command
             .args(&arguments)
             .env("XDG_CONFIG_HOME", config)
             .env("LANG", "en_US.UTF-8")
             .env("MOSH_SERVER_NETWORK_TMOUT", "60")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("starting zosh-server");
+            .stderr(Stdio::piped());
+        if let Some(agent) = agent {
+            command.env("SSH_AUTH_SOCK", agent);
+        }
+        let mut process = command.spawn().expect("starting zosh-server");
         let stdout = process.stdout.take().expect("the server's stdout");
         let connect = read_connect_line(stdout);
         let mut fields = connect.split_whitespace();
@@ -591,6 +682,57 @@ impl MoshServer {
     fn stop(&mut self) {
         let _ = self.process.kill();
         let _ = self.process.wait();
+    }
+}
+
+/// Minimal agent used by the full-stack pane test. It answers every request
+/// with an empty identities list, which is enough to exercise complete framed
+/// requests in both the server's bootstrap prime and the Zosh agent bridge.
+#[cfg(unix)]
+struct FakeAgent {
+    path: PathBuf,
+    _directory: tempfile::TempDir,
+}
+
+#[cfg(unix)]
+impl FakeAgent {
+    fn start() -> Self {
+        use std::os::unix::net::UnixListener;
+
+        let directory = tempfile::tempdir().expect("a temporary agent directory");
+        let path = directory.path().join("agent.sock");
+        let listener = UnixListener::bind(&path).expect("binding the fake agent");
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { return };
+                std::thread::spawn(move || {
+                    use std::io::{Read as _, Write as _};
+                    loop {
+                        let mut length = [0_u8; 4];
+                        if stream.read_exact(&mut length).is_err() {
+                            return;
+                        }
+                        let body_len = u32::from_be_bytes(length) as usize;
+                        let mut body = vec![0_u8; body_len];
+                        if stream.read_exact(&mut body).is_err() {
+                            return;
+                        }
+                        let empty_identities = [0, 0, 0, 5, 12, 0, 0, 0, 0];
+                        if stream.write_all(&empty_identities).is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        Self {
+            path,
+            _directory: directory,
+        }
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
     }
 }
 

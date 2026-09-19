@@ -53,6 +53,35 @@ pub fn session_catalog_dir() -> PathBuf {
     platform_config_dir().join(name)
 }
 
+/// Stable socket name inherited by daemon-owned shells for a forwarded agent.
+///
+/// The link may not exist when the shell starts. A native SSH control
+/// connection installs it for its lifetime; per-pane aliases normally point
+/// here, while Zosh temporarily redirects its pane's alias to a private socket.
+pub fn forwarded_agent_socket() -> PathBuf {
+    session_catalog_dir().join("forwarded-agent.sock")
+}
+
+/// Stable agent name inherited by one daemon-owned pane.
+///
+/// It normally points at [`forwarded_agent_socket`], which native SSH owns.
+/// A Zosh relay replaces only its pane's link with that link's private agent,
+/// so concurrent panes cannot steal the socket name from one another.
+#[cfg(unix)]
+pub fn pane_forwarded_agent_socket(pane_id: u64) -> PathBuf {
+    session_catalog_dir().join(format!("forwarded-agent-{pane_id}.sock"))
+}
+
+/// The immutable fallback behind one pane's stable agent name.
+///
+/// Local panes point this at the agent supplied by their creating window;
+/// remote panes point it at [`forwarded_agent_socket`]. A Zosh relay can then
+/// restore this name without needing to know which kind of pane it serves.
+#[cfg(unix)]
+pub fn pane_forwarded_agent_fallback(pane_id: u64) -> PathBuf {
+    session_catalog_dir().join(format!("forwarded-agent-{pane_id}.fallback"))
+}
+
 fn is_target_debug_binary(path: &Path) -> bool {
     let mut saw_target = false;
     for component in path.components() {

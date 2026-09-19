@@ -1,5 +1,42 @@
 use super::*;
 
+#[cfg(unix)]
+#[test]
+fn a_relay_publishes_its_agent_at_the_daemons_stable_path() {
+    let directory = tempfile::tempdir().unwrap();
+    let target = directory.path().join("private-agent.sock");
+    let stable = directory.path().join("forwarded-agent.sock");
+    let fallback = directory.path().join("ssh-agent.sock");
+
+    let link =
+        ForwardedAgentLink::publish(target.clone(), stable.clone(), fallback.clone()).unwrap();
+    assert_eq!(fs::read_link(&stable).unwrap(), target);
+
+    drop(link);
+    assert_eq!(fs::read_link(&stable).unwrap(), fallback);
+}
+
+#[cfg(unix)]
+#[test]
+fn an_older_relay_does_not_remove_a_newer_agent_link() {
+    let directory = tempfile::tempdir().unwrap();
+    let first_target = directory.path().join("first-agent.sock");
+    let second_target = directory.path().join("second-agent.sock");
+    let stable = directory.path().join("forwarded-agent.sock");
+    let fallback = directory.path().join("ssh-agent.sock");
+
+    let first =
+        ForwardedAgentLink::publish(first_target, stable.clone(), fallback.clone()).unwrap();
+    let second =
+        ForwardedAgentLink::publish(second_target.clone(), stable.clone(), fallback.clone())
+            .unwrap();
+    drop(first);
+    assert_eq!(fs::read_link(&stable).unwrap(), second_target);
+
+    drop(second);
+    assert_eq!(fs::read_link(&stable).unwrap(), fallback);
+}
+
 /// The secret is read before anything else, from a terminal already in raw
 /// mode, so the relay has to find the end of the line itself rather than
 /// relying on a line discipline that is no longer doing it.

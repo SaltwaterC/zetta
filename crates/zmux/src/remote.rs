@@ -348,7 +348,12 @@ impl RemoteTransport {
             local_socket.display(),
             remote_endpoint.socket_path.display()
         );
-        let arguments = forward_arguments(&self.target, &forwarding);
+        let remote_agent_socket = remote_endpoint
+            .socket_path
+            .parent()
+            .map(|directory| directory.join("forwarded-agent.sock"));
+        let arguments =
+            forward_arguments(&self.target, &forwarding, remote_agent_socket.as_deref());
         let mut command = Command::new(&self.ssh_program);
         command
             .args(&arguments)
@@ -577,20 +582,37 @@ fn shell_escape_double_quoted(value: &str) -> String {
         .replace('`', "\\`")
 }
 
-fn forward_arguments(target: &RemoteTarget, forwarding: &str) -> Vec<String> {
-    let mut arguments = vec![
-        "-T".to_owned(),
-        "-N".to_owned(),
-        "-o".to_owned(),
-        "ExitOnForwardFailure=yes".to_owned(),
-    ];
+fn forward_arguments(
+    target: &RemoteTarget,
+    forwarding: &str,
+    remote_agent_socket: Option<&Path>,
+) -> Vec<String> {
+    let mut arguments = vec!["-T".to_owned()];
+    if target.forward_agent != Some(true) {
+        arguments.push("-N".to_owned());
+    }
+    arguments.extend(["-o".to_owned(), "ExitOnForwardFailure=yes".to_owned()]);
     push_target_options(&mut arguments, target);
-    arguments.extend([
-        "-L".to_owned(),
-        forwarding.to_owned(),
-        target.destination.clone(),
-    ]);
+    arguments.extend(["-L".to_owned(), forwarding.to_owned()]);
+    arguments.push(target.destination.clone());
+    if target.forward_agent == Some(true)
+        && let Some(socket) = remote_agent_socket
+    {
+        arguments.push(agent_holder_command(socket));
+    }
     arguments
+}
+
+fn agent_holder_command(socket: &Path) -> String {
+    let socket = shell_quote(&socket.to_string_lossy());
+    let script = format!(
+        "umask 077; link={socket}; temporary=\"$link.$$\"; if test -n \"$SSH_AUTH_SOCK\"; then rm -f \"$temporary\"; ln -s \"$SSH_AUTH_SOCK\" \"$temporary\" && mv -f \"$temporary\" \"$link\"; fi; exec sleep 2147483647"
+    );
+    format!("/bin/sh -c {}", shell_quote(&script))
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
 fn push_target_options(arguments: &mut Vec<String>, target: &RemoteTarget) {

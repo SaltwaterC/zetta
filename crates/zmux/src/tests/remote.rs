@@ -47,7 +47,7 @@ fn remote_target_does_not_override_open_ssh_identity_selection() {
             .any(|argument| argument == "-i")
     );
     assert!(
-        !forward_arguments(&target, "/tmp/local.sock:/run/zmux.sock")
+        !forward_arguments(&target, "/tmp/local.sock:/run/zmux.sock", None)
             .iter()
             .any(|argument| argument == "-i")
     );
@@ -63,7 +63,11 @@ fn remote_targets_explicitly_control_native_agent_forwarding() {
         program_arguments(&enabled),
         profiles_arguments(&enabled),
         start_daemon_arguments(&enabled, Path::new("/tmp/zmux")),
-        forward_arguments(&enabled, "/tmp/local.sock:/run/zmux.sock"),
+        forward_arguments(
+            &enabled,
+            "/tmp/local.sock:/run/zmux.sock",
+            Some(Path::new("/run/zetta/forwarded-agent.sock")),
+        ),
     ] {
         assert!(arguments.iter().any(|argument| argument == "-A"));
         assert!(!arguments.iter().any(|argument| argument == "-a"));
@@ -73,7 +77,7 @@ fn remote_targets_explicitly_control_native_agent_forwarding() {
         program_arguments(&disabled),
         profiles_arguments(&disabled),
         start_daemon_arguments(&disabled, Path::new("/tmp/zmux")),
-        forward_arguments(&disabled, "/tmp/local.sock:/run/zmux.sock"),
+        forward_arguments(&disabled, "/tmp/local.sock:/run/zmux.sock", None),
     ] {
         assert!(arguments.iter().any(|argument| argument == "-a"));
         assert!(!arguments.iter().any(|argument| argument == "-A"));
@@ -85,7 +89,7 @@ fn forwards_are_stream_local_and_do_not_request_a_shell() {
     let target = RemoteTarget::new("alias").with_port(Some(2200));
 
     assert_eq!(
-        forward_arguments(&target, "/tmp/local.sock:/run/user/1000/zmux.sock"),
+        forward_arguments(&target, "/tmp/local.sock:/run/user/1000/zmux.sock", None,),
         [
             "-T",
             "-N",
@@ -98,6 +102,24 @@ fn forwards_are_stream_local_and_do_not_request_a_shell() {
             "alias",
         ]
     );
+}
+
+#[test]
+fn an_agent_forward_keeps_a_remote_session_channel_open() {
+    let target = RemoteTarget::new("alias").with_forward_agent(true);
+
+    let arguments = forward_arguments(
+        &target,
+        "/tmp/local.sock:/run/user/1000/zmux.sock",
+        Some(Path::new("/run/user/1000/zetta/forwarded-agent.sock")),
+    );
+
+    assert!(arguments.iter().any(|argument| argument == "-A"));
+    assert!(!arguments.iter().any(|argument| argument == "-N"));
+    let command = arguments.last().expect("the remote holder command");
+    assert!(command.contains("SSH_AUTH_SOCK"));
+    assert!(command.contains("/run/user/1000/zetta/forwarded-agent.sock"));
+    assert!(command.contains("exec sleep"));
 }
 
 #[cfg(unix)]

@@ -275,9 +275,10 @@ gives each attached pane a Mosh link of its own, which survives roaming and
 suspend. `keep_alive_ms` is how long such a link may go without sending before
 it holds itself open, between 20 and 3000 milliseconds; `null` leaves it on
 Mosh's own three-second heartbeat. `forward_agent` opts in to forwarding the
-local SSH agent through Zosh panes; it is off by default and has no effect
-under `ssh`. Remote processes that can open the forwarded socket can use the
-agent, as with OpenSSH `ForwardAgent`.
+local SSH agent to remote panes; it uses Zosh's authenticated extension for
+Zosh panes and native OpenSSH forwarding for SSH panes. It is off by default.
+Remote processes that can open the forwarded socket can use the agent, as with
+OpenSSH `ForwardAgent`.
 
 These are defaults for the remote-session picker, which can change them before
 connecting, and they are overridden by `zmux attach --protocol`,

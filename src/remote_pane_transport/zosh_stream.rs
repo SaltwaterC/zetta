@@ -117,15 +117,6 @@ pub(super) fn bootstrap(
     secret: Option<&SessionSecret>,
     mux_pane_ids: &[u64],
 ) -> (HashMap<u64, ZoshPaneStream>, Vec<String>) {
-    if forward_agent {
-        return (
-            HashMap::new(),
-            vec![
-                "SSH-agent forwarding is unavailable for existing zmux relay panes; their shells already exist, so those panes stayed on SSH."
-                    .to_owned(),
-            ],
-        );
-    }
     let Some(target) = client.remote_target().cloned() else {
         return (
             HashMap::new(),

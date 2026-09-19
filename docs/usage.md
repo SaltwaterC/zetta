@@ -176,9 +176,11 @@ zosh`, or by default with `sessions.remote.protocol`. See
 SSH-agent forwarding is a separate opt-in: use `--forward-agent` with Zosh or
 `zmux attach --protocol zosh --forward-agent`. The bundled Zosh pair proxies
 the authenticated agent protocol over Mosh; stock or older peers keep the
-terminal alive and report that forwarding is unavailable. Existing remote
-`zmux` panes retain their SSH byte-stream fallback because their shells already
-exist before the Zosh relay starts.
+terminal alive and report that forwarding is unavailable. Remote `zmux` shells
+inherit a stable agent-socket name when they are created; a Zosh pane relay
+points that name at its negotiated private socket for the relay's lifetime.
+Panes created by an older `zmux` build must be recreated once so their shells
+inherit the stable name.
 
 ## CLI command panes
 
