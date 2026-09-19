@@ -23,11 +23,29 @@ const REMOTE_ERROR_MAX_CHARS: usize = 240;
 fn remote_error_message(error: &anyhow::Error) -> String {
     let output = strip_remote_terminal_sequences(&format!("{error:#}"));
     let lower_output = output.to_ascii_lowercase();
+    if (lower_output.contains("reading multiplexer endpoint")
+        && lower_output.contains("no such file or directory"))
+        || lower_output.contains("no multiplexer is running")
+    {
+        return "No remote session service is running on this host. Create a remote session to start one."
+            .to_owned();
+    }
     if lower_output.contains("exit status: 127")
         || lower_output.contains("command not found: zmux")
         || lower_output.contains("zmux: command not found")
     {
-        return "Remote zmux could not be started (exit status 127). Make sure it is installed and available in the remote login shell's PATH.".to_owned();
+        return "Remote zmux was not found. Install it on the remote host or add it to the remote login shell's PATH.".to_owned();
+    }
+
+    // The login shell can write prompt-plugin failures before the command's
+    // own diagnostic. Prefer the latter when `zmux` identified it explicitly.
+    if let Some(message) = output
+        .lines()
+        .map(str::trim)
+        .rev()
+        .find(|line| line.to_ascii_lowercase().starts_with("zmux:"))
+    {
+        return truncate_remote_error(message);
     }
 
     let mut message = output

@@ -328,10 +328,46 @@ fn remote_shell_startup_failures_are_short_and_readable() {
 
     assert_eq!(
         message,
-        "Remote zmux could not be started (exit status 127). Make sure it is installed and available in the remote login shell's PATH."
+        "Remote zmux was not found. Install it on the remote host or add it to the remote login shell's PATH."
     );
     assert!(!message.contains('\x1b'));
     assert!(!message.contains("gitstatus"));
+}
+
+#[test]
+fn missing_remote_daemon_is_reported_instead_of_shell_startup_noise() {
+    let error = anyhow::anyhow!(
+        "listing remote sessions: SSH endpoint query failed with exit status: 1: \
+         (anon):setopt:7: can't change option: monitor\n\n\
+         \x1b[31mERROR\x1b[39m: gitstatus failed to initialize.\n\n\
+         Add GITSTATUS_LOG_LEVEL=DEBUG to ~/.zshrc for extra diagnostics.\n\n\
+         zmux: reading multiplexer endpoint \
+         /home/user/.config/zetta/sessions/zmux.json: \
+         No such file or directory (os error 2)"
+    );
+
+    let message = remote_error_message(&error);
+
+    assert_eq!(
+        message,
+        "No remote session service is running on this host. Create a remote session to start one."
+    );
+    assert!(!message.contains("gitstatus"));
+    assert!(!message.contains("setopt"));
+}
+
+#[test]
+fn remote_zmux_diagnostic_takes_precedence_over_shell_startup_noise() {
+    let error = anyhow::anyhow!(
+        "SSH endpoint query failed with exit status: 1: \
+         shell prompt failed to initialize\n\
+         zmux: endpoint belongs to an unsupported version"
+    );
+
+    assert_eq!(
+        remote_error_message(&error),
+        "zmux: endpoint belongs to an unsupported version"
+    );
 }
 
 #[test]
