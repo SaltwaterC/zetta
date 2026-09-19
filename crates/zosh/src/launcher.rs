@@ -1278,7 +1278,9 @@ fn server_options_with_colors(
 }
 
 fn local_server_arguments(command: &MoshCommand, colors: u16) -> Vec<String> {
-    server_options_with_colors(command, colors, command.server == DEFAULT_SERVER)
+    let zosh_server = parse_server_command(&command.server)
+        .is_ok_and(|arguments| is_zosh_server_command(&arguments));
+    server_options_with_colors(command, colors, zosh_server)
 }
 
 fn parse_server_command(value: &str) -> Result<Vec<String>> {

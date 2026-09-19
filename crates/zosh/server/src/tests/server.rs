@@ -1,6 +1,14 @@
 use super::*;
 
 #[test]
+fn udp_port_candidates_start_randomly_and_wrap_the_complete_range() {
+    let ports = (0..4)
+        .map(|attempt| candidate_port(60_000, 4, 2, attempt))
+        .collect::<Vec<_>>();
+    assert_eq!(ports, [60_002, 60_003, 60_000, 60_001]);
+}
+
+#[test]
 fn publishing_pty_event_preserves_wakeup_before_park() {
     // Use a fresh thread so another test cannot leave a park token behind.
     thread::spawn(|| {

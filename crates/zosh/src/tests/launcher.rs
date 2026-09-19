@@ -257,6 +257,19 @@ fn local_server_arguments_skip_the_executable_name() {
 }
 
 #[test]
+fn an_explicit_local_zosh_server_path_gets_agent_forwarding() {
+    let command = MoshCommand {
+        server: "/opt/zosh-server".to_owned(),
+        forward_agent: true,
+        ..MoshCommand::default()
+    };
+    assert!(
+        local_server_arguments(&command, terminal::color_count())
+            .contains(&"--forward-agent".to_owned())
+    );
+}
+
+#[test]
 fn server_option_accepts_a_shell_command_with_arguments() {
     let command = parse_args(args(&[
         "--server",

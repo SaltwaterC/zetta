@@ -863,8 +863,20 @@ fn bind_udp(bind_ip: Option<IpAddr>, low: u16, high: u16) -> Result<(UdpSocket, 
         return Ok((socket, port));
     }
 
+    // Starting at the bottom of the range every time immediately reused the
+    // same one or two ports as sessions came and went. Stateful firewalls and
+    // NATs can retain the old UDP association after its server exits, making
+    // a fresh session on that port a black hole until the mapping expires.
+    // Pick a different starting point and still try the complete range, so a
+    // busy candidate never reduces the set of ports available to the server.
+    let span = u32::from(high) - u32::from(low) + 1;
+    let mut random = [0_u8; 2];
+    getrandom::fill(&mut random).map_err(|error| anyhow!("choosing a UDP port: {error}"))?;
+    let start = u32::from(u16::from_ne_bytes(random)) % span;
+
     let mut last_error = None;
-    for port in low..=high {
+    for attempt in 0..span {
+        let port = candidate_port(low, span, start, attempt);
         match UdpSocket::bind(SocketAddr::new(ip, port)) {
             Ok(socket) => return Ok((socket, port)),
             Err(error) => last_error = Some(error),
@@ -875,6 +887,11 @@ fn bind_udp(bind_ip: Option<IpAddr>, low: u16, high: u16) -> Result<(UdpSocket, 
         "unable to bind any UDP port in {low}:{high} on {ip}: {}",
         last_error.map_or_else(|| "empty port range".to_owned(), |e| e.to_string())
     ))
+}
+
+fn candidate_port(low: u16, span: u32, start: u32, attempt: u32) -> u16 {
+    let offset = (start + attempt) % span;
+    u16::try_from(u32::from(low) + offset).expect("candidate stays inside the u16 port range")
 }
 
 fn configured_network_timeout() -> Option<Duration> {
