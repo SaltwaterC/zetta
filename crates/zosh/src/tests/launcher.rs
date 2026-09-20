@@ -350,6 +350,17 @@ fn ssh_bootstrap_preserves_target_and_remote_command() {
 }
 
 #[test]
+fn ssh_bootstrap_leaves_locale_selection_to_ssh() {
+    let command = MoshCommand::default();
+    let (_, arguments) = ssh_bootstrap_command(&command, "host");
+    let remote = arguments.last().expect("remote server command");
+
+    assert!(!remote.contains("'-l'"), "{remote}");
+    assert!(!remote.contains("LANG="), "{remote}");
+    assert!(!remote.contains("LC_"), "{remote}");
+}
+
+#[test]
 fn forwarding_temporarily_enables_native_bootstrap_forwarding() {
     let command = MoshCommand {
         forward_agent: true,

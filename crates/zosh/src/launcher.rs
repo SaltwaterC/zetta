@@ -28,23 +28,6 @@ use crate::{
 const DEFAULT_SERVER: &str = "zosh-server";
 const STOCK_SERVER: &str = "mosh-server";
 const DEFAULT_SSH: &str = "ssh";
-const LOCALE_VARIABLES: [&str; 15] = [
-    "LANG",
-    "LANGUAGE",
-    "LC_ALL",
-    "LC_ADDRESS",
-    "LC_COLLATE",
-    "LC_CTYPE",
-    "LC_IDENTIFICATION",
-    "LC_MESSAGES",
-    "LC_MONETARY",
-    "LC_NUMERIC",
-    "LC_MEASUREMENT",
-    "LC_NAME",
-    "LC_PAPER",
-    "LC_TELEPHONE",
-    "LC_TIME",
-];
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum PredictionMode {
@@ -1250,13 +1233,10 @@ fn server_options_with_colors(
 ) -> Vec<String> {
     let mut arguments = vec!["new".to_owned()];
     arguments.extend(["-c".to_owned(), colors.to_string()]);
-    for variable in LOCALE_VARIABLES {
-        if let Ok(value) = env::var(variable)
-            && !value.is_empty()
-        {
-            arguments.extend(["-l".to_owned(), format!("{variable}={value}")]);
-        }
-    }
+    // The server already inherits the environment that sshd established for
+    // the remote command. Leave locale selection to OpenSSH's
+    // SendEnv/AcceptEnv policy and the remote host's own defaults instead of
+    // overriding it with locale names that may exist only on the client.
     match &command.bind_server {
         BindServer::Ssh => arguments.push("-s".to_owned()),
         BindServer::Any => {}
