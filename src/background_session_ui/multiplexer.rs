@@ -741,8 +741,13 @@ impl Zetta {
         ) {
             clear_session_theme_overrides(&mut state);
         }
+        let policy = if runtime.is_remote() {
+            ProjectContextPolicy::Remote
+        } else {
+            ProjectContextPolicy::Local
+        };
         let restored_panes = restored_pane_metadata(&state, &summary);
-        let restored_metadata = self.prepare_restored_panes(restored_panes.clone());
+        let restored_metadata = self.prepare_restored_panes(restored_panes.clone(), policy);
         let restored_profiles = self.restored_profiles(&restored_panes, &restored_metadata);
         let tab_id = self.next_tab_id;
         self.next_tab_id += 1;
@@ -801,7 +806,9 @@ impl Zetta {
             self.shared_collaboration
                 .bind(session_id, tab_id, shared_state, mappings)?;
         }
-        self.bind_restored_projects(&tab, &restored_metadata);
+        if !policy.is_remote() {
+            self.bind_restored_projects(&tab, &restored_metadata);
+        }
 
         self.build_attached_panes(
             &mut tab,
@@ -1042,6 +1049,11 @@ impl Zetta {
                 tab_theme_override.as_deref(),
                 &profile,
                 project.as_deref(),
+                if runtime.is_remote() {
+                    ProjectContextPolicy::Remote
+                } else {
+                    ProjectContextPolicy::Local
+                },
                 cx,
             );
             let working_directory = restored.working_directory(routing_id);

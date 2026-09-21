@@ -53,7 +53,7 @@ impl Zetta {
         else {
             return;
         };
-        inherit_project_for_panes(&mut self.projects, source, tab);
+        inherit_project_for_panes(&mut self.projects, source, tab, ProjectContextPolicy::Local);
     }
 
     /// Resolves saved pane directories before any terminal view is built.
@@ -63,10 +63,14 @@ impl Zetta {
     pub(super) fn prepare_restored_panes(
         &mut self,
         panes: Vec<(u64, String, Option<PathBuf>)>,
+        policy: ProjectContextPolicy,
     ) -> RestoredPaneMetadata {
-        let destination_root = self
-            .active_project_config()
-            .map(|project| project.root.clone());
+        let destination_root = (!policy.is_remote())
+            .then(|| {
+                self.active_project_config()
+                    .map(|project| project.root.clone())
+            })
+            .flatten();
         let mut metadata = RestoredPaneMetadata::default();
         for (routing_id, profile_name, working_directory) in panes {
             let profile = self
@@ -82,12 +86,16 @@ impl Zetta {
                     dark_theme: None,
                     icon: ProfileIcon::default(),
                 });
-            let project_root = match working_directory.as_deref() {
-                Some(directory) => resolve_registered_project_config_root(
-                    &restored_project_directory(&profile, directory),
-                    &self.projects.registry,
-                ),
-                None => destination_root.clone(),
+            let project_root = if policy.is_remote() {
+                None
+            } else {
+                match working_directory.as_deref() {
+                    Some(directory) => resolve_registered_project_config_root(
+                        &restored_project_directory(&profile, directory),
+                        &self.projects.registry,
+                    ),
+                    None => destination_root.clone(),
+                }
             };
             metadata.panes.insert(
                 routing_id,
@@ -191,6 +199,7 @@ impl Zetta {
         tab_theme_override: Option<&str>,
         profile: &Profile,
         project: Option<&ProjectConfig>,
+        policy: ProjectContextPolicy,
         cx: &App,
     ) -> Option<Arc<Theme>> {
         if let Some(name) = pane_theme_override {
@@ -210,6 +219,9 @@ impl Zetta {
                         Some(format!("Could not restore tab theme {name:?}: {error:#}"));
                 }
             }
+        }
+        if policy.is_remote() {
+            return Some(self.application_theme(cx));
         }
         match resolve_project_profile_theme(profile, project, cx) {
             Ok(theme) => theme.or_else(|| Some(self.application_theme(cx))),
@@ -256,7 +268,8 @@ impl Zetta {
                 base.chain(stacked)
             })
             .collect::<Vec<_>>();
-        let restored_metadata = self.prepare_restored_panes(restored_panes.clone());
+        let restored_metadata =
+            self.prepare_restored_panes(restored_panes.clone(), ProjectContextPolicy::Local);
         let profiles = self.restored_profiles(&restored_panes, &restored_metadata);
         for pane in &mut tab.panes {
             if let Some(profile) = profiles.get(&pane.routing_id) {
@@ -356,6 +369,7 @@ impl Zetta {
                 tab_theme_override.as_deref(),
                 &profile,
                 project.as_deref(),
+                ProjectContextPolicy::Local,
                 cx,
             );
             let display_only = !terminal.read(cx).is_pty();

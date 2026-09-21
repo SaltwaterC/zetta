@@ -88,7 +88,11 @@ fn inherit_project_for_panes(
     projects: &mut crate::project_context::ProjectState,
     source_pane_id: u64,
     tab: &Tab,
+    policy: ProjectContextPolicy,
 ) {
+    if policy.is_remote() {
+        return;
+    }
     for pane in &tab.panes {
         projects.inherit_pane_root(source_pane_id, pane.id);
         for entry in &pane.stack.entries {

@@ -148,22 +148,23 @@ impl Zetta {
             self.working_directory.clone(),
             working_directory_configured,
         );
-        let terminal_theme = match resolve_terminal_theme(
-            None,
-            tab_theme_override.as_deref(),
+        let application_theme = self.application_theme(cx);
+        let fallback = self.project_context_policy(tab_id).theme_fallback(
             &profile,
             project.as_deref(),
-            cx,
-        ) {
-            Ok(theme) => theme,
-            Err(error) => {
-                self.set_multi_command_error(
-                    format!("Could not apply the active profile theme: {error:#}"),
-                    cx,
-                );
-                return;
-            }
-        };
+            &application_theme,
+        );
+        let terminal_theme =
+            match resolve_terminal_theme(None, tab_theme_override.as_deref(), fallback, cx) {
+                Ok(theme) => theme,
+                Err(error) => {
+                    self.set_multi_command_error(
+                        format!("Could not apply the active profile theme: {error:#}"),
+                        cx,
+                    );
+                    return;
+                }
+            };
         let terminal_settings = Arc::new(TerminalSpawnSettings::current(cx));
 
         let new_pane_ids = (0..additional)

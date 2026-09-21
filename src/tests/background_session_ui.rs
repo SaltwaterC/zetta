@@ -233,7 +233,7 @@ fn a_tab_arriving_from_elsewhere_inherits_this_windows_project() {
 
     let tab = attached_tab_with_a_stacked_command();
 
-    inherit_project_for_panes(&mut projects, 7, &tab);
+    inherit_project_for_panes(&mut projects, 7, &tab, ProjectContextPolicy::Local);
 
     assert_eq!(projects.root_for_pane(11), Some(&root));
     assert!(
@@ -251,8 +251,29 @@ fn a_tab_arriving_from_elsewhere_inherits_this_windows_project() {
     let mut empty = crate::project_context::ProjectState::new(
         crate::project::ProjectRegistry::load_from(temporary.path().join("empty.json")).unwrap(),
     );
-    inherit_project_for_panes(&mut empty, 7, &tab);
+    inherit_project_for_panes(&mut empty, 7, &tab, ProjectContextPolicy::Local);
     assert!(empty.root_for_pane(11).is_none());
+}
+
+#[test]
+fn a_remote_tab_never_inherits_this_windows_project() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().join("project");
+    std::fs::create_dir_all(&root).unwrap();
+    let registry_path = temporary.path().join("registry.json");
+    let registry = crate::project::ProjectRegistry::load_from(registry_path).unwrap();
+    let mut projects = crate::project_context::ProjectState::new(registry);
+    projects.pane_roots.insert(7, root);
+    let tab = attached_tab_with_a_stacked_command();
+
+    inherit_project_for_panes(&mut projects, 7, &tab, ProjectContextPolicy::Remote);
+
+    assert!(projects.root_for_pane(11).is_none());
+    assert!(
+        projects
+            .root_for_pane(tab.panes[0].stack.entries[0].id)
+            .is_none()
+    );
 }
 
 #[test]

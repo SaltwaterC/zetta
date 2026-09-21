@@ -1947,8 +1947,12 @@ impl Zetta {
         // the pane's process runs on the session's host, and a split from it
         // sends this name back for that host to resolve. See
         // `terminal_spawn::shared_draft_process`.
-        let profile = self
-            .profiles
+        let configured_profiles = if self.project_context_policy(tab_id).is_remote() {
+            &self.launch_config.profiles
+        } else {
+            &self.profiles
+        };
+        let profile = configured_profiles
             .iter()
             .find(|profile| profile.name.eq_ignore_ascii_case(profile_name))
             .cloned()

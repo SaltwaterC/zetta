@@ -836,13 +836,14 @@ impl Zetta {
                     tab.theme_override.as_deref(),
                 )
             });
-        match resolve_terminal_theme(
-            pane_theme_override,
-            tab_theme_override,
+        let application_theme = self.application_theme(cx);
+        let policy = self.project_context_policy(tab_id);
+        let fallback = policy.theme_fallback(
             profile,
             self.project_config_for_tab(tab_id).map(Arc::as_ref),
-            cx,
-        ) {
+            &application_theme,
+        );
+        match resolve_terminal_theme(pane_theme_override, tab_theme_override, fallback, cx) {
             Ok(theme) => Some(theme),
             Err(error) => {
                 self.report_pane_spawn_error(

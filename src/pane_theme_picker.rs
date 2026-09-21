@@ -290,13 +290,20 @@ impl Zetta {
                         entry.theme_override = None;
                     }
                 }
+                let application_theme = self.application_theme(cx);
+                let policy = self.project_context_policy(tab_id);
+                let project = (!policy.is_remote())
+                    .then(|| {
+                        self.projects
+                            .config_for_pane(project_pane_id)
+                            .map(Arc::as_ref)
+                    })
+                    .flatten();
+                let fallback = policy.theme_fallback(&profile, project, &application_theme);
                 resolve_terminal_theme(
                     None,
                     self.tabs[self.active_tab].theme_override.as_deref(),
-                    &profile,
-                    self.projects
-                        .config_for_pane(project_pane_id)
-                        .map(Arc::as_ref),
+                    fallback,
                     cx,
                 )
                 .ok()

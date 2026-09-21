@@ -249,7 +249,7 @@ to choose a tab icon. Submit an empty name to resume automatic naming.
 From a Zetta pane, `zetta tabicon ICON` changes the active tab icon;
 `zetta tabicon none` explicitly hides it, and `zetta tabicon --reset` (or `-r`)
 clears the override so the active project's icon, or the configured application
-default outside a project, is used. `zetta tabicon --list` prints the available
+default outside a project and in remote sessions, is used. `zetta tabicon --list` prints the available
 built-in icon names.
 Tabs retain a fixed width as their names change.
 
@@ -360,7 +360,9 @@ tab theme refreshes every terminal in the tab and the tab-specific chrome.
 the command palette.
 Pane overrides take precedence over tab overrides. The picker pins a reset
 action at the top: pane reset falls back to the tab theme, while tab reset
-falls back to the configured project/profile/application theme. Type to
+falls back to the configured project/profile/application theme. In a remote
+session both resets stop at the tab override or local application theme; local
+project and profile themes do not apply. Type to
 filter, use the arrow keys and `Enter` to apply, or `Escape` to cancel.
 
 These overrides are session-scoped rather than configuration: they are not

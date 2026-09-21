@@ -161,7 +161,8 @@ user-installed themes. Use `zetta theme pane THEME` or `zetta theme tab THEME`
 session-scoped theme. The choice survives backgrounding, reconnect, and
 encrypted disk resume, but not pane/tab close or a configuration reload.
 `zetta theme pane --reset` falls back to the tab theme; `zetta theme tab
---reset` restores the configured theme. `--theme`
+--reset` restores the configured theme (the local application theme for a
+remote session). `--theme`
 (or `-t`) also completes profile themes when typed after `--profile` at launch,
 since it non-persistently overrides that profile's theme for the new window.
 

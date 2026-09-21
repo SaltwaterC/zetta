@@ -459,7 +459,13 @@ fn render_active_tab_shape(
         })
 }
 
-fn render_tab(chrome: TabChrome<'_>, tab: &Tab, tab_theme: Arc<Theme>, cx: &App) -> AnyElement {
+fn render_tab(
+    chrome: TabChrome<'_>,
+    tab: &Tab,
+    tab_theme: Arc<Theme>,
+    resolved_icon: Option<IconName>,
+    cx: &App,
+) -> AnyElement {
     let TabChrome {
         index,
         selected_tab_index,
@@ -530,7 +536,7 @@ fn render_tab(chrome: TabChrome<'_>, tab: &Tab, tab_theme: Arc<Theme>, cx: &App)
         tab_auto_background,
         tab.shared,
         tab.silent_mode,
-        tab.icon,
+        resolved_icon,
         pinned || !is_shrinking || (is_renaming_tab && selected),
     );
     let full_title = tab_title_with_remote_session(full_title, remote_destination);
@@ -1273,77 +1279,96 @@ fn tab_bar_tab_elements(
                     // selected tab's neighbour lookups below want the same
                     // themes, and each `theme_for_tab` is a registry lock read
                     // plus an `Arc` clone.
-                    let theme = this.theme_for_tab(tab, cx);
-                    (index, tab, selected, theme)
+                    let remote_destination = this.mux_panes.remote_tab_destination(tab.id);
+                    let policy = if remote_destination.is_some() {
+                        ProjectContextPolicy::Remote
+                    } else {
+                        ProjectContextPolicy::Local
+                    };
+                    let theme = this.theme_for_tab_with_policy(tab, policy, cx);
+                    let icon = this.resolved_tab_icon_with_policy(tab, policy);
+                    (index, tab, selected, theme, icon, remote_destination)
                 })
                 .collect();
-            let first_visible_selected = visible_tabs.first().is_some_and(|(_, _, sel, _)| *sel);
+            let first_visible_selected = visible_tabs
+                .first()
+                .is_some_and(|(_, _, sel, _, _, _)| *sel);
             let visible_tabs_for_neighbors = visible_tabs.clone();
             let tabs = visible_tabs
                 .into_iter()
                 .enumerate()
-                .map(|(visible_index, (index, tab, selected, tab_theme))| {
-                    let next_selected = visible_tabs_for_neighbors
-                        .get(visible_index + 1)
-                        .is_some_and(|(_, _, next_sel, _)| *next_sel);
-                    let (left_transition_background, right_transition_background) = if selected {
-                        let left_background = visible_index
-                            .checked_sub(1)
-                            .and_then(|index| visible_tabs_for_neighbors.get(index))
-                            .map(|(_, _, _, theme)| theme.colors().tab_inactive_background);
-                        let right_background = visible_tabs_for_neighbors
+                .map(
+                    |(
+                        visible_index,
+                        (index, tab, selected, tab_theme, resolved_icon, remote_destination),
+                    )| {
+                        let next_selected = visible_tabs_for_neighbors
                             .get(visible_index + 1)
-                            .map(|(_, _, _, theme)| theme.colors().tab_inactive_background);
-                        // With no pinned tab or overflow trigger before it,
-                        // the first visible tab sits directly beside the
-                        // title-bar controls. Its rounded corner must reveal
-                        // that background, not the tab bar's, or differing
-                        // theme colors leave a square seam at the boundary.
-                        let left_edge_background = active_tab_left_edge_background(
-                            visible_index,
-                            pinned_count,
-                            visible_range.start,
-                            compact_leading_background,
-                        );
-                        active_tab_transition_backgrounds(
-                            left_background,
-                            right_background,
-                            left_edge_background,
-                            tab_bar_background,
+                            .is_some_and(|(_, _, next_sel, _, _, _)| *next_sel);
+                        let (left_transition_background, right_transition_background) = if selected
+                        {
+                            let left_background = visible_index
+                                .checked_sub(1)
+                                .and_then(|index| visible_tabs_for_neighbors.get(index))
+                                .map(|(_, _, _, theme, _, _)| {
+                                    theme.colors().tab_inactive_background
+                                });
+                            let right_background =
+                                visible_tabs_for_neighbors.get(visible_index + 1).map(
+                                    |(_, _, _, theme, _, _)| theme.colors().tab_inactive_background,
+                                );
+                            // With no pinned tab or overflow trigger before it,
+                            // the first visible tab sits directly beside the
+                            // title-bar controls. Its rounded corner must reveal
+                            // that background, not the tab bar's, or differing
+                            // theme colors leave a square seam at the boundary.
+                            let left_edge_background = active_tab_left_edge_background(
+                                visible_index,
+                                pinned_count,
+                                visible_range.start,
+                                compact_leading_background,
+                            );
+                            active_tab_transition_backgrounds(
+                                left_background,
+                                right_background,
+                                left_edge_background,
+                                tab_bar_background,
+                            )
+                        } else {
+                            (tab_bar_background, tab_bar_background)
+                        };
+                        render_tab(
+                            TabChrome {
+                                index,
+                                selected_tab_index: this.active_tab,
+                                selected,
+                                next_selected,
+                                tab_count,
+                                pinned: index < pinned_count,
+                                tab_move_mode_active,
+                                no_mux,
+                                is_shrinking,
+                                is_renaming_tab,
+                                compact_mode,
+                                title_bar_height,
+                                tab_close_button_on_left,
+                                compact_tab_top_left,
+                                compact_tab_top_right,
+                                compact_tab_bottom_left,
+                                compact_tab_bottom_right,
+                                corner_radius,
+                                left_transition_background,
+                                right_transition_background,
+                                remote_destination,
+                                handle: &handle,
+                            },
+                            tab,
+                            tab_theme,
+                            resolved_icon,
+                            cx,
                         )
-                    } else {
-                        (tab_bar_background, tab_bar_background)
-                    };
-                    render_tab(
-                        TabChrome {
-                            index,
-                            selected_tab_index: this.active_tab,
-                            selected,
-                            next_selected,
-                            tab_count,
-                            pinned: index < pinned_count,
-                            tab_move_mode_active,
-                            no_mux,
-                            is_shrinking,
-                            is_renaming_tab,
-                            compact_mode,
-                            title_bar_height,
-                            tab_close_button_on_left,
-                            compact_tab_top_left,
-                            compact_tab_top_right,
-                            compact_tab_bottom_left,
-                            compact_tab_bottom_right,
-                            corner_radius,
-                            left_transition_background,
-                            right_transition_background,
-                            remote_destination: this.mux_panes.remote_tab_destination(tab.id),
-                            handle: &handle,
-                        },
-                        tab,
-                        tab_theme,
-                        cx,
-                    )
-                })
+                    },
+                )
                 .collect::<Vec<_>>();
             TabBarTabs {
                 tabs,

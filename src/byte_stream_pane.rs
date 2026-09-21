@@ -69,21 +69,22 @@ impl Zetta {
         let active_pane_id = tab.active_pane;
         let profile = tab.active_profile().cloned()?;
         let project = self.active_project_config().cloned();
-        let terminal_theme = match resolve_terminal_theme(
-            None,
-            tab_theme_override.as_deref(),
+        let application_theme = self.application_theme(cx);
+        let fallback = self.project_context_policy(tab_id).theme_fallback(
             &profile,
             project.as_deref(),
-            cx,
-        ) {
-            Ok(theme) => theme,
-            Err(error) => {
-                self.configuration_error =
-                    Some(format!("Could not apply profile theme: {error:#}"));
-                cx.notify();
-                return None;
-            }
-        };
+            &application_theme,
+        );
+        let terminal_theme =
+            match resolve_terminal_theme(None, tab_theme_override.as_deref(), fallback, cx) {
+                Ok(theme) => theme,
+                Err(error) => {
+                    self.configuration_error =
+                        Some(format!("Could not apply profile theme: {error:#}"));
+                    cx.notify();
+                    return None;
+                }
+            };
         let pane_id = self.next_pane_id;
         self.next_pane_id += 1;
         self.projects.inherit_pane_root(active_pane_id, pane_id);

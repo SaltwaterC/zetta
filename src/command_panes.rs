@@ -637,14 +637,15 @@ impl Zetta {
         );
         let shell =
             exact_pane_command_shell(&profile.command, &request.command, wsl_directory.as_deref())?;
-        let terminal_theme = resolve_terminal_theme(
-            None,
-            tab_theme_override.as_deref(),
+        let application_theme = self.application_theme(cx);
+        let fallback = self.project_context_policy(tab_id).theme_fallback(
             &profile,
             project.as_deref(),
-            cx,
-        )
-        .context("could not resolve the active profile theme")?;
+            &application_theme,
+        );
+        let terminal_theme =
+            resolve_terminal_theme(None, tab_theme_override.as_deref(), fallback, cx)
+                .context("could not resolve the active profile theme")?;
         let mut settings = TerminalSpawnSettings::current(cx);
         let path_hyperlink_regexes = settings.path_hyperlink_regexes(true);
         let pane_id = self.next_pane_id;
@@ -835,14 +836,15 @@ impl Zetta {
             self.working_directory.clone(),
             working_directory_configured,
         );
-        let terminal_theme = resolve_terminal_theme(
-            None,
-            tab_theme_override.as_deref(),
+        let application_theme = self.application_theme(cx);
+        let fallback = self.project_context_policy(tab_id).theme_fallback(
             &profile,
             project.as_deref(),
-            cx,
-        )
-        .context("could not resolve the target profile theme")?;
+            &application_theme,
+        );
+        let terminal_theme =
+            resolve_terminal_theme(None, tab_theme_override.as_deref(), fallback, cx)
+                .context("could not resolve the target profile theme")?;
         let command = quote_pane_command_for_shell(&profile.command, &request.command)?;
         let entry_id = self.next_pane_id;
         self.next_pane_id += 1;

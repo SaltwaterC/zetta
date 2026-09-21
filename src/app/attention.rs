@@ -215,16 +215,23 @@ impl Zetta {
             }
         };
 
+        let application_theme = self.application_theme(cx);
+        let policy = self.project_context_policy(tab.id);
+        let project = (!policy.is_remote())
+            .then(|| {
+                self.projects
+                    .config_for_pane(project_pane_id)
+                    .map(Arc::as_ref)
+            })
+            .flatten();
+        let fallback = policy.theme_fallback(profile, project, &application_theme);
         let theme = view
             .and_then(|view| view.read(cx).theme().cloned())
             .or_else(|| {
                 resolve_terminal_theme(
                     pane.theme_override(selection),
                     tab.theme_override.as_deref(),
-                    profile,
-                    self.projects
-                        .config_for_pane(project_pane_id)
-                        .map(Arc::as_ref),
+                    fallback,
                     cx,
                 )
                 .ok()

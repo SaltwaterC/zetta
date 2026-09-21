@@ -437,13 +437,13 @@ pub(crate) fn tab_icon_help() -> String {
         ),
         (
             "-r, --reset",
-            "Restore the active project's or application's configured icon",
+            "Restore the project/application icon (application for remote tabs)",
         ),
         ("-l, --list", "Print built-in icon names, including none"),
         ("-h, --help", "Print help"),
     ]);
     format!(
-        "Set the active tab's per-tab icon override through the running Zetta process\n\nUsage: zetta tabicon [OPTIONS] ICON\n       zetta tabicon --reset\n       zetta tabicon --list\n\nICON is a built-in icon name. Use none to explicitly hide the icon. Use --reset to clear the explicit override and use the active project's effective icon, or the configured application default outside a project. The choice remains with the logical tab across project changes and background/shared-session handoffs, and is never written to user or project configuration. The icon list is fetched dynamically with --list.\n\nOptions:\n{options}"
+        "Set the active tab's per-tab icon override through the running Zetta process\n\nUsage: zetta tabicon [OPTIONS] ICON\n       zetta tabicon --reset\n       zetta tabicon --list\n\nICON is a built-in icon name. Use none to explicitly hide the icon. Use --reset to clear the explicit override and use the active project's effective icon, or the configured application default outside a project and in remote sessions. The choice remains with the logical tab across project changes and background/shared-session handoffs, and is never written to user or project configuration. The icon list is fetched dynamically with --list.\n\nOptions:\n{options}"
     )
 }
 
@@ -533,7 +533,7 @@ pub(crate) fn theme_help(scope: Option<ThemeScope>) -> String {
         ),
         (
             "-r, --reset",
-            "Restore the configured theme (or the tab theme for a pane)",
+            "Restore the configured theme (application theme for remote tabs)",
         ),
         (
             "-l, --list",

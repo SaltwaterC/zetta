@@ -236,7 +236,10 @@ impl Zetta {
         if tab_index >= self.tabs.len() {
             return;
         }
-        let current_icon = self.tabs.get(tab_index).and_then(|tab| tab.icon);
+        let current_icon = self
+            .tabs
+            .get(tab_index)
+            .and_then(|tab| self.resolved_tab_icon(tab));
         let entries = self.tab_icon_entries();
         self.tab_icon_picker = Some(TabIconPicker::new(
             TabIconPickerTarget::Tab(tab_index),
@@ -501,9 +504,10 @@ impl Zetta {
 
         // Get selected icon for highlighting
         let selected_icon = match target {
-            TabIconPickerTarget::Tab(tab_index) => {
-                self.tabs.get(tab_index).and_then(|tab| tab.icon)
-            }
+            TabIconPickerTarget::Tab(tab_index) => self
+                .tabs
+                .get(tab_index)
+                .and_then(|tab| self.resolved_tab_icon(tab)),
             TabIconPickerTarget::Default => self
                 .settings_editor
                 .as_ref()

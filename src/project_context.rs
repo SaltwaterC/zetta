@@ -243,6 +243,33 @@ fn wsl_distribution(profile: &Profile) -> Option<&str> {
     profile.name.strip_prefix("WSL: ")
 }
 
+/// Whether a tab may consume project-scoped configuration from this viewer.
+/// Remote sessions keep reporting their working directories, but those paths
+/// belong to the remote host and must never select a local project.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ProjectContextPolicy {
+    Local,
+    Remote,
+}
+
+impl ProjectContextPolicy {
+    pub(crate) const fn is_remote(self) -> bool {
+        matches!(self, Self::Remote)
+    }
+
+    pub(crate) fn theme_fallback<'a>(
+        self,
+        profile: &'a Profile,
+        project: Option<&'a ProjectConfig>,
+        application_theme: &'a Arc<Theme>,
+    ) -> TerminalThemeFallback<'a> {
+        match self {
+            Self::Local => TerminalThemeFallback::Configured { profile, project },
+            Self::Remote => TerminalThemeFallback::Application(application_theme),
+        }
+    }
+}
+
 pub(crate) fn wsl_reported_directory(profile: &Profile, directory: &str) -> Option<PathBuf> {
     let distribution = wsl_distribution(profile)?;
     if distribution.is_empty()
@@ -265,13 +292,24 @@ pub(crate) fn wsl_reported_directory(profile: &Profile, directory: &str) -> Opti
 
 impl Zetta {
     pub(crate) fn active_project_config(&self) -> Option<&Arc<ProjectConfig>> {
-        let pane_id = self.tabs.get(self.active_tab)?.active_pane;
-        self.projects.config_for_pane(pane_id)
+        let tab = self.tabs.get(self.active_tab)?;
+        self.project_config_for_tab(tab.id)
     }
 
     pub(crate) fn project_config_for_tab(&self, tab_id: u64) -> Option<&Arc<ProjectConfig>> {
+        if self.project_context_policy(tab_id).is_remote() {
+            return None;
+        }
         let pane_id = self.tabs.iter().find(|tab| tab.id == tab_id)?.active_pane;
         self.projects.config_for_pane(pane_id)
+    }
+
+    pub(crate) fn project_context_policy(&self, tab_id: u64) -> ProjectContextPolicy {
+        if self.mux_panes.is_remote_tab(tab_id) {
+            ProjectContextPolicy::Remote
+        } else {
+            ProjectContextPolicy::Local
+        }
     }
 
     pub(crate) fn effective_config(&self) -> &Config {
@@ -354,9 +392,23 @@ impl Zetta {
     }
 
     pub(crate) fn theme_for_tab(&self, tab: &Tab, cx: &App) -> Arc<Theme> {
-        tab.theme_override
+        self.theme_for_tab_with_policy(tab, self.project_context_policy(tab.id), cx)
+    }
+
+    pub(crate) fn theme_for_tab_with_policy(
+        &self,
+        tab: &Tab,
+        policy: ProjectContextPolicy,
+        cx: &App,
+    ) -> Arc<Theme> {
+        let override_theme = tab
+            .theme_override
             .as_deref()
-            .and_then(|name| ThemeRegistry::global(cx).get(name).ok())
+            .and_then(|name| ThemeRegistry::global(cx).get(name).ok());
+        if policy.is_remote() {
+            return override_theme.unwrap_or_else(|| self.application_theme(cx));
+        }
+        override_theme
             .or_else(|| {
                 self.projects
                     .config_for_pane(tab.active_pane)
@@ -364,6 +416,26 @@ impl Zetta {
                     .and_then(|name| ThemeRegistry::global(cx).get(name).ok())
             })
             .unwrap_or_else(|| tab.theme(cx, || self.application_theme(cx)))
+    }
+
+    /// The icon this viewer displays for a tab. A remote tab's serialized
+    /// effective icon may have come from another viewer's project; mask that
+    /// value without mutating shared session state.
+    pub(crate) fn resolved_tab_icon(&self, tab: &Tab) -> Option<IconName> {
+        self.resolved_tab_icon_with_policy(tab, self.project_context_policy(tab.id))
+    }
+
+    pub(crate) fn resolved_tab_icon_with_policy(
+        &self,
+        tab: &Tab,
+        policy: ProjectContextPolicy,
+    ) -> Option<IconName> {
+        resolve_tab_icon(
+            tab.icon,
+            tab.icon_override,
+            policy,
+            self.launch_config.default_tab_icon,
+        )
     }
 
     pub(crate) fn project_environment_for_tab(&self, tab_id: u64) -> HashMap<String, String> {
@@ -379,6 +451,19 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.project_context_policy(tab_id).is_remote() {
+            let has_local_context = self.projects.root_for_pane(pane_id).is_some()
+                || self.projects.detections.contains_key(&pane_id)
+                || self
+                    .projects
+                    .offer
+                    .as_ref()
+                    .is_some_and(|offer| offer.pane_id == pane_id);
+            if has_local_context {
+                self.projects.forget_pane(pane_id);
+            }
+            return;
+        }
         let Some(tab) = self
             .tabs
             .iter()
@@ -473,6 +558,10 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.project_context_policy(tab_id).is_remote() {
+            self.projects.forget_pane(pane_id);
+            return;
+        }
         let Some(state) = self.projects.detections.get(&pane_id) else {
             return;
         };
@@ -603,6 +692,13 @@ impl Zetta {
     /// context bookkeeping. Configuration reloads use this path because they
     /// do not have a window with which to call `activate_current_project`.
     pub(crate) fn refresh_active_project_tab_icon(&mut self, project: Option<&ProjectConfig>) {
+        if self
+            .tabs
+            .get(self.active_tab)
+            .is_some_and(|tab| self.project_context_policy(tab.id).is_remote())
+        {
+            return;
+        }
         if let Some(tab) = self.tabs.get_mut(self.active_tab) {
             apply_project_tab_icon(
                 tab.id,
@@ -617,9 +713,23 @@ impl Zetta {
     pub(crate) fn reset_active_project_tab_icon(&mut self) -> bool {
         let default_tab_icon = self.launch_config.default_tab_icon;
         let project = self.active_project_config().cloned();
+        let policy = self
+            .tabs
+            .get(self.active_tab)
+            .map_or(ProjectContextPolicy::Local, |tab| {
+                self.project_context_policy(tab.id)
+            });
         let Some(tab) = self.tabs.get_mut(self.active_tab) else {
             return false;
         };
+        if policy.is_remote() {
+            reset_remote_tab_icon(
+                tab.id,
+                &mut tab.icon_override,
+                &mut self.projects.inherited_tab_icons,
+            );
+            return true;
+        }
         reset_project_tab_icon(
             tab.id,
             &mut tab.icon,
@@ -635,6 +745,7 @@ impl Zetta {
         let Some(tab_index) = self.tabs.iter().position(|tab| tab.id == tab_id) else {
             return;
         };
+        let policy = self.project_context_policy(tab_id);
         let projects = self.tabs[tab_index]
             .panes
             .iter()
@@ -642,12 +753,16 @@ impl Zetta {
                 std::iter::once(pane.id).chain(pane.stack.entries.iter().map(|entry| entry.id))
             })
             .filter_map(|pane_id| {
+                if policy.is_remote() {
+                    return None;
+                }
                 self.projects
                     .config_for_pane(pane_id)
                     .cloned()
                     .map(|project| (pane_id, project))
             })
             .collect::<HashMap<_, _>>();
+        let application_theme = self.application_theme(cx);
         let tab = &mut self.tabs[tab_index];
         for pane in &mut tab.panes {
             let project = projects.get(&pane.id);
@@ -668,11 +783,12 @@ impl Zetta {
                 &mut pane.profile,
                 self.launch_theme_override.as_ref(),
             );
+            let fallback =
+                policy.theme_fallback(&pane.profile, project.map(Arc::as_ref), &application_theme);
             let theme = resolve_terminal_theme(
                 pane.theme_override.as_deref(),
                 tab.theme_override.as_deref(),
-                &pane.profile,
-                project.map(Arc::as_ref),
+                fallback,
                 cx,
             )
             .ok()
@@ -699,11 +815,15 @@ impl Zetta {
                     &mut entry.profile,
                     self.launch_theme_override.as_ref(),
                 );
+                let fallback = policy.theme_fallback(
+                    &entry.profile,
+                    project.map(Arc::as_ref),
+                    &application_theme,
+                );
                 let theme = resolve_terminal_theme(
                     entry.theme_override.as_deref(),
                     tab.theme_override.as_deref(),
-                    &entry.profile,
-                    project.map(Arc::as_ref),
+                    fallback,
                     cx,
                 )
                 .ok()
@@ -723,8 +843,20 @@ impl Zetta {
         let Some(tab_index) = self.tabs.iter().position(|tab| tab.id == tab_id) else {
             return;
         };
-        let projects = terminal_projects_for_tab(&self.tabs[tab_index], &self.projects);
-        refresh_terminal_themes_in_tab(&mut self.tabs[tab_index], &projects, cx);
+        let policy = self.project_context_policy(tab_id);
+        let projects = if policy.is_remote() {
+            HashMap::new()
+        } else {
+            terminal_projects_for_tab(&self.tabs[tab_index], &self.projects)
+        };
+        let application_theme = self.application_theme(cx);
+        refresh_terminal_themes_in_tab(
+            &mut self.tabs[tab_index],
+            &projects,
+            policy,
+            &application_theme,
+            cx,
+        );
     }
 
     pub(crate) fn refresh_terminal_themes_for_appearance(&mut self, cx: &mut Context<Self>) {
@@ -733,8 +865,20 @@ impl Zetta {
         // template leaf overrides live on the pane profile, while the
         // appearance change only selects which of its two fields is active.
         for index in 0..self.tabs.len() {
-            let projects = terminal_projects_for_tab(&self.tabs[index], &self.projects);
-            refresh_terminal_themes_in_tab(&mut self.tabs[index], &projects, cx);
+            let policy = self.project_context_policy(self.tabs[index].id);
+            let projects = if policy.is_remote() {
+                HashMap::new()
+            } else {
+                terminal_projects_for_tab(&self.tabs[index], &self.projects)
+            };
+            let application_theme = self.application_theme(cx);
+            refresh_terminal_themes_in_tab(
+                &mut self.tabs[index],
+                &projects,
+                policy,
+                &application_theme,
+                cx,
+            );
         }
 
         let background_projects = self
@@ -743,7 +887,16 @@ impl Zetta {
             .map(|tab| terminal_projects_for_tab(tab, &self.projects))
             .collect::<Vec<_>>();
         for (tab, projects) in self.background_sessions.iter_mut().zip(background_projects) {
-            refresh_terminal_themes_in_tab(tab, &projects, cx);
+            let application_theme = ThemeRegistry::global(cx)
+                .get(selected_theme_name_for_appearance(&self.launch_config, cx))
+                .unwrap_or_else(|_| cx.theme().clone());
+            refresh_terminal_themes_in_tab(
+                tab,
+                &projects,
+                ProjectContextPolicy::Local,
+                &application_theme,
+                cx,
+            );
         }
     }
 
@@ -1025,6 +1178,32 @@ impl Zetta {
     }
 }
 
+pub(crate) const fn resolve_tab_icon(
+    effective_icon: Option<IconName>,
+    icon_override: TabIconOverride,
+    policy: ProjectContextPolicy,
+    application_default: Option<IconName>,
+) -> Option<IconName> {
+    match icon_override {
+        TabIconOverride::Icon(icon) => Some(icon),
+        TabIconOverride::Hidden => None,
+        TabIconOverride::None if policy.is_remote() => application_default,
+        TabIconOverride::None => effective_icon,
+    }
+}
+
+fn reset_remote_tab_icon(
+    tab_id: u64,
+    icon_override: &mut TabIconOverride,
+    inherited_tab_icons: &mut HashMap<u64, Option<IconName>>,
+) {
+    // `icon` is deliberately not an argument: it is shared canonical state
+    // and may have been derived from another viewer's project. Each remote
+    // viewer resolves its own application default at display time.
+    inherited_tab_icons.remove(&tab_id);
+    *icon_override = TabIconOverride::None;
+}
+
 /// Applies the active project's icon when a tab has no explicit user choice.
 /// The first time a project applies, the tab's current icon is snapshotted
 /// into `inherited_tab_icons` so leaving the project can restore it. Explicit
@@ -1104,14 +1283,35 @@ pub(crate) fn resolve_project_profile_theme(
     resolve_profile_theme(profile, cx)
 }
 
+/// The configured fallback below pane and tab overrides. Local panes consult
+/// project/profile configuration; remote panes use this viewer's application
+/// theme because their paths and launch profiles belong to another machine.
+#[derive(Clone, Copy)]
+pub(crate) enum TerminalThemeFallback<'a> {
+    Configured {
+        profile: &'a Profile,
+        project: Option<&'a ProjectConfig>,
+    },
+    Application(&'a Arc<Theme>),
+}
+
+impl<'a> TerminalThemeFallback<'a> {
+    #[cfg(test)]
+    pub(crate) const fn configured(
+        profile: &'a Profile,
+        project: Option<&'a ProjectConfig>,
+    ) -> Self {
+        Self::Configured { profile, project }
+    }
+}
+
 /// Resolves terminal content styling in one place. Explicit pane state wins
 /// over project and profile configuration; an absent result means the
 /// application theme selected by the caller/view remains in effect.
 pub(crate) fn resolve_terminal_theme(
     pane_theme_override: Option<&str>,
     tab_theme_override: Option<&str>,
-    profile: &Profile,
-    project: Option<&ProjectConfig>,
+    fallback: TerminalThemeFallback<'_>,
     cx: &App,
 ) -> Result<Option<Arc<Theme>>> {
     if let Some(name) = pane_theme_override {
@@ -1126,7 +1326,12 @@ pub(crate) fn resolve_terminal_theme(
             .with_context(|| format!("using tab theme {name:?}"))
             .map(Some);
     }
-    resolve_project_profile_theme(profile, project, cx)
+    match fallback {
+        TerminalThemeFallback::Configured { profile, project } => {
+            resolve_project_profile_theme(profile, project, cx)
+        }
+        TerminalThemeFallback::Application(theme) => Ok(Some(theme.clone())),
+    }
 }
 
 fn project_theme_name<'a>(project: &'a ProjectConfig, cx: &App) -> Option<&'a str> {
@@ -1140,8 +1345,14 @@ fn project_theme_name<'a>(project: &'a ProjectConfig, cx: &App) -> Option<&'a st
 fn refresh_terminal_themes_in_tab(
     tab: &mut Tab,
     projects: &HashMap<u64, Arc<ProjectConfig>>,
+    policy: ProjectContextPolicy,
+    application_theme: &Arc<Theme>,
     cx: &mut Context<Zetta>,
 ) {
+    let refresh = ThemeRefreshContext {
+        policy,
+        application_theme,
+    };
     for pane in &mut tab.panes {
         refresh_terminal_theme_for_profile(
             pane.theme_override.as_deref(),
@@ -1149,6 +1360,7 @@ fn refresh_terminal_themes_in_tab(
             &mut pane.profile,
             pane.view.clone(),
             projects.get(&pane.id).map(Arc::as_ref),
+            refresh,
             cx,
         );
         for entry in &mut pane.stack.entries {
@@ -1158,10 +1370,17 @@ fn refresh_terminal_themes_in_tab(
                 &mut entry.profile,
                 entry.view.clone(),
                 projects.get(&entry.id).map(Arc::as_ref),
+                refresh,
                 cx,
             );
         }
     }
+}
+
+#[derive(Clone, Copy)]
+struct ThemeRefreshContext<'a> {
+    policy: ProjectContextPolicy,
+    application_theme: &'a Arc<Theme>,
 }
 
 fn terminal_projects_for_tab(
@@ -1188,17 +1407,15 @@ fn refresh_terminal_theme_for_profile(
     profile: &mut Profile,
     view: Option<Entity<TerminalView>>,
     project: Option<&ProjectConfig>,
+    refresh: ThemeRefreshContext<'_>,
     cx: &mut Context<Zetta>,
 ) {
-    let theme = resolve_terminal_theme(
-        pane_theme_override,
-        tab_theme_override,
-        profile,
-        project,
-        cx,
-    )
-    .ok()
-    .flatten();
+    let fallback = refresh
+        .policy
+        .theme_fallback(profile, project, refresh.application_theme);
+    let theme = resolve_terminal_theme(pane_theme_override, tab_theme_override, fallback, cx)
+        .ok()
+        .flatten();
     if let Some(view) = view {
         view.update(cx, |view, cx| view.set_theme(theme, cx));
     }

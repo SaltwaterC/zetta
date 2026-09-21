@@ -107,6 +107,16 @@ tab that has scrolled into a left or right overflow menu carries a server icon
 there instead of the stripe. The marking follows the tab, not the active pane,
 because every pane in a tab belongs to the same session.
 
+A remote tab is outside every project registered on the viewing machine. Its
+saved and live working directories remain available for titles and for new
+remote splits to inherit, but they never select a local project or trigger a
+project import offer, initial split, profile, command, environment, or launch
+directory. With no session-scoped override, terminal and window chrome use the
+viewer's application theme, and the tab uses the viewer's configured default
+icon. Explicit pane/tab themes and explicit or hidden tab icons still follow
+the shared session. This display-time fallback does not write one viewer's
+local theme or default icon into the shared session.
+
 ### Carrying panes over Zosh
 
 By default every pane of a remote session arrives on that one SSH forward,

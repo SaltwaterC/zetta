@@ -480,6 +480,75 @@ fn resetting_outside_a_project_restores_the_application_default_even_from_hidden
     assert!(inherited.is_empty());
 }
 
+#[test]
+fn remote_tab_icons_mask_inherited_values_without_overriding_explicit_choices() {
+    let remote = ProjectContextPolicy::Remote;
+    let application_default = Some(IconName::Terminal);
+
+    assert_eq!(
+        resolve_tab_icon(
+            Some(IconName::Folder),
+            TabIconOverride::None,
+            remote,
+            application_default,
+        ),
+        application_default
+    );
+    assert_eq!(
+        resolve_tab_icon(
+            Some(IconName::Folder),
+            TabIconOverride::Icon(IconName::Star),
+            remote,
+            application_default,
+        ),
+        Some(IconName::Star)
+    );
+    assert_eq!(
+        resolve_tab_icon(
+            Some(IconName::Folder),
+            TabIconOverride::Hidden,
+            remote,
+            application_default,
+        ),
+        None
+    );
+}
+
+#[test]
+fn resetting_a_remote_icon_clears_only_the_override_and_keeps_canonical_state() {
+    let canonical_icon = Some(IconName::Folder);
+    let mut icon_override = TabIconOverride::Icon(IconName::Star);
+    let mut inherited = HashMap::from([(1, Some(IconName::Terminal))]);
+
+    reset_remote_tab_icon(1, &mut icon_override, &mut inherited);
+
+    assert_eq!(canonical_icon, Some(IconName::Folder));
+    assert_eq!(icon_override, TabIconOverride::None);
+    assert!(inherited.is_empty());
+    assert_eq!(
+        resolve_tab_icon(
+            canonical_icon,
+            icon_override,
+            ProjectContextPolicy::Remote,
+            Some(IconName::Terminal),
+        ),
+        Some(IconName::Terminal)
+    );
+}
+
+#[test]
+fn local_tab_icons_keep_their_effective_project_or_application_value() {
+    assert_eq!(
+        resolve_tab_icon(
+            Some(IconName::Folder),
+            TabIconOverride::None,
+            ProjectContextPolicy::Local,
+            Some(IconName::Terminal),
+        ),
+        Some(IconName::Folder)
+    );
+}
+
 #[gpui::test]
 fn active_project_theme_overrides_a_profile_theme_it_never_mentioned(
     cx: &mut gpui::TestAppContext,
@@ -519,22 +588,26 @@ fn active_project_theme_overrides_a_profile_theme_it_never_mentioned(
             .unwrap();
         assert_eq!(theme.name.as_ref(), "Solarized Dark");
 
-        let explicit = resolve_terminal_theme(Some("One Dark"), None, &profile, Some(&project), cx)
+        let configured = TerminalThemeFallback::configured(&profile, Some(&project));
+        let explicit = resolve_terminal_theme(Some("One Dark"), None, configured, cx)
             .unwrap()
             .unwrap();
         assert_eq!(explicit.name.as_ref(), "One Dark");
 
-        let tab_override =
-            resolve_terminal_theme(None, Some("Gruvbox Dark"), &profile, Some(&project), cx)
-                .unwrap()
-                .unwrap();
+        let tab_override = resolve_terminal_theme(
+            None,
+            Some("Gruvbox Dark"),
+            TerminalThemeFallback::configured(&profile, Some(&project)),
+            cx,
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(tab_override.name.as_ref(), "Gruvbox Dark");
 
         let pane_override = resolve_terminal_theme(
             Some("One Light"),
             Some("Gruvbox Dark"),
-            &profile,
-            Some(&project),
+            TerminalThemeFallback::configured(&profile, Some(&project)),
             cx,
         )
         .unwrap()
@@ -552,9 +625,14 @@ fn active_project_theme_overrides_a_profile_theme_it_never_mentioned(
             .unwrap()
             .unwrap();
         assert_eq!(theme.name.as_ref(), "Gruvbox Dark");
-        let explicit = resolve_terminal_theme(Some("One Dark"), None, &profile, Some(&project), cx)
-            .unwrap()
-            .unwrap();
+        let explicit = resolve_terminal_theme(
+            Some("One Dark"),
+            None,
+            TerminalThemeFallback::configured(&profile, Some(&project)),
+            cx,
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(explicit.name.as_ref(), "One Dark");
 
         // A project that sets no theme of its own falls back to the profile.
@@ -577,5 +655,33 @@ fn active_project_theme_overrides_a_profile_theme_it_never_mentioned(
             .unwrap()
             .unwrap();
         assert_eq!(theme.name.as_ref(), "Solarized Light");
+    });
+}
+
+#[gpui::test]
+fn remote_terminal_theme_uses_application_fallback_below_session_overrides(
+    cx: &mut gpui::TestAppContext,
+) {
+    cx.update(|cx| {
+        theme::init(theme::LoadThemes::All(Box::new(ZettaAssets)), cx);
+        let registry = ThemeRegistry::global(cx);
+        theme_settings::load_bundled_themes(&registry);
+
+        let application = registry.get("Solarized Light").unwrap();
+        let fallback = TerminalThemeFallback::Application(&application);
+        let theme = resolve_terminal_theme(None, None, fallback, cx)
+            .unwrap()
+            .unwrap();
+        assert_eq!(theme.name.as_ref(), "Solarized Light");
+
+        let theme = resolve_terminal_theme(None, Some("Gruvbox Dark"), fallback, cx)
+            .unwrap()
+            .unwrap();
+        assert_eq!(theme.name.as_ref(), "Gruvbox Dark");
+
+        let theme = resolve_terminal_theme(Some("One Dark"), Some("Gruvbox Dark"), fallback, cx)
+            .unwrap()
+            .unwrap();
+        assert_eq!(theme.name.as_ref(), "One Dark");
     });
 }

@@ -240,6 +240,7 @@ impl Zetta {
             }
         }
         let terminal_themes = match self.resolve_pane_template_themes(
+            tab_id,
             &leaves,
             active_pane_theme_override.as_deref(),
             tab_theme_override.as_deref(),
@@ -381,21 +382,24 @@ impl Zetta {
     /// a borrow of the active tab when it needs this.
     fn resolve_pane_template_themes(
         &self,
+        tab_id: u64,
         leaves: &[ResolvedPaneSplitLeaf],
         active_pane_theme_override: Option<&str>,
         tab_theme_override: Option<&str>,
         project: Option<&ProjectConfig>,
         cx: &App,
     ) -> Result<Vec<Option<Arc<Theme>>>> {
+        let application_theme = self.application_theme(cx);
+        let policy = self.project_context_policy(tab_id);
         let themes = match leaves
             .iter()
             .enumerate()
             .map(|(index, leaf)| {
+                let fallback = policy.theme_fallback(&leaf.profile, project, &application_theme);
                 resolve_terminal_theme(
                     (index == 0).then_some(active_pane_theme_override).flatten(),
                     tab_theme_override,
-                    &leaf.profile,
-                    project,
+                    fallback,
                     cx,
                 )
             })
@@ -634,11 +638,16 @@ impl Zetta {
             self.working_directory.clone(),
             working_directory_configured,
         );
+        let application_theme = self.application_theme(cx);
+        let fallback = self.project_context_policy(tab_id).theme_fallback(
+            &profile,
+            self.active_project_config().map(AsRef::as_ref),
+            &application_theme,
+        );
         let terminal_theme = match resolve_terminal_theme(
             pane_theme_override.as_deref(),
             tab_theme_override.as_deref(),
-            &profile,
-            self.active_project_config().map(AsRef::as_ref),
+            fallback,
             cx,
         ) {
             Ok(theme) => theme,

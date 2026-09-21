@@ -340,7 +340,8 @@ impl Zetta {
                 }
             };
         let restored_panes = restored_pane_metadata(&state, &persisted_summary);
-        let restored_metadata = self.prepare_restored_panes(restored_panes.clone());
+        let restored_metadata =
+            self.prepare_restored_panes(restored_panes.clone(), ProjectContextPolicy::Local);
         let restored_profiles = self.restored_profiles(&restored_panes, &restored_metadata);
         let snapshot_routing_ids = state
             .panes

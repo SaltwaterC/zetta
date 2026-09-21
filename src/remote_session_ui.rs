@@ -615,7 +615,7 @@ impl Zetta {
             self.serial_console = None;
         }
         let remote = self.launch_config.sessions.remote.clone();
-        let templates = remote_session_templates(self.effective_config());
+        let templates = remote_session_templates(&self.launch_config);
         let picker = RemoteSessionPicker {
             suggestions: crate::multi_command::ssh_config_host_suggestions(),
             generation: operation_generation,
@@ -745,7 +745,7 @@ impl Zetta {
             }
         };
         let spec = match build_remote_create_spec(
-            self.effective_config(),
+            &self.launch_config,
             &template,
             &profile_name,
             &profiles,

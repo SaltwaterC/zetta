@@ -157,12 +157,13 @@ still display notifications but do not route clicks.
 From a Zetta pane, `zetta tabicon ICON` sets a per-tab icon override on the
 active tab (`none` explicitly hides its icon); `zetta tabicon --reset` (or `-r`)
 clears that override so the active project's effective icon, or the configured
-application default outside a project, is used. The choice is kept with the
+application default outside a project and in remote sessions, is used. The choice is kept with the
 logical tab but is not written to user or project configuration.
 `zetta theme pane THEME`
 sets a session-scoped theme on the active pane, while `zetta theme tab THEME`
 sets one for the whole tab. Pane themes take precedence over tab themes, and
-`--reset` restores the next configured theme in the chain. **Reset Pane Theme**
+`--reset` restores the next configured theme in the chain; remote sessions fall
+back directly to the local application's theme. **Reset Pane Theme**
 and **Reset Tab Theme** are also available from the command palette. These overrides
 follow their pane or tab through backgrounding, reconnect, and encrypted disk
 resume, but are cleared when the pane or tab closes or configuration reloads.
