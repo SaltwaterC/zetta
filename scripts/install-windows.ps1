@@ -16,11 +16,13 @@ param(
     [string]$SourceZoshBinary,
     [string]$SourceZoshServerBinary,
     [string]$SourceZwtBinary,
+    [string]$SourceNotifyBinary,
     [switch]$WorktreeEnabled,
     [switch]$MuxDisabled,
     [switch]$UpgradeMux,
     [switch]$ZoshEnabled,
     [switch]$ZoshServerEnabled,
+    [switch]$NotifyEnabled,
     [string]$InstallDirectory,
     [string]$ShortcutPath
 )
@@ -36,6 +38,7 @@ if (-not $env:APPDATA) {
 
 $zoshSourceProvided = [bool]$SourceZoshBinary
 $zoshServerSourceProvided = [bool]$SourceZoshServerBinary
+$notifySourceProvided = [bool]$SourceNotifyBinary
 
 $repositoryRoot = Split-Path -Parent $PSScriptRoot
 $muxEnabled = -not $MuxDisabled
@@ -66,8 +69,14 @@ if ($zoshSourceProvided) {
 if ($zoshServerSourceProvided) {
     $ZoshServerEnabled = $true
 }
+if ($notifySourceProvided) {
+    $NotifyEnabled = $true
+}
 if ($WorktreeEnabled -and -not $SourceZwtBinary) {
     $SourceZwtBinary = Join-Path (Split-Path -Parent $SourceBinary) "zwt.exe"
+}
+if ($NotifyEnabled -and -not $SourceNotifyBinary) {
+    $SourceNotifyBinary = Join-Path (Split-Path -Parent $SourceBinary) "zntfy.exe"
 }
 if (-not $InstallDirectory) {
     $InstallDirectory = Join-Path $env:LOCALAPPDATA "Programs\Zetta"
@@ -84,6 +93,7 @@ $installedZoshBinary = Join-Path $InstallDirectory "zosh.exe"
 $installedZoshServerBinary = Join-Path $InstallDirectory "zosh-server.exe"
 $legacyMoshServerBinary = Join-Path $InstallDirectory "mosh-server.exe"
 $installedZwtBinary = Join-Path $InstallDirectory "zwt.exe"
+$installedNotifyBinary = Join-Path $InstallDirectory "zntfy.exe"
 $runtimeFileNames = @("conpty.dll", "OpenConsole.exe")
 $sourceDirectory = Split-Path -Parent $SourceBinary
 $pathMarker = Join-Path $InstallDirectory ".zetta-path-managed"
@@ -119,6 +129,9 @@ function Get-InstallFiles {
     if ($WorktreeEnabled) {
         $files += [pscustomobject]@{ Source = $SourceZwtBinary; Destination = $installedZwtBinary }
     }
+    if ($NotifyEnabled) {
+        $files += [pscustomobject]@{ Source = $SourceNotifyBinary; Destination = $installedNotifyBinary }
+    }
     foreach ($fileName in $runtimeFileNames) {
         $files += [pscustomobject]@{
             Source = Join-Path $sourceDirectory $fileName
@@ -150,6 +163,26 @@ function Remove-DisabledWorktreeFiles {
                 Write-Host "Removed $path"
             } catch {
                 Write-Warning "Could not remove disabled worktree executable ${path}: $_"
+            }
+        }
+    }
+}
+
+function Remove-DisabledNotifyFiles {
+    if ($NotifyEnabled) {
+        return
+    }
+    foreach ($path in @(
+        $installedNotifyBinary,
+        (Get-VersionedPath $installedNotifyBinary "new"),
+        (Get-VersionedPath $installedNotifyBinary "old")
+    )) {
+        if (Test-Path -LiteralPath $path) {
+            try {
+                Remove-Item -LiteralPath $path -Force
+                Write-Host "Removed $path"
+            } catch {
+                Write-Warning "Could not remove disabled notification executable ${path}: $_"
             }
         }
     }
@@ -384,6 +417,7 @@ function Install-Binary {
         Assert-PtyHostStopped
     }
     Remove-DisabledWorktreeFiles
+    Remove-DisabledNotifyFiles
     Remove-DisabledMuxFiles
     Remove-DisabledZoshFiles
     Remove-DisabledZoshServerFiles
@@ -587,6 +621,9 @@ function Uninstall-Binary {
     }
     if (-not $WorktreeEnabled) {
         $filesToRemove += [pscustomobject]@{ Source = $null; Destination = $installedZwtBinary }
+    }
+    if (-not $NotifyEnabled) {
+        $filesToRemove += [pscustomobject]@{ Source = $null; Destination = $installedNotifyBinary }
     }
     if (-not $ZoshEnabled) {
         $filesToRemove += [pscustomobject]@{ Source = $null; Destination = $installedZoshBinary }

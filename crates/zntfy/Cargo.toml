@@ -1,0 +1,46 @@
+[package]
+name = "zntfy"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "GPL-3.0-or-later"
+description = "Standalone cross-platform desktop notifications for Zetta and other terminals"
+
+[lib]
+path = "src/lib.rs"
+doctest = false
+
+[[bin]]
+name = "zntfy"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+futures = "0.3"
+libc = "0.2"
+notify-rust = { version = "4", features = ["preview-macos-un"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sysinfo = "0.37"
+tempfile = "3"
+zmux = { path = "../zmux", default-features = false }
+
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+cpal = "0.16"
+
+[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
+ashpd = { version = "0.13", default-features = false, features = ["async-io", "notification"] }
+url = "2.2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+mac-usernotifications = { version = "0.3.1", features = ["blocking-wrappers"] }
+
+[target.'cfg(windows)'.dependencies]
+uds_windows = "1.2"
+windows-registry = "0.5"
+
+[lints.clippy]
+manual_let_else = "deny"
+map_unwrap_or = "deny"
+redundant_closure = "deny"
+semicolon_if_nothing_returned = "deny"

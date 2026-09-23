@@ -42,7 +42,7 @@ serial-console = ["dep:serialport"]
 http-server = []
 tftp-server = []
 tftp-client = []
-notifications = ["dep:notify-rust", "dep:cpal", "dep:mac-usernotifications", "dep:ashpd"]
+notifications = []
 clipboard = ["dep:arboard"]
 worktree = ["dep:zwt", "zwt/recursive-submodules"]
 zosh = ["zosh-client", "zosh-server"]
@@ -115,7 +115,6 @@ image = { version = "0.25", default-features = false, features = [
 ] }
 menu = { path = "crates/menu" }
 moshcatty = { git = "https://github.com/binaricat/MoshCatty.git", rev = "554b9d305e7ac4b11de740d764bbc3e05f816d7b", optional = true }
-notify-rust = { version = "4", features = ["preview-macos-un"], optional = true }
 release_channel = { path = "crates/release_channel" }
 reqwest_client = { path = "zed/crates/reqwest_client" }
 rust-embed = "8"
@@ -199,11 +198,7 @@ windows = { version = "0.61", features = [
 ] }
 windows-core = "0.61"
 
-[target.'cfg(not(target_os = "macos"))'.dependencies]
-cpal = { version = "0.16", optional = true }
-
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
-ashpd = { version = "0.13", default-features = false, features = ["async-io", "notification"], optional = true }
 url = "2.2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
@@ -211,7 +206,6 @@ zbus = { version = "5.17", default-features = false, features = ["async-io"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = "0.6"
-mac-usernotifications = { version = "0.3.1", features = ["blocking-wrappers"], optional = true }
 url = "2.2"
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = ["block2", "NSApplication", "NSEvent", "NSMenu"] }

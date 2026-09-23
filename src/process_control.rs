@@ -64,8 +64,6 @@ pub(crate) use client::PaneThemeAnswer;
 pub(crate) use client::ProcessPaneThemeQuery;
 #[cfg(all(feature = "notifications", any(test, not(target_os = "macos"))))]
 pub(crate) use client::request_process_focus_tab;
-#[cfg(feature = "notifications")]
-pub(crate) use client::request_process_silent_mode;
 pub(crate) use client::{
     request_existing_process_command, request_existing_process_configuration_reload,
     request_existing_process_new_window, request_existing_process_pane,

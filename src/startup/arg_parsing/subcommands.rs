@@ -591,7 +591,9 @@ pub(super) fn parse_notify_subcommand(arguments: &[OsString]) -> Result<StartupA
                 std::process::exit(0);
             }
             return Ok(StartupArgs::for_mode(StartupMode::CliService(
-                parse_notify_cleanup_args(cleanup_arguments.iter().cloned())?,
+                CliServiceCommand::NotifyCleanup(parse_notify_cleanup_args(
+                    cleanup_arguments.iter().cloned(),
+                )?),
             )));
         }
         #[cfg(not(notify_cleanup_enabled))]
@@ -609,7 +611,7 @@ pub(super) fn parse_notify_subcommand(arguments: &[OsString]) -> Result<StartupA
             std::process::exit(0);
         }
         Ok(StartupArgs::for_mode(StartupMode::CliService(
-            parse_notify_args(arguments.iter().cloned())?,
+            CliServiceCommand::Notify(parse_notify_args(arguments.iter().cloned())?),
         )))
     }
     #[cfg(not(feature = "notifications"))]

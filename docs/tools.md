@@ -142,9 +142,15 @@ equivalent shortcut and retains TFTP command completion.
 
 ## Desktop notifications
 
-`zetta notify` shows a desktop notification through the native notification
-system of the current platform: D-Bus on Linux and BSD, Notification Center on
-macOS, and toast notifications on Windows.
+`zntfy` is the standalone desktop notification command. It works from Zetta or
+another terminal emulator and uses the current platform's native notification
+system: D-Bus on Linux and BSD, Notification Center on macOS, and toast
+notifications on Windows. With the `notifications` feature enabled,
+`zetta notify` proxies to the sibling `zntfy` executable and accepts the same options.
+Build both executables with `make build` for local development; packaged builds
+install them together. To build them directly with Cargo, run
+`cargo build --bin zetta` and
+`cargo build --manifest-path crates/zntfy/Cargo.toml --target-dir target --bin zntfy`.
 
 On macOS, an installed CLI transparently submits notifications through the
 signed `Zetta.app` bundle and the modern `UNUserNotificationCenter` API. The
@@ -198,6 +204,7 @@ zetta notify "Build finished"
 zetta notify "Build finished" "All tests passed"
 zetta notify --icon ./artifacts/logo.png --sound zetta-ok "Build finished"
 zetta notify --sound zetta-alarm --timeout never "Long-running task complete"
+zntfy "Build finished" "From any terminal"
 ```
 
 SUMMARY is required and is the notification's title; BODY is optional
@@ -220,24 +227,24 @@ platform recognizes it. On macOS, Notification Center owns playback of system
 sound names, while Zetta's built-in tones continue asynchronously after
 `zetta notify` exits.
 
-When `zetta notify` runs inside a Zetta terminal with both inherited
+When `zntfy` or `zetta notify` runs inside a Zetta terminal with both inherited
 `ZETTA_PROCESS_ID` and `ZETTA_ATTENTION_ID` values valid, clicking the
 notification body activates the matching Zetta window and visible tab.
 Dismissing, timing out, replying to, or choosing another notification action
 does not focus anything. If the tab has closed or is only dormant/background,
 the click is a no-op; Zetta does not reconnect sessions for notifications.
-Outside Zetta, or when either inherited value is missing or invalid, plain
-`zetta notify` remains fire-and-forget. Packaged macOS app builds support this
+Outside Zetta, or when either inherited value is missing or invalid, the
+notification remains fire-and-forget. Packaged macOS app builds support this
 click routing; unbundled development builds use `osascript` and display the
 notification without routing its click.
 
-With [shell integration](shell-integration.md) enabled, `zntfy` is an
-equivalent shortcut and retains notification command completion.
+With [shell integration](shell-integration.md) enabled, the `zntfy` shortcut
+retains notification command completion.
 
-A notification targeting a tab spawns a short-lived background process that
+A notification targeting a tab spawns a background `zntfy` process that
 waits for the click so it can focus the originating tab, then exits once the
-notification's own timeout has passed. On Linux and BSD, `zetta notify cleanup`
-finds and terminates any of these processes that have outlived their
+notification's own timeout has passed. On Linux and BSD, `zntfy cleanup` and
+its `zetta notify cleanup` proxy find and terminate any workers that have outlived their
 notification's timeout; `--dry-run` lists them without terminating anything.
 This is normally unnecessary, since each process bounds its own lifetime to
 the notification's timeout, but some notification servers (GNOME Shell in

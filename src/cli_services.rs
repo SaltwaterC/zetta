@@ -15,15 +15,15 @@ pub(crate) use servers::{http_server_help, parse_http_args};
 pub(crate) use servers::{parse_tftp_server_args, tftp_server_help};
 
 #[cfg(feature = "notifications")]
-mod notify;
+mod notify_proxy;
 #[cfg(all(test, notify_cleanup_enabled))]
-pub(crate) use notify::NotifyCleanupCommand;
+pub(crate) use notify_proxy::NotifyCleanupCommand;
 #[cfg(all(target_os = "macos", feature = "notifications"))]
-pub(crate) use notify::macos_notification_target_for_response;
+pub(crate) use notify_proxy::macos_notification_target_for_response;
 #[cfg(notify_cleanup_enabled)]
-pub(crate) use notify::{notify_cleanup_help, parse_notify_cleanup_args};
+pub(crate) use notify_proxy::{notify_cleanup_help, parse_notify_cleanup_args};
 #[cfg(feature = "notifications")]
-pub(crate) use notify::{notify_help, parse_notify_args, run_notification};
+pub(crate) use notify_proxy::{notify_help, parse_notify_args, run_notification_proxy};
 
 #[cfg(feature = "clipboard")]
 mod clipboard;
@@ -32,9 +32,6 @@ pub(crate) use clipboard::{copy_help, parse_copy_args, parse_paste_args, paste_h
 
 use anyhow::Result;
 
-/// The timeout values accepted by both `notify` and `attention --notify`.
-/// Keeping this type independent of notify-rust lets badge-only builds parse
-/// and reject notification options without pulling in the optional backend.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum NotificationTimeout {
     #[default]
@@ -84,9 +81,9 @@ pub(crate) enum CliServiceCommand {
     #[cfg(feature = "tftp-server")]
     Tftp(servers::TftpServerCommand),
     #[cfg(feature = "notifications")]
-    Notify(notify::NotifyCommand),
+    Notify(NotificationRequest),
     #[cfg(notify_cleanup_enabled)]
-    NotifyCleanup(notify::NotifyCleanupCommand),
+    NotifyCleanup(notify_proxy::NotifyCleanupCommand),
     #[cfg(feature = "clipboard")]
     Copy(clipboard::CopyCommand),
     #[cfg(feature = "clipboard")]
@@ -106,11 +103,12 @@ impl CliServiceCommand {
             #[cfg(feature = "tftp-server")]
             Self::Tftp(command) => command.run(),
             #[cfg(feature = "notifications")]
-            Self::Notify(command) => {
-                notify::run_notification(command, notify::notification_target_from_environment())
-            }
+            Self::Notify(command) => notify_proxy::run_notification_proxy(
+                command,
+                notify_proxy::notification_target_from_environment(),
+            ),
             #[cfg(notify_cleanup_enabled)]
-            Self::NotifyCleanup(command) => notify::run_notify_cleanup(command),
+            Self::NotifyCleanup(command) => notify_proxy::run_notification_cleanup_proxy(command),
             #[cfg(feature = "clipboard")]
             Self::Copy(command) => command.run(),
             #[cfg(feature = "clipboard")]

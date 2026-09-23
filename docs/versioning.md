@@ -43,7 +43,7 @@ the current version of a format:
 
 There is also one deliberately versioned local cache artifact: macOS built-in
 notification audio is stored with a `-v1.wav` suffix in
-`src/notification_sounds.rs`. Bump that suffix when the waveform or WAV
+`crates/zntfy/src/sounds.rs`. Bump that suffix when the waveform or WAV
 encoding changes; it only invalidates regenerated audio and does not affect
 Zetta peers, sessions, or persisted configuration.
 

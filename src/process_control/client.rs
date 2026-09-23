@@ -406,17 +406,6 @@ impl ProcessPaneThemeQuery {
     }
 }
 
-#[cfg(feature = "notifications")]
-pub(crate) fn request_process_silent_mode(
-    process_id: u32,
-    attention_id: Option<u64>,
-) -> Result<bool> {
-    anyhow::ensure!(process_id != 0, "process ID must be positive");
-    anyhow::ensure!(attention_id != Some(0), "attention ID must be positive");
-    let endpoint = read_control_endpoint(process_id)?;
-    send_get_silent_mode_request(&endpoint, attention_id)
-}
-
 #[cfg(all(feature = "notifications", any(test, not(target_os = "macos"))))]
 pub(crate) fn request_process_focus_tab(process_id: u32, attention_id: u64) -> Result<bool> {
     anyhow::ensure!(process_id != 0, "process ID must be positive");
@@ -496,6 +485,7 @@ fn send_reload_projects_request(endpoint: &ControlEndpoint) -> Result<bool> {
 }
 
 #[cfg(feature = "notifications")]
+#[cfg(test)]
 fn send_get_silent_mode_request(
     endpoint: &ControlEndpoint,
     attention_id: Option<u64>,

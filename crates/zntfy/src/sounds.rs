@@ -1,3 +1,5 @@
+//! Built-in notification tones, synthesis, and platform playback.
+
 #[cfg(not(target_os = "macos"))]
 use std::sync::{Arc, Condvar, Mutex};
 #[cfg(not(target_os = "macos"))]
@@ -22,7 +24,7 @@ use std::process::{Command, Stdio};
 /// theme and may not play at all), these are rendered and played directly by
 /// Zetta, so they work identically regardless of the host's audio setup.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum BuiltinSound {
+pub enum BuiltinSound {
     Default,
     Ok,
     Alarm,
@@ -30,13 +32,13 @@ pub(crate) enum BuiltinSound {
 }
 
 impl BuiltinSound {
-    pub(crate) const ALL: [Self; 4] = [Self::Default, Self::Ok, Self::Alarm, Self::Gong];
+    pub const ALL: [Self; 4] = [Self::Default, Self::Ok, Self::Alarm, Self::Gong];
 
-    pub(crate) fn parse(name: &str) -> Option<Self> {
+    pub fn parse(name: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|sound| sound.name() == name)
     }
 
-    pub(crate) fn name(self) -> &'static str {
+    pub fn name(self) -> &'static str {
         match self {
             Self::Default => "zetta-default",
             Self::Ok => "zetta-ok",
@@ -75,7 +77,7 @@ impl BuiltinSound {
         }
     }
 
-    pub(crate) fn play(self) -> Result<()> {
+    pub fn play(self) -> Result<()> {
         #[cfg(target_os = "macos")]
         {
             self.play_with_afplay()
@@ -89,7 +91,7 @@ impl BuiltinSound {
 
     #[cfg(target_os = "macos")]
     fn play_with_afplay(self) -> Result<()> {
-        let audio_path = prepare_macos_builtin_sound(self, &crate::config::platform_config_dir())?;
+        let audio_path = prepare_macos_builtin_sound(self, &crate::platform_config_dir())?;
         spawn_afplay(&audio_path).context("starting macOS notification audio")?;
         Ok(())
     }
@@ -275,12 +277,12 @@ struct Note {
 const GONG_DURATION_MS: u32 = 4_200;
 const GONG_PEAK_AMPLITUDE: f32 = 0.3;
 const GONG_PCM_SAMPLE_RATE: u32 = 22_050;
-const GONG_PCM: &[u8] = include_bytes!("notification_sounds/gong.pcm");
+const GONG_PCM: &[u8] = include_bytes!("sounds/gong.pcm");
 
 // This is a real CC0 gong recording, not a synthesized approximation. The
 // source is lossless signed 16-bit PCM: companded 8-bit audio produces audible
 // quantization steps as a metallic sound decays. Linear interpolation adapts
-// it to the output device's native rate. See notification_sounds/README.md for
+// it to the output device's native rate. See sounds/README.md for
 // provenance.
 fn render_gong(sample_rate: u32) -> Vec<f32> {
     if sample_rate == 0 || GONG_PCM.is_empty() {
@@ -358,5 +360,5 @@ fn render(notes: &[Note], sample_rate: u32) -> Vec<f32> {
 }
 
 #[cfg(test)]
-#[path = "tests/notification_sounds.rs"]
+#[path = "tests/sounds.rs"]
 mod tests;

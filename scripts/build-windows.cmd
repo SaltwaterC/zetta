@@ -20,6 +20,14 @@ set "BINARIES=!BINARIES! --bin zwt"
 set "VERIFY_ARGS=!VERIFY_ARGS! -WorktreeBinaryPath !TARGET_DIR!\zwt.exe"
 exit /b 0
 
+:append_notification_target
+if /i "%~1"=="0" exit /b 0
+if /i "%~1"=="false" exit /b 0
+if /i "%~1"=="no" exit /b 0
+if /i "%~1"=="off" exit /b 0
+set "VERIFY_ARGS=!VERIFY_ARGS! -NotifyBinaryPath !TARGET_DIR!\zntfy.exe"
+exit /b 0
+
 :append_zmux_targets
 if /i "%~1"=="0" exit /b 0
 if /i "%~1"=="false" exit /b 0
@@ -95,9 +103,15 @@ call :append_zmux_targets "%ZMUX%"
 call :append_zosh_client_targets "%ZOSH_CLIENT%"
 call :append_zosh_server_targets "%ZOSH_SERVER%"
 call :append_worktree_targets "%WORKTREE%"
+call :append_notification_target "%NOTIFY%"
 
 call scripts\cargo-windows.cmd build %PROFILE_ARGS% --jobs %CARGO_BUILD_JOBS% --locked --no-default-features --features %FEATURES% !BINARIES!
 if errorlevel 1 exit /b !errorlevel!
+
+if /i not "%NOTIFY%"=="0" if /i not "%NOTIFY%"=="false" if /i not "%NOTIFY%"=="no" if /i not "%NOTIFY%"=="off" (
+    call scripts\cargo-windows.cmd build %PROFILE_ARGS% --jobs %CARGO_BUILD_JOBS% --locked --manifest-path crates\zntfy\Cargo.toml --target-dir target --bin zntfy
+    if errorlevel 1 exit /b !errorlevel!
+)
 
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\verify-windows-binary.ps1 -ConsoleBinaryPath !TARGET_DIR!\zetta.exe -GuiBinaryPath !TARGET_DIR!\zetta-gui.exe !VERIFY_ARGS!
 exit /b !errorlevel!

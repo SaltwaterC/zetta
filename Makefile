@@ -66,6 +66,7 @@ ZETTA_CRATE_DIRS := \
 	crates/terminal \
 	crates/terminal_view \
 	crates/zetta_profiles \
+	crates/zntfy \
 	crates/zwt \
 	crates/zmux \
 	crates/zosh \
@@ -77,6 +78,7 @@ ZETTA_TEST_CRATE_DIRS := \
 	crates/alacritty_terminal \
 	crates/terminal \
 	crates/zetta_profiles \
+	crates/zntfy \
 	crates/zwt \
 	crates/zmux \
 	crates/zosh \
@@ -192,6 +194,7 @@ MAC_CLI_DIR := $(DESTDIR)$(PREFIX)/bin
 MAC_CLI_PATH := $(MAC_CLI_DIR)/zetta
 MAC_ZMUX_CLI_PATH := $(MAC_CLI_DIR)/zmux
 MAC_ZWT_CLI_PATH := $(MAC_CLI_DIR)/zwt
+MAC_ZNTFY_CLI_PATH := $(MAC_CLI_DIR)/zntfy
 MAC_ZOSH_CLI_PATH := $(MAC_CLI_DIR)/zosh
 MAC_ZOSH_SERVER_PATH := $(MAC_CLI_DIR)/zosh-server
 LINUX_USER_INSTALL := $(if $(and $(filter Linux,$(UNAME_S)),$(IS_ROOT)),,1)
@@ -200,9 +203,11 @@ LINUX_USER_BIN_DIR := $(DESTDIR)$(HOME)/.local/bin
 LINUX_USER_DESKTOP_DIR := $(LINUX_USER_DATA_DIR)/applications
 LINUX_USER_CLI_PATH := $(LINUX_USER_BIN_DIR)/zetta
 LINUX_USER_ZWT_PATH := $(LINUX_USER_BIN_DIR)/zwt
+LINUX_USER_ZNTFY_PATH := $(LINUX_USER_BIN_DIR)/zntfy
 LINUX_USER_ZOSH_PATH := $(LINUX_USER_BIN_DIR)/zosh
 
 WINDOWS_ZWT_ARGS := $(if $(call tool_enabled,$(WORKTREE)), -SourceZwtBinary "$(BUILD_TARGET_DIR)/zwt.exe",)
+WINDOWS_NOTIFY_ARGS := $(if $(call tool_enabled,$(NOTIFY)), -SourceNotifyBinary "$(BUILD_TARGET_DIR)/zntfy.exe",)
 WINDOWS_ZOSH_ARGS := $(if $(call tool_enabled,$(ZOSH_CLIENT)), -SourceZoshBinary "$(BUILD_TARGET_DIR)/zosh.exe",)$(if $(call tool_enabled,$(ZOSH_SERVER)), -SourceZoshServerBinary "$(BUILD_TARGET_DIR)/zosh-server.exe",)
 WINDOWS_ZMUX_ARGS := $(if $(call tool_enabled,$(ZMUX)),, -MuxDisabled)
 WINDOWS_ZMUX_UPGRADE_ARGS := $(if $(call tool_enabled,$(ZMUX)), -UpgradeMux,)
@@ -482,10 +487,10 @@ build:
 	cmd.exe /d /c scripts\build-windows.cmd $(CARGO_PROFILE_ARGS)
 
 install: build
-	powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/install-windows.ps1 -Action Install -SourceBinary "$(BUILD_TARGET_DIR)/zetta.exe" -SourceGuiBinary "$(BUILD_TARGET_DIR)/zetta-gui.exe" $(WINDOWS_ZMUX_ARGS)$(WINDOWS_ZMUX_UPGRADE_ARGS) $(WINDOWS_ZOSH_ARGS)$(WINDOWS_ZWT_ARGS)
+	powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/install-windows.ps1 -Action Install -SourceBinary "$(BUILD_TARGET_DIR)/zetta.exe" -SourceGuiBinary "$(BUILD_TARGET_DIR)/zetta-gui.exe" $(WINDOWS_ZMUX_ARGS)$(WINDOWS_ZMUX_UPGRADE_ARGS) $(WINDOWS_ZOSH_ARGS)$(WINDOWS_ZWT_ARGS)$(WINDOWS_NOTIFY_ARGS)
 
 install-binary:
-	powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/install-windows.ps1 -Action InstallBinary -SourceBinary "$(BUILD_TARGET_DIR)/zetta.exe" -SourceGuiBinary "$(BUILD_TARGET_DIR)/zetta-gui.exe" $(WINDOWS_ZMUX_ARGS) $(WINDOWS_ZOSH_ARGS)$(WINDOWS_ZWT_ARGS)
+	powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/install-windows.ps1 -Action InstallBinary -SourceBinary "$(BUILD_TARGET_DIR)/zetta.exe" -SourceGuiBinary "$(BUILD_TARGET_DIR)/zetta-gui.exe" $(WINDOWS_ZMUX_ARGS) $(WINDOWS_ZOSH_ARGS)$(WINDOWS_ZWT_ARGS)$(WINDOWS_NOTIFY_ARGS)
 
 install-capabilities:
 
@@ -509,6 +514,9 @@ refresh-desktop-caches:
 else ifeq ($(UNAME_S),Darwin)
 build:
 	$(ENV) -u DESTDIR $(CARGO_RUN) build $(CARGO_PROFILE_ARGS) --locked --no-default-features --features "$(BUILD_FEATURES)"
+ifneq ($(call tool_enabled,$(NOTIFY)),)
+	$(ENV) -u DESTDIR $(CARGO_RUN) build $(CARGO_PROFILE_ARGS) --locked --manifest-path crates/zntfy/Cargo.toml --target-dir target --bin zntfy
+endif
 
 install:
 	@if [ "$$(id -u)" -eq 0 ]; then \
@@ -535,6 +543,11 @@ endif
 install-binary:
 	mkdir -p "$(MAC_BUNDLE)/Contents/MacOS" "$(BINDIR)"
 	$(INSTALL) -m 755 "$(BUILD_TARGET_DIR)/zetta" "$(MAC_BUNDLE)/Contents/MacOS/zetta"
+ifneq ($(call tool_enabled,$(NOTIFY)),)
+	$(INSTALL) -m 755 "$(BUILD_TARGET_DIR)/zntfy" "$(MAC_BUNDLE)/Contents/MacOS/zntfy"
+else
+	$(RM) "$(MAC_BUNDLE)/Contents/MacOS/zntfy"
+endif
 ifneq ($(call tool_enabled,$(ZMUX)),)
 	$(INSTALL) -m 755 "$(BUILD_TARGET_DIR)/zmux" "$(MAC_BUNDLE)/Contents/MacOS/zmux"
 else
@@ -559,6 +572,13 @@ endif
 	$(RM) "$(MAC_CLI_PATH)"
 	sed 's|@MAC_RUNTIME_BUNDLE@|$(MAC_RUNTIME_BUNDLE)|g' resources/macos/zetta-cli.in > "$(MAC_CLI_PATH)"
 	chmod 755 "$(MAC_CLI_PATH)"
+ifneq ($(call tool_enabled,$(NOTIFY)),)
+	$(RM) "$(MAC_ZNTFY_CLI_PATH)"
+	sed 's|@MAC_RUNTIME_BUNDLE@|$(MAC_RUNTIME_BUNDLE)|g' resources/macos/zntfy-cli.in > "$(MAC_ZNTFY_CLI_PATH)"
+	chmod 755 "$(MAC_ZNTFY_CLI_PATH)"
+else
+	$(RM) "$(MAC_ZNTFY_CLI_PATH)"
+endif
 ifneq ($(call tool_enabled,$(ZMUX)),)
 	$(RM) "$(MAC_ZMUX_CLI_PATH)"
 	sed 's|@MAC_RUNTIME_BUNDLE@|$(MAC_RUNTIME_BUNDLE)|g' resources/macos/zmux-cli.in > "$(MAC_ZMUX_CLI_PATH)"
@@ -613,8 +633,10 @@ uninstall-binary:
 	$(RM) "$(MAC_ZWT_CLI_PATH)"
 	$(RM) "$(MAC_ZOSH_CLI_PATH)"
 	$(RM) "$(MAC_ZOSH_SERVER_PATH)"
+	$(RM) "$(MAC_ZNTFY_CLI_PATH)"
 	$(RM) "$(MAC_CLI_DIR)/mosh-server"
 	$(RM) "$(MAC_BUNDLE)/Contents/MacOS/zetta"
+	$(RM) "$(MAC_BUNDLE)/Contents/MacOS/zntfy"
 	$(RM) "$(MAC_BUNDLE)/Contents/MacOS/zmux"
 	$(RM) "$(MAC_BUNDLE)/Contents/MacOS/zosh"
 	$(RM) "$(MAC_BUNDLE)/Contents/MacOS/zwt"
@@ -627,6 +649,9 @@ refresh-desktop-caches:
 else
 build:
 	$(ENV) -u DESTDIR $(CARGO_RUN) build $(CARGO_PROFILE_ARGS) --locked --no-default-features --features "$(BUILD_FEATURES)"
+ifneq ($(call tool_enabled,$(NOTIFY)),)
+	$(ENV) -u DESTDIR $(CARGO_RUN) build $(CARGO_PROFILE_ARGS) --locked --manifest-path crates/zntfy/Cargo.toml --target-dir target --bin zntfy
+endif
 
 install:
 	@if [ "$$(id -u)" -eq 0 ]; then \
@@ -652,6 +677,11 @@ endif
 
 install-binary:
 	$(INSTALL) -Dm755 "$(BUILD_TARGET_DIR)/zetta" $(BINDIR)/zetta
+ifneq ($(call tool_enabled,$(NOTIFY)),)
+	$(INSTALL) -Dm755 "$(BUILD_TARGET_DIR)/zntfy" $(BINDIR)/zntfy
+else
+	$(RM) $(BINDIR)/zntfy
+endif
 	# The multiplexer holds background sessions, so it has to be installed
 	# beside Zetta: a client starts it from its own directory rather than
 	# through PATH, where an unrelated zmux could be picked up instead.
@@ -697,6 +727,12 @@ ifneq ($(call tool_enabled,$(WORKTREE)),)
 	ln -s "$(BINDIR)/zwt" "$(LINUX_USER_ZWT_PATH)"
 else
 	$(RM) "$(LINUX_USER_ZWT_PATH)"
+endif
+ifneq ($(call tool_enabled,$(NOTIFY)),)
+	$(RM) "$(LINUX_USER_ZNTFY_PATH)"
+	ln -s "$(BINDIR)/zntfy" "$(LINUX_USER_ZNTFY_PATH)"
+else
+	$(RM) "$(LINUX_USER_ZNTFY_PATH)"
 endif
 endif
 
@@ -761,11 +797,13 @@ uninstall-binary:
 	$(RM) $(BINDIR)/zosh-server
 	$(RM) $(BINDIR)/mosh-server
 	$(RM) $(BINDIR)/zwt
+	$(RM) $(BINDIR)/zntfy
 ifneq ($(LINUX_USER_INSTALL),)
 	$(RM) "$(LINUX_USER_CLI_PATH)"
 	$(RM) "$(LINUX_USER_BIN_DIR)/zmux"
 	$(RM) "$(LINUX_USER_ZOSH_PATH)"
 	$(RM) "$(LINUX_USER_ZWT_PATH)"
+	$(RM) "$(LINUX_USER_ZNTFY_PATH)"
 endif
 	$(MAKE) uninstall-user-path
 

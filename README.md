@@ -149,6 +149,8 @@ PATH`, `zetta http server`, `zetta tftp server`, and `zetta notify`. From a
 Zetta terminal, `zetta attention [OPTIONS] [SUMMARY] [BODY]` marks the
 originating tab with a badge; it works in badge-only builds, defaults to
 `Attention required`, and adds a desktop notification when `--notify` is used.
+The standalone `zntfy` command sends the same notifications from other terminal
+emulators; a notifications-enabled `zetta notify` proxies to it.
 Notifications issued from a Zetta terminal can be clicked to activate their
 issuing window and visible tab; closed, dormant, or background-only tabs are
 left alone. Plain `zetta notify` outside Zetta remains fire-and-forget.

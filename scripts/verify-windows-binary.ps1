@@ -8,7 +8,8 @@ param(
     [string]$PtyBinaryPath,
     [string]$ZoshBinaryPath,
     [string]$ZoshServerBinaryPath,
-    [string]$WorktreeBinaryPath
+    [string]$WorktreeBinaryPath,
+    [string]$NotifyBinaryPath
 )
 
 $ErrorActionPreference = "Stop"
@@ -78,6 +79,10 @@ $worktreeBinary = $null
 if ($WorktreeBinaryPath) {
     $worktreeBinary = (Resolve-Path -LiteralPath $WorktreeBinaryPath).Path
 }
+$notifyBinary = $null
+if ($NotifyBinaryPath) {
+    $notifyBinary = (Resolve-Path -LiteralPath $NotifyBinaryPath).Path
+}
 $actualConsoleSubsystem = Get-PeSubsystem $consoleBinary
 $actualGuiSubsystem = Get-PeSubsystem $guiBinary
 $actualMuxSubsystem = $null
@@ -118,6 +123,12 @@ if ($worktreeBinary) {
     $actualWorktreeSubsystem = Get-PeSubsystem $worktreeBinary
     if ($actualWorktreeSubsystem -ne $consoleSubsystem) {
         throw "$worktreeBinary uses PE subsystem $actualWorktreeSubsystem; expected console subsystem $consoleSubsystem"
+    }
+}
+if ($notifyBinary) {
+    $actualNotifySubsystem = Get-PeSubsystem $notifyBinary
+    if ($actualNotifySubsystem -ne $consoleSubsystem) {
+        throw "$notifyBinary uses PE subsystem $actualNotifySubsystem; expected console subsystem $consoleSubsystem"
     }
 }
 
@@ -167,6 +178,13 @@ if ($worktreeBinary) {
         throw "$worktreeBinary --help failed its CLI smoke test"
     }
 }
+$notifyHelp = $null
+if ($notifyBinary) {
+    $notifyHelp = ((& $notifyBinary --help | Out-String).Trim() -replace "`r", "")
+    if ($LASTEXITCODE -ne 0 -or $notifyHelp -notmatch '(?m)^Usage: zntfy \[OPTIONS\] SUMMARY \[BODY\]$') {
+        throw "$notifyBinary --help failed its CLI smoke test"
+    }
+}
 
 Write-Host "Verified Windows console executable: $consoleBinary ($version)"
 Write-Host "Verified Windows GUI launcher: $guiBinary"
@@ -184,4 +202,7 @@ if ($zoshServerBinary) {
 }
 if ($worktreeBinary) {
     Write-Host "Verified standalone worktree executable: $worktreeBinary"
+}
+if ($notifyBinary) {
+    Write-Host "Verified standalone notification executable: $notifyBinary"
 }

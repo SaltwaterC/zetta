@@ -11,7 +11,7 @@ use crate::cli_services::{http_server_help, parse_http_args};
 #[cfg(notify_cleanup_enabled)]
 use crate::cli_services::{notify_cleanup_help, parse_notify_cleanup_args};
 #[cfg(feature = "notifications")]
-use crate::cli_services::{notify_help, parse_notify_args, run_notification};
+use crate::cli_services::{notify_help, parse_notify_args};
 #[cfg(feature = "serial-console")]
 use crate::cli_services::{parse_serial_args, serial_help};
 #[cfg(feature = "tftp-server")]

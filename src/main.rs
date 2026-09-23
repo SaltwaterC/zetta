@@ -30,8 +30,6 @@ mod mux;
 mod mux;
 #[cfg(feature = "session-persistence")]
 mod mux_identity;
-#[cfg(feature = "notifications")]
-mod notification_sounds;
 mod process_control;
 mod profile_cli;
 mod profile_icon;

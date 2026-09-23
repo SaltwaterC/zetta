@@ -153,8 +153,8 @@ make install
 
 This installs `~/Applications/Zetta.app`, including the Zetta icon and the
 development binaries, and creates `~/.local/bin/zetta`, `~/.local/bin/zmux`,
-`~/.local/bin/zosh`, `~/.local/bin/zosh-server`, and `~/.local/bin/zwt` as
-command-line launchers or binaries for the bundled tools.
+`~/.local/bin/zosh`, `~/.local/bin/zosh-server`, `~/.local/bin/zwt`, and
+`~/.local/bin/zntfy` as command-line launchers or binaries for the bundled tools.
 It also adds `~/.local/bin` to the installing user's shell startup file so new
 shells can invoke them directly. See [user-local shell PATH setup](#user-local-shell-path-setup)
 for the shell-specific startup files. Native panes prepend the running
@@ -189,6 +189,7 @@ The build produces the following runtime files in `target\debug`:
 - `zosh.exe`, the bundled standalone Zosh client
 - `zosh-server.exe`, the bundled Rust Zosh server
 - `zwt.exe`, the standalone Git worktree executable
+- `zntfy.exe`, the standalone desktop notification executable when enabled
 - `conpty.dll`
 - `OpenConsole.exe`
 
@@ -208,7 +209,7 @@ This copies the runtime to `%LOCALAPPDATA%\Programs\Zetta`, adds that directory
 to the per-user Windows `PATH`, and creates a Start Menu shortcut. The PATH
 change is inherited by new processes, so open a new console (or restart a
 process that was already running) before invoking `zetta`, `zmux`, `zosh`,
-`zosh-server`, or `zwt`. The shortcut launches `zetta-gui.exe`, which starts
+`zosh-server`, `zwt`, or `zntfy`. The shortcut launches `zetta-gui.exe`, which starts
 the console-native executable without opening an extra console window.
 
 Zetta can be reinstalled while it is running. Windows keeps the previous
@@ -254,7 +255,8 @@ make install
 ```
 
 The Linux user-local install stores the application in `~/.local/zetta.app`,
-links `~/.local/bin/zetta`, `~/.local/bin/zmux`, and `~/.local/bin/zwt` to their
+links `~/.local/bin/zetta`, `~/.local/bin/zmux`, `~/.local/bin/zwt`, and
+`~/.local/bin/zntfy` to their
 binaries, and installs the desktop entry under
 `~/.local/share/applications`. The desktop entry uses the installed binary and
 icon paths directly, so it works even when the desktop session does not have

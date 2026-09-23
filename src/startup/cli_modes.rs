@@ -317,7 +317,7 @@ pub(super) fn run_attention_command(command: &AttentionCommand) -> Result<()> {
     anyhow::ensure!(accepted, "the originating Zetta tab is no longer available");
     #[cfg(feature = "notifications")]
     if command.notify {
-        run_notification(&command.notification, Some(target))?;
+        crate::cli_services::run_notification_proxy(&command.notification, Some(target))?;
     }
     #[cfg(not(feature = "notifications"))]
     if command.notify {

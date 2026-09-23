@@ -313,8 +313,9 @@ without that feature, so no call site needs a feature predicate:
 
 - `cli_services.rs`: CLI service dispatch; a module directory —
   `cli_services/serial.rs`, `cli_services/servers.rs` (HTTP + TFTP server),
-  `cli_services/notify.rs`, `cli_services/clipboard.rs`, and
-  `cli_services/raw_terminal.rs`
+  `cli_services/clipboard.rs`, and `cli_services/raw_terminal.rs`. When enabled,
+  its `notify` arm proxies to the sibling `zntfy` executable; the standalone
+  notification backend and built-in sounds live in `crates/zntfy`
 - `byte_stream_pane.rs`: shared pane opener for byte-stream-backed panes
   (HTTP/TFTP server log panes, the serial console)
 - `http_server.rs`: the embedded HTTP file server and the log stream its pane
@@ -322,7 +323,6 @@ without that feature, so no call site needs a feature predicate:
 - `tftp.rs`: shared TFTP packet/opcode types; a module directory —
   `tftp/server.rs` and `tftp/client.rs`
 - `serial_console.rs`: serial device detection and the serial field model
-- `notification_sounds.rs`: built-in notification sounds and their synthesis
 - `output_benchmark.rs`: the `zetta benchmark output` workloads and results
 
 ## Platform and shell integration

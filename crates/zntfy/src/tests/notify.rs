@@ -1,20 +1,19 @@
 use std::ffi::OsString;
 
 use super::*;
-use crate::cli_services::CliServiceCommand;
 
 #[test]
 fn notify_parser_accepts_summary_body_and_options() {
     assert_eq!(
         parse_notify_args([OsString::from("Build finished")]).unwrap(),
-        CliServiceCommand::Notify(NotifyCommand {
+        NotifyCommand {
             summary: "Build finished".to_owned(),
             body: None,
             app_name: None,
             icon: None,
             sound: None,
             timeout: None,
-        })
+        }
     );
 
     assert_eq!(
@@ -31,14 +30,14 @@ fn notify_parser_accepts_summary_body_and_options() {
             OsString::from("All tests passed"),
         ])
         .unwrap(),
-        CliServiceCommand::Notify(NotifyCommand {
+        NotifyCommand {
             summary: "Build finished".to_owned(),
             body: Some("All tests passed".to_owned()),
             app_name: Some("zetta".to_owned()),
             icon: Some("/usr/share/icons/zetta.png".to_owned()),
             sound: Some("message-new-instant".to_owned()),
             timeout: Some(NotificationTimeout::Never),
-        })
+        }
     );
 
     let shorthand = parse_notify_args([
@@ -55,14 +54,14 @@ fn notify_parser_accepts_summary_body_and_options() {
     .unwrap();
     assert_eq!(
         shorthand,
-        CliServiceCommand::Notify(NotifyCommand {
+        NotifyCommand {
             summary: "Build finished".to_owned(),
             body: None,
             app_name: Some("zetta".to_owned()),
             icon: Some("icon.png".to_owned()),
             sound: Some("bell".to_owned()),
             timeout: Some(NotificationTimeout::Milliseconds(5000)),
-        })
+        }
     );
 }
 
@@ -123,15 +122,15 @@ fn notification_responses_only_focus_on_default_activation() {
 fn notify_cleanup_parser_accepts_dry_run_and_rejects_duplicates_and_unknowns() {
     assert_eq!(
         parse_notify_cleanup_args([]).unwrap(),
-        CliServiceCommand::NotifyCleanup(NotifyCleanupCommand { dry_run: false })
+        NotifyCleanupCommand { dry_run: false }
     );
     assert_eq!(
         parse_notify_cleanup_args([OsString::from("--dry-run")]).unwrap(),
-        CliServiceCommand::NotifyCleanup(NotifyCleanupCommand { dry_run: true })
+        NotifyCleanupCommand { dry_run: true }
     );
     assert_eq!(
         parse_notify_cleanup_args([OsString::from("-n")]).unwrap(),
-        CliServiceCommand::NotifyCleanup(NotifyCleanupCommand { dry_run: true })
+        NotifyCleanupCommand { dry_run: true }
     );
     assert!(
         parse_notify_cleanup_args([OsString::from("-n"), OsString::from("--dry-run")]).is_err()
@@ -148,8 +147,7 @@ fn worker_notification_timeout_reparses_the_workers_own_argv() {
     // A worker relaunched with no explicit --timeout defaults like `notify` itself.
     assert_eq!(
         worker_notification_timeout(&cmd(&[
-            "/path/to/zetta",
-            "notify",
+            "/path/to/zntfy",
             "--sound",
             "zetta-ok",
             "Build finished",
@@ -160,8 +158,7 @@ fn worker_notification_timeout_reparses_the_workers_own_argv() {
     // An explicit --timeout survives the round trip through its own argv.
     assert_eq!(
         worker_notification_timeout(&cmd(&[
-            "/path/to/zetta",
-            "notify",
+            "/path/to/zntfy",
             "--timeout",
             "5000",
             "Build finished",
@@ -182,7 +179,7 @@ fn worker_notification_timeout_reparses_the_workers_own_argv() {
 
     // Anything that isn't recognizably a `notify` worker's own argv is left
     // alone rather than guessed at.
-    assert_eq!(worker_notification_timeout(&cmd(&["/path/to/zetta"])), None);
+    assert_eq!(worker_notification_timeout(&cmd(&["/path/to/zntfy"])), None);
     assert_eq!(
         worker_notification_timeout(&cmd(&["/path/to/zetta", "attention", "Build finished"])),
         None
@@ -290,7 +287,6 @@ fn notification_worker_reexec_replays_explicit_notify_arguments() {
     assert_eq!(
         arguments,
         vec![
-            "notify",
             "--app-name",
             "zetta-ci",
             "--icon",
@@ -359,16 +355,16 @@ fn custom_notification_identity_is_not_replaced_by_zetta_desktop_entry() {
 fn default_notification_icon_is_cached_and_kept_up_to_date() {
     let directory = tempfile::tempdir().unwrap();
     let config_dir = directory.path().join("zetta");
-    let expected = crate::zetta_assets::embedded_notification_icon().unwrap();
+    let expected = DEFAULT_NOTIFICATION_ICON;
 
     let path = write_default_notification_icon(&config_dir).unwrap();
     assert_eq!(path, config_dir.join("notification-icon.png"));
-    assert_eq!(std::fs::read(&path).unwrap(), *expected);
+    assert_eq!(std::fs::read(&path).unwrap(), expected);
 
     // A stale or corrupted cached icon is rewritten rather than trusted as-is.
     std::fs::write(&path, b"stale").unwrap();
     write_default_notification_icon(&config_dir).unwrap();
-    assert_eq!(std::fs::read(&path).unwrap(), *expected);
+    assert_eq!(std::fs::read(&path).unwrap(), expected);
 }
 
 #[cfg(target_os = "macos")]

@@ -66,6 +66,7 @@ function Invoke-Installer([string]$Action = "InstallBinary") {
         "-SourcePtyBinary", (Join-Path $sourceDirectory "zmux-pty.exe"),
         "-SourceZoshBinary", (Join-Path $sourceDirectory "zosh.exe"),
         "-SourceZoshServerBinary", (Join-Path $sourceDirectory "zosh-server.exe"),
+        "-SourceNotifyBinary", (Join-Path $sourceDirectory "zntfy.exe"),
         "-InstallDirectory", $installDirectory
     )
     $output = @(& powershell.exe @arguments 2>&1)
@@ -88,6 +89,7 @@ function Set-SourceGeneration([string]$Generation) {
     Write-TestFile (Join-Path $sourceDirectory "zmux-pty.exe") "pty-$Generation"
     Write-TestFile (Join-Path $sourceDirectory "zosh.exe") "zosh-$Generation"
     Write-TestFile (Join-Path $sourceDirectory "zosh-server.exe") "zosh-server-$Generation"
+    Write-TestFile (Join-Path $sourceDirectory "zntfy.exe") "zntfy-$Generation"
     Write-TestFile (Join-Path $sourceDirectory "conpty.dll") "conpty-$Generation"
     Write-TestFile (Join-Path $sourceDirectory "OpenConsole.exe") "console-$Generation"
 }
@@ -127,6 +129,7 @@ try {
     Assert-FileContents $installedPty "pty-first" "initial helper was not installed"
     Assert-FileContents (Join-Path $installDirectory "zosh.exe") "zosh-first" "zosh was not installed"
     Assert-FileContents (Join-Path $installDirectory "zosh-server.exe") "zosh-server-first" "zosh-server was not installed"
+    Assert-FileContents (Join-Path $installDirectory "zntfy.exe") "zntfy-first" "zntfy was not installed"
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $installDirectory "mosh-server.exe"))) "initial install left legacy mosh-server"
     Assert-FileContents $installedPtyVersion "1" "initial helper marker is wrong"
     Assert-UserPathEntries ($unrelatedUserPathEntries + $installDirectory) "initial install disturbed or omitted user PATH entries"
@@ -234,6 +237,7 @@ try {
     })) "uninstall left the installed directory in the user PATH"
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $installDirectory "zosh.exe"))) "uninstall left zosh"
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $installDirectory "zosh-server.exe"))) "uninstall left zosh-server"
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $installDirectory "zntfy.exe"))) "uninstall left zntfy"
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $installDirectory "mosh-server.exe"))) "uninstall left legacy mosh-server"
     Assert-True (-not (Test-Path -LiteralPath $installedPtyVersion)) "uninstall left the helper marker"
     Write-Host "Windows installer tests passed."
