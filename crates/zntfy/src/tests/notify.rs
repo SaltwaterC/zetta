@@ -424,6 +424,26 @@ fn macos_routes_system_sounds_through_notification_center() {
 
 #[cfg(target_os = "macos")]
 #[test]
+fn macos_plays_builtin_sound_even_when_notification_delivery_is_denied() {
+    let calls = std::cell::RefCell::new(Vec::new());
+    let result = deliver_macos_with_builtin_sound(
+        Some(crate::sounds::BuiltinSound::Gong),
+        |sound| {
+            assert_eq!(sound, crate::sounds::BuiltinSound::Gong);
+            calls.borrow_mut().push("play");
+            Ok(())
+        },
+        || {
+            calls.borrow_mut().push("deliver");
+            anyhow::bail!("notification authorization denied")
+        },
+    );
+    assert_eq!(calls.into_inner(), ["play", "deliver"]);
+    assert!(result.is_err());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
 fn macos_targeted_notification_ids_round_trip_and_are_unique() {
     let target = NotificationTarget {
         process_id: std::process::id(),

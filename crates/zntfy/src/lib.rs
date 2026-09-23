@@ -948,6 +948,19 @@ fn macos_notification_sound(command: &NotifyCommand) -> Option<&str> {
         .filter(|sound| crate::sounds::BuiltinSound::parse(sound).is_none())
 }
 
+#[cfg(target_os = "macos")]
+fn deliver_macos_with_builtin_sound(
+    sound: Option<crate::sounds::BuiltinSound>,
+    play: impl FnOnce(crate::sounds::BuiltinSound) -> Result<()>,
+    deliver: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    // Built-in audio is independent of Notification Center authorization.
+    if let Some(sound) = sound {
+        play(sound)?;
+    }
+    deliver()
+}
+
 #[cfg(any(not(target_os = "macos"), test))]
 fn notification_response_activates_tab(response: &notify_rust::NotificationResponse) -> bool {
     response.is_default_action()
@@ -1117,35 +1130,34 @@ impl NotificationRequest {
             .flatten();
         let notification_sound = (!silent).then(|| macos_notification_sound(self)).flatten();
 
-        if let Some(target) = target
-            && bundled
-        {
-            let notification_id = macos_targeted_notification_id(target);
-            let notification =
-                build_bundled_macos_notification(self, notification_sound, Some(&notification_id))?;
-            let handle = notification
-                .send_blocking()
-                .map_err(|error| anyhow::anyhow!("{error}"))
-                .context("showing the desktop notification")?;
-            if let Some(sound) = bundled_sound {
-                sound.play()?;
+        deliver_macos_with_builtin_sound(bundled_sound, crate::sounds::BuiltinSound::play, || {
+            if let Some(target) = target
+                && bundled
+            {
+                let notification_id = macos_targeted_notification_id(target);
+                let notification = build_bundled_macos_notification(
+                    self,
+                    notification_sound,
+                    Some(&notification_id),
+                )?;
+                let handle = notification
+                    .send_blocking()
+                    .map_err(|error| anyhow::anyhow!("{error}"))
+                    .context("showing the desktop notification")?;
+                spawn_notification_response_watchdog(self.timeout);
+                let response = mac_usernotifications::block_on_main(handle.response())
+                    .map_err(|error| anyhow::anyhow!("{error}"))
+                    .context("waiting for the desktop notification response")?;
+                if response.is_default_action() {
+                    let _ = request_process_focus_tab(target.process_id, target.attention_id);
+                }
+            } else if bundled {
+                show_bundled_macos_notification(self, notification_sound, None)?;
+            } else {
+                show_unbundled_macos_notification(self, notification_sound)?;
             }
-            spawn_notification_response_watchdog(self.timeout);
-            let response = mac_usernotifications::block_on_main(handle.response())
-                .map_err(|error| anyhow::anyhow!("{error}"))
-                .context("waiting for the desktop notification response")?;
-            if response.is_default_action() {
-                let _ = request_process_focus_tab(target.process_id, target.attention_id);
-            }
-        } else if bundled {
-            show_bundled_macos_notification(self, notification_sound, None)?;
-            if let Some(sound) = bundled_sound {
-                sound.play()?;
-            }
-        } else {
-            show_unbundled_macos_notification(self, notification_sound)?;
-        }
-        Ok(())
+            Ok(())
+        })
     }
 
     #[cfg(not(target_os = "macos"))]
