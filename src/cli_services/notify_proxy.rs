@@ -203,6 +203,19 @@ pub(crate) fn run_notification_proxy(
     notification: &NotificationRequest,
     target: Option<NotificationTarget>,
 ) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    if std::env::var_os("ZNTFY_INTERNAL_ZETTA_NOTIFICATION_HOST").as_deref()
+        == Some(std::ffi::OsStr::new("1"))
+    {
+        let command = zntfy::parse_notify_args(notification_reexec_args(notification))?;
+        return zntfy::run_macos_hosted_notification(
+            &command,
+            target.map(|target| zntfy::NotificationTarget {
+                process_id: target.process_id,
+                attention_id: target.attention_id,
+            }),
+        );
+    }
     let executable = notification_helper_executable()?;
     let mut command = Command::new(&executable);
     command.args(notification_reexec_args(notification));

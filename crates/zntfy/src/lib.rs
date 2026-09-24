@@ -2,21 +2,23 @@
 //!
 //! Native notification delivery, worker lifetime, icon caching and sound
 //! playback live here so `zntfy` can run without the Zetta GUI. The only
-//! connection back to Zetta is the small process-control client used when a
-//! shell inherits a valid attention target.
+//! connections back to Zetta are the process-control client for tab state and,
+//! on macOS, the main app executable for its Notification Center identity.
 
 use std::ffi::OsString;
 #[cfg(any(not(target_os = "macos"), test))]
 use std::fs;
+use std::io::{BufReader, Write as _};
 use std::path::Path;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 #[cfg(target_os = "macos")]
 use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(target_os = "macos")]
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result};
+use serde::{Deserialize, Serialize};
 
 mod process_control;
 mod sounds;
@@ -121,6 +123,57 @@ const NOTIFICATION_WORKER_ENV: &str = "ZETTA_NOTIFICATION_WORKER";
 const NOTIFICATION_TARGET_PROCESS_ID_ENV: &str = "ZETTA_NOTIFICATION_TARGET_PROCESS_ID";
 const NOTIFICATION_TARGET_ATTENTION_ID_ENV: &str = "ZETTA_NOTIFICATION_TARGET_ATTENTION_ID";
 const SILENT_ENV: &str = "ZNTFY_SILENT";
+
+#[derive(Serialize, Deserialize)]
+struct WorkerDelivery {
+    error: Option<String>,
+    #[serde(default)]
+    warning: Option<String>,
+}
+
+fn report_worker_delivery(error: Option<&anyhow::Error>, warning: Option<&str>) {
+    if std::env::var_os(NOTIFICATION_WORKER_ENV).is_none()
+        && std::env::var_os(NOTIFICATION_DAEMON_ENV).is_none()
+    {
+        return;
+    }
+    let mut stdout = std::io::stdout().lock();
+    let status = WorkerDelivery {
+        error: error.map(|error| format!("{error:#}")),
+        warning: warning.map(str::to_owned),
+    };
+    let _ = serde_json::to_writer(&mut stdout, &status);
+    let _ = stdout.write_all(b"\n");
+    let _ = stdout.flush();
+}
+
+fn wait_for_worker_delivery(child: &mut Child) -> Result<()> {
+    let stdout = child
+        .stdout
+        .take()
+        .context("notification worker has no status pipe")?;
+    read_worker_delivery(BufReader::new(stdout))
+}
+
+fn read_worker_delivery(mut reader: impl std::io::BufRead) -> Result<()> {
+    let mut line = String::new();
+    reader
+        .read_line(&mut line)
+        .context("reading notification worker status")?;
+    anyhow::ensure!(
+        !line.is_empty(),
+        "notification worker exited before delivery"
+    );
+    let status: WorkerDelivery =
+        serde_json::from_str(&line).context("parsing notification worker status")?;
+    if let Some(error) = status.error {
+        anyhow::bail!("notification worker failed: {error}");
+    }
+    if let Some(warning) = status.warning {
+        eprintln!("zntfy: {warning}");
+    }
+    Ok(())
+}
 
 #[cfg(target_os = "macos")]
 const MACOS_TARGETED_NOTIFICATION_PREFIX: &str = "zetta-target";
@@ -361,7 +414,6 @@ fn try_show_portal_notification(command: &NotifyCommand) -> Result<bool> {
     Ok(sent.is_ok())
 }
 
-#[cfg(linux_like)]
 const NOTIFICATION_DAEMON_ENV: &str = "ZETTA_NOTIFICATION_DAEMON";
 
 fn notification_worker_executable() -> Result<Option<PathBuf>> {
@@ -460,7 +512,7 @@ fn spawn_notification_worker(
         .env_remove("ZETTA_PROCESS_ID")
         .env_remove("ZETTA_ATTENTION_ID")
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::null());
 
     #[cfg(unix)]
@@ -484,10 +536,10 @@ fn spawn_notification_worker(
         command.creation_flags(DETACHED_PROCESS);
     }
 
-    command
+    let mut child = command
         .spawn()
         .context("spawning the targeted desktop notification worker")?;
-    Ok(())
+    wait_for_worker_delivery(&mut child)
 }
 
 #[cfg(linux_like)]
@@ -498,7 +550,7 @@ fn spawn_notification_daemon(notification: &NotificationRequest) -> Result<()> {
         .args(notification_reexec_args(notification))
         .env(NOTIFICATION_DAEMON_ENV, "1")
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::null());
     // Detach the notification worker from the terminal that invoked the CLI.
     // It must keep its D-Bus connection alive after this parent exits so GNOME
@@ -517,10 +569,10 @@ fn spawn_notification_daemon(notification: &NotificationRequest) -> Result<()> {
             });
         }
     }
-    command
+    let mut child = command
         .spawn()
         .context("spawning the desktop notification worker")?;
-    Ok(())
+    wait_for_worker_delivery(&mut child)
 }
 
 /// How long a Linux notification stays alive before the desktop expires it,
@@ -802,6 +854,8 @@ fn write_default_notification_icon(config_dir: &Path) -> Result<PathBuf> {
 
 #[cfg(target_os = "macos")]
 const MACOS_NOTIFICATION_REEXEC_ENV: &str = "ZETTA_INTERNAL_NOTIFICATION_BUNDLE_REEXEC";
+#[cfg(target_os = "macos")]
+const MACOS_ZETTA_HOST_ENV: &str = "ZNTFY_INTERNAL_ZETTA_NOTIFICATION_HOST";
 
 #[cfg(target_os = "macos")]
 fn macos_bundle_executable(path: &Path) -> Option<PathBuf> {
@@ -815,6 +869,91 @@ fn macos_bundle_executable(path: &Path) -> Option<PathBuf> {
             .extension()
             .is_some_and(|extension| extension == "app"))
     .then_some(executable)
+}
+
+#[cfg(target_os = "macos")]
+fn macos_zetta_host_executable(helper: &Path) -> Option<PathBuf> {
+    (helper.file_name() == Some(std::ffi::OsStr::new("zntfy"))
+        && helper.parent()?.parent()?.parent()?.file_name()
+            == Some(std::ffi::OsStr::new("Zetta.app")))
+    .then(|| helper.with_file_name("zetta"))
+}
+
+/// Submit through Zetta's main bundle executable, whose Notification Center
+/// identity (and icon) belongs to the app. Auxiliary executables inside the
+/// same bundle do not inherit that identity on macOS.
+#[cfg(target_os = "macos")]
+fn run_through_macos_zetta_host(
+    notification: &NotificationRequest,
+    target: Option<NotificationTarget>,
+) -> Result<bool> {
+    let current = std::env::current_exe().context("locating the zntfy executable")?;
+    let Some(helper) = macos_bundle_executable(&current) else {
+        return Ok(false);
+    };
+    let Some(host) = macos_zetta_host_executable(&helper) else {
+        return Ok(false);
+    };
+    anyhow::ensure!(
+        host.is_file(),
+        "Zetta notification host {} is missing",
+        host.display()
+    );
+    let mut command = Command::new(&host);
+    command
+        .arg("notify")
+        .args(notification_reexec_args(notification));
+    command.env(MACOS_ZETTA_HOST_ENV, "1");
+    if let Some(target) = target {
+        command
+            .env("ZETTA_PROCESS_ID", target.process_id.to_string())
+            .env("ZETTA_ATTENTION_ID", target.attention_id.to_string());
+    } else {
+        command
+            .env_remove("ZETTA_PROCESS_ID")
+            .env_remove("ZETTA_ATTENTION_ID");
+    }
+    let output = command
+        .output()
+        .with_context(|| format!("starting {}", host.display()))?;
+    anyhow::ensure!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    report_worker_delivery(None, None);
+    Ok(true)
+}
+
+/// The Zetta main executable calls this only for a request proxied by zntfy.
+/// The GUI's notification-response observer owns click-to-tab routing.
+#[cfg(target_os = "macos")]
+pub fn run_macos_hosted_notification(
+    notification: &NotificationRequest,
+    target: Option<NotificationTarget>,
+) -> Result<()> {
+    let silent = target.map_or_else(
+        || std::env::var(SILENT_ENV).as_deref() == Ok("1"),
+        |target| {
+            request_process_silent_mode(target.process_id, Some(target.attention_id))
+                .unwrap_or(false)
+        },
+    );
+    let builtin_sound = (!silent)
+        .then(|| {
+            notification
+                .sound
+                .as_deref()
+                .and_then(crate::sounds::BuiltinSound::parse)
+        })
+        .flatten();
+    let system_sound = (!silent)
+        .then(|| macos_notification_sound(notification))
+        .flatten();
+    deliver_macos_with_builtin_sound(builtin_sound, crate::sounds::BuiltinSound::play, || {
+        let id = target.map(macos_targeted_notification_id);
+        show_bundled_macos_notification(notification, system_sound, id.as_deref())
+    })
 }
 
 /// A process entered through `/usr/local/bin/zetta` does not inherit the
@@ -893,6 +1032,41 @@ function run(argv) {
 }
 
 #[cfg(target_os = "macos")]
+fn show_macos_script_fallback(
+    command: &NotifyCommand,
+    sound: Option<&str>,
+    native_error: anyhow::Error,
+) -> Result<()> {
+    // A deliberate denial belongs to the user; do not evade it by submitting
+    // the same notification under the script host's separate app identity.
+    let native_authorization = mac_usernotifications::blocking::get_notification_settings()
+        .ok()
+        .map(|settings| settings.authorization_status);
+    if !macos_script_fallback_allowed(native_authorization) {
+        return Err(native_error);
+    }
+    show_unbundled_macos_notification(command, sound).with_context(|| {
+        format!(
+            "native macOS notification failed: {native_error:#}; script-host fallback also failed"
+        )
+    })?;
+    let warning = "macOS rejected native notifications from this CLI; used the script host, so clicking this notification cannot focus a Zetta tab";
+    if std::env::var_os(NOTIFICATION_WORKER_ENV).is_some() {
+        report_worker_delivery(None, Some(warning));
+    } else {
+        eprintln!("zntfy: {warning}");
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn macos_script_fallback_allowed(
+    status: Option<mac_usernotifications::AuthorizationStatus>,
+) -> bool {
+    status != Some(mac_usernotifications::AuthorizationStatus::Denied)
+}
+
+#[cfg(target_os = "macos")]
 fn show_bundled_macos_notification(
     command: &NotifyCommand,
     sound: Option<&str>,
@@ -916,7 +1090,7 @@ fn build_bundled_macos_notification(
         .context("requesting macOS desktop notification authorization")?;
     anyhow::ensure!(
         authorized,
-        "macOS desktop notification authorization was denied; enable notifications for Zetta in System Settings"
+        "macOS did not authorize this notification process; the app setting may be enabled while macOS rejects an executable that is not the bundle's main executable"
     );
 
     let mut notification = mac_usernotifications::Notification::new()
@@ -1030,8 +1204,25 @@ pub fn run_notification(
     command: &NotificationRequest,
     target: Option<NotificationTarget>,
 ) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    if run_through_macos_zetta_host(command, target)? {
+        return Ok(());
+    }
     if std::env::var_os(NOTIFICATION_WORKER_ENV).is_some() {
-        return command.run(Some(notification_target_from_worker_environment()?));
+        let result = notification_target_from_worker_environment()
+            .and_then(|target| command.run(Some(target)));
+        if let Err(error) = &result {
+            report_worker_delivery(Some(error), None);
+        }
+        return result;
+    }
+    #[cfg(linux_like)]
+    if std::env::var_os(NOTIFICATION_DAEMON_ENV).is_some() {
+        let result = command.run(None);
+        if let Err(error) = &result {
+            report_worker_delivery(Some(error), None);
+        }
+        return result;
     }
     if let Some(target) = target
         && let Some(executable) = notification_worker_executable()?
@@ -1135,15 +1326,24 @@ impl NotificationRequest {
                 && bundled
             {
                 let notification_id = macos_targeted_notification_id(target);
-                let notification = build_bundled_macos_notification(
+                let native = build_bundled_macos_notification(
                     self,
                     notification_sound,
                     Some(&notification_id),
-                )?;
-                let handle = notification
-                    .send_blocking()
-                    .map_err(|error| anyhow::anyhow!("{error}"))
-                    .context("showing the desktop notification")?;
+                )
+                .and_then(|notification| {
+                    notification
+                        .send_blocking()
+                        .map_err(|error| anyhow::anyhow!("{error}"))
+                        .context("showing the desktop notification")
+                });
+                let handle = match native {
+                    Ok(handle) => handle,
+                    Err(error) => {
+                        return show_macos_script_fallback(self, notification_sound, error);
+                    }
+                };
+                report_worker_delivery(None, None);
                 spawn_notification_response_watchdog(self.timeout);
                 let response = mac_usernotifications::block_on_main(handle.response())
                     .map_err(|error| anyhow::anyhow!("{error}"))
@@ -1152,7 +1352,10 @@ impl NotificationRequest {
                     let _ = request_process_focus_tab(target.process_id, target.attention_id);
                 }
             } else if bundled {
-                show_bundled_macos_notification(self, notification_sound, None)?;
+                if let Err(error) = show_bundled_macos_notification(self, notification_sound, None)
+                {
+                    show_macos_script_fallback(self, notification_sound, error)?;
+                }
             } else {
                 show_unbundled_macos_notification(self, notification_sound)?;
             }
@@ -1195,6 +1398,7 @@ impl NotificationRequest {
         if let Some(bundled_sound) = bundled_sound {
             bundled_sound.play()?;
         }
+        report_worker_delivery(None, None);
         if let Some(target) = target {
             #[cfg(linux_like)]
             spawn_notification_response_watchdog(self.timeout);

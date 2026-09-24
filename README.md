@@ -154,8 +154,9 @@ emulators; a notifications-enabled `zetta notify` proxies to it.
 Notifications issued from a Zetta terminal can be clicked to activate their
 issuing window and visible tab; closed, dormant, or background-only tabs are
 left alone. Plain `zetta notify` outside Zetta remains fire-and-forget.
-Packaged macOS app builds support click routing; unbundled development builds
-still display notifications but do not route clicks.
+On macOS, `zntfy` in a packaged Zetta app submits through the app's main
+executable so notifications retain Zetta's icon and click-to-tab routing.
+An unbundled development build uses the script host and cannot route clicks.
 From a Zetta pane, `zetta tabicon ICON` sets a per-tab icon override on the
 active tab (`none` explicitly hides its icon); `zetta tabicon --reset` (or `-r`)
 clears that override so the active project's effective icon, or the configured

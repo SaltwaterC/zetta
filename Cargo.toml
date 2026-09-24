@@ -42,7 +42,7 @@ serial-console = ["dep:serialport"]
 http-server = []
 tftp-server = []
 tftp-client = []
-notifications = []
+notifications = ["dep:zntfy"]
 clipboard = ["dep:arboard"]
 worktree = ["dep:zwt", "zwt/recursive-submodules"]
 zosh = ["zosh-client", "zosh-server"]
@@ -205,6 +205,7 @@ url = "2.2"
 zbus = { version = "5.17", default-features = false, features = ["async-io"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+zntfy = { path = "crates/zntfy", optional = true }
 block2 = "0.6"
 url = "2.2"
 objc2 = "0.6"

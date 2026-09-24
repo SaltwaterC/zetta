@@ -152,11 +152,12 @@ install them together. To build them directly with Cargo, run
 `cargo build --bin zetta` and
 `cargo build --manifest-path crates/zntfy/Cargo.toml --target-dir target --bin zntfy`.
 
-On macOS, an installed CLI transparently submits notifications through the
-signed `Zetta.app` bundle and the modern `UNUserNotificationCenter` API. The
-first invocation asks macOS for notification permission. Standalone development
-builds fall back to macOS's bundled script host, so they do not require an app
-bundle merely to show a notification.
+On macOS, `zntfy` installed inside `Zetta.app` submits through the app's main
+executable. Notification Center therefore uses Zetta's authorized identity and
+icon, and body clicks can route back to a tab. Native submission errors are
+reported rather than silently switching to a generic script-host notification.
+An unbundled standalone development build uses the script host and cannot
+route clicks.
 
 Silent mode is a transient process-wide control available from the title bar,
 the command palette, and `Ctrl-Shift-S`. Tab Silent Mode is a separate
@@ -234,16 +235,20 @@ Dismissing, timing out, replying to, or choosing another notification action
 does not focus anything. If the tab has closed or is only dormant/background,
 the click is a no-op; Zetta does not reconnect sessions for notifications.
 Outside Zetta, or when either inherited value is missing or invalid, the
-notification remains fire-and-forget. Packaged macOS app builds support this
-click routing; unbundled development builds use `osascript` and display the
-notification without routing its click.
+notification remains fire-and-forget. Packaged macOS app builds route via the
+main Zetta executable. Unbundled development builds display through the script
+host without click routing.
 
 With [shell integration](shell-integration.md) enabled, the `zntfy` shortcut
 retains notification command completion.
 
-A notification targeting a tab spawns a background `zntfy` process that
-waits for the click so it can focus the originating tab, then exits once the
-notification's own timeout has passed. On Linux and BSD, `zntfy cleanup` and
+A notification targeting a tab spawns a background `zntfy` process on platforms
+where the notification client must wait for the click. On packaged macOS, the
+running Zetta app handles the click instead. The command confirms native
+submission and reports authorization or backend errors rather than claiming
+success before submission. Focus and per-app alert settings can still suppress
+a banner after submission succeeds. The worker exits once the notification's
+own timeout has passed. On Linux and BSD, `zntfy cleanup` and
 its `zetta notify cleanup` proxy find and terminate any workers that have outlived their
 notification's timeout; `--dry-run` lists them without terminating anything.
 This is normally unnecessary, since each process bounds its own lifetime to

@@ -3,6 +3,21 @@ use std::ffi::OsString;
 use super::*;
 
 #[test]
+fn worker_delivery_requires_an_acknowledgment_and_propagates_errors() {
+    assert!(read_worker_delivery("{\"error\":null}\n".as_bytes()).is_ok());
+    assert!(
+        read_worker_delivery("{\"error\":null,\"warning\":\"fallback used\"}\n".as_bytes()).is_ok()
+    );
+    let error = read_worker_delivery(
+        "{\"error\":\"macOS desktop notification authorization was denied\"}\n".as_bytes(),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("authorization was denied"));
+    assert!(read_worker_delivery("".as_bytes()).is_err());
+    assert!(read_worker_delivery("not-json\n".as_bytes()).is_err());
+}
+
+#[test]
 fn notify_parser_accepts_summary_body_and_options() {
     assert_eq!(
         parse_notify_args([OsString::from("Build finished")]).unwrap(),
@@ -390,6 +405,26 @@ fn macos_bundle_executable_resolves_a_cli_symlink() {
 
 #[cfg(target_os = "macos")]
 #[test]
+fn macos_zetta_helper_uses_the_main_app_executable() {
+    let helper = Path::new("/Applications/Zetta.app/Contents/MacOS/zntfy");
+    assert_eq!(
+        macos_zetta_host_executable(helper),
+        Some(PathBuf::from(
+            "/Applications/Zetta.app/Contents/MacOS/zetta"
+        ))
+    );
+    assert_eq!(
+        macos_zetta_host_executable(Path::new("/Applications/Other.app/Contents/MacOS/zntfy")),
+        None
+    );
+    assert_eq!(
+        macos_zetta_host_executable(Path::new("/Applications/Zetta.app/Contents/MacOS/other")),
+        None
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
 fn macos_only_attaches_an_explicit_notification_icon() {
     let mut command = NotifyCommand {
         summary: "Build finished".to_owned(),
@@ -440,6 +475,20 @@ fn macos_plays_builtin_sound_even_when_notification_delivery_is_denied() {
     );
     assert_eq!(calls.into_inner(), ["play", "deliver"]);
     assert!(result.is_err());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_script_fallback_respects_an_explicit_denial() {
+    use mac_usernotifications::AuthorizationStatus;
+
+    assert!(!macos_script_fallback_allowed(Some(
+        AuthorizationStatus::Denied
+    )));
+    assert!(macos_script_fallback_allowed(Some(
+        AuthorizationStatus::Authorized
+    )));
+    assert!(macos_script_fallback_allowed(None));
 }
 
 #[cfg(target_os = "macos")]

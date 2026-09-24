@@ -18,6 +18,25 @@ fn proxy_arguments_preserve_all_notification_options() {
 
 #[cfg(target_os = "macos")]
 #[test]
+fn hosted_notification_reparses_the_proxy_arguments() {
+    let request = NotificationRequest {
+        summary: "A title".to_owned(),
+        body: Some("A body".to_owned()),
+        app_name: None,
+        icon: Some("image.png".to_owned()),
+        sound: Some("zetta-gong".to_owned()),
+        timeout: Some(NotificationTimeout::Never),
+    };
+    let hosted = zntfy::parse_notify_args(notification_reexec_args(&request)).unwrap();
+    assert_eq!(hosted.summary, request.summary);
+    assert_eq!(hosted.body, request.body);
+    assert_eq!(hosted.icon, request.icon);
+    assert_eq!(hosted.sound, request.sound);
+    assert_eq!(hosted.timeout, Some(zntfy::NotificationTimeout::Never));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
 fn macos_response_only_routes_this_processes_body_click() {
     let tag = format!("zetta-target:{}:7:99-123-1", std::process::id());
     assert_eq!(
