@@ -120,6 +120,7 @@ fn serve_session(cfg: Config, socket: UdpSocket, mut transport: ServerTransport)
     // already producing them. It collects on spec and settles the question
     // here, once, from the first state it accepts.
     let mut scrollback_settled = false;
+    let mut clipboard_supported = false;
     let mut responder = QueryResponder::new();
     let mut user_stream = UserStreamTracker::new();
     let mut udp_buf = vec![0u8; UDP_BUFFER];
@@ -164,6 +165,7 @@ fn serve_session(cfg: Config, socket: UdpSocket, mut transport: ServerTransport)
                 &session.event_rx,
                 &mut terminal,
                 &mut responder,
+                clipboard_supported,
                 &session.write_tx,
                 &mut echo,
                 cfg.verbose > 0,
@@ -249,6 +251,7 @@ fn serve_session(cfg: Config, socket: UdpSocket, mut transport: ServerTransport)
                                 terminal.forget_scrollback();
                                 scrollback_settled = true;
                             }
+                            clipboard_supported |= accepted.clipboard_version == Some(1);
                             if !agent_decided {
                                 let requested = accepted
                                     .events
@@ -524,6 +527,7 @@ fn drain_pty_events(
     events: &Receiver<PtyEvent>,
     terminal: &mut TerminalState,
     responder: &mut QueryResponder,
+    clipboard_supported: bool,
     writes: &SyncSender<PtyWrite>,
     echo: &mut EchoAcknowledgements,
     verbose: bool,
@@ -544,7 +548,23 @@ fn drain_pty_events(
                 terminal.process(&bytes);
                 let replies = responder.feed(&bytes, terminal.cursor_position(), terminal.size());
                 for query in responder.take_terminal_queries() {
-                    terminal.add_query(query);
+                    if zclip::protocol::Frame::parse(&query).is_some() && !clipboard_supported {
+                        continue;
+                    }
+                    if terminal.add_query(query.clone()) == 0
+                        && let Some(frame) = zclip::protocol::Frame::parse(&query)
+                    {
+                        queue_pty_write(
+                            writes,
+                            zclip::protocol::Frame {
+                                id: frame.id,
+                                message: zclip::protocol::Message::Error(
+                                    "zosh clipboard query backlog is full".into(),
+                                ),
+                            }
+                            .encode(),
+                        )?;
+                    }
                 }
                 progress.dirty = true;
                 for reply in replies {
@@ -845,6 +865,7 @@ fn configure_child_environment(
         "xterm"
     };
     command.env("TERM", term);
+    command.env("ZOSH_CLIPBOARD_CHANNEL", "1");
     if cfg.colors >= 1 << 15 {
         command.env("COLORTERM", "truecolor");
     }

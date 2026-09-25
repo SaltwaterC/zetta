@@ -99,6 +99,28 @@ fn terminal_query_proxy_matches_color_responses_by_kind() {
 }
 
 #[test]
+fn clipboard_query_response_survives_split_input_without_becoming_keyboard_input() {
+    let mut proxy = TerminalQueryProxy::default();
+    let id = [0x42; 16];
+    let query = zclip::protocol::Frame {
+        id,
+        message: zclip::protocol::Message::Probe,
+    }
+    .encode();
+    let response = zclip::protocol::Frame {
+        id,
+        message: zclip::protocol::Message::Ready,
+    }
+    .encode();
+    assert!(proxy.register_query(&query));
+    assert!(proxy.filter(&response[..8]).is_empty());
+    assert_eq!(
+        proxy.filter(&response[8..]),
+        vec![ProxiedInput::TerminalResponse(response)]
+    );
+}
+
+#[test]
 fn forwarded_terminal_queries_are_written_and_registered() {
     let events = vec![HostEvent::TerminalQuery {
         id: 4,

@@ -325,6 +325,13 @@ where
                 self.event_proxy.send_event(Event::ResizeRequest { rows, columns });
             });
 
+            // A private OSC carries requests from interactive SSH children.
+            // The parser ignores it for display; this scanner reports each
+            // complete frame to the owning terminal instead.
+            state.clipboard_frames.observe(&buf[..unprocessed], |frame| {
+                self.event_proxy.send_event(Event::ClipboardFrame(frame));
+            });
+
             // Parse the incoming bytes.
             #[cfg(windows)]
             let parse_started = Instant::now();
@@ -678,6 +685,7 @@ pub struct State {
     writing: Option<Writing>,
     parser: ansi::Processor,
     resize_requests: ResizeRequestParser,
+    clipboard_frames: zclip::protocol::Scanner,
     #[cfg(windows)]
     profile: PtyProfile,
 }

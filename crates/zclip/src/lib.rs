@@ -2,6 +2,10 @@
 use anyhow::{Context as _, Result};
 use std::ffi::OsString;
 
+pub mod host;
+pub mod protocol;
+pub mod remote;
+
 fn format_help_table<'a>(rows: impl AsRef<[(&'a str, &'a str)]>) -> String {
     let rows = rows
         .as_ref()
@@ -51,7 +55,7 @@ pub struct PasteCommand;
 
 pub fn copy_help() -> String {
     format!(
-        "Copy standard input to the clipboard\n\nUsage: zcopy [OPTIONS]\n\nReads standard input and writes it to the system clipboard as UTF-8 text, mirroring macOS's pbcopy. Also available as zetta copy and, outside macOS, pbcopy through shell integration.\n\nOptions:\n{}\n\nOn Linux and FreeBSD, zcopy starts a detached process that keeps serving the clipboard after this command exits, since the X11 and Wayland clipboards are only available while their owning process is running. macOS and Windows keep the clipboard through their own system services, so no such process is needed there.",
+        "Copy standard input to the clipboard\n\nUsage: zcopy [OPTIONS]\n\nReads standard input as UTF-8 text, mirroring macOS's pbcopy. In an interactive SSH or zosh pane, sends it to the clipboard of the displaying Zetta window. If no Zetta channel answers, uses the local clipboard backend when built with one. An explicit remote error exits nonzero. Also available as zetta copy and, outside macOS, pbcopy through shell integration.\n\nOptions:\n{}\n\nOn Linux and FreeBSD, a local copy starts a detached process that keeps serving the clipboard after this command exits, since the X11 and Wayland clipboards are only available while their owning process is running. A backend-free remote build has no local fallback.",
         format_help_table([
             (
                 "-pboard NAME",
@@ -64,7 +68,7 @@ pub fn copy_help() -> String {
 
 pub fn paste_help() -> String {
     format!(
-        "Print the clipboard's contents\n\nUsage: zpaste [OPTIONS]\n\nWrites the system clipboard's text contents to standard output, mirroring macOS's pbpaste. Also available as zetta paste and, outside macOS, pbpaste through shell integration. Prints nothing if the clipboard is empty or holds no text.\n\nOptions:\n{}",
+        "Print the clipboard's contents\n\nUsage: zpaste [OPTIONS]\n\nWrites clipboard text to standard output, mirroring macOS's pbpaste. In an interactive SSH or zosh pane, reads the displaying Zetta window's clipboard when Allow Remote Clipboard Paste is enabled for that tab. If no Zetta channel answers, uses the local clipboard backend when built with one. An explicit denial or transfer error exits nonzero. Prints nothing if the clipboard is empty or holds no text. Also available as zetta paste and, outside macOS, pbpaste through shell integration.\n\nOptions:\n{}",
         format_help_table([
             (
                 "-pboard NAME",

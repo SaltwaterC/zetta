@@ -465,6 +465,8 @@ pub(crate) struct Zetta {
     pub(crate) pane_output_save_in_progress: bool,
     pub(crate) transient_notice: TransientNotice,
     pub(crate) tabs: Vec<Tab>,
+    /// Paste access is local to this viewer and disappears with its tab.
+    pub(crate) remote_clipboard_paste_tabs: HashSet<u64>,
     pub(crate) background_sessions: BackgroundSessionRunner<Tab>,
     /// The multiplexer that owns every pane's process, connected on first use.
     /// `None` until then. Normal launches require the daemon; `--no-mux` is an
@@ -923,6 +925,7 @@ impl Zetta {
             pane_output_save_in_progress: false,
             transient_notice: TransientNotice::default(),
             tabs: Vec::new(),
+            remote_clipboard_paste_tabs: HashSet::new(),
             background_sessions: BackgroundSessionRunner::default(),
             #[cfg(feature = "zmux")]
             mux: None,

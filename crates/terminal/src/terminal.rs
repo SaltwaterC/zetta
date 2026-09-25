@@ -1,6 +1,7 @@
 mod mappings;
 
 mod alacritty;
+mod clipboard_channel;
 mod pty_info;
 mod snapshot;
 pub mod terminal_settings;
@@ -1285,6 +1286,7 @@ pub(crate) enum TerminalBackendEvent {
     ResetTitle,
     ClipboardStore(String),
     ClipboardLoad(ClipboardFormatter),
+    ClipboardFrame(zclip::protocol::Frame),
     ColorRequest(usize, ColorFormatter),
     PtyWrite(String),
     TextAreaSizeRequest(TextAreaSizeFormatter),
@@ -1484,6 +1486,7 @@ impl fmt::Debug for TerminalBackendEvent {
             Self::ResetTitle => f.write_str("ResetTitle"),
             Self::ClipboardStore(data) => write!(f, "ClipboardStore({data})"),
             Self::ClipboardLoad(_) => f.write_str("ClipboardLoad"),
+            Self::ClipboardFrame(_) => f.write_str("ClipboardFrame"),
             Self::ColorRequest(index, _) => write!(f, "ColorRequest({index})"),
             Self::PtyWrite(output) => write!(f, "PtyWrite({output})"),
             Self::TextAreaSizeRequest(_) => f.write_str("TextAreaSizeRequest"),
@@ -2158,6 +2161,9 @@ impl TerminalBuilder {
             wakeup_gate,
             term_config: config,
             output_processor: Processor::<StdSyncHandler>::new(),
+            output_clipboard_scanner: zclip::protocol::Scanner::default(),
+            remote_clipboard: zclip::host::Host::default(),
+            remote_clipboard_paste_allowed: false,
             title_override: None,
             events: VecDeque::with_capacity(10),
             last_content: Content {
@@ -2997,6 +3003,9 @@ impl TerminalBuilder {
                 wakeup_gate,
                 term_config: config,
                 output_processor,
+                output_clipboard_scanner: zclip::protocol::Scanner::default(),
+                remote_clipboard: zclip::host::Host::default(),
+                remote_clipboard_paste_allowed: false,
                 title_override: terminal_title_override,
                 events: VecDeque::with_capacity(10), //Should never get this high.
                 last_content: Default::default(),
@@ -3292,6 +3301,9 @@ pub struct Terminal {
     wakeup_gate: WakeupGate,
     term_config: AlacrittyTermConfig,
     output_processor: Processor<StdSyncHandler>,
+    output_clipboard_scanner: zclip::protocol::Scanner,
+    remote_clipboard: zclip::host::Host,
+    remote_clipboard_paste_allowed: bool,
     events: VecDeque<InternalEvent>,
     /// This is only used for mouse mode cell change detection
     last_mouse: Option<(Point, SelectionSide)>,
@@ -3528,6 +3540,23 @@ const FIND_HYPERLINK_THROTTLE_PX: Pixels = px(5.0);
 const SELECTION_DRAG_THRESHOLD: f64 = 2.0;
 
 impl Terminal {
+    pub fn set_remote_clipboard_paste_allowed(&mut self, allowed: bool) {
+        self.remote_clipboard_paste_allowed = allowed;
+    }
+
+    pub fn handle_remote_clipboard_frame(&mut self, frame: zclip::protocol::Frame) {
+        if self.pty_control.is_none() {
+            return;
+        }
+        let response = self.remote_clipboard.handle(
+            frame,
+            self.remote_clipboard_paste_allowed,
+            clipboard_channel::copy,
+            clipboard_channel::paste,
+        );
+        self.write_to_pty(response.encode());
+    }
+
     /// Enable UI wakeups while this terminal is visible.
     ///
     /// PTY parsing and scrollback collection continue while disabled; only the high-frequency
@@ -3658,6 +3687,9 @@ impl Terminal {
                     }
                     .into_bytes(),
                 )
+            }
+            TerminalBackendEvent::ClipboardFrame(frame) => {
+                self.handle_remote_clipboard_frame(frame);
             }
             TerminalBackendEvent::PtyWrite(out) => self.write_to_pty(out.into_bytes()),
             TerminalBackendEvent::TextAreaSizeRequest(format) => {
@@ -4154,8 +4186,15 @@ impl Terminal {
     pub fn write_output(&mut self, bytes: &[u8], cx: &mut Context<Self>) {
         // Inject bytes directly into the terminal emulator and refresh the UI.
         // This bypasses the PTY/event loop for display-only terminals.
+        let mut frames = Vec::new();
+        let visible = self
+            .output_clipboard_scanner
+            .filter_cow(bytes, |frame| frames.push(frame));
+        for frame in frames {
+            self.handle_remote_clipboard_frame(frame);
+        }
         let mut previous_byte_was_cr = false;
-        let converted = convert_lf_to_crlf(bytes, &mut previous_byte_was_cr);
+        let converted = convert_lf_to_crlf(&visible, &mut previous_byte_was_cr);
 
         let mut term = self.term.lock();
         self.output_processor.advance(&mut *term, &converted);
@@ -12425,6 +12464,31 @@ mod tests {
 
         let clipboard_text = cx.update(|cx| cx.read_from_clipboard().and_then(|item| item.text()));
         assert_eq!(clipboard_text.as_deref(), Some("original"));
+    }
+
+    #[gpui::test]
+    async fn display_only_output_without_a_pane_control_cannot_serve_clipboard(
+        cx: &mut TestAppContext,
+    ) {
+        let terminal = cx.new(|cx| {
+            TerminalBuilder::new_display_only(
+                SettingsCursorShape::default(),
+                AlternateScroll::On,
+                None,
+                0,
+                cx.background_executor(),
+                PathStyle::local(),
+            )
+            .subscribe(cx)
+        });
+        let request = zclip::protocol::Frame {
+            id: [7; 16],
+            message: zclip::protocol::Message::Probe,
+        };
+        terminal.update(cx, |terminal, cx| {
+            terminal.write_output(&request.encode(), cx);
+            assert!(terminal.take_pty_write_log().is_empty());
+        });
     }
 
     #[gpui::test]

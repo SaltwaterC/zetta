@@ -117,6 +117,7 @@ struct Pane {
     /// shared client's keystrokes silently, which is why it is queued here for
     /// the drain thread to finish.
     pending_input: Vec<u8>,
+    clipboard_scanner: zclip::protocol::Scanner,
 }
 
 /// A revoke handover that has not been joined yet.

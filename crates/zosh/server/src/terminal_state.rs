@@ -21,6 +21,8 @@ pub const SCROLLBACK_BUDGET_MAX: usize = 2048 * 1024;
 /// request would lose its opening screenfuls. This is held on spec and thrown
 /// away the moment a client turns out not to want it.
 const SCROLLBACK_BUDGET_PROVISIONAL: usize = SCROLLBACK_BUDGET_MAX;
+const MAX_PENDING_QUERY_BYTES: usize = 2 * 1024 * 1024;
+const MAX_PENDING_QUERIES: usize = 128;
 
 /// One row that has scrolled off the top, waiting to be acknowledged.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -383,6 +385,7 @@ pub struct TerminalState {
     snapshots: BTreeMap<u64, TerminalSnapshot>,
     max_snapshots: usize,
     pending_queries: Vec<TerminalQuery>,
+    pending_query_bytes: usize,
     next_query_id: u64,
 }
 
@@ -418,6 +421,7 @@ impl TerminalState {
             snapshots: BTreeMap::new(),
             max_snapshots: 64,
             pending_queries: Vec::new(),
+            pending_query_bytes: 0,
             next_query_id: 1,
         }
     }
@@ -529,10 +533,16 @@ impl TerminalState {
     /// Record a query found in PTY output and assign it the next session-local
     /// ID. It is emitted in every cumulative state until that state is acked.
     pub fn add_query(&mut self, bytes: Vec<u8>) -> u64 {
+        if self.pending_queries.len() >= MAX_PENDING_QUERIES
+            || self.pending_query_bytes.saturating_add(bytes.len()) > MAX_PENDING_QUERY_BYTES
+        {
+            return 0;
+        }
         let id = self.next_query_id;
         self.next_query_id = id
             .checked_add(1)
             .expect("terminal query ID space exhausted");
+        self.pending_query_bytes += bytes.len();
         self.pending_queries.push(TerminalQuery { id, bytes });
         id
     }
@@ -636,7 +646,11 @@ impl TerminalState {
         }
         if acknowledged_query_count > 0 {
             let query_count = acknowledged_query_count.min(self.pending_queries.len());
-            self.pending_queries.drain(..query_count);
+            self.pending_query_bytes -= self
+                .pending_queries
+                .drain(..query_count)
+                .map(|query| query.bytes.len())
+                .sum::<usize>();
             for snapshot in self.snapshots.values_mut() {
                 snapshot.query_count = snapshot
                     .query_count
@@ -782,7 +796,7 @@ struct QueryScanResult {
     terminal_queries: Vec<Vec<u8>>,
 }
 
-const MAX_QUERY_SEQUENCE: usize = 4096;
+const MAX_QUERY_SEQUENCE: usize = 46 * 1024;
 
 impl QueryScanner {
     fn feed(&mut self, data: &[u8], cursor: (u16, u16), size: (u16, u16)) -> QueryScanResult {
@@ -869,7 +883,9 @@ impl QueryScanner {
     }
 
     fn finish_osc(&mut self, result: &mut QueryScanResult) {
-        if is_terminal_color_query(&self.sequence) {
+        if is_terminal_color_query(&self.sequence)
+            || zclip::protocol::Frame::parse(&self.sequence).is_some()
+        {
             result
                 .terminal_queries
                 .push(std::mem::take(&mut self.sequence));
@@ -1040,6 +1056,24 @@ mod tests {
     }
 
     #[test]
+    fn clipboard_frames_are_forwarded_once_even_when_split() {
+        let mut responder = QueryResponder::new();
+        let frame = zclip::protocol::Frame {
+            id: [4; 16],
+            message: zclip::protocol::Message::Data {
+                sequence: 7,
+                bytes: vec![b'x'; zclip::protocol::CHUNK_SIZE],
+            },
+        }
+        .encode();
+        for part in frame.chunks(500) {
+            assert!(responder.feed(part, (0, 0), (24, 80)).is_empty());
+        }
+        assert_eq!(responder.take_terminal_queries(), vec![frame]);
+        assert!(responder.take_terminal_queries().is_empty());
+    }
+
+    #[test]
     fn ordinary_csi_queries_keep_their_local_replies() {
         let mut responder = QueryResponder::new();
         assert_eq!(
@@ -1055,6 +1089,7 @@ mod tests {
         assert_eq!(terminal.add_query(b"q1".to_vec()), 1);
         terminal.snapshot_for_state(1);
         assert_eq!(terminal.add_query(b"q2".to_vec()), 2);
+        assert_eq!(terminal.pending_query_bytes, 4);
         terminal.snapshot_for_state(2);
         assert_eq!(
             terminal.queries_from_ack(),
@@ -1073,6 +1108,7 @@ mod tests {
         // A retransmitted state still sees both IDs before the ACK. Once
         // state 1 is acknowledged, only the newer query remains to repeat.
         terminal.acknowledge(1);
+        assert_eq!(terminal.pending_query_bytes, 2);
         assert_eq!(
             terminal.queries_from_ack(),
             &[TerminalQuery {
@@ -1082,6 +1118,7 @@ mod tests {
         );
         terminal.acknowledge(2);
         assert!(terminal.queries_from_ack().is_empty());
+        assert_eq!(terminal.pending_query_bytes, 0);
     }
 
     /// A title is terminal state that `vt100::Screen::state_diff` knows

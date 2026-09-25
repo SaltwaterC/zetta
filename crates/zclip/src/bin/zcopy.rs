@@ -1,6 +1,8 @@
 //! Standalone UTF-8 clipboard writer.
 use anyhow::Result;
-use zclip::{CopyMode, backend, parse_copy_args};
+#[cfg(feature = "backend")]
+use zclip::backend;
+use zclip::{CopyMode, parse_copy_args, remote};
 fn main() -> Result<()> {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     if args
@@ -10,5 +12,12 @@ fn main() -> Result<()> {
         println!("{}", zclip::copy_help());
         return Ok(());
     }
-    backend::copy(matches!(parse_copy_args(args)?, CopyMode::Daemon))
+    let daemon = matches!(parse_copy_args(args)?, CopyMode::Daemon);
+    if !daemon && remote::copy()?.is_some() {
+        return Ok(());
+    }
+    #[cfg(feature = "backend")]
+    return backend::copy(daemon);
+    #[cfg(not(feature = "backend"))]
+    anyhow::bail!("no Zetta clipboard channel answered; this zcopy has no local backend")
 }

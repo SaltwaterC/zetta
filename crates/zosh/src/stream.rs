@@ -140,6 +140,7 @@ impl PaneSession {
             session.prediction_mut().set_predict_overwrite(true);
         }
         session.set_keep_alive(keep_alive);
+        session.request_clipboard_relay();
         if scrollback_kib > 0 {
             // Before the loop starts, so it rides the first instruction and
             // the server carries history from the first row that scrolls.

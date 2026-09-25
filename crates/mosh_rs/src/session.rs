@@ -268,6 +268,11 @@ impl<S: Screen> MoshSession<S> {
         self.sender.state_mut().push_scrollback_request(budget_kib);
     }
 
+    /// Announce support for private clipboard frames in terminal queries.
+    pub fn request_clipboard_relay(&mut self) {
+        self.sender.state_mut().push_clipboard_version(1);
+    }
+
     /// What to prepend to a window title before passing it on. Empty
     /// by default: the mechanism is here, the text is the caller's.
     pub fn set_title_prefix(&mut self, prefix: impl Into<String>) {

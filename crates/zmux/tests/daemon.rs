@@ -8564,10 +8564,11 @@ fn test_png() -> Vec<u8> {
 
 /// Opens a shared session with one daemon-owned pane, which is what a window
 /// attached to a session — remote or local — is actually looking at.
-fn shared_pane_for_image_paste(
+fn shared_pane_with_command(
     daemon: &TestDaemon,
     client: &Client,
     protection: Option<&zmux::auth::SessionAuthentication>,
+    command: &str,
 ) -> (u64, zmux::client::SharedSpawnedPane) {
     let pane = client
         .spawn(spawn_request(None, "printf ready; sleep 60"))
@@ -8585,7 +8586,7 @@ fn shared_pane_for_image_paste(
         )
         .unwrap();
 
-    let request = spawn_request(Some(pane.session_id), "sleep 60");
+    let request = spawn_request(Some(pane.session_id), command);
     let shared = client
         .spawn_shared(SharedSpawnRequest {
             session_id: pane.session_id,
@@ -8605,6 +8606,108 @@ fn shared_pane_for_image_paste(
             )
         });
     (pane.session_id, shared)
+}
+
+fn shared_pane_for_image_paste(
+    daemon: &TestDaemon,
+    client: &Client,
+    protection: Option<&zmux::auth::SessionAuthentication>,
+) -> (u64, zmux::client::SharedSpawnedPane) {
+    shared_pane_with_command(daemon, client, protection, "sleep 60")
+}
+
+fn clipboard_probe_frame() -> zclip::protocol::Frame {
+    zclip::protocol::Frame {
+        id: [0x42; 16],
+        message: zclip::protocol::Message::Probe,
+    }
+}
+
+fn shell_octal_bytes(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("\\{byte:03o}")).collect()
+}
+
+#[test]
+fn shared_clipboard_request_reaches_one_viewer_and_is_not_replayed() {
+    let daemon = TestDaemon::start();
+    let client = daemon.client();
+    let frame = clipboard_probe_frame().encode();
+    let command = format!(
+        "stty raw -echo; printf ready; dd bs=1 count=1 2>/dev/null; \
+         printf '{}'; printf after-frame; dd bs=1 count=1 2>/dev/null; \
+         printf reattached; sleep 60",
+        shell_octal_bytes(&frame)
+    );
+    let (session_id, spawned) = shared_pane_with_command(&daemon, &client, None, &command);
+    let pane_id = spawned.pane.pane_id();
+    let mut reader = spawned.pane.reader();
+    read_until_reader(&mut reader, "ready");
+    spawned.pane.send_input(b"x").unwrap();
+    let seen = read_until_reader(&mut reader, "after-frame");
+    assert!(
+        seen.as_bytes()
+            .windows(frame.len())
+            .any(|part| part == frame)
+    );
+    drop(reader);
+    drop(spawned);
+
+    let AttachOutcome::SharedAttached { pane: viewer, .. } = client
+        .attach_shared_with_secret(session_id, pane_id, None)
+        .unwrap()
+    else {
+        panic!("the pane did not reattach as shared")
+    };
+    let mut replay_reader = viewer.reader();
+    viewer.send_input(b"y").unwrap();
+    let replay = read_until_reader(&mut replay_reader, "reattached");
+    assert!(
+        !replay.contains("zclip;1;"),
+        "clipboard request was retained for a later viewer: {replay:?}"
+    );
+}
+
+#[test]
+fn shared_clipboard_request_with_two_viewers_returns_ambiguity_error() {
+    let daemon = TestDaemon::start();
+    let client = daemon.client();
+    let frame = clipboard_probe_frame().encode();
+    let error = zclip::protocol::Frame {
+        id: clipboard_probe_frame().id,
+        message: zclip::protocol::Message::Error(
+            "multiple Zetta viewers are attached; clipboard destination is ambiguous".into(),
+        ),
+    }
+    .encode();
+    let expected_hex: String = error.iter().map(|byte| format!("{byte:02x}")).collect();
+    let command = format!(
+        "stty raw -echo; printf ready; dd bs=1 count=1 2>/dev/null; \
+         printf '{}'; dd bs=1 count={} 2>/dev/null | od -An -tx1 | tr -d ' \\n'; \
+         printf done; sleep 60",
+        shell_octal_bytes(&frame),
+        error.len()
+    );
+    let (session_id, spawned) = shared_pane_with_command(&daemon, &client, None, &command);
+    let pane_id = spawned.pane.pane_id();
+    let AttachOutcome::SharedAttached { pane: second, .. } = client
+        .attach_shared_with_secret(session_id, pane_id, None)
+        .unwrap()
+    else {
+        panic!("the second viewer did not attach as shared")
+    };
+    let mut reader = spawned.pane.reader();
+    read_until_reader(&mut reader, "ready");
+    spawned.pane.send_input(b"x").unwrap();
+    let seen = read_until_reader(&mut reader, "done");
+    assert!(
+        seen.contains(&expected_hex),
+        "missing ambiguity reply: {seen:?}"
+    );
+    assert!(
+        !seen.contains("zclip;1;"),
+        "request reached a viewer: {seen:?}"
+    );
+    drop(second);
 }
 
 /// Subscribing is answered before anything is delivered on the connection, and

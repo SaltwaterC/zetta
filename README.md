@@ -9,6 +9,9 @@ Zetta currently supports Linux, Windows, and macOS. All platforms are targets
 for active development.
 
 Clipboard builds also ship standalone `zcopy` and `zpaste` commands. `zetta copy` and `zetta paste` forward to these sibling executables.
+In an interactive SSH or zosh pane, the helpers use the clipboard of the
+displaying Zetta window. Remote paste needs **Allow Remote Clipboard Paste**
+enabled in that tab's menu; it is off by default.
 
 ## Highlights
 

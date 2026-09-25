@@ -30,6 +30,9 @@ pub enum Event {
     /// into the expected escape sequence format.
     ClipboardLoad(ClipboardType, Arc<dyn Fn(&str) -> String + Sync + Send + 'static>),
 
+    /// Private clipboard request from an interactive child.
+    ClipboardFrame(zclip::protocol::Frame),
+
     /// Request to write the RGB value of a color to the PTY.
     ///
     /// The attached function is a formatter which will correctly transform the RGB color into the
@@ -77,6 +80,7 @@ impl Debug for Event {
         match self {
             Event::ClipboardStore(ty, text) => write!(f, "ClipboardStore({ty:?}, {text})"),
             Event::ClipboardLoad(ty, _) => write!(f, "ClipboardLoad({ty:?})"),
+            Event::ClipboardFrame(_) => f.write_str("ClipboardFrame"),
             Event::TextAreaSizeRequest(_) => write!(f, "TextAreaSizeRequest"),
             Event::ResizeRequest { rows, columns } => {
                 write!(f, "ResizeRequest({columns}x{rows})")

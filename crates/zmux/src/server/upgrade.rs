@@ -432,6 +432,7 @@ pub(super) fn adopt_handover(
                 exited: pane.exited,
                 exit_status: pane.exit_status,
                 pending_input: Vec::new(),
+                clipboard_scanner: zclip::protocol::Scanner::default(),
             });
         }
         sessions.push(Session {
@@ -536,6 +537,7 @@ pub(super) fn adopt_handover(
                 exited: pane.exited,
                 exit_status: pane.exit_status,
                 pending_input: Vec::new(),
+                clipboard_scanner: zclip::protocol::Scanner::default(),
             });
         }
         sessions.push(Session {
@@ -714,9 +716,10 @@ pub(super) fn pause_pane_reader(pane: &mut Pane) -> Result<()> {
         if read == 0 {
             break;
         }
-        pane.retained.push(&buffer[..read]);
-        record_handover_output(pane, &buffer[..read]);
-        relay_output(pane, &buffer[..read]);
+        let visible = filter_clipboard_output(pane, &buffer[..read]);
+        pane.retained.push(&visible);
+        record_handover_output(pane, &visible);
+        relay_output(pane, &visible);
     }
     Ok(())
 }

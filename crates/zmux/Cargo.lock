@@ -129,6 +129,7 @@ dependencies = [
  "unicode-width",
  "vte",
  "windows-sys 0.59.0",
+ "zclip",
 ]
 
 [[package]]
@@ -3182,6 +3183,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "zclip"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "getrandom 0.3.4",
+ "libc",
+ "tempfile",
+ "windows",
+]
+
+[[package]]
 name = "zerocopy"
 version = "0.8.56"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3316,6 +3329,7 @@ dependencies = [
  "tempfile",
  "uds_windows",
  "windows",
+ "zclip",
  "zeroize",
  "zetta_profiles",
  "zmux",

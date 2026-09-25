@@ -1018,6 +1018,10 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let remote_paste_allowed = self.remote_clipboard_paste_tabs.contains(&tab_id);
+        terminal.update(cx, |terminal, _| {
+            terminal.set_remote_clipboard_paste_allowed(remote_paste_allowed);
+        });
         let run_registry = crate::run_command::process_run_registry();
         if let Some(identity) = run_identity {
             run_registry.pane_reopened(identity);

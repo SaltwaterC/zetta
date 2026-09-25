@@ -123,6 +123,9 @@ pub struct UserInstruction {
     /// ignores this unknown field.
     #[prost(message, optional, tag = "23")]
     pub agent: Option<AgentUserInstruction>,
+    /// Version of the private clipboard query relay understood by this client.
+    #[prost(uint32, optional, tag = "24")]
+    pub clipboard_version: Option<u32>,
 }
 
 #[derive(Clone, PartialEq, Eq, prost::Message)]
@@ -180,6 +183,8 @@ pub enum UserEvent {
     /// it is acknowledged, so the announcement arrives exactly once without
     /// anything having to repeat or confirm it.
     ScrollbackRequest(u32),
+    /// Advertise support for relaying private clipboard query frames.
+    ClipboardVersion(u32),
     /// Ask a Zosh server to negotiate agent forwarding.
     AgentHello(u32),
     /// A response to one complete SSH-agent request, or a close marker when
@@ -239,6 +244,10 @@ impl UserStream {
     /// [`UserEvent::ScrollbackRequest`].
     pub fn push_scrollback_request(&mut self, budget_kib: u32) {
         self.events.push(UserEvent::ScrollbackRequest(budget_kib));
+    }
+
+    pub fn push_clipboard_version(&mut self, version: u32) {
+        self.events.push(UserEvent::ClipboardVersion(version));
     }
 
     pub fn push_agent_hello(&mut self, version: u32) {
@@ -308,6 +317,7 @@ impl UserStream {
                             zosh_keepalive_ms: None,
                             terminal_response: None,
                             zosh_scrollback_kib: None,
+                            clipboard_version: None,
                             agent: None,
                         }),
                     }
@@ -322,6 +332,7 @@ impl UserStream {
                         zosh_keepalive_ms: None,
                         terminal_response: None,
                         zosh_scrollback_kib: None,
+                        clipboard_version: None,
                         agent: None,
                     });
                 }
@@ -336,6 +347,7 @@ impl UserStream {
                         zosh_keepalive_ms: Some(*interval_ms),
                         terminal_response: None,
                         zosh_scrollback_kib: None,
+                        clipboard_version: None,
                         agent: None,
                     });
                 }
@@ -346,6 +358,7 @@ impl UserStream {
                         zosh_keepalive_ms: None,
                         terminal_response: Some(bytes.clone()),
                         zosh_scrollback_kib: None,
+                        clipboard_version: None,
                         agent: None,
                     });
                 }
@@ -359,7 +372,14 @@ impl UserStream {
                         zosh_keepalive_ms: None,
                         terminal_response: None,
                         zosh_scrollback_kib: Some(*budget_kib),
+                        clipboard_version: None,
                         agent: None,
+                    });
+                }
+                UserEvent::ClipboardVersion(version) => {
+                    msg.instruction.push(UserInstruction {
+                        clipboard_version: Some(*version),
+                        ..Default::default()
                     });
                 }
                 UserEvent::AgentHello(version) => {
@@ -369,6 +389,7 @@ impl UserStream {
                         zosh_keepalive_ms: None,
                         terminal_response: None,
                         zosh_scrollback_kib: None,
+                        clipboard_version: None,
                         agent: Some(AgentUserInstruction {
                             hello: Some(AgentHelloMessage {
                                 version: Some(*version),
@@ -389,6 +410,7 @@ impl UserStream {
                         zosh_keepalive_ms: None,
                         terminal_response: None,
                         zosh_scrollback_kib: None,
+                        clipboard_version: None,
                         agent: Some(AgentUserInstruction {
                             hello: None,
                             response: Some(AgentResponseMessage {
@@ -434,6 +456,9 @@ impl UserStream {
             }
             if let Some(budget_kib) = inst.zosh_scrollback_kib {
                 self.push_scrollback_request(budget_kib);
+            }
+            if let Some(version) = inst.clipboard_version {
+                self.push_clipboard_version(version);
             }
             if let Some(agent) = inst.agent {
                 if let Some(hello) = agent.hello
@@ -663,6 +688,18 @@ mod tests {
         let mut rebuilt = old.clone();
         rebuilt.apply_string(&diff).unwrap();
         assert_eq!(rebuilt, new);
+    }
+
+    #[test]
+    fn clipboard_capability_round_trips_as_field_twenty_four() {
+        let mut stream = UserStream::new();
+        stream.push_clipboard_version(1);
+        let encoded = stream.init_diff();
+        let message = UserMessage::decode(encoded.as_slice()).unwrap();
+        assert_eq!(message.instruction[0].clipboard_version, Some(1));
+        let mut decoded = UserStream::new();
+        decoded.apply_string(&encoded).unwrap();
+        assert_eq!(decoded, stream);
     }
 
     #[test]

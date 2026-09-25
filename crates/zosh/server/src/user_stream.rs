@@ -51,6 +51,7 @@ pub struct AcceptedInput {
     /// KiB, if it asked at all.  Like the keep-alive it contributes no
     /// input, so the prefix arithmetic above never sees it.
     pub scrollback_kib: Option<u32>,
+    pub clipboard_version: Option<u32>,
 }
 
 #[derive(Debug, Clone)]
@@ -95,6 +96,7 @@ impl UserStreamTracker {
                 events: Vec::new(),
                 keep_alive_ms: None,
                 scrollback_kib: None,
+                clipboard_version: None,
             });
         }
 
@@ -105,6 +107,7 @@ impl UserStreamTracker {
         let Announcements {
             keep_alive_ms,
             scrollback_kib,
+            clipboard_version,
         } = announcements(&state.diff);
 
         let base = self.states.get(&state.old_num).cloned().ok_or_else(|| {
@@ -165,6 +168,7 @@ impl UserStreamTracker {
                 events: Vec::new(),
                 keep_alive_ms,
                 scrollback_kib,
+                clipboard_version,
             });
         }
 
@@ -201,6 +205,7 @@ impl UserStreamTracker {
             events: pending,
             keep_alive_ms,
             scrollback_kib,
+            clipboard_version,
         })
     }
 }
@@ -216,6 +221,7 @@ const TERMINAL_RESPONSE_FIELD: u64 = 21;
 const SCROLLBACK_FIELD: u64 = 22;
 /// Zosh's SSH-agent extension on `ClientBuffers.Instruction`.
 const AGENT_FIELD: u64 = 23;
+const CLIPBOARD_FIELD: u64 = 24;
 const MAX_AGENT_FRAME: usize = 256 * 1024;
 const WIRE_VARINT: u64 = 0;
 const WIRE_FIXED64: u64 = 1;
@@ -228,6 +234,7 @@ const WIRE_FIXED32: u64 = 5;
 struct Announcements {
     keep_alive_ms: Option<u32>,
     scrollback_kib: Option<u32>,
+    clipboard_version: Option<u32>,
 }
 
 /// The settings a UserStream diff announces, if it announces any.
@@ -257,6 +264,7 @@ fn announcements(diff: &[u8]) -> Announcements {
             let announced = instruction_announcements(instruction);
             found.keep_alive_ms = announced.keep_alive_ms.or(found.keep_alive_ms);
             found.scrollback_kib = announced.scrollback_kib.or(found.scrollback_kib);
+            found.clipboard_version = announced.clipboard_version.or(found.clipboard_version);
             continue;
         }
         if !skip_field(&mut rest, wire) {
@@ -275,6 +283,10 @@ fn instruction_announcements(mut rest: &[u8]) -> Announcements {
             }
             (SCROLLBACK_FIELD, WIRE_VARINT) => {
                 found.scrollback_kib = read_varint(&mut rest).and_then(|v| u32::try_from(v).ok());
+            }
+            (CLIPBOARD_FIELD, WIRE_VARINT) => {
+                found.clipboard_version =
+                    read_varint(&mut rest).and_then(|v| u32::try_from(v).ok());
             }
             _ => {
                 if !skip_field(&mut rest, wire) {
@@ -726,6 +738,15 @@ mod tests {
         let mut diff = keep_alive(100);
         diff.extend_from_slice(&keep_alive(250));
         assert_eq!(keep_alive_interval(&diff), Some(250));
+    }
+
+    #[test]
+    fn clipboard_capability_is_an_announcement_without_keyboard_events() {
+        let mut instruction = vec![0xC0, 0x01, 0x01]; // field 24, version 1
+        let mut diff = vec![0x0A, instruction.len() as u8];
+        diff.append(&mut instruction);
+        assert_eq!(announcements(&diff).clipboard_version, Some(1));
+        assert!(decode_events(&diff).unwrap().is_empty());
     }
 
     #[test]

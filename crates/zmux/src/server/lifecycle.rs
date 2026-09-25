@@ -637,6 +637,7 @@ pub(super) fn create_shared(
             exited: false,
             exit_status: None,
             pending_input: Vec::new(),
+            clipboard_scanner: zclip::protocol::Scanner::default(),
         });
     }
 
@@ -866,6 +867,7 @@ fn commit_shared_batch(
             exited: false,
             exit_status: None,
             pending_input: Vec::new(),
+            clipboard_scanner: zclip::protocol::Scanner::default(),
         });
     }
     state
@@ -1192,6 +1194,7 @@ pub(super) fn spawn(
         exited: false,
         exit_status: None,
         pending_input: Vec::new(),
+        clipboard_scanner: zclip::protocol::Scanner::default(),
     });
     let pane = session.panes.last().expect("the pane was just pushed");
 

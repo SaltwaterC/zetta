@@ -59,6 +59,7 @@ sysinfo = "0.37"
 tempfile = "3"
 zeroize = "1"
 zetta_profiles = { path = "../zetta_profiles" }
+zclip = { path = "../zclip", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
 uds_windows = "1.2"

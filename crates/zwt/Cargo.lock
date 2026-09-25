@@ -32,6 +32,7 @@ dependencies = [
  "unicode-width",
  "vte",
  "windows-sys 0.59.0",
+ "zclip",
 ]
 
 [[package]]
@@ -938,6 +939,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 
 [[package]]
+name = "zclip"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64",
+ "getrandom 0.3.4",
+ "libc",
+ "tempfile",
+ "windows",
+]
+
+[[package]]
 name = "zeroize"
 version = "1.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -978,6 +991,7 @@ dependencies = [
  "tempfile",
  "uds_windows",
  "windows",
+ "zclip",
  "zeroize",
  "zetta_profiles",
 ]

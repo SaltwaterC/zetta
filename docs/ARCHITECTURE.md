@@ -275,6 +275,8 @@ honours neither `Window::request_autoscroll` nor `ScrollHandle::scroll_to_item`)
   side of `zetta pane` and registered project commands
 - `silent_mode.rs`: silent-mode state, the system do-not-disturb query, and
   `FocusStatusAccess`
+- `remote_clipboard_ui.rs`: the per-viewer tab switch for remote clipboard
+  reads, including propagation to every interactive terminal in that tab
 
 ## Remote sessions and image paste
 
@@ -306,6 +308,8 @@ without that feature, so no call site needs a feature predicate:
 - `session_state_stub.rs`: restore-command validation shared by local sessions
 - `remote_session_ui_stub.rs`: the remote-session picker's disabled-build surface
 - `cli_service_stubs.rs`: disabled-build fallbacks for CLI-service actions
+- `remote_clipboard_ui_stub.rs`: disabled-build surface for the tab permission
+  action
 - `remote_pane_transport/zosh_stream_disabled.rs`: the Mosh pane surface for a
   build without the bundled Zosh client, where the type has no values at all
 
@@ -316,6 +320,8 @@ without that feature, so no call site needs a feature predicate:
   `cli_services/clipboard.rs` (validated proxy to sibling `zcopy` and `zpaste`),
   and `cli_services/raw_terminal.rs`. `crates/zclip` shares the clipboard option
   parser with Zetta and keeps `arboard` behind a binary-only backend feature.
+  Its `protocol.rs`, `host.rs`, and `remote.rs` own the private OSC transport,
+  displaying-window request state, and standalone helper TTY transport.
   When enabled, the `notify` arm proxies to sibling `zntfy`; its backend and
   built-in sounds live in `crates/zntfy`
 - `byte_stream_pane.rs`: shared pane opener for byte-stream-backed panes

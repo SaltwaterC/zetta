@@ -303,6 +303,29 @@ preference is validated but does not change the output. `zetta paste` prints
 nothing, without an error, if the clipboard is empty or holds no text. Run
 `zetta copy --help` or `zetta paste --help` for complete syntax.
 
+In an interactive SSH or zosh pane, the helpers first probe the Zetta window
+displaying that pane. `zcopy` then copies to that window's clipboard. `zpaste`
+reads it only after **Allow Remote Clipboard Paste** is enabled in the tab
+menu or command palette. The switch starts off and is cleared when the tab
+closes or detaches. Copying is always permitted. A disabled read or a failed
+transfer exits with an error; a channel that does not answer within three
+seconds makes a helper with a local backend use that machine's clipboard.
+Transfers stop after 30 seconds without a response. Clipboard text has no
+protocol size limit; data travels in 32 KiB chunks through the controlling
+terminal, separate from stdin and stdout, so pipelines work. A remote command
+needs a TTY (`ssh -t` for a one-shot command).
+
+On a headless remote host, build the helpers without a native clipboard
+backend from a Zetta checkout:
+
+```sh
+cargo install --path crates/zclip --no-default-features --locked
+```
+
+Put the installed `zcopy` and `zpaste` on the remote `PATH`. A backend-free
+helper reports an error if no Zetta channel answers. The Zetta host needs its
+own native sibling helpers installed alongside the Zetta executable.
+
 On Linux and BSD, the X11 and Wayland clipboards are only available while
 their owning process keeps running, so `zcopy` starts a detached
 background process that keeps serving the clipboard after the command exits.

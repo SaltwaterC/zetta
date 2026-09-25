@@ -57,6 +57,7 @@ dependencies = [
  "unicode-width 0.2.2",
  "vte",
  "windows-sys 0.59.0",
+ "zclip",
 ]
 
 [[package]]
@@ -4311,6 +4312,7 @@ dependencies = [
  "util_macros",
  "vte",
  "windows 0.61.3",
+ "zclip",
  "zetta_profiles",
 ]
 
@@ -5314,6 +5316,18 @@ dependencies = [
  "quote",
  "syn 2.0.119",
  "synstructure",
+]
+
+[[package]]
+name = "zclip"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64",
+ "getrandom 0.3.4",
+ "libc",
+ "tempfile",
+ "windows 0.61.3",
 ]
 
 [[package]]

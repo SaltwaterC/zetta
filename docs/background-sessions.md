@@ -22,6 +22,13 @@ snapshot of each pane's screen; `zmux` keeps reading the terminals so nothing
 blocks, and replays the snapshot and everything since when the session is
 attached again.
 
+Remote `zcopy` and `zpaste` requests are delivered only to the window viewing
+the pane. In a shared pane, `zmux` forwards a request when exactly one viewer
+is attached; with multiple viewers it returns an ambiguity error. Requests are
+removed before output is retained, so reattaching never replays a clipboard
+operation. Each viewer controls its own **Allow Remote Clipboard Paste** switch;
+another viewer never inherits it, and detaching clears it.
+
 When a tab is shared while it remains on screen, Zetta also checkpoints each
 exclusive pane when the offer is published. With disk retention this means a
 daemon restart before the tab is detached still has the last shared screen to

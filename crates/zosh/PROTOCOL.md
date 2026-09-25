@@ -109,6 +109,26 @@ skips host field 20, and a stock Mosh server skips client field 21; neither
 peer gains color-query forwarding, but ordinary terminal output and keyboard
 input remain compatible.
 
+### Clipboard relay
+
+The client announces clipboard relay version 1 in field 24 of a standalone
+`ClientBuffers.Instruction`. The server forwards private clipboard OSC frames
+only after receiving that capability. They use the same deduplicated field 20
+terminal-query path and the ordered field 21 terminal-response path described
+above. A stock Mosh peer ignores the new field and does not take part in the
+relay. The server keeps at most 2 MiB of unacknowledged terminal queries; if
+the queue fills, it sends an error response to the remote helper.
+
+The private frame syntax is `ESC ] 777 ; zclip ; 1 ; ID ; KIND [; ...] BEL`.
+`ID` is a random 128-bit lowercase hex request ID. `KIND` is `probe`,
+`ready`, `copy`, `paste`, `data;SEQUENCE;BASE64`, `ack;NEXT_SEQUENCE`, `end`,
+`done`, or `error;BASE64`. A data frame holds at most 32 KiB of bytes. Sequence
+numbers start at zero; acknowledgements are cumulative. Copy data is spooled
+to a private temporary file and committed only after `end` and UTF-8
+validation. Paste data is not written to stdout until the transfer completes
+and validates. A helper probes before consuming stdin, waits three seconds
+for a channel, and allows 30 seconds of inactivity during a transfer.
+
 ### Scrollback
 
 Mosh synchronizes a screen. Everything that scrolls past the top of it between

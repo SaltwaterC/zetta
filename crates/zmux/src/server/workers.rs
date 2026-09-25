@@ -230,16 +230,17 @@ pub(super) fn drain_loop(daemon: Arc<Daemon>, mut waker: Stream) {
                             match read_pane(&mut pane.pty, &mut buffer) {
                                 Ok(0) | Err(_) => break,
                                 Ok(read) => {
-                                    pane.retained.push(&buffer[..read]);
+                                    let visible = filter_clipboard_output(pane, &buffer[..read]);
+                                    if visible.is_empty() {
+                                        continue;
+                                    }
+                                    pane.retained.push(&visible);
                                     #[cfg(feature = "session-persistence")]
                                     record_persistence_output(
-                                        &daemon,
-                                        session_id,
-                                        pane.id,
-                                        &buffer[..read],
+                                        &daemon, session_id, pane.id, &visible,
                                     );
-                                    record_handover_output(pane, &buffer[..read]);
-                                    relay_output(pane, &buffer[..read]);
+                                    record_handover_output(pane, &visible);
+                                    relay_output(pane, &visible);
                                 }
                             }
                         }
@@ -279,12 +280,17 @@ pub(super) fn drain_loop(daemon: Arc<Daemon>, mut waker: Stream) {
                         }
                     }
                     if filled > 0 {
-                        pane.retained.push(&buffer[..filled]);
+                        let visible = filter_clipboard_output(pane, &buffer[..filled]);
+                        if visible.is_empty() {
+                            idle = false;
+                            continue;
+                        }
+                        pane.retained.push(&visible);
                         #[cfg(feature = "session-persistence")]
-                        record_persistence_output(&daemon, session_id, pane.id, &buffer[..filled]);
-                        record_handover_output(pane, &buffer[..filled]);
+                        record_persistence_output(&daemon, session_id, pane.id, &visible);
+                        record_handover_output(pane, &visible);
                         idle = false;
-                        relay_output(pane, &buffer[..filled]);
+                        relay_output(pane, &visible);
                     }
                 }
             }
@@ -539,6 +545,37 @@ pub(super) fn relay_output(pane: &mut Pane, bytes: &[u8]) {
         }
     };
     queue_for_shared_clients(&mut pane.attachment, pane.handover_waiters, &frame);
+}
+
+/// Consume private clipboard requests before retention or fan-out. A request
+/// has exactly one displaying window or it receives an explicit error.
+pub(super) fn filter_clipboard_output<'a>(
+    pane: &mut Pane,
+    bytes: &'a [u8],
+) -> std::borrow::Cow<'a, [u8]> {
+    let mut scanner = std::mem::take(&mut pane.clipboard_scanner);
+    let visible = scanner.filter_cow(bytes, |frame| {
+        let viewers = shared_viewer_count(&pane.attachment);
+        if viewers == 1 {
+            relay_output(pane, &frame.encode());
+        } else {
+            let error = if viewers == 0 {
+                "no Zetta viewer is attached"
+            } else {
+                "multiple Zetta viewers are attached; clipboard destination is ambiguous"
+            };
+            pane.pending_input.extend_from_slice(
+                &zclip::protocol::Frame {
+                    id: frame.id,
+                    message: zclip::protocol::Message::Error(error.into()),
+                }
+                .encode(),
+            );
+            flush_pending_input(pane);
+        }
+    });
+    pane.clipboard_scanner = scanner;
+    visible
 }
 
 /// Returns a pane whose last shared client has gone to being unheld.

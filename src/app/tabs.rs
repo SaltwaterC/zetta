@@ -334,6 +334,8 @@ impl Zetta {
             return;
         }
         let tab_id = self.tabs[index].id;
+        self.set_tab_remote_clipboard_paste(tab_id, false, cx);
+        self.remote_clipboard_paste_tabs.remove(&tab_id);
         let remote_shared_tab = self.mux_panes.is_remote_tab(tab_id);
         let shared_tab =
             remote_shared_tab || self.tabs[index].shared || self.has_shared_tab_binding(tab_id);

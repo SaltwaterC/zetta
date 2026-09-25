@@ -428,6 +428,7 @@ impl From<AlacTermEvent> for TerminalBackendEvent {
             AlacTermEvent::ResetTitle => Self::ResetTitle,
             AlacTermEvent::ClipboardStore(_, data) => Self::ClipboardStore(data),
             AlacTermEvent::ClipboardLoad(_, format) => Self::ClipboardLoad(format),
+            AlacTermEvent::ClipboardFrame(frame) => Self::ClipboardFrame(frame),
             AlacTermEvent::ColorRequest(index, format) => Self::ColorRequest(index, format),
             AlacTermEvent::PtyWrite(output) => Self::PtyWrite(output),
             AlacTermEvent::TextAreaSizeRequest(format) => {

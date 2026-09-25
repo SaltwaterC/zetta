@@ -86,6 +86,10 @@ The `clipboard` feature (enabled by default; see
 packages to build. Building with `CLIPBOARD=0` (or `--no-default-features`
 without re-enabling `clipboard`) omits `zetta copy`, `zetta paste`, and the
 `zcopy` and `zpaste` executables and `pbcopy`/`pbpaste` shell integration aliases.
+For a headless SSH or zosh host, the standalone helpers can be installed from
+the same checkout with `cargo install --path crates/zclip --no-default-features
+--locked`. That build uses the displaying Zetta window's clipboard when its
+interactive terminal channel answers and has no machine-local fallback.
 
 The built-in vi editor's syntax highlighting is enabled by default. Build
 with `SYNTAX_HIGHLIGHTING=0` (or `--no-default-features` without re-enabling

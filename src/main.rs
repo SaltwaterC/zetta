@@ -237,6 +237,7 @@ actions!(
         ToggleSilentMode,
         RequestFocusStatusAccess,
         ToggleTabSilentMode,
+        ToggleRemoteClipboardPaste,
         ToggleMultiCommand,
         ToggleStackedCommand,
         SelectPreviousStackedPane,
@@ -265,6 +266,7 @@ fn action_is_enabled_in_build(name: &str) -> bool {
         name if name == ToggleSerialConsole.name() => cfg!(feature = "serial-console"),
         name if name == StartHttpServer.name() => cfg!(feature = "http-server"),
         name if name == StartTftpServer.name() => cfg!(feature = "tftp-server"),
+        name if name == ToggleRemoteClipboardPaste.name() => cfg!(feature = "clipboard"),
         name if name == RequestFocusStatusAccess.name() => cfg!(target_os = "macos"),
         _ => true,
     }
@@ -416,6 +418,11 @@ mod pane_overlay;
 mod pane_render;
 mod pane_theme_picker;
 mod pane_view_state;
+#[cfg(feature = "clipboard")]
+mod remote_clipboard_ui;
+#[cfg(not(feature = "clipboard"))]
+#[path = "remote_clipboard_ui_stub.rs"]
+mod remote_clipboard_ui;
 #[cfg(feature = "zmux")]
 mod remote_pane_transport;
 #[cfg(feature = "zmux")]

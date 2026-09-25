@@ -35,7 +35,8 @@ use crate::{
 const IDLE_WAIT_MS: u64 = 100;
 const EXIT_MESSAGE: &[u8] = b"\r\n[zosh is exiting.]\r\n";
 
-const MAX_TERMINAL_QUERY_SEQUENCE: usize = 4096;
+const MAX_TERMINAL_QUERY_SEQUENCE: usize = 46 * 1024;
+const MAX_PENDING_TERMINAL_QUERIES: usize = 128;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ColorQueryKind {
@@ -43,9 +44,15 @@ enum ColorQueryKind {
     Background,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TerminalQueryKind {
+    Color(ColorQueryKind),
+    Clipboard([u8; 16]),
+}
+
 #[derive(Default)]
 pub(crate) struct TerminalQueryProxy {
-    pending: VecDeque<ColorQueryKind>,
+    pending: VecDeque<TerminalQueryKind>,
     state: TerminalQueryInputState,
     sequence: Vec<u8>,
 }
@@ -66,10 +73,21 @@ pub(crate) enum ProxiedInput {
 }
 
 impl TerminalQueryProxy {
-    pub(crate) fn register_query(&mut self, query: &[u8]) {
-        if let Some(kind) = terminal_color_query_kind(query) {
-            self.pending.push_back(kind);
+    pub(crate) fn register_query(&mut self, query: &[u8]) -> bool {
+        let kind = terminal_color_query_kind(query)
+            .map(TerminalQueryKind::Color)
+            .or_else(|| {
+                zclip::protocol::Frame::parse(query)
+                    .map(|frame| TerminalQueryKind::Clipboard(frame.id))
+            });
+        let Some(kind) = kind else {
+            return false;
+        };
+        if self.pending.len() >= MAX_PENDING_TERMINAL_QUERIES {
+            return false;
         }
+        self.pending.push_back(kind);
+        true
     }
 
     pub(crate) fn filter(&mut self, bytes: &[u8]) -> Vec<ProxiedInput> {
@@ -161,7 +179,20 @@ impl TerminalQueryProxy {
     fn finish_sequence(&mut self, output: &mut Vec<ProxiedInput>) {
         let sequence = std::mem::take(&mut self.sequence);
         self.state = TerminalQueryInputState::Ground;
-        let response_kind = terminal_color_response_kind(&sequence);
+        let response_kind = terminal_color_response_kind(&sequence)
+            .map(TerminalQueryKind::Color)
+            .or_else(|| {
+                let frame = zclip::protocol::Frame::parse(&sequence)?;
+                matches!(
+                    frame.message,
+                    zclip::protocol::Message::Ready
+                        | zclip::protocol::Message::Ack { .. }
+                        | zclip::protocol::Message::Data { .. }
+                        | zclip::protocol::Message::Done
+                        | zclip::protocol::Message::Error(_)
+                )
+                .then_some(TerminalQueryKind::Clipboard(frame.id))
+            });
         let matching_query =
             response_kind.and_then(|kind| self.pending.iter().position(|pending| *pending == kind));
         if let Some(query_index) = matching_query {
@@ -599,6 +630,7 @@ fn configure_session(session: &mut ClientSession, settings: &SessionSettings) {
         session.prediction_mut().set_predict_overwrite(true);
     }
     session.set_keep_alive(settings.keep_alive);
+    session.request_clipboard_relay();
     if settings.scrollback_kib > 0 {
         // Before anything is sent, so it rides the first instruction and the
         // server is carrying history from the first row that scrolls. It is a
@@ -910,8 +942,9 @@ pub(crate) fn forward_terminal_queries<W: Write>(
 ) -> io::Result<()> {
     let mut forwarded = false;
     for event in events {
-        if let HostEvent::TerminalQuery { bytes, .. } = event {
-            query_proxy.register_query(bytes);
+        if let HostEvent::TerminalQuery { bytes, .. } = event
+            && query_proxy.register_query(bytes)
+        {
             stdout.write_all(bytes)?;
             forwarded = true;
         }

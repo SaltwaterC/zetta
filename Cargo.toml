@@ -47,7 +47,7 @@ clipboard = ["dep:zclip"]
 worktree = ["dep:zwt", "zwt/recursive-submodules"]
 zosh = ["zosh-client", "zosh-server"]
 zosh-client = ["dep:zosh"]
-zosh-server = ["dep:flate2", "dep:moshcatty", "dep:portable-pty", "dep:vt100"]
+zosh-server = ["dep:flate2", "dep:moshcatty", "dep:portable-pty", "dep:vt100", "dep:zclip"]
 
 [[bin]]
 name = "zetta-gui"

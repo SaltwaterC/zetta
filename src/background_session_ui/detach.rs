@@ -655,6 +655,8 @@ impl Zetta {
         cx: &mut Context<Self>,
     ) {
         let tab_id = self.tabs[index].id;
+        self.set_tab_remote_clipboard_paste(tab_id, false, cx);
+        self.remote_clipboard_paste_tabs.remove(&tab_id);
         let shared_tab = self.tabs[index].shared || self.has_shared_tab_binding(tab_id);
         // The panes leave this window: their shared connections close with
         // their terminals, so the multiplexer's shared set stops counting on
