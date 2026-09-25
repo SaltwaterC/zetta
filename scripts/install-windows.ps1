@@ -17,6 +17,8 @@ param(
     [string]$SourceZoshServerBinary,
     [string]$SourceZwtBinary,
     [string]$SourceNotifyBinary,
+    [string]$SourceCopyBinary,
+    [string]$SourcePasteBinary,
     [switch]$WorktreeEnabled,
     [switch]$MuxDisabled,
     [switch]$UpgradeMux,
@@ -39,6 +41,10 @@ if (-not $env:APPDATA) {
 $zoshSourceProvided = [bool]$SourceZoshBinary
 $zoshServerSourceProvided = [bool]$SourceZoshServerBinary
 $notifySourceProvided = [bool]$SourceNotifyBinary
+$clipboardEnabled = [bool]$SourceCopyBinary -and [bool]$SourcePasteBinary
+if ([bool]$SourceCopyBinary -ne [bool]$SourcePasteBinary) {
+    throw "Provide both clipboard helper paths or neither"
+}
 
 $repositoryRoot = Split-Path -Parent $PSScriptRoot
 $muxEnabled = -not $MuxDisabled
@@ -94,6 +100,8 @@ $installedZoshServerBinary = Join-Path $InstallDirectory "zosh-server.exe"
 $legacyMoshServerBinary = Join-Path $InstallDirectory "mosh-server.exe"
 $installedZwtBinary = Join-Path $InstallDirectory "zwt.exe"
 $installedNotifyBinary = Join-Path $InstallDirectory "zntfy.exe"
+$installedCopyBinary = Join-Path $InstallDirectory "zcopy.exe"
+$installedPasteBinary = Join-Path $InstallDirectory "zpaste.exe"
 $runtimeFileNames = @("conpty.dll", "OpenConsole.exe")
 $sourceDirectory = Split-Path -Parent $SourceBinary
 $pathMarker = Join-Path $InstallDirectory ".zetta-path-managed"
@@ -131,6 +139,10 @@ function Get-InstallFiles {
     }
     if ($NotifyEnabled) {
         $files += [pscustomobject]@{ Source = $SourceNotifyBinary; Destination = $installedNotifyBinary }
+    }
+    if ($clipboardEnabled) {
+        $files += [pscustomobject]@{ Source = $SourceCopyBinary; Destination = $installedCopyBinary }
+        $files += [pscustomobject]@{ Source = $SourcePasteBinary; Destination = $installedPasteBinary }
     }
     foreach ($fileName in $runtimeFileNames) {
         $files += [pscustomobject]@{
@@ -184,6 +196,15 @@ function Remove-DisabledNotifyFiles {
             } catch {
                 Write-Warning "Could not remove disabled notification executable ${path}: $_"
             }
+        }
+    }
+}
+
+function Remove-DisabledClipboardFiles {
+    if ($clipboardEnabled) { return }
+    foreach ($binary in @($installedCopyBinary, $installedPasteBinary)) {
+        foreach ($path in @($binary, (Get-VersionedPath $binary "new"), (Get-VersionedPath $binary "old"))) {
+            if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force }
         }
     }
 }
@@ -418,6 +439,7 @@ function Install-Binary {
     }
     Remove-DisabledWorktreeFiles
     Remove-DisabledNotifyFiles
+    Remove-DisabledClipboardFiles
     Remove-DisabledMuxFiles
     Remove-DisabledZoshFiles
     Remove-DisabledZoshServerFiles
@@ -621,6 +643,10 @@ function Uninstall-Binary {
     }
     if (-not $WorktreeEnabled) {
         $filesToRemove += [pscustomobject]@{ Source = $null; Destination = $installedZwtBinary }
+    }
+    if (-not $clipboardEnabled) {
+        $filesToRemove += [pscustomobject]@{ Source = $null; Destination = $installedCopyBinary }
+        $filesToRemove += [pscustomobject]@{ Source = $null; Destination = $installedPasteBinary }
     }
     if (-not $NotifyEnabled) {
         $filesToRemove += [pscustomobject]@{ Source = $null; Destination = $installedNotifyBinary }

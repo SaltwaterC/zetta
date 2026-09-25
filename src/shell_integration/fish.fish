@@ -341,14 +341,8 @@ function zntfy --wraps 'zetta notify' --description 'Zetta desktop notifications
     zetta notify $argv
 end
 
-function zcopy --wraps 'zetta copy' --description 'Copy standard input to the clipboard'
-    zetta copy $argv
-end
-
-function zpaste --wraps 'zetta paste' --description "Print the clipboard's contents"
-    zetta paste $argv
-end
-
+# ZETTA_CLIPBOARD_INTEGRATION_BEGIN
+functions -e zcopy zpaste 2>/dev/null
 # Real pbcopy/pbpaste already exist on macOS, so Zetta leaves them alone
 # there. Elsewhere, Zetta's pbcopy/pbpaste keep the muscle memory working;
 # any preexisting pbcopy/pbpaste function or abbreviation is erased first so
@@ -357,13 +351,14 @@ switch (uname)
     case Darwin
     case '*'
         functions -e pbcopy pbpaste 2>/dev/null
-        function pbcopy --wraps 'zetta copy' --description 'Copy standard input to the clipboard'
-            zetta copy $argv
+        function pbcopy --wraps 'zcopy' --description 'Copy standard input to the clipboard'
+            command zcopy $argv
         end
-        function pbpaste --wraps 'zetta paste' --description "Print the clipboard's contents"
-            zetta paste $argv
+        function pbpaste --wraps 'zpaste' --description "Print the clipboard's contents"
+            command zpaste $argv
         end
 end
+# ZETTA_CLIPBOARD_INTEGRATION_END
 
 function __zetta_config_args
     set -l words (commandline -opc)
@@ -1091,6 +1086,7 @@ function __zetta_long_options
                 --sound 'Sound name' \
                 --timeout 'Timeout' \
                 --help 'Print help'
+# ZETTA_CLIPBOARD_INTEGRATION_BEGIN
         case copy zcopy pbcopy
             printf '%s\t%s\n' --pboard 'Pasteboard to use' --help 'Print help'
         case paste zpaste pbpaste
@@ -1098,6 +1094,7 @@ function __zetta_long_options
                 --pboard 'Pasteboard to use' \
                 --prefer 'Preferred clipboard format' \
                 --help 'Print help'
+# ZETTA_CLIPBOARD_INTEGRATION_END
         end
     end | __zetta_filter_long_options
 end
@@ -1120,8 +1117,10 @@ complete -c zetta -n '__zetta_at_root' -a http -d 'Serve static files over HTTP'
 complete -c zetta -n '__zetta_at_root' -a tftp -d 'Transfer a file with TFTP'
 complete -c zetta -n '__zetta_at_root' -a notify -d 'Show a desktop notification'
 complete -c zetta -n '__zetta_at_root' -a attention -d 'Mark the originating tab as needing attention'
+# ZETTA_CLIPBOARD_INTEGRATION_BEGIN
 complete -c zetta -n '__zetta_at_root' -a copy -d 'Copy standard input to the clipboard'
 complete -c zetta -n '__zetta_at_root' -a paste -d "Print the clipboard's contents"
+# ZETTA_CLIPBOARD_INTEGRATION_END
 complete -c zetta -n '__zetta_at_root' -a tabicon -d 'Set the active tab icon'
 complete -c zetta -n '__zetta_at_root' -a theme -d "Non-persistently change the active pane or tab's theme"
 complete -c zetta -n '__zetta_at_root' -a splits -d 'List configured pane split templates'
@@ -1567,6 +1566,7 @@ complete -c zntfy -s a -r -n '__zetta_short_option -a'
 complete -c zntfy -s i -r -n '__zetta_short_option -i'
 complete -c zntfy -s s -r -a '(__zetta_sound_names)' -n '__zetta_short_option -s'
 complete -c zntfy -s t -r -a 'default never' -n '__zetta_short_option -t'
+# ZETTA_CLIPBOARD_INTEGRATION_BEGIN
 complete -c zcopy -f -l pboard -r -a 'general ruler find font'
 complete -c zcopy -l help -d 'Print help'
 complete -c zcopy -a '(__zetta_long_options zcopy)'
@@ -1589,3 +1589,4 @@ if test (uname) != Darwin
     complete -c pbpaste -n '__zetta_short_option -pboard' -a 'general ruler find font'
     complete -c pbpaste -n '__zetta_short_option -prefer' -a 'txt rtf ps'
 end
+# ZETTA_CLIPBOARD_INTEGRATION_END

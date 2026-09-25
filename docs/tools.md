@@ -282,14 +282,16 @@ background session. Run `zetta attention --help` for complete syntax.
 
 ## Clipboard
 
-`zetta copy` and `zetta paste` read standard input to the system clipboard and
-write the clipboard's text contents to standard output, mirroring macOS's
+`zcopy` reads standard input into the system clipboard, and `zpaste` writes
+clipboard text to standard output. They are standalone executables; `zetta copy`
+and `zetta paste` validate arguments and forward to them with inherited standard
+streams. Their behavior mirrors macOS's
 `pbcopy`/`pbpaste`:
 
 ```sh
-echo "Build finished" | zetta copy
-zetta copy < release-notes.txt
-zetta paste > release-notes-copy.txt
+echo "Build finished" | zcopy
+zcopy < release-notes.txt
+zpaste > release-notes-copy.txt
 zetta paste | grep TODO
 ```
 
@@ -302,14 +304,14 @@ nothing, without an error, if the clipboard is empty or holds no text. Run
 `zetta copy --help` or `zetta paste --help` for complete syntax.
 
 On Linux and BSD, the X11 and Wayland clipboards are only available while
-their owning process keeps running, so `zetta copy` forks a short-lived
+their owning process keeps running, so `zcopy` starts a detached
 background process that keeps serving the clipboard after the command exits.
 macOS and Windows keep the clipboard through their own system services, so no
 such process is needed there.
 
-With [shell integration](shell-integration.md) enabled, `zcopy` and `zpaste`
-are equivalent shortcuts and retain command completion. On every platform
+`zcopy` and `zpaste` run directly without shell integration. [Shell
+integration](shell-integration.md) adds completions for them. On every platform
 other than macOS (which already has real `pbcopy`/`pbpaste`), the integration
-also defines `pbcopy` and `pbpaste` as the same shortcuts, taking priority
+also defines `pbcopy` and `pbpaste` as functions calling the standalone tools, taking priority
 over any preexisting `pbcopy`/`pbpaste` alias (for example one pointing at
 `xclip`) so that muscle memory keeps working there too.

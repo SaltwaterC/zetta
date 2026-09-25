@@ -313,9 +313,11 @@ without that feature, so no call site needs a feature predicate:
 
 - `cli_services.rs`: CLI service dispatch; a module directory —
   `cli_services/serial.rs`, `cli_services/servers.rs` (HTTP + TFTP server),
-  `cli_services/clipboard.rs`, and `cli_services/raw_terminal.rs`. When enabled,
-  its `notify` arm proxies to the sibling `zntfy` executable; the standalone
-  notification backend and built-in sounds live in `crates/zntfy`
+  `cli_services/clipboard.rs` (validated proxy to sibling `zcopy` and `zpaste`),
+  and `cli_services/raw_terminal.rs`. `crates/zclip` shares the clipboard option
+  parser with Zetta and keeps `arboard` behind a binary-only backend feature.
+  When enabled, the `notify` arm proxies to sibling `zntfy`; its backend and
+  built-in sounds live in `crates/zntfy`
 - `byte_stream_pane.rs`: shared pane opener for byte-stream-backed panes
   (HTTP/TFTP server log panes, the serial console)
 - `http_server.rs`: the embedded HTTP file server and the log stream its pane

@@ -1,0 +1,25 @@
+[package]
+name = "zclip"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "GPL-3.0-or-later"
+
+[features]
+default = ["backend"]
+backend = ["dep:arboard", "dep:libc"]
+
+[dependencies]
+anyhow = "1"
+arboard = { version = "3", default-features = false, features = ["wayland-data-control"], optional = true }
+libc = { version = "0.2", optional = true }
+
+[[bin]]
+name = "zcopy"
+path = "src/bin/zcopy.rs"
+required-features = ["backend"]
+
+[[bin]]
+name = "zpaste"
+path = "src/bin/zpaste.rs"
+required-features = ["backend"]

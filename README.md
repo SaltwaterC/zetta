@@ -8,6 +8,8 @@ shortcuts expected from a complete terminal application.
 Zetta currently supports Linux, Windows, and macOS. All platforms are targets
 for active development.
 
+Clipboard builds also ship standalone `zcopy` and `zpaste` commands. `zetta copy` and `zetta paste` forward to these sibling executables.
+
 ## Highlights
 
 - Tabs with renameable titles, selectable icons, session-only pinned tabs, and tab reordering, recursive pane splits and

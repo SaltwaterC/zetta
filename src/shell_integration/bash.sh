@@ -1413,6 +1413,7 @@ _zntfy_complete() {
     _zetta_compgen '--app-name --icon --sound --timeout --help'
 }
 
+# ZETTA_CLIPBOARD_INTEGRATION_BEGIN
 _zcopy_complete() {
     local current=${COMP_WORDS[COMP_CWORD]} previous=${COMP_WORDS[COMP_CWORD-1]}
     case "$previous" in
@@ -1439,10 +1440,9 @@ _zpaste_complete() {
     _zetta_compgen '--pboard --prefer --help'
 }
 
+# ZETTA_CLIPBOARD_INTEGRATION_END
 ztftp() { zetta tftp "$@"; }
 zntfy() { zetta notify "$@"; }
-zcopy() { zetta copy "$@"; }
-zpaste() { zetta paste "$@"; }
 complete -F _zetta_complete zetta
 if [[ ${__ZETTA_MOSH_WRAPPER:-0} == 1 ]]; then
     complete -F _zosh_complete mosh
@@ -1499,9 +1499,13 @@ complete -F _zetta_complete_zmux zmux
 complete -F _zetta_complete zvi
 complete -F _ztftp_complete ztftp
 complete -F _zntfy_complete zntfy
+# ZETTA_CLIPBOARD_INTEGRATION_BEGIN
 complete -F _zcopy_complete zcopy
 complete -F _zpaste_complete zpaste
+# ZETTA_CLIPBOARD_INTEGRATION_END
 
+# ZETTA_CLIPBOARD_INTEGRATION_BEGIN
+unset -f zcopy zpaste 2>/dev/null
 # Real pbcopy/pbpaste already exist on macOS, so Zetta leaves them alone there.
 # Elsewhere, Zetta's pbcopy/pbpaste keep the muscle memory working; any
 # preexisting pbcopy/pbpaste alias (eg. one pointing at xclip) is removed
@@ -1510,9 +1514,10 @@ case "$OSTYPE" in
     darwin*) ;;
     *)
         unalias pbcopy pbpaste 2>/dev/null
-        pbcopy() { zetta copy "$@"; }
-        pbpaste() { zetta paste "$@"; }
+        pbcopy() { command zcopy "$@"; }
+        pbpaste() { command zpaste "$@"; }
         complete -F _zcopy_complete pbcopy
         complete -F _zpaste_complete pbpaste
         ;;
 esac
+# ZETTA_CLIPBOARD_INTEGRATION_END

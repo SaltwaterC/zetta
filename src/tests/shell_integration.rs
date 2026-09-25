@@ -1799,6 +1799,7 @@ fn supported_shells_generate_attention_completion() {
     }
 }
 
+#[cfg(feature = "clipboard")]
 #[test]
 fn supported_shells_generate_copy_paste_completion_and_shortcuts() {
     for shell in [
@@ -1810,6 +1811,9 @@ fn supported_shells_generate_copy_paste_completion_and_shortcuts() {
         let script = shell.script();
         assert!(script.contains("zcopy"));
         assert!(script.contains("zpaste"));
+        assert!(!script.contains("zcopy() { zetta copy"));
+        assert!(!script.contains("function zcopy { & zetta copy"));
+        assert!(!script.contains("function zcopy --wraps"));
         assert!(script.contains("copy"));
         assert!(script.contains("paste"));
         if shell == ShellIntegration::Fish {
@@ -1825,24 +1829,28 @@ fn supported_shells_generate_copy_paste_completion_and_shortcuts() {
 // Regression guard: pbcopy/pbpaste already exist natively on macOS, so Zetta
 // must not shadow them there, but every other platform should get them so
 // pbcopy/pbpaste muscle memory keeps working.
+#[cfg(feature = "clipboard")]
 #[test]
 fn pbcopy_and_pbpaste_are_gated_to_non_macos_platforms() {
     let bash = ShellIntegration::Bash.script();
     assert!(bash.contains("pbcopy"));
     assert!(bash.contains("pbpaste"));
     assert!(bash.contains("unalias pbcopy pbpaste"));
+    assert!(bash.contains("pbcopy() { command zcopy"));
     assert!(bash.contains("darwin*) ;;"));
 
     let zsh = ShellIntegration::Zsh.script();
     assert!(zsh.contains("pbcopy"));
     assert!(zsh.contains("pbpaste"));
     assert!(zsh.contains("unalias pbcopy pbpaste"));
+    assert!(zsh.contains("function pbcopy { command zcopy"));
     assert!(zsh.contains("darwin*) ;;"));
 
     let fish = ShellIntegration::Fish.script();
     assert!(fish.contains("pbcopy"));
     assert!(fish.contains("pbpaste"));
     assert!(fish.contains("functions -e pbcopy pbpaste"));
+    assert!(fish.contains("command zcopy $argv"));
     assert!(fish.contains("case Darwin\n    case '*'"));
 
     let powershell = ShellIntegration::PowerShell.script();
@@ -1850,6 +1858,7 @@ fn pbcopy_and_pbpaste_are_gated_to_non_macos_platforms() {
     assert!(powershell.contains("pbpaste"));
     assert!(powershell.contains("if (-not $IsMacOS) {"));
     assert!(powershell.contains("Remove-Item -Path Alias:pbcopy,Alias:pbpaste"));
+    assert!(powershell.contains("function pbcopy { & zcopy @args }"));
 }
 
 // Regression test: zsh expands an active alias while parsing a `name() {
@@ -1860,6 +1869,7 @@ fn pbcopy_and_pbpaste_are_gated_to_non_macos_platforms() {
 // depends on the alias actually being defined; only executing the script
 // with a preexisting pbcopy/pbpaste alias (as a real user's zshrc would
 // have) reproduces it. Zetta must use `function name { ... }` there instead.
+#[cfg(feature = "clipboard")]
 #[test]
 fn zsh_accepts_the_generated_integration_with_a_preexisting_pbcopy_alias() {
     let script = ShellIntegration::Zsh.script();
@@ -3403,4 +3413,21 @@ fn shell_names_are_case_insensitive_and_pwsh_is_supported() {
         ShellIntegration::PowerShell
     );
     assert!(ShellIntegration::parse("sh").is_err());
+}
+
+#[cfg(not(feature = "clipboard"))]
+#[test]
+fn generated_integrations_omit_clipboard_shortcuts() {
+    for shell in [
+        ShellIntegration::Bash,
+        ShellIntegration::Fish,
+        ShellIntegration::PowerShell,
+        ShellIntegration::Zsh,
+    ] {
+        let script = shell.script();
+        assert!(!script.contains("ZETTA_CLIPBOARD_INTEGRATION"));
+        assert!(!script.contains("pbcopy"));
+        assert!(!script.contains("zcopy"));
+        assert!(!script.contains("zpaste"));
+    }
 }

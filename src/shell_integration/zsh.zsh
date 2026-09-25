@@ -339,9 +339,9 @@ _zetta_options() {
 
 ztftp() { zetta tftp "$@"; }
 zntfy() { zetta notify "$@"; }
-zcopy() { zetta copy "$@"; }
-zpaste() { zetta paste "$@"; }
 
+# ZETTA_CLIPBOARD_INTEGRATION_BEGIN
+unfunction zcopy zpaste 2>/dev/null
 # Real pbcopy/pbpaste already exist on macOS, so Zetta leaves them alone
 # there. Elsewhere, Zetta's pbcopy/pbpaste keep the muscle memory working;
 # any preexisting pbcopy/pbpaste alias (eg. one pointing at xclip) is
@@ -355,10 +355,11 @@ case "$OSTYPE" in
     darwin*) ;;
     *)
         unalias pbcopy pbpaste 2>/dev/null
-        function pbcopy { zetta copy "$@"; }
-        function pbpaste { zetta paste "$@"; }
+        function pbcopy { command zcopy "$@"; }
+        function pbpaste { command zpaste "$@"; }
         ;;
 esac
+# ZETTA_CLIPBOARD_INTEGRATION_END
 
 _zetta_profiles() {
     local -a config_args=("$@")
@@ -1280,6 +1281,7 @@ _zntfy() {
     _zetta_options --app-name --icon --sound --timeout --help
 }
 
+# ZETTA_CLIPBOARD_INTEGRATION_BEGIN
 _zcopy() {
     local previous=${words[CURRENT-1]}
     case $previous in
@@ -1306,6 +1308,7 @@ _zpaste() {
     _zetta_options --pboard --prefer --help
 }
 
+# ZETTA_CLIPBOARD_INTEGRATION_END
 compdef _zetta zetta
 if (( _zetta_mosh_missing )); then
     compdef _zetta mosh
@@ -1385,12 +1388,15 @@ compdef _zmux zmux
 # ZETTA_ZMUX_INTEGRATION_END
 compdef _ztftp ztftp
 compdef _zntfy zntfy
+# ZETTA_CLIPBOARD_INTEGRATION_BEGIN
 compdef _zcopy zcopy
 compdef _zpaste zpaste
+# ZETTA_CLIPBOARD_INTEGRATION_END
 compdef _zetta zvi
 if (( _zetta_vi_missing )); then
     compdef _zetta vi
 fi
+# ZETTA_CLIPBOARD_INTEGRATION_BEGIN
 case "$OSTYPE" in
     darwin*) ;;
     *)
@@ -1398,3 +1404,4 @@ case "$OSTYPE" in
         compdef _zpaste pbpaste
         ;;
 esac
+# ZETTA_CLIPBOARD_INTEGRATION_END

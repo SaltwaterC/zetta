@@ -9,7 +9,9 @@ param(
     [string]$ZoshBinaryPath,
     [string]$ZoshServerBinaryPath,
     [string]$WorktreeBinaryPath,
-    [string]$NotifyBinaryPath
+    [string]$NotifyBinaryPath,
+    [string]$CopyBinaryPath,
+    [string]$PasteBinaryPath
 )
 
 $ErrorActionPreference = "Stop"
@@ -183,6 +185,20 @@ if ($notifyBinary) {
     $notifyHelp = ((& $notifyBinary --help | Out-String).Trim() -replace "`r", "")
     if ($LASTEXITCODE -ne 0 -or $notifyHelp -notmatch '(?m)^Usage: zntfy \[OPTIONS\] SUMMARY \[BODY\]$') {
         throw "$notifyBinary --help failed its CLI smoke test"
+    }
+}
+
+foreach ($clipboardTool in @(
+    @{ Path = $CopyBinaryPath; Name = "zcopy" },
+    @{ Path = $PasteBinaryPath; Name = "zpaste" }
+)) {
+    if (-not $clipboardTool.Path) { continue }
+    if ((Get-PeSubsystem $clipboardTool.Path) -ne $consoleSubsystem) {
+        throw "$($clipboardTool.Path) does not use the console subsystem"
+    }
+    $helpText = ((& $clipboardTool.Path --help | Out-String).Trim() -replace "`r", "")
+    if ($LASTEXITCODE -ne 0 -or $helpText -notmatch "Usage: $($clipboardTool.Name) \[OPTIONS\]") {
+        throw "$($clipboardTool.Path) --help failed its CLI smoke test"
     }
 }
 

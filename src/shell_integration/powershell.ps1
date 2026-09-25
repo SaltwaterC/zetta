@@ -172,9 +172,9 @@ $zettaWorktreeCommits = {
 
 function ztftp { & zetta tftp @args }
 function zntfy { & zetta notify @args }
-function zcopy { & zetta copy @args }
-function zpaste { & zetta paste @args }
 
+# ZETTA_CLIPBOARD_INTEGRATION_BEGIN
+Remove-Item -Path Function:zcopy,Function:zpaste -ErrorAction SilentlyContinue
 # Real pbcopy/pbpaste already exist on macOS, so Zetta leaves them alone
 # there. Elsewhere, Zetta's pbcopy/pbpaste keep the muscle memory working;
 # any preexisting pbcopy/pbpaste alias (eg. one pointing at a third-party
@@ -182,9 +182,10 @@ function zpaste { & zetta paste @args }
 # above, $IsMacOS is unset (falsy) on Windows PowerShell 5.1.
 if (-not $IsMacOS) {
     Remove-Item -Path Alias:pbcopy,Alias:pbpaste -ErrorAction SilentlyContinue
-    function pbcopy { & zetta copy @args }
-    function pbpaste { & zetta paste @args }
+    function pbcopy { & zcopy @args }
+    function pbpaste { & zpaste @args }
 }
+# ZETTA_CLIPBOARD_INTEGRATION_END
 
 $zettaProfiles = { param($configArguments) @(& zetta profile list @configArguments 2>$null) }
 $zettaProfileThemes = { param($configArguments) @(& zetta profile themes @configArguments 2>$null) }
@@ -794,8 +795,10 @@ Register-ArgumentCompleter -Native -CommandName zmux -ScriptBlock $zettaCompleti
 # ZETTA_ZMUX_INTEGRATION_END
 Register-ArgumentCompleter -CommandName ztftp -ScriptBlock $zettaCompletions
 Register-ArgumentCompleter -CommandName zntfy -ScriptBlock $zettaCompletions
+# ZETTA_CLIPBOARD_INTEGRATION_BEGIN
 Register-ArgumentCompleter -CommandName zcopy -ScriptBlock $zettaCompletions
 Register-ArgumentCompleter -CommandName zpaste -ScriptBlock $zettaCompletions
+# ZETTA_CLIPBOARD_INTEGRATION_END
 Register-ArgumentCompleter -CommandName zvi -ScriptBlock $zettaCompletions
 # ZETTA_WORKTREE_INTEGRATION_BEGIN
 Register-ArgumentCompleter -CommandName zwt -ScriptBlock $zettaCompletions
@@ -806,7 +809,9 @@ if ($zettaViMissing) {
 if ($zettaMoshMissing) {
     Register-ArgumentCompleter -CommandName mosh -ScriptBlock $zettaCompletions
 }
+# ZETTA_CLIPBOARD_INTEGRATION_BEGIN
 if (-not $IsMacOS) {
     Register-ArgumentCompleter -CommandName pbcopy -ScriptBlock $zettaCompletions
     Register-ArgumentCompleter -CommandName pbpaste -ScriptBlock $zettaCompletions
 }
+# ZETTA_CLIPBOARD_INTEGRATION_END

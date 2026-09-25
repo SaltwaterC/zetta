@@ -54,7 +54,7 @@ function Assert-UserPathContainsOnce([string]$ExpectedEntry, [string]$Message) {
     Assert-Equal 1 $matches.Count $Message
 }
 
-function Invoke-Installer([string]$Action = "InstallBinary") {
+function Invoke-Installer([string]$Action = "InstallBinary", [bool]$ClipboardEnabled = $true) {
     $arguments = @(
         "-NoProfile",
         "-ExecutionPolicy", "Bypass",
@@ -69,6 +69,9 @@ function Invoke-Installer([string]$Action = "InstallBinary") {
         "-SourceNotifyBinary", (Join-Path $sourceDirectory "zntfy.exe"),
         "-InstallDirectory", $installDirectory
     )
+    if ($ClipboardEnabled) {
+        $arguments += @("-SourceCopyBinary", (Join-Path $sourceDirectory "zcopy.exe"), "-SourcePasteBinary", (Join-Path $sourceDirectory "zpaste.exe"))
+    }
     $output = @(& powershell.exe @arguments 2>&1)
     return [pscustomobject]@{
         ExitCode = [int]$LASTEXITCODE
@@ -90,6 +93,8 @@ function Set-SourceGeneration([string]$Generation) {
     Write-TestFile (Join-Path $sourceDirectory "zosh.exe") "zosh-$Generation"
     Write-TestFile (Join-Path $sourceDirectory "zosh-server.exe") "zosh-server-$Generation"
     Write-TestFile (Join-Path $sourceDirectory "zntfy.exe") "zntfy-$Generation"
+    Write-TestFile (Join-Path $sourceDirectory "zcopy.exe") "zcopy-$Generation"
+    Write-TestFile (Join-Path $sourceDirectory "zpaste.exe") "zpaste-$Generation"
     Write-TestFile (Join-Path $sourceDirectory "conpty.dll") "conpty-$Generation"
     Write-TestFile (Join-Path $sourceDirectory "OpenConsole.exe") "console-$Generation"
 }
@@ -130,6 +135,8 @@ try {
     Assert-FileContents (Join-Path $installDirectory "zosh.exe") "zosh-first" "zosh was not installed"
     Assert-FileContents (Join-Path $installDirectory "zosh-server.exe") "zosh-server-first" "zosh-server was not installed"
     Assert-FileContents (Join-Path $installDirectory "zntfy.exe") "zntfy-first" "zntfy was not installed"
+    Assert-FileContents (Join-Path $installDirectory "zcopy.exe") "zcopy-first" "zcopy was not installed"
+    Assert-FileContents (Join-Path $installDirectory "zpaste.exe") "zpaste-first" "zpaste was not installed"
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $installDirectory "mosh-server.exe"))) "initial install left legacy mosh-server"
     Assert-FileContents $installedPtyVersion "1" "initial helper marker is wrong"
     Assert-UserPathEntries ($unrelatedUserPathEntries + $installDirectory) "initial install disturbed or omitted user PATH entries"
@@ -218,6 +225,8 @@ try {
         Assert-FileContents $staleOld "locked-old-helper" "ordinary install touched a locked .old helper"
         Assert-FileContents $staleNew "locked-new-helper" "ordinary install touched a locked .new helper"
         Assert-FileContents (Join-Path $installDirectory "zetta.exe") "zetta-ordinary-change" "ordinary install did not update the application"
+        Assert-FileContents (Join-Path $installDirectory "zcopy.exe") "zcopy-ordinary-change" "ordinary install did not replace zcopy"
+        Assert-FileContents (Join-Path $installDirectory "zpaste.exe") "zpaste-ordinary-change" "ordinary install did not replace zpaste"
     } finally {
         if ($null -ne $staleOldLock) {
             $staleOldLock.Dispose()
@@ -226,6 +235,11 @@ try {
             $staleNewLock.Dispose()
         }
     }
+
+    Assert-InstallerSucceeded (Invoke-Installer "InstallBinary" $false) "clipboard-disabled install failed"
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $installDirectory "zcopy.exe"))) "clipboard-disabled install left zcopy"
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $installDirectory "zpaste.exe"))) "clipboard-disabled install left zpaste"
+    Assert-InstallerSucceeded (Invoke-Installer) "clipboard re-enable failed"
 
     # The helper marker is installer state and is removed even though it is not
     # part of the hash-checked application file list.
@@ -238,6 +252,8 @@ try {
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $installDirectory "zosh.exe"))) "uninstall left zosh"
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $installDirectory "zosh-server.exe"))) "uninstall left zosh-server"
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $installDirectory "zntfy.exe"))) "uninstall left zntfy"
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $installDirectory "zcopy.exe"))) "uninstall left zcopy"
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $installDirectory "zpaste.exe"))) "uninstall left zpaste"
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $installDirectory "mosh-server.exe"))) "uninstall left legacy mosh-server"
     Assert-True (-not (Test-Path -LiteralPath $installedPtyVersion)) "uninstall left the helper marker"
     Write-Host "Windows installer tests passed."

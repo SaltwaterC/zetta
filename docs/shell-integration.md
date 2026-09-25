@@ -7,13 +7,11 @@ completion time from `zetta profile list` and `zetta profile themes`, so
 configuration's current state. Completing a value that contains spaces or
 quotes (such as a profile named `Project Shell` or a theme named `Gruvbox Light
 Hard`) inserts it as a single argument, so the completed line runs without
-manual quoting. The script also provides `zvi`, an
-unconditional shortcut for
-the built-in vi editor, `ztftp`, a shortcut for the built-in TFTP client,
-`zntfy`, a shortcut for sending desktop notifications, and `zcopy`/`zpaste`,
-shortcuts for the clipboard; each has the same completion as its corresponding
-`zetta` command. The top-level `attention` command also completes its long
-notification options while retaining all short aliases.
+manual quoting. The script also provides `zvi`, a shortcut for the built-in
+vi editor, `ztftp` for the TFTP client, and `zntfy` for desktop notifications.
+It adds completions for the standalone `zcopy` and `zpaste` clipboard tools.
+The top-level `attention` command completes its long notification options
+while retaining all short aliases.
 
 When no real command, alias, function, or builtin named mosh exists, the
 integration defines a mosh function that runs zetta mosh. Existing Mosh
@@ -135,7 +133,7 @@ If `EDITOR` is not already set, it defaults to `zetta vi`. When no `vi`
 command, alias, function, or other executable is already available, the
 integration adds `vi` as a wrapper for Zetta's built-in editor.
 On every platform other than macOS, the script also defines `pbcopy` and
-`pbpaste` as the same shortcuts as `zcopy`/`zpaste`, taking priority over any
+`pbpaste` as functions calling `zcopy`/`zpaste`, taking priority over any
 preexisting `pbcopy`/`pbpaste` alias so that muscle memory from macOS keeps
 working there too; macOS already has real `pbcopy`/`pbpaste`, so Zetta leaves
 them untouched there.

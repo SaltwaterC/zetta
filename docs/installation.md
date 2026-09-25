@@ -85,7 +85,7 @@ The `clipboard` feature (enabled by default; see
 [Serial and network tools](tools.md#clipboard)) needs no extra system
 packages to build. Building with `CLIPBOARD=0` (or `--no-default-features`
 without re-enabling `clipboard`) omits `zetta copy`, `zetta paste`, and the
-`zcopy`/`zpaste`/`pbcopy`/`pbpaste` shell integration aliases.
+`zcopy` and `zpaste` executables and `pbcopy`/`pbpaste` shell integration aliases.
 
 The built-in vi editor's syntax highlighting is enabled by default. Build
 with `SYNTAX_HIGHLIGHTING=0` (or `--no-default-features` without re-enabling

@@ -67,6 +67,7 @@ ZETTA_CRATE_DIRS := \
 	crates/terminal_view \
 	crates/zetta_profiles \
 	crates/zntfy \
+	crates/zclip \
 	crates/zwt \
 	crates/zmux \
 	crates/zosh \
@@ -79,6 +80,7 @@ ZETTA_TEST_CRATE_DIRS := \
 	crates/terminal \
 	crates/zetta_profiles \
 	crates/zntfy \
+	crates/zclip \
 	crates/zwt \
 	crates/zmux \
 	crates/zosh \
@@ -207,6 +209,7 @@ LINUX_USER_ZNTFY_PATH := $(LINUX_USER_BIN_DIR)/zntfy
 LINUX_USER_ZOSH_PATH := $(LINUX_USER_BIN_DIR)/zosh
 
 WINDOWS_ZWT_ARGS := $(if $(call tool_enabled,$(WORKTREE)), -SourceZwtBinary "$(BUILD_TARGET_DIR)/zwt.exe",)
+WINDOWS_CLIP_ARGS := $(if $(call tool_enabled,$(CLIPBOARD)), -SourceCopyBinary "$(BUILD_TARGET_DIR)/zcopy.exe" -SourcePasteBinary "$(BUILD_TARGET_DIR)/zpaste.exe",)
 WINDOWS_NOTIFY_ARGS := $(if $(call tool_enabled,$(NOTIFY)), -SourceNotifyBinary "$(BUILD_TARGET_DIR)/zntfy.exe",)
 WINDOWS_ZOSH_ARGS := $(if $(call tool_enabled,$(ZOSH_CLIENT)), -SourceZoshBinary "$(BUILD_TARGET_DIR)/zosh.exe",)$(if $(call tool_enabled,$(ZOSH_SERVER)), -SourceZoshServerBinary "$(BUILD_TARGET_DIR)/zosh-server.exe",)
 WINDOWS_ZMUX_ARGS := $(if $(call tool_enabled,$(ZMUX)),, -MuxDisabled)
@@ -487,10 +490,10 @@ build:
 	cmd.exe /d /c scripts\build-windows.cmd $(CARGO_PROFILE_ARGS)
 
 install: build
-	powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/install-windows.ps1 -Action Install -SourceBinary "$(BUILD_TARGET_DIR)/zetta.exe" -SourceGuiBinary "$(BUILD_TARGET_DIR)/zetta-gui.exe" $(WINDOWS_ZMUX_ARGS)$(WINDOWS_ZMUX_UPGRADE_ARGS) $(WINDOWS_ZOSH_ARGS)$(WINDOWS_ZWT_ARGS)$(WINDOWS_NOTIFY_ARGS)
+	powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/install-windows.ps1 -Action Install -SourceBinary "$(BUILD_TARGET_DIR)/zetta.exe" -SourceGuiBinary "$(BUILD_TARGET_DIR)/zetta-gui.exe" $(WINDOWS_ZMUX_ARGS)$(WINDOWS_ZMUX_UPGRADE_ARGS) $(WINDOWS_ZOSH_ARGS)$(WINDOWS_ZWT_ARGS)$(WINDOWS_NOTIFY_ARGS)$(WINDOWS_CLIP_ARGS)
 
 install-binary:
-	powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/install-windows.ps1 -Action InstallBinary -SourceBinary "$(BUILD_TARGET_DIR)/zetta.exe" -SourceGuiBinary "$(BUILD_TARGET_DIR)/zetta-gui.exe" $(WINDOWS_ZMUX_ARGS) $(WINDOWS_ZOSH_ARGS)$(WINDOWS_ZWT_ARGS)$(WINDOWS_NOTIFY_ARGS)
+	powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/install-windows.ps1 -Action InstallBinary -SourceBinary "$(BUILD_TARGET_DIR)/zetta.exe" -SourceGuiBinary "$(BUILD_TARGET_DIR)/zetta-gui.exe" $(WINDOWS_ZMUX_ARGS) $(WINDOWS_ZOSH_ARGS)$(WINDOWS_ZWT_ARGS)$(WINDOWS_NOTIFY_ARGS)$(WINDOWS_CLIP_ARGS)
 
 install-capabilities:
 
@@ -516,6 +519,9 @@ build:
 	$(ENV) -u DESTDIR $(CARGO_RUN) build $(CARGO_PROFILE_ARGS) --locked --no-default-features --features "$(BUILD_FEATURES)"
 ifneq ($(call tool_enabled,$(NOTIFY)),)
 	$(ENV) -u DESTDIR $(CARGO_RUN) build $(CARGO_PROFILE_ARGS) --locked --manifest-path crates/zntfy/Cargo.toml --target-dir target --bin zntfy
+endif
+ifneq ($(call tool_enabled,$(CLIPBOARD)),)
+	$(ENV) -u DESTDIR $(CARGO_RUN) build $(CARGO_PROFILE_ARGS) --locked --manifest-path crates/zclip/Cargo.toml --target-dir target --bin zcopy --bin zpaste
 endif
 
 install:
@@ -548,6 +554,12 @@ ifneq ($(call tool_enabled,$(NOTIFY)),)
 else
 	$(RM) "$(MAC_BUNDLE)/Contents/MacOS/zntfy"
 endif
+ifneq ($(call tool_enabled,$(CLIPBOARD)),)
+	$(INSTALL) -m 755 "$(BUILD_TARGET_DIR)/zcopy" "$(MAC_BUNDLE)/Contents/MacOS/zcopy"
+	$(INSTALL) -m 755 "$(BUILD_TARGET_DIR)/zpaste" "$(MAC_BUNDLE)/Contents/MacOS/zpaste"
+else
+	$(RM) "$(MAC_BUNDLE)/Contents/MacOS/zcopy" "$(MAC_BUNDLE)/Contents/MacOS/zpaste"
+endif
 ifneq ($(call tool_enabled,$(ZMUX)),)
 	$(INSTALL) -m 755 "$(BUILD_TARGET_DIR)/zmux" "$(MAC_BUNDLE)/Contents/MacOS/zmux"
 else
@@ -578,6 +590,14 @@ ifneq ($(call tool_enabled,$(NOTIFY)),)
 	chmod 755 "$(MAC_ZNTFY_CLI_PATH)"
 else
 	$(RM) "$(MAC_ZNTFY_CLI_PATH)"
+endif
+ifneq ($(call tool_enabled,$(CLIPBOARD)),)
+	$(RM) "$(MAC_CLI_DIR)/zcopy" "$(MAC_CLI_DIR)/zpaste"
+	sed 's|@MAC_RUNTIME_BUNDLE@|$(MAC_RUNTIME_BUNDLE)|g' resources/macos/zcopy-cli.in > "$(MAC_CLI_DIR)/zcopy"
+	sed 's|@MAC_RUNTIME_BUNDLE@|$(MAC_RUNTIME_BUNDLE)|g' resources/macos/zpaste-cli.in > "$(MAC_CLI_DIR)/zpaste"
+	chmod 755 "$(MAC_CLI_DIR)/zcopy" "$(MAC_CLI_DIR)/zpaste"
+else
+	$(RM) "$(MAC_CLI_DIR)/zcopy" "$(MAC_CLI_DIR)/zpaste"
 endif
 ifneq ($(call tool_enabled,$(ZMUX)),)
 	$(RM) "$(MAC_ZMUX_CLI_PATH)"
@@ -634,9 +654,11 @@ uninstall-binary:
 	$(RM) "$(MAC_ZOSH_CLI_PATH)"
 	$(RM) "$(MAC_ZOSH_SERVER_PATH)"
 	$(RM) "$(MAC_ZNTFY_CLI_PATH)"
+	$(RM) "$(MAC_CLI_DIR)/zcopy" "$(MAC_CLI_DIR)/zpaste"
 	$(RM) "$(MAC_CLI_DIR)/mosh-server"
 	$(RM) "$(MAC_BUNDLE)/Contents/MacOS/zetta"
 	$(RM) "$(MAC_BUNDLE)/Contents/MacOS/zntfy"
+	$(RM) "$(MAC_BUNDLE)/Contents/MacOS/zcopy" "$(MAC_BUNDLE)/Contents/MacOS/zpaste"
 	$(RM) "$(MAC_BUNDLE)/Contents/MacOS/zmux"
 	$(RM) "$(MAC_BUNDLE)/Contents/MacOS/zosh"
 	$(RM) "$(MAC_BUNDLE)/Contents/MacOS/zwt"
@@ -651,6 +673,9 @@ build:
 	$(ENV) -u DESTDIR $(CARGO_RUN) build $(CARGO_PROFILE_ARGS) --locked --no-default-features --features "$(BUILD_FEATURES)"
 ifneq ($(call tool_enabled,$(NOTIFY)),)
 	$(ENV) -u DESTDIR $(CARGO_RUN) build $(CARGO_PROFILE_ARGS) --locked --manifest-path crates/zntfy/Cargo.toml --target-dir target --bin zntfy
+endif
+ifneq ($(call tool_enabled,$(CLIPBOARD)),)
+	$(ENV) -u DESTDIR $(CARGO_RUN) build $(CARGO_PROFILE_ARGS) --locked --manifest-path crates/zclip/Cargo.toml --target-dir target --bin zcopy --bin zpaste
 endif
 
 install:
@@ -681,6 +706,12 @@ ifneq ($(call tool_enabled,$(NOTIFY)),)
 	$(INSTALL) -Dm755 "$(BUILD_TARGET_DIR)/zntfy" $(BINDIR)/zntfy
 else
 	$(RM) $(BINDIR)/zntfy
+endif
+ifneq ($(call tool_enabled,$(CLIPBOARD)),)
+	$(INSTALL) -Dm755 "$(BUILD_TARGET_DIR)/zcopy" $(BINDIR)/zcopy
+	$(INSTALL) -Dm755 "$(BUILD_TARGET_DIR)/zpaste" $(BINDIR)/zpaste
+else
+	$(RM) $(BINDIR)/zcopy $(BINDIR)/zpaste
 endif
 	# The multiplexer holds background sessions, so it has to be installed
 	# beside Zetta: a client starts it from its own directory rather than
@@ -733,6 +764,13 @@ ifneq ($(call tool_enabled,$(NOTIFY)),)
 	ln -s "$(BINDIR)/zntfy" "$(LINUX_USER_ZNTFY_PATH)"
 else
 	$(RM) "$(LINUX_USER_ZNTFY_PATH)"
+endif
+ifneq ($(call tool_enabled,$(CLIPBOARD)),)
+	$(RM) "$(LINUX_USER_BIN_DIR)/zcopy" "$(LINUX_USER_BIN_DIR)/zpaste"
+	ln -s "$(BINDIR)/zcopy" "$(LINUX_USER_BIN_DIR)/zcopy"
+	ln -s "$(BINDIR)/zpaste" "$(LINUX_USER_BIN_DIR)/zpaste"
+else
+	$(RM) "$(LINUX_USER_BIN_DIR)/zcopy" "$(LINUX_USER_BIN_DIR)/zpaste"
 endif
 endif
 
@@ -798,12 +836,14 @@ uninstall-binary:
 	$(RM) $(BINDIR)/mosh-server
 	$(RM) $(BINDIR)/zwt
 	$(RM) $(BINDIR)/zntfy
+	$(RM) $(BINDIR)/zcopy $(BINDIR)/zpaste
 ifneq ($(LINUX_USER_INSTALL),)
 	$(RM) "$(LINUX_USER_CLI_PATH)"
 	$(RM) "$(LINUX_USER_BIN_DIR)/zmux"
 	$(RM) "$(LINUX_USER_ZOSH_PATH)"
 	$(RM) "$(LINUX_USER_ZWT_PATH)"
 	$(RM) "$(LINUX_USER_ZNTFY_PATH)"
+	$(RM) "$(LINUX_USER_BIN_DIR)/zcopy" "$(LINUX_USER_BIN_DIR)/zpaste"
 endif
 	$(MAKE) uninstall-user-path
 

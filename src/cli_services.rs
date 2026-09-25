@@ -88,8 +88,6 @@ pub(crate) enum CliServiceCommand {
     Copy(clipboard::CopyCommand),
     #[cfg(feature = "clipboard")]
     Paste(clipboard::PasteCommand),
-    #[cfg(feature = "clipboard")]
-    CopyDaemon,
 }
 
 #[cfg(cli_services)]
@@ -113,8 +111,6 @@ impl CliServiceCommand {
             Self::Copy(command) => command.run(),
             #[cfg(feature = "clipboard")]
             Self::Paste(command) => command.run(),
-            #[cfg(feature = "clipboard")]
-            Self::CopyDaemon => clipboard::run_clipboard_copy_daemon(),
         }
     }
 }
