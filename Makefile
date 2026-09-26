@@ -289,6 +289,15 @@ test:
 		$(CARGO_RUN) test --locked --quiet -- --format=terse, \
 		Crate tests)
 
+ifneq ($(OS),Windows_NT)
+	$(MAKE) test-zosh-interop
+endif
+
+.PHONY: test-zosh-interop
+test-zosh-interop:
+	$(CARGO_RUN) build --locked --manifest-path crates/zosh/server/Cargo.toml --bin zosh-server --target-dir "$(CURDIR)/target/zosh-interop"
+	ZOSH_TEST_SERVER="$(CURDIR)/target/zosh-interop/debug/zosh-server" $(CARGO_RUN) test --locked --manifest-path crates/zosh/Cargo.toml interop_tests -- --ignored
+
 fmt:
 	$(CARGO) fmt --check
 	$(call parallel_for,$(ZETTA_CRATE_DIRS), \

@@ -148,6 +148,10 @@ fn connect_test_session(arguments: &[&str]) -> mosh_rs::MoshSession<display::Dis
         String::from_utf8_lossy(&output.stderr)
     );
     let bootstrap = String::from_utf8(output.stdout).unwrap();
+    session_from_bootstrap(&bootstrap)
+}
+
+fn session_from_bootstrap(bootstrap: &str) -> mosh_rs::MoshSession<display::DisplayScreen> {
     let mut endpoint = bootstrap
         .lines()
         .find_map(|line| line.strip_prefix("MOSH CONNECT "))
@@ -191,4 +195,214 @@ fn pump_until(
         );
         std::thread::sleep(Duration::from_millis(10));
     }
+}
+
+// Own the foreground server directly: even a failed assertion kills and reaps
+// only this test's child, never a user's session or an unrelated process.
+struct ColourFixture {
+    server: Option<std::process::Child>,
+    session: Option<mosh_rs::MoshSession<display::DisplayScreen>>,
+    directory: std::path::PathBuf,
+}
+
+impl Drop for ColourFixture {
+    fn drop(&mut self) {
+        // Give the server a chance to tear down its PTY child on assertion
+        // failures too, then reap our foreground process regardless.
+        if let Some(session) = self.session.as_mut() {
+            session.shutdown();
+            let deadline = Instant::now() + Duration::from_secs(1);
+            while !session.finished() && Instant::now() < deadline {
+                if session.pump_ready().is_err() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+        if let Some(server) = self.server.as_mut() {
+            let _ = server.kill();
+            let _ = server.wait();
+        }
+        let _ = std::fs::remove_dir_all(&self.directory);
+    }
+}
+
+fn fixture_environment(command: &mut Command, locale: &str) {
+    command.env_clear().envs([
+        ("PATH", "/usr/bin:/bin"),
+        ("LANG", locale),
+        ("LANGUAGE", ""),
+        ("LC_CTYPE", locale),
+        ("LC_NUMERIC", ""),
+        ("LC_ZOSH_TEST", "remote-extension"),
+        ("TERM", "xterm-256color"),
+        ("COLORTERM", "truecolor"),
+        ("PYTHONCOERCECLOCALE", "0"),
+        ("PYTHONUTF8", "0"),
+        ("MOSH_SERVER_NETWORK_TMOUT", "10"),
+    ]);
+}
+
+#[test]
+#[ignore = "requires freshly built ZOSH_TEST_SERVER and Python 3; use make test-zosh-interop"]
+fn colours_and_remote_locales_survive_a_complete_round_trip() {
+    use std::io::BufRead;
+    let locales = Command::new("locale")
+        .arg("-a")
+        .env_clear()
+        .output()
+        .unwrap();
+    assert!(locales.status.success());
+    let locales = String::from_utf8(locales.stdout).unwrap();
+    let locale = locales
+        .lines()
+        .find(|name| name.to_ascii_lowercase().replace('-', "").contains("utf8"))
+        .expect("install a UTF-8 locale for the loopback fixture");
+    let python = Command::new("python3")
+        .args(["-c", "import sys; print(sys.executable)"])
+        .output()
+        .expect("Python 3 is required for the terminal fixture");
+    assert!(python.status.success());
+    let python = String::from_utf8(python.stdout).unwrap();
+    let directory = std::env::temp_dir().join(format!("zosh-colour-locale-{}", std::process::id()));
+    std::fs::create_dir(&directory).unwrap();
+    let mut fixture = ColourFixture {
+        server: None,
+        session: None,
+        directory,
+    };
+    let report = fixture.directory.join("remote.json");
+    let script = include_str!("fixtures/colour_locale.py");
+    let mut direct = Command::new(python.trim());
+    fixture_environment(&mut direct, locale);
+    let direct = direct
+        .args(["-c", script, "direct", "unused", locale])
+        .output()
+        .unwrap();
+    assert!(
+        direct.status.success(),
+        "{}",
+        String::from_utf8_lossy(&direct.stderr)
+    );
+
+    let mut command =
+        Command::new(std::env::var_os("ZOSH_TEST_SERVER").expect("set ZOSH_TEST_SERVER"));
+    fixture_environment(&mut command, locale);
+    // These must be supplied by the server's colour configuration, not inherited.
+    command.env_remove("TERM").env_remove("COLORTERM");
+    command
+        .args([
+            "new",
+            "--foreground",
+            "-i",
+            "127.0.0.1",
+            "-p",
+            "0",
+            "-c",
+            "32768",
+            "--",
+            python.trim(),
+            "-c",
+            script,
+            "remote",
+        ])
+        .arg(&report)
+        .arg(locale)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit());
+    fixture.server = Some(command.spawn().unwrap());
+    let stdout = fixture.server.as_mut().unwrap().stdout.take().unwrap();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        for line in std::io::BufReader::new(stdout).lines() {
+            let line = line.unwrap();
+            if line.starts_with("MOSH CONNECT ") {
+                let _ = sender.send(line);
+                break;
+            }
+        }
+    });
+    let bootstrap = receiver
+        .recv_timeout(Duration::from_secs(5))
+        .expect("server bootstrap deadline");
+    reader.join().unwrap();
+    fixture.session = Some(session_from_bootstrap(&bootstrap));
+    let session = fixture.session.as_mut().unwrap();
+    session.send_resize(80, 24);
+    let mut proxy = client::TerminalQueryProxy::default();
+    let mut physical = vt100::Parser::new(24, 80, 0);
+    let queries: [&[u8]; 4] = [
+        b"\x1b]10;?\x07",
+        b"\x1b]11;?\x1b\\",
+        b"\x1b]10;?\x1b\\",
+        b"\x1b]11;?\x07",
+    ];
+    let responses: [&[u8]; 4] = [
+        b"\x1b]10;rgb:1212/3434/5656\x07",
+        b"\x1b]11;rgb:abab/cdcd/efef\x1b\\",
+        b"\x1b]10;rgb:7878/9a9a/bcbc\x1b\\",
+        b"\x1b]11;rgb:dede/f0f0/1212\x07",
+    ];
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut answered = 0;
+    loop {
+        let events = session.pump_ready().unwrap();
+        let mut outer = Vec::new();
+        client::forward_terminal_queries(&events, &mut proxy, &mut outer).unwrap();
+        if !outer.is_empty() {
+            assert!(answered < queries.len(), "unexpected repeated query");
+            assert_eq!(outer, queries[answered]);
+            // One-byte fragments split the introducer, RGB payload and ST.
+            // The fixture will not issue its next query until this reply arrives.
+            let mut complete = 0;
+            for fragment in responses[answered].chunks(1) {
+                for input in proxy.filter(fragment) {
+                    let client::ProxiedInput::TerminalResponse(bytes) = input else {
+                        panic!("terminal reply became keyboard input");
+                    };
+                    session.send_terminal_response(&bytes);
+                    complete += 1;
+                }
+            }
+            assert_eq!(complete, 1);
+            answered += 1;
+        }
+        physical.process(&session.render());
+        if physical.screen().contents().contains("COLOUR-LOCALE-DONE") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "round-trip deadline after {answered} replies: {}",
+            physical.screen().contents()
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(answered, 4);
+    for (row, foreground, background) in [
+        (
+            0,
+            vt100::Color::Rgb(0x12, 0x34, 0x56),
+            vt100::Color::Rgb(0xab, 0xcd, 0xef),
+        ),
+        (
+            1,
+            vt100::Color::Rgb(0x78, 0x9a, 0xbc),
+            vt100::Color::Rgb(0xde, 0xf0, 0x12),
+        ),
+    ] {
+        let cell = physical.screen().cell(row, 0).unwrap();
+        assert_eq!(cell.contents(), "X");
+        assert_eq!(cell.fgcolor(), foreground);
+        assert_eq!(cell.bgcolor(), background);
+    }
+    assert_eq!(
+        std::fs::read(report).unwrap(),
+        direct.stdout,
+        "remote locale/Perl diagnostics differ from direct execution"
+    );
+    session.send_input(b"q");
+    session.shutdown();
+    pump_until(session, |session, _| session.finished());
 }

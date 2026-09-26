@@ -350,14 +350,58 @@ fn ssh_bootstrap_preserves_target_and_remote_command() {
 }
 
 #[test]
-fn ssh_bootstrap_leaves_locale_selection_to_ssh() {
-    let command = MoshCommand::default();
-    let (_, arguments) = ssh_bootstrap_command(&command, "host");
-    let remote = arguments.last().expect("remote server command");
-
-    assert!(!remote.contains("'-l'"), "{remote}");
-    assert!(!remote.contains("LANG="), "{remote}");
-    assert!(!remote.contains("LC_"), "{remote}");
+fn ssh_bootstrap_pairs_truecolour_with_remote_locale_selection() {
+    const CHILD: &str = "ZOSH_LAUNCHER_LOCALE_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "launcher::tests::ssh_bootstrap_pairs_truecolour_with_remote_locale_selection",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env("TERM", "xterm-256color")
+            .env("COLORTERM", "truecolor")
+            .env("LANG", "client-only.UTF-8")
+            .env("LANGUAGE", "client-language")
+            .env("LC_ALL", "client-all.UTF-8")
+            .env("LC_CTYPE", "client-ctype.UTF-8")
+            .env("LC_ZOSH_TEST", "client-extension")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+        return;
+    }
+    for server in [None, Some("/opt/custom/zosh-server"), Some("mosh-server")] {
+        let mut command = MoshCommand::default();
+        if let Some(server) = server {
+            command.server = server.into();
+            command.server_explicit = true;
+        }
+        let (_, arguments) = ssh_bootstrap_command(&command, "host");
+        let remote = arguments.last().unwrap();
+        assert!(remote.contains("'-c' '32768'"), "{remote}");
+        for forbidden in [
+            "'-l'",
+            "LANG=",
+            "LANGUAGE=",
+            "LC_",
+            "client-only",
+            "client-language",
+        ] {
+            assert!(!remote.contains(forbidden), "{remote}");
+        }
+        if server.is_none() {
+            assert!(remote.contains("'mosh-server'"), "{remote}");
+            assert_eq!(remote.matches("'-c' '32768'").count(), 2, "{remote}");
+        }
+    }
 }
 
 #[test]

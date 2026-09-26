@@ -106,6 +106,17 @@ that predates a `--no-init` session, just as the shell's request does over SSH.
 
 ## Verification
 
+From the repository root, run `make test-zosh-interop` to build a fresh server
+and run the loopback integration tests. Normal `make test` includes this target
+on Unix. The colour/locale fixture requires Python 3, an installed UTF-8 locale,
+and `locale`; on Linux it also requires Perl. It uses an isolated environment,
+compares remote locale diagnostics with direct execution, and checks repeated
+foreground/background queries, fragmented BEL/ST replies, and exact transported
+RGB cells. It owns and cleans up its foreground server process.
+
+These are regression guarantees, not a reproduction or resolution of the
+intermittent colour report.
+
 ### Opt-in timing diagnostics
 
 PTY output and input-write completions wake the server loop immediately.

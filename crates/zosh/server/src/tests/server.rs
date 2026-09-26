@@ -229,3 +229,109 @@ fn coalesced_screen_update_retains_echo_ack() {
     }
     assert_eq!(screen.screen().contents(), "xy");
 }
+
+#[test]
+fn colour_configuration_preserves_inherited_locales_and_explicit_overrides() {
+    const CHILD: &str = "ZOSH_SERVER_LOCALE_CHILD";
+    const LOCALES: &[(&str, &str)] = &[
+        ("LANG", "remote.UTF-8"),
+        ("LANGUAGE", "remote: fallback"),
+        ("LC_ALL", "all.UTF-8"),
+        ("LC_CTYPE", "ctype.UTF-8"),
+        ("LC_NUMERIC", ""),
+        ("LC_TIME", "time"),
+        ("LC_COLLATE", "collate"),
+        ("LC_MONETARY", "money"),
+        ("LC_MESSAGES", "messages"),
+        ("LC_PAPER", "paper"),
+        ("LC_NAME", "name"),
+        ("LC_ADDRESS", "address"),
+        ("LC_TELEPHONE", "telephone"),
+        ("LC_MEASUREMENT", "measurement"),
+        ("LC_IDENTIFICATION", "identity"),
+        ("LC_ZOSH_TEST", "extension"),
+    ];
+    if std::env::var_os(CHILD).is_none() {
+        for mode in ["seeded", "empty", "unset"] {
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+            child.args(["--exact", "server::tests::colour_configuration_preserves_inherited_locales_and_explicit_overrides", "--nocapture"])
+                .env_clear().env(CHILD, mode);
+            if mode != "unset" {
+                child.envs(
+                    LOCALES
+                        .iter()
+                        .map(|(name, value)| (*name, if mode == "empty" { "" } else { *value })),
+                );
+            }
+            let output = child.output().unwrap();
+            assert!(
+                output.status.success(),
+                "{mode}: {}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+        }
+        return;
+    }
+    let mode = std::env::var(CHILD).unwrap();
+    for colors in [256, 32768] {
+        let cfg = Config {
+            colors,
+            ..Config::default()
+        };
+        let mut command = CommandBuilder::new("fixture");
+        configure_child_environment(&mut command, &cfg, None);
+        for (name, value) in LOCALES {
+            assert_eq!(
+                command.get_env(name),
+                match mode.as_str() {
+                    "seeded" => Some(std::ffi::OsStr::new(value)),
+                    "empty" => Some(std::ffi::OsStr::new("")),
+                    "unset" => None,
+                    _ => unreachable!(),
+                },
+                "{mode}: {name}"
+            );
+        }
+        assert_eq!(command.get_env("LC_UNSET_TEST"), None);
+        assert_eq!(
+            command.get_env("TERM"),
+            Some(std::ffi::OsStr::new("xterm-256color"))
+        );
+        if colors == 32768 {
+            assert_eq!(
+                command.get_env("COLORTERM"),
+                Some(std::ffi::OsStr::new("truecolor"))
+            );
+        }
+    }
+    let crate::args::ParseOutcome::Run(cfg) = crate::args::parse(
+        [
+            "new",
+            "-c",
+            "32768",
+            "-l",
+            "LANG=explicit.UTF-8",
+            "-l",
+            "LC_ALL=",
+            "-l",
+            "LC_NUMERIC=C",
+        ]
+        .into_iter()
+        .map(Into::into)
+        .collect(),
+    )
+    .unwrap() else {
+        panic!("expected server configuration")
+    };
+    let mut command = CommandBuilder::new("fixture");
+    configure_child_environment(&mut command, &cfg, None);
+    for (name, value) in [
+        ("LANG", "explicit.UTF-8"),
+        ("LC_ALL", ""),
+        ("LC_NUMERIC", "C"),
+    ] {
+        assert_eq!(command.get_env(name), Some(std::ffi::OsStr::new(value)));
+    }
+}
