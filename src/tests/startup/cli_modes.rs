@@ -1,5 +1,13 @@
 use super::*;
 
+fn temporary_bash_home() -> tempfile::TempDir {
+    let home = tempfile::tempdir().unwrap();
+    // Debian's global bashrc prints a sudo hint unless the temporary HOME has
+    // this file, which would be captured as output by the tests below.
+    std::fs::write(home.path().join(".hushlogin"), "").unwrap();
+    home
+}
+
 #[test]
 fn shell_integration_setup_message_explains_how_to_enable_a_new_configuration() {
     let message = shell_integration_configuration_message(&ShellIntegrationConfiguration::Written(
@@ -32,7 +40,7 @@ fn shell_integration_setup_message_reports_an_unchanged_configuration() {
 // reason for this test to risk it.
 #[test]
 fn wait_command_process_resolves_a_shell_function_the_wrapped_command_names() {
-    let temporary = tempfile::tempdir().unwrap();
+    let temporary = temporary_bash_home();
     std::fs::write(
         temporary.path().join(".bashrc"),
         "zetta_test_pane_wait_probe() { printf 'probe-ran:%s\\n' \"$1\"; }\n",
@@ -60,7 +68,7 @@ fn wait_command_process_resolves_a_shell_function_the_wrapped_command_names() {
 // for why `is_terminal_foreground: false` is used here too.
 #[test]
 fn wait_command_process_passes_metacharacters_through_unmangled() {
-    let temporary = tempfile::tempdir().unwrap();
+    let temporary = temporary_bash_home();
 
     let output = wait_command_process(
         &Shell::Program("bash".to_owned()),

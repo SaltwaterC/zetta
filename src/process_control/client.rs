@@ -406,7 +406,7 @@ impl ProcessPaneThemeQuery {
     }
 }
 
-#[cfg(all(feature = "notifications", any(test, not(target_os = "macos"))))]
+#[cfg(all(feature = "notifications", test))]
 pub(crate) fn request_process_focus_tab(process_id: u32, attention_id: u64) -> Result<bool> {
     anyhow::ensure!(process_id != 0, "process ID must be positive");
     anyhow::ensure!(attention_id != 0, "attention ID must be positive");
@@ -550,7 +550,7 @@ fn send_set_worktree_name_request(
     )
 }
 
-#[cfg(all(feature = "notifications", any(test, not(target_os = "macos"))))]
+#[cfg(all(feature = "notifications", test))]
 fn send_focus_tab_request(endpoint: &ControlEndpoint, attention_id: u64) -> Result<bool> {
     send_control_command(
         endpoint,

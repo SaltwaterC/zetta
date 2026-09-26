@@ -62,7 +62,7 @@ mod server;
 pub(crate) use client::PaneThemeAnswer;
 #[cfg(feature = "syntax-highlighting")]
 pub(crate) use client::ProcessPaneThemeQuery;
-#[cfg(all(feature = "notifications", any(test, not(target_os = "macos"))))]
+#[cfg(all(feature = "notifications", test))]
 pub(crate) use client::request_process_focus_tab;
 pub(crate) use client::{
     request_existing_process_command, request_existing_process_configuration_reload,

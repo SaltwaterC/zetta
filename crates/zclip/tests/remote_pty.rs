@@ -62,7 +62,7 @@ fn run_helper(
     // SAFETY: setsid and ioctl are async-signal-safe and run before exec.
     unsafe {
         command.pre_exec(move || {
-            if libc::setsid() == -1 || libc::ioctl(slave_fd, libc::TIOCSCTTY.into(), 0) == -1 {
+            if libc::setsid() == -1 || libc::ioctl(slave_fd, libc::TIOCSCTTY, 0) == -1 {
                 return Err(std::io::Error::last_os_error());
             }
             Ok(())
