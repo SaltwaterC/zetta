@@ -303,8 +303,10 @@ preference is validated but does not change the output. `zetta paste` prints
 nothing, without an error, if the clipboard is empty or holds no text. Run
 `zetta copy --help` or `zetta paste --help` for complete syntax.
 
-In an interactive SSH or zosh pane, the helpers first probe the Zetta window
-displaying that pane. `zcopy` then copies to that window's clipboard. `zpaste`
+In a local Zetta shell, the native helpers use the local clipboard. In an
+interactive SSH or zosh pane, they first probe the Zetta window displaying
+that pane. A backend-free helper also probes in a Zetta-managed shared pane.
+`zcopy` then copies to that window's clipboard. `zpaste`
 reads it only after **Allow Remote Clipboard Paste** is enabled in the tab
 menu or command palette. The switch starts off and is cleared when the tab
 closes or detaches. Copying is always permitted. A disabled read or a failed

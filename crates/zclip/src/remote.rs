@@ -14,15 +14,21 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 const TRANSFER_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub fn should_probe() -> bool {
-    env::var_os("ZCLIP_HOST_BACKEND").is_none()
-        && [
-            "SSH_CONNECTION",
-            "SSH_TTY",
-            "ZETTA_TERM",
-            "ZOSH_CLIPBOARD_CHANNEL",
-        ]
-        .iter()
-        .any(|name| env::var_os(name).is_some())
+    should_probe_with(
+        |name| env::var_os(name).is_some(),
+        cfg!(feature = "backend"),
+    )
+}
+
+fn should_probe_with(mut has: impl FnMut(&str) -> bool, native_backend: bool) -> bool {
+    !has("ZCLIP_HOST_BACKEND")
+        && (has("SSH_CONNECTION")
+            || has("SSH_TTY")
+            || has("ZOSH_CLIPBOARD_CHANNEL")
+            // Local Zetta shells have this marker too. Only a backend-free
+            // helper needs it to recognize a remote shared pane whose daemon
+            // was started outside SSH or zosh.
+            || (!native_backend && has("ZETTA_TERM")))
 }
 
 /// `None` means that no Zetta channel answered the probe. Once a channel
@@ -199,6 +205,10 @@ impl std::fmt::Display for ProbeTimeout {
 }
 
 impl std::error::Error for ProbeTimeout {}
+
+#[cfg(test)]
+#[path = "tests/remote.rs"]
+mod tests;
 
 #[cfg(unix)]
 struct ControllingTty {
