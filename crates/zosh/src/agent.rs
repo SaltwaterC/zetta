@@ -484,9 +484,9 @@ fn connect_agent(path: &Path) -> io::Result<AgentStream> {
     }
     #[cfg(windows)]
     {
-        return Ok(Box::new(
+        Ok(Box::new(
             OpenOptions::new().read(true).write(true).open(path)?,
-        ));
+        ))
     }
     #[cfg(not(any(unix, windows)))]
     {
@@ -584,8 +584,7 @@ impl BootstrapAgentRelay {
         })
     }
 
-    #[cfg(test)]
-    #[cfg(any(unix, windows))]
+    #[cfg(all(test, unix))]
     fn for_test_agent_path(agent_path: &Path) -> io::Result<Self> {
         Self::from_agent_path(agent_path.to_owned())
     }
@@ -755,12 +754,11 @@ fn relay_pipe_accept_loop(
             break;
         }
         let connected = unsafe { ConnectNamedPipe(handle, None) };
-        if connected.is_err() {
-            let error = connected.unwrap_err();
-            if error.code().0 as u32 & 0xffff != ERROR_PIPE_CONNECTED.0 {
-                let _ = unsafe { CloseHandle(handle) };
-                continue;
-            }
+        if let Err(error) = connected
+            && error.code().0 as u32 & 0xffff != ERROR_PIPE_CONNECTED.0
+        {
+            let _ = unsafe { CloseHandle(handle) };
+            continue;
         }
         let stream = unsafe { std::fs::File::from_raw_handle(handle.0 as _) };
         if stop.load(Ordering::Acquire) {

@@ -21,6 +21,7 @@ fn session_bind_frame(is_forwarding: bool) -> Vec<u8> {
     frame(&body)
 }
 
+#[cfg(unix)]
 fn read_test_frame(stream: &mut impl Read) -> Vec<u8> {
     let mut length = [0; 4];
     stream.read_exact(&mut length).unwrap();

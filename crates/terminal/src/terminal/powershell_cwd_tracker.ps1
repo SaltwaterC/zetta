@@ -62,3 +62,11 @@ if (-not $terminalTrackerActive) {
         } catch {}
     }
 }
+
+# This script runs through -NoExit -Command before PowerShell's first prompt.
+# Load the rest of Zetta's integration here so no setup command is typed into
+# the terminal and echoed by PSReadLine. The executable path comes from the
+# pane environment, not PATH, which may still name an older Zetta build.
+if (-not [string]::IsNullOrEmpty($env:ZETTA_HOST_EXECUTABLE)) {
+    & $env:ZETTA_HOST_EXECUTABLE init powershell | Out-String | Invoke-Expression
+}

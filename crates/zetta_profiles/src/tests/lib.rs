@@ -124,6 +124,12 @@ fn an_interactive_posix_shell_is_sent_its_integration() {
     );
 }
 
+#[cfg(windows)]
+#[test]
+fn powershell_setup_is_not_sent_as_visible_terminal_input() {
+    assert!(shell_integration_startup_command(ShellKind::PowerShell, &[]).is_none());
+}
+
 #[test]
 fn the_terminal_environment_advertises_zettas_own_capabilities() {
     let environment = terminal_environment(TerminalEnvironmentOptions { version: "9.9.9" })

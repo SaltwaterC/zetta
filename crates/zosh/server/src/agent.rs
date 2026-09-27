@@ -527,12 +527,11 @@ fn create_named_pipe_listener(events: SyncSender<LocalEvent>) -> io::Result<Path
                     break;
                 }
                 let connected = unsafe { ConnectNamedPipe(handle, None) };
-                if connected.is_err() {
-                    let error = connected.unwrap_err();
-                    if error.code().0 as u32 & 0xffff != ERROR_PIPE_CONNECTED.0 {
-                        let _ = unsafe { CloseHandle(handle) };
-                        continue;
-                    }
+                if let Err(error) = connected
+                    && error.code().0 as u32 & 0xffff != ERROR_PIPE_CONNECTED.0
+                {
+                    let _ = unsafe { CloseHandle(handle) };
+                    continue;
                 }
                 let stream = unsafe { std::fs::File::from_raw_handle(handle.0 as _) };
                 if events

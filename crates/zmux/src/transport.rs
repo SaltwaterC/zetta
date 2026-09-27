@@ -72,16 +72,36 @@ pub struct Endpoint {
 
 impl Endpoint {
     pub fn read(path: &Path) -> Result<Self> {
-        let contents = std::fs::read(path)
-            .with_context(|| format!("reading multiplexer endpoint {}", path.display()))?;
-        let endpoint: Self = serde_json::from_slice(&contents)
-            .with_context(|| format!("parsing multiplexer endpoint {}", path.display()))?;
+        let endpoint = Self::read_unchecked(path)?;
         anyhow::ensure!(
             endpoint.version == ENDPOINT_VERSION,
             "multiplexer endpoint {} has unsupported version {}",
             path.display(),
             endpoint.version
         );
+        Ok(endpoint)
+    }
+
+    /// The Windows pseudoconsole host outlives daemon upgrades. Its version 1
+    /// endpoint has the same fields as version 2, so a new daemon must still
+    /// be able to find and stop a host that published the older version.
+    #[cfg(windows)]
+    pub fn read_host(path: &Path) -> Result<Self> {
+        let endpoint = Self::read_unchecked(path)?;
+        anyhow::ensure!(
+            matches!(endpoint.version, 1 | ENDPOINT_VERSION),
+            "pseudoconsole host endpoint {} has unsupported version {}",
+            path.display(),
+            endpoint.version
+        );
+        Ok(endpoint)
+    }
+
+    fn read_unchecked(path: &Path) -> Result<Self> {
+        let contents = std::fs::read(path)
+            .with_context(|| format!("reading multiplexer endpoint {}", path.display()))?;
+        let endpoint: Self = serde_json::from_slice(&contents)
+            .with_context(|| format!("parsing multiplexer endpoint {}", path.display()))?;
         Ok(endpoint)
     }
 

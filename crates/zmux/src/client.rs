@@ -1074,7 +1074,7 @@ impl Client {
         })
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn from_remote_transport_for_test(
         remote: Arc<RemoteTransport>,
         endpoint: Endpoint,
@@ -1440,7 +1440,7 @@ impl Client {
         if let Response::AttestationRequired { handle } = received.0 {
             let nonce = crate::transport::answer_challenge(handle)?;
             connection.send(&Request::Attested { nonce })?;
-            return Ok(connection.receive::<Response>()?);
+            return connection.receive::<Response>();
         }
         Ok(received)
     }

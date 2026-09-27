@@ -1,5 +1,6 @@
 use crate::agent::AgentServer;
 use crate::args::Config;
+#[cfg(unix)]
 use crate::lifecycle;
 use crate::protocol::{AgentHostRecord, ServerTransport, encode_host_message_with_agent};
 use crate::terminal_state::{QueryResponder, TerminalState};
@@ -62,6 +63,13 @@ struct PtySession {
     exited: bool,
 }
 
+#[cfg_attr(
+    windows,
+    allow(
+        unused_mut,
+        reason = "only the Unix server setup mutates this configuration"
+    )
+)]
 pub fn run(mut cfg: Config) -> Result<()> {
     let timing_file = timing::open()?;
     let (socket, port) = bind_udp(cfg.bind_ip, cfg.port_low, cfg.port_high)?;

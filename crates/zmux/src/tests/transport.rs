@@ -74,6 +74,28 @@ fn an_endpoint_from_a_future_version_is_refused() {
     assert!(Endpoint::read(&path).is_err());
 }
 
+#[cfg(windows)]
+#[test]
+fn a_legacy_windows_host_endpoint_remains_readable_without_weakening_daemon_endpoints() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("zmux-host.json");
+    let mut endpoint = Endpoint {
+        version: 1,
+        protocol_version: crate::pty_host::HOST_PROTOCOL_VERSION,
+        process_id: std::process::id(),
+        socket_path: directory.path().join("zmux-host.sock"),
+        token: "test-token".to_owned(),
+    };
+    endpoint.write(&path).unwrap();
+
+    assert_eq!(Endpoint::read_host(&path).unwrap(), endpoint);
+    assert!(Endpoint::read(&path).is_err());
+
+    endpoint.version = ENDPOINT_VERSION + 1;
+    endpoint.write(&path).unwrap();
+    assert!(Endpoint::read_host(&path).is_err());
+}
+
 #[test]
 fn messages_are_length_framed_and_bounded() {
     #[derive(Debug, PartialEq, serde::Serialize, serde::Deserialize)]

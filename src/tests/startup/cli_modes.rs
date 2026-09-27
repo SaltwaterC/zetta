@@ -1,5 +1,6 @@
 use super::*;
 
+#[cfg(unix)]
 fn temporary_bash_home() -> tempfile::TempDir {
     let home = tempfile::tempdir().unwrap();
     // Debian's global bashrc prints a sudo hint unless the temporary HOME has
@@ -38,6 +39,7 @@ fn shell_integration_setup_message_reports_an_unchanged_configuration() {
 // sequential command — not for a thread among many all touching the same
 // tty. Alias/function resolution is identical either way, so there is no
 // reason for this test to risk it.
+#[cfg(unix)]
 #[test]
 fn wait_command_process_resolves_a_shell_function_the_wrapped_command_names() {
     let temporary = temporary_bash_home();
@@ -66,6 +68,7 @@ fn wait_command_process_resolves_a_shell_function_the_wrapped_command_names() {
 
 // See the comment on `wait_command_process_resolves_a_shell_function_the_wrapped_command_names`
 // for why `is_terminal_foreground: false` is used here too.
+#[cfg(unix)]
 #[test]
 fn wait_command_process_passes_metacharacters_through_unmangled() {
     let temporary = temporary_bash_home();

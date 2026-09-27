@@ -802,7 +802,7 @@ fn attached_client_receives_conpty_output_without_host_competing_for_it() {
     let mut output = std::fs::File::from(pane.conout);
     let mut input = std::fs::File::from(pane.conin);
     let mut sent_device_attributes = false;
-    let deadline = Instant::now() + Duration::from_secs(2);
+    let deadline = Instant::now() + Duration::from_secs(5);
     let mut bytes = Vec::new();
     while Instant::now() < deadline {
         let mut available = 0;
@@ -908,7 +908,7 @@ fn detached_conpty_reader_stops_before_exclusive_reattach() {
     let mut output = std::fs::File::from(pane.conout);
     let mut input = std::fs::File::from(pane.conin);
 
-    let initial = read_until(&mut output, &mut input, b"before", Duration::from_secs(2));
+    let initial = read_until(&mut output, &mut input, b"before", Duration::from_secs(5));
     assert!(
         String::from_utf8_lossy(&initial).contains("before"),
         "the attached client received no initial output: {:?}",

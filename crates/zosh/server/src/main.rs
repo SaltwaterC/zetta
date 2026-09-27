@@ -25,10 +25,9 @@ fn main() -> Result<()> {
         }
         args::ParseOutcome::Run(cfg) => {
             #[cfg(windows)]
-            if !cfg.foreground && !cfg.internal_child {
-                if lifecycle::windows_parent_bootstrap(&raw)? {
-                    return Ok(());
-                }
+            if !cfg.foreground && !cfg.internal_child && lifecycle::windows_parent_bootstrap(&raw)?
+            {
+                return Ok(());
             }
 
             server::run(cfg)

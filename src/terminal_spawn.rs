@@ -3,10 +3,19 @@ use super::*;
 use crate::mux::MuxPaneIds;
 use crate::worktree_detection::terminal_event_requires_worktree_detection;
 
+/// PowerShell loads its integration from the command passed at process start,
+/// before the first prompt. Sending a second line through its terminal makes
+/// that line visible in the user's shell.
+#[cfg(windows)]
+fn shell_integration_startup_command(_shell: &Shell) -> Option<Vec<u8>> {
+    None
+}
+
 /// Returns the shell command used to load this process's shell integration
-/// into an interactive native shell.  The command is sent after the shell's
+/// into an interactive native shell. The command is sent after the shell's
 /// startup files have completed so a stale `zetta` found earlier on PATH
 /// cannot leave the pane with CWD-only tracking.
+#[cfg(not(windows))]
 fn shell_integration_startup_command(shell: &Shell) -> Option<Vec<u8>> {
     let (program, arguments) = shell.program_and_args();
     if zetta_profiles::runs_a_command(arguments) {
@@ -17,7 +26,6 @@ fn shell_integration_startup_command(shell: &Shell) -> Option<Vec<u8>> {
         .file_name()?
         .to_string_lossy()
         .to_ascii_lowercase();
-    #[cfg(not(windows))]
     let command = match shell_name.as_str() {
         "bash" | "bash.exe" => {
             r#"if [[ ${__ZETTA_LIFECYCLE_TRACKING_INSTALLED:-0} != 1 || ${__ZETTA_LIFECYCLE_TRACKING_ENABLED:-0} != 1 ]]; then eval "$(command zetta init bash)"; fi"#
@@ -30,14 +38,6 @@ fn shell_integration_startup_command(shell: &Shell) -> Option<Vec<u8>> {
         }
         _ => return None,
     };
-    #[cfg(windows)]
-    let command = match shell_name.as_str() {
-        "powershell" | "powershell.exe" | "pwsh" | "pwsh.exe" => {
-            r#"if (-not $global:__ZettaLifecycleTrackerInstalled -or -not $global:__ZettaLifecycleTrackingEnabled) { & $env:ZETTA_HOST_EXECUTABLE init powershell | Out-String | Invoke-Expression }"#
-        }
-        _ => return None,
-    };
-
     let mut command = command.as_bytes().to_vec();
     command.push(b'\r');
     Some(command)
@@ -1237,7 +1237,13 @@ impl Zetta {
         };
         let effective_theme = terminal_theme.clone().unwrap_or_else(|| cx.theme().clone());
         // The `mut` is for the zsh history step below, which is Unix-only.
-        #[cfg_attr(windows, allow(unused_mut))]
+        #[cfg_attr(
+            windows,
+            allow(
+                unused_mut,
+                reason = "only the Unix shell-history setup mutates this map"
+            )
+        )]
         let mut environment: HashMap<String, String> = match (TerminalEnvironment {
             profile: &profile.command,
             overrides: &combined_environment,
@@ -2309,13 +2315,7 @@ impl Zetta {
                 // only closes this process's copy of the descriptor, not the
                 // daemon's, so without this the pane stays wedged as ours
                 // until the window exits. See `Zetta::release_mux_pane`.
-                this.release_mux_pane(tab_id, pane_id, cx);
-                // Only when the whole tab is gone: a pane closed on its own
-                // still leaves the tab's other panes sharing this session, so
-                // their mapping to it must not be erased here.
-                if tab_index.is_none() {
-                    this.mux_panes.forget_tab(tab_id);
-                }
+                this.release_orphaned_terminal_spawn(tab_id, pane_id, tab_index, cx);
             }
         }
         #[cfg(feature = "zmux")]
@@ -2381,6 +2381,22 @@ impl Zetta {
                 });
             })
             .detach();
+        }
+    }
+
+    /// Releases the multiplexer pane after its terminal finishes spawning
+    /// without a live pane to own it. A pane closed inside a still-live tab
+    /// keeps that tab's session mapping; a closed tab does not.
+    fn release_orphaned_terminal_spawn(
+        &mut self,
+        tab_id: u64,
+        pane_id: u64,
+        tab_index: Option<usize>,
+        cx: &mut Context<Self>,
+    ) {
+        self.release_mux_pane(tab_id, pane_id, cx);
+        if tab_index.is_none() {
+            self.mux_panes.forget_tab(tab_id);
         }
     }
 

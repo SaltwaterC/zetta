@@ -283,6 +283,7 @@ impl DisplayScreen {
         *wrapping = false;
     }
 
+    #[cfg(unix)]
     pub(crate) fn input_modes(&self) -> Vec<u8> {
         self.inner.inner().input_mode_formatted()
     }

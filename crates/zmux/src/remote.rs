@@ -1,10 +1,13 @@
 //! OpenSSH transport for a remote `zmux` daemon.
 //!
 //! The daemon protocol remains the same framed JSON protocol used by local
-//! Unix sockets. OpenSSH's stream-local forwarding only supplies the transport
-//! between the local client and the remote Unix socket; no request or terminal
-//! bytes are handled on an SSH process's output path.
+//! Unix sockets. Unix clients use OpenSSH stream-local forwarding. Windows
+//! clients run a remote stdio proxy because Win32-OpenSSH cannot listen on a
+//! local Unix socket. The proxy reads the daemon endpoint on the remote host;
+//! no local TCP listener or client-supplied remote socket path is involved.
 
+#[cfg(windows)]
+use std::{io, net::Shutdown};
 use std::{
     io::Read,
     path::{Path, PathBuf},
@@ -21,6 +24,7 @@ use crate::{
 use anyhow::{Context as _, Result};
 
 const ENDPOINT_TIMEOUT: Duration = Duration::from_secs(15);
+#[cfg(unix)]
 const FORWARD_TIMEOUT: Duration = Duration::from_secs(10);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 const POLL_INTERVAL: Duration = Duration::from_millis(20);
@@ -44,6 +48,9 @@ const REMOTE_PROGRAM_COMMAND: &str =
 
 /// Runs the standalone profile discovery command without requiring a daemon.
 const REMOTE_PROFILES_COMMAND: &str = r#"/bin/sh -c 'exec 3>&1 1>/dev/null; exec "${SHELL:-/bin/sh}" -lic "exec zmux profiles --json >&3"'"#;
+
+#[cfg(windows)]
+const REMOTE_STDIO_COMMAND: &str = r#"/bin/sh -c 'exec 3>&1 1>/dev/null; exec "${SHELL:-/bin/sh}" -lic "exec zmux proxy-stdio >&3"'"#;
 
 /// A destination understood by OpenSSH.
 ///
@@ -108,6 +115,7 @@ impl RemoteTarget {
 /// The child and its private socket directory are owned by this value. When
 /// the last client for a remote runtime goes away, dropping the transport
 /// terminates SSH and removes the local socket automatically.
+#[cfg(unix)]
 struct ForwardState {
     child: Child,
     directory: tempfile::TempDir,
@@ -115,12 +123,14 @@ struct ForwardState {
     endpoint: Endpoint,
 }
 
+#[cfg(unix)]
 impl ForwardState {
     fn is_alive(&mut self) -> bool {
         matches!(self.child.try_wait(), Ok(None))
     }
 }
 
+#[cfg(unix)]
 impl Drop for ForwardState {
     fn drop(&mut self) {
         terminate_child(&mut self.child);
@@ -132,7 +142,21 @@ impl Drop for ForwardState {
 }
 
 struct RemoteState {
+    #[cfg(unix)]
     forward: Option<ForwardState>,
+    #[cfg(windows)]
+    endpoint: Option<Endpoint>,
+    #[cfg(windows)]
+    agent_holder: Option<Child>,
+}
+
+#[cfg(windows)]
+impl Drop for RemoteState {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.agent_holder.take() {
+            terminate_child(&mut child);
+        }
+    }
 }
 
 /// A reusable remote mux connection factory.
@@ -172,7 +196,14 @@ impl RemoteTransport {
         Ok(Self {
             target,
             ssh_program: ssh_program.into(),
-            state: Mutex::new(RemoteState { forward: None }),
+            state: Mutex::new(RemoteState {
+                #[cfg(unix)]
+                forward: None,
+                #[cfg(windows)]
+                endpoint: None,
+                #[cfg(windows)]
+                agent_holder: None,
+            }),
         })
     }
 
@@ -183,6 +214,7 @@ impl RemoteTransport {
     /// Returns the endpoint currently exposed by the local side of the
     /// forward. Its token and protocol come from the remote daemon; only the
     /// socket path is replaced with the private local socket.
+    #[cfg(unix)]
     pub fn endpoint(&self) -> Result<Endpoint> {
         let state = self.state.lock().unwrap();
         state
@@ -192,8 +224,19 @@ impl RemoteTransport {
             .context("remote SSH forwarding has not been established")
     }
 
+    #[cfg(windows)]
+    pub fn endpoint(&self) -> Result<Endpoint> {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .endpoint
+            .clone()
+            .context("remote SSH endpoint has not been queried")
+    }
+
     /// Opens one framed mux connection, rebuilding the forward once if the
     /// persistent SSH process or its local socket has gone away.
+    #[cfg(unix)]
     pub fn connect(&self) -> Result<(Endpoint, Stream)> {
         let mut state = self.state.lock().unwrap();
         for attempt in 0..2 {
@@ -290,12 +333,90 @@ impl RemoteTransport {
         )
     }
 
-    /// Confirms that the persistent forward still reaches the daemon described
-    /// by its cached endpoint. A stream-local listener can outlive a remote
-    /// daemon replacement, so checking only the local socket is insufficient:
-    /// the next real request would otherwise be sent with a stale token or to a
-    /// stale remote socket. The probe is a normal mux request and never starts
-    /// another SSH process.
+    #[cfg(windows)]
+    pub fn connect(&self) -> Result<(Endpoint, Stream)> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for attempt in 0..2 {
+            if self.target.forward_agent == Some(true)
+                && state
+                    .agent_holder
+                    .as_mut()
+                    .is_none_or(|child| !matches!(child.try_wait(), Ok(None)))
+            {
+                if let Some(mut child) = state.agent_holder.take() {
+                    terminate_child(&mut child);
+                }
+                state.endpoint = None;
+            }
+            let endpoint = match &state.endpoint {
+                Some(endpoint) => endpoint.clone(),
+                None => {
+                    let endpoint = self.query_stdio_endpoint(&mut state)?;
+                    state.endpoint = Some(endpoint.clone());
+                    endpoint
+                }
+            };
+            let probe = self.open_stdio_bridge()?;
+            match self.probe(&endpoint, probe) {
+                Ok(()) => return Ok((endpoint, self.open_stdio_bridge()?)),
+                Err(error) if attempt == 0 => {
+                    log::debug!(
+                        "remote SSH stdio probe for {} failed: {error:#}",
+                        self.target.destination()
+                    );
+                    state.endpoint = None;
+                    if let Some(mut child) = state.agent_holder.take() {
+                        terminate_child(&mut child);
+                    }
+                }
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!(
+                            "checking the SSH stdio proxy for {} (the remote zmux must support proxy-stdio)",
+                            self.target.destination()
+                        )
+                    });
+                }
+            }
+        }
+        anyhow::bail!(
+            "could not connect to the SSH stdio proxy for {}",
+            self.target.destination()
+        )
+    }
+
+    #[cfg(windows)]
+    fn open_stdio_bridge(&self) -> Result<Stream> {
+        use crate::transport::Listener;
+
+        let directory = tempfile::Builder::new()
+            .prefix("zetta-zmux-stdio-")
+            .tempdir()
+            .context("creating the private SSH stdio directory")?;
+        let socket = directory.path().join("mux.sock");
+        let listener = Listener::bind(&socket).context("binding the local SSH stdio socket")?;
+        let client =
+            Stream::connect(&socket).context("connecting to the local SSH stdio socket")?;
+        let (relay, _) = listener
+            .accept()
+            .context("accepting the local SSH stdio socket")?;
+        drop(listener);
+        let target = self.target.clone();
+        let ssh_program = self.ssh_program.clone();
+        thread::Builder::new()
+            .name("zmux-ssh-stdio".to_owned())
+            .spawn(move || run_stdio_bridge(ssh_program, target, relay, directory))
+            .context("starting the SSH stdio bridge")?;
+        Ok(client)
+    }
+
+    /// Confirms that the transport reaches the daemon described by its cached
+    /// endpoint. A listener can outlive a daemon replacement, so checking only
+    /// the local socket is insufficient: the next request could carry a stale
+    /// token. On Windows each probe has its own SSH stdio process.
     fn probe(&self, endpoint: &Endpoint, stream: Stream) -> Result<()> {
         // Ping is served on a one-request connection and the daemon closes it
         // after replying. Consume this connection completely and let the
@@ -323,6 +444,7 @@ impl RemoteTransport {
     /// Re-queries `zmux endpoint --json` and replaces the forward. This is used
     /// after an invalid token or a remote daemon replacement, where both the
     /// socket path and token may have changed.
+    #[cfg(unix)]
     pub fn refresh(&self) -> Result<Endpoint> {
         let mut state = self.state.lock().unwrap();
         state.forward = None;
@@ -335,6 +457,40 @@ impl RemoteTransport {
             .clone())
     }
 
+    #[cfg(windows)]
+    pub fn refresh(&self) -> Result<Endpoint> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.endpoint = None;
+        if let Some(mut child) = state.agent_holder.take() {
+            terminate_child(&mut child);
+        }
+        let endpoint = self.query_stdio_endpoint(&mut state)?;
+        state.endpoint = Some(endpoint.clone());
+        Ok(endpoint)
+    }
+
+    #[cfg(windows)]
+    fn query_stdio_endpoint(&self, state: &mut RemoteState) -> Result<Endpoint> {
+        let endpoint = self.query_endpoint()?;
+        if self.target.forward_agent == Some(true)
+            && let Some(directory) = endpoint.socket_path.parent()
+        {
+            let socket = directory.join("forwarded-agent.sock");
+            let mut command = Command::new(&self.ssh_program);
+            command
+                .args(agent_holder_arguments(&self.target, &socket))
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            state.agent_holder = Some(command.spawn().context("starting SSH agent forwarding")?);
+        }
+        Ok(endpoint)
+    }
+
+    #[cfg(unix)]
     fn start_forward(&self) -> Result<ForwardState> {
         let remote_endpoint = self.query_endpoint()?;
         let directory = tempfile::Builder::new()
@@ -529,6 +685,120 @@ impl RemoteTransport {
     }
 }
 
+/// The remote half of the Windows transport. The endpoint path comes from this
+/// host's daemon catalog, never from an SSH command argument. The daemon still
+/// validates the client's endpoint token on its normal framed connection.
+#[cfg(unix)]
+pub fn run_stdio_proxy() -> Result<()> {
+    use std::io;
+
+    let endpoint = Endpoint::read(&crate::server::endpoint_path(
+        &crate::paths::session_catalog_dir(),
+    ))?;
+    let daemon = Stream::connect(&endpoint.socket_path)
+        .context("connecting the SSH stdio proxy to the local daemon")?;
+    proxy_stream(daemon, io::stdin(), io::stdout())
+}
+
+#[cfg(unix)]
+fn proxy_stream(
+    mut daemon: Stream,
+    mut input: impl Read + Send + 'static,
+    mut output: impl std::io::Write,
+) -> Result<()> {
+    use std::{io, net::Shutdown};
+
+    let mut daemon_input = daemon.try_clone()?;
+    thread::spawn(move || {
+        let _ = io::copy(&mut input, &mut daemon_input);
+        let _ = daemon_input.shutdown(Shutdown::Write);
+    });
+    let mut bytes = [0; 8192];
+    loop {
+        let count = daemon
+            .read(&mut bytes)
+            .context("reading the daemon response for SSH stdout")?;
+        if count == 0 {
+            break;
+        }
+        output
+            .write_all(&bytes[..count])
+            .context("copying the daemon response to SSH stdout")?;
+        output.flush().context("flushing SSH stdout")?;
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn run_stdio_bridge(
+    ssh_program: PathBuf,
+    target: RemoteTarget,
+    relay: Stream,
+    _directory: tempfile::TempDir,
+) {
+    let mut command = Command::new(ssh_program);
+    command
+        .args(stdio_arguments(&target))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let Ok(mut child) = command.spawn() else {
+        log::debug!(
+            "could not start SSH stdio proxy for {}",
+            target.destination()
+        );
+        return;
+    };
+    copy_stdio_child(&mut child, relay, target.destination());
+}
+
+#[cfg(windows)]
+fn copy_stdio_child(child: &mut Child, mut relay: Stream, destination: &str) {
+    let (Some(mut ssh_input), Some(mut ssh_output), Some(ssh_error)) =
+        (child.stdin.take(), child.stdout.take(), child.stderr.take())
+    else {
+        terminate_child(child);
+        return;
+    };
+    let Ok(mut relay_input) = relay.try_clone() else {
+        terminate_child(child);
+        return;
+    };
+    let input = thread::spawn(move || {
+        let _ = io::copy(&mut relay_input, &mut ssh_input);
+    });
+    let errors = thread::spawn(move || capture_ssh_stderr(ssh_error));
+    let result = io::copy(&mut ssh_output, &mut relay);
+    let _ = relay.shutdown(Shutdown::Both);
+    let _ = input.join();
+    terminate_child(child);
+    let stderr = errors.join().unwrap_or_default();
+    if let Err(error) = result {
+        log::debug!("SSH stdio proxy for {destination} stopped: {error}");
+    }
+    if !stderr.is_empty() {
+        log::debug!(
+            "SSH stdio proxy for {}: {}",
+            destination,
+            String::from_utf8_lossy(&stderr).trim()
+        );
+    }
+}
+
+#[cfg(windows)]
+fn capture_ssh_stderr(mut stderr: impl Read) -> Vec<u8> {
+    let mut captured = Vec::new();
+    let mut buffer = [0; 4096];
+    while let Ok(count) = stderr.read(&mut buffer) {
+        if count == 0 {
+            break;
+        }
+        let remaining = MAX_SSH_OUTPUT_BYTES.saturating_sub(captured.len());
+        captured.extend_from_slice(&buffer[..count.min(remaining)]);
+    }
+    captured
+}
+
 struct SshOutput {
     stdout: Vec<u8>,
 }
@@ -563,6 +833,30 @@ fn profiles_arguments(target: &RemoteTarget) -> Vec<String> {
     arguments
 }
 
+#[cfg(windows)]
+fn stdio_arguments(target: &RemoteTarget) -> Vec<String> {
+    let mut arguments = vec![
+        "-T".to_owned(),
+        "-o".to_owned(),
+        "ClearAllForwardings=yes".to_owned(),
+    ];
+    push_target_options(&mut arguments, target);
+    arguments.extend([target.destination.clone(), REMOTE_STDIO_COMMAND.to_owned()]);
+    arguments
+}
+
+#[cfg(windows)]
+fn agent_holder_arguments(target: &RemoteTarget, socket: &Path) -> Vec<String> {
+    let mut arguments = vec![
+        "-T".to_owned(),
+        "-o".to_owned(),
+        "ClearAllForwardings=yes".to_owned(),
+    ];
+    push_target_options(&mut arguments, target);
+    arguments.extend([target.destination.clone(), agent_holder_command(socket)]);
+    arguments
+}
+
 fn start_daemon_arguments(target: &RemoteTarget, program: &Path) -> Vec<String> {
     let mut arguments = vec!["-T".to_owned()];
     push_target_options(&mut arguments, target);
@@ -582,6 +876,7 @@ fn shell_escape_double_quoted(value: &str) -> String {
         .replace('`', "\\`")
 }
 
+#[cfg(any(unix, test))]
 fn forward_arguments(
     target: &RemoteTarget,
     forwarding: &str,
@@ -702,11 +997,6 @@ fn restrict_directory(path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt as _;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
         .with_context(|| format!("restricting SSH forward directory {}", path.display()))
-}
-
-#[cfg(not(unix))]
-fn restrict_directory(_path: &Path) -> Result<()> {
-    Ok(())
 }
 
 #[cfg(test)]

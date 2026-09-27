@@ -109,7 +109,7 @@ fn palette_attributes_preserve_unrelated_bits() {
 #[test]
 fn screen_buffer_update_changes_only_palette_color_bits_and_window_convention() {
     use windows::Win32::System::Console::{
-        CONSOLE_CHARACTER_ATTRIBUTES, CONSOLE_SCREEN_BUFFER_INFOEX,
+        CONSOLE_CHARACTER_ATTRIBUTES, CONSOLE_SCREEN_BUFFER_INFOEX, SMALL_RECT,
     };
 
     let palette = ConsolePalette {
@@ -117,11 +117,16 @@ fn screen_buffer_update_changes_only_palette_color_bits_and_window_convention() 
         foreground_index: 14,
         background_index: 1,
     };
-    let mut info = CONSOLE_SCREEN_BUFFER_INFOEX::default();
-    info.wAttributes = CONSOLE_CHARACTER_ATTRIBUTES(0x5a7c);
-    info.wPopupAttributes = 0xa5c3;
-    info.srWindow.Right = 79;
-    info.srWindow.Bottom = 23;
+    let mut info = CONSOLE_SCREEN_BUFFER_INFOEX {
+        wAttributes: CONSOLE_CHARACTER_ATTRIBUTES(0x5a7c),
+        wPopupAttributes: 0xa5c3,
+        srWindow: SMALL_RECT {
+            Right: 79,
+            Bottom: 23,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
 
     update_screen_buffer_info(&mut info, palette);
 

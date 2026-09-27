@@ -307,8 +307,10 @@ fn current_console_info_with_handle() -> Result<(
         .open("CONOUT$")
         .context("opening CONOUT$")?;
     let handle = HANDLE(output.as_raw_handle());
-    let mut info = CONSOLE_SCREEN_BUFFER_INFOEX::default();
-    info.cbSize = std::mem::size_of::<CONSOLE_SCREEN_BUFFER_INFOEX>() as u32;
+    let mut info = CONSOLE_SCREEN_BUFFER_INFOEX {
+        cbSize: std::mem::size_of::<CONSOLE_SCREEN_BUFFER_INFOEX>() as u32,
+        ..Default::default()
+    };
     unsafe { GetConsoleScreenBufferInfoEx(handle, &mut info) }
         .context("reading console color state")?;
     Ok((output, handle, info))
@@ -393,6 +395,16 @@ pub enum HostRequest {
     Shutdown,
 }
 
+pub(crate) struct OpenConsoleRequest {
+    pub(crate) program: Option<String>,
+    pub(crate) args: Vec<String>,
+    pub(crate) env: HashMap<String, String>,
+    pub(crate) working_directory: Option<PathBuf>,
+    pub(crate) size: TerminalSize,
+    pub(crate) palette: ConsolePalette,
+    pub(crate) target_process_id: u32,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "response", rename_all = "snake_case")]
 pub enum HostResponse {
@@ -457,7 +469,7 @@ pub fn run() -> Result<()> {
 
     // A live host is never replaced: it is holding consoles that cannot be
     // recreated, which is the entire reason it exists.
-    if let Ok(existing) = Endpoint::read(&endpoint)
+    if let Ok(existing) = Endpoint::read_host(&endpoint)
         && Stream::connect(&existing.socket_path).is_ok()
     {
         anyhow::bail!("a pseudoconsole host is already running");
@@ -553,13 +565,15 @@ fn handle(host: &Arc<Host>, envelope: HostEnvelope) -> HostResponse {
             palette,
         } => match open_console(
             host,
-            program,
-            args,
-            env,
-            working_directory,
-            size,
-            palette,
-            envelope.target_process_id,
+            OpenConsoleRequest {
+                program,
+                args,
+                env,
+                working_directory,
+                size,
+                palette,
+                target_process_id: envelope.target_process_id,
+            },
         ) {
             Ok(response) => response,
             Err(error) => HostResponse::Error {
@@ -650,16 +664,16 @@ fn handle(host: &Arc<Host>, envelope: HostEnvelope) -> HostResponse {
     }
 }
 
-fn open_console(
-    host: &Arc<Host>,
-    program: Option<String>,
-    args: Vec<String>,
-    env: HashMap<String, String>,
-    working_directory: Option<PathBuf>,
-    size: TerminalSize,
-    palette: ConsolePalette,
-    target_process_id: u32,
-) -> Result<HostResponse> {
+fn open_console(host: &Arc<Host>, request: OpenConsoleRequest) -> Result<HostResponse> {
+    let OpenConsoleRequest {
+        program,
+        args,
+        env,
+        working_directory,
+        size,
+        palette,
+        target_process_id,
+    } = request;
     let escape_args = escape_windows_shell_args(program.as_deref());
     let console_palette_helper = (!is_wsl_program(program.as_deref()))
         .then(|| std::env::current_exe().unwrap_or_else(|_| PathBuf::from("zmux-pty.exe")));
@@ -831,7 +845,7 @@ pub fn ensure_running(directory: &Path) -> Result<HostClient> {
 /// stale. Keep this cleanup beside the host protocol so both cases use the
 /// same endpoint identity and process tree.
 pub fn stop(directory: &Path, force: bool) -> Result<bool> {
-    let Ok(endpoint) = Endpoint::read(&endpoint_path(directory)) else {
+    let Ok(endpoint) = Endpoint::read_host(&endpoint_path(directory)) else {
         return Ok(false);
     };
     if Stream::connect(&endpoint.socket_path).is_err() {
@@ -921,7 +935,7 @@ fn remove_stopped_files(directory: &Path, endpoint: &Endpoint) {
     // so its normal cleanup code is not reached. Remove only files that still
     // describe this exact host; a replacement that started immediately after
     // it stopped must keep its own endpoint.
-    if Endpoint::read(&endpoint_path(directory)).is_ok_and(|current| current == *endpoint) {
+    if Endpoint::read_host(&endpoint_path(directory)).is_ok_and(|current| current == *endpoint) {
         let _ = std::fs::remove_file(&endpoint.socket_path);
         let _ = std::fs::remove_file(endpoint_path(directory));
     }
@@ -933,7 +947,7 @@ pub struct HostClient {
 
 impl HostClient {
     pub fn connect(directory: &Path) -> Result<Option<Self>> {
-        let Ok(endpoint) = Endpoint::read(&endpoint_path(directory)) else {
+        let Ok(endpoint) = Endpoint::read_host(&endpoint_path(directory)) else {
             return Ok(None);
         };
         // A host older than this daemon can drive is refused here, before an
@@ -963,16 +977,16 @@ impl HostClient {
         Ok(connection.receive::<HostResponse>()?.0)
     }
 
-    pub fn open(
-        &self,
-        program: Option<String>,
-        args: Vec<String>,
-        env: HashMap<String, String>,
-        working_directory: Option<PathBuf>,
-        size: TerminalSize,
-        palette: ConsolePalette,
-        target_process_id: u32,
-    ) -> Result<(u64, u32, Vec<i64>)> {
+    pub(crate) fn open(&self, request: OpenConsoleRequest) -> Result<(u64, u32, Vec<i64>)> {
+        let OpenConsoleRequest {
+            program,
+            args,
+            env,
+            working_directory,
+            size,
+            palette,
+            target_process_id,
+        } = request;
         match self.request(
             HostRequest::Open {
                 program,

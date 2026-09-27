@@ -66,23 +66,20 @@ pub fn runs_a_command(args: &[String]) -> bool {
     })
 }
 
+/// PowerShell's setup must run from its startup arguments. Sending this line
+/// through the terminal would echo it at the first prompt.
+#[cfg(windows)]
+pub fn shell_integration_startup_command(_kind: ShellKind, _args: &[String]) -> Option<Vec<u8>> {
+    None
+}
+
 /// The line that loads the shell integration, or `None` for a shell that has
 /// none. Carriage-return terminated, because it is delivered as if typed.
+#[cfg(not(windows))]
 pub fn shell_integration_startup_command(kind: ShellKind, args: &[String]) -> Option<Vec<u8>> {
     if runs_a_command(args) {
         return None;
     }
-    // Deliberately per platform rather than per shell: a Cygwin or MSYS2 bash
-    // on Windows reaches Zetta through a launcher, and the `zetta` its `eval`
-    // would call is not the one on that shell's `PATH`.
-    #[cfg(windows)]
-    let command = match kind {
-        ShellKind::PowerShell => {
-            r#"if (-not $global:__ZettaLifecycleTrackerInstalled -or -not $global:__ZettaLifecycleTrackingEnabled) { & $env:ZETTA_HOST_EXECUTABLE init powershell | Out-String | Invoke-Expression }"#
-        }
-        _ => return None,
-    };
-    #[cfg(not(windows))]
     let command = match kind {
         ShellKind::Bash => {
             r#"if [[ ${__ZETTA_LIFECYCLE_TRACKING_INSTALLED:-0} != 1 || ${__ZETTA_LIFECYCLE_TRACKING_ENABLED:-0} != 1 ]]; then eval "$(command zetta init bash)"; fi"#

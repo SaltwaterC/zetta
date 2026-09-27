@@ -634,10 +634,15 @@ fn an_embedded_bootstrap_runs_its_command_and_names_the_bundled_zosh() {
         arguments.windows(2).any(|pair| pair == ["-p", "2222"]),
         "{arguments:?}"
     );
+    let expected_proxy_command = if cfg!(windows) {
+        "ProxyCommand=\"/opt/zetta/zosh\" --fake-proxy"
+    } else {
+        "ProxyCommand='/opt/zetta/zosh' --fake-proxy"
+    };
     assert!(
         arguments
             .iter()
-            .any(|argument| argument.contains("ProxyCommand='/opt/zetta/zosh' --fake-proxy")),
+            .any(|argument| argument.contains(expected_proxy_command)),
         "{arguments:?}"
     );
     let remote = arguments.last().expect("the remote command");

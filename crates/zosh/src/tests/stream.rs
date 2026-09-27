@@ -9,11 +9,15 @@ use std::time::{Duration, Instant};
 fn the_output_pipe_blocks_until_bytes_arrive_and_ends_when_the_loop_does() {
     let pipe = Arc::new(OutputPipe::default());
     let writer = Arc::clone(&pipe);
+    let (reader_started, reader_started_rx) = std::sync::mpsc::channel();
     let reader = thread::spawn(move || {
         let mut buffer = [0_u8; 4];
-        let started = Instant::now();
+        let read_started = Instant::now();
+        reader_started
+            .send(())
+            .expect("notifying the test that the reader is ready");
         let read = pipe.read(&mut buffer).expect("a live pipe reads");
-        let waited = started.elapsed();
+        let waited = read_started.elapsed();
         let mut bytes = buffer[..read].to_vec();
         loop {
             let read = pipe.read(&mut buffer).expect("a live pipe reads");
@@ -25,7 +29,10 @@ fn the_output_pipe_blocks_until_bytes_arrive_and_ends_when_the_loop_does() {
     });
 
     // Nothing has been written yet, so the reader is parked rather than
-    // spinning on an empty buffer or reporting a premature end of file.
+    // spinning on an empty buffer or reporting a premature end of file. Wait
+    // until the reader thread has started before measuring that interval: on
+    // Windows it can otherwise be scheduled only after the writer has run.
+    reader_started_rx.recv().expect("the reader thread started");
     thread::sleep(Duration::from_millis(50));
     writer.write(b"first").expect("a read pipe accepts a frame");
     writer

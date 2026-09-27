@@ -321,15 +321,16 @@ fn start_shared_draft(
     let _child_pid = pty.child_pid();
     #[cfg(windows)]
     let (console_id, _child_pid, pty, child_events) = {
-        let (console_id, child_pid, handles) = daemon.pty_host.open(
-            program,
-            args,
-            env,
-            working_directory.clone(),
-            draft.size,
-            draft.console_palette,
-            std::process::id(),
-        )?;
+        let (console_id, child_pid, handles) =
+            daemon.pty_host.open(crate::pty_host::OpenConsoleRequest {
+                program,
+                args,
+                env,
+                working_directory: working_directory.clone(),
+                size: draft.size,
+                palette: draft.console_palette,
+                target_process_id: std::process::id(),
+            })?;
         let mut handles = crate::transport::claim_duplicated(&handles);
         if handles.len() != 2 {
             let _ = daemon.pty_host.close(console_id);
@@ -1029,15 +1030,16 @@ pub(super) fn spawn(
     let child_pid = pty.child_pid();
     #[cfg(windows)]
     let (console_id, child_pid, pty, child_events) = {
-        let (console_id, child_pid, handles) = daemon.pty_host.open(
-            request.program,
-            request.args,
-            request.env,
-            start_directory,
-            request.size,
-            request.console_palette,
-            std::process::id(),
-        )?;
+        let (console_id, child_pid, handles) =
+            daemon.pty_host.open(crate::pty_host::OpenConsoleRequest {
+                program: request.program,
+                args: request.args,
+                env: request.env,
+                working_directory: start_directory,
+                size: request.size,
+                palette: request.console_palette,
+                target_process_id: std::process::id(),
+            })?;
         let mut handles = crate::transport::claim_duplicated(&handles);
         if handles.len() != 2 {
             let _ = daemon.pty_host.close(console_id);
@@ -2327,12 +2329,11 @@ pub(super) fn attestation_needed(
         session_id: Some(session_id),
         ..
     }) = request
-    {
-        if daemon.restored.lock().unwrap().iter().any(|restored| {
+        && daemon.restored.lock().unwrap().iter().any(|restored| {
             restored.request.record_id == *session_id && restored.request.verifier.is_some()
-        }) {
-            return true;
-        }
+        })
+    {
+        return true;
     }
     let session_id = match request {
         Request::SpawnShared(request) => Some(request.session_id),

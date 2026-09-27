@@ -117,6 +117,13 @@ fn wait_command_process(
     command: &[String],
     #[cfg_attr(not(unix), allow(unused_variables))] is_terminal_foreground: bool,
 ) -> std::process::Command {
+    #[cfg_attr(
+        windows,
+        allow(
+            unused_mut,
+            reason = "only the Unix pre_exec setup mutates this command"
+        )
+    )]
     let mut child = ShellBuilder::new(shell, cfg!(windows))
         .build_std_command(Some(command[0].clone()), &command[1..]);
     #[cfg(unix)]

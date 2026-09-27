@@ -3234,7 +3234,7 @@ impl TerminalBuilder {
         use windows::Win32::Storage::FileSystem::SearchPathW;
         use windows::core::HSTRING;
 
-        let path = if path.starts_with(r"\\?\") || !path.contains(&['/', '\\']) {
+        let path = if path.starts_with(r"\\?\") || !path.contains(['/', '\\']) {
             path.to_string()
         } else {
             r"\\?\".to_string() + path
@@ -3638,16 +3638,14 @@ impl Terminal {
                     self.reported_shell_command
                         .get_or_insert_with(|| command.clone());
                     #[cfg(windows)]
-                    if first_shell_marker {
-                        if let Some(timing) = self.wsl_startup_timing.take() {
-                            let marker_at = Instant::now();
-                            log_wsl_startup_phase(
-                                "first_shell_marker",
-                                timing.started_at,
-                                timing.pty_ready_at,
-                                marker_at,
-                            );
-                        }
+                    if first_shell_marker && let Some(timing) = self.wsl_startup_timing.take() {
+                        let marker_at = Instant::now();
+                        log_wsl_startup_phase(
+                            "first_shell_marker",
+                            timing.started_at,
+                            timing.pty_ready_at,
+                            marker_at,
+                        );
                     }
                     if self.reported_foreground_command.as_deref() != Some(command.as_str()) {
                         self.reported_foreground_command = Some(command);
@@ -5956,12 +5954,11 @@ impl Terminal {
     fn client_side_working_directory(&self) -> Option<PathBuf> {
         if let Some(directory) = self.reported_working_directory.as_deref() {
             #[cfg(windows)]
-            if matches!(posix_host(&self.template.shell), Some(PosixHost::Cygwin)) {
-                if let Some(root) = cygwin_root_from_program(&self.template.shell.program())
-                    && let Some(directory) = cygwin_path_to_windows(&root, directory)
-                {
-                    return Some(directory);
-                }
+            if matches!(posix_host(&self.template.shell), Some(PosixHost::Cygwin))
+                && let Some(root) = cygwin_root_from_program(&self.template.shell.program())
+                && let Some(directory) = cygwin_path_to_windows(&root, directory)
+            {
+                return Some(directory);
             }
             let directory = PathBuf::from(directory);
             if directory.is_absolute() {
@@ -6737,7 +6734,7 @@ impl PreparedInput {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn write_input_command(
     writer: &mut InputWriter,
     command: InputCommand,
@@ -9634,6 +9631,52 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_powershell_loads_integration_before_the_first_prompt_without_echoing_setup() {
+        let host = std::env::temp_dir().join(format!(
+            "zetta-test-host-{}-{}.cmd",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        std::fs::write(
+            &host,
+            b"@echo off\r\nif /i not \"%~1 %~2\"==\"init powershell\" exit /b 1\r\necho function global:ZettaStartupProbe { 'integration-loaded' }\r\n",
+        )
+        .unwrap();
+
+        let mut checked = 0;
+        for program in ["powershell.exe", "pwsh.exe"] {
+            if std::process::Command::new(program)
+                .args(["-NoLogo", "-NoProfile", "-Command", "exit"])
+                .output()
+                .is_err()
+            {
+                continue;
+            }
+            checked += 1;
+
+            let script = format!("{POWERSHELL_CWD_TRACKER}\nZettaStartupProbe");
+            let output = std::process::Command::new(program)
+                .args(["-NoLogo", "-NoProfile", "-Command", &script])
+                .env("ZETTA_HOST_EXECUTABLE", &host)
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                output.status.success() && stdout.contains("integration-loaded"),
+                "{program} did not load startup integration: stdout={stdout:?}, stderr={:?}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(
+                !stdout.contains("ZETTA_HOST_EXECUTABLE init powershell"),
+                "{program} echoed the startup command: {stdout:?}"
+            );
+        }
+        std::fs::remove_file(host).unwrap();
+        assert!(checked > 0, "Windows PowerShell was not available to test");
     }
 
     #[cfg(windows)]

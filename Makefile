@@ -254,9 +254,9 @@ define parallel_for
 		name=$$(cat "$$f"); \
 		status=$$(cat "$$tmpdir/status.$$idx"); \
 		if [ "$$status" -eq 0 ]; then \
-			printf "  \033[32m✓\033[0m %s\n" "$$name"; \
+			printf "  [OK] %s\n" "$$name"; \
 		else \
-			printf "  \033[31m✗\033[0m %s\n" "$$name"; \
+			printf "  [FAIL] %s\n" "$$name"; \
 			failed=1; \
 		fi; \
 	done; \
@@ -425,7 +425,7 @@ check-macos:
 	$(macos_cc_present) || { \
 		echo "$@: no macOS cross toolchain."; \
 		echo "  The Rust target alone is not enough: dependencies compile C against"; \
-		echo "  the Apple SDK, which a Linux cc and a bare clang do not have — cc"; \
+		echo "  the Apple SDK, which a Linux cc and a bare clang do not have: cc"; \
 		echo "  rejects -arch, and clang falls back to /usr/include and fails on"; \
 		echo "  glibc headers. Install osxcross with an Apple SDK, then put"; \
 		echo "  o64-clang on PATH or set CC_x86_64_apple_darwin to it."; \
@@ -452,14 +452,14 @@ check-platforms: check-features
 	for platform in linux windows macos; do \
 		if $(MAKE) --no-print-directory can-check-$$platform >/dev/null 2>&1; then \
 			if $(MAKE) --no-print-directory check-$$platform; then \
-				printf "  \033[32m✓\033[0m %s%s\n" "$$platform" \
+				printf "  \033[32m[OK]\033[0m %s%s\n" "$$platform" \
 					"$$([ "$$platform" = "$(HOST_PLATFORM)" ] && echo ' (host)')"; \
 			else \
-				printf "  \033[31m✗\033[0m %s\n" "$$platform"; \
+				printf "  \033[31m[FAIL]\033[0m %s\n" "$$platform"; \
 				failed=1; \
 			fi; \
 		else \
-			printf "  \033[33m—\033[0m %s (no toolchain; run 'make check-%s')\n" \
+			printf "  \033[33m[SKIP]\033[0m %s (no toolchain; run 'make check-%s')\n" \
 				"$$platform" "$$platform"; \
 		fi; \
 	done; \

@@ -78,6 +78,12 @@ Zetta falls back to the SSH byte stream, and says so, when the remote host has
 no usable Mosh server. Native background sessions on this machine are local and
 need no transport at all.
 
+On Windows, remote session control uses the remote `zmux proxy-stdio` command
+through the system SSH client because Windows OpenSSH cannot create the local
+Unix socket forward used on Linux and macOS. Install a `zmux` build with that
+command on the remote host before connecting from Windows. SSH host aliases,
+authentication, and the optional agent-forwarding setting still use OpenSSH.
+
 Shared panes carried over SSH use the daemon's common terminal grid. Maximizing
 a pane can leave spare space until every viewer has room for a larger grid.
 During resizing, a smaller pane clips the existing grid until the daemon

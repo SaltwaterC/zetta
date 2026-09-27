@@ -1,5 +1,27 @@
 use super::*;
 
+#[cfg(unix)]
+#[test]
+fn stdio_proxy_copies_daemon_bytes_without_changing_them() {
+    use std::io::{Cursor, Read as _, Write as _};
+
+    let directory = tempfile::tempdir().unwrap();
+    let socket = directory.path().join("daemon.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0; 5];
+        stream.read_exact(&mut request).unwrap();
+        assert_eq!(&request, b"\0\xffmux");
+        stream.write_all(b"\xff\0reply").unwrap();
+    });
+    let stream = Stream::connect(&socket).unwrap();
+    let mut output = Vec::new();
+    proxy_stream(stream, Cursor::new(b"\0\xffmux".to_vec()), &mut output).unwrap();
+    assert_eq!(output, b"\xff\0reply");
+    server.join().unwrap();
+}
+
 #[test]
 fn remote_targets_keep_open_ssh_destination_syntax_intact() {
     let target = RemoteTarget::new("alias.example").with_port(Some(2222));
@@ -35,6 +57,73 @@ fn endpoint_queries_preserve_the_user_ssh_configuration() {
             r#"/bin/sh -c 'exec 3>&1 1>/dev/null; exec "${SHELL:-/bin/sh}" -lic "command zmux endpoint --json >&3"'"#,
         ]
     );
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_stdio_proxy_uses_the_configured_ssh_target_without_a_forward() {
+    let target = RemoteTarget::new("pi").with_port(Some(2222));
+    let arguments = stdio_arguments(&target);
+    assert_eq!(
+        arguments[0..6],
+        ["-T", "-o", "ClearAllForwardings=yes", "-p", "2222", "pi"]
+    );
+    assert_eq!(arguments[6], REMOTE_STDIO_COMMAND);
+    assert!(!arguments.iter().any(|argument| argument == "-L"));
+    assert!(!arguments.iter().any(|argument| argument == "-N"));
+
+    let agent_off = stdio_arguments(&RemoteTarget::new("pi").with_forward_agent(false));
+    assert!(agent_off.iter().any(|argument| argument == "-a"));
+    assert!(!agent_off.iter().any(|argument| argument == "-A"));
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_agent_holder_keeps_forwarded_agent_available_to_later_panes() {
+    let target = RemoteTarget::new("pi").with_forward_agent(true);
+    let arguments = agent_holder_arguments(
+        &target,
+        Path::new("/run/user/1000/zetta/forwarded-agent.sock"),
+    );
+    assert_eq!(
+        arguments[0..5],
+        ["-T", "-o", "ClearAllForwardings=yes", "-A", "pi"]
+    );
+    assert!(arguments[5].contains("SSH_AUTH_SOCK"));
+    assert!(arguments[5].contains("exec sleep"));
+    assert!(!arguments.iter().any(|argument| argument == "-L"));
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_stdio_bridge_preserves_binary_bytes_and_eof() {
+    use std::io::{Read, Write};
+
+    let directory = tempfile::tempdir().unwrap();
+    let socket = directory.path().join("stdio.sock");
+    let listener = crate::transport::Listener::bind(&socket).unwrap();
+    let mut client = Stream::connect(&socket).unwrap();
+    let (relay, _) = listener.accept().unwrap();
+    let mut child = Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "[Console]::OpenStandardInput().CopyTo([Console]::OpenStandardOutput())",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let pump = thread::spawn(move || copy_stdio_child(&mut child, relay, "test"));
+    let payload = b"\0\xff\r\nzmux\x1b[31m";
+    client.write_all(payload).unwrap();
+    client.shutdown(Shutdown::Write).unwrap();
+    let mut echoed = Vec::new();
+    client.read_to_end(&mut echoed).unwrap();
+    assert_eq!(echoed, payload);
+    pump.join().unwrap();
 }
 
 #[test]

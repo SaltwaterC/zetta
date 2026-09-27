@@ -11,58 +11,6 @@ if /i "%~1"=="off" exit /b 0
 set "FEATURES=%FEATURES%,%~2"
 exit /b 0
 
-:append_worktree_targets
-if /i "%~1"=="0" exit /b 0
-if /i "%~1"=="false" exit /b 0
-if /i "%~1"=="no" exit /b 0
-if /i "%~1"=="off" exit /b 0
-set "BINARIES=!BINARIES! --bin zwt"
-set "VERIFY_ARGS=!VERIFY_ARGS! -WorktreeBinaryPath !TARGET_DIR!\zwt.exe"
-exit /b 0
-
-:append_clipboard_targets
-if /i "%~1"=="0" exit /b 0
-if /i "%~1"=="false" exit /b 0
-if /i "%~1"=="no" exit /b 0
-if /i "%~1"=="off" exit /b 0
-set "VERIFY_ARGS=!VERIFY_ARGS! -CopyBinaryPath !TARGET_DIR!\zcopy.exe -PasteBinaryPath !TARGET_DIR!\zpaste.exe"
-exit /b 0
-
-:append_notification_target
-if /i "%~1"=="0" exit /b 0
-if /i "%~1"=="false" exit /b 0
-if /i "%~1"=="no" exit /b 0
-if /i "%~1"=="off" exit /b 0
-set "VERIFY_ARGS=!VERIFY_ARGS! -NotifyBinaryPath !TARGET_DIR!\zntfy.exe"
-exit /b 0
-
-:append_zmux_targets
-if /i "%~1"=="0" exit /b 0
-if /i "%~1"=="false" exit /b 0
-if /i "%~1"=="no" exit /b 0
-if /i "%~1"=="off" exit /b 0
-set "BINARIES=!BINARIES! --bin zmux --bin zmux-pty"
-set "VERIFY_ARGS=!VERIFY_ARGS! -MuxBinaryPath !TARGET_DIR!\zmux.exe -PtyBinaryPath !TARGET_DIR!\zmux-pty.exe"
-exit /b 0
-
-:append_zosh_client_targets
-if /i "%~1"=="0" exit /b 0
-if /i "%~1"=="false" exit /b 0
-if /i "%~1"=="no" exit /b 0
-if /i "%~1"=="off" exit /b 0
-set "BINARIES=!BINARIES! --bin zosh"
-set "VERIFY_ARGS=!VERIFY_ARGS! -ZoshBinaryPath !TARGET_DIR!\zosh.exe"
-exit /b 0
-
-:append_zosh_server_targets
-if /i "%~1"=="0" exit /b 0
-if /i "%~1"=="false" exit /b 0
-if /i "%~1"=="no" exit /b 0
-if /i "%~1"=="off" exit /b 0
-set "BINARIES=!BINARIES! --bin zosh-server"
-set "VERIFY_ARGS=!VERIFY_ARGS! -ZoshServerBinaryPath !TARGET_DIR!\zosh-server.exe"
-exit /b 0
-
 :main
 if not defined CARGO set "CARGO=cargo"
 if not defined SERIAL set "SERIAL=1"
@@ -107,22 +55,33 @@ call :append_feature "%ZOSH_SERVER%" zosh-server
 
 set "BINARIES=--bin zetta --bin zetta-gui"
 set "VERIFY_ARGS="
-call :append_zmux_targets "%ZMUX%"
-call :append_zosh_client_targets "%ZOSH_CLIENT%"
-call :append_zosh_server_targets "%ZOSH_SERVER%"
-call :append_worktree_targets "%WORKTREE%"
-call :append_notification_target "%NOTIFY%"
-call :append_clipboard_targets "%CLIPBOARD%"
-
+if /i not "%ZMUX%"=="0" if /i not "%ZMUX%"=="false" if /i not "%ZMUX%"=="no" if /i not "%ZMUX%"=="off" (
+    set "BINARIES=!BINARIES! --bin zmux --bin zmux-pty"
+    set "VERIFY_ARGS=!VERIFY_ARGS! -MuxBinaryPath !TARGET_DIR!\zmux.exe -PtyBinaryPath !TARGET_DIR!\zmux-pty.exe"
+)
+if /i not "%ZOSH_CLIENT%"=="0" if /i not "%ZOSH_CLIENT%"=="false" if /i not "%ZOSH_CLIENT%"=="no" if /i not "%ZOSH_CLIENT%"=="off" (
+    set "BINARIES=!BINARIES! --bin zosh"
+    set "VERIFY_ARGS=!VERIFY_ARGS! -ZoshBinaryPath !TARGET_DIR!\zosh.exe"
+)
+if /i not "%ZOSH_SERVER%"=="0" if /i not "%ZOSH_SERVER%"=="false" if /i not "%ZOSH_SERVER%"=="no" if /i not "%ZOSH_SERVER%"=="off" (
+    set "BINARIES=!BINARIES! --bin zosh-server"
+    set "VERIFY_ARGS=!VERIFY_ARGS! -ZoshServerBinaryPath !TARGET_DIR!\zosh-server.exe"
+)
+if /i not "%WORKTREE%"=="0" if /i not "%WORKTREE%"=="false" if /i not "%WORKTREE%"=="no" if /i not "%WORKTREE%"=="off" (
+    set "BINARIES=!BINARIES! --bin zwt"
+    set "VERIFY_ARGS=!VERIFY_ARGS! -WorktreeBinaryPath !TARGET_DIR!\zwt.exe"
+)
 call scripts\cargo-windows.cmd build %PROFILE_ARGS% --jobs %CARGO_BUILD_JOBS% --locked --no-default-features --features %FEATURES% !BINARIES!
 if errorlevel 1 exit /b !errorlevel!
 
 if /i not "%NOTIFY%"=="0" if /i not "%NOTIFY%"=="false" if /i not "%NOTIFY%"=="no" if /i not "%NOTIFY%"=="off" (
+    set "VERIFY_ARGS=!VERIFY_ARGS! -NotifyBinaryPath !TARGET_DIR!\zntfy.exe"
     call scripts\cargo-windows.cmd build %PROFILE_ARGS% --jobs %CARGO_BUILD_JOBS% --locked --manifest-path crates\zntfy\Cargo.toml --target-dir target --bin zntfy
     if errorlevel 1 exit /b !errorlevel!
 )
 
 if /i not "%CLIPBOARD%"=="0" if /i not "%CLIPBOARD%"=="false" if /i not "%CLIPBOARD%"=="no" if /i not "%CLIPBOARD%"=="off" (
+    set "VERIFY_ARGS=!VERIFY_ARGS! -CopyBinaryPath !TARGET_DIR!\zcopy.exe -PasteBinaryPath !TARGET_DIR!\zpaste.exe"
     call scripts\cargo-windows.cmd build %PROFILE_ARGS% --jobs %CARGO_BUILD_JOBS% --locked --manifest-path crates\zclip\Cargo.toml --target-dir target --bin zcopy --bin zpaste
     if errorlevel 1 exit /b !errorlevel!
 )

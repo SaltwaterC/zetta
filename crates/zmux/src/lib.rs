@@ -115,6 +115,10 @@ fn usage(no_mux: bool) -> String {
                 "Print the running daemon endpoint as machine-readable JSON",
             ),
             (
+                "proxy-stdio",
+                "Carry one local daemon connection over stdin and stdout for\nremote clients using Windows OpenSSH; run by Zetta, not by hand",
+            ),
+            (
                 "attach SSH_TARGET SESSION_ID",
                 "Open a shared remote session through OpenSSH",
             ),
@@ -1003,9 +1007,9 @@ pub fn run_with_defaults(arguments: &[OsString], defaults: ClientDefaults) -> Re
                 );
                 return Ok(());
             }
-            value @ ("list" | "profiles" | "create" | "endpoint" | "attach" | "stop"
-            | "reconnect" | "resume" | "share" | "unshare" | "kill" | "forget"
-            | "relay-pane")
+            value @ ("list" | "profiles" | "create" | "endpoint" | "proxy-stdio" | "attach"
+            | "stop" | "reconnect" | "resume" | "share" | "unshare" | "kill"
+            | "forget" | "relay-pane")
                 if command.is_none() =>
             {
                 command = Some(value.to_owned());
@@ -1246,6 +1250,20 @@ pub fn run_with_defaults(arguments: &[OsString], defaults: ClientDefaults) -> Re
                 transport::Endpoint::read(&server::endpoint_path(&paths::session_catalog_dir()))?;
             println!("{}", serde_json::to_string(&endpoint)?);
             Ok(())
+        }
+        Some("proxy-stdio") => {
+            anyhow::ensure!(
+                remote_target.is_none() && port.is_none(),
+                "proxy-stdio is a local daemon command"
+            );
+            #[cfg(unix)]
+            {
+                remote::run_stdio_proxy()
+            }
+            #[cfg(not(unix))]
+            {
+                anyhow::bail!("proxy-stdio requires a Unix daemon host")
+            }
         }
         Some("attach") => {
             let target = remote_target.context("attach requires an SSH target")?;
