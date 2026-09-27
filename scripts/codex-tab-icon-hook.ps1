@@ -144,6 +144,13 @@ if ([string]::IsNullOrWhiteSpace($zettaExecutable) -or
     $zettaExecutable = $zettaCommand.Source
 }
 
+# A Codex session can outlive the Zetta process that created its pane when a
+# shared session is reattached. Let the CLI discover the current process then.
+if ($env:ZETTA_PROCESS_ID -match '^[1-9][0-9]*$' -and
+    -not (Get-Process -Id ([int] $env:ZETTA_PROCESS_ID) -ErrorAction SilentlyContinue)) {
+    Remove-Item Env:ZETTA_PROCESS_ID
+}
+
 $previousErrorActionPreference = $ErrorActionPreference
 $ErrorActionPreference = "Continue"
 $zettaExitCode = 1

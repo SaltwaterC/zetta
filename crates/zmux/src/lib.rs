@@ -1246,8 +1246,7 @@ pub fn run_with_defaults(arguments: &[OsString], defaults: ClientDefaults) -> Re
                 "endpoint is a local daemon command"
             );
             anyhow::ensure!(port.is_none(), "endpoint is a local daemon command");
-            let endpoint =
-                transport::Endpoint::read(&server::endpoint_path(&paths::session_catalog_dir()))?;
+            let endpoint = remote::live_endpoint(&paths::session_catalog_dir())?;
             println!("{}", serde_json::to_string(&endpoint)?);
             Ok(())
         }

@@ -357,6 +357,19 @@ fn missing_remote_daemon_is_reported_instead_of_shell_startup_noise() {
 }
 
 #[test]
+fn stale_remote_endpoint_is_reported_as_a_missing_daemon() {
+    let error = anyhow::anyhow!(
+        "listing remote sessions: checking the SSH stdio proxy for pi: \
+         SSH stderr: zmux: connecting the SSH stdio proxy to the local daemon: \
+         Connection refused (os error 111)"
+    );
+    assert_eq!(
+        remote_error_message(&error),
+        "No remote session service is running on this host. Create a remote session to start one."
+    );
+}
+
+#[test]
 fn remote_zmux_diagnostic_takes_precedence_over_shell_startup_noise() {
     let error = anyhow::anyhow!(
         "SSH endpoint query failed with exit status: 1: \

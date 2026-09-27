@@ -1,10 +1,7 @@
 use super::*;
 
-// On Windows, `bash.exe` is commonly the WSL launcher rather than a native
-// Bash binary. Starting several WSL instances concurrently can make the
-// launcher fail with no useful stderr, so keep all external Bash tests
-// serialized. The lock is harmless on Unix and also covers the tests that
-// invoke Bash as one shell among several.
+// Keep the external Bash tests serialized, including tests that invoke Bash
+// alongside other shells.
 fn lock_bash_tests() -> std::sync::MutexGuard<'static, ()> {
     static BASH_TEST_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
     BASH_TEST_LOCK
@@ -14,19 +11,73 @@ fn lock_bash_tests() -> std::sync::MutexGuard<'static, ()> {
 }
 
 fn bash_command() -> std::process::Command {
-    clean_shell_command("bash")
+    clean_shell_command(bash_program().expect("bash availability checked before running the test"))
 }
 
-/// Whether this machine has a `bash` that runs.
-///
-/// Every test that drives the generated Bash script checks this and returns
-/// early: on Windows `bash.exe` is commonly the WSL launcher, which need not be
-/// installed, and on a minimal Linux image there may be no Bash at all.
 fn bash_available() -> bool {
-    bash_command()
+    bash_program().is_some()
+}
+
+/// Select a responsive Bash once for all tests. Windows' first `bash.exe` is
+/// often the WSL launcher; use a native Bash so a stalled WSL startup cannot
+/// hold the shared test lock indefinitely.
+fn bash_program() -> Option<&'static std::path::Path> {
+    static BASH: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
+    BASH.get_or_init(|| {
+        #[cfg(windows)]
+        {
+            std::env::var_os("PATH")
+                .into_iter()
+                .flat_map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
+                .map(|dir| dir.join("bash.exe"))
+                .filter(|path| path.is_file() && !is_windows_bash_launcher(path))
+                .find(|path| bash_responds(path))
+        }
+        #[cfg(not(windows))]
+        {
+            let path = std::path::PathBuf::from("bash");
+            bash_responds(&path).then_some(path)
+        }
+    })
+    .as_deref()
+}
+
+#[cfg(windows)]
+fn is_windows_bash_launcher(path: &std::path::Path) -> bool {
+    path.parent()
+        .and_then(std::path::Path::file_name)
+        .and_then(std::ffi::OsStr::to_str)
+        .is_some_and(|dir| {
+            dir.eq_ignore_ascii_case("System32") || dir.eq_ignore_ascii_case("WindowsApps")
+        })
+}
+
+fn bash_responds(path: &std::path::Path) -> bool {
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+
+    let Ok(mut child) = clean_shell_command(path)
         .arg("--version")
-        .output()
-        .is_ok_and(|output| output.status.success())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return false;
+    };
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Err(_) => return false,
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(25)),
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
+            }
+        }
+    }
 }
 
 /// Runs `driver` under `command` with the shell integration script prepended,
@@ -68,7 +119,7 @@ fn bash_completion_command() -> std::process::Command {
     command
 }
 
-fn clean_shell_command(program: &str) -> std::process::Command {
+fn clean_shell_command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
     let mut command = std::process::Command::new(program);
     // Do not let a user's shell startup environment change the exit status or
     // behavior of a generated script under test.
@@ -1566,6 +1617,9 @@ fn posix_zwt_help_does_not_change_directory_or_inject_path_only() {
     path = std::env::join_paths(paths).unwrap();
 
     for shell in ["bash", "zsh"] {
+        if shell == "bash" && !bash_available() {
+            continue;
+        }
         let version = if shell == "bash" {
             bash_command().arg("--version").output()
         } else {
@@ -1660,6 +1714,9 @@ fn posix_zwt_sync_and_config_pass_through_without_changing_directory() {
     path = std::env::join_paths(paths).unwrap();
 
     for shell in ["bash", "zsh"] {
+        if shell == "bash" && !bash_available() {
+            continue;
+        }
         let version = if shell == "bash" {
             bash_command().arg("--version").output()
         } else {

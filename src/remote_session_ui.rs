@@ -26,6 +26,8 @@ fn remote_error_message(error: &anyhow::Error) -> String {
     if (lower_output.contains("reading multiplexer endpoint")
         && lower_output.contains("no such file or directory"))
         || lower_output.contains("no multiplexer is running")
+        || (lower_output.contains("connecting the ssh stdio proxy to the local daemon")
+            && lower_output.contains("connection refused"))
     {
         return "No remote session service is running on this host. Create a remote session to start one."
             .to_owned();

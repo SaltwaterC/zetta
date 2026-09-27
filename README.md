@@ -83,6 +83,8 @@ through the system SSH client because Windows OpenSSH cannot create the local
 Unix socket forward used on Linux and macOS. Install a `zmux` build with that
 command on the remote host before connecting from Windows. SSH host aliases,
 authentication, and the optional agent-forwarding setting still use OpenSSH.
+If no remote daemon is running, the picker offers creation; creating a session
+starts a fresh daemon even when a crashed one left an endpoint file behind.
 
 Shared panes carried over SSH use the daemon's common terminal grid. Maximizing
 a pane can leave spare space until every viewer has room for a larger grid.

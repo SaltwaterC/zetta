@@ -1018,8 +1018,7 @@ impl Client {
     /// listing and attachment continue to require an already-running daemon.
     pub fn connect_remote_for_creation(target: RemoteTarget) -> Result<Self> {
         let remote = Arc::new(RemoteTransport::for_creation(target)?);
-        remote.ensure_daemon()?;
-        let endpoint = remote.refresh()?;
+        let endpoint = remote.ensure_daemon()?;
         Ok(Self {
             endpoint: Mutex::new(endpoint),
             directory: PathBuf::new(),
@@ -1061,8 +1060,7 @@ impl Client {
             target,
             ssh_program,
         )?);
-        remote.ensure_daemon()?;
-        let endpoint = remote.refresh()?;
+        let endpoint = remote.ensure_daemon()?;
         Ok(Self {
             endpoint: Mutex::new(endpoint),
             directory: PathBuf::new(),

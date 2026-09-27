@@ -1,5 +1,30 @@
 use super::*;
 
+#[test]
+fn a_stale_endpoint_does_not_claim_a_remote_daemon_is_running() {
+    let directory = tempfile::tempdir().unwrap();
+    let socket = directory.path().join("daemon.sock");
+    let endpoint = Endpoint {
+        version: ENDPOINT_VERSION,
+        protocol_version: PROTOCOL_VERSION,
+        process_id: 1234,
+        socket_path: socket.clone(),
+        token: "test-token".to_owned(),
+    };
+    endpoint
+        .write(&crate::server::endpoint_path(directory.path()))
+        .unwrap();
+
+    assert!(
+        format!("{:#}", live_endpoint(directory.path()).unwrap_err())
+            .contains("no multiplexer is running")
+    );
+    let listener = crate::transport::Listener::bind(&socket).unwrap();
+    assert_eq!(live_endpoint(directory.path()).unwrap(), endpoint);
+    drop(listener);
+    assert!(live_endpoint(directory.path()).is_err());
+}
+
 #[cfg(unix)]
 #[test]
 fn stdio_proxy_copies_daemon_bytes_without_changing_them() {
@@ -123,6 +148,76 @@ fn windows_stdio_bridge_preserves_binary_bytes_and_eof() {
     let mut echoed = Vec::new();
     client.read_to_end(&mut echoed).unwrap();
     assert_eq!(echoed, payload);
+    pump.join().unwrap();
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_stdio_bridge_reports_the_remote_process_error() {
+    use std::io::Read as _;
+
+    let directory = tempfile::tempdir().unwrap();
+    let socket = directory.path().join("stdio.sock");
+    let listener = crate::transport::Listener::bind(&socket).unwrap();
+    let mut client = Stream::connect(&socket).unwrap();
+    let (relay, _) = listener.accept().unwrap();
+    let mut child = Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "[Console]::Error.WriteLine('remote proxy failed'); exit 27",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let pump = thread::spawn(move || copy_stdio_child(&mut child, relay, "test"));
+    let mut output = Vec::new();
+    client.read_to_end(&mut output).unwrap();
+    assert!(output.is_empty());
+    assert!(pump.join().unwrap().contains("remote proxy failed"));
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_stdio_bridge_returns_a_response_before_the_client_closes() {
+    use std::io::{Read as _, Write as _};
+
+    let directory = tempfile::tempdir().unwrap();
+    let socket = directory.path().join("stdio.sock");
+    let ready = directory.path().join("ready");
+    let listener = crate::transport::Listener::bind(&socket).unwrap();
+    let mut client = Stream::connect(&socket).unwrap();
+    let (relay, _) = listener.accept().unwrap();
+    let mut child = Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "[IO.File]::WriteAllText($env:ZETTA_TEST_READY,'ready'); $b=New-Object byte[] 5; $n=[Console]::OpenStandardInput().Read($b,0,5); [Console]::OpenStandardOutput().Write($b,0,$n)",
+        ])
+        .env("ZETTA_TEST_READY", &ready)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let pump = thread::spawn(move || copy_stdio_child(&mut child, relay, "test"));
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !ready.exists() {
+        assert!(Instant::now() < deadline, "the echo process did not start");
+        thread::sleep(Duration::from_millis(10));
+    }
+    client
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .unwrap();
+    client.write_all(b"hello").unwrap();
+    let mut response = [0; 5];
+    client.read_exact(&mut response).unwrap();
+    assert_eq!(&response, b"hello");
+    drop(client);
     pump.join().unwrap();
 }
 

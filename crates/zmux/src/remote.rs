@@ -7,7 +7,7 @@
 //! no local TCP listener or client-supplied remote socket path is involved.
 
 #[cfg(windows)]
-use std::{io, net::Shutdown};
+use std::{io, net::Shutdown, sync::mpsc};
 use std::{
     io::Read,
     path::{Path, PathBuf},
@@ -151,6 +151,12 @@ struct RemoteState {
 }
 
 #[cfg(windows)]
+struct StdioBridge {
+    stream: Stream,
+    failure: mpsc::Receiver<String>,
+}
+
+#[cfg(windows)]
 impl Drop for RemoteState {
     fn drop(&mut self) {
         if let Some(mut child) = self.agent_holder.take() {
@@ -164,6 +170,18 @@ pub struct RemoteTransport {
     target: RemoteTarget,
     ssh_program: PathBuf,
     state: Mutex<RemoteState>,
+}
+
+/// Read a published endpoint only when a daemon still owns its socket. A
+/// crashed daemon can leave the JSON file behind; treating it as live prevents
+/// remote creation from starting its replacement.
+pub(crate) fn live_endpoint(directory: &Path) -> Result<Endpoint> {
+    let endpoint = Endpoint::read(&crate::server::endpoint_path(directory))?;
+    anyhow::ensure!(
+        Stream::connect(&endpoint.socket_path).is_ok(),
+        "no multiplexer is running"
+    );
+    Ok(endpoint)
 }
 
 impl RemoteTransport {
@@ -359,13 +377,15 @@ impl RemoteTransport {
                     endpoint
                 }
             };
-            let probe = self.open_stdio_bridge()?;
-            match self.probe(&endpoint, probe) {
-                Ok(()) => return Ok((endpoint, self.open_stdio_bridge()?)),
+            let StdioBridge { stream, failure } = self.open_stdio_bridge()?;
+            match self.probe(&endpoint, stream) {
+                Ok(()) => return Ok((endpoint, self.open_stdio_bridge()?.stream)),
                 Err(error) if attempt == 0 => {
+                    let detail = failure.recv_timeout(Duration::from_secs(1)).ok();
                     log::debug!(
-                        "remote SSH stdio probe for {} failed: {error:#}",
-                        self.target.destination()
+                        "remote SSH stdio probe for {} failed: {error:#}; {}",
+                        self.target.destination(),
+                        detail.as_deref().unwrap_or("SSH did not report a failure")
                     );
                     state.endpoint = None;
                     if let Some(mut child) = state.agent_holder.take() {
@@ -373,10 +393,12 @@ impl RemoteTransport {
                     }
                 }
                 Err(error) => {
+                    let detail = failure.recv_timeout(Duration::from_secs(1)).ok();
                     return Err(error).with_context(|| {
                         format!(
-                            "checking the SSH stdio proxy for {} (the remote zmux must support proxy-stdio)",
-                            self.target.destination()
+                            "checking the SSH stdio proxy for {}: {}",
+                            self.target.destination(),
+                            detail.as_deref().unwrap_or("SSH did not report a failure")
                         )
                     });
                 }
@@ -389,7 +411,7 @@ impl RemoteTransport {
     }
 
     #[cfg(windows)]
-    fn open_stdio_bridge(&self) -> Result<Stream> {
+    fn open_stdio_bridge(&self) -> Result<StdioBridge> {
         use crate::transport::Listener;
 
         let directory = tempfile::Builder::new()
@@ -406,11 +428,17 @@ impl RemoteTransport {
         drop(listener);
         let target = self.target.clone();
         let ssh_program = self.ssh_program.clone();
+        let (failure_sender, failure) = mpsc::channel();
         thread::Builder::new()
             .name("zmux-ssh-stdio".to_owned())
-            .spawn(move || run_stdio_bridge(ssh_program, target, relay, directory))
+            .spawn(move || {
+                run_stdio_bridge(ssh_program, target, relay, directory, failure_sender);
+            })
             .context("starting the SSH stdio bridge")?;
-        Ok(client)
+        Ok(StdioBridge {
+            stream: client,
+            failure,
+        })
     }
 
     /// Confirms that the transport reaches the daemon described by its cached
@@ -633,7 +661,9 @@ impl RemoteTransport {
     /// Starts the remote standalone daemon when it is not already reachable,
     /// then waits for its endpoint to become available.
     pub fn ensure_daemon(&self) -> Result<Endpoint> {
-        if let Ok(endpoint) = self.query_endpoint() {
+        // The endpoint file can outlive a crashed daemon. Probe the daemon
+        // itself before deciding that a new one must not be started.
+        if let Ok((endpoint, _)) = self.connect() {
             return Ok(endpoint);
         }
         let program = self.resolve_remote_program()?;
@@ -642,8 +672,8 @@ impl RemoteTransport {
             .context("starting the remote zmux daemon")?;
         let deadline = Instant::now() + ENDPOINT_TIMEOUT;
         loop {
-            match self.query_endpoint() {
-                Ok(endpoint) => return Ok(endpoint),
+            match self.connect() {
+                Ok((endpoint, _)) => return Ok(endpoint),
                 Err(error) if Instant::now() < deadline => {
                     log::debug!(
                         "remote zmux daemon for {} is not ready: {error:#}",
@@ -735,6 +765,7 @@ fn run_stdio_bridge(
     target: RemoteTarget,
     relay: Stream,
     _directory: tempfile::TempDir,
+    failure: mpsc::Sender<String>,
 ) {
     let mut command = Command::new(ssh_program);
     command
@@ -742,38 +773,42 @@ fn run_stdio_bridge(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let Ok(mut child) = command.spawn() else {
-        log::debug!(
-            "could not start SSH stdio proxy for {}",
-            target.destination()
-        );
-        return;
-    };
-    copy_stdio_child(&mut child, relay, target.destination());
+    match command.spawn() {
+        Ok(mut child) => {
+            let detail = copy_stdio_child(&mut child, relay, target.destination());
+            let _ = failure.send(detail);
+        }
+        Err(error) => {
+            let _ = failure.send(format!("could not start SSH: {error}"));
+        }
+    }
 }
 
 #[cfg(windows)]
-fn copy_stdio_child(child: &mut Child, mut relay: Stream, destination: &str) {
+fn copy_stdio_child(child: &mut Child, mut relay: Stream, destination: &str) -> String {
     let (Some(mut ssh_input), Some(mut ssh_output), Some(ssh_error)) =
         (child.stdin.take(), child.stdout.take(), child.stderr.take())
     else {
         terminate_child(child);
-        return;
+        return "SSH did not expose its standard streams".to_owned();
     };
     let Ok(mut relay_input) = relay.try_clone() else {
         terminate_child(child);
-        return;
+        return "could not clone the local SSH relay socket".to_owned();
     };
-    let input = thread::spawn(move || {
+    let _input = thread::spawn(move || {
         let _ = io::copy(&mut relay_input, &mut ssh_input);
     });
     let errors = thread::spawn(move || capture_ssh_stderr(ssh_error));
     let result = io::copy(&mut ssh_output, &mut relay);
     let _ = relay.shutdown(Shutdown::Both);
-    let _ = input.join();
+    // The client can still have its write half open when SSH exits. Joining
+    // the input pump here would wait for that client and hide SSH's error.
+    // Closing the relay makes the pump finish when the client drops its stream.
+    let status = child.try_wait().ok().flatten();
     terminate_child(child);
     let stderr = errors.join().unwrap_or_default();
-    if let Err(error) = result {
+    if let Err(ref error) = result {
         log::debug!("SSH stdio proxy for {destination} stopped: {error}");
     }
     if !stderr.is_empty() {
@@ -782,6 +817,17 @@ fn copy_stdio_child(child: &mut Child, mut relay: Stream, destination: &str) {
             destination,
             String::from_utf8_lossy(&stderr).trim()
         );
+    }
+    let message = String::from_utf8_lossy(&stderr).trim().to_owned();
+    if !message.is_empty() {
+        return format!("SSH stderr: {message}");
+    }
+    if let Err(error) = result {
+        return format!("reading SSH output failed: {error}");
+    }
+    match status {
+        Some(status) => format!("SSH exited with {status} without a mux response"),
+        None => "SSH closed without a mux response".to_owned(),
     }
 }
 

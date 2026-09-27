@@ -9,6 +9,8 @@
             "type": "command",
             "command": "sh \"$(git rev-parse --show-toplevel)/scripts/codex-tab-icon-hook.sh\" idle",
             "commandWindows": "powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \"& (Join-Path (& git rev-parse --show-toplevel) 'scripts/codex-tab-icon-hook.ps1') 'idle'\"",
+            "async": true,
+            "timeout": 10,
             "statusMessage": "Updating Zetta Codex tab icon"
           }
         ]
@@ -47,6 +49,8 @@
             "type": "command",
             "command": "sh \"$(git rev-parse --show-toplevel)/scripts/codex-tab-icon-hook.sh\" prompt",
             "commandWindows": "powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \"& (Join-Path (& git rev-parse --show-toplevel) 'scripts/codex-tab-icon-hook.ps1') 'prompt'\"",
+            "async": true,
+            "timeout": 10,
             "statusMessage": "Updating Zetta Codex tab icon"
           }
         ]
@@ -59,6 +63,8 @@
             "type": "command",
             "command": "sh \"$(git rev-parse --show-toplevel)/scripts/codex-tab-icon-hook.sh\" idle",
             "commandWindows": "powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \"& (Join-Path (& git rev-parse --show-toplevel) 'scripts/codex-tab-icon-hook.ps1') 'idle'\"",
+            "async": true,
+            "timeout": 10,
             "statusMessage": "Updating Zetta Codex tab icon"
           },
           {
@@ -77,6 +83,8 @@
             "type": "command",
             "command": "sh \"$(git rev-parse --show-toplevel)/scripts/codex-tab-icon-hook.sh\" idle",
             "commandWindows": "powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \"& (Join-Path (& git rev-parse --show-toplevel) 'scripts/codex-tab-icon-hook.ps1') 'idle'\"",
+            "async": true,
+            "timeout": 3,
             "statusMessage": "Updating Zetta Codex tab icon"
           }
         ]
