@@ -919,7 +919,10 @@ function __zetta_long_options
                 --predict 'Prediction mode' \
                 -o 'Allow predictive overwrites' \
                 --predict-overwrite 'Allow predictive overwrites' \
+                --no-predict-overwrite 'Do not overwrite predictions' \
                 --keep-alive 'Send a keep-alive packet every 500 ms' \
+                --forward-agent 'Forward SSH-agent connections to Zosh hosts' \
+                --no-forward-agent 'Disable SSH-agent forwarding' \
                 --scrollback 'Keep the output that scrolls off the screen (default)' \
                 --no-scrollback 'Keep only what is on the screen, as stock Mosh does' \
                 --family 'Address family' \
@@ -1189,7 +1192,10 @@ complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_give
 complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_given' -l no-predict-overwrite -d 'Do not overwrite predictions'
 complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_given' -s k -d 'Send a keep-alive packet every 500 ms'
 complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_given' -l keep-alive -d 'Send a keep-alive packet every 500 ms'
+complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_given' -l forward-agent -d 'Forward SSH-agent connections to Zosh hosts'
+complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_given' -l no-forward-agent -d 'Disable SSH-agent forwarding'
 complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_given' -l scrollback -d 'Keep the output that scrolls off the screen (default)'
+complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_given' -s s -d 'Keep the output that scrolls off the screen (default)'
 complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_given' -l no-scrollback -d 'Keep only what is on the screen, as stock Mosh does'
 complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_given' -s a -d 'Always predict'
 complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_given' -s n -d 'Never predict'
@@ -1207,7 +1213,10 @@ complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_give
 complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_given' -l local -d 'Use locally discovered addressing'
 complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_given' -l experimental-remote-ip -r -a 'local remote proxy'
 complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_given' -l help -d 'Print help'
+complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_given' -s h -d 'Print help'
 complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_given' -l version -d 'Print version'
+complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_given' -s V -d 'Print version'
+complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_given' -a '--'
 complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_given' -a '(__zetta_ssh_targets)'
 complete -c zetta -n '__fish_seen_subcommand_from init' -l help -d 'Print help'
 complete -c zetta -n '__fish_seen_subcommand_from init' -a '(__zetta_long_options init)'
@@ -1220,7 +1229,6 @@ complete -c zetta -n '__fish_seen_subcommand_from http' -a '(__zetta_long_option
 complete -c zetta -n '__fish_seen_subcommand_from terminal-size' -l json -d 'Print machine-readable JSON'
 
 complete -c zosh -f
-complete -c zosh -n 'not __zetta_mosh_host_given' -s c -d 'Print terminal color count'
 complete -c zosh -n 'not __zetta_mosh_host_given' -l client -r -d 'Mosh client on the local machine'
 complete -c zosh -n 'not __zetta_mosh_host_given' -l server -r -d 'Mosh server on the remote machine'
 complete -c zosh -n 'not __zetta_mosh_host_given' -l predict -r -a 'adaptive always never experimental'
@@ -1229,7 +1237,10 @@ complete -c zosh -n 'not __zetta_mosh_host_given' -l predict-overwrite -d 'Allow
 complete -c zosh -n 'not __zetta_mosh_host_given' -l no-predict-overwrite -d 'Do not overwrite predictions'
 complete -c zosh -n 'not __zetta_mosh_host_given' -s k -d 'Send a keep-alive packet every 500 ms'
 complete -c zosh -n 'not __zetta_mosh_host_given' -l keep-alive -d 'Send a keep-alive packet every 500 ms'
+complete -c zosh -n 'not __zetta_mosh_host_given' -l forward-agent -d 'Forward SSH-agent connections to Zosh hosts'
+complete -c zosh -n 'not __zetta_mosh_host_given' -l no-forward-agent -d 'Disable SSH-agent forwarding'
 complete -c zosh -n 'not __zetta_mosh_host_given' -l scrollback -d 'Keep the output that scrolls off the screen (default)'
+complete -c zosh -n 'not __zetta_mosh_host_given' -s s -d 'Keep the output that scrolls off the screen (default)'
 complete -c zosh -n 'not __zetta_mosh_host_given' -l no-scrollback -d 'Keep only what is on the screen, as stock Mosh does'
 complete -c zosh -n 'not __zetta_mosh_host_given' -s a -d 'Always predict'
 complete -c zosh -n 'not __zetta_mosh_host_given' -s n -d 'Never predict'
@@ -1250,6 +1261,7 @@ complete -c zosh -n 'not __zetta_mosh_host_given' -s h -d 'Print help'
 complete -c zosh -n 'not __zetta_mosh_host_given' -l help -d 'Print help'
 complete -c zosh -n 'not __zetta_mosh_host_given' -s V -d 'Print version'
 complete -c zosh -n 'not __zetta_mosh_host_given' -l version -d 'Print version'
+complete -c zosh -n 'not __zetta_mosh_host_given' -a '--'
 complete -c zosh -n 'not __zetta_mosh_host_given' -a '(__zetta_ssh_targets)'
 if set -q __ZETTA_MOSH_WRAPPER
     complete -c mosh -f
@@ -1261,6 +1273,11 @@ if set -q __ZETTA_MOSH_WRAPPER
     complete -c mosh -n 'not __zetta_mosh_host_given' -l no-predict-overwrite
     complete -c mosh -n 'not __zetta_mosh_host_given' -s k
     complete -c mosh -n 'not __zetta_mosh_host_given' -l keep-alive
+    complete -c mosh -n 'not __zetta_mosh_host_given' -l forward-agent
+    complete -c mosh -n 'not __zetta_mosh_host_given' -l no-forward-agent
+    complete -c mosh -n 'not __zetta_mosh_host_given' -s s
+    complete -c mosh -n 'not __zetta_mosh_host_given' -l scrollback
+    complete -c mosh -n 'not __zetta_mosh_host_given' -l no-scrollback
     complete -c mosh -n 'not __zetta_mosh_host_given' -s a
     complete -c mosh -n 'not __zetta_mosh_host_given' -s n
     complete -c mosh -n 'not __zetta_mosh_host_given' -s 4
@@ -1277,7 +1294,10 @@ if set -q __ZETTA_MOSH_WRAPPER
     complete -c mosh -n 'not __zetta_mosh_host_given' -l local
     complete -c mosh -n 'not __zetta_mosh_host_given' -l experimental-remote-ip -r -a 'local remote proxy'
     complete -c mosh -n 'not __zetta_mosh_host_given' -l help
+    complete -c mosh -n 'not __zetta_mosh_host_given' -s h
     complete -c mosh -n 'not __zetta_mosh_host_given' -l version
+    complete -c mosh -n 'not __zetta_mosh_host_given' -s V
+    complete -c mosh -n 'not __zetta_mosh_host_given' -a '--'
     complete -c mosh -n 'not __zetta_mosh_host_given' -a '(__zetta_ssh_targets)'
 end
 # ZETTA_ZMUX_INTEGRATION_BEGIN
