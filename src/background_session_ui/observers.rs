@@ -302,7 +302,12 @@ impl Zetta {
                         )
                     })
                     .unwrap_or_default();
-                let working_directory = pane.working_directory(cx);
+                // Carry a restored directory across another detach even when a
+                // running TUI has not emitted fresh shell metadata. This is only
+                // publication metadata, not an authoritative shell CWD report.
+                let working_directory = pane
+                    .working_directory(cx)
+                    .or_else(|| pane.terminal.as_ref()?.read(cx).working_directory());
                 let state = if pane.error.is_some() || pane.exit.is_some() {
                     BackgroundPaneState::Failed
                 } else if pane.terminal.is_some() {

@@ -181,6 +181,10 @@ back directly to the local application's theme. **Reset Pane Theme**
 and **Reset Tab Theme** are also available from the command palette. These overrides
 follow their pane or tab through backgrounding, reconnect, and encrypted disk
 resume, but are cleared when the pane or tab closes or configuration reloads.
+Local reconnect restores each pane's project context from its saved working
+directory and loads the current project configuration before showing the terminal,
+so a running TUI keeps its project theme before new shell metadata arrives.
+Remote session paths are never matched against local registered projects.
 `zetta overlay TEXT` non-persistently shows text over the active pane's
 terminal content, with `--size`, `--opacity`, and `--color` options
 (`--color` accepts the named presets `black`, `white`, `gray`, `red`,

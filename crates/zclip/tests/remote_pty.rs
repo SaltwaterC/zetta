@@ -62,7 +62,8 @@ fn run_helper(
     // SAFETY: setsid and ioctl are async-signal-safe and run before exec.
     unsafe {
         command.pre_exec(move || {
-            if libc::setsid() == -1 || libc::ioctl(slave_fd, libc::TIOCSCTTY, 0) == -1 {
+            // Darwin exposes this constant as u32, but ioctl takes c_ulong.
+            if libc::setsid() == -1 || libc::ioctl(slave_fd, libc::TIOCSCTTY as _, 0) == -1 {
                 return Err(std::io::Error::last_os_error());
             }
             Ok(())

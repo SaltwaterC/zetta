@@ -1386,19 +1386,13 @@ impl Zetta {
             .background_authentication()
             .flatten()
             .is_some();
-        let mut summary = self.background_session_summary(tab, protected, cx);
-        if let Err(error) = remap_summary_to_mux(&mut summary, self.mux_panes.ids()) {
-            // Not `debug`: this is the window and the daemon disagreeing about
-            // which panes the session holds, which is what leaves geometry
-            // diverged with nothing saying so.
-            log::warn!(
-                "could not describe shared session {session_id} in the multiplexer's pane ids: \
-                 {error:#}"
-            );
-            return None;
-        }
-        summary.id = session_id;
-        Some(summary)
+        self.multiplexer_session_summary(tab, session_id, protected, cx)
+            .map_err(|error| {
+                log::warn!(
+                    "could not describe shared session {session_id} in the multiplexer's pane ids: {error:#}"
+                );
+            })
+            .ok()
     }
 
     /// The durable tab state to publish and the blob it carries, or `None` when
@@ -2720,12 +2714,12 @@ pub(crate) fn remap_summary_to_mux(
     summary.active_pane = local_to_mux
         .get(&summary.active_pane)
         .copied()
-        .context("the active shared pane has no multiplexer id")?;
+        .context("the active pane has no multiplexer id")?;
     for pane in &mut summary.panes {
         pane.id = local_to_mux
             .get(&pane.id)
             .copied()
-            .with_context(|| format!("shared pane {} has no multiplexer id", pane.id))?;
+            .with_context(|| format!("pane {} has no multiplexer id", pane.id))?;
     }
     summary.layout = remap_summary_layout(&summary.layout, local_to_mux)?;
     Ok(())
@@ -2740,7 +2734,7 @@ fn remap_summary_layout(
             pane_id: local_to_mux
                 .get(pane_id)
                 .copied()
-                .with_context(|| format!("shared pane {pane_id} has no multiplexer id"))?,
+                .with_context(|| format!("pane {pane_id} has no multiplexer id"))?,
         },
         BackgroundPaneLayout::Split {
             axis,

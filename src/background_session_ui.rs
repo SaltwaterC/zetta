@@ -143,7 +143,7 @@ fn restored_pane_metadata(
                 summary
                     .panes
                     .iter()
-                    .find(|summary| summary.id == pane.id)
+                    .find(|summary| summary.id == pane.mux_pane_id.unwrap_or(pane.id))
                     .and_then(|summary| summary.working_directory.clone()),
             ));
             let stacked = pane.stack.iter().map(|entry| {

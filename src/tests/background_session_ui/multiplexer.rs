@@ -259,3 +259,259 @@ fn a_live_pane_missing_from_the_blob_is_synthesized_from_the_summary() {
     assert_eq!(synthesized.generated_label.as_deref(), Some("Pane 42"));
     assert_eq!(repaired.active_pane, 42);
 }
+
+fn publication_profile() -> Profile {
+    Profile {
+        name: "System".into(),
+        command: task::Shell::System,
+        theme: None,
+        dark_theme: None,
+        icon: ProfileIcon::default(),
+    }
+}
+
+#[test]
+fn disk_restore_metadata_joins_by_mux_id_but_keeps_routing_ids() {
+    let state = tab_state(vec![
+        pane_state(2, Some(1)),
+        pane_state(1, Some(2)),
+        pane_state(3, None),
+    ]);
+    let mut summary = summary(vec![1, 2, 3], BackgroundPaneLayout::Pane { pane_id: 1 }, 1);
+    for pane in &mut summary.panes {
+        pane.working_directory = Some(PathBuf::from(format!("directory-{}", pane.id)));
+    }
+    let metadata = restored_pane_metadata(&state, &summary);
+    assert_eq!(
+        metadata[0],
+        (2, "System".into(), Some(PathBuf::from("directory-1")))
+    );
+    assert_eq!(
+        metadata[1],
+        (1, "System".into(), Some(PathBuf::from("directory-2")))
+    );
+    assert_eq!(
+        metadata[2],
+        (3, "System".into(), Some(PathBuf::from("directory-3")))
+    );
+}
+
+#[gpui::test]
+fn detach_publication_preserves_layout_cwd_and_project_theme(cx: &mut gpui::TestAppContext) {
+    cx.update(|cx| {
+        theme_settings::init(
+            theme::LoadThemes::All(Box::new(crate::zetta_assets::ZettaAssets)),
+            cx,
+        );
+        let registry = ThemeRegistry::global(cx);
+        theme_settings::load_bundled_themes(&registry);
+        theme::GlobalTheme::update_theme(cx, registry.get("One Light").unwrap());
+        terminal::terminal_settings::TerminalSettings::init(cx);
+    });
+    let (zetta, cx) = cx.add_window_view(|window, cx| {
+        let mut config = Config::defaults(None, None);
+        config.profiles.clear();
+        Zetta::new(
+            config,
+            None,
+            crate::ZettaLaunchOptions {
+                no_mux: true,
+                ..Default::default()
+            },
+            window,
+            cx,
+        )
+    });
+    let temporary = tempfile::tempdir().unwrap();
+    let mut roots = Vec::new();
+    for (name, theme) in [
+        ("first", "One Dark"),
+        ("second", "Solarized Light"),
+        ("destination", "Gruvbox Dark"),
+    ] {
+        let root = temporary.path().join(name);
+        std::fs::create_dir_all(root.join(".zetta")).unwrap();
+        std::fs::write(
+            ProjectConfig::path_for(&root),
+            format!(r#"{{"theme":"{theme}"}}"#),
+        )
+        .unwrap();
+        roots.push(std::fs::canonicalize(root).unwrap());
+    }
+    let directories = [roots[0].clone(), roots[1].clone(), roots[0].join("src")];
+    std::fs::create_dir_all(&directories[2]).unwrap();
+    zetta.update_in(cx, |zetta, window, cx| {
+        zetta.projects.registry =
+            ProjectRegistry::load_from(temporary.path().join("registry.json")).unwrap();
+        for root in &roots {
+            zetta.projects.registry.add(root).unwrap();
+        }
+        let mut destination = tab_state(vec![pane_state(99, None)])
+            .into_tab(99, |_| publication_profile())
+            .unwrap();
+        destination.theme_override = None;
+        zetta
+            .projects
+            .insert_config(ProjectConfig::load(&roots[2], &zetta.launch_config).unwrap());
+        zetta.projects.pane_roots.insert(99, roots[2].clone());
+        zetta.tabs.push(destination);
+        zetta.active_tab = 0;
+        zetta.next_pane_id = 100;
+
+        let mut state = tab_state(vec![
+            pane_state(2, Some(1)),
+            pane_state(1, Some(3)),
+            pane_state(3, Some(2)),
+        ]);
+        state.shared = false;
+        state.theme_override = None;
+        state.active_pane = 1;
+        state.layout = LayoutState::Split {
+            axis: AxisState::Vertical,
+            first_ratio: 270,
+            first: Box::new(LayoutState::Pane { pane_id: 3 }),
+            second: Box::new(LayoutState::Split {
+                axis: AxisState::Horizontal,
+                first_ratio: 630,
+                first: Box::new(LayoutState::Pane { pane_id: 2 }),
+                second: Box::new(LayoutState::Pane { pane_id: 1 }),
+            }),
+        };
+        let mut tab = state.into_tab(9, |_| publication_profile()).unwrap();
+        for (pane, mux_id) in tab.panes.iter().zip([1, 3, 2]) {
+            zetta.mux_panes.record(pane.id, mux_id);
+        }
+        for (index, pane) in tab.panes.iter_mut().enumerate() {
+            let builder = terminal::TerminalBuilder::new_display_only(
+                terminal::terminal_settings::CursorShape::Block,
+                terminal::terminal_settings::AlternateScroll::On,
+                None,
+                0,
+                cx.background_executor(),
+                util::paths::PathStyle::local(),
+            )
+            .with_working_directory(Some(directories[index].clone()));
+            pane.terminal = Some(cx.new(|cx| builder.subscribe(cx)));
+        }
+        // Reconnect must read the latest configuration, even if this window
+        // already cached the project before it was edited.
+        zetta
+            .projects
+            .insert_config(ProjectConfig::load(&roots[0], &zetta.launch_config).unwrap());
+        std::fs::write(
+            ProjectConfig::path_for(&roots[0]),
+            r#"{"theme":"Solarized Dark"}"#,
+        )
+        .unwrap();
+        for _ in 0..2 {
+            let (summary, opaque) = zetta.session_publication(&tab, 9, false, cx).unwrap();
+            assert_eq!(summary.active_pane, 3);
+            assert_eq!(
+                summary.panes.iter().map(|pane| pane.id).collect::<Vec<_>>(),
+                vec![1, 3, 2]
+            );
+            let expected = BackgroundPaneLayout::Split {
+                axis: "vertical".into(),
+                first_ratio: 270,
+                first: Box::new(BackgroundPaneLayout::Pane { pane_id: 2 }),
+                second: Box::new(BackgroundPaneLayout::Split {
+                    axis: "horizontal".into(),
+                    first_ratio: 630,
+                    first: Box::new(BackgroundPaneLayout::Pane { pane_id: 1 }),
+                    second: Box::new(BackgroundPaneLayout::Pane { pane_id: 3 }),
+                }),
+            };
+            assert_eq!(summary.layout, expected);
+            for (index, pane) in summary.panes.iter().enumerate() {
+                assert_eq!(pane.working_directory.as_ref(), Some(&directories[index]));
+            }
+            let saved: TabState = serde_json::from_value(opaque.clone()).unwrap();
+            assert_eq!(saved.panes[0].id, tab.panes[0].id);
+            let canonical = zmux::messages::SharedSessionState::new(9, summary.clone(), opaque);
+            let (state, _) = reconcile_attached_state(saved, &canonical, false).unwrap();
+            let metadata = zetta.prepare_restored_panes(
+                restored_pane_metadata(&state, &summary),
+                ProjectContextPolicy::Local,
+            );
+            tab = state.into_tab(9, |_| publication_profile()).unwrap();
+            let mappings = tab.reassign_ids(9, &mut zetta.next_pane_id);
+            zetta.bind_restored_projects(&tab, &metadata);
+            for mux_id in [1, 3, 2] {
+                zetta.mux_panes.record(mappings[&mux_id], mux_id);
+            }
+            restore_test_views(zetta, &mut tab, &metadata, &roots, window, cx);
+            let remote = zetta.prepare_restored_panes(
+                restored_pane_metadata(&TabState::from_tab(&tab, zetta.mux_panes.ids()), &summary),
+                ProjectContextPolicy::Remote,
+            );
+            assert!(
+                remote
+                    .panes
+                    .values()
+                    .all(|pane| pane.project_root.is_none())
+            );
+        }
+        zetta.mux_panes.forget_pane(tab.panes[0].id);
+        assert!(zetta.session_publication(&tab, 9, false, cx).is_err());
+    });
+}
+
+fn restore_test_views(
+    zetta: &mut Zetta,
+    tab: &mut Tab,
+    metadata: &RestoredPaneMetadata,
+    roots: &[PathBuf],
+    window: &mut Window,
+    cx: &mut Context<Zetta>,
+) {
+    for (index, pane) in tab.panes.iter_mut().enumerate() {
+        let project = zetta.projects.config_for_pane(pane.id).cloned().unwrap();
+        assert_eq!(project.root, roots[index % 2]);
+        let theme = zetta.restored_terminal_theme(
+            None,
+            None,
+            &pane.profile,
+            Some(&project),
+            ProjectContextPolicy::Local,
+            cx,
+        );
+        let builder = terminal::TerminalBuilder::new_display_only(
+            terminal::terminal_settings::CursorShape::Block,
+            terminal::terminal_settings::AlternateScroll::On,
+            None,
+            0,
+            cx.background_executor(),
+            util::paths::PathStyle::local(),
+        )
+        .with_working_directory(metadata.working_directory(pane.routing_id));
+        let terminal = cx.new(|cx| builder.subscribe(cx));
+        let view = cx.new(|cx| TerminalView::new_with_theme(terminal.clone(), theme, window, cx));
+        assert_eq!(
+            view.read(cx).theme().unwrap().name.as_ref(),
+            ["Solarized Dark", "Solarized Light"][index % 2]
+        );
+        assert!(terminal.read(cx).reported_working_directory().is_none());
+        pane.terminal = Some(terminal);
+        pane.view = Some(view);
+        for (pane_override, tab_override, expected) in [
+            (Some("One Light"), Some("One Dark"), "One Light"),
+            (None, Some("One Light"), "One Light"),
+        ] {
+            assert_eq!(
+                zetta
+                    .restored_terminal_theme(
+                        pane_override,
+                        tab_override,
+                        &pane.profile,
+                        Some(&project),
+                        ProjectContextPolicy::Local,
+                        cx
+                    )
+                    .unwrap()
+                    .name
+                    .as_ref(),
+                expected
+            );
+        }
+    }
+}

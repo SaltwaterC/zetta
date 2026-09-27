@@ -1,9 +1,10 @@
 //! Turning a session that has been handed back into the tab a window shows.
 //!
 //! A restored pane's working directory, project binding, profile and theme all
-//! come from the durable state rather than from the current configuration, so
-//! reconnecting cannot silently re-point a pane at a different project or
-//! theme. `RestoredPaneMetadata` is what carries that across.
+//! start with the saved directory. Local restores resolve its registered project
+//! and current configuration before constructing views; remote restores never
+//! resolve remote paths against local projects. Explicit session themes retain
+//! precedence. `RestoredPaneMetadata` carries the context across ID reassignment.
 
 use super::*;
 

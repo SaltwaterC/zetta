@@ -546,6 +546,10 @@ impl Zetta {
             "remote sessions are live-only and cannot be stored as local background sessions"
         );
 
+        // Validate the entire publication before stopping any readers. A missing
+        // base-pane mapping must leave the foreground tab usable on failure.
+        self.multiplexer_session_summary(tab, session_id, authentication.is_some(), cx)?;
+
         // Stacked terminals are task terminals, not interactive terminals, and
         // cannot be reattached yet. Stop their readers before releasing their
         // daemon panes, then leave their durable entries for restore_stack to
@@ -611,6 +615,32 @@ impl Zetta {
         Ok(true)
     }
 
+    /// The public summary always uses daemon IDs; the opaque tab state retains
+    /// local routing IDs and its explicit `mux_pane_id` mappings.
+    pub(super) fn multiplexer_session_summary(
+        &self,
+        tab: &Tab,
+        session_id: u64,
+        authentication_required: bool,
+        cx: &App,
+    ) -> anyhow::Result<BackgroundSessionSummary> {
+        if let Some(pane) = tab
+            .panes
+            .iter()
+            .find(|pane| self.mux_panes.mux_pane_id(pane.id).is_none())
+        {
+            anyhow::bail!(
+                "pane {} is not run by the session multiplexer",
+                pane.label()
+            );
+        }
+        let mut summary = self.background_session_summary(tab, authentication_required, cx);
+        super::collaboration::remap_summary_to_mux(&mut summary, self.mux_panes.ids())
+            .context("describing the session in the multiplexer's pane ids")?;
+        summary.id = session_id;
+        Ok(summary)
+    }
+
     /// What the multiplexer publishes for a tab's session: the summary the
     /// catalog lists, and the state another window rebuilds the tab from when it
     /// attaches or joins.
@@ -625,12 +655,8 @@ impl Zetta {
         authentication_required: bool,
         cx: &App,
     ) -> anyhow::Result<(BackgroundSessionSummary, serde_json::Value)> {
-        let mut summary = self.background_session_summary(tab, authentication_required, cx);
-        // The catalog and the daemon address a session by the id the
-        // multiplexer assigned it, not by this window's tab id. Publishing the
-        // tab id instead made the catalog list a session the daemon would then
-        // claim did not exist, because it looks sessions up under the mux id.
-        summary.id = session_id;
+        let summary =
+            self.multiplexer_session_summary(tab, session_id, authentication_required, cx)?;
         let mut state = crate::session_state::TabState::from_tab(tab, self.mux_panes.ids());
         state.pane_theme_source = Some(crate::session_state::PaneThemeSource {
             process_id: std::process::id(),
