@@ -1,6 +1,71 @@
 use super::*;
 
 #[test]
+fn remote_program_paths_use_the_remote_hosts_posix_rules() {
+    assert_eq!(
+        parse_remote_program_path(b"/home/qodfanzksn/bin/zmux\n").unwrap(),
+        PathBuf::from("/home/qodfanzksn/bin/zmux")
+    );
+    assert!(parse_remote_program_path(b"bin/zmux\n").is_err());
+    assert!(parse_remote_program_path(b"~/bin/zmux\n").is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn remote_program_query_expands_a_home_shortened_path() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let home = tempfile::tempdir().unwrap();
+    let shell = home.path().join("shell");
+    std::fs::write(
+        &shell,
+        "#!/bin/sh\nprintf 'startup noise\\n'\nprintf '~/bin/zmux\\n' >&3\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+    let output = Command::new("/bin/sh")
+        .arg("-c")
+        .arg(REMOTE_PROGRAM_COMMAND)
+        .env("SHELL", &shell)
+        .env("HOME", home.path())
+        .env("PATH", home.path())
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        format!("{}\n", home.path().join("bin/zmux").display())
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn remote_queries_use_an_existing_noninteractive_zmux() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let directory = tempfile::tempdir().unwrap();
+    let zmux = directory.path().join("zmux");
+    std::fs::write(&zmux, "#!/bin/sh\nprintf '[\"System\"]\\n'\n").unwrap();
+    std::fs::set_permissions(&zmux, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let shell = directory.path().join("shell");
+    std::fs::write(&shell, "#!/bin/sh\nexit 77\n").unwrap();
+    std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+    let output = Command::new("/bin/sh")
+        .arg("-c")
+        .arg(REMOTE_PROFILES_COMMAND)
+        .env("PATH", directory.path())
+        .env("SHELL", &shell)
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    assert_eq!(output.stdout, b"[\"System\"]\n");
+}
+
+#[test]
 fn a_stale_endpoint_does_not_claim_a_remote_daemon_is_running() {
     let directory = tempfile::tempdir().unwrap();
     let socket = directory.path().join("daemon.sock");
@@ -79,7 +144,7 @@ fn endpoint_queries_preserve_the_user_ssh_configuration() {
             "-p",
             "2222",
             "dev@example.test",
-            r#"/bin/sh -c 'exec 3>&1 1>/dev/null; exec "${SHELL:-/bin/sh}" -lic "command zmux endpoint --json >&3"'"#,
+            REMOTE_ENDPOINT_COMMAND,
         ]
     );
 }

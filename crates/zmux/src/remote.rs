@@ -30,27 +30,25 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 const POLL_INTERVAL: Duration = Duration::from_millis(20);
 const MAX_SSH_OUTPUT_BYTES: usize = 1024 * 1024;
 
-// OpenSSH runs a remote command through the account's shell without making it
-// interactive. Zetta's installed CLI path is commonly added to an
-// interactive shell rc file, so ask that same shell to load its rc file
-// before resolving zmux. Startup files may write prompts or terminal-control
-// sequences to stdout, so keep that output away from the endpoint JSON and
-// send only the command's stdout through fd 3. The POSIX wrapper owns the fd
-// setup so the account's shell can be fish or another shell with different
-// redirection syntax. Keep this as one command argument: OpenSSH joins the
-// remote command arguments into the command string it gives the server.
-const REMOTE_ENDPOINT_COMMAND: &str = r#"/bin/sh -c 'exec 3>&1 1>/dev/null; exec "${SHELL:-/bin/sh}" -lic "command zmux endpoint --json >&3"'"#;
+// OpenSSH already runs the remote command through the account's shell. Use
+// its PATH when zmux is available there: forcing an interactive login shell
+// can run startup hooks that wait for a terminal even with SSH's -T option.
+// Fall back to that shell when its rc file is needed to add zmux to PATH.
+// Startup files may write prompts or terminal-control sequences to stdout,
+// so send only the command's output through fd 3. Keep the POSIX wrapper as
+// one argument: OpenSSH joins remote command arguments into one string.
+const REMOTE_ENDPOINT_COMMAND: &str = r#"/bin/sh -c 'exec 3>&1 1>/dev/null; if command -v zmux >/dev/null 2>&1; then exec zmux endpoint --json >&3; fi; exec "${SHELL:-/bin/sh}" -lic "command zmux endpoint --json >&3"'"#;
 
-/// Where that same shell resolves `zmux`. Written the same way, and for the
-/// same reasons, as the endpoint command above.
-const REMOTE_PROGRAM_COMMAND: &str =
-    r#"/bin/sh -c 'exec 3>&1 1>/dev/null; exec "${SHELL:-/bin/sh}" -lic "command -v zmux >&3"'"#;
+/// Where that same shell resolves `zmux`. Some interactive shells abbreviate
+/// paths below the home directory as `~/...`, so expand that prefix in the
+/// remote POSIX wrapper before returning the path to the client.
+const REMOTE_PROGRAM_COMMAND: &str = r#"/bin/sh -c 'exec 3>&1 1>/dev/null; resolved=$(command -v zmux); if test -z "$resolved"; then resolved=$("${SHELL:-/bin/sh}" -lic "command -v zmux >&3" 3>&1 1>/dev/null); fi; case "$resolved" in "~/"*) resolved="$HOME/${resolved#\~/}";; esac; printf "%s\n" "$resolved" >&3'"#;
 
 /// Runs the standalone profile discovery command without requiring a daemon.
-const REMOTE_PROFILES_COMMAND: &str = r#"/bin/sh -c 'exec 3>&1 1>/dev/null; exec "${SHELL:-/bin/sh}" -lic "exec zmux profiles --json >&3"'"#;
+const REMOTE_PROFILES_COMMAND: &str = r#"/bin/sh -c 'exec 3>&1 1>/dev/null; if command -v zmux >/dev/null 2>&1; then exec zmux profiles --json >&3; fi; exec "${SHELL:-/bin/sh}" -lic "exec zmux profiles --json >&3"'"#;
 
 #[cfg(windows)]
-const REMOTE_STDIO_COMMAND: &str = r#"/bin/sh -c 'exec 3>&1 1>/dev/null; exec "${SHELL:-/bin/sh}" -lic "exec zmux proxy-stdio >&3"'"#;
+const REMOTE_STDIO_COMMAND: &str = r#"/bin/sh -c 'exec 3>&1 1>/dev/null; if command -v zmux >/dev/null 2>&1; then exec zmux proxy-stdio >&3; fi; exec "${SHELL:-/bin/sh}" -lic "exec zmux proxy-stdio >&3"'"#;
 
 /// A destination understood by OpenSSH.
 ///
@@ -611,24 +609,7 @@ impl RemoteTransport {
     pub fn resolve_remote_program(&self) -> Result<PathBuf> {
         let arguments = program_arguments(&self.target);
         let output = run_capture(&self.ssh_program, &arguments, ENDPOINT_TIMEOUT)?;
-        let text = std::str::from_utf8(&output.stdout)
-            .context("remote zmux path was not UTF-8")?
-            .lines()
-            .map(str::trim)
-            .find(|line| !line.is_empty())
-            .unwrap_or_default()
-            .to_owned();
-        anyhow::ensure!(
-            !text.is_empty(),
-            "the remote host has no zmux on the path its shell resolves"
-        );
-        let path = PathBuf::from(text);
-        anyhow::ensure!(
-            path.is_absolute(),
-            "the remote host resolved zmux to {}, which is not an absolute path",
-            path.display()
-        );
-        Ok(path)
+        parse_remote_program_path(&output.stdout)
     }
 
     /// Returns the names the remote host can resolve through its standalone
@@ -908,7 +889,7 @@ fn start_daemon_arguments(target: &RemoteTarget, program: &Path) -> Vec<String> 
     push_target_options(&mut arguments, target);
     let program = shell_escape_double_quoted(&program.to_string_lossy());
     let command = format!(
-        r#"/bin/sh -c 'exec "${{SHELL:-/bin/sh}}" -lic "nohup \"{program}\" --daemon >/dev/null 2>&1 </dev/null &"'"#
+        r#"/bin/sh -c 'if command -v zmux >/dev/null 2>&1; then nohup "{program}" --daemon >/dev/null 2>&1 </dev/null & exit; fi; exec "${{SHELL:-/bin/sh}}" -lic "nohup \"{program}\" --daemon >/dev/null 2>&1 </dev/null &"'"#
     );
     arguments.extend([target.destination.clone(), command]);
     arguments
@@ -979,6 +960,26 @@ fn terminate_child(child: &mut Child) {
     }
 }
 
+fn parse_remote_program_path(output: &[u8]) -> Result<PathBuf> {
+    let text = std::str::from_utf8(output)
+        .context("remote zmux path was not UTF-8")?
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or_default();
+    anyhow::ensure!(
+        !text.is_empty(),
+        "the remote host has no zmux on the path its shell resolves"
+    );
+    // This path belongs to the remote POSIX host. Windows Path::is_absolute
+    // rejects /home/... even though it is absolute for the host running zmux.
+    anyhow::ensure!(
+        text.starts_with('/'),
+        "the remote host resolved zmux to {text}, which is not an absolute path"
+    );
+    Ok(PathBuf::from(text))
+}
+
 fn run_capture(program: &Path, arguments: &[String], timeout: Duration) -> Result<SshOutput> {
     let mut child = Command::new(program)
         .args(arguments)
@@ -1006,8 +1007,15 @@ fn run_capture(program: &Path, arguments: &[String], timeout: Duration) -> Resul
         if Instant::now() >= deadline {
             terminate_child(&mut child);
             let _ = stdout_thread.join();
-            let _ = stderr_thread.join();
-            anyhow::bail!("SSH endpoint query timed out after {timeout:?}");
+            let stderr = stderr_thread
+                .join()
+                .map_err(|_| anyhow::anyhow!("SSH stderr reader panicked"))??;
+            let detail = String::from_utf8_lossy(&stderr);
+            let detail = detail.trim();
+            if detail.is_empty() {
+                anyhow::bail!("SSH endpoint query timed out after {timeout:?}");
+            }
+            anyhow::bail!("SSH endpoint query timed out after {timeout:?}: {detail}");
         }
         thread::sleep(POLL_INTERVAL);
     };
