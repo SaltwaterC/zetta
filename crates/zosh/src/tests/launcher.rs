@@ -191,6 +191,21 @@ fn bootstrap_parser_accepts_connect_before_proxy_address() {
 }
 
 #[test]
+fn bootstrap_accepts_pty_carriage_returns_before_protocol_lines() {
+    let output = "MOSH IP 192.0.2.10\r\n\rMOSH CONNECT 60001 AAAAAAAAAAAAAAAAAAAAAA\r\n";
+    let command = MoshCommand::default();
+    let endpoint = bootstrap_endpoint_ready(
+        &command,
+        output,
+        "\rMOSH CONNECT 60001 AAAAAAAAAAAAAAAAAAAAAA\r\n",
+    )
+    .expect("the endpoint is ready")
+    .unwrap();
+    assert_eq!(endpoint.ip.as_deref(), Some("192.0.2.10"));
+    assert_eq!(endpoint.port, 60001);
+}
+
+#[test]
 fn bootstrap_parser_rejects_malformed_connect() {
     let error = parse_bootstrap_output("MOSH CONNECT 60001 too-short").unwrap_err();
     assert!(error.to_string().contains("malformed MOSH CONNECT key"));

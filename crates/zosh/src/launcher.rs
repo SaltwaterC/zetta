@@ -756,7 +756,11 @@ fn run_ssh_bootstrap(
                     endpoint.agent_path = agent_path;
                     return Ok(BootstrapResult::Endpoint(endpoint));
                 }
-                Err(error) if line.starts_with("MOSH CONNECT ") => {
+                Err(error)
+                    if line
+                        .split('\r')
+                        .any(|part| part.trim_start().starts_with("MOSH CONNECT ")) =>
+                {
                     stop_bootstrap_child(&mut child, readers);
                     return Err(error);
                 }
@@ -812,6 +816,15 @@ fn finish_ssh_bootstrap(
             status,
             format_diagnostics(&combined)
         ));
+    }
+    if combined.contains("MOSH CONNECT ") {
+        let endpoint = parse_bootstrap_output(&combined)?;
+        if command.remote_ip == RemoteIpMode::Proxy && endpoint.ip.is_none() {
+            anyhow::bail!(
+                "SSH bootstrap printed MOSH CONNECT but the proxy did not report MOSH IP"
+            );
+        }
+        anyhow::bail!("SSH bootstrap printed MOSH CONNECT but the endpoint was not accepted");
     }
     forward_diagnostics(&combined);
     Err(anyhow::anyhow!("SSH bootstrap did not print MOSH CONNECT"))
@@ -1739,7 +1752,9 @@ pub(crate) fn parse_bootstrap_output(output: &str) -> Result<BootstrapEndpoint> 
     let mut connect = None;
     let mut ip = None;
     let mut diagnostics = Vec::new();
-    for line in output.lines().map(str::trim_end) {
+    // A PTY can put a carriage return before a protocol line, including on
+    // Windows where SSH's output uses CRLF. Treat CR as a line boundary.
+    for line in output.split(['\r', '\n']).map(str::trim) {
         if let Some(value) = line.strip_prefix("MOSH CONNECT ") {
             anyhow::ensure!(
                 connect.is_none(),
