@@ -916,12 +916,16 @@ fn close_in_process(process_id: u32, handle: i64) -> Result<()> {
 #[cfg(windows)]
 pub fn answer_challenge(handle: i64) -> Result<String> {
     use std::io::Read as _;
+    use std::os::windows::io::BorrowedHandle;
 
-    let handle = claim_duplicated(&[handle])
-        .pop()
-        .context("the multiplexer sent no attestation handle")?;
+    // The daemon owns this handle in our process and closes it when the
+    // challenge ends. Closing it here would let Windows reuse its value before
+    // the daemon's cleanup, which could then close an unrelated handle.
+    // SAFETY: the daemon duplicated this handle into this process and keeps
+    // the challenge alive while waiting for the answer.
+    let handle = unsafe { BorrowedHandle::borrow_raw(handle as *mut _) };
     let mut answer = String::new();
-    std::fs::File::from(handle)
+    std::fs::File::from(handle.try_clone_to_owned()?)
         .take((PeerChallenge::NONCE_BYTES * 2) as u64)
         .read_to_string(&mut answer)
         .context("reading the multiplexer's attestation nonce")?;

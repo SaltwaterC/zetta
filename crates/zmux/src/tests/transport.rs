@@ -230,6 +230,13 @@ fn an_attestation_is_answerable_only_by_the_process_it_was_issued_to() {
     let answer = answer_challenge(challenge.handle())
         .expect("this process must be able to read a handle in its own table");
 
+    // The daemon still owns the original handle until the challenge drops.
+    // If answering closes it, cleanup can close an unrelated reused handle.
+    use std::os::windows::io::BorrowedHandle;
+    // SAFETY: `challenge` is still alive and owns this handle in our process.
+    let handle = unsafe { BorrowedHandle::borrow_raw(challenge.handle() as *mut _) };
+    assert!(handle.try_clone_to_owned().is_ok());
+
     assert_eq!(answer.len(), PeerChallenge::NONCE_BYTES * 2);
     assert!(challenge.matches(&answer));
     assert!(
