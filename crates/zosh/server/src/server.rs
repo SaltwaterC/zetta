@@ -1,6 +1,6 @@
 use crate::agent::AgentServer;
 use crate::args::Config;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use crate::lifecycle;
 use crate::protocol::{AgentHostRecord, ServerTransport, encode_host_message_with_agent};
 use crate::terminal_state::{QueryResponder, TerminalState};
@@ -90,6 +90,13 @@ pub fn run(mut cfg: Config) -> Result<()> {
     // This is the bootstrap contract parsed by the stock mosh wrapper.
     println!("MOSH CONNECT {port} {key_text}");
     std::io::stdout().flush().context("flushing MOSH CONNECT")?;
+
+    #[cfg(windows)]
+    let _detached_stdout = if cfg.internal_child {
+        Some(lifecycle::release_bootstrap_stdout()?)
+    } else {
+        None
+    };
 
     #[cfg(unix)]
     if !cfg.foreground {

@@ -88,7 +88,6 @@ pub(super) fn windows_bootstrap_command(
         ]);
     }
     arguments.extend([
-        "-n".to_owned(),
         target.to_owned(),
         "--".to_owned(),
         windows_remote_command(command, colors)?,

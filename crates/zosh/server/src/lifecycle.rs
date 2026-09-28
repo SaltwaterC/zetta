@@ -5,6 +5,8 @@ use anyhow::{Result, bail};
 use std::ffi::OsString;
 #[cfg(windows)]
 use std::io::{BufRead, BufReader, Write};
+#[cfg(windows)]
+use std::os::windows::io::AsRawHandle;
 
 #[cfg(unix)]
 pub fn detach_after_connect_line() -> Result<()> {
@@ -121,6 +123,30 @@ pub fn windows_parent_bootstrap(raw_args: &[OsString]) -> Result<bool> {
     Ok(true)
 }
 
+/// Release the bootstrap pipe after the child has printed its endpoint.
+/// Keeping it open makes SSH wait for the entire UDP session to end.
+#[cfg(windows)]
+pub fn release_bootstrap_stdout() -> Result<std::fs::File> {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Console::{GetStdHandle, STD_OUTPUT_HANDLE, SetStdHandle};
+
+    let null = std::fs::OpenOptions::new()
+        .write(true)
+        .open("NUL")
+        .context("opening NUL for detached server stdout")?;
+    let original = unsafe { GetStdHandle(STD_OUTPUT_HANDLE) }
+        .context("reading detached server stdout handle")?;
+    unsafe {
+        SetStdHandle(
+            STD_OUTPUT_HANDLE,
+            windows::Win32::Foundation::HANDLE(null.as_raw_handle()),
+        )
+    }
+    .context("redirecting detached server stdout")?;
+    unsafe { CloseHandle(original) }.context("closing detached server bootstrap pipe")?;
+    Ok(null)
+}
+
 #[cfg(windows)]
 fn has_lifecycle_flag(args: &[OsString], needle: &str) -> bool {
     let mut command = false;
@@ -135,3 +161,7 @@ fn has_lifecycle_flag(args: &[OsString], needle: &str) -> bool {
     }
     false
 }
+
+#[cfg(all(test, windows))]
+#[path = "tests/lifecycle.rs"]
+mod tests;
