@@ -32,6 +32,9 @@ use std::os::unix::{fs::PermissionsExt, net::UnixListener};
 
 use mosh_rs::HostEvent;
 
+#[cfg(windows)]
+mod windows_pipe;
+
 pub(crate) const AGENT_PROTOCOL_VERSION: u32 = 1;
 pub(crate) const AGENT_MAX_FRAME: usize = 256 * 1024;
 const MAX_CONNECTIONS: usize = 16;
@@ -42,6 +45,35 @@ const NEGOTIATION_TIMEOUT: Duration = Duration::from_secs(3);
 const BOOTSTRAP_RELAY_POLL: Duration = Duration::from_millis(5);
 const SESSION_BIND_EXTENSION: &[u8] = b"session-bind@openssh.com";
 const SSH_AGENT_EXTENSION: u8 = 27;
+#[cfg(windows)]
+const WINDOWS_OPENSSH_AGENT: &str = r"\\.\pipe\openssh-ssh-agent";
+
+pub(crate) fn environment_agent_path() -> Option<PathBuf> {
+    std::env::var_os("SSH_AUTH_SOCK")
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            #[cfg(windows)]
+            {
+                Some(PathBuf::from(WINDOWS_OPENSSH_AGENT))
+            }
+            #[cfg(not(windows))]
+            {
+                None
+            }
+        })
+}
+
+pub(crate) fn normalize_agent_path(path: PathBuf) -> PathBuf {
+    #[cfg(windows)]
+    {
+        let value = path.to_string_lossy();
+        if value.starts_with("//./pipe/") {
+            return PathBuf::from(value.replace('/', "\\"));
+        }
+    }
+    path
+}
 
 #[derive(Debug)]
 pub(crate) enum AgentClientCommand {
@@ -103,11 +135,11 @@ impl AgentBridge {
         agent_path: Option<PathBuf>,
     ) -> Self {
         let (result_tx, results) = mpsc::sync_channel(MAX_OUTSTANDING);
-        let path = requested
-            .then(|| agent_path.or_else(|| std::env::var_os("SSH_AUTH_SOCK").map(PathBuf::from)));
+        let path = requested.then(|| agent_path.or_else(environment_agent_path));
         let path = path
             .flatten()
             .filter(|path| !path.as_os_str().is_empty())
+            .map(normalize_agent_path)
             .filter(|path| local_agent_path_exists(path));
         let mut bridge = Self {
             path,
@@ -121,9 +153,7 @@ impl AgentBridge {
             warned: false,
         };
         if requested && bridge.path.is_none() {
-            bridge.warn(
-                "SSH_AUTH_SOCK is not set or does not name a local agent socket; agent forwarding is disabled",
-            );
+            bridge.warn("no usable local SSH agent was found; agent forwarding is disabled");
             bridge.waiting_since = None;
         }
         bridge
@@ -471,8 +501,22 @@ fn local_agent_path_exists(path: &Path) -> bool {
     }
     #[cfg(not(unix))]
     {
-        let _ = path;
-        true
+        #[cfg(windows)]
+        {
+            use std::os::windows::ffi::OsStrExt as _;
+            use windows::Win32::System::Pipes::WaitNamedPipeW;
+            let wide = path
+                .as_os_str()
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect::<Vec<_>>();
+            unsafe { WaitNamedPipeW(windows::core::PCWSTR(wide.as_ptr()), 100).as_bool() }
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = path;
+            false
+        }
     }
 }
 
@@ -505,8 +549,6 @@ fn connect_agent(path: &Path) -> io::Result<AgentStream> {
 pub(crate) struct BootstrapAgentRelay {
     #[cfg(any(unix, windows))]
     path: PathBuf,
-    #[cfg(any(unix, windows))]
-    agent_path: PathBuf,
     #[cfg(any(unix, windows))]
     binding: Arc<Mutex<Option<Vec<u8>>>>,
     #[cfg(any(unix, windows))]
@@ -554,7 +596,6 @@ impl BootstrapAgentRelay {
             })?;
         Ok(Self {
             path: socket_path,
-            agent_path,
             binding,
             stop,
             thread: Some(thread),
@@ -566,6 +607,7 @@ impl BootstrapAgentRelay {
         let path = create_bootstrap_pipe_path();
         let binding = Arc::new(Mutex::new(None));
         let stop = Arc::new(AtomicBool::new(false));
+        let (ready_tx, ready_rx) = mpsc::sync_channel(1);
         let thread = thread::Builder::new()
             .name("zosh-agent-bootstrap-relay".to_owned())
             .spawn({
@@ -573,11 +615,13 @@ impl BootstrapAgentRelay {
                 let agent_path = agent_path.clone();
                 let stop = Arc::clone(&stop);
                 let path = path.clone();
-                move || relay_pipe_accept_loop(path, agent_path, binding, stop)
+                move || relay_pipe_accept_loop(path, agent_path, binding, stop, ready_tx)
             })?;
+        ready_rx.recv().map_err(|_| {
+            io::Error::other("Windows bootstrap agent listener exited before becoming ready")
+        })??;
         Ok(Self {
             path,
-            agent_path,
             binding,
             stop,
             thread: Some(thread),
@@ -592,16 +636,6 @@ impl BootstrapAgentRelay {
     #[cfg(any(unix, windows))]
     pub(crate) fn path(&self) -> &Path {
         &self.path
-    }
-
-    #[cfg(any(unix, windows))]
-    pub(crate) fn agent_path(&self) -> &Path {
-        &self.agent_path
-    }
-
-    #[cfg(not(any(unix, windows)))]
-    pub(crate) fn agent_path(&self) -> &Path {
-        Path::new("")
     }
 
     #[cfg(not(any(unix, windows)))]
@@ -718,36 +752,34 @@ fn relay_pipe_accept_loop(
     agent_path: PathBuf,
     binding: Arc<Mutex<Option<Vec<u8>>>>,
     stop: Arc<AtomicBool>,
+    ready: SyncSender<io::Result<()>>,
 ) {
     use std::os::windows::ffi::OsStrExt;
     use std::os::windows::io::FromRawHandle;
-    use windows::Win32::Foundation::{CloseHandle, ERROR_PIPE_CONNECTED, INVALID_HANDLE_VALUE};
-    use windows::Win32::Storage::FileSystem::PIPE_ACCESS_DUPLEX;
-    use windows::Win32::System::Pipes::{
-        ConnectNamedPipe, CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS,
-        PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
-    };
+    use windows::Win32::Foundation::{CloseHandle, ERROR_PIPE_CONNECTED};
+    use windows::Win32::System::Pipes::ConnectNamedPipe;
 
     let wide = path
         .as_os_str()
         .encode_wide()
         .chain(std::iter::once(0))
         .collect::<Vec<_>>();
+    let mut ready = Some(ready);
     while !stop.load(Ordering::Acquire) {
-        let handle = unsafe {
-            CreateNamedPipeW(
-                windows::core::PCWSTR(wide.as_ptr()),
-                PIPE_ACCESS_DUPLEX,
-                PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
-                PIPE_UNLIMITED_INSTANCES,
-                AGENT_MAX_FRAME as u32,
-                AGENT_MAX_FRAME as u32,
-                0,
-                None,
-            )
+        let handle = match windows_pipe::create(
+            windows::core::PCWSTR(wide.as_ptr()),
+            AGENT_MAX_FRAME as u32,
+        ) {
+            Ok(handle) => handle,
+            Err(error) => {
+                if let Some(ready) = ready.take() {
+                    let _ = ready.send(Err(error));
+                }
+                break;
+            }
         };
-        if handle == INVALID_HANDLE_VALUE {
-            break;
+        if let Some(ready) = ready.take() {
+            let _ = ready.send(Ok(()));
         }
         if stop.load(Ordering::Acquire) {
             let _ = unsafe { CloseHandle(handle) };

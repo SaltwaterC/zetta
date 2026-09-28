@@ -69,6 +69,11 @@ zosh. The launcher prefers `zosh-server` through SSH, falls back to the stock
 `mosh-server` when it is unavailable, and uses plain SSH only when neither
 remote server is clearly usable.
 
+`zosh --forward-agent USER@HOST` forwards the selected local SSH agent through
+the bundled server. On Windows the client can use the OpenSSH service pipe even
+when `SSH_AUTH_SOCK` is unset, and a Windows host can run `zosh-server.exe`
+through either cmd or PowerShell as its SSH default shell.
+
 A remote zmux session can carry its panes the same way. Its control traffic —
 listing, attaching, spawning panes, layout and exit reports — is framed JSON
 and stays on SSH, but each attached pane is a terminal, so choosing Zosh in the

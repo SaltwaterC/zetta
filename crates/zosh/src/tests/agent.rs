@@ -292,3 +292,55 @@ fn binding_failure_keeps_raw_agent_requests_working() {
     fs::remove_file(path).unwrap();
     fs::remove_dir(directory).unwrap();
 }
+
+#[cfg(windows)]
+#[test]
+fn windows_bootstrap_pipe_captures_binding_and_forwards_requests() {
+    use std::os::windows::{ffi::OsStrExt as _, io::FromRawHandle as _};
+    use windows::Win32::Foundation::ERROR_PIPE_CONNECTED;
+    use windows::Win32::System::Pipes::ConnectNamedPipe;
+
+    let path = create_bootstrap_pipe_path();
+    let wide = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let handle =
+        windows_pipe::create(windows::core::PCWSTR(wide.as_ptr()), AGENT_MAX_FRAME as u32).unwrap();
+    let handle_value = handle.0 as usize;
+    let binding = session_bind_frame(true);
+    let request = frame(&[11]);
+    let response = frame(&[12, 0, 0, 0, 0]);
+    let agent_thread = thread::spawn({
+        let binding = binding.clone();
+        let response = response.clone();
+        move || {
+            // This thread takes sole ownership of the pipe handle.
+            let handle = windows::Win32::Foundation::HANDLE(handle_value as _);
+            let connected = unsafe { ConnectNamedPipe(handle, None) };
+            if let Err(error) = connected {
+                assert_eq!(error.code().0 as u32 & 0xffff, ERROR_PIPE_CONNECTED.0);
+            }
+            let mut agent = unsafe { std::fs::File::from_raw_handle(handle.0 as _) };
+            assert_eq!(read_frame_from_buffer(&mut agent).unwrap(), binding);
+            agent.write_all(&frame(&[6])).unwrap();
+            assert_eq!(read_frame_from_buffer(&mut agent).unwrap(), frame(&[11]));
+            agent.write_all(&response).unwrap();
+        }
+    });
+    let relay = BootstrapAgentRelay::for_agent_path(path).unwrap().unwrap();
+    let mut forwarded = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(relay.path())
+        .unwrap();
+    forwarded.write_all(&binding).unwrap();
+    forwarded.write_all(&request).unwrap();
+    assert_eq!(read_frame_from_buffer(&mut forwarded).unwrap(), frame(&[6]));
+    assert_eq!(read_frame_from_buffer(&mut forwarded).unwrap(), response);
+    assert_eq!(relay.binding(), Some(binding));
+    drop(forwarded);
+    agent_thread.join().unwrap();
+    drop(relay);
+}

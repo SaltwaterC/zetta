@@ -697,3 +697,23 @@ fn an_embedded_bootstrap_needs_a_target_and_a_command() {
         .is_err()
     );
 }
+
+#[test]
+fn configured_forward_agent_path_precedes_the_login_agent() {
+    let config = "forwardagent //./pipe/forwarded-agent\nidentityagent //./pipe/login-agent\n";
+    assert_eq!(
+        parse_forward_agent(config).or_else(|| parse_identity_agent(config)),
+        Some(PathBuf::from("//./pipe/forwarded-agent"))
+    );
+    assert_eq!(parse_forward_agent("forwardagent yes\n"), None);
+    assert_eq!(parse_identity_agent("identityagent none\n"), None);
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_pipe_paths_normalize_before_the_client_opens_them() {
+    assert_eq!(
+        normalize_agent_path(PathBuf::from("//./pipe/custom-agent")),
+        PathBuf::from(r"\\.\pipe\custom-agent")
+    );
+}

@@ -182,6 +182,12 @@ points that name at its negotiated private socket for the relay's lifetime.
 Panes created by an older `zmux` build must be recreated once so their shells
 inherit the stable name.
 
+On Windows, Zosh uses an agent pipe chosen by `ForwardAgent`, `IdentityAgent`,
+or `SSH_AUTH_SOCK`, falling back to the Windows OpenSSH service pipe when none
+is set. A Windows `zosh-server.exe` host works with cmd or PowerShell as the
+OpenSSH default shell. The local agent must be running, and the remote server
+must permit SSH agent forwarding during bootstrap.
+
 ## CLI command panes
 
 Run a command in the active pane, a pane selected by label, or a newly created

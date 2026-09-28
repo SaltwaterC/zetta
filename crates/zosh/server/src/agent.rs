@@ -6,6 +6,9 @@
 //! between that thread and cumulative Mosh host records.
 
 use crate::protocol::AgentHostRecord;
+
+#[cfg(windows)]
+mod windows_pipe;
 use std::{
     collections::{BTreeMap, HashMap},
     io::{self, Read, Write},
@@ -19,6 +22,11 @@ use std::{
 use std::fs;
 #[cfg(windows)]
 use std::fs::OpenOptions;
+#[cfg(windows)]
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
 pub const MAX_FRAME: usize = 256 * 1024;
 const MAX_CONNECTIONS: usize = 16;
@@ -134,6 +142,24 @@ struct Reply {
 
 type AgentStream = Box<dyn ReadWrite + Send>;
 
+#[cfg(windows)]
+struct WindowsPipeListener {
+    path: PathBuf,
+    stop: Arc<AtomicBool>,
+    thread: Option<thread::JoinHandle<()>>,
+}
+
+#[cfg(windows)]
+impl Drop for WindowsPipeListener {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        let _ = OpenOptions::new().read(true).write(true).open(&self.path);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
 trait ReadWrite: Read + Write {}
 impl<T: Read + Write> ReadWrite for T {}
 
@@ -141,6 +167,8 @@ impl<T: Read + Write> ReadWrite for T {}
 pub struct AgentServer {
     #[cfg(unix)]
     listener: Option<UnixListener>,
+    #[cfg(windows)]
+    listener: Option<WindowsPipeListener>,
     socket_path: Option<PathBuf>,
     events: Receiver<LocalEvent>,
     event_tx: SyncSender<LocalEvent>,
@@ -161,10 +189,12 @@ impl AgentServer {
             Err(error) => (None, None, Some(error.to_string())),
         };
         #[cfg(windows)]
-        let (socket_path, error) = match create_named_pipe_listener(event_tx.clone()) {
-            Ok(path) => (Some(path), None),
+        let (listener, error) = match create_named_pipe_listener(event_tx.clone()) {
+            Ok(listener) => (Some(listener), None),
             Err(error) => (None, Some(error.to_string())),
         };
+        #[cfg(windows)]
+        let socket_path = listener.as_ref().map(|listener| listener.path.clone());
         #[cfg(not(any(unix, windows)))]
         let (socket_path, error) = (
             None,
@@ -173,6 +203,8 @@ impl AgentServer {
 
         let mut server = Self {
             #[cfg(unix)]
+            listener,
+            #[cfg(windows)]
             listener,
             socket_path,
             events,
@@ -383,6 +415,8 @@ impl AgentServer {
 
 impl Drop for AgentServer {
     fn drop(&mut self) {
+        #[cfg(windows)]
+        self.listener.take();
         #[cfg(unix)]
         if let Some(path) = self.socket_path.take() {
             let _ = fs::remove_file(&path);
@@ -486,14 +520,10 @@ fn valid_frame(frame: &[u8]) -> bool {
 }
 
 #[cfg(windows)]
-fn create_named_pipe_listener(events: SyncSender<LocalEvent>) -> io::Result<PathBuf> {
+fn create_named_pipe_listener(events: SyncSender<LocalEvent>) -> io::Result<WindowsPipeListener> {
     use std::os::windows::io::FromRawHandle;
-    use windows::Win32::Foundation::{CloseHandle, ERROR_PIPE_CONNECTED, INVALID_HANDLE_VALUE};
-    use windows::Win32::Storage::FileSystem::PIPE_ACCESS_DUPLEX;
-    use windows::Win32::System::Pipes::{
-        ConnectNamedPipe, CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS,
-        PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
-    };
+    use windows::Win32::Foundation::{CloseHandle, ERROR_PIPE_CONNECTED};
+    use windows::Win32::System::Pipes::ConnectNamedPipe;
 
     let name = format!(
         r"\\.\pipe\zosh-agent-{}-{}",
@@ -504,48 +534,64 @@ fn create_named_pipe_listener(events: SyncSender<LocalEvent>) -> io::Result<Path
         .encode_utf16()
         .chain(std::iter::once(0))
         .collect::<Vec<_>>();
-    thread::Builder::new()
+    let path = PathBuf::from(name);
+    let stop = Arc::new(AtomicBool::new(false));
+    let (ready_tx, ready_rx) = mpsc::sync_channel(1);
+    let thread = thread::Builder::new()
         .name("zosh-agent-pipe-listener".to_owned())
-        .spawn(move || {
-            loop {
-                let handle = unsafe {
-                    CreateNamedPipeW(
+        .spawn({
+            let stop = Arc::clone(&stop);
+            move || {
+                let mut ready_tx = Some(ready_tx);
+                loop {
+                    let handle = match windows_pipe::create(
                         windows::core::PCWSTR(wide.as_ptr()),
-                        PIPE_ACCESS_DUPLEX,
-                        PIPE_TYPE_BYTE
-                            | PIPE_READMODE_BYTE
-                            | PIPE_WAIT
-                            | PIPE_REJECT_REMOTE_CLIENTS,
-                        PIPE_UNLIMITED_INSTANCES,
                         MAX_FRAME as u32,
-                        MAX_FRAME as u32,
-                        0,
-                        None,
-                    )
-                };
-                if handle == INVALID_HANDLE_VALUE {
-                    break;
-                }
-                let connected = unsafe { ConnectNamedPipe(handle, None) };
-                if let Err(error) = connected
-                    && error.code().0 as u32 & 0xffff != ERROR_PIPE_CONNECTED.0
-                {
-                    let _ = unsafe { CloseHandle(handle) };
-                    continue;
-                }
-                let stream = unsafe { std::fs::File::from_raw_handle(handle.0 as _) };
-                if events
-                    .send(LocalEvent::Connected {
+                    ) {
+                        Ok(handle) => handle,
+                        Err(error) => {
+                            if let Some(ready) = ready_tx.take() {
+                                let _ = ready.send(Err(error));
+                            }
+                            break;
+                        }
+                    };
+                    if let Some(ready) = ready_tx.take() {
+                        let _ = ready.send(Ok(()));
+                    }
+                    if stop.load(Ordering::Acquire) {
+                        let _ = unsafe { CloseHandle(handle) };
+                        break;
+                    }
+                    let connected = unsafe { ConnectNamedPipe(handle, None) };
+                    if let Err(error) = connected
+                        && error.code().0 as u32 & 0xffff != ERROR_PIPE_CONNECTED.0
+                    {
+                        let _ = unsafe { CloseHandle(handle) };
+                        continue;
+                    }
+                    let stream = unsafe { std::fs::File::from_raw_handle(handle.0 as _) };
+                    if stop.load(Ordering::Acquire) {
+                        break;
+                    }
+                    match events.try_send(LocalEvent::Connected {
                         stream: Box::new(stream),
-                    })
-                    .is_err()
-                {
-                    break;
+                    }) {
+                        Ok(()) | Err(std::sync::mpsc::TrySendError::Full(_)) => {}
+                        Err(std::sync::mpsc::TrySendError::Disconnected(_)) => break,
+                    }
                 }
             }
         })
         .map_err(io::Error::other)?;
-    Ok(PathBuf::from(name))
+    ready_rx
+        .recv()
+        .map_err(|_| io::Error::other("agent pipe listener exited before readiness"))??;
+    Ok(WindowsPipeListener {
+        path,
+        stop,
+        thread: Some(thread),
+    })
 }
 
 #[cfg(windows)]

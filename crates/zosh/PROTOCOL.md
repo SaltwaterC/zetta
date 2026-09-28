@@ -437,7 +437,13 @@ Agent forwarding is deliberately off unless `--forward-agent` is present.
 The launcher passes `--forward-agent` only to the bundled `zosh-server`. During
 that bootstrap it resolves the destination's effective `IdentityAgent` (which
 may differ from `SSH_AUTH_SOCK`) and temporarily enables native forwarding
-through a private local agent relay. Login authentication still talks directly
+through a private local agent relay. On Windows it also accepts an explicit
+`ForwardAgent` pipe path and falls back to the Windows OpenSSH service pipe
+when neither SSH configuration nor `SSH_AUTH_SOCK` selects an agent. A native
+Windows server is launched through PowerShell from either cmd or PowerShell
+as the SSH default shell.
+
+Login authentication still talks directly
 to the configured agent; only `ForwardAgent` names the relay. Before printing
 `MOSH CONNECT`, `zosh-server` opens the inherited forwarded socket and makes
 one bounded identities request. OpenSSH puts the
