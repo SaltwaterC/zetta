@@ -7756,6 +7756,12 @@ fn a_pane_the_client_could_not_show_can_be_given_back() {
             viewer.send_input(b"echo pane-still-lives\r").unwrap();
             let answered = Instant::now() + Duration::from_secs(10);
             loop {
+                // The shared reader pauses output after a size frame until its
+                // owner applies that size. This test has no terminal UI, so it
+                // must acknowledge the frame itself before waiting for output.
+                for size in viewer.take_revisioned_sizes() {
+                    viewer.finish_size_application(size);
+                }
                 if seen.lock().unwrap().contains("pane-still-lives") {
                     return;
                 }
