@@ -98,7 +98,8 @@ fn an_idle_session_with_keep_alive_is_answered_several_times_a_second() {
 // The command emits both supported query spellings. The normal Mosh client
 // path observes the decoded host events here; the terminal frontend's byte
 // proxy is covered by the focused client tests because this test has no real
-// outer terminal to answer the queries.
+// outer terminal to answer the queries. Keep the shell alive until the client
+// receives them, since an immediate child exit starts server shutdown.
 #[test]
 #[ignore = "requires ZOSH_TEST_SERVER pointing at the bundled Mosh server"]
 fn bundled_server_forwards_osc_color_queries() {
@@ -109,7 +110,7 @@ fn bundled_server_forwards_osc_color_queries() {
         "--",
         "/bin/sh",
         "-c",
-        "printf '\\033]10;?\\007\\033]11;?\\033\\\\'; printf READY",
+        "printf '\\033]10;?\\007\\033]11;?\\033\\\\'; printf READY; read reply",
     ]);
     session.send_resize(80, 24);
 
