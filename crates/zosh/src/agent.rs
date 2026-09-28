@@ -52,7 +52,7 @@ pub(crate) fn environment_agent_path() -> Option<PathBuf> {
     std::env::var_os("SSH_AUTH_SOCK")
         .filter(|path| !path.is_empty())
         .map(PathBuf::from)
-        .or_else(|| {
+        .or({
             #[cfg(windows)]
             {
                 Some(PathBuf::from(WINDOWS_OPENSSH_AGENT))
