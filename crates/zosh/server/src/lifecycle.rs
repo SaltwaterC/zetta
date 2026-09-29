@@ -6,7 +6,11 @@ use std::ffi::OsString;
 #[cfg(windows)]
 use std::io::{BufRead, BufReader, Write};
 #[cfg(windows)]
+use std::os::windows::ffi::OsStrExt;
+#[cfg(windows)]
 use std::os::windows::io::AsRawHandle;
+#[cfg(windows)]
+use std::os::windows::io::FromRawHandle;
 
 #[cfg(unix)]
 pub fn detach_after_connect_line() -> Result<()> {
@@ -64,9 +68,6 @@ pub fn detach_after_connect_line() -> Result<()> {
 /// Re-exec the server using detached process creation and relay its first line.
 #[cfg(windows)]
 pub fn windows_parent_bootstrap(raw_args: &[OsString]) -> Result<bool> {
-    use std::os::windows::process::CommandExt;
-    use std::process::{Command, Stdio};
-
     if has_lifecycle_flag(raw_args, "--foreground")
         || has_lifecycle_flag(raw_args, "--no-detach")
         || has_lifecycle_flag(raw_args, "--internal-child")
@@ -74,45 +75,22 @@ pub fn windows_parent_bootstrap(raw_args: &[OsString]) -> Result<bool> {
         return Ok(false);
     }
 
-    const DETACHED_PROCESS: u32 = 0x0000_0008;
-    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-    const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
-
     let exe = std::env::current_exe().context("locating current zosh-server executable")?;
-
-    let spawn = |flags: u32| -> std::io::Result<std::process::Child> {
-        let mut cmd = Command::new(&exe);
-        cmd.arg("--internal-child")
-            .args(raw_args)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null());
-        cmd.creation_flags(flags);
-        cmd.spawn()
-    };
-
-    // OpenSSH for Windows commonly uses a job object for session cleanup.
-    // Prefer breaking away so closing SSH does not kill the Mosh UDP session.
-    // Fall back for environments where breakaway is disallowed (manual launch,
-    // service managers, and some sshd configurations).
-    let mut child =
-        match spawn(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB) {
-            Ok(child) => child,
-            Err(_) => spawn(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)
-                .context("spawning detached Windows zosh-server child")?,
-        };
-
-    let stdout = child
-        .stdout
-        .take()
-        .context("detached child did not expose bootstrap stdout")?;
+    let child_args = std::iter::once(OsString::from("--internal-child"))
+        .chain(raw_args.iter().cloned())
+        .collect::<Vec<_>>();
+    let (stdout, child) = spawn_detached_process(&exe, &child_args)?;
     let mut reader = BufReader::new(stdout);
     let mut line = String::new();
-    let n = reader
-        .read_line(&mut line)
-        .context("reading MOSH CONNECT from detached child")?;
+    let n = match reader.read_line(&mut line) {
+        Ok(n) => n,
+        Err(error) => {
+            child.terminate();
+            return Err(error).context("reading MOSH CONNECT from detached child");
+        }
+    };
     if n == 0 || !line.starts_with("MOSH CONNECT ") {
-        let _ = child.kill();
+        child.terminate();
         bail!("detached zosh-server child exited before emitting MOSH CONNECT");
     }
 
@@ -121,6 +99,184 @@ pub fn windows_parent_bootstrap(raw_args: &[OsString]) -> Result<bool> {
     // Dropping Child does not terminate the child process. The child owns the
     // UDP session; this bootstrap process can now exit and let SSH close.
     Ok(true)
+}
+
+#[cfg(windows)]
+struct DetachedChild {
+    process: windows::Win32::Foundation::HANDLE,
+    thread: windows::Win32::Foundation::HANDLE,
+}
+
+#[cfg(windows)]
+impl DetachedChild {
+    fn terminate(&self) {
+        use windows::Win32::System::Threading::TerminateProcess;
+        let _ = unsafe { TerminateProcess(self.process, 1) };
+    }
+}
+
+#[cfg(windows)]
+impl Drop for DetachedChild {
+    fn drop(&mut self) {
+        use windows::Win32::Foundation::CloseHandle;
+        let _ = unsafe { CloseHandle(self.process) };
+        let _ = unsafe { CloseHandle(self.thread) };
+    }
+}
+
+#[cfg(windows)]
+fn spawn_detached_process(
+    exe: &std::path::Path,
+    args: &[OsString],
+) -> Result<(std::fs::File, DetachedChild)> {
+    use windows::Win32::Foundation::{HANDLE, HANDLE_FLAG_INHERIT, SetHandleInformation};
+    use windows::Win32::Security::SECURITY_ATTRIBUTES;
+    use windows::Win32::System::Pipes::CreatePipe;
+    use windows::Win32::System::Threading::{
+        CREATE_BREAKAWAY_FROM_JOB, CREATE_NEW_PROCESS_GROUP, CreateProcessW, DETACHED_PROCESS,
+        DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT,
+        InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST,
+        PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROCESS_INFORMATION, STARTF_USESTDHANDLES,
+        STARTUPINFOEXW, UpdateProcThreadAttribute,
+    };
+    use windows::core::{PCWSTR, PWSTR};
+
+    let mut pipe_read = HANDLE::default();
+    let mut pipe_write = HANDLE::default();
+    let security = SECURITY_ATTRIBUTES {
+        nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+        bInheritHandle: true.into(),
+        ..SECURITY_ATTRIBUTES::default()
+    };
+    unsafe { CreatePipe(&mut pipe_read, &mut pipe_write, Some(&security), 0) }
+        .context("creating detached server bootstrap pipe")?;
+    let stdout = unsafe { std::fs::File::from_raw_handle(pipe_read.0) };
+    let pipe_writer = unsafe { std::fs::File::from_raw_handle(pipe_write.0) };
+    let stdin = std::fs::OpenOptions::new().read(true).open("NUL")?;
+    let stderr = std::fs::OpenOptions::new().write(true).open("NUL")?;
+    for file in [&stdin, &stderr] {
+        unsafe {
+            SetHandleInformation(
+                HANDLE(file.as_raw_handle()),
+                HANDLE_FLAG_INHERIT.0,
+                HANDLE_FLAG_INHERIT,
+            )
+        }
+        .context("making detached server NUL handles inheritable")?;
+    }
+
+    let handles = [
+        HANDLE(stdin.as_raw_handle()),
+        HANDLE(pipe_writer.as_raw_handle()),
+        HANDLE(stderr.as_raw_handle()),
+    ];
+    let mut attribute_bytes = 0;
+    let _ = unsafe { InitializeProcThreadAttributeList(None, 1, None, &mut attribute_bytes) };
+    anyhow::ensure!(
+        attribute_bytes != 0,
+        "detached server handle list has no size"
+    );
+    let mut storage = vec![0usize; attribute_bytes.div_ceil(std::mem::size_of::<usize>())];
+    let attributes = LPPROC_THREAD_ATTRIBUTE_LIST(storage.as_mut_ptr().cast());
+    unsafe { InitializeProcThreadAttributeList(Some(attributes), 1, None, &mut attribute_bytes) }
+        .context("initializing detached server handle list")?;
+    let spawn_result: Result<DetachedChild> = (|| {
+        unsafe {
+            UpdateProcThreadAttribute(
+                attributes,
+                0,
+                PROC_THREAD_ATTRIBUTE_HANDLE_LIST as usize,
+                Some(handles.as_ptr().cast()),
+                std::mem::size_of_val(&handles),
+                None,
+                None,
+            )
+        }
+        .context("restricting detached server inherited handles")?;
+        let mut startup = STARTUPINFOEXW::default();
+        startup.StartupInfo.cb = std::mem::size_of::<STARTUPINFOEXW>() as u32;
+        startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+        startup.StartupInfo.hStdInput = handles[0];
+        startup.StartupInfo.hStdOutput = handles[1];
+        startup.StartupInfo.hStdError = handles[2];
+        startup.lpAttributeList = attributes;
+        let exe_wide = wide_null(exe.as_os_str());
+        let mut command_line = child_command_line(exe.as_os_str(), args);
+        let flags = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | EXTENDED_STARTUPINFO_PRESENT;
+        let mut process = PROCESS_INFORMATION::default();
+        let mut spawn = |flags, process: &mut PROCESS_INFORMATION| unsafe {
+            CreateProcessW(
+                PCWSTR(exe_wide.as_ptr()),
+                Some(PWSTR(command_line.as_mut_ptr())),
+                None,
+                None,
+                true,
+                flags,
+                None,
+                PCWSTR::null(),
+                &startup.StartupInfo,
+                process,
+            )
+        };
+        // OpenSSH uses a job for session cleanup. A child left in that job
+        // cannot outlive the bootstrap; a local launch can use the fallback.
+        if let Err(error) = spawn(flags | CREATE_BREAKAWAY_FROM_JOB, &mut process) {
+            anyhow::ensure!(
+                std::env::var_os("SSH_CONNECTION").is_none(),
+                "Windows SSH job prevents detaching zosh-server: {error}"
+            );
+            spawn(flags, &mut process).context("spawning detached Windows zosh-server child")?;
+        }
+        Ok(DetachedChild {
+            process: process.hProcess,
+            thread: process.hThread,
+        })
+    })();
+    unsafe { DeleteProcThreadAttributeList(attributes) };
+    let child = spawn_result?;
+    drop(pipe_writer);
+    Ok((stdout, child))
+}
+
+#[cfg(windows)]
+fn wide_null(value: &std::ffi::OsStr) -> Vec<u16> {
+    value.encode_wide().chain(std::iter::once(0)).collect()
+}
+
+#[cfg(windows)]
+fn child_command_line(exe: &std::ffi::OsStr, args: &[OsString]) -> Vec<u16> {
+    let mut result = Vec::new();
+    for word in std::iter::once(exe).chain(args.iter().map(OsString::as_os_str)) {
+        if !result.is_empty() {
+            result.push(b' ' as u16);
+        }
+        result.extend(quote_windows_word(word));
+    }
+    result.push(0);
+    result
+}
+
+#[cfg(windows)]
+fn quote_windows_word(word: &std::ffi::OsStr) -> Vec<u16> {
+    let units = word.encode_wide().collect::<Vec<_>>();
+    let mut quoted = vec![b'"' as u16];
+    let mut slashes = 0;
+    for unit in units {
+        if unit == b'\\' as u16 {
+            slashes += 1;
+            continue;
+        }
+        if unit == b'"' as u16 {
+            quoted.extend(std::iter::repeat_n(b'\\' as u16, slashes * 2 + 1));
+        } else {
+            quoted.extend(std::iter::repeat_n(b'\\' as u16, slashes));
+        }
+        quoted.push(unit);
+        slashes = 0;
+    }
+    quoted.extend(std::iter::repeat_n(b'\\' as u16, slashes * 2));
+    quoted.push(b'"' as u16);
+    quoted
 }
 
 /// Release the bootstrap pipe after the child has printed its endpoint.

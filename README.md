@@ -72,7 +72,8 @@ remote server is clearly usable.
 `zosh --forward-agent USER@HOST` forwards the selected local SSH agent through
 the bundled server. On Windows the client can use the OpenSSH service pipe even
 when `SSH_AUTH_SOCK` is unset, and a Windows host can run `zosh-server.exe`
-through either cmd or PowerShell as its SSH default shell.
+through either cmd or PowerShell as its SSH default shell. On Windows, Zosh
+starts the configured OpenSSH `DefaultShell` for interactive sessions.
 
 A remote zmux session can carry its panes the same way. Its control traffic —
 listing, attaching, spawning panes, layout and exit reports — is framed JSON

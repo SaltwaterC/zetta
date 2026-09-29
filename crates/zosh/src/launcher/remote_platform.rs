@@ -70,7 +70,12 @@ pub(super) fn windows_bootstrap_command(
     target: &str,
     colors: u16,
 ) -> Result<(String, Vec<String>)> {
-    let (program, arguments) = ssh_base_command(command, false);
+    let (program, mut arguments) = ssh_base_command(command, false);
+    // Win32 OpenSSH's PTY path can swallow the bootstrap line. The server
+    // creates its own ConPTY after SSH exits, so the bootstrap needs no PTY.
+    *arguments
+        .last_mut()
+        .expect("ssh_base_command adds PTY mode") = "-T".to_owned();
     let mut arguments = if command.forward_agent {
         without_native_agent_forwarding(arguments)
     } else {

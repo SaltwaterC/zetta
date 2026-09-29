@@ -1,5 +1,20 @@
 use super::*;
 
+#[cfg(windows)]
+#[test]
+fn default_command_uses_openssh_shell_when_configured() {
+    let Some(shell) = windows_ssh_default_shell() else {
+        return;
+    };
+    let command = build_command(&Config::default());
+    assert_eq!(command.get_argv(), &[shell]);
+    let explicit = Config {
+        command: vec!["custom-shell.exe".into()],
+        ..Config::default()
+    };
+    assert_eq!(build_command(&explicit).get_argv(), &explicit.command);
+}
+
 #[test]
 fn udp_port_candidates_start_randomly_and_wrap_the_complete_range() {
     let ports = (0..4)

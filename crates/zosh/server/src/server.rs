@@ -856,10 +856,58 @@ fn kill_pty(pty: &mut Option<PtySession>, wait: bool) {
 
 fn build_command(cfg: &Config) -> CommandBuilder {
     if cfg.command.is_empty() {
+        #[cfg(windows)]
+        if let Some(shell) = windows_ssh_default_shell() {
+            return CommandBuilder::new(shell);
+        }
         CommandBuilder::new_default_prog()
     } else {
         CommandBuilder::from_argv(cfg.command.clone())
     }
+}
+
+/// Match the shell configured for an ordinary Windows OpenSSH login.
+#[cfg(windows)]
+fn windows_ssh_default_shell() -> Option<std::ffi::OsString> {
+    use windows::Win32::Foundation::ERROR_SUCCESS;
+    use windows::Win32::System::Registry::{
+        HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ, RRF_SUBKEY_WOW6464KEY, RegGetValueW,
+    };
+    use windows::core::w;
+
+    let flags = RRF_RT_REG_SZ | RRF_SUBKEY_WOW6464KEY;
+    let mut size = 0;
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_LOCAL_MACHINE,
+            w!("SOFTWARE\\OpenSSH"),
+            w!("DefaultShell"),
+            flags,
+            None,
+            None,
+            Some(&mut size),
+        )
+    };
+    if status != ERROR_SUCCESS || size < 2 || size % 2 != 0 {
+        return None;
+    }
+    let mut value = vec![0u16; size as usize / 2];
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_LOCAL_MACHINE,
+            w!("SOFTWARE\\OpenSSH"),
+            w!("DefaultShell"),
+            flags,
+            None,
+            Some(value.as_mut_ptr().cast()),
+            Some(&mut size),
+        )
+    };
+    if status != ERROR_SUCCESS {
+        return None;
+    }
+    let end = value.iter().position(|unit| *unit == 0)?;
+    (end > 0).then(|| std::ffi::OsString::from(String::from_utf16_lossy(&value[..end])))
 }
 
 fn configure_child_environment(

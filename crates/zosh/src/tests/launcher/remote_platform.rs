@@ -41,10 +41,11 @@ fn windows_command_passes_server_arguments_without_shell_interpolation() {
 }
 
 #[test]
-fn windows_bootstrap_keeps_ssh_stdin_for_pty_sessions() {
+fn windows_bootstrap_disables_ssh_pty() {
     let command = MoshCommand::default();
     let (_, arguments) = windows_bootstrap_command(&command, "windows-host", 256).unwrap();
-    assert!(arguments.contains(&"-tt".to_owned()));
+    assert!(arguments.contains(&"-T".to_owned()));
+    assert!(!arguments.contains(&"-tt".to_owned()));
     assert!(!arguments.contains(&"-n".to_owned()));
 }
 
