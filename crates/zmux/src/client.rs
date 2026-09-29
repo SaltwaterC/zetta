@@ -208,6 +208,11 @@ pub struct SharedPane {
     /// a ready connection between the pane and its reader; no network read is
     /// performed while it is held.
     reader_handoffs: Arc<Mutex<VecDeque<SharedReaderHandoff>>>,
+    /// Set by the reader when its connection broke and no replacement was
+    /// waiting, cleared when one is installed. A window's recovery is told
+    /// by the daemon and supplies the replacement itself; a holder without
+    /// that subscription — `zmux relay-pane` — has only this to go on.
+    stream_lost: Arc<AtomicBool>,
     /// Output produced while the pane was detached or shared, to be replayed
     /// into a fresh terminal before it is shown.
     pub replay: Vec<u8>,
@@ -293,8 +298,15 @@ impl SharedPane {
             size_application_pending: self.size_application_pending.clone(),
             pending_size_frame: self.pending_size_frame.clone(),
             reader_handoffs: self.reader_handoffs.clone(),
+            stream_lost: self.stream_lost.clone(),
             reconnect_replay: VecDeque::new(),
         }
+    }
+
+    /// Whether the stream broke with nothing to replace it yet. See
+    /// [`Self::replace_connection_from`] for what repairs it.
+    pub fn stream_lost(&self) -> bool {
+        self.stream_lost.load(Ordering::Acquire)
     }
 
     /// Replaces a failed relay while the terminal's reader remains alive. The
@@ -422,6 +434,7 @@ impl SharedPane {
             size_application_pending: Arc::new(AtomicBool::new(false)),
             pending_size_frame: Arc::new(Mutex::new(None)),
             reader_handoffs: Arc::new(Mutex::new(VecDeque::new())),
+            stream_lost: Arc::new(AtomicBool::new(false)),
             replay,
         }
     }
@@ -446,6 +459,7 @@ pub struct SharedReader {
     size_application_pending: Arc<AtomicBool>,
     pending_size_frame: Arc<Mutex<Option<(SessionRevision, u16, u16)>>>,
     reader_handoffs: Arc<Mutex<VecDeque<SharedReaderHandoff>>>,
+    stream_lost: Arc<AtomicBool>,
     reconnect_replay: VecDeque<u8>,
 }
 
@@ -498,9 +512,7 @@ impl io::Read for SharedReader {
                             if self.install_next_handoff() {
                                 continue;
                             }
-                            if is_would_block(&error) || is_closed(&error) {
-                                return Err(io::Error::from(io::ErrorKind::WouldBlock));
-                            }
+                            self.note_failure(&error);
                             return Err(io::Error::from(io::ErrorKind::WouldBlock));
                         }
                     };
@@ -555,9 +567,7 @@ impl io::Read for SharedReader {
                     if self.install_next_handoff() {
                         continue;
                     }
-                    if is_would_block(&error) || is_closed(&error) {
-                        return Err(io::Error::from(io::ErrorKind::WouldBlock));
-                    }
+                    self.note_failure(&error);
                     return Err(io::Error::from(io::ErrorKind::WouldBlock));
                 }
             }
@@ -581,7 +591,18 @@ impl SharedReader {
         };
         self.connection = Some(handoff.connection);
         self.reconnect_replay.extend(handoff.replay);
+        self.stream_lost.store(false, Ordering::Release);
         true
+    }
+
+    /// Records a connection that failed for real rather than timing out.
+    /// Either way the caller is told `WouldBlock`, so a holder waiting for a
+    /// replacement keeps polling; this is how one that has to make its own
+    /// replacement finds out it must.
+    fn note_failure(&self, error: &anyhow::Error) {
+        if !is_would_block(error) {
+            self.stream_lost.store(true, Ordering::Release);
+        }
     }
 }
 
@@ -601,6 +622,7 @@ fn is_would_block(error: &anyhow::Error) -> bool {
 
 /// Whether a connection error is the peer having finished, rather than anything
 /// having gone wrong.
+#[cfg(unix)]
 fn is_closed(error: &anyhow::Error) -> bool {
     error.chain().any(|cause| {
         cause

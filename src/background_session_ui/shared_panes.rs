@@ -375,20 +375,20 @@ impl Zetta {
         terminal: &Entity<Terminal>,
         cx: &mut Context<Self>,
     ) {
-        let Some(pane) = self
-            .shared_panes
-            .get(&pane_id)
-            .map(|entry| entry.pane.clone())
-        else {
+        let Some((pane, key)) = self.shared_panes.get(&pane_id).map(|entry| {
+            (
+                entry.pane.clone(),
+                crate::mux::SharedSessionKey::new(&entry.runtime, entry.pane.session_id()),
+            )
+        }) else {
             return;
         };
-        let session_id = pane.session_id();
-        if !self.shared_collaboration.may_report_size(session_id) {
+        if !self.shared_collaboration.may_report_size(&key) {
             return;
         }
         let Some(revision) = self
             .shared_collaboration
-            .state(session_id)
+            .state(&key)
             .map(|state| state.revision)
         else {
             return;

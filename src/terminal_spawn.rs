@@ -1,6 +1,8 @@
 use super::*;
 #[cfg(feature = "zmux")]
 use crate::mux::MuxPaneIds;
+#[cfg(feature = "zmux")]
+use crate::mux::SharedSessionKey;
 use crate::worktree_detection::terminal_event_requires_worktree_detection;
 
 /// PowerShell loads its integration from the command passed at process start,
@@ -1292,10 +1294,10 @@ impl Zetta {
         #[cfg(feature = "zmux")]
         if let Some(provider) = mux_provider.as_ref().filter(|provider| {
             provider
-                .session_id()
-                .is_some_and(|session_id| self.shared_collaboration.is_bound(session_id))
+                .shared_key()
+                .is_some_and(|key| self.shared_collaboration.is_bound(&key))
         }) {
-            let Some(session_id) = provider.session_id() else {
+            let Some(key) = provider.shared_key() else {
                 self.report_pane_spawn_error(
                     tab_id,
                     pane_id,
@@ -1306,7 +1308,7 @@ impl Zetta {
             };
             let base_revision = self
                 .shared_collaboration
-                .state(session_id)
+                .state(&key)
                 .map_or(zmux::messages::SessionRevision::INITIAL, |state| {
                     state.revision
                 });
@@ -1600,8 +1602,10 @@ impl Zetta {
         if let Some(zmux::messages::SharedPaneRef::Existing { pane_id }) = active_pane {
             named.push(pane_id);
         }
-        let session_id = provider.session_id();
-        if !session_id.is_some_and(|session_id| self.shared_geometry_is_current(session_id, &named))
+        let key = provider.shared_key();
+        if !key
+            .as_ref()
+            .is_some_and(|key| self.shared_geometry_is_current(key, &named))
         {
             self.discard_uncommitted_shared_pane(
                 tab_id,
@@ -1620,10 +1624,18 @@ impl Zetta {
         // that did not write it has no way to know what it is looking at.
         let daemon_loads_shell_integration = shell_integration_startup_command.is_some();
         let shell_integration_startup_command = None;
+        let spawn_tab = self.tabs.iter().find(|tab| tab.id == tab_id);
         let stand_in_size = shared_spawn_stand_in_size(
-            self.tabs.iter().find(|tab| tab.id == tab_id),
+            spawn_tab,
             target_pane_id
-                .and_then(|mux_pane_id| self.mux_panes.local_pane_id(mux_pane_id))
+                .and_then(|mux_pane_id| {
+                    self.mux_panes.local_pane_id_among(
+                        spawn_tab
+                            .into_iter()
+                            .flat_map(|tab| tab.panes.iter().map(|pane| pane.id)),
+                        mux_pane_id,
+                    )
+                })
                 .unwrap_or(pane_id),
             cx,
         );
@@ -1798,7 +1810,9 @@ impl Zetta {
                         // The snapshot first: it is the session as it is, and
                         // applying it is what makes the retry below propose
                         // something the session can actually accept.
-                        this.apply_shared_snapshot(state.session_id, *state, window, cx);
+                        if let Some(key) = &key {
+                            this.apply_shared_snapshot(key, *state, window, cx);
+                        }
                         let Some(mut retry) = retry else {
                             this.discard_uncommitted_shared_pane(
                                 tab_id,
@@ -1811,12 +1825,11 @@ impl Zetta {
                         // Rebased on what the session is at now. The revision
                         // the launch was built with belongs to the picture that
                         // has just been replaced.
-                        if let Some(revision) = retry
-                            .provider
-                            .session_id()
-                            .and_then(|session_id| this.shared_collaboration.state(session_id))
-                            .map(|state| state.revision)
-                        {
+                        if let Some(revision) = retry.provider.shared_key().and_then(|key| {
+                            this.shared_collaboration
+                                .state(&key)
+                                .map(|state| state.revision)
+                        }) {
                             retry.base_revision = revision;
                         }
                         this.spawn_shared_terminal_now(retry, window, cx);
@@ -1829,7 +1842,9 @@ impl Zetta {
                     state,
                 }) => {
                     this.update_in(cx, |this, window, cx| {
-                        this.apply_shared_snapshot(state.session_id, *state, window, cx);
+                        if let Some(key) = &key {
+                            this.apply_shared_snapshot(key, *state, window, cx);
+                        }
                         this.discard_uncommitted_shared_pane(
                             tab_id,
                             pane_id,
@@ -1918,8 +1933,8 @@ impl Zetta {
         }
         let current = launches[0]
             .provider
-            .session_id()
-            .is_some_and(|session_id| self.shared_geometry_is_current(session_id, &named));
+            .shared_key()
+            .is_some_and(|key| self.shared_geometry_is_current(&key, &named));
         if !current {
             for launch in &launches {
                 self.discard_uncommitted_shared_pane(
@@ -1995,6 +2010,7 @@ impl Zetta {
             panes,
             active_pane: Some(active_pane),
         };
+        let daemon = runtime.daemon();
         let build = executor.spawn(async move {
             build_shared_terminal_batch(launches, runtime, request, &terminal_executor)
         });
@@ -2005,16 +2021,20 @@ impl Zetta {
                 mut terminals,
             }) => {
                 this.update_in(cx, |this, window, cx| {
+                    let key = SharedSessionKey {
+                        daemon: daemon.clone(),
+                        session_id,
+                    };
                     for (_, spawned) in &terminals {
                         let pane = spawned.shared_pane.as_ref().expect("batch pane is shared");
                         this.mux_panes.record(spawned.pane_id, pane.pane_id());
                         this.shared_collaboration.record_pane(
-                            session_id,
+                            &key,
                             pane.pane_id(),
                             spawned.pane_id,
                         );
                     }
-                    this.apply_shared_snapshot(session_id, state, window, cx);
+                    this.apply_shared_snapshot(&key, state, window, cx);
                     for (builder, spawned) in terminals.drain(..) {
                         this.finish_terminal_spawn(builder, spawned, window, cx);
                     }
@@ -2031,7 +2051,11 @@ impl Zetta {
                         "shared session {} refused this window's pane batch: {reason}",
                         state.session_id
                     );
-                    this.apply_shared_snapshot(state.session_id, state, window, cx);
+                    let key = SharedSessionKey {
+                        daemon: daemon.clone(),
+                        session_id: state.session_id,
+                    };
+                    this.apply_shared_snapshot(&key, state, window, cx);
                     for (tab_id, pane_id) in panes {
                         this.discard_uncommitted_shared_pane(
                             tab_id,
@@ -2047,7 +2071,11 @@ impl Zetta {
             }
             Ok(SharedTerminalBatchBuild::Conflict { state, panes }) => {
                 this.update_in(cx, |this, window, cx| {
-                    this.apply_shared_snapshot(state.session_id, state, window, cx);
+                    let key = SharedSessionKey {
+                        daemon: daemon.clone(),
+                        session_id: state.session_id,
+                    };
+                    this.apply_shared_snapshot(&key, state, window, cx);
                     for (tab_id, pane_id) in panes {
                         this.discard_uncommitted_shared_pane(
                             tab_id,
@@ -2234,16 +2262,17 @@ impl Zetta {
                 runtime.clone(),
             );
             self.mux_panes.record(pane_id, mux_pane_id);
+            let key = SharedSessionKey::new(runtime, shared_pane.session_id());
             self.shared_collaboration
-                .record_pane(shared_pane.session_id(), mux_pane_id, pane_id);
+                .record_pane(&key, mux_pane_id, pane_id);
             if let Some(state) = shared_state {
                 let _ = self.shared_collaboration.accept_pane_added(
-                    shared_pane.session_id(),
+                    &key,
                     state.clone(),
                     mux_pane_id,
                     pane_id,
                 );
-                self.apply_shared_snapshot(shared_pane.session_id(), state, window, cx);
+                self.apply_shared_snapshot(&key, state, window, cx);
             }
         }
         let this = self;

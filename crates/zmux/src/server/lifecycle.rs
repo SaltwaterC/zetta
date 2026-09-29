@@ -381,6 +381,30 @@ fn prepare_pane_agent_links(pane_id: u64, fallback_target: &Path) {
     }
 }
 
+/// Removes the pair of links [`prepare_pane_agent_links`] made for a pane.
+///
+/// Called where the daemon discards a pane, and nowhere else: not from a
+/// `Drop`, because an in-place upgrade hands live panes to its replacement and
+/// the old process must not take their links with it. Before this, every pane
+/// a daemon had ever started left its two links behind in the session
+/// directory.
+#[cfg(unix)]
+pub(super) fn remove_pane_agent_links(pane_id: u64) {
+    for path in [
+        crate::paths::pane_forwarded_agent_socket(pane_id),
+        crate::paths::pane_forwarded_agent_fallback(pane_id),
+    ] {
+        if let Err(error) = std::fs::remove_file(&path)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            log::debug!("could not remove {}: {error}", path.display());
+        }
+    }
+}
+
+#[cfg(not(unix))]
+pub(super) fn remove_pane_agent_links(_pane_id: u64) {}
+
 fn close_provisional_shared_panes(daemon: &Arc<Daemon>, panes: Vec<ProvisionalSharedPane>) {
     #[cfg(not(windows))]
     let _ = daemon;
@@ -876,6 +900,9 @@ fn commit_shared_batch(
         .panes
         .retain(|pane| !removed.contains(&pane.id));
     session.panes.retain(|pane| !removed.contains(&pane.id));
+    for pane_id in &removed {
+        remove_pane_agent_links(*pane_id);
+    }
     state.presentation.layout = next_layout;
     state.presentation.active_pane = next_active_pane;
     state
@@ -1318,6 +1345,7 @@ pub(super) fn spawn(
         sessions.retain(|session| !session.panes.is_empty());
         drop(sessions);
         drop(discarded);
+        remove_pane_agent_links(pane_id);
         #[cfg(windows)]
         let _ = daemon.pty_host.close(console_id);
         return Err(error);
@@ -2593,7 +2621,14 @@ pub(super) fn kill(
         .extract_if(.., |session| session.id == session_id)
         .collect::<Vec<_>>();
     drop(sessions);
+    let discarded_panes = discarded
+        .iter()
+        .flat_map(|session| session.panes.iter().map(|pane| pane.id))
+        .collect::<Vec<_>>();
     drop(discarded);
+    for pane_id in discarded_panes {
+        remove_pane_agent_links(pane_id);
+    }
     #[cfg(feature = "session-persistence")]
     if let Some(persistence) = daemon.persistence.lock().unwrap().as_mut() {
         persistence.forget(session_id)?;

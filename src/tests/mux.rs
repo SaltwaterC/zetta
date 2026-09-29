@@ -55,7 +55,7 @@ fn an_attached_session_is_adopted_by_the_tab_showing_it() {
 }
 
 #[test]
-fn pane_identifiers_map_both_ways_and_can_be_forgotten() {
+fn pane_identifiers_are_recorded_and_can_be_forgotten() {
     let mut panes = MuxPanes::default();
     panes.record(10, 900);
     panes.record(11, 901);
@@ -165,4 +165,41 @@ fn a_superseded_multiplexer_says_the_terminals_are_fine_and_a_restart_is_not() {
     assert!(unknown.contains("keep working"), "{unknown}");
     assert!(unknown.contains("restarted"), "{unknown}");
     assert!(!unknown.contains("protocol"), "{unknown}");
+}
+
+/// The stall a split in a local tab hit: this daemon and a remote one both
+/// number panes from 1, and recording the remote pane unmapped the local pane
+/// that shared its number — so the next split found its target with "no mux
+/// id".
+#[test]
+fn panes_on_different_daemons_with_the_same_number_are_both_kept() {
+    let mut panes = MuxPanes::default();
+    // Local pane 3 is the multiplexer's pane 1; so is remote pane 7.
+    panes.record(3, 1);
+    panes.record(7, 1);
+
+    assert_eq!(panes.mux_pane_id(3), Some(1));
+    assert_eq!(panes.mux_pane_id(7), Some(1));
+    // Looked up within one tab, the number means that tab's pane.
+    assert_eq!(panes.local_pane_id_among([3, 4], 1), Some(3));
+    assert_eq!(panes.local_pane_id_among([7], 1), Some(7));
+    assert_eq!(panes.local_pane_id_among([4], 1), None);
+}
+
+#[test]
+fn a_session_key_names_the_daemon_as_well_as_the_number() {
+    let local = SharedSessionKey {
+        daemon: MuxDaemon::Local,
+        session_id: 1,
+    };
+    let remote = SharedSessionKey {
+        daemon: MuxDaemon::Remote(std::sync::Arc::from("pi:")),
+        session_id: 1,
+    };
+    assert_ne!(local, remote);
+
+    let mut panes = MuxPanes::default();
+    panes.adopt_session(3, 1);
+    assert_eq!(panes.shared_key(3), Some(local));
+    assert_eq!(panes.shared_key(4), None);
 }

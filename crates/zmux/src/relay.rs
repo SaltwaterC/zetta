@@ -39,6 +39,14 @@
 //!   request against, so on a command line it would let any account on this
 //!   host pose as the window this relay serves. When both are read, the secret
 //!   is the first line and the viewer the second.
+//! - **A lost stream is re-attached, not the end of the pane.** The daemon
+//!   ends a viewer's stream when it gives up on it — one that has not read for
+//!   half a minute — and a window supplies the replacement itself. This relay
+//!   has nobody to do that for it, so it does it: attach again, blank the
+//!   screen, write the replay, carry on. Keystrokes typed in between are held
+//!   and sent on the new stream rather than dropped.
+//! - **Its stderr is the pane.** So nothing is printed there; warnings go to
+//!   the host's `daemon.log` alongside the daemon's own (see `logging.rs`).
 
 use std::{
     ffi::OsString,
@@ -51,7 +59,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context as _, Result};
@@ -73,6 +81,19 @@ const IDLE_POLL: Duration = Duration::from_millis(20);
 /// not be able to make this allocate without bound.
 const MAX_SECRET_BYTES: usize = 4096;
 
+/// How long a lost stream is tried for before the relay gives up and ends,
+/// which ends the pane in the viewer's window rather than leaving it frozen.
+const REATTACH_PATIENCE: Duration = Duration::from_secs(60);
+
+/// Between two attempts to re-attach, and between two attempts to resend
+/// input while the stream is being replaced.
+const RETRY_INTERVAL: Duration = Duration::from_millis(200);
+
+/// A write to the terminal slower than this is logged. The daemon gives up on
+/// a viewer that reads nothing for 30 seconds, and a relay reads nothing while
+/// it is blocked writing — so this is what says why it did.
+const SLOW_WRITE: Duration = Duration::from_secs(1);
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RelayOptions {
     pub session_id: u64,
@@ -93,6 +114,7 @@ pub struct RelayOptions {
 /// Returns when the pane closes, which is what ends the Mosh session in front
 /// of it and, in turn, the pane in the viewer's window.
 pub fn run(options: RelayOptions) -> Result<()> {
+    crate::logging::init_daemon_log(&crate::paths::session_catalog_dir());
     // Raw mode first: the secret below must not be echoed back into the
     // terminal that is about to display this pane. It is not enough on its own
     // — the prelude can arrive before this process does — which is what
@@ -130,7 +152,7 @@ pub fn run(options: RelayOptions) -> Result<()> {
     // Kept on the client, so the snapshot each size report is stamped from is
     // authorized on a protected session the same way the attach was.
     client.set_session_secret(secret.as_ref());
-    let (pane, revision) = attach(&client, options, secret.as_ref(), viewer)?;
+    let (pane, revision) = attach(&client, options, secret.as_ref(), viewer.clone())?;
     let pane = Arc::new(pane);
 
     stdout
@@ -144,6 +166,12 @@ pub fn run(options: RelayOptions) -> Result<()> {
         session_id: options.session_id,
         revision,
     };
+    let reattach = Reattach {
+        options,
+        secret: secret.as_ref(),
+        viewer,
+        input_lost: Arc::new(AtomicBool::new(false)),
+    };
     // Sent from here rather than through [`SizeReports::report_terminal_size`]:
     // the attach just read this revision, and a relay that cannot report a size
     // at all has nothing to relay, so this one is fatal where a later one is not.
@@ -155,10 +183,103 @@ pub fn run(options: RelayOptions) -> Result<()> {
     signal_hook::flag::register(signal_hook::consts::SIGWINCH, Arc::clone(&resized))
         .context("watching for terminal size changes")?;
 
-    forward_input(Arc::clone(&pane));
-    let result = forward_output(&mut sizes, &resized, &mut stdout);
+    let ending = Arc::new(AtomicBool::new(false));
+    forward_input(
+        Arc::clone(&pane),
+        Arc::clone(&reattach.input_lost),
+        Arc::clone(&ending),
+    );
+    let result = forward_output(&mut sizes, &reattach, &resized, &mut stdout);
+    ending.store(true, Ordering::Release);
+    if let Err(error) = &result {
+        log::warn!(
+            "relaying session {} pane {} ended: {error:#}",
+            options.session_id,
+            options.pane_id
+        );
+    }
     drop(raw_mode);
     result
+}
+
+/// What it takes to attach the pane again after its stream is lost.
+struct Reattach<'a> {
+    options: RelayOptions,
+    secret: Option<&'a SessionSecret>,
+    viewer: Option<ClientId>,
+    /// Set by the input thread when a keystroke could not be sent: a stream
+    /// can break while nothing is being output, and this is how the output
+    /// side hears of it.
+    input_lost: Arc<AtomicBool>,
+}
+
+impl Reattach<'_> {
+    fn needed(&self, pane: &SharedPane) -> bool {
+        pane.stream_lost() || self.input_lost.load(Ordering::Acquire)
+    }
+
+    /// Attaches the pane again and hands the new stream to the reader, with
+    /// the screen blanked so the replay repaints it from nothing. Keeps trying
+    /// for [`REATTACH_PATIENCE`]; a pane that has gone meanwhile ends the relay
+    /// the way it ends any other time.
+    fn run(&self, sizes: &mut SizeReports<'_>, stdout: &mut impl io::Write) -> Result<Continue> {
+        let SizeReports {
+            client,
+            pane,
+            session_id,
+            ..
+        } = *sizes;
+        log::warn!(
+            "relaying session {session_id} pane {}: the stream was lost; attaching again",
+            pane.pane_id()
+        );
+        let deadline = Instant::now() + REATTACH_PATIENCE;
+        loop {
+            match attach(client, self.options, self.secret, self.viewer.clone()) {
+                Ok((replacement, revision)) => {
+                    blank_the_screen(stdout)?;
+                    pane.replace_connection_from(&replacement)
+                        .context("installing the re-attached stream")?;
+                    self.input_lost.store(false, Ordering::Release);
+                    sizes.revision = revision;
+                    // The new attachment is unmeasured until it reports.
+                    sizes.report_terminal_size();
+                    log::warn!(
+                        "relaying session {session_id} pane {}: attached again",
+                        pane.pane_id()
+                    );
+                    return Ok(Continue::Relaying);
+                }
+                Err(error) if pane_is_gone(&error) => {
+                    log::warn!(
+                        "relaying session {session_id} pane {}: the pane has gone: {error:#}",
+                        pane.pane_id()
+                    );
+                    return Ok(Continue::Ended);
+                }
+                Err(error) if Instant::now() < deadline => {
+                    log::debug!("re-attaching the relayed pane failed, retrying: {error:#}");
+                    thread::sleep(RETRY_INTERVAL);
+                }
+                Err(error) => {
+                    return Err(error).context("re-attaching the relayed pane");
+                }
+            }
+        }
+    }
+}
+
+enum Continue {
+    Relaying,
+    Ended,
+}
+
+/// Whether an attach failed because there is no longer a pane to attach.
+fn pane_is_gone(error: &anyhow::Error) -> bool {
+    let message = format!("{error:#}");
+    message.contains("does not exist")
+        || message.contains("has no pane")
+        || message.contains("has ended")
 }
 
 /// A stable daemon path pointing at this relay's private Zosh agent socket.
@@ -290,18 +411,28 @@ fn attach(
 
 /// Input runs on its own thread because its read blocks: the pane's output has
 /// to keep flowing while nobody is typing.
-fn forward_input(pane: Arc<SharedPane>) {
+///
+/// A keystroke that cannot be sent is held, not dropped: the stream is being
+/// replaced (see [`Reattach`]), and the writer it is sent through follows the
+/// replacement. Giving up on the first failure used to end this thread, and
+/// with it every keystroke the pane would ever get.
+fn forward_input(pane: Arc<SharedPane>, input_lost: Arc<AtomicBool>, ending: Arc<AtomicBool>) {
     thread::spawn(move || {
         let mut stdin = io::stdin();
         let mut bytes = [0_u8; 4096];
         loop {
-            match stdin.read(&mut bytes) {
+            let count = match stdin.read(&mut bytes) {
                 Ok(0) | Err(_) => return,
-                Ok(count) => {
-                    if pane.send_input(&bytes[..count]).is_err() {
-                        return;
-                    }
+                Ok(count) => count,
+            };
+            let deadline = Instant::now() + REATTACH_PATIENCE;
+            while let Err(error) = pane.send_input(&bytes[..count]) {
+                if ending.load(Ordering::Acquire) || Instant::now() >= deadline {
+                    log::warn!("dropping relayed input after the stream was lost: {error:#}");
+                    return;
                 }
+                input_lost.store(true, Ordering::Release);
+                thread::sleep(RETRY_INTERVAL);
             }
         }
     });
@@ -361,7 +492,7 @@ impl SizeReports<'_> {
             // A report can lose a race with a layout change, and the next one
             // carries the newer revision. Losing the pane over it would be
             // worse than the size being briefly wrong.
-            eprintln!("zmux relay-pane: could not report the terminal size: {error:#}");
+            log::warn!("relay-pane could not report the terminal size: {error:#}");
         }
     }
 
@@ -386,6 +517,7 @@ impl SizeReports<'_> {
 /// reporting a size change whenever one arrives.
 fn forward_output(
     sizes: &mut SizeReports<'_>,
+    reattach: &Reattach<'_>,
     resized: &AtomicBool,
     stdout: &mut impl io::Write,
 ) -> Result<()> {
@@ -398,18 +530,41 @@ fn forward_output(
         }
         match reader.read(&mut bytes) {
             Ok(0) => return Ok(()),
-            Ok(count) => stdout
-                .write_all(&bytes[..count])
-                .and_then(|()| stdout.flush())
-                .context("writing the pane's output")?,
+            Ok(count) => write_output(stdout, &bytes[..count])?,
             // The shared reader reports every recoverable stall this way,
-            // including its own read timeout; only an ended pane is an end.
+            // including its own read timeout and a stream that broke with no
+            // replacement yet; only an ended pane is an end.
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                if reattach.needed(sizes.pane) {
+                    match reattach.run(sizes, stdout)? {
+                        Continue::Relaying => continue,
+                        Continue::Ended => return Ok(()),
+                    }
+                }
                 thread::sleep(IDLE_POLL);
             }
             Err(error) => return Err(error).context("reading the pane's output"),
         }
     }
+}
+
+/// Writes to the terminal `zosh-server` gave this relay, saying so when that
+/// took long enough to matter: while it blocks, nothing reads the pane.
+fn write_output(stdout: &mut impl io::Write, bytes: &[u8]) -> Result<()> {
+    let started = Instant::now();
+    stdout
+        .write_all(bytes)
+        .and_then(|()| stdout.flush())
+        .context("writing the pane's output")?;
+    let took = started.elapsed();
+    if took >= SLOW_WRITE {
+        log::warn!(
+            "writing {} bytes of pane output to the Mosh terminal took {took:?}; the pane was \
+             not read meanwhile",
+            bytes.len()
+        );
+    }
+    Ok(())
 }
 
 /// Reads one line from stdin, which is already in raw mode, so this stops at

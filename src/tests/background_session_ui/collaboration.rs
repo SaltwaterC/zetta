@@ -1,5 +1,13 @@
 use super::*;
 
+/// A session on this window's own daemon, as the tests' sessions all are.
+fn local(session_id: u64) -> SharedSessionKey {
+    SharedSessionKey {
+        daemon: crate::mux::MuxDaemon::Local,
+        session_id,
+    }
+}
+
 fn pane_summary(id: u64) -> BackgroundPaneSummary {
     BackgroundPaneSummary {
         id,
@@ -121,32 +129,32 @@ fn two_pane_tab() -> Tab {
 fn stable_mux_ids_are_mapped_to_local_pane_ids() {
     let mut coordinator = SharedSessionCoordinator::default();
     coordinator
-        .bind(9, 100, shared_state(9, 1), [(41, 7)])
+        .bind(&local(9), 100, shared_state(9, 1), [(41, 7)])
         .unwrap();
 
-    assert_eq!(coordinator.local_pane_id(9, 41), Some(7));
-    assert_eq!(coordinator.mux_pane_id(9, 7), Some(41));
+    assert_eq!(coordinator.local_pane_id(&local(9), 41), Some(7));
+    assert_eq!(coordinator.mux_pane_id(&local(9), 7), Some(41));
 
-    coordinator.record_pane(9, 42, 8);
-    assert_eq!(coordinator.local_pane_id(9, 42), Some(8));
-    coordinator.record_pane(9, 42, 9);
-    assert_eq!(coordinator.local_pane_id(9, 42), Some(9));
-    assert_eq!(coordinator.mux_pane_id(9, 8), None);
-    assert_eq!(coordinator.remove_pane(9, 42), Some(9));
-    assert_eq!(coordinator.local_pane_id(9, 42), None);
+    coordinator.record_pane(&local(9), 42, 8);
+    assert_eq!(coordinator.local_pane_id(&local(9), 42), Some(8));
+    coordinator.record_pane(&local(9), 42, 9);
+    assert_eq!(coordinator.local_pane_id(&local(9), 42), Some(9));
+    assert_eq!(coordinator.mux_pane_id(&local(9), 8), None);
+    assert_eq!(coordinator.remove_pane(&local(9), 42), Some(9));
+    assert_eq!(coordinator.local_pane_id(&local(9), 42), None);
 }
 
 #[test]
 fn canonical_snapshots_apply_with_local_ids_and_reject_stale_revisions() {
     let mut coordinator = SharedSessionCoordinator::default();
     coordinator
-        .bind(9, 100, canonical_state(9, 4), [(41, 7)])
+        .bind(&local(9), 100, canonical_state(9, 4), [(41, 7)])
         .unwrap();
 
     let mut tab = local_tab(100, 7);
     assert_eq!(
         coordinator
-            .apply_snapshot_to_tab(9, canonical_state(9, 5), &mut tab)
+            .apply_snapshot_to_tab(&local(9), canonical_state(9, 5), &mut tab)
             .unwrap(),
         SharedSnapshotDisposition::Applied
     );
@@ -156,12 +164,12 @@ fn canonical_snapshots_apply_with_local_ids_and_reject_stale_revisions() {
 
     assert_eq!(
         coordinator
-            .apply_snapshot_to_tab(9, canonical_state(9, 4), &mut tab)
+            .apply_snapshot_to_tab(&local(9), canonical_state(9, 4), &mut tab)
             .unwrap(),
         SharedSnapshotDisposition::Stale
     );
     assert_eq!(tab.custom_title.as_deref(), Some("canonical-5"));
-    assert_eq!(coordinator.state(9).unwrap().revision.0, 5);
+    assert_eq!(coordinator.state(&local(9)).unwrap().revision.0, 5);
 }
 
 /// Only `ReplaceTab` and `SetTabState` replace the daemon's copy of the opaque
@@ -173,11 +181,11 @@ fn canonical_snapshots_apply_with_local_ids_and_reject_stale_revisions() {
 fn a_geometry_only_snapshot_does_not_roll_back_unpublished_tab_state() {
     let mut coordinator = SharedSessionCoordinator::default();
     coordinator
-        .bind(9, 100, canonical_state(9, 4), [(41, 7)])
+        .bind(&local(9), 100, canonical_state(9, 4), [(41, 7)])
         .unwrap();
     let mut tab = local_tab(100, 7);
     coordinator
-        .apply_snapshot_to_tab(9, canonical_state(9, 5), &mut tab)
+        .apply_snapshot_to_tab(&local(9), canonical_state(9, 5), &mut tab)
         .unwrap();
 
     // A durable change this window has made and not published yet.
@@ -192,7 +200,7 @@ fn a_geometry_only_snapshot_does_not_roll_back_unpublished_tab_state() {
     geometry.presentation.maximized_pane = Some(41);
     assert_eq!(
         coordinator
-            .apply_snapshot_to_tab(9, geometry, &mut tab)
+            .apply_snapshot_to_tab(&local(9), geometry, &mut tab)
             .unwrap(),
         SharedSnapshotDisposition::Applied
     );
@@ -209,7 +217,7 @@ fn a_geometry_only_snapshot_does_not_roll_back_unpublished_tab_state() {
     // durable half having stopped applying altogether.
     assert_eq!(
         coordinator
-            .apply_snapshot_to_tab(9, canonical_state(9, 7), &mut tab)
+            .apply_snapshot_to_tab(&local(9), canonical_state(9, 7), &mut tab)
             .unwrap(),
         SharedSnapshotDisposition::Applied
     );
@@ -278,17 +286,19 @@ fn a_tab_the_summary_cannot_describe_still_publishes_its_durable_state() {
 fn the_same_tab_state_is_not_published_twice() {
     let mut coordinator = SharedSessionCoordinator::default();
     coordinator
-        .bind(9, 100, canonical_state(9, 4), [(41, 7)])
+        .bind(&local(9), 100, canonical_state(9, 4), [(41, 7)])
         .unwrap();
     let state = serde_json::json!({ "icon": "sparkle" });
 
     assert!(
-        coordinator.durable_state_is_unpublished(9, &state),
+        coordinator.durable_state_is_unpublished(&local(9), &state),
         "a window that has published nothing owes its first blob"
     );
-    coordinator.record_published_state(9, state.clone());
-    assert!(!coordinator.durable_state_is_unpublished(9, &state));
-    assert!(coordinator.durable_state_is_unpublished(9, &serde_json::json!({ "icon": "pin" })));
+    coordinator.record_published_state(&local(9), state.clone());
+    assert!(!coordinator.durable_state_is_unpublished(&local(9), &state));
+    assert!(
+        coordinator.durable_state_is_unpublished(&local(9), &serde_json::json!({ "icon": "pin" }))
+    );
 }
 
 /// A publication re-queues itself between its halves. Geometry the daemon will
@@ -316,17 +326,17 @@ fn a_publication_stops_re_queuing_at_its_attempt_limit() {
 fn recovery_snapshot_keeps_pending_keyboard_focus_while_applying_canonical_state() {
     let mut coordinator = SharedSessionCoordinator::default();
     coordinator
-        .bind(9, 100, two_pane_state(9, 4, 41), [(41, 7), (42, 8)])
+        .bind(&local(9), 100, two_pane_state(9, 4, 41), [(41, 7), (42, 8)])
         .unwrap();
     let mut tab = two_pane_tab();
     tab.active_pane = 8;
-    let generation = coordinator.request_focus(9, 42).unwrap();
+    let generation = coordinator.request_focus(&local(9), 42).unwrap();
 
     let mut recovery = two_pane_state(9, 4, 41);
     recovery.presentation.maximized_pane = Some(41);
     assert_eq!(
         coordinator
-            .apply_snapshot_to_tab(9, recovery, &mut tab)
+            .apply_snapshot_to_tab(&local(9), recovery, &mut tab)
             .unwrap(),
         SharedSnapshotDisposition::Applied
     );
@@ -339,27 +349,27 @@ fn recovery_snapshot_keeps_pending_keyboard_focus_while_applying_canonical_state
         Some(7),
         "canonical metadata still applies"
     );
-    assert!(coordinator.focus_intent_is_current(9, 42, generation));
+    assert!(coordinator.focus_intent_is_current(&local(9), 42, generation));
 }
 
 #[test]
 fn focus_acknowledgement_clears_the_intent_and_later_canonical_focus_wins() {
     let mut coordinator = SharedSessionCoordinator::default();
     coordinator
-        .bind(9, 100, two_pane_state(9, 4, 41), [(41, 7), (42, 8)])
+        .bind(&local(9), 100, two_pane_state(9, 4, 41), [(41, 7), (42, 8)])
         .unwrap();
     let mut tab = two_pane_tab();
     tab.active_pane = 8;
-    let generation = coordinator.request_focus(9, 42).unwrap();
+    let generation = coordinator.request_focus(&local(9), 42).unwrap();
 
     coordinator
-        .apply_snapshot_to_tab(9, two_pane_state(9, 5, 42), &mut tab)
+        .apply_snapshot_to_tab(&local(9), two_pane_state(9, 5, 42), &mut tab)
         .unwrap();
-    assert!(!coordinator.focus_intent_is_current(9, 42, generation));
+    assert!(!coordinator.focus_intent_is_current(&local(9), 42, generation));
     assert_eq!(tab.active_pane, 8);
 
     coordinator
-        .apply_snapshot_to_tab(9, two_pane_state(9, 6, 41), &mut tab)
+        .apply_snapshot_to_tab(&local(9), two_pane_state(9, 6, 41), &mut tab)
         .unwrap();
     assert_eq!(
         tab.active_pane, 7,
@@ -371,31 +381,31 @@ fn focus_acknowledgement_clears_the_intent_and_later_canonical_focus_wins() {
 fn rapid_focus_changes_collapse_and_an_old_response_cannot_settle_the_newer_one() {
     let mut coordinator = SharedSessionCoordinator::default();
     coordinator
-        .bind(9, 100, two_pane_state(9, 4, 41), [(41, 7), (42, 8)])
+        .bind(&local(9), 100, two_pane_state(9, 4, 41), [(41, 7), (42, 8)])
         .unwrap();
     let mut tab = two_pane_tab();
-    let first = coordinator.request_focus(9, 42).unwrap();
+    let first = coordinator.request_focus(&local(9), 42).unwrap();
     assert_eq!(
-        coordinator.take_next_operation(9),
+        coordinator.take_next_operation(&local(9)),
         Some(SharedOperation::FocusPane {
             mux_pane_id: 42,
             generation: first,
             attempts: 0,
         })
     );
-    let second = coordinator.request_focus(9, 41).unwrap();
+    let second = coordinator.request_focus(&local(9), 41).unwrap();
 
     coordinator
-        .apply_snapshot_to_tab(9, two_pane_state(9, 5, 42), &mut tab)
+        .apply_snapshot_to_tab(&local(9), two_pane_state(9, 5, 42), &mut tab)
         .unwrap();
-    assert!(coordinator.focus_intent_is_current(9, 41, second));
+    assert!(coordinator.focus_intent_is_current(&local(9), 41, second));
     assert_eq!(
         tab.active_pane, 7,
         "the old response cannot clear newer focus"
     );
-    coordinator.finish_operation(9);
+    coordinator.finish_operation(&local(9));
     assert_eq!(
-        coordinator.take_next_operation(9),
+        coordinator.take_next_operation(&local(9)),
         Some(SharedOperation::FocusPane {
             mux_pane_id: 41,
             generation: second,
@@ -408,30 +418,30 @@ fn rapid_focus_changes_collapse_and_an_old_response_cannot_settle_the_newer_one(
 fn removed_focus_targets_and_exhausted_old_retries_discard_only_their_intent() {
     let mut coordinator = SharedSessionCoordinator::default();
     coordinator
-        .bind(9, 100, two_pane_state(9, 4, 41), [(41, 7), (42, 8)])
+        .bind(&local(9), 100, two_pane_state(9, 4, 41), [(41, 7), (42, 8)])
         .unwrap();
     let mut tab = two_pane_tab();
     tab.active_pane = 8;
-    let removed = coordinator.request_focus(9, 42).unwrap();
+    let removed = coordinator.request_focus(&local(9), 42).unwrap();
     let mut without_target = shared_state(9, 5);
     without_target.state = canonical_state(9, 5).state;
     coordinator
-        .apply_snapshot_to_tab(9, without_target, &mut tab)
+        .apply_snapshot_to_tab(&local(9), without_target, &mut tab)
         .unwrap();
-    assert!(!coordinator.focus_intent_is_current(9, 42, removed));
+    assert!(!coordinator.focus_intent_is_current(&local(9), 42, removed));
     assert_eq!(tab.active_pane, 7);
 
-    let old = coordinator.request_focus(9, 41).unwrap();
-    let newest = coordinator.request_focus(9, 41).unwrap();
-    coordinator.clear_focus_intent(9, 41, old);
-    assert!(coordinator.focus_intent_is_current(9, 41, newest));
+    let old = coordinator.request_focus(&local(9), 41).unwrap();
+    let newest = coordinator.request_focus(&local(9), 41).unwrap();
+    coordinator.clear_focus_intent(&local(9), 41, old);
+    assert!(coordinator.focus_intent_is_current(&local(9), 41, newest));
     assert_eq!(
         focus_retry(41, newest, SHARED_FOCUS_ATTEMPTS - 1),
         None,
         "the bounded retry limit gives up rather than preserving stale focus forever"
     );
-    coordinator.clear_focus_intent(9, 41, newest);
-    assert!(!coordinator.focus_intent_is_current(9, 41, newest));
+    coordinator.clear_focus_intent(&local(9), 41, newest);
+    assert!(!coordinator.focus_intent_is_current(&local(9), 41, newest));
 }
 
 #[test]
@@ -492,7 +502,7 @@ fn detaching_a_pane_collapses_the_split_that_held_it() {
 fn a_snapshot_placing_a_pane_the_tab_does_not_hold_is_refused() {
     let mut coordinator = SharedSessionCoordinator::default();
     coordinator
-        .bind(9, 100, canonical_state(9, 4), [(41, 7), (42, 8)])
+        .bind(&local(9), 100, canonical_state(9, 4), [(41, 7), (42, 8)])
         .unwrap();
 
     // The tab holds only pane 7 — pane 8 was closed here a moment ago — while
@@ -508,7 +518,7 @@ fn a_snapshot_placing_a_pane_the_tab_does_not_hold_is_refused() {
     };
 
     let error = coordinator
-        .apply_snapshot_to_tab(9, two_panes, &mut tab)
+        .apply_snapshot_to_tab(&local(9), two_panes, &mut tab)
         .expect_err("a layout naming an absent pane is not applicable");
     assert!(
         format!("{error:#}").contains("does not hold"),
@@ -520,7 +530,7 @@ fn a_snapshot_placing_a_pane_the_tab_does_not_hold_is_refused() {
         "a refused snapshot leaves the tab's own layout alone"
     );
     assert_eq!(
-        coordinator.state(9).unwrap().revision.0,
+        coordinator.state(&local(9)).unwrap().revision.0,
         4,
         "a refused snapshot is not recorded as the canonical state, so the next \
          one is not mistaken for stale"
@@ -531,43 +541,45 @@ fn a_snapshot_placing_a_pane_the_tab_does_not_hold_is_refused() {
 fn pane_events_update_mappings_and_watcher_lifecycle_is_generation_safe() {
     let mut coordinator = SharedSessionCoordinator::default();
     coordinator
-        .bind(9, 100, shared_state(9, 1), [(41, 7)])
+        .bind(&local(9), 100, shared_state(9, 1), [(41, 7)])
         .unwrap();
 
-    let first_watch = coordinator.begin_watch(9).unwrap();
-    assert!(coordinator.watch_is_current(9, first_watch));
-    assert!(coordinator.begin_watch(9).is_none());
-    coordinator.end_watch(9, first_watch);
+    let first_watch = coordinator.begin_watch(&local(9)).unwrap();
+    assert!(coordinator.watch_is_current(&local(9), first_watch));
+    assert!(coordinator.begin_watch(&local(9)).is_none());
+    coordinator.end_watch(&local(9), first_watch);
 
-    let second_watch = coordinator.begin_watch(9).unwrap();
-    coordinator.end_watch(9, first_watch);
-    assert!(coordinator.watch_is_current(9, second_watch));
+    let second_watch = coordinator.begin_watch(&local(9)).unwrap();
+    coordinator.end_watch(&local(9), first_watch);
+    assert!(coordinator.watch_is_current(&local(9), second_watch));
 
     let mut added = shared_state(9, 2);
     added.summary.panes.push(pane_summary(42));
     assert_eq!(
-        coordinator.accept_pane_added(9, added, 42, 8).unwrap(),
+        coordinator
+            .accept_pane_added(&local(9), added, 42, 8)
+            .unwrap(),
         SharedSnapshotDisposition::Applied
     );
-    assert_eq!(coordinator.local_pane_id(9, 42), Some(8));
-    assert_eq!(coordinator.mux_pane_id(9, 8), Some(42));
+    assert_eq!(coordinator.local_pane_id(&local(9), 42), Some(8));
+    assert_eq!(coordinator.mux_pane_id(&local(9), 8), Some(42));
 
     assert_eq!(
         coordinator
-            .accept_pane_removed(9, shared_state(9, 1), 42)
+            .accept_pane_removed(&local(9), shared_state(9, 1), 42)
             .unwrap(),
         None
     );
-    assert_eq!(coordinator.local_pane_id(9, 42), Some(8));
+    assert_eq!(coordinator.local_pane_id(&local(9), 42), Some(8));
     assert_eq!(
         coordinator
-            .accept_pane_removed(9, shared_state(9, 3), 42)
+            .accept_pane_removed(&local(9), shared_state(9, 3), 42)
             .unwrap(),
         Some(8)
     );
-    assert_eq!(coordinator.local_pane_id(9, 42), None);
-    coordinator.end_watch(9, second_watch);
-    assert!(!coordinator.watch_is_current(9, second_watch));
+    assert_eq!(coordinator.local_pane_id(&local(9), 42), None);
+    coordinator.end_watch(&local(9), second_watch);
+    assert!(!coordinator.watch_is_current(&local(9), second_watch));
 }
 
 #[test]
@@ -665,12 +677,12 @@ fn local_layout_diffs_choose_directional_move_and_rotation_operations() {
 fn shared_geometry_queue_is_single_flight_and_remembers_pending_work() {
     let mut coordinator = SharedSessionCoordinator::default();
     coordinator
-        .bind(9, 100, shared_state(9, 1), [(41, 7)])
+        .bind(&local(9), 100, shared_state(9, 1), [(41, 7)])
         .unwrap();
 
-    coordinator.enqueue(9, SharedOperation::PublishState { attempts: 0 });
+    coordinator.enqueue(&local(9), SharedOperation::PublishState { attempts: 0 });
     coordinator.enqueue(
-        9,
+        &local(9),
         SharedOperation::ClosePane {
             local_pane_id: 7,
             mux_pane_id: 41,
@@ -679,54 +691,54 @@ fn shared_geometry_queue_is_single_flight_and_remembers_pending_work() {
     );
 
     assert_eq!(
-        coordinator.take_next_operation(9),
+        coordinator.take_next_operation(&local(9)),
         Some(SharedOperation::PublishState { attempts: 0 }),
         "operations run in the order they were asked for"
     );
-    assert!(!coordinator.may_report_size(9));
+    assert!(!coordinator.may_report_size(&local(9)));
     assert_eq!(
-        coordinator.take_next_operation(9),
+        coordinator.take_next_operation(&local(9)),
         None,
         "a second operation waits for the one in flight"
     );
 
-    coordinator.finish_operation(9);
-    assert!(coordinator.may_report_size(9));
+    coordinator.finish_operation(&local(9));
+    assert!(coordinator.may_report_size(&local(9)));
     assert_eq!(
-        coordinator.take_next_operation(9),
+        coordinator.take_next_operation(&local(9)),
         Some(SharedOperation::ClosePane {
             local_pane_id: 7,
             mux_pane_id: 41,
             attempts: 0,
         })
     );
-    coordinator.finish_operation(9);
-    assert_eq!(coordinator.take_next_operation(9), None);
+    coordinator.finish_operation(&local(9));
+    assert_eq!(coordinator.take_next_operation(&local(9)), None);
 }
 
 #[test]
 fn queued_shared_operations_collapse_onto_equivalent_work() {
     let mut coordinator = SharedSessionCoordinator::default();
     coordinator
-        .bind(9, 100, shared_state(9, 1), [(41, 7)])
+        .bind(&local(9), 100, shared_state(9, 1), [(41, 7)])
         .unwrap();
 
-    coordinator.enqueue(9, SharedOperation::PublishState { attempts: 0 });
+    coordinator.enqueue(&local(9), SharedOperation::PublishState { attempts: 0 });
     // A publication re-queues itself between its geometry and durable halves,
     // and must not leave a second one behind when a local change queues one at
     // the same time: both would publish the same tab.
-    coordinator.enqueue(9, SharedOperation::PublishState { attempts: 1 });
+    coordinator.enqueue(&local(9), SharedOperation::PublishState { attempts: 1 });
     let close = SharedOperation::ClosePane {
         local_pane_id: 7,
         mux_pane_id: 41,
         attempts: 0,
     };
-    coordinator.enqueue(9, close);
+    coordinator.enqueue(&local(9), close);
     // A retry differs only in its attempt count and must not queue a second
     // close of the same pane: the daemon refuses one naming a pane it no
     // longer holds, and that refusal would abandon the real close.
     coordinator.enqueue(
-        9,
+        &local(9),
         SharedOperation::ClosePane {
             local_pane_id: 7,
             mux_pane_id: 41,
@@ -735,25 +747,25 @@ fn queued_shared_operations_collapse_onto_equivalent_work() {
     );
 
     assert_eq!(
-        coordinator.take_next_operation(9),
+        coordinator.take_next_operation(&local(9)),
         Some(SharedOperation::PublishState { attempts: 0 })
     );
-    coordinator.finish_operation(9);
-    assert_eq!(coordinator.take_next_operation(9), Some(close));
-    coordinator.finish_operation(9);
-    assert_eq!(coordinator.take_next_operation(9), None);
+    coordinator.finish_operation(&local(9));
+    assert_eq!(coordinator.take_next_operation(&local(9)), Some(close));
+    coordinator.finish_operation(&local(9));
+    assert_eq!(coordinator.take_next_operation(&local(9)), None);
 }
 
 #[test]
 fn canonical_pane_removal_schedules_one_publication_for_the_survivor() {
     let mut coordinator = SharedSessionCoordinator::default();
     coordinator
-        .bind(9, 100, two_pane_state(9, 1, 41), [(41, 7), (42, 8)])
+        .bind(&local(9), 100, two_pane_state(9, 1, 41), [(41, 7), (42, 8)])
         .unwrap();
     let mut tab = two_pane_tab();
 
     let removed = coordinator
-        .accept_pane_removed(9, shared_state(9, 2), 42)
+        .accept_pane_removed(&local(9), shared_state(9, 2), 42)
         .unwrap()
         .expect("the removed pane was mapped locally");
     detach_pane_from_tab(&mut tab, removed);
@@ -762,16 +774,16 @@ fn canonical_pane_removal_schedules_one_publication_for_the_survivor() {
     assert!(tab.pane(8).is_none());
     assert_eq!(tab.layout, PaneLayout::Pane(7));
     assert!(
-        coordinator.schedule_publication(9),
+        coordinator.schedule_publication(&local(9)),
         "removing a canonical pane must request a durable-state sync"
     );
     assert!(
-        !coordinator.schedule_publication(9),
+        !coordinator.schedule_publication(&local(9)),
         "several removals before the debounce fires share one publication"
     );
-    coordinator.enqueue(9, SharedOperation::PublishState { attempts: 0 });
+    coordinator.enqueue(&local(9), SharedOperation::PublishState { attempts: 0 });
     assert_eq!(
-        coordinator.take_next_operation(9),
+        coordinator.take_next_operation(&local(9)),
         Some(SharedOperation::PublishState { attempts: 0 })
     );
 }
@@ -780,33 +792,33 @@ fn canonical_pane_removal_schedules_one_publication_for_the_survivor() {
 fn a_snapshot_older_than_the_bound_state_is_stale() {
     let mut coordinator = SharedSessionCoordinator::default();
     coordinator
-        .bind(9, 100, shared_state(9, 4), [(41, 7)])
+        .bind(&local(9), 100, shared_state(9, 4), [(41, 7)])
         .unwrap();
 
-    assert!(coordinator.snapshot_is_stale(9, &shared_state(9, 3)));
+    assert!(coordinator.snapshot_is_stale(&local(9), &shared_state(9, 3)));
     assert!(
-        !coordinator.snapshot_is_stale(9, &shared_state(9, 4)),
+        !coordinator.snapshot_is_stale(&local(9), &shared_state(9, 4)),
         "the revision the window already holds is applied again, not discarded: \
          it is the answer to an operation this window asked for"
     );
-    assert!(!coordinator.snapshot_is_stale(9, &shared_state(9, 5)));
+    assert!(!coordinator.snapshot_is_stale(&local(9), &shared_state(9, 5)));
 }
 
 #[test]
 fn a_pane_is_only_attached_once_across_concurrent_snapshots() {
     let mut coordinator = SharedSessionCoordinator::default();
     coordinator
-        .bind(9, 100, shared_state(9, 1), [(41, 7)])
+        .bind(&local(9), 100, shared_state(9, 1), [(41, 7)])
         .unwrap();
 
-    assert!(coordinator.begin_attach(9, 42));
+    assert!(coordinator.begin_attach(&local(9), 42));
     assert!(
-        !coordinator.begin_attach(9, 42),
+        !coordinator.begin_attach(&local(9), 42),
         "a second snapshot seeing the same pane missing must not attach it again"
     );
-    coordinator.end_attach(9, 42);
+    coordinator.end_attach(&local(9), 42);
     assert!(
-        coordinator.begin_attach(9, 42),
+        coordinator.begin_attach(&local(9), 42),
         "a failed attachment is retried by the next snapshot"
     );
 }
@@ -902,7 +914,7 @@ fn a_pane_with_nothing_left_to_sit_beside_is_not_reinserted() {
 fn applying_a_snapshot_mid_split_leaves_the_new_pane_in_the_layout() {
     let mut coordinator = SharedSessionCoordinator::default();
     coordinator
-        .bind(9, 100, canonical_state(9, 4), [(41, 7)])
+        .bind(&local(9), 100, canonical_state(9, 4), [(41, 7)])
         .unwrap();
 
     // The tab as a split leaves it: pane 8 exists beside pane 7 and the
@@ -920,7 +932,7 @@ fn applying_a_snapshot_mid_split_leaves_the_new_pane_in_the_layout() {
 
     assert_eq!(
         coordinator
-            .apply_snapshot_to_tab(9, canonical_state(9, 5), &mut tab)
+            .apply_snapshot_to_tab(&local(9), canonical_state(9, 5), &mut tab)
             .unwrap(),
         SharedSnapshotDisposition::Applied
     );
@@ -974,17 +986,52 @@ fn a_pane_carried_over_mosh_has_no_shared_stream_to_replace(cx: &mut gpui::TestA
         // an entry in `shared_panes`, because nothing here reads that stream.
         zetta
             .shared_collaboration
-            .bind(9, 100, shared_state(9, 1), [(41, 7)])
+            .bind(&local(9), 100, shared_state(9, 1), [(41, 7)])
             .unwrap();
 
-        assert_eq!(zetta.shared_collaboration.local_pane_id(9, 41), Some(7));
+        assert_eq!(
+            zetta.shared_collaboration.local_pane_id(&local(9), 41),
+            Some(7)
+        );
         assert!(
-            !zetta.shared_stream_is_replaceable(9, 41),
+            !zetta.shared_stream_is_replaceable(&local(9), 41),
             "a pane with no multiplexer stream in this window has none to put back"
         );
         assert!(
-            !zetta.shared_stream_is_replaceable(9, 42),
+            !zetta.shared_stream_is_replaceable(&local(9), 42),
             "and neither has a pane this window does not hold at all"
         );
     });
+}
+
+/// A local tab found a remote session of the same number bound and took the
+/// shared-session path for an ordinary split. Bound sessions are told apart by
+/// daemon as well as number, and forgetting one leaves the other.
+#[test]
+fn sessions_with_the_same_number_on_different_daemons_are_separate() {
+    let remote = SharedSessionKey {
+        daemon: crate::mux::MuxDaemon::Remote(std::sync::Arc::from("pi:")),
+        session_id: 9,
+    };
+    let mut coordinator = SharedSessionCoordinator::default();
+    coordinator
+        .bind(&remote, 200, shared_state(9, 1), [(41, 70)])
+        .unwrap();
+
+    assert!(coordinator.is_bound(&remote));
+    assert!(
+        !coordinator.is_bound(&local(9)),
+        "a local session must not look bound because a remote one of its number is"
+    );
+    assert_eq!(coordinator.local_pane_id(&local(9), 41), None);
+
+    coordinator
+        .bind(&local(9), 100, shared_state(9, 1), [(41, 7)])
+        .unwrap();
+    assert_eq!(coordinator.tab_id(&local(9)), Some(100));
+    assert_eq!(coordinator.tab_id(&remote), Some(200));
+    assert_eq!(coordinator.local_pane_id(&remote, 41), Some(70));
+
+    coordinator.forget(&local(9));
+    assert!(coordinator.is_bound(&remote));
 }

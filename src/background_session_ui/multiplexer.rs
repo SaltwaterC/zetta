@@ -923,8 +923,12 @@ impl Zetta {
                 .panes
                 .iter()
                 .filter_map(|pane| Some((pane.mux_pane_id?, *pane_ids.get(&pane.id)?)));
-            self.shared_collaboration
-                .bind(session_id, tab_id, shared_state, mappings)?;
+            self.shared_collaboration.bind(
+                &crate::mux::SharedSessionKey::new(&runtime, session_id),
+                tab_id,
+                shared_state,
+                mappings,
+            )?;
         }
         if !policy.is_remote() {
             self.bind_restored_projects(&tab, &restored_metadata);
@@ -956,7 +960,12 @@ impl Zetta {
             self.connect_terminal_view(tab_id, pane_id, view, window, cx);
         }
         if has_canonical_shared_state {
-            self.watch_shared_session(session_id, runtime, window, cx);
+            self.watch_shared_session(
+                &crate::mux::SharedSessionKey::new(&runtime, session_id),
+                runtime,
+                window,
+                cx,
+            );
             if repaired_state {
                 self.sync_shared_tab_state(tab_id, cx);
             }

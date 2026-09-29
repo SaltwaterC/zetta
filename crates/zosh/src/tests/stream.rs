@@ -183,3 +183,40 @@ fn wait_for_wake(wake: &Wake, timeout_ms: u64) {
 fn wait_for_wake(wake: &Wake, timeout_ms: u64) {
     wake.wait(timeout_ms);
 }
+
+/// A pane that is closed drops every handle to its session, and the loop has
+/// to finish the shutdown rather than chase the closed channel for ever.
+#[test]
+fn a_closed_command_channel_is_one_shutdown_not_a_spin() {
+    let (sender, receiver) = mpsc::channel();
+    sender.send(Command::Input(b"typed".to_vec())).unwrap();
+    drop(sender);
+
+    let (done_sender, done) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut applied = Vec::new();
+        let embedder = drain_commands(&receiver, |command| applied.push(command));
+        let _ = done_sender.send((embedder, applied));
+    });
+    let (embedder, applied) = done
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("draining a closed channel must return");
+    assert_eq!(embedder, Embedder::Gone);
+    assert!(matches!(
+        applied.as_slice(),
+        [Command::Input(bytes), Command::Shutdown] if bytes == b"typed"
+    ));
+}
+
+#[test]
+fn an_open_channel_is_drained_without_waiting() {
+    let (sender, receiver) = mpsc::channel();
+    sender.send(Command::Resize(80, 24)).unwrap();
+    let mut applied = Vec::new();
+    assert_eq!(
+        drain_commands(&receiver, |command| applied.push(command)),
+        Embedder::Present
+    );
+    assert!(matches!(applied.as_slice(), [Command::Resize(80, 24)]));
+    drop(sender);
+}

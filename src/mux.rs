@@ -259,6 +259,21 @@ impl MuxRuntime {
         self.remote
     }
 
+    /// The daemon this runtime talks to. Two runtimes for the same host are
+    /// the same daemon, whatever else differs between them.
+    pub(crate) fn daemon(&self) -> MuxDaemon {
+        match self.client.remote_target() {
+            Some(target) => MuxDaemon::Remote(Arc::from(format!(
+                "{}:{}",
+                target.destination(),
+                target
+                    .port()
+                    .map_or_else(String::new, |port| port.to_string())
+            ))),
+            None => MuxDaemon::Local,
+        }
+    }
+
     /// What carries this session's panes.
     pub(crate) fn pane_transport(&self) -> crate::remote_pane_transport::RemotePaneTransport {
         self.pane_transport
@@ -492,6 +507,11 @@ impl MuxPtyProvider {
     pub(crate) fn session_id(&self) -> Option<u64> {
         self.session.id()
     }
+
+    /// This pane's session, keyed by the daemon it is on.
+    pub(crate) fn shared_key(&self) -> Option<SharedSessionKey> {
+        Some(SharedSessionKey::new(&self.runtime, self.session_id()?))
+    }
 }
 
 impl PtyProvider for MuxPtyProvider {
@@ -657,6 +677,37 @@ pub(crate) fn attached_pane_handover_with_secret(
     }
 }
 
+/// Which multiplexer a session or pane number was issued by.
+///
+/// Those numbers are unique within one daemon and nowhere else: this machine's
+/// daemon and every remote host's number their sessions and panes from 1. A
+/// window holding tabs on more than one therefore has to say which daemon a
+/// number came from before it looks anything up by it. Keyed by the number
+/// alone, a local tab found a remote session of the same number already bound,
+/// took the shared-session path for an ordinary split, and failed.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum MuxDaemon {
+    Local,
+    /// A remote host's daemon, as its SSH destination and port name it.
+    Remote(Arc<str>),
+}
+
+/// A session, named by the daemon that owns it and its number there.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct SharedSessionKey {
+    pub(crate) daemon: MuxDaemon,
+    pub(crate) session_id: u64,
+}
+
+impl SharedSessionKey {
+    pub(crate) fn new(runtime: &MuxRuntime, session_id: u64) -> Self {
+        Self {
+            daemon: runtime.daemon(),
+            session_id,
+        }
+    }
+}
+
 /// Where each visible pane's terminal lives in the multiplexer.
 ///
 /// Kept beside the tabs rather than inside them because a pane's identity in
@@ -665,8 +716,13 @@ pub(crate) fn attached_pane_handover_with_secret(
 /// window.
 #[derive(Default)]
 pub(crate) struct MuxPanes {
+    /// Local pane id to the pane id its multiplexer knows it by. Keyed by the
+    /// local id only: a multiplexer pane id is unique within one daemon, and a
+    /// window can hold panes of several — its own, and every remote host it
+    /// has a tab on — whose numbering all starts at 1. A reverse map keyed by
+    /// that number let recording a remote pane silently unmap the local pane
+    /// that shared its number; see [`Self::local_pane_id_among`].
     panes: HashMap<u64, u64>,
-    reverse_panes: HashMap<u64, u64>,
     sessions: HashMap<u64, MuxSession>,
     runtimes: HashMap<u64, MuxRuntime>,
 }
@@ -744,6 +800,18 @@ impl MuxPanes {
         self.sessions.get(&tab_id)?.id()
     }
 
+    /// A tab's session as a key that says which daemon it belongs to. A tab
+    /// with no runtime of its own is on this window's local daemon.
+    pub(crate) fn shared_key(&self, tab_id: u64) -> Option<SharedSessionKey> {
+        Some(SharedSessionKey {
+            daemon: self
+                .runtimes
+                .get(&tab_id)
+                .map_or(MuxDaemon::Local, MuxRuntime::daemon),
+            session_id: self.session_id(tab_id)?,
+        })
+    }
+
     /// Whether a tab in this window is already showing this session.
     ///
     /// The reconnect picker needs this: attaching a session the same *process*
@@ -761,20 +829,24 @@ impl MuxPanes {
     }
 
     pub(crate) fn record(&mut self, pane_id: u64, mux_pane_id: u64) {
-        if let Some(previous) = self.panes.insert(pane_id, mux_pane_id) {
-            self.reverse_panes.remove(&previous);
-        }
-        if let Some(previous) = self.reverse_panes.insert(mux_pane_id, pane_id) {
-            self.panes.remove(&previous);
-        }
+        self.panes.insert(pane_id, mux_pane_id);
     }
 
     pub(crate) fn mux_pane_id(&self, pane_id: u64) -> Option<u64> {
         self.panes.get(&pane_id).copied()
     }
 
-    pub(crate) fn local_pane_id(&self, mux_pane_id: u64) -> Option<u64> {
-        self.reverse_panes.get(&mux_pane_id).copied()
+    /// The local pane, among `pane_ids`, that its multiplexer knows as
+    /// `mux_pane_id`. Asked of one tab's panes, never of the window: the same
+    /// multiplexer pane id names a different pane on every daemon.
+    pub(crate) fn local_pane_id_among(
+        &self,
+        pane_ids: impl IntoIterator<Item = u64>,
+        mux_pane_id: u64,
+    ) -> Option<u64> {
+        pane_ids
+            .into_iter()
+            .find(|pane_id| self.mux_pane_id(*pane_id) == Some(mux_pane_id))
     }
 
     pub(crate) fn ids(&self) -> &HashMap<u64, u64> {
@@ -782,9 +854,7 @@ impl MuxPanes {
     }
 
     pub(crate) fn forget_pane(&mut self, pane_id: u64) {
-        if let Some(mux_pane_id) = self.panes.remove(&pane_id) {
-            self.reverse_panes.remove(&mux_pane_id);
-        }
+        self.panes.remove(&pane_id);
     }
 
     pub(crate) fn forget_tab(&mut self, tab_id: u64) {
@@ -1227,29 +1297,29 @@ impl crate::Zetta {
         pane_id: u64,
         cx: &mut gpui::Context<crate::Zetta>,
     ) -> bool {
-        let Some(session_id) = self.mux_panes.session_id(tab_id) else {
+        let Some(key) = self.mux_panes.shared_key(tab_id) else {
             return false;
         };
-        if !self.shared_collaboration.is_bound(session_id) {
+        if !self.shared_collaboration.is_bound(&key) {
             return false;
         }
         let Some(mux_pane_id) = self
             .shared_collaboration
-            .mux_pane_id(session_id, pane_id)
+            .mux_pane_id(&key, pane_id)
             .or_else(|| self.mux_panes.mux_pane_id(pane_id))
         else {
             return false;
         };
         self.closing_shared_panes.insert(pane_id);
         self.shared_collaboration.enqueue(
-            session_id,
+            &key,
             crate::background_session_ui::collaboration::SharedOperation::ClosePane {
                 local_pane_id: pane_id,
                 mux_pane_id,
                 attempts: 0,
             },
         );
-        self.pump_shared_operations(tab_id, session_id, cx);
+        self.pump_shared_operations(tab_id, &key, cx);
         cx.notify();
         true
     }
@@ -1265,7 +1335,8 @@ impl crate::Zetta {
         let Some(session_id) = self.mux_panes.session_id(tab_id) else {
             return;
         };
-        self.shared_collaboration.forget(session_id);
+        self.shared_collaboration
+            .forget(&SharedSessionKey::new(&runtime, session_id));
         runtime.shared_reports().forget(session_id);
         let client = runtime.client().clone();
         cx.background_spawn(async move {

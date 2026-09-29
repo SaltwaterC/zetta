@@ -373,11 +373,24 @@ pub(super) fn relay_backpressure(pane: &mut Pane, evicted: &mut bool) -> bool {
             }
         }
         if !stalled.is_empty() {
-            log::warn!(
-                "dropping {} shared viewer(s) of pane {} whose backlog stopped shrinking",
-                stalled.len(),
-                pane.id
-            );
+            for client in clients
+                .iter()
+                .filter(|client| stalled.contains(&client.attachment))
+            {
+                log::warn!(
+                    "dropping a shared viewer of pane {} whose backlog stopped shrinking: {} \
+                     (client {}, relaying for {}), {} bytes queued, nothing written for {:?}",
+                    pane.id,
+                    crate::process_status::describe(client.process_id),
+                    client.client_id.as_str(),
+                    client
+                        .relaying_for
+                        .as_ref()
+                        .map_or("nobody", ClientId::as_str),
+                    client.relay.queued.load(Ordering::Relaxed),
+                    now.duration_since(client.wrote_at),
+                );
+            }
             // Before they leave the set: the flag is what makes each relay end
             // its stream as broken, so the viewer reattaches, instead of as
             // finished, which would leave its terminal with nothing reading.

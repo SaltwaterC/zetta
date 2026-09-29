@@ -319,16 +319,19 @@ fn drive(
         session.request_agent_forwarding(AGENT_PROTOCOL_VERSION);
     }
     session.send_resize(i32::from(size.0), i32::from(size.1));
+    let mut embedder = Embedder::Present;
     loop {
         let wait = session.wait_time_ms().min(IDLE_WAIT_MS);
         wait_for_command_or_network(&session, wake, wait)?;
         wake.drain();
-        apply_commands(
-            &mut session,
-            commands,
-            &mut query_proxy,
-            &mut pending_resize,
-        );
+        if embedder == Embedder::Present {
+            embedder = apply_commands(
+                &mut session,
+                commands,
+                &mut query_proxy,
+                &mut pending_resize,
+            );
+        }
         let events = session.pump_ready().context("pumping the Mosh session")?;
         for command in agent.handle_events(&events) {
             apply_agent_command(&mut session, command);
@@ -371,26 +374,50 @@ fn apply_agent_command(session: &mut ClientSession, command: AgentClientCommand)
     }
 }
 
+/// Whether anything can still send the loop a command.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Embedder {
+    Present,
+    /// Every handle has gone. Nothing can arrive any more, so the channel is
+    /// not asked again: it would answer "disconnected" every time.
+    Gone,
+}
+
 /// Applies everything the embedder has queued, without blocking.
-///
-/// A closed channel means every handle has gone, which is the same request as
-/// an explicit shutdown; the loop keeps running afterwards so the session can
-/// finish its shutdown handshake.
 fn apply_commands(
     session: &mut ClientSession,
     commands: &Receiver<Command>,
     query_proxy: &mut TerminalQueryProxy,
     pending_resize: &mut Option<(u16, u16)>,
-) {
+) -> Embedder {
+    drain_commands(commands, |command| match command {
+        Command::Input(bytes) => apply_input(session, query_proxy, &bytes),
+        Command::Resize(columns, rows) => {
+            session.send_resize(i32::from(columns), i32::from(rows));
+            *pending_resize = Some((columns, rows));
+        }
+        Command::Shutdown => session.shutdown(),
+    })
+}
+
+/// Hands every queued command to `apply`, then says whether more can come.
+///
+/// A closed channel means every handle has gone, which is the same request as
+/// an explicit shutdown, so it is applied as one — once. The loop keeps
+/// running afterwards so the session can finish its shutdown handshake, and
+/// stops asking the channel. Treating "disconnected" as one more command to
+/// act on, and then asking again, is what spun a dropped pane's session
+/// thread at full speed for ever: it never returned to its wait, never read
+/// its socket again, and never finished the shutdown it kept restarting.
+fn drain_commands(commands: &Receiver<Command>, mut apply: impl FnMut(Command)) -> Embedder {
     loop {
         match commands.try_recv() {
-            Ok(Command::Input(bytes)) => apply_input(session, query_proxy, &bytes),
-            Ok(Command::Resize(columns, rows)) => {
-                session.send_resize(i32::from(columns), i32::from(rows));
-                *pending_resize = Some((columns, rows));
+            Ok(command) => apply(command),
+            Err(TryRecvError::Disconnected) => {
+                apply(Command::Shutdown);
+                return Embedder::Gone;
             }
-            Ok(Command::Shutdown) | Err(TryRecvError::Disconnected) => session.shutdown(),
-            Err(TryRecvError::Empty) => return,
+            Err(TryRecvError::Empty) => return Embedder::Present,
         }
     }
 }

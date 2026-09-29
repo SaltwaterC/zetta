@@ -301,6 +301,9 @@ fn prune_exited_panes(daemon: &Arc<Daemon>) -> bool {
             !remove
         });
         changed |= session.panes.len() != before;
+        for pane_id in &removed {
+            lifecycle::remove_pane_agent_links(*pane_id);
+        }
         if !removed.is_empty()
             && !session.panes.is_empty()
             && let Some(state) = remove_pruned_shared_panes(daemon, session, &removed)

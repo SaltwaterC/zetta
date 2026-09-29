@@ -4429,24 +4429,18 @@ fn shared_batch_spawns_commit_exact_geometry_and_rebase_same_target_additions() 
     assert_eq!(conflict, closed);
 }
 
-/// A window recovering a failed shared stream attaches again under the same
-/// client ID, and its old stream can be torn down after the new one exists.
-/// Ending the old stream removed every attachment of that client, the
-/// replacement included, so the recovered pane went dead at once.
-#[test]
-fn ending_one_shared_stream_leaves_the_same_clients_other_attachment() {
-    let daemon = TestDaemon::start();
-    let client = daemon.client();
-    let request = CreateSharedRequest {
+/// A headless shared session of one pane running `command`.
+fn one_pane_shared_request(client: &Client, command: &str) -> CreateSharedRequest {
+    CreateSharedRequest {
         operation_id: client.next_shared_operation_id(),
-        title: "recovered".to_owned(),
+        title: "one pane".to_owned(),
         replacement: SharedDraftLayout::Draft { draft_id: 1 },
         panes: vec![zmux::messages::SharedPaneDraft {
             draft_id: 1,
             profile: "System".to_owned(),
             command: Some(zetta_profiles::ProfileCommand::with_args(
                 "sh",
-                vec!["-c".to_owned(), "printf ready; exec cat".to_owned()],
+                vec!["-c".to_owned(), command.to_owned()],
             )),
             env: HashMap::new(),
             working_directory: None,
@@ -4474,7 +4468,60 @@ fn ending_one_shared_stream_leaves_the_same_clients_other_attachment() {
         }],
         active_pane: Some(SharedPaneRef::Draft { draft_id: 1 }),
         verifier: None,
-    };
+    }
+}
+
+/// Every pane gets a pair of forwarded-agent links in the session directory.
+/// They have to go with the pane: nothing removed them, so every pane a daemon
+/// had ever started left two links behind.
+#[cfg(unix)]
+#[test]
+fn a_panes_agent_links_are_removed_with_it() {
+    let daemon = TestDaemon::start();
+    let client = daemon.client();
+    let created = client
+        .create_shared(one_pane_shared_request(&client, "sleep 60"))
+        .expect("creating a shared session");
+    let pane_id = created.state.operation_receipts[0].draft_mappings[0].pane_id;
+    let links = [
+        daemon
+            .sessions_dir()
+            .join(format!("forwarded-agent-{pane_id}.sock")),
+        daemon
+            .sessions_dir()
+            .join(format!("forwarded-agent-{pane_id}.fallback")),
+    ];
+    for link in &links {
+        assert!(
+            std::fs::symlink_metadata(link).is_ok(),
+            "the pane's link {} was not made",
+            link.display()
+        );
+    }
+
+    client.kill(created.session_id).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while links
+        .iter()
+        .any(|link| std::fs::symlink_metadata(link).is_ok())
+    {
+        assert!(
+            Instant::now() < deadline,
+            "the pane's agent links outlived it: {links:?}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// A window recovering a failed shared stream attaches again under the same
+/// client ID, and its old stream can be torn down after the new one exists.
+/// Ending the old stream removed every attachment of that client, the
+/// replacement included, so the recovered pane went dead at once.
+#[test]
+fn ending_one_shared_stream_leaves_the_same_clients_other_attachment() {
+    let daemon = TestDaemon::start();
+    let client = daemon.client();
+    let request = one_pane_shared_request(&client, "printf ready; exec cat");
     let created = client.create_shared(request).unwrap();
     let pane_id = created.state.operation_receipts[0].draft_mappings[0].pane_id;
     let attach = || match client
