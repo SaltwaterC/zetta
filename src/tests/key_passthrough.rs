@@ -56,13 +56,12 @@ fn shift_f9_arms_the_focused_terminal_and_escape_cancels(cx: &mut TestAppContext
     });
     let (zetta, cx) = cx.add_window_view(|window, cx| {
         let mut config = Config::defaults(None, None);
-        config.profiles.push(Profile {
-            name: "System".to_owned(),
-            command: Shell::System,
-            theme: None,
-            dark_theme: None,
-            icon: ProfileIcon::Zetta,
-        });
+        // An empty profile list keeps `Zetta::new` from opening its own tab
+        // and spawning a real shell: its shell-integration OSC title
+        // sequence races the deterministic test scheduler on the real PTY
+        // reader thread. The test builds its own pane below and attaches a
+        // display-only terminal to it instead.
+        config.profiles.clear();
         Zetta::new(
             config,
             None,
@@ -78,6 +77,48 @@ fn shift_f9_arms_the_focused_terminal_and_escape_cancels(cx: &mut TestAppContext
     let received = Rc::new(RefCell::new(Vec::new()));
     let received_for_view = received.clone();
     let focused = zetta.update_in(cx, |zetta, window, cx| {
+        let profile = Profile {
+            name: "System".to_owned(),
+            command: Shell::System,
+            theme: None,
+            dark_theme: None,
+            icon: ProfileIcon::Zetta,
+        };
+        let pane_id = zetta.next_pane_id;
+        zetta.next_pane_id += 1;
+        let tab_id = zetta.next_tab_id;
+        zetta.next_tab_id += 1;
+        zetta.tabs.push(Tab {
+            id: tab_id,
+            attention_id: tab_id,
+            attention: None,
+            panes: vec![TerminalPane::new(pane_id, profile).with_label_number(1)],
+            pane_indices: HashMap::from([(pane_id, 0)]),
+            next_pane_label: 2,
+            theme_override: None,
+            layout: PaneLayout::Pane(pane_id),
+            active_pane: pane_id,
+            focus_history: vec![pane_id],
+            maximized_pane: None,
+            minimized_panes: Vec::new(),
+            selected_minimized_pane: None,
+            broadcast_input: false,
+            silent_mode: false,
+            close_policy: TabClosePolicy::Close,
+            shared: false,
+            custom_title: None,
+            worktree_seed_title: None,
+            process_title: None,
+            icon: Some(IconName::Terminal),
+            icon_override: TabIconOverride::None,
+            pinned: false,
+            renaming_pane: None,
+            rename_buffer: None,
+            editing_overlay_pane: None,
+            overlay_buffer: None,
+            overlay_style_picker: None,
+        });
+        zetta.active_tab = zetta.tabs.len() - 1;
         let builder = TerminalBuilder::new_display_only(
             terminal::terminal_settings::CursorShape::Block,
             terminal::terminal_settings::AlternateScroll::On,
