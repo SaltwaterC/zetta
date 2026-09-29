@@ -11049,7 +11049,7 @@ mod tests {
 
     #[cfg(windows)]
     #[gpui::test]
-    async fn windows_conpty_preserves_ctrl_j_in_win32_input_mode(cx: &mut TestAppContext) {
+    async fn windows_conpty_preserves_newline_keys_in_win32_input_mode(cx: &mut TestAppContext) {
         cx.executor().allow_parking();
         cx.update(|cx| {
             TerminalSettings::init(cx);
@@ -11057,10 +11057,10 @@ mod tests {
         });
 
         let output_path =
-            std::env::temp_dir().join(format!("zetta-ctrl-j-{}.txt", std::process::id()));
+            std::env::temp_dir().join(format!("zetta-newline-keys-{}.txt", std::process::id()));
         let escaped_output_path = output_path.to_string_lossy().replace('\'', "''");
         let command = format!(
-            "$key = [Console]::ReadKey($true); [IO.File]::WriteAllText('{}', ('{{0}}|{{1}}|{{2}}' -f [int]$key.KeyChar, $key.Key, $key.Modifiers))",
+            "$keys = 1..2 | ForEach-Object {{ $key = [Console]::ReadKey($true); '{{0}}|{{1}}|{{2}}' -f [int]$key.KeyChar, $key.Key, $key.Modifiers }}; [IO.File]::WriteAllLines('{}', [string[]]$keys)",
             escaped_output_path
         );
         let (terminal, completion_rx) = build_test_terminal_with_arguments(
@@ -11088,9 +11088,10 @@ mod tests {
 
         let handled = terminal.update(cx, |terminal, _| {
             terminal.last_content.mode.insert(Modes::WIN32_INPUT);
-            terminal.try_keystroke(&Keystroke::parse("ctrl-j").unwrap(), false)
+            ["ctrl-j", "shift-enter"]
+                .map(|key| terminal.try_keystroke(&Keystroke::parse(key).unwrap(), false))
         });
-        assert!(handled);
+        assert_eq!(handled, [true, true]);
 
         assert_eq!(
             completion_rx.recv().await.unwrap(),
@@ -11098,7 +11099,7 @@ mod tests {
         );
         let observed = std::fs::read_to_string(&output_path).unwrap();
         let _ = std::fs::remove_file(output_path);
-        assert_eq!(observed, "10|J|Control");
+        assert_eq!(observed.lines().collect::<Vec<_>>(), ["10|J|Control"; 2]);
     }
 
     #[gpui::test]

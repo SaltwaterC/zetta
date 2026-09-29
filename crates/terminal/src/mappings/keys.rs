@@ -253,10 +253,26 @@ fn win32_input_sequence(keystroke: &Keystroke, mode: Modes) -> Option<Cow<'stati
         return None;
     }
 
-    let virtual_key = win32_virtual_key(&keystroke.key)?;
+    // Console applications treat Ctrl+J as a line feed. Encode Shift+Enter
+    // the same way so it inserts a line instead of submitting the input.
+    let shift_enter =
+        keystroke.key == "enter" && TerminalModifiers::new(keystroke) == TerminalModifiers::Shift;
+    let virtual_key = if shift_enter {
+        win32_virtual_key("j")?
+    } else {
+        win32_virtual_key(&keystroke.key)?
+    };
     let scan_code = unsafe { MapVirtualKeyW(virtual_key, MAPVK_VK_TO_VSC) };
-    let unicode_char = win32_unicode_char(keystroke);
-    let control_key_state = win32_control_key_state(keystroke);
+    let unicode_char = if shift_enter {
+        10
+    } else {
+        win32_unicode_char(keystroke)
+    };
+    let control_key_state = if shift_enter {
+        8
+    } else {
+        win32_control_key_state(keystroke)
+    };
 
     // ConPTY's Win32 input mode accepts serialized KEY_EVENT_RECORD fields:
     // virtual key, scan code, Unicode character, key-down, control state, repeat count.
@@ -600,6 +616,34 @@ mod test {
             to_esc_str(&ctrl_j, Modes::WIN32_INPUT, false),
             Some("\x1b[74;36;10;1;8;1_".into())
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn shift_enter_uses_ctrl_j_win32_input_record_only_without_other_modifiers() {
+        let mode = Modes::WIN32_INPUT;
+        let shift_enter = Keystroke::parse("shift-enter").unwrap();
+        let ctrl_j = Keystroke::parse("ctrl-j").unwrap();
+
+        assert_eq!(
+            to_esc_str(&shift_enter, mode, false),
+            Some("\x1b[74;36;10;1;8;1_".into())
+        );
+        assert_eq!(
+            to_esc_str(&shift_enter, mode, false),
+            to_esc_str(&ctrl_j, mode, false)
+        );
+        assert_eq!(
+            to_esc_str(&Keystroke::parse("enter").unwrap(), mode, false),
+            Some("\x1b[13;28;13;1;0;1_".into())
+        );
+        for key in ["ctrl-enter", "alt-shift-enter", "ctrl-shift-enter"] {
+            assert_ne!(
+                to_esc_str(&Keystroke::parse(key).unwrap(), mode, false),
+                to_esc_str(&shift_enter, mode, false),
+                "{key} must remain distinct from Shift+Enter"
+            );
+        }
     }
 
     #[test]
