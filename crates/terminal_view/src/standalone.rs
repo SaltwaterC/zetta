@@ -947,6 +947,29 @@ impl TerminalView {
         handled
     }
 
+    /// Feed a physical keystroke through the same encoding and input-event path
+    /// as the focused terminal's key handler, including broadcast listeners.
+    pub fn forward_keystroke(&mut self, keystroke: &Keystroke, cx: &mut Context<Self>) -> bool {
+        if !self.input_enabled {
+            return false;
+        }
+        if self.process_keystroke(keystroke, cx) {
+            if let Some(event) = enabled_input_event(self.emit_input_events, || {
+                TerminalViewEvent::Input(TerminalInput::Keystroke(keystroke.clone()))
+            }) {
+                cx.emit(event);
+            }
+            return true;
+        }
+        // Plain characters normally arrive through GPUI's input handler after
+        // key dispatch. Passthrough stops dispatch, so commit that character here.
+        if let Some(text) = &keystroke.key_char {
+            self.commit_text(text, cx);
+            return true;
+        }
+        false
+    }
+
     fn key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         if !self.input_enabled {
             return;

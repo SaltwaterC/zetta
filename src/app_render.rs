@@ -193,7 +193,15 @@ impl Zetta {
     /// them. Telling the user their tab can now be joined must not temporarily
     /// reduce the shared grid for a message that removes itself moments later.
     fn render_transient_notice_overlay(&self, colors: &ThemeColors) -> Option<AnyElement> {
-        let notice = self.transient_notice.message()?;
+        let passthrough_armed = self
+            .key_passthrough
+            .as_ref()
+            .is_some_and(|state| state.held_key.is_none());
+        let notice = if passthrough_armed {
+            "Send next key to terminal · Esc to cancel"
+        } else {
+            self.transient_notice.message()?
+        };
         // Styled like the resize- and move-mode labels rather than as a `Banner`.
         // A `Banner` is built to sit on the feedback column's own background and
         // carries a translucent one of its own; floating it over a terminal left
@@ -204,6 +212,9 @@ impl Zetta {
         Some(
             div()
                 .absolute()
+                .when(passthrough_armed, |notice| {
+                    notice.debug_selector(|| "key-passthrough-indicator".to_owned())
+                })
                 .bottom(px(12.))
                 .right(px(12.))
                 .max_w(px(420.))
@@ -294,6 +305,7 @@ impl Zetta {
             .on_action(cx.listener(Self::focus_pane_right))
             .on_action(cx.listener(Self::focus_pane_up))
             .on_action(cx.listener(Self::focus_pane_down))
+            .on_action(cx.listener(Self::send_next_key_to_terminal))
             .on_action(cx.listener(Self::toggle_maximize_pane))
             .on_action(cx.listener(Self::minimize_pane))
             .on_action(cx.listener(Self::restore_minimized_pane))
@@ -536,6 +548,7 @@ impl Zetta {
                 content.capture_key_down(cx.listener(Self::remote_session_key_down_capture))
             })
             .capture_key_up(cx.listener(Self::pane_resize_key_up))
+            .capture_key_up(cx.listener(Self::key_passthrough_key_up))
             .on_key_down(cx.listener(Self::command_palette_key_down))
             .child(column);
 
@@ -640,6 +653,7 @@ impl Render for Zetta {
         // platform supports it. Keep it consistent with resize mode if a
         // compositor reports an undersized bound anyway.
         crate::app::enforce_minimum_window_size(window);
+        self.cancel_key_passthrough_if_unfocused(window, cx);
         self.sync_visible_terminals(cx);
 
         let theme = self.window_theme(cx);

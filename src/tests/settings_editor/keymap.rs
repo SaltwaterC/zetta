@@ -225,6 +225,7 @@ fn keymap_template_exposes_all_builtin_shortcuts() {
         ("ctrl-+", "zetta::IncreaseTerminalFontSize"),
         ("ctrl-alt-r", "zetta::ReloadConfiguration"),
         ("alt-left", "zetta::FocusPaneLeft"),
+        ("shift-f9", "zetta::SendNextKeyToTerminal"),
         ("alt-right", "zetta::FocusPaneRight"),
         ("alt-up", "zetta::FocusPaneUp"),
         ("alt-down", "zetta::FocusPaneDown"),

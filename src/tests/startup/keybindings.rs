@@ -384,6 +384,24 @@ fn pane_focus_shortcuts_use_the_platform_modifier() {
 }
 
 #[test]
+fn send_next_key_is_terminal_scoped_and_bound_to_shift_f9() {
+    let bindings = default_keybindings_for_mode(0, false, &gpui::DummyKeyboardMapper);
+    let key = gpui::Keystroke::parse("shift-f9").unwrap();
+    assert!(bindings.iter().any(|binding| {
+        binding.action().name() == SendNextKeyToTerminal.name()
+            && binding.match_keystrokes(std::slice::from_ref(&key)) == Some(false)
+            && binding.predicate().is_some_and(|predicate| {
+                predicate
+                    .depth_of(&[
+                        gpui::KeyContext::parse("Zetta").unwrap(),
+                        gpui::KeyContext::parse("Terminal").unwrap(),
+                    ])
+                    .is_some()
+            })
+    }));
+}
+
+#[test]
 fn alt_shortcuts_use_the_platform_equivalent() {
     for (shortcut, expected) in [
         ("alt-left", "cmd-left"),

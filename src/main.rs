@@ -20,6 +20,7 @@ mod zmux {
         }
     }
 }
+mod key_passthrough;
 mod keymap_file;
 #[cfg(feature = "zosh-client")]
 mod mosh;
@@ -228,6 +229,7 @@ actions!(
         FocusPaneRight,
         FocusPaneUp,
         FocusPaneDown,
+        SendNextKeyToTerminal,
         ToggleMaximizePane,
         MinimizePane,
         RestoreMinimizedPane,

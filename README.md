@@ -367,6 +367,10 @@ code until the row's close control or the close shortcut is used. Opening
 another command while one is selected adds it to the same host pane; the host
 pane controls are hidden while stacking is enabled.
 
+Press `Shift-F9` to send the next key to the focused terminal even when Zetta
+normally binds it. A bottom-right indicator stays visible until that key is
+pressed; `Escape` cancels. The shortcut can be changed in the keymap.
+
 ## Documentation
 
 - [Installation](docs/installation.md): build requirements and platform

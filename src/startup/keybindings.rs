@@ -651,6 +651,7 @@ fn default_keybindings_for_mode(
             Some("Zetta > Terminal"),
         ),
         KeyBinding::new("shift-f11", ToggleFullscreen, Some("Zetta > Terminal")),
+        KeyBinding::new("shift-f9", SendNextKeyToTerminal, Some("Zetta > Terminal")),
         // Override Zed's inherited `pane::CloseActiveItem` binding in terminal focus.
         KeyBinding::new("ctrl-shift-w", CloseTab, Some("Terminal")),
     ];

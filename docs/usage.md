@@ -1000,6 +1000,7 @@ mode `Ctrl-Shift-B` shares the active tab, while in `--no-mux` mode it toggles
 | `Cmd-Shift-A` (macOS) / `Alt-Shift-A` (Windows/Linux) | Select all terminal text |
 | `Ctrl-Shift-Backspace` | Clear the system clipboard |
 | `Cmd-Arrow` (macOS) / `Alt-Arrow` (Windows/Linux) | Focus the pane in that direction |
+| `Shift-F9`, then a key | Send the next key to the focused terminal, even when Zetta binds it; `Escape` cancels |
 | `Cmd-Shift-Down` (macOS) / `Alt-Shift-Down` (Windows/Linux) | Minimize the active pane |
 | `Cmd-Shift-Left` / `Cmd-Shift-Right` (macOS) / `Alt-Shift-Left` / `Alt-Shift-Right` (Windows/Linux) | Select the previous / next minimized pane |
 | `Cmd-Shift-Up` (macOS) / `Alt-Shift-Up` (Windows/Linux) | Restore the selected minimized pane |

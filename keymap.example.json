@@ -63,6 +63,7 @@
       "ctrl-alt-r": "zetta::ReloadConfiguration",
       "ctrl-shift-f12": "zetta::TogglePerformanceOverlay",
       "shift-f11": "zetta::ToggleFullscreen",
+      "shift-f9": "zetta::SendNextKeyToTerminal",
       "alt-left": "zetta::FocusPaneLeft",
       "alt-right": "zetta::FocusPaneRight",
       "alt-up": "zetta::FocusPaneUp",

@@ -464,6 +464,7 @@ pub(crate) struct Zetta {
     pub(crate) pane_output_error: Option<String>,
     pub(crate) pane_output_save_in_progress: bool,
     pub(crate) transient_notice: TransientNotice,
+    pub(crate) key_passthrough: Option<crate::key_passthrough::KeyPassthrough>,
     pub(crate) tabs: Vec<Tab>,
     /// Paste access is local to this viewer and disappears with its tab.
     pub(crate) remote_clipboard_paste_tabs: HashSet<u64>,
@@ -758,6 +759,8 @@ impl Zetta {
             .push(cx.observe_window_activation(window, |this, window, cx| {
                 if window.is_window_active() {
                     this.focus_after_window_activation(window, cx);
+                } else {
+                    this.cancel_key_passthrough(cx);
                 }
             }));
         self._subscriptions
@@ -924,6 +927,7 @@ impl Zetta {
             pane_output_error: None,
             pane_output_save_in_progress: false,
             transient_notice: TransientNotice::default(),
+            key_passthrough: None,
             tabs: Vec::new(),
             remote_clipboard_paste_tabs: HashSet::new(),
             background_sessions: BackgroundSessionRunner::default(),
@@ -1048,6 +1052,8 @@ impl Zetta {
                 cx.observe_window_activation(window, |this, window, cx| {
                     if window.is_window_active() {
                         this.focus_after_window_activation(window, cx);
+                    } else {
+                        this.cancel_key_passthrough(cx);
                     }
                 }),
                 cx.observe_window_appearance(window, |this, window, cx| {
