@@ -10,6 +10,10 @@ description = "Cross-platform Mosh terminal client for Zetta"
 path = "src/lib.rs"
 doctest = false
 
+[[bin]]
+name = "zosh"
+path = "src/main.rs"
+
 [dependencies]
 anyhow = "1"
 # The scrollback rows the server carries ride inside an OSC string, so they

@@ -880,3 +880,77 @@ clean:
 	$(CARGO) clean
 
 endif
+
+# Standalone tools.
+#
+# `make build` produces the whole terminal, GPUI and all. A headless host such
+# as a Raspberry Pi wants only the command-line tools, so these targets build
+# them from their own crates instead of through the root package: nothing here
+# compiles the GUI or its dependencies.
+#
+#   make install-tools RELEASE=1 TOOLS_BINDIR=$$HOME/bin
+#   make build-tools TOOLS="zmux zosh"
+#
+# TOOLS picks the subset (default: every tool below except zwt and zntfy, which
+# a headless host rarely needs). TOOLS_BINDIR is where install-tools puts them
+# and defaults to BINDIR (on Windows, the directory `make install` uses);
+# DESTDIR does not apply to an explicit TOOLS_BINDIR.
+#
+# They build into target/tools rather than target: the root package also builds
+# `zmux` and `zosh-server`, from different crates, and sharing a target
+# directory would have each overwrite the other's binary. `zmux` here is the
+# standalone daemon, so it does not read Zetta's configuration for identity
+# paths — the trade `crates/zmux` exists to make for a constrained host.
+KNOWN_TOOLS := zmux zosh zosh-server zcopy zpaste zwt zntfy
+TOOLS ?= zmux zosh zosh-server zcopy zpaste
+ifeq ($(OS),Windows_NT)
+TOOLS_BINDIR ?=
+EXE := .exe
+TOOLS_CARGO := $(CARGO_RUN)
+else
+TOOLS_BINDIR ?= $(BINDIR)
+EXE :=
+TOOLS_CARGO := $(ENV) -u DESTDIR $(CARGO_RUN)
+endif
+TOOLS_TARGET_DIR := target/tools
+TOOLS_OUT_DIR := $(TOOLS_TARGET_DIR)/$(BUILD_PROFILE)
+
+TOOL_CRATE_zmux := crates/zmux
+# zmux-pty is the Windows pty helper; nothing else runs it, so it is neither
+# built nor installed elsewhere.
+TOOL_BINS_zmux := zmux$(if $(filter Windows_NT,$(OS)), zmux-pty)
+TOOL_CRATE_zosh := crates/zosh
+TOOL_BINS_zosh := zosh
+TOOL_CRATE_zosh-server := crates/zosh/server
+TOOL_BINS_zosh-server := zosh-server
+TOOL_CRATE_zcopy := crates/zclip
+TOOL_BINS_zcopy := zcopy
+TOOL_CRATE_zpaste := crates/zclip
+TOOL_BINS_zpaste := zpaste
+TOOL_CRATE_zwt := crates/zwt
+TOOL_BINS_zwt := zwt
+TOOL_CRATE_zntfy := crates/zntfy
+TOOL_BINS_zntfy := zntfy
+
+ifneq ($(filter-out $(KNOWN_TOOLS),$(TOOLS)),)
+$(error unknown TOOLS: $(filter-out $(KNOWN_TOOLS),$(TOOLS)); choose from: $(KNOWN_TOOLS))
+endif
+
+TOOLS_CRATES := $(sort $(foreach t,$(TOOLS),$(TOOL_CRATE_$(t))))
+TOOLS_BINS := $(sort $(foreach t,$(TOOLS),$(TOOL_BINS_$(t))))
+tools_crate_bins = $(sort $(foreach t,$(TOOLS),$(if $(filter $(1),$(TOOL_CRATE_$(t))),$(TOOL_BINS_$(t)))))
+
+space := $(subst ,, )
+comma := ,
+
+.PHONY: build-tools install-tools
+
+build-tools:
+	$(foreach c,$(TOOLS_CRATES),$(TOOLS_CARGO) build $(CARGO_PROFILE_ARGS) --locked --manifest-path $(c)/Cargo.toml --target-dir $(TOOLS_TARGET_DIR) $(addprefix --bin ,$(call tools_crate_bins,$(c))) &&) true
+
+install-tools: build-tools
+ifeq ($(OS),Windows_NT)
+	powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/install-tools.ps1 -SourceDirectory "$(TOOLS_OUT_DIR)" -Binaries $(subst $(space),$(comma),$(addsuffix $(EXE),$(TOOLS_BINS))) $(if $(TOOLS_BINDIR),-InstallDirectory "$(TOOLS_BINDIR)")
+else
+	$(foreach b,$(TOOLS_BINS),$(INSTALL) -Dm755 "$(TOOLS_OUT_DIR)/$(b)" "$(TOOLS_BINDIR)/$(b)" &&) true
+endif

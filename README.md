@@ -159,6 +159,15 @@ The default build also produces the standalone `zwt` Git worktree command. Set
 bundled Zosh client and server executables and the `zetta mosh` route. Set
 `ZOSH_CLIENT=0` or `ZOSH_SERVER=0` to omit either component independently.
 
+Headless hosts (a Raspberry Pi, say) can build and install only the
+command-line tools, without compiling the GUI: `make install-tools RELEASE=1
+TOOLS_BINDIR=$HOME/bin`. `TOOLS` selects the subset from `zmux`, `zosh`,
+`zosh-server`, `zcopy`, `zpaste`, `zwt` and `zntfy` (default: the first five;
+Windows also gets `zmux-pty` with `zmux`),
+so `make build-tools TOOLS="zmux zosh"` builds two of them. `TOOLS_BINDIR`
+defaults to `BINDIR`. They build into `target/tools`, and `zmux` there is the
+standalone daemon from `crates/zmux`.
+
 Corporate or otherwise restricted deployments can omit the serial console,
 network tools, and desktop notification support at build time. For example, `make
 build SERIAL=0 HTTP=0 TFTP=0 NOTIFY=0` produces a terminal-only build.
