@@ -641,6 +641,7 @@ fn an_embedded_bootstrap_runs_its_command_and_names_the_bundled_zosh() {
         forward_agent: false,
         proxy_program: Some(PathBuf::from("/opt/zetta/zosh")),
         control_path: None,
+        server_network_timeout: None,
     };
     let command = embedded_command(&request).expect("a valid request");
     let (program, arguments) = ssh_bootstrap_command(&command, &request.target);
@@ -670,6 +671,39 @@ fn an_embedded_bootstrap_runs_its_command_and_names_the_bundled_zosh() {
     assert!(
         remote.contains("command -v zosh-server") && remote.contains("'mosh-server'"),
         "a host without the bundled server still gets a stock one: {remote}"
+    );
+}
+
+/// A pane's server is told to give up on a client it has not heard from for
+/// the embedder's timeout, whichever server the host turns out to have; the
+/// standalone command keeps Mosh's wait-for-ever.
+#[test]
+fn an_embedded_server_is_given_a_network_timeout() {
+    let request = PaneBootstrapRequest {
+        target: "build-host".to_owned(),
+        remote_command: vec!["zmux".to_owned(), "relay-pane".to_owned()],
+        server_network_timeout: Some(std::time::Duration::from_secs(86_400)),
+        ..PaneBootstrapRequest::default()
+    };
+    let command = embedded_command(&request).expect("a valid request");
+    let (_, arguments) = ssh_bootstrap_command(&command, &request.target);
+    let remote = arguments.last().expect("the remote command");
+    assert!(
+        remote.contains("MOSH_SERVER_NETWORK_TMOUT=86400 'zosh-server' 'new'"),
+        "{remote}"
+    );
+    assert!(
+        remote.contains("MOSH_SERVER_NETWORK_TMOUT=86400 'mosh-server' 'new'"),
+        "a stock server honours the same variable: {remote}"
+    );
+
+    let (_, arguments) = ssh_bootstrap_command(&MoshCommand::default(), "build-host");
+    assert!(
+        !arguments
+            .last()
+            .unwrap()
+            .contains("MOSH_SERVER_NETWORK_TMOUT"),
+        "the standalone command waits for its client as Mosh does"
     );
 }
 

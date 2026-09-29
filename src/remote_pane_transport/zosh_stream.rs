@@ -22,6 +22,18 @@ use zmux::auth::SessionSecret;
 /// layout resizes it before anything is shown.
 const INITIAL_PANE_SIZE: (u16, u16) = (80, 24);
 
+/// How long a pane's `zosh-server` waits to hear from this window before it
+/// ends the Mosh session.
+///
+/// Mosh's own default is for ever, which suits a terminal that is the only
+/// place its program lives. Here the program lives in the multiplexer, so
+/// ending the link loses nothing: the relay behind it exits, and attaching
+/// the session again brings up a fresh one. What for ever did cost is every
+/// window that went without a clean shutdown — a crash, a lost laptop —
+/// leaving its servers and relays running on the host indefinitely, each one
+/// still a viewer of its pane. A day outlasts a laptop asleep overnight.
+const SERVER_NETWORK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+
 /// What a pane holds on to for as long as it is shown. Dropping it ends the
 /// Mosh session, which is what closing the pane should do.
 pub(crate) type ZoshPaneHandle = zosh::PaneSession;
@@ -298,6 +310,7 @@ fn bootstrap_endpoint(
         forward_agent: request.forward_agent,
         proxy_program: bundled_zosh_program(),
         control_path: request.control_path.clone(),
+        server_network_timeout: Some(SERVER_NETWORK_TIMEOUT),
     });
     match bootstrap {
         Ok(zosh::PaneBootstrapOutcome::Endpoint(endpoint)) => {

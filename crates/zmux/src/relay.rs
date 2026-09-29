@@ -56,7 +56,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     thread,
     time::{Duration, Instant},
@@ -88,6 +88,11 @@ const REATTACH_PATIENCE: Duration = Duration::from_secs(60);
 /// Between two attempts to re-attach, and between two attempts to resend
 /// input while the stream is being replaced.
 const RETRY_INTERVAL: Duration = Duration::from_millis(200);
+
+/// A gap between two reads of the pane longer than this is logged, with what
+/// the relay was doing instead. The daemon gives up on a viewer after 30
+/// seconds without progress; this says which step took them.
+const READ_GAP_WARNING: Duration = Duration::from_secs(2);
 
 /// A write to the terminal slower than this is logged. The daemon gives up on
 /// a viewer that reads nothing for 30 seconds, and a relay reads nothing while
@@ -146,9 +151,11 @@ pub fn run(options: RelayOptions) -> Result<()> {
     let mut stdout = io::stdout();
     blank_the_screen(&mut stdout)?;
 
-    let client = Client::connect_existing()
-        .context("connecting to this host's multiplexer")?
-        .context("no multiplexer is running on this host")?;
+    let client = Arc::new(
+        Client::connect_existing()
+            .context("connecting to this host's multiplexer")?
+            .context("no multiplexer is running on this host")?,
+    );
     // Kept on the client, so the snapshot each size report is stamped from is
     // authorized on a protected session the same way the attach was.
     client.set_session_secret(secret.as_ref());
@@ -160,12 +167,13 @@ pub fn run(options: RelayOptions) -> Result<()> {
         .and_then(|()| stdout.flush())
         .context("writing the pane's retained output")?;
 
-    let mut sizes = SizeReports {
-        client: &client,
-        pane: &pane,
+    let sizes = Arc::new(SizeReports {
+        client: Arc::clone(&client),
+        pane: Arc::clone(&pane),
         session_id: options.session_id,
-        revision,
-    };
+        revision: AtomicU64::new(revision.0),
+        report_requested: AtomicBool::new(false),
+    });
     let reattach = Reattach {
         options,
         secret: secret.as_ref(),
@@ -189,7 +197,8 @@ pub fn run(options: RelayOptions) -> Result<()> {
         Arc::clone(&reattach.input_lost),
         Arc::clone(&ending),
     );
-    let result = forward_output(&mut sizes, &reattach, &resized, &mut stdout);
+    report_sizes(Arc::clone(&sizes), resized, Arc::clone(&ending));
+    let result = forward_output(&sizes, &reattach, &mut stdout);
     ending.store(true, Ordering::Release);
     if let Err(error) = &result {
         log::warn!(
@@ -222,13 +231,8 @@ impl Reattach<'_> {
     /// the screen blanked so the replay repaints it from nothing. Keeps trying
     /// for [`REATTACH_PATIENCE`]; a pane that has gone meanwhile ends the relay
     /// the way it ends any other time.
-    fn run(&self, sizes: &mut SizeReports<'_>, stdout: &mut impl io::Write) -> Result<Continue> {
-        let SizeReports {
-            client,
-            pane,
-            session_id,
-            ..
-        } = *sizes;
+    fn run(&self, sizes: &SizeReports, stdout: &mut impl io::Write) -> Result<Continue> {
+        let (client, pane, session_id) = (&*sizes.client, &*sizes.pane, sizes.session_id);
         log::warn!(
             "relaying session {session_id} pane {}: the stream was lost; attaching again",
             pane.pane_id()
@@ -241,9 +245,11 @@ impl Reattach<'_> {
                     pane.replace_connection_from(&replacement)
                         .context("installing the re-attached stream")?;
                     self.input_lost.store(false, Ordering::Release);
-                    sizes.revision = revision;
-                    // The new attachment is unmeasured until it reports.
-                    sizes.report_terminal_size();
+                    sizes.revision.store(revision.0, Ordering::Release);
+                    // The new attachment is unmeasured until it reports. Left
+                    // to the size thread, like every other report, so this
+                    // loop does not wait on the daemon to answer it.
+                    sizes.report_requested.store(true, Ordering::Release);
                     log::warn!(
                         "relaying session {session_id} pane {}: attached again",
                         pane.pane_id()
@@ -455,14 +461,24 @@ fn forward_input(pane: Arc<SharedPane>, input_lost: Arc<AtomicBool>, ending: Arc
 /// it sends rather than the one the layout it measured was for. A remembered
 /// revision is still the fallback, so a daemon that cannot answer leaves the
 /// reporting no worse than it was.
-struct SizeReports<'a> {
-    client: &'a Client,
-    pane: &'a SharedPane,
+///
+/// Reporting happens on a thread of its own ([`report_sizes`]). Asking the
+/// daemon for the revision is a request with a timeout of fifteen seconds, and
+/// on the output thread every `SIGWINCH` held the pane's output until it was
+/// answered — long enough, twice over, for the daemon to give up on this relay
+/// as a viewer that had stopped reading.
+struct SizeReports {
+    client: Arc<Client>,
+    pane: Arc<SharedPane>,
     session_id: u64,
-    revision: SessionRevision,
+    /// The last revision this relay knows of, as a [`SessionRevision`].
+    revision: AtomicU64,
+    /// A report is wanted even without a resize: after a re-attach, whose new
+    /// attachment is unmeasured until it reports.
+    report_requested: AtomicBool,
 }
 
-impl SizeReports<'_> {
+impl SizeReports {
     /// Records the revision an arbitrated size arrived at, and releases the
     /// output held behind it.
     ///
@@ -470,25 +486,23 @@ impl SizeReports<'_> {
     /// relay writes to a real terminal whose geometry Mosh owns. It has still
     /// observed the size boundary, so the shared reader may continue to the
     /// redraw queued after it.
-    fn observe_arbitrated(&mut self) {
+    fn observe_arbitrated(&self) {
         let Some(&(arbitrated, columns, lines)) = self.pane.take_revisioned_sizes().last() else {
             return;
         };
-        self.revision = arbitrated;
+        self.revision.store(arbitrated.0, Ordering::Release);
         self.pane
             .finish_size_application((arbitrated, columns, lines));
     }
 
     /// Reports the terminal's current size at the session's current revision.
-    fn report_terminal_size(&mut self) {
+    fn report_terminal_size(&self) {
         let Some((columns, lines)) = terminal_size() else {
             return;
         };
-        self.revision = self.current_revision();
-        if let Err(error) = self
-            .pane
-            .send_resize_for_revision(self.revision, columns, lines)
-        {
+        let revision = self.current_revision();
+        self.revision.store(revision.0, Ordering::Release);
+        if let Err(error) = self.pane.send_resize_for_revision(revision, columns, lines) {
             // A report can lose a race with a layout change, and the next one
             // carries the newer revision. Losing the pane over it would be
             // worse than the size being briefly wrong.
@@ -497,7 +511,19 @@ impl SizeReports<'_> {
     }
 
     fn current_revision(&self) -> SessionRevision {
-        match self.client.shared_snapshot(self.session_id) {
+        let known = SessionRevision(self.revision.load(Ordering::Acquire));
+        let started = Instant::now();
+        let answer = self.client.shared_snapshot(self.session_id);
+        let took = started.elapsed();
+        if took >= READ_GAP_WARNING {
+            log::warn!(
+                "relaying pane {} of session {}: the daemon took {took:?} to report the \
+                 session's revision",
+                self.pane.pane_id(),
+                self.session_id
+            );
+        }
+        match answer {
             Ok(state) => state.revision,
             Err(error) => {
                 log::debug!(
@@ -505,42 +531,70 @@ impl SizeReports<'_> {
                      reporting at {}: {error:#}",
                     self.pane.pane_id(),
                     self.session_id,
-                    self.revision.0
+                    known.0
                 );
-                self.revision
+                known
             }
         }
     }
 }
 
+/// Reports the terminal's size whenever Mosh resizes it, off the output
+/// thread: see [`SizeReports`].
+fn report_sizes(sizes: Arc<SizeReports>, resized: Arc<AtomicBool>, ending: Arc<AtomicBool>) {
+    thread::spawn(move || {
+        while !ending.load(Ordering::Acquire) {
+            let resize = resized.swap(false, Ordering::SeqCst);
+            let requested = sizes.report_requested.swap(false, Ordering::AcqRel);
+            if resize || requested {
+                sizes.report_terminal_size();
+            }
+            thread::sleep(IDLE_POLL);
+        }
+    });
+}
+
 /// Copies the pane's output to this process's terminal until the pane closes,
 /// reporting a size change whenever one arrives.
 fn forward_output(
-    sizes: &mut SizeReports<'_>,
+    sizes: &SizeReports,
     reattach: &Reattach<'_>,
-    resized: &AtomicBool,
     stdout: &mut impl io::Write,
 ) -> Result<()> {
     let mut reader = sizes.pane.reader();
     let mut bytes = [0_u8; 16 * 1024];
+    let mut last_read = Instant::now();
+    let mut doing = "starting";
     loop {
         sizes.observe_arbitrated();
-        if resized.swap(false, Ordering::SeqCst) {
-            sizes.report_terminal_size();
+        let gap = last_read.elapsed();
+        if gap >= READ_GAP_WARNING {
+            log::warn!(
+                "relaying session {} pane {}: the pane went unread for {gap:?} while {doing}",
+                sizes.session_id,
+                sizes.pane.pane_id()
+            );
         }
-        match reader.read(&mut bytes) {
+        let read = reader.read(&mut bytes);
+        last_read = Instant::now();
+        match read {
             Ok(0) => return Ok(()),
-            Ok(count) => write_output(stdout, &bytes[..count])?,
+            Ok(count) => {
+                doing = "writing its output to the Mosh terminal";
+                write_output(stdout, &bytes[..count])?;
+            }
             // The shared reader reports every recoverable stall this way,
             // including its own read timeout and a stream that broke with no
             // replacement yet; only an ended pane is an end.
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                if reattach.needed(sizes.pane) {
+                if reattach.needed(&sizes.pane) {
+                    doing = "attaching the pane again";
                     match reattach.run(sizes, stdout)? {
                         Continue::Relaying => continue,
                         Continue::Ended => return Ok(()),
                     }
                 }
+                doing = "idle";
                 thread::sleep(IDLE_POLL);
             }
             Err(error) => return Err(error).context("reading the pane's output"),

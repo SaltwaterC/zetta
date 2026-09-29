@@ -156,6 +156,13 @@ What moves and what does not:
   tab never has half its panes on one transport and half on the other.
 - **A protected session's secret travels inside the link**, never in the remote
   command line, which every account on that host can read.
+- **A link nobody answers ends after a day.** Each pane's `zosh-server` is
+  started with `MOSH_SERVER_NETWORK_TMOUT` set to 24 hours, so a window that
+  went without shutting its links down — a crash, a lost laptop — does not
+  leave servers and relays running on the host for good. The pane itself lives
+  in the multiplexer and is unaffected; after a longer absence, attach the
+  session again to bring up fresh links. The `zosh` command keeps Mosh's
+  default of waiting indefinitely.
 - **Agent forwarding stays with the pane transport.** With `--forward-agent`,
   the relay publishes Zosh's negotiated private agent socket at the stable name
   the daemon put in the pane shell's environment. A pane created by an older

@@ -14,6 +14,7 @@ use std::{
     process::{Child, Command, ExitStatus, Stdio},
     sync::mpsc,
     thread,
+    time::Duration,
 };
 
 use anyhow::{Context as _, Result};
@@ -157,6 +158,10 @@ struct MoshCommand {
     /// bootstrap then runs as a session on that connection instead of
     /// logging in again; see [`PaneBootstrapRequest::control_path`].
     control_path: Option<PathBuf>,
+    /// How long the remote server may go without hearing from its client
+    /// before it ends the session; see
+    /// [`PaneBootstrapRequest::server_network_timeout`].
+    server_network_timeout: Option<Duration>,
     original_arguments: Vec<std::ffi::OsString>,
     help: bool,
     version: bool,
@@ -192,6 +197,7 @@ impl Default for MoshCommand {
             remote_command: Vec::new(),
             proxy_program: None,
             control_path: None,
+            server_network_timeout: None,
             original_arguments: Vec::new(),
             help: false,
             version: false,
@@ -266,6 +272,17 @@ pub struct PaneBootstrapRequest {
     /// binding, the socket is not used, and a failed shared bootstrap is tried
     /// again with a login of its own.
     pub control_path: Option<PathBuf>,
+    /// How long the remote server may go without hearing from its client
+    /// before it ends the session (`MOSH_SERVER_NETWORK_TMOUT`, which both
+    /// `zosh-server` and `mosh-server` honour). `None` is Mosh's own
+    /// behaviour: wait for the client for ever.
+    ///
+    /// For the standalone command that is right — the client is a person's
+    /// terminal, and roaming back to it after any absence is the point. An
+    /// embedder whose pane lives on elsewhere is different: a client that went
+    /// without a shutdown (a crash, a lost machine) leaves a server, and
+    /// whatever it runs, waiting for good.
+    pub server_network_timeout: Option<Duration>,
 }
 
 /// A Mosh endpoint, ready for [`crate::PaneSession::connect`].
@@ -427,6 +444,7 @@ fn embedded_command(request: &PaneBootstrapRequest) -> Result<MoshCommand> {
         embedded: true,
         remote_command: request.remote_command.clone(),
         proxy_program: request.proxy_program.clone(),
+        server_network_timeout: request.server_network_timeout,
         ..MoshCommand::default()
     };
     if let Some(port) = request.ssh_port {
@@ -1319,9 +1337,21 @@ fn remote_server_invocation(command: &MoshCommand, colors: u16) -> Result<String
             "if command -v {DEFAULT_SERVER} >/dev/null 2>&1; then {zosh}; else {stock}; fi"
         ));
     }
-    Ok(shell_quote_words(&server_arguments_with_colors(
-        command, colors,
-    )?))
+    Ok(format!(
+        "{}{}",
+        server_environment(command),
+        shell_quote_words(&server_arguments_with_colors(command, colors)?)
+    ))
+}
+
+/// The environment assignment a server invocation is prefixed with, if any.
+/// A prefix rather than an `export`, so it reaches only the server and the
+/// remote shell's syntax is the same as for the invocation itself.
+fn server_environment(command: &MoshCommand) -> String {
+    command
+        .server_network_timeout
+        .map(|timeout| format!("MOSH_SERVER_NETWORK_TMOUT={} ", timeout.as_secs().max(1)))
+        .unwrap_or_default()
 }
 
 fn server_invocation_for(command: &MoshCommand, server: &str, colors: u16) -> String {
@@ -1331,7 +1361,11 @@ fn server_invocation_for(command: &MoshCommand, server: &str, colors: u16) -> St
         colors,
         server == DEFAULT_SERVER,
     ));
-    shell_quote_words(&arguments)
+    format!(
+        "{}{}",
+        server_environment(command),
+        shell_quote_words(&arguments)
+    )
 }
 
 fn proxy_command(command: &MoshCommand) -> String {
