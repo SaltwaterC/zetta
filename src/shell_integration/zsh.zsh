@@ -1153,9 +1153,12 @@ _zetta() {
             ;;
         tabicon)
             if [[ $words[(I)--reset] -gt 0 || $words[(I)-r] -gt 0 ]]; then
+                if [[ $words[CURRENT] == -* ]]; then
+                    _zetta_options --queue --help
+                fi
                 return
             elif [[ $words[CURRENT] == -* ]]; then
-                _zetta_options --icon --reset --list --help
+                _zetta_options --icon --reset --queue --list --help
             else
                 _zetta_tab_icons
             fi

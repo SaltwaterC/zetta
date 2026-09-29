@@ -60,8 +60,11 @@ pub(crate) enum StartupMode {
     Mux(Vec<OsString>),
     SetTabIcon {
         icon: Option<IconName>,
+        queue: bool,
     },
-    ResetTabIcon,
+    ResetTabIcon {
+        queue: bool,
+    },
     ListTabIcons,
     SetTheme {
         scope: ThemeScope,

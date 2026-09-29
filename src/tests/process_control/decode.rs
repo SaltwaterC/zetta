@@ -824,26 +824,45 @@ fn tab_icon_control_requests_decode_names_and_allow_clearing() {
     assert_eq!(
         decode_control_request(&mut icon_request, "token"),
         Some(ControlRequestCommand::SetTabIcon {
-            icon: Some(ui::IconName::Terminal)
+            icon: Some(ui::IconName::Terminal),
+            queue: false,
         })
     );
 
     let mut clear_request = request("token", "set_tab_icon");
     assert_eq!(
         decode_control_request(&mut clear_request, "token"),
-        Some(ControlRequestCommand::SetTabIcon { icon: None })
+        Some(ControlRequestCommand::SetTabIcon {
+            icon: None,
+            queue: false
+        })
     );
 
     let mut invalid_request = request("token", "set_tab_icon");
     invalid_request.icon = Some("not-an-icon".to_owned());
     assert_eq!(decode_control_request(&mut invalid_request, "token"), None);
+    let mut queued_request = request("token", "set_tab_icon");
+    queued_request.queue = Some(true);
+    assert_eq!(
+        decode_control_request(&mut queued_request, "token"),
+        Some(ControlRequestCommand::SetTabIcon {
+            icon: None,
+            queue: true
+        })
+    );
 }
 
 #[test]
-fn tab_icon_reset_control_requests_are_payload_free() {
+fn tab_icon_reset_control_requests_only_allow_queue() {
     assert_eq!(
         decode_control_request(&mut request("token", "reset_tab_icon"), "token"),
-        Some(ControlRequestCommand::ResetTabIcon)
+        Some(ControlRequestCommand::ResetTabIcon { queue: false })
+    );
+    let mut queued_request = request("token", "reset_tab_icon");
+    queued_request.queue = Some(true);
+    assert_eq!(
+        decode_control_request(&mut queued_request, "token"),
+        Some(ControlRequestCommand::ResetTabIcon { queue: true })
     );
 
     for mut invalid_request in [
@@ -1054,6 +1073,7 @@ fn reconnect_requests_carry_a_session_target_and_optional_secret() {
         remote_keep_alive_ms: None,
         remote_forward_agent: None,
         icon: None,
+        queue: None,
         pane_theme: None,
         pane_theme_revision: None,
         pane_id: None,

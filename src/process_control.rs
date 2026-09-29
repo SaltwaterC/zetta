@@ -103,9 +103,10 @@ pub(crate) use server::ProcessControlServer;
 ///
 /// 19 adds a raw shell-command request for registered project commands.
 ///
-/// 20 adds the payload-free `reset_tab_icon` request, which clears a tab's
+/// 20 adds `reset_tab_icon`, which clears a tab's
 /// explicit icon override and reapplies its active project or application
-/// default.
+/// default. Tab icon requests may now carry `queue: true` to acknowledge
+/// acceptance into the application command queue before UI completion.
 ///
 /// A New Window request may carry an optional profile name and a short-lived Wayland activation token in
 /// the private string payload so an existing process can focus its surface.
@@ -406,8 +407,11 @@ enum ControlRequestCommand {
     },
     SetTabIcon {
         icon: Option<IconName>,
+        queue: bool,
     },
-    ResetTabIcon,
+    ResetTabIcon {
+        queue: bool,
+    },
     SetTheme {
         scope: crate::ThemeScope,
         theme: Option<String>,
@@ -482,6 +486,8 @@ struct ControlRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     remote_forward_agent: Option<bool>,
     icon: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    queue: Option<bool>,
     pane_theme: Option<String>,
     /// The pane-theme revision the client already knows, so an unchanged theme
     /// can be answered without involving the main thread.

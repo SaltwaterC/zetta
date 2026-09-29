@@ -388,18 +388,18 @@ pub(super) fn list_tab_icons() -> Result<()> {
 }
 
 /// `zetta tabicon NAME`.
-pub(super) fn set_tab_icon(icon: Option<IconName>) -> Result<()> {
+pub(super) fn set_tab_icon(icon: Option<IconName>, queue: bool) -> Result<()> {
     anyhow::ensure!(
-        request_existing_process_tab_icon(icon)?,
+        request_existing_process_tab_icon(icon, queue)?,
         "no running Zetta process accepted the tab icon request"
     );
     Ok(())
 }
 
 /// `zetta tabicon --reset`.
-pub(super) fn reset_tab_icon() -> Result<()> {
+pub(super) fn reset_tab_icon(queue: bool) -> Result<()> {
     anyhow::ensure!(
-        request_existing_process_tab_icon_reset()?,
+        request_existing_process_tab_icon_reset(queue)?,
         "no running Zetta process accepted the tab icon reset request"
     );
     Ok(())

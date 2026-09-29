@@ -204,9 +204,9 @@ fn dispatch_startup_mode(args: &StartupArgs) -> Option<Result<()>> {
             Ok(())
         }
         StartupMode::ConfigureCurrentShellIntegration => cli_modes::configure_shell_integration(),
-        StartupMode::ResetTabIcon => cli_modes::reset_tab_icon(),
+        StartupMode::ResetTabIcon { queue } => cli_modes::reset_tab_icon(*queue),
         StartupMode::ListTabIcons => cli_modes::list_tab_icons(),
-        StartupMode::SetTabIcon { icon } => cli_modes::set_tab_icon(*icon),
+        StartupMode::SetTabIcon { icon, queue } => cli_modes::set_tab_icon(*icon, *queue),
         StartupMode::SetTheme { scope, theme } => cli_modes::set_theme(*scope, theme.clone()),
         StartupMode::ListThemes => cli_modes::list_themes(),
         StartupMode::ListPaneSplits => cli_modes::list_pane_splits(),

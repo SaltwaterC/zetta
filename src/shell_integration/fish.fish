@@ -1484,6 +1484,8 @@ complete -c zetta -n '__fish_seen_subcommand_from paste; and __zetta_short_optio
 complete -c zetta -n '__fish_seen_subcommand_from paste; and __zetta_short_option -prefer' -a 'txt rtf ps'
 complete -c zetta -n '__fish_seen_subcommand_from tabicon' -l reset -d 'Restore the configured project or application icon'
 complete -c zetta -s r -n '__fish_seen_subcommand_from tabicon; and __zetta_short_option -r'
+complete -c zetta -n '__fish_seen_subcommand_from tabicon' -l queue -d 'Return when the icon change is queued'
+complete -c zetta -s q -n '__fish_seen_subcommand_from tabicon; and __zetta_short_option -q'
 complete -c zetta -n '__fish_seen_subcommand_from tabicon' -l list -d 'Print built-in icon names'
 complete -c zetta -n '__fish_seen_subcommand_from tabicon' -l help -d 'Print help'
 complete -c zetta -n '__fish_seen_subcommand_from tabicon' -a '(__zetta_long_options tabicon)'

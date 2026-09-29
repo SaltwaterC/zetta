@@ -157,11 +157,11 @@ $zettaExitCode = 1
 for ($attempt = 1; $attempt -le 5; $attempt++) {
     try {
         if ($State -eq "reset") {
-            & $zettaExecutable tabicon --reset 2>&1 | ForEach-Object {
+            & $zettaExecutable tabicon --queue --reset 2>&1 | ForEach-Object {
                 [Console]::Error.WriteLine($_.ToString())
             }
         } else {
-            & $zettaExecutable tabicon $icon 2>&1 | ForEach-Object {
+            & $zettaExecutable tabicon --queue $icon 2>&1 | ForEach-Object {
                 [Console]::Error.WriteLine($_.ToString())
             }
         }

@@ -1218,12 +1218,16 @@ _zetta_complete() {
         tabicon)
             for (( index = 2; index < COMP_CWORD; index++ )); do
                 if [[ ${COMP_WORDS[index]} == --reset || ${COMP_WORDS[index]} == -r ]]; then
-                    COMPREPLY=()
+                    if [[ $current == -* ]]; then
+                        _zetta_compgen '--queue --help'
+                    else
+                        COMPREPLY=()
+                    fi
                     return
                 fi
             done
             if [[ $current == -* ]]; then
-                _zetta_compgen '--icon --reset --list --help'
+                _zetta_compgen '--icon --reset --queue --list --help'
             else
                 _zetta_complete_tab_icons
             fi

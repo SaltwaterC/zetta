@@ -181,6 +181,9 @@ active tab (`none` explicitly hides its icon); `zetta tabicon --reset` (or `-r`)
 clears that override so the active project's effective icon, or the configured
 application default outside a project and in remote sessions, is used. The choice is kept with the
 logical tab but is not written to user or project configuration.
+Add `-q` or `--queue` to either tab icon change to return as soon as Zetta
+accepts it into the application queue; by default the CLI waits for the change
+to be applied.
 `zetta theme pane THEME`
 sets a session-scoped theme on the active pane, while `zetta theme tab THEME`
 sets one for the whole tab. Pane themes take precedence over tab themes, and

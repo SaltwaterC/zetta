@@ -730,7 +730,7 @@ $zettaCompletions = {
             'attention' { '--notify', '--app-name', '--icon', '--sound', '--timeout', '--help' }
             'copy' { '--pboard', '--help' }
             'paste' { '--pboard', '--prefer', '--help' }
-            'tabicon' { '--icon', '--reset', '--list', '--help' }
+            'tabicon' { '--icon', '--reset', '--queue', '--list', '--help' }
             'theme' {
                 if ($words.Count -le 2) {
                     'pane', 'tab', '--help'

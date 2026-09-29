@@ -68,13 +68,55 @@ fn control_server_delivers_a_token_authenticated_tab_icon_reset_request() {
         serde_json::from_slice(&fs::read(endpoint_path).unwrap()).unwrap();
     assert_eq!(endpoint.version, CONTROL_VERSION);
 
-    let client = thread::spawn(move || send_reset_tab_icon_request(&endpoint).unwrap());
+    let client = thread::spawn(move || send_reset_tab_icon_request(&endpoint, false).unwrap());
     let command = futures::executor::block_on(received.next()).unwrap();
     let ProcessControlCommand::ResetTabIcon { completion } = command else {
         panic!("unexpected process control command");
     };
+    assert!(
+        !client.is_finished(),
+        "default tabicon should wait for UI completion"
+    );
     completion.send(true).unwrap();
     assert!(client.join().unwrap());
+}
+
+#[test]
+fn queued_tab_icons_acknowledge_before_ui_completion_and_keep_request_order() {
+    let directory = tempfile::tempdir().unwrap();
+    let endpoint_path = directory.path().join("control.json");
+    let (commands, mut received) = futures::channel::mpsc::unbounded();
+    let _server = ProcessControlServer::start_at(commands, endpoint_path.clone()).unwrap();
+    let endpoint: ControlEndpoint =
+        serde_json::from_slice(&fs::read(endpoint_path).unwrap()).unwrap();
+
+    // Leave the application's completion channels unanswered. Both requests
+    // must still return, and the application sees the set before the reset.
+    assert!(send_set_tab_icon_request(&endpoint, Some(IconName::Terminal), true).unwrap());
+    assert!(send_reset_tab_icon_request(&endpoint, true).unwrap());
+    let first = futures::executor::block_on(received.next()).unwrap();
+    let second = futures::executor::block_on(received.next()).unwrap();
+    assert!(matches!(
+        first,
+        ProcessControlCommand::SetTabIcon {
+            icon: Some(IconName::Terminal),
+            ..
+        }
+    ));
+    assert!(matches!(second, ProcessControlCommand::ResetTabIcon { .. }));
+}
+
+#[test]
+fn queued_tab_icon_reports_an_unavailable_endpoint() {
+    let directory = tempfile::tempdir().unwrap();
+    let endpoint = ControlEndpoint {
+        version: CONTROL_VERSION,
+        process_id: std::process::id(),
+        socket_path: directory.path().join("missing.sock"),
+        token: "token".to_owned(),
+    };
+    assert!(send_set_tab_icon_request(&endpoint, Some(IconName::Terminal), true).is_err());
+    assert!(send_reset_tab_icon_request(&endpoint, true).is_err());
 }
 
 #[test]

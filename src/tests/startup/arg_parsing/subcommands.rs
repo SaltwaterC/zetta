@@ -197,7 +197,8 @@ fn tabicon_subcommand_parses_icons_and_dynamic_listing() {
             .unwrap()
             .mode,
         StartupMode::SetTabIcon {
-            icon: Some(IconName::Terminal)
+            icon: Some(IconName::Terminal),
+            queue: false,
         }
     );
     assert_eq!(
@@ -208,7 +209,10 @@ fn tabicon_subcommand_parses_icons_and_dynamic_listing() {
         ])
         .unwrap()
         .mode,
-        StartupMode::SetTabIcon { icon: None }
+        StartupMode::SetTabIcon {
+            icon: None,
+            queue: false
+        }
     );
     assert_eq!(
         parse_args_from([OsString::from("tabicon"), OsString::from("--list")])
@@ -221,7 +225,24 @@ fn tabicon_subcommand_parses_icons_and_dynamic_listing() {
             parse_args_from([OsString::from("tabicon"), OsString::from(reset)])
                 .unwrap()
                 .mode,
-            StartupMode::ResetTabIcon
+            StartupMode::ResetTabIcon { queue: false }
+        );
+    }
+    for queue in ["--queue", "-q"] {
+        assert_eq!(
+            parse_args_from(["tabicon", queue, "terminal"].map(OsString::from))
+                .unwrap()
+                .mode,
+            StartupMode::SetTabIcon {
+                icon: Some(IconName::Terminal),
+                queue: true
+            }
+        );
+        assert_eq!(
+            parse_args_from(["tabicon", "--reset", queue].map(OsString::from))
+                .unwrap()
+                .mode,
+            StartupMode::ResetTabIcon { queue: true }
         );
     }
     for arguments in [
@@ -230,6 +251,8 @@ fn tabicon_subcommand_parses_icons_and_dynamic_listing() {
         vec!["tabicon", "--reset", "--icon", "terminal"],
         vec!["tabicon", "--reset", "--list"],
         vec!["tabicon", "--list", "--reset"],
+        vec!["tabicon", "--list", "--queue"],
+        vec!["tabicon", "--queue", "--queue", "terminal"],
     ] {
         assert!(
             parse_args_from(arguments.iter().map(|argument| OsString::from(*argument))).is_err(),

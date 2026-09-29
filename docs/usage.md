@@ -257,6 +257,8 @@ From a Zetta pane, `zetta tabicon ICON` changes the active tab icon;
 clears the override so the active project's icon, or the configured application
 default outside a project and in remote sessions, is used. `zetta tabicon --list` prints the available
 built-in icon names.
+Add `-q` or `--queue` when setting or resetting an icon to return once Zetta
+queues the request. Without it, the command waits for application acknowledgment.
 Tabs retain a fixed width as their names change.
 
 Right-click a tab and choose the checked `Pin Tab` entry, or run **Zetta: Toggle

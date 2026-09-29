@@ -440,10 +440,14 @@ pub(crate) fn tab_icon_help() -> String {
             "Restore the project/application icon (application for remote tabs)",
         ),
         ("-l, --list", "Print built-in icon names, including none"),
+        (
+            "-q, --queue",
+            "Return when Zetta queues the change, before the UI applies it",
+        ),
         ("-h, --help", "Print help"),
     ]);
     format!(
-        "Set the active tab's per-tab icon override through the running Zetta process\n\nUsage: zetta tabicon [OPTIONS] ICON\n       zetta tabicon --reset\n       zetta tabicon --list\n\nICON is a built-in icon name. Use none to explicitly hide the icon. Use --reset to clear the explicit override and use the active project's effective icon, or the configured application default outside a project and in remote sessions. The choice remains with the logical tab across project changes and background/shared-session handoffs, and is never written to user or project configuration. The icon list is fetched dynamically with --list.\n\nOptions:\n{options}"
+        "Set the active tab's per-tab icon override through the running Zetta process\n\nUsage: zetta tabicon [OPTIONS] ICON\n       zetta tabicon [--queue] --reset\n       zetta tabicon --list\n\nICON is a built-in icon name. Use none to explicitly hide the icon. Use --reset to clear the explicit override and use the active project's effective icon, or the configured application default outside a project and in remote sessions. The choice remains with the logical tab across project changes and background/shared-session handoffs, and is never written to user or project configuration. By default this command waits for application acknowledgment; --queue returns once Zetta accepts the request into its command queue. The icon list is fetched dynamically with --list.\n\nOptions:\n{options}"
     )
 }
 
@@ -451,6 +455,7 @@ pub(crate) fn parse_tab_icon_args(args: &[OsString]) -> Result<StartupMode> {
     let mut icon_name = None;
     let mut list = false;
     let mut reset = false;
+    let mut queue = false;
     let mut arguments = args.iter();
     while let Some(argument) = arguments.next() {
         match argument.to_string_lossy().as_ref() {
@@ -465,6 +470,10 @@ pub(crate) fn parse_tab_icon_args(args: &[OsString]) -> Result<StartupMode> {
             "--reset" | "-r" => {
                 anyhow::ensure!(!reset, "--reset may only be specified once");
                 reset = true;
+            }
+            "--queue" | "-q" => {
+                anyhow::ensure!(!queue, "--queue may only be specified once");
+                queue = true;
             }
             "--icon" | "-i" => {
                 anyhow::ensure!(icon_name.is_none(), "--icon may only be specified once");
@@ -491,9 +500,10 @@ pub(crate) fn parse_tab_icon_args(args: &[OsString]) -> Result<StartupMode> {
             icon_name.is_none(),
             "--reset cannot be combined with an icon name"
         );
-        return Ok(StartupMode::ResetTabIcon);
+        return Ok(StartupMode::ResetTabIcon { queue });
     }
     if list {
+        anyhow::ensure!(!queue, "--queue cannot be combined with --list");
         anyhow::ensure!(
             icon_name.is_none(),
             "--list cannot be combined with an icon name"
@@ -509,7 +519,7 @@ pub(crate) fn parse_tab_icon_args(args: &[OsString]) -> Result<StartupMode> {
             format!("unknown tab icon {icon_name:?}; run zetta tabicon --list for available icons")
         })?)
     };
-    Ok(StartupMode::SetTabIcon { icon })
+    Ok(StartupMode::SetTabIcon { icon, queue })
 }
 
 pub(crate) fn theme_help(scope: Option<ThemeScope>) -> String {

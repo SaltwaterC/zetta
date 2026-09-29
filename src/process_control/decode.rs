@@ -78,6 +78,7 @@ mod field {
     pub(super) const PANE_REQUEST: u32 = 1 << 23;
     pub(super) const SHELL_COMMAND: u32 = 1 << 24;
     pub(super) const PANE_THEME_REVISION: u32 = 1 << 25;
+    pub(super) const QUEUE: u32 = 1 << 28;
 
     /// The pane-styling fields that the oldest commands accept and never read.
     ///
@@ -119,6 +120,7 @@ fn control_request_fields(request: &ControlRequest) -> ControlFields {
                 field::REMOTE_FORWARD_AGENT,
             )
             | bit(request.icon.is_some(), field::ICON)
+            | bit(request.queue.is_some(), field::QUEUE)
             | bit(request.pane_theme.is_some(), field::PANE_THEME)
             | bit(
                 request.pane_theme_revision.is_some(),
@@ -195,8 +197,8 @@ fn allowed_control_fields(command: &str) -> Option<ControlFields> {
         }
         "reconnect_session" => RUNNER_ID | SESSION_ID | SECRET | ATTENTION_ID,
         "resume_disk_session" => SESSION_ID | SECRET | CONFIG_PATH,
-        "set_tab_icon" => UNREAD_STYLE,
-        "reset_tab_icon" => 0,
+        "set_tab_icon" => UNREAD_STYLE | QUEUE,
+        "reset_tab_icon" => QUEUE,
         "set_theme" => UNREAD_STYLE | SCOPE,
         "list_themes" => {
             PANE_OVERLAY
@@ -536,9 +538,14 @@ fn decode_appearance_command(request: &mut ControlRequest) -> Option<ControlRequ
                 Some(icon) => Some(icon.parse().ok()?),
                 None => None,
             };
-            Some(ControlRequestCommand::SetTabIcon { icon })
+            Some(ControlRequestCommand::SetTabIcon {
+                icon,
+                queue: request.queue.take().unwrap_or(false),
+            })
         }
-        "reset_tab_icon" => Some(ControlRequestCommand::ResetTabIcon),
+        "reset_tab_icon" => Some(ControlRequestCommand::ResetTabIcon {
+            queue: request.queue.take().unwrap_or(false),
+        }),
         "set_theme" => {
             let scope = match request.scope.take()?.as_str() {
                 "pane" => crate::ThemeScope::Pane,

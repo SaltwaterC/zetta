@@ -159,6 +159,18 @@ impl ControlDispatch<'_> {
         dispatch_control_command(self.commands, self.stopping, build)
     }
 
+    /// Acknowledge when the application queue accepts the command.
+    fn queue(&self, build: impl FnOnce(Sender<bool>) -> ProcessControlCommand) -> &'static str {
+        let (completion, _) = channel();
+        if self.stopping.load(Ordering::Acquire)
+            || self.commands.unbounded_send(build(completion)).is_err()
+        {
+            "rejected"
+        } else {
+            "ok"
+        }
+    }
+
     /// The same, for a command that answers with a value written into
     /// `response`, or the reason it refused.
     fn send_for<T>(
@@ -223,7 +235,7 @@ fn apply_control_request(
             apply_session_command(command, &dispatch)
         }
         ControlRequestCommand::SetTabIcon { .. }
-        | ControlRequestCommand::ResetTabIcon
+        | ControlRequestCommand::ResetTabIcon { .. }
         | ControlRequestCommand::SetTheme { .. }
         | ControlRequestCommand::ListThemes
         | ControlRequestCommand::GetPaneTheme { .. }
@@ -417,11 +429,21 @@ fn apply_appearance_command(
     response: &mut ControlResponse,
 ) -> &'static str {
     match command {
-        ControlRequestCommand::SetTabIcon { icon } => {
-            dispatch.send(|completion| ProcessControlCommand::SetTabIcon { icon, completion })
+        ControlRequestCommand::SetTabIcon { icon, queue } => {
+            let build = |completion| ProcessControlCommand::SetTabIcon { icon, completion };
+            if queue {
+                dispatch.queue(build)
+            } else {
+                dispatch.send(build)
+            }
         }
-        ControlRequestCommand::ResetTabIcon => {
-            dispatch.send(|completion| ProcessControlCommand::ResetTabIcon { completion })
+        ControlRequestCommand::ResetTabIcon { queue } => {
+            let build = |completion| ProcessControlCommand::ResetTabIcon { completion };
+            if queue {
+                dispatch.queue(build)
+            } else {
+                dispatch.send(build)
+            }
         }
         ControlRequestCommand::SetTheme { scope, theme } => {
             dispatch.send(|completion| ProcessControlCommand::SetTheme {

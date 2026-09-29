@@ -192,7 +192,10 @@ fn request_process_pane_labels(
     send_list_pane_labels_request(&endpoint, attention_id)
 }
 
-pub(crate) fn request_existing_process_tab_icon(icon: Option<IconName>) -> Result<bool> {
+pub(crate) fn request_existing_process_tab_icon(
+    icon: Option<IconName>,
+    queue: bool,
+) -> Result<bool> {
     if let Ok(process_id) = env::var("ZETTA_PROCESS_ID") {
         let process_id = process_id
             .parse::<u32>()
@@ -201,18 +204,18 @@ pub(crate) fn request_existing_process_tab_icon(icon: Option<IconName>) -> Resul
             process_id != 0,
             "ZETTA_PROCESS_ID must be a positive process ID"
         );
-        return request_process_tab_icon(process_id, icon);
+        return request_process_tab_icon(process_id, icon, queue);
     }
 
     for endpoint in live_control_endpoints()? {
-        if send_set_tab_icon_request(&endpoint, icon).unwrap_or(false) {
+        if send_set_tab_icon_request(&endpoint, icon, queue).unwrap_or(false) {
             return Ok(true);
         }
     }
     Ok(false)
 }
 
-pub(crate) fn request_existing_process_tab_icon_reset() -> Result<bool> {
+pub(crate) fn request_existing_process_tab_icon_reset(queue: bool) -> Result<bool> {
     if let Ok(process_id) = env::var("ZETTA_PROCESS_ID") {
         let process_id = process_id
             .parse::<u32>()
@@ -221,29 +224,29 @@ pub(crate) fn request_existing_process_tab_icon_reset() -> Result<bool> {
             process_id != 0,
             "ZETTA_PROCESS_ID must be a positive process ID"
         );
-        return request_process_tab_icon_reset(process_id);
+        return request_process_tab_icon_reset(process_id, queue);
     }
 
     for endpoint in live_control_endpoints()? {
-        if send_reset_tab_icon_request(&endpoint).unwrap_or(false) {
+        if send_reset_tab_icon_request(&endpoint, queue).unwrap_or(false) {
             return Ok(true);
         }
     }
     Ok(false)
 }
 
-fn request_process_tab_icon(process_id: u32, icon: Option<IconName>) -> Result<bool> {
+fn request_process_tab_icon(process_id: u32, icon: Option<IconName>, queue: bool) -> Result<bool> {
     let Some(endpoint) = live_control_endpoint(process_id)? else {
         return Ok(false);
     };
-    send_set_tab_icon_request(&endpoint, icon)
+    send_set_tab_icon_request(&endpoint, icon, queue)
 }
 
-fn request_process_tab_icon_reset(process_id: u32) -> Result<bool> {
+fn request_process_tab_icon_reset(process_id: u32, queue: bool) -> Result<bool> {
     let Some(endpoint) = live_control_endpoint(process_id)? else {
         return Ok(false);
     };
-    send_reset_tab_icon_request(&endpoint)
+    send_reset_tab_icon_request(&endpoint, queue)
 }
 
 pub(crate) fn request_existing_process_theme(
@@ -675,11 +678,16 @@ fn send_reload_configuration_request(
     )
 }
 
-fn send_set_tab_icon_request(endpoint: &ControlEndpoint, icon: Option<IconName>) -> Result<bool> {
+fn send_set_tab_icon_request(
+    endpoint: &ControlEndpoint,
+    icon: Option<IconName>,
+    queue: bool,
+) -> Result<bool> {
     send_control_command(
         endpoint,
         "set_tab_icon",
         ControlRequest {
+            queue: queue.then_some(true),
             icon: icon.map(|icon| {
                 let name: &'static str = icon.into();
                 name.to_owned()
@@ -689,8 +697,15 @@ fn send_set_tab_icon_request(endpoint: &ControlEndpoint, icon: Option<IconName>)
     )
 }
 
-fn send_reset_tab_icon_request(endpoint: &ControlEndpoint) -> Result<bool> {
-    send_control_command(endpoint, "reset_tab_icon", ControlRequest::default())
+fn send_reset_tab_icon_request(endpoint: &ControlEndpoint, queue: bool) -> Result<bool> {
+    send_control_command(
+        endpoint,
+        "reset_tab_icon",
+        ControlRequest {
+            queue: queue.then_some(true),
+            ..Default::default()
+        },
+    )
 }
 
 fn send_set_theme_request(
