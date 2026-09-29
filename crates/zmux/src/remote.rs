@@ -16,6 +16,10 @@
 //!   `ssh HOST zmux proxy-mux` running instead and carry every connection over
 //!   its stdio; see `mux_bridge.rs`. The bridge reports the endpoint itself, so
 //!   no separate query login is needed.
+//! - **Windows hosts** refuse stream-local forwarding on the server side too,
+//!   so every client reaches one through the same bridge — a Unix client runs
+//!   it as a session on its master. Which hosts those are is learned the first
+//!   time a POSIX command fails there; see `remote_host.rs`.
 //!
 //! A connection is probed (a `Ping` on a connection of its own) only when
 //! nothing has recently shown the endpoint to be good. A listener can outlive
@@ -48,6 +52,7 @@ use std::{
 
 use crate::{
     messages::{ClientId, Envelope, PROTOCOL_VERSION, Request, Response},
+    remote_host::{self, HostPlatform},
     transport::{Connection, ENDPOINT_VERSION, Endpoint, Stream},
 };
 use anyhow::{Context as _, Result};
@@ -101,8 +106,7 @@ fn remote_program_command() -> String {
 /// Runs the standalone profile discovery command without requiring a daemon.
 const REMOTE_PROFILES_COMMAND: &str = r#"/bin/sh -c 'exec 3>&1 1>/dev/null; if command -v zmux >/dev/null 2>&1; then exec zmux profiles --json >&3; fi; exec "${SHELL:-/bin/sh}" -lic "exec zmux profiles --json >&3"'"#;
 
-/// Starts the Windows client's multiplexed bridge on the remote host.
-#[cfg(any(windows, test))]
+/// Starts the multiplexed bridge on a POSIX host.
 fn remote_bridge_command(link_agent: bool) -> String {
     let arguments = if link_agent {
         "proxy-mux --forward-agent"
@@ -255,22 +259,20 @@ impl Drop for ForwardState {
     }
 }
 
-/// The Windows transport's one SSH login: `zmux proxy-mux` on the far side.
-#[cfg(windows)]
+/// `zmux proxy-mux` on the far side: a Windows client's one SSH login, or a
+/// session on a Unix client's master when the host is Windows.
 struct BridgeLink {
     bridge: crate::mux_bridge::MuxBridge,
     child: Child,
     stderr: CapturedOutput,
 }
 
-#[cfg(windows)]
 impl BridgeLink {
     fn is_alive(&mut self) -> bool {
         self.bridge.is_alive() && matches!(self.child.try_wait(), Ok(None))
     }
 }
 
-#[cfg(windows)]
 impl Drop for BridgeLink {
     fn drop(&mut self) {
         terminate_child(&mut self.child);
@@ -284,12 +286,9 @@ struct RemoteState {
     forward: Option<ForwardState>,
     #[cfg(unix)]
     master: Option<Master>,
-    #[cfg(windows)]
     link: Option<BridgeLink>,
-    #[cfg(windows)]
-    endpoint: Option<Endpoint>,
-    #[cfg(windows)]
-    verified_at: Option<Instant>,
+    link_endpoint: Option<Endpoint>,
+    link_verified_at: Option<Instant>,
     /// The remote host's own `zmux`, learned alongside the endpoint.
     program: Option<PathBuf>,
 }
@@ -301,12 +300,9 @@ impl RemoteState {
             forward: None,
             #[cfg(unix)]
             master: None,
-            #[cfg(windows)]
             link: None,
-            #[cfg(windows)]
-            endpoint: None,
-            #[cfg(windows)]
-            verified_at: None,
+            link_endpoint: None,
+            link_verified_at: None,
             program: None,
         }
     }
@@ -504,39 +500,75 @@ impl RemoteTransport {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    /// Returns the endpoint currently exposed by the local side of the
-    /// forward. Its token and protocol come from the remote daemon; only the
-    /// socket path is replaced with the private local socket.
-    #[cfg(unix)]
-    pub fn endpoint(&self) -> Result<Endpoint> {
-        self.lock_state()
-            .forward
-            .as_ref()
-            .map(|forward| forward.endpoint.clone())
-            .context("remote SSH forwarding has not been established")
+    /// Whether this host is reached through the bridge rather than a forward:
+    /// always from Windows, and from Unix once the host is known to be
+    /// Windows.
+    fn uses_link(&self) -> bool {
+        cfg!(windows) || remote_host::learned(&self.target) == Some(HostPlatform::Windows)
     }
 
-    #[cfg(windows)]
+    /// Runs `forward` unless the host is known to need the bridge, and runs
+    /// `link` instead when `forward` is what found that out.
+    #[cfg(unix)]
+    fn forward_or_link<T>(
+        &self,
+        state: &mut RemoteState,
+        forward: impl FnOnce(&mut RemoteState) -> Result<T>,
+        link: impl FnOnce(&mut RemoteState) -> Result<T>,
+    ) -> Result<T> {
+        if !self.uses_link() {
+            match forward(state) {
+                Err(error) if error.is::<WindowsHost>() => {}
+                result => return result,
+            }
+        }
+        link(state)
+    }
+
+    /// Returns the endpoint the daemon is reached at. Over a forward, its
+    /// token and protocol come from the remote daemon and only the socket path
+    /// is replaced with the private local socket.
     pub fn endpoint(&self) -> Result<Endpoint> {
-        self.lock_state()
-            .endpoint
-            .clone()
-            .context("remote SSH endpoint has not been queried")
+        let state = self.lock_state();
+        if self.uses_link() {
+            return state
+                .link_endpoint
+                .clone()
+                .context("remote SSH endpoint has not been queried");
+        }
+        #[cfg(unix)]
+        {
+            state
+                .forward
+                .as_ref()
+                .map(|forward| forward.endpoint.clone())
+                .context("remote SSH forwarding has not been established")
+        }
+        #[cfg(windows)]
+        unreachable!("a Windows client always uses the bridge")
     }
 
     /// The endpoint, establishing the connection to it if nothing has yet.
     /// Unlike [`Self::refresh`] this keeps a connection that is already up,
     /// which is the point of sharing one.
-    #[cfg(unix)]
     pub fn ensure_endpoint(&self) -> Result<Endpoint> {
         let mut state = self.lock_state();
-        self.ensure_endpoint_locked(&mut state)
+        #[cfg(unix)]
+        {
+            self.forward_or_link(
+                &mut state,
+                |state| self.ensure_endpoint_locked(state),
+                |state| self.install_link(state),
+            )
+        }
+        #[cfg(windows)]
+        self.install_link(&mut state)
     }
 
-    #[cfg(windows)]
-    pub fn ensure_endpoint(&self) -> Result<Endpoint> {
-        let mut state = self.lock_state();
-        self.install_link(&mut state)
+    /// Whether the host has been found to be Windows, whose shells a pane
+    /// relay cannot reach yet. Known once anything has run there.
+    pub fn is_windows_host(&self) -> bool {
+        remote_host::learned(&self.target) == Some(HostPlatform::Windows)
     }
 
     /// The control socket of this transport's SSH login, while it is up.
@@ -567,9 +599,8 @@ impl RemoteTransport {
         {
             forward.verified_at = Some(Instant::now());
         }
-        #[cfg(windows)]
-        if state.endpoint.as_ref() == Some(endpoint) {
-            state.verified_at = Some(Instant::now());
+        if state.link_endpoint.as_ref() == Some(endpoint) {
+            state.link_verified_at = Some(Instant::now());
         }
     }
 
@@ -580,19 +611,29 @@ impl RemoteTransport {
         if let Some(forward) = state.forward.as_mut() {
             forward.verified_at = None;
         }
-        #[cfg(windows)]
-        {
-            state.verified_at = None;
-        }
+        state.link_verified_at = None;
     }
 
     /// Opens one framed mux connection, rebuilding the SSH login once if it
     /// has gone away or no longer reaches the daemon.
-    #[cfg(unix)]
     pub fn connect(&self) -> Result<(Endpoint, Stream)> {
         let mut state = self.lock_state();
+        #[cfg(unix)]
+        {
+            self.forward_or_link(
+                &mut state,
+                |state| self.connect_forward(state),
+                |state| self.connect_link(state),
+            )
+        }
+        #[cfg(windows)]
+        self.connect_link(&mut state)
+    }
+
+    #[cfg(unix)]
+    fn connect_forward(&self, state: &mut RemoteState) -> Result<(Endpoint, Stream)> {
         for attempt in 0..2 {
-            self.install_forward(&mut state)?;
+            self.install_forward(state)?;
             let forward = state
                 .forward
                 .as_ref()
@@ -645,12 +686,10 @@ impl RemoteTransport {
         )
     }
 
-    #[cfg(windows)]
-    pub fn connect(&self) -> Result<(Endpoint, Stream)> {
-        let mut state = self.lock_state();
+    fn connect_link(&self, state: &mut RemoteState) -> Result<(Endpoint, Stream)> {
         for attempt in 0..2 {
-            let endpoint = self.install_link(&mut state)?;
-            let trusted = is_trusted(state.verified_at);
+            let endpoint = self.install_link(state)?;
+            let trusted = is_trusted(state.link_verified_at);
             let (opened, stderr) = {
                 let link = state.link.as_ref().expect("the bridge was just installed");
                 let opened = if trusted {
@@ -665,7 +704,7 @@ impl RemoteTransport {
             match opened {
                 Ok(stream) => {
                     if !trusted {
-                        state.verified_at = Some(Instant::now());
+                        state.link_verified_at = Some(Instant::now());
                     }
                     return Ok((endpoint, stream));
                 }
@@ -676,8 +715,8 @@ impl RemoteTransport {
                         captured_text(&stderr)
                     );
                     state.link = None;
-                    state.endpoint = None;
-                    state.verified_at = None;
+                    state.link_endpoint = None;
+                    state.link_verified_at = None;
                 }
                 Err((error, activity)) => {
                     let detail = ssh_detail(&captured_text(&stderr));
@@ -737,9 +776,22 @@ impl RemoteTransport {
     /// Re-queries the remote endpoint and replaces the forward. This is used
     /// after an invalid token or a remote daemon replacement, where both the
     /// socket path and token may have changed. The SSH login itself is kept.
-    #[cfg(unix)]
     pub fn refresh(&self) -> Result<Endpoint> {
         let mut state = self.lock_state();
+        #[cfg(unix)]
+        {
+            self.forward_or_link(
+                &mut state,
+                |state| self.refresh_forward(state),
+                |state| self.refresh_link(state),
+            )
+        }
+        #[cfg(windows)]
+        self.refresh_link(&mut state)
+    }
+
+    #[cfg(unix)]
+    fn refresh_forward(&self, state: &mut RemoteState) -> Result<Endpoint> {
         if let Some(forward) = state.forward.take()
             && let Some(master) = state.master.as_mut()
             && master.is_alive()
@@ -757,7 +809,7 @@ impl RemoteTransport {
                 );
             }
         }
-        self.ensure_endpoint_locked(&mut state)
+        self.ensure_endpoint_locked(state)
     }
 
     #[cfg(unix)]
@@ -771,12 +823,10 @@ impl RemoteTransport {
             .clone())
     }
 
-    #[cfg(windows)]
-    pub fn refresh(&self) -> Result<Endpoint> {
-        let mut state = self.lock_state();
-        state.endpoint = None;
-        state.verified_at = None;
-        self.install_link(&mut state)
+    fn refresh_link(&self, state: &mut RemoteState) -> Result<Endpoint> {
+        state.link_endpoint = None;
+        state.link_verified_at = None;
+        self.install_link(state)
     }
 
     /// Makes sure the SSH login is up, returning its control socket.
@@ -944,7 +994,6 @@ impl RemoteTransport {
     /// A bridge started while no daemon was running reports no endpoint; it
     /// is asked again over the same link rather than replaced, so waiting
     /// for a daemon to start costs a round trip per poll, not a login.
-    #[cfg(windows)]
     fn install_link(&self, state: &mut RemoteState) -> Result<Endpoint> {
         if state.link.as_mut().is_some_and(|link| !link.is_alive()) {
             if let Some(link) = state.link.as_ref() {
@@ -955,16 +1004,16 @@ impl RemoteTransport {
                 );
             }
             state.link = None;
-            state.endpoint = None;
-            state.verified_at = None;
+            state.link_endpoint = None;
+            state.link_verified_at = None;
         }
         if state.link.is_none() {
-            let link = self.start_link()?;
+            let link = self.start_link(state)?;
             let info = link.bridge.initial_info().clone();
             state.link = Some(link);
             self.apply_bridge_info(state, info)?;
         }
-        if let Some(endpoint) = state.endpoint.clone() {
+        if let Some(endpoint) = state.link_endpoint.clone() {
             return Ok(endpoint);
         }
         let info = state
@@ -976,7 +1025,6 @@ impl RemoteTransport {
         self.apply_bridge_info(state, info)
     }
 
-    #[cfg(windows)]
     fn apply_bridge_info(
         &self,
         state: &mut RemoteState,
@@ -990,15 +1038,42 @@ impl RemoteTransport {
                 .unwrap_or_else(|| "the remote host reported no multiplexer".to_owned())
         })?;
         validate_endpoint(&endpoint)?;
-        state.endpoint = Some(endpoint.clone());
-        state.verified_at = None;
+        state.link_endpoint = Some(endpoint.clone());
+        state.link_verified_at = None;
         Ok(endpoint)
     }
 
-    #[cfg(windows)]
-    fn start_link(&self) -> Result<BridgeLink> {
+    /// Starts the bridge in the host's dialect. A Windows client may not know
+    /// it yet: the POSIX bridge failing is what finds out.
+    fn start_link(&self, state: &mut RemoteState) -> Result<BridgeLink> {
+        #[cfg(unix)]
+        let control = Some(self.ensure_master(state)?);
+        #[cfg(windows)]
+        let control: Option<PathBuf> = {
+            let _ = state;
+            None
+        };
+        let known = remote_host::learned(&self.target);
+        let platform = known.unwrap_or(HostPlatform::Posix);
+        match self.spawn_link(control.as_deref(), platform) {
+            Ok(link) => {
+                remote_host::learn(&self.target, platform);
+                Ok(link)
+            }
+            Err(error) if known.is_none() => {
+                let error = self.explain_failure(control.as_deref(), error);
+                if !error.is::<WindowsHost>() {
+                    return Err(error);
+                }
+                self.spawn_link(control.as_deref(), HostPlatform::Windows)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn spawn_link(&self, control: Option<&Path>, platform: HostPlatform) -> Result<BridgeLink> {
         let mut child = Command::new(&self.ssh_program)
-            .args(bridge_arguments(&self.target))
+            .args(bridge_arguments(&self.target, control, platform))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -1044,6 +1119,71 @@ impl RemoteTransport {
         }
     }
 
+    /// A POSIX command failed on a host whose dialect is not known yet: finds
+    /// out whether that is because the host is Windows, which is the one
+    /// failure a retry in the other dialect can fix. Returns [`WindowsHost`]
+    /// if so, and the original error otherwise.
+    fn explain_failure(&self, control: Option<&Path>, error: anyhow::Error) -> anyhow::Error {
+        if remote_host::learned(&self.target).is_some() {
+            return error;
+        }
+        let arguments = command_arguments(
+            &self.target,
+            control,
+            remote_host::PLATFORM_PROBE.to_owned(),
+        );
+        match run_capture(&self.ssh_program, &arguments, ENDPOINT_TIMEOUT) {
+            Ok(output) => {
+                let platform = remote_host::classify_probe(&output.stdout);
+                remote_host::learn(&self.target, platform);
+                match platform {
+                    HostPlatform::Windows => {
+                        log::debug!(
+                            "{} is a Windows host; the POSIX command failed: {error:#}",
+                            self.target.destination()
+                        );
+                        anyhow::Error::new(WindowsHost)
+                    }
+                    HostPlatform::Posix => error,
+                }
+            }
+            Err(probe) => {
+                log::debug!(
+                    "could not tell which shell {} runs: {probe:#}",
+                    self.target.destination()
+                );
+                error
+            }
+        }
+    }
+
+    /// Runs a one-shot command in the host's dialect, finding the dialect out
+    /// if the POSIX form fails on a host not seen before.
+    fn run_host_command(
+        &self,
+        control: Option<&Path>,
+        arguments: impl Fn(HostPlatform) -> Vec<String>,
+    ) -> Result<(HostPlatform, SshOutput)> {
+        let known = remote_host::learned(&self.target);
+        let platform = known.unwrap_or(HostPlatform::Posix);
+        match run_capture(&self.ssh_program, &arguments(platform), ENDPOINT_TIMEOUT) {
+            Ok(output) => {
+                remote_host::learn(&self.target, platform);
+                Ok((platform, output))
+            }
+            Err(error) if known.is_none() => {
+                let error = self.explain_failure(control, error);
+                if !error.is::<WindowsHost>() {
+                    return Err(error);
+                }
+                let windows = arguments(HostPlatform::Windows);
+                let output = run_capture(&self.ssh_program, &windows, ENDPOINT_TIMEOUT)?;
+                Ok((HostPlatform::Windows, output))
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     /// Resolves the remote host's own `zmux` executable.
     ///
     /// Same shell wrapper and the same fd discipline as the endpoint query,
@@ -1060,9 +1200,10 @@ impl RemoteTransport {
             return Ok(program);
         }
         let control = self.command_control()?;
-        let arguments = program_arguments(&self.target, control.as_deref());
-        let output = run_capture(&self.ssh_program, &arguments, ENDPOINT_TIMEOUT)?;
-        let program = parse_remote_program_path(&output.stdout)?;
+        let (platform, output) = self.run_host_command(control.as_deref(), |platform| {
+            program_arguments(&self.target, control.as_deref(), platform)
+        })?;
+        let program = parse_remote_program_path(&output.stdout, platform)?;
         self.lock_state().program = Some(program.clone());
         Ok(program)
     }
@@ -1071,11 +1212,9 @@ impl RemoteTransport {
     /// `zmux` profile boundary. This intentionally does not start a daemon.
     pub fn query_profiles(&self) -> Result<Vec<String>> {
         let control = self.command_control()?;
-        let output = run_capture(
-            &self.ssh_program,
-            &profiles_arguments(&self.target, control.as_deref()),
-            ENDPOINT_TIMEOUT,
-        )?;
+        let (_, output) = self.run_host_command(control.as_deref(), |platform| {
+            profiles_arguments(&self.target, control.as_deref(), platform)
+        })?;
         let text = std::str::from_utf8(&output.stdout)
             .context("remote profile output was not UTF-8")?
             .trim();
@@ -1105,9 +1244,10 @@ impl RemoteTransport {
         }
         let program = self.resolve_remote_program()?;
         let control = self.command_control()?;
-        let arguments = start_daemon_arguments(&self.target, control.as_deref(), &program);
-        run_capture(&self.ssh_program, &arguments, ENDPOINT_TIMEOUT)
-            .context("starting the remote zmux daemon")?;
+        self.run_host_command(control.as_deref(), |platform| {
+            start_daemon_arguments(&self.target, control.as_deref(), &program, platform)
+        })
+        .context("starting the remote zmux daemon")?;
         let deadline = Instant::now() + ENDPOINT_TIMEOUT;
         loop {
             match self.connect() {
@@ -1127,20 +1267,41 @@ impl RemoteTransport {
     }
 
     /// Asks the remote host where `zmux` is and which daemon it is running.
+    /// Fails with [`WindowsHost`] when the host turns out to need the bridge.
     #[cfg(unix)]
     fn query_endpoint(&self, control: Option<&Path>) -> Result<(PathBuf, Endpoint)> {
         let arguments = endpoint_arguments(&self.target, control);
-        let output = run_capture(&self.ssh_program, &arguments, ENDPOINT_TIMEOUT)?;
-        parse_endpoint_output(&output.stdout)
+        match run_capture(&self.ssh_program, &arguments, ENDPOINT_TIMEOUT) {
+            Ok(output) => {
+                remote_host::learn(&self.target, HostPlatform::Posix);
+                parse_endpoint_output(&output.stdout)
+            }
+            Err(error) => Err(self.explain_failure(control, error)),
+        }
     }
 }
+
+/// The host is Windows, which a forward cannot reach: use the bridge.
+#[derive(Debug)]
+struct WindowsHost;
+
+impl std::fmt::Display for WindowsHost {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("the remote host is Windows, which is reached through the zmux bridge")
+    }
+}
+
+impl std::error::Error for WindowsHost {}
 
 /// Splits the endpoint query's output: the resolved program, then the JSON.
 #[cfg(any(unix, test))]
 fn parse_endpoint_output(output: &[u8]) -> Result<(PathBuf, Endpoint)> {
     let text = std::str::from_utf8(output).context("remote endpoint output was not UTF-8")?;
     let mut lines = text.lines().map(str::trim).filter(|line| !line.is_empty());
-    let program = parse_remote_program_path(lines.next().unwrap_or_default().as_bytes())?;
+    let program = parse_remote_program_path(
+        lines.next().unwrap_or_default().as_bytes(),
+        HostPlatform::Posix,
+    )?;
     let json = lines.next().unwrap_or_default();
     anyhow::ensure!(!json.is_empty(), "remote zmux endpoint returned no JSON");
     let endpoint: Endpoint =
@@ -1175,7 +1336,7 @@ fn ssh_detail(stderr: &str) -> String {
     }
 }
 
-/// The far side of a Windows client's bridge: `zmux proxy-mux`.
+/// The far side of the bridge: `zmux proxy-mux`.
 ///
 /// Each stream the client opens becomes a fresh connection to the daemon
 /// published in this host's session catalog, found again every time so a
@@ -1183,7 +1344,6 @@ fn ssh_detail(stderr: &str) -> String {
 /// the agent this SSH session forwarded is linked where daemon-owned shells
 /// look for it, for as long as the link is what is serving them — the job a
 /// separate holder session used to do.
-#[cfg(unix)]
 pub fn run_mux_proxy(link_agent: bool) -> Result<()> {
     use std::io;
 
@@ -1207,6 +1367,13 @@ pub fn run_mux_proxy(link_agent: bool) -> Result<()> {
         }
     };
     crate::mux_bridge::serve(io::stdin(), io::stdout(), connect, info)
+}
+
+/// A Windows host's shells have no forwarded-agent name to find: agent
+/// forwarding into daemon-owned shells is Unix-only for now.
+#[cfg(windows)]
+fn link_forwarded_agent() {
+    log::debug!("forwarded agents are not linked for a Windows host's shells");
 }
 
 /// Points the stable forwarded-agent name at this session's agent, replacing
@@ -1262,19 +1429,39 @@ fn endpoint_arguments(target: &RemoteTarget, control: Option<&Path>) -> Vec<Stri
     command_arguments(target, control, remote_endpoint_command())
 }
 
-fn program_arguments(target: &RemoteTarget, control: Option<&Path>) -> Vec<String> {
-    command_arguments(target, control, remote_program_command())
+fn program_arguments(
+    target: &RemoteTarget,
+    control: Option<&Path>,
+    platform: HostPlatform,
+) -> Vec<String> {
+    let command = match platform {
+        HostPlatform::Posix => remote_program_command(),
+        HostPlatform::Windows => remote_host::program_command(),
+    };
+    command_arguments(target, control, command)
 }
 
-fn profiles_arguments(target: &RemoteTarget, control: Option<&Path>) -> Vec<String> {
-    command_arguments(target, control, REMOTE_PROFILES_COMMAND.to_owned())
+fn profiles_arguments(
+    target: &RemoteTarget,
+    control: Option<&Path>,
+    platform: HostPlatform,
+) -> Vec<String> {
+    let command = match platform {
+        HostPlatform::Posix => REMOTE_PROFILES_COMMAND.to_owned(),
+        HostPlatform::Windows => remote_host::profiles_command(),
+    };
+    command_arguments(target, control, command)
 }
 
 fn start_daemon_arguments(
     target: &RemoteTarget,
     control: Option<&Path>,
     program: &Path,
+    platform: HostPlatform,
 ) -> Vec<String> {
+    if platform == HostPlatform::Windows {
+        return command_arguments(target, control, remote_host::start_daemon_command(program));
+    }
     let program = shell_escape_double_quoted(&program.to_string_lossy());
     let command = format!(
         r#"/bin/sh -c 'if command -v zmux >/dev/null 2>&1; then nohup "{program}" --daemon >/dev/null 2>&1 </dev/null & exit; fi; exec "${{SHELL:-/bin/sh}}" -lic "nohup \"{program}\" --daemon >/dev/null 2>&1 </dev/null &"'"#
@@ -1335,19 +1522,27 @@ fn agent_holder_arguments(
     command_arguments(target, Some(control_path), agent_holder_command(socket))
 }
 
-/// The Windows client's one login: the multiplexed bridge.
-#[cfg(any(windows, test))]
-fn bridge_arguments(target: &RemoteTarget) -> Vec<String> {
-    let mut arguments = vec![
-        "-T".to_owned(),
-        "-o".to_owned(),
-        "ClearAllForwardings=yes".to_owned(),
-    ];
-    push_target_options(&mut arguments, target);
-    arguments.extend([
-        target.destination.clone(),
-        remote_bridge_command(target.forward_agent == Some(true)),
-    ]);
+/// The multiplexed bridge: a Windows client's one login, or a session on a
+/// Unix client's master.
+fn bridge_arguments(
+    target: &RemoteTarget,
+    control: Option<&Path>,
+    platform: HostPlatform,
+) -> Vec<String> {
+    let link_agent = target.forward_agent == Some(true);
+    let command = match platform {
+        HostPlatform::Posix => remote_bridge_command(link_agent),
+        HostPlatform::Windows => remote_host::bridge_command(link_agent),
+    };
+    let mut arguments = command_arguments(target, control, command);
+    if control.is_none() {
+        // A login of its own drops the configured forwards too: the bridge is
+        // the only thing it carries.
+        arguments.splice(
+            1..1,
+            ["-o".to_owned(), "ClearAllForwardings=yes".to_owned()],
+        );
+    }
     arguments
 }
 
@@ -1396,7 +1591,7 @@ fn terminate_child(child: &mut Child) {
     }
 }
 
-fn parse_remote_program_path(output: &[u8]) -> Result<PathBuf> {
+fn parse_remote_program_path(output: &[u8], platform: HostPlatform) -> Result<PathBuf> {
     let text = std::str::from_utf8(output)
         .context("remote zmux path was not UTF-8")?
         .lines()
@@ -1407,6 +1602,9 @@ fn parse_remote_program_path(output: &[u8]) -> Result<PathBuf> {
         !text.is_empty(),
         "the remote host has no zmux on the path its shell resolves"
     );
+    if platform == HostPlatform::Windows {
+        return remote_host::parse_program_path(text);
+    }
     // This path belongs to the remote POSIX host. Windows Path::is_absolute
     // rejects /home/... even though it is absolute for the host running zmux.
     anyhow::ensure!(

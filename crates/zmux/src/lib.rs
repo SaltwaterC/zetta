@@ -24,9 +24,11 @@ pub mod reconnect;
 #[cfg(unix)]
 pub mod relay;
 pub mod remote;
+mod remote_host;
 pub mod retention;
 
 pub mod client;
+mod daemon_spawn;
 pub mod messages;
 mod mux_bridge;
 #[cfg(windows)]
@@ -118,7 +120,7 @@ fn usage(no_mux: bool) -> String {
             ),
             (
                 "proxy-mux [--forward-agent]",
-                "Carry every daemon connection of one remote client over stdin\nand stdout, for clients using Windows OpenSSH; with\n--forward-agent, link the agent that SSH session forwarded for\nthis host's shells. Run by Zetta, not by hand",
+                "Carry every daemon connection of one remote client over stdin\nand stdout, for clients using Windows OpenSSH and for every\nclient of a Windows host; with --forward-agent, link the agent\nthat SSH session forwarded for this host's shells. Run by Zetta,\nnot by hand",
             ),
             (
                 "attach SSH_TARGET SESSION_ID",
@@ -602,6 +604,7 @@ pub fn run_with_defaults(arguments: &[OsString], defaults: ClientDefaults) -> Re
     let mut json = false;
     let mut ids_only = false;
     let mut daemon = false;
+    let mut detach = false;
     let mut retention = retention::Retention::default();
     let mut command: Option<String> = None;
     let mut session: Option<SessionArgument> = None;
@@ -893,6 +896,10 @@ pub fn run_with_defaults(arguments: &[OsString], defaults: ClientDefaults) -> Re
             "--retention-bytes" => expect_retention_bytes = true,
             // Hidden: how a client starts the daemon it could not find.
             "--daemon" => daemon = true,
+            // Hidden: with --daemon, start the daemon so it outlives this
+            // process's session, then return — how a Windows host is asked to
+            // start one over SSH.
+            "--detach" => detach = true,
             value if value.starts_with("--daemon-options=") => {
                 anyhow::ensure!(
                     daemon_options.is_none(),
@@ -1209,6 +1216,15 @@ pub fn run_with_defaults(arguments: &[OsString], defaults: ClientDefaults) -> Re
         }
     }
 
+    anyhow::ensure!(!detach || daemon, "--detach is only valid with --daemon");
+    if detach {
+        let forwarded = arguments
+            .iter()
+            .filter(|argument| !matches!(argument.to_str(), Some("--daemon" | "--detach")))
+            .cloned()
+            .collect::<Vec<_>>();
+        return client::start_detached_daemon(&forwarded);
+    }
     if daemon {
         logging::init_daemon_log(&paths::session_catalog_dir());
         #[cfg(unix)]
@@ -1259,14 +1275,7 @@ pub fn run_with_defaults(arguments: &[OsString], defaults: ClientDefaults) -> Re
                 remote_target.is_none() && port.is_none(),
                 "proxy-mux is a local daemon command"
             );
-            #[cfg(unix)]
-            {
-                remote::run_mux_proxy(remote_forward_agent == Some(true))
-            }
-            #[cfg(not(unix))]
-            {
-                anyhow::bail!("proxy-mux requires a Unix daemon host")
-            }
+            remote::run_mux_proxy(remote_forward_agent == Some(true))
         }
         Some("attach") => {
             let target = remote_target.context("attach requires an SSH target")?;

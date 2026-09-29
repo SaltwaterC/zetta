@@ -1,11 +1,11 @@
 //! Many daemon connections over one byte stream.
 //!
-//! Win32-OpenSSH cannot forward a local Unix socket, so a Windows client
-//! reaches a remote daemon through `ssh HOST zmux proxy-mux` instead: one SSH
-//! login whose stdin and stdout carry every connection the client opens. This
-//! module is both halves of that link. It is platform-neutral — the far side
-//! always runs on the daemon's (Unix) host and the near side on Windows, but
-//! nothing here depends on which is which, so both are tested together.
+//! Win32-OpenSSH forwards Unix sockets in neither direction, so a Windows
+//! client — or any client of a Windows host — reaches a remote daemon through
+//! `ssh HOST zmux proxy-mux` instead: one SSH session whose stdin and stdout
+//! carry every connection the client opens. This module is both halves of that
+//! link. It is platform-neutral — either half runs on either OS, and nothing
+//! here depends on which is which, so both are tested together.
 //!
 //! The daemon protocol is untouched: each logical stream is one ordinary
 //! daemon connection, byte for byte, and the far side opens a fresh one for
@@ -33,7 +33,6 @@
 //! another thread, because a reader blocked on a full outbound pipe while the
 //! peer's reader is blocked the same way is a deadlock across the SSH link.
 
-#[cfg(any(windows, test))]
 use std::time::Duration;
 use std::{
     collections::HashMap,
@@ -405,7 +404,6 @@ impl Link {
     }
 
     /// Sends a frame from a thread of its own, for the link reader.
-    #[cfg(unix)]
     fn send_detached(self: &Arc<Self>, stream: u32, kind: Kind, payload: Vec<u8>) {
         let link = self.clone();
         let spawned = thread::Builder::new()
@@ -483,7 +481,6 @@ fn pump_inbound(link: &Link, stream: u32, inbound: mpsc::Receiver<Inbound>, mut 
 /// `connect` opens one daemon connection per stream; `info` answers stream 0.
 /// Both are called afresh each time, so a daemon replaced while the link is up
 /// is found again rather than served from a stale endpoint.
-#[cfg(unix)]
 pub(crate) fn serve(
     mut reader: impl Read,
     writer: impl Write + Send + 'static,
@@ -544,7 +541,6 @@ pub(crate) fn serve(
 }
 
 /// The near side of a link: opens streams over it.
-#[cfg(any(windows, test))]
 pub(crate) struct MuxBridge {
     link: Arc<Link>,
     next_stream: Mutex<u32>,
@@ -556,7 +552,6 @@ pub(crate) struct MuxBridge {
     pairs: LocalPairs,
 }
 
-#[cfg(any(windows, test))]
 impl MuxBridge {
     /// Starts the near side over a link whose far side has just been started.
     ///
@@ -666,14 +661,12 @@ impl MuxBridge {
     }
 }
 
-#[cfg(any(windows, test))]
 impl Drop for MuxBridge {
     fn drop(&mut self) {
         self.link.shut_down();
     }
 }
 
-#[cfg(any(windows, test))]
 fn run_near_reader(
     mut reader: impl Read,
     link: &Arc<Link>,
@@ -718,10 +711,10 @@ fn run_near_reader(
 
 /// Where the near side gets the connected pairs of local sockets its streams
 /// are: one end for the caller, one relayed over the link.
-#[cfg(all(unix, test))]
+#[cfg(unix)]
 struct LocalPairs;
 
-#[cfg(all(unix, test))]
+#[cfg(unix)]
 impl LocalPairs {
     fn new() -> io::Result<Self> {
         Ok(Self)

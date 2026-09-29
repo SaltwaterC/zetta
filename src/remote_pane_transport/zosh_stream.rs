@@ -135,6 +135,17 @@ pub(super) fn bootstrap(
             vec!["A local session's panes are already local, so Zosh has nothing to carry.".into()],
         );
     };
+    // `zmux relay-pane` is Unix-only, so there is nothing for a Windows host's
+    // Mosh server to run.
+    if client.remote_host_is_windows() {
+        return (
+            HashMap::new(),
+            vec![format!(
+                "{} is a Windows host, which cannot relay a pane over Zosh yet, so its panes stayed on SSH.",
+                target.destination()
+            )],
+        );
+    }
     // Learned with the endpoint, so normally free; the relay is the same
     // executable for every pane.
     let program = match client.resolve_remote_program() {

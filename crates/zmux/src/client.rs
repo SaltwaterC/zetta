@@ -1176,6 +1176,13 @@ impl Client {
             .and_then(|remote| remote.control_path())
     }
 
+    /// Whether this client's remote host is Windows.
+    pub fn remote_host_is_windows(&self) -> bool {
+        self.remote
+            .as_ref()
+            .is_some_and(|remote| remote.is_windows_host())
+    }
+
     /// Where the remote host keeps its own `zmux`.
     ///
     /// Learned with the endpoint, so normally answered without asking the
@@ -3503,6 +3510,20 @@ fn start_daemon(
         .spawn()
         .with_context(|| format!("starting the multiplexer {}", executable.display()))?;
     Ok(())
+}
+
+/// `zmux --daemon --detach`: starts the daemon with `forwarded` — every other
+/// argument that command was given — so that it outlives this process's
+/// session, and returns without waiting for it.
+pub(crate) fn start_detached_daemon(forwarded: &[std::ffi::OsString]) -> Result<()> {
+    let (executable, arguments) = multiplexer_command()?;
+    let arguments = arguments
+        .into_iter()
+        .map(std::ffi::OsString::from)
+        .chain(forwarded.iter().cloned())
+        .collect::<Vec<_>>();
+    crate::daemon_spawn::spawn_detached(&executable, &arguments)
+        .with_context(|| format!("starting the multiplexer {}", executable.display()))
 }
 
 fn append_startup_retention_arguments(arguments: &mut Vec<String>, retention: Option<Retention>) {

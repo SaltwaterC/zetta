@@ -30,7 +30,6 @@ session-persistence = [
     "scrollback-buffer",
     "dep:age",
     "dep:age-core",
-    "dep:base64",
     "dep:hpke",
     "dep:reqwest",
 ]
@@ -45,7 +44,8 @@ alacritty_terminal = { path = "../alacritty_terminal", default-features = false,
 anyhow = "1"
 argon2 = "0.5"
 async-channel = "2.5.0"
-base64 = { version = "0.21", optional = true }
+# Always: a Windows host is sent its commands as PowerShell -EncodedCommand.
+base64 = "0.22"
 getrandom = { version = "0.3", features = ["std"] }
 hpke = { version = "0.14", default-features = false, features = ["alloc", "chacha", "getrandom", "hkdfsha2", "mlkem", "x25519"], optional = true }
 libc = "0.2"

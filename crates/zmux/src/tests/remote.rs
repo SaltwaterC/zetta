@@ -45,11 +45,25 @@ fn write_script(path: &Path, content: impl AsRef<str>) {
 #[test]
 fn remote_program_paths_use_the_remote_hosts_posix_rules() {
     assert_eq!(
-        parse_remote_program_path(b"/home/qodfanzksn/bin/zmux\n").unwrap(),
+        parse_remote_program_path(b"/home/qodfanzksn/bin/zmux\n", HostPlatform::Posix).unwrap(),
         PathBuf::from("/home/qodfanzksn/bin/zmux")
     );
-    assert!(parse_remote_program_path(b"bin/zmux\n").is_err());
-    assert!(parse_remote_program_path(b"~/bin/zmux\n").is_err());
+    assert!(parse_remote_program_path(b"bin/zmux\n", HostPlatform::Posix).is_err());
+    assert!(parse_remote_program_path(b"~/bin/zmux\n", HostPlatform::Posix).is_err());
+    assert!(parse_remote_program_path(b"C:\\Zetta\\zmux.exe\r\n", HostPlatform::Posix).is_err());
+}
+
+#[test]
+fn remote_program_paths_on_a_windows_host_use_its_rules() {
+    assert_eq!(
+        parse_remote_program_path(
+            b"C:\\Users\\dev\\AppData\\Local\\Programs\\Zetta\\zmux.exe\r\n",
+            HostPlatform::Windows
+        )
+        .unwrap(),
+        PathBuf::from(r"C:\Users\dev\AppData\Local\Programs\Zetta\zmux.exe")
+    );
+    assert!(parse_remote_program_path(b"/usr/bin/zmux\n", HostPlatform::Windows).is_err());
 }
 
 #[cfg(unix)]
@@ -166,13 +180,19 @@ fn commands_on_a_shared_login_name_its_socket_and_add_no_forwards() {
     let target = RemoteTarget::new("alias").with_port(Some(2222));
     let control = Path::new("/tmp/zetta-zmux-x/ctl");
 
-    for arguments in [
+    let mut commands = vec![
         endpoint_arguments(&target, Some(control)),
-        program_arguments(&target, Some(control)),
-        profiles_arguments(&target, Some(control)),
-        start_daemon_arguments(&target, Some(control), Path::new("/opt/zmux")),
         agent_holder_arguments(&target, control, Path::new("/run/agent.sock")),
-    ] {
+    ];
+    for platform in [HostPlatform::Posix, HostPlatform::Windows] {
+        commands.extend([
+            program_arguments(&target, Some(control), platform),
+            profiles_arguments(&target, Some(control), platform),
+            start_daemon_arguments(&target, Some(control), Path::new("/opt/zmux"), platform),
+            bridge_arguments(&target, Some(control), platform),
+        ]);
+    }
+    for arguments in commands {
         assert_eq!(
             arguments[..7],
             [
@@ -243,7 +263,7 @@ fn remote_target_does_not_override_open_ssh_identity_selection() {
     for arguments in [
         endpoint_arguments(&target, None),
         master_arguments(&target, Path::new("/tmp/ctl")),
-        bridge_arguments(&target),
+        bridge_arguments(&target, None, HostPlatform::Posix),
     ] {
         assert!(!arguments.iter().any(|argument| argument == "-i"));
     }
@@ -258,23 +278,34 @@ fn remote_targets_explicitly_control_native_agent_forwarding() {
 
     for arguments in [
         endpoint_arguments(&enabled, None),
-        program_arguments(&enabled, Some(control)),
-        profiles_arguments(&enabled, None),
-        start_daemon_arguments(&enabled, Some(control), Path::new("/tmp/zmux")),
+        program_arguments(&enabled, Some(control), HostPlatform::Posix),
+        profiles_arguments(&enabled, None, HostPlatform::Windows),
+        start_daemon_arguments(
+            &enabled,
+            Some(control),
+            Path::new("/tmp/zmux"),
+            HostPlatform::Posix,
+        ),
         master_arguments(&enabled, control),
         agent_holder_arguments(&enabled, control, socket),
-        bridge_arguments(&enabled),
+        bridge_arguments(&enabled, None, HostPlatform::Posix),
+        bridge_arguments(&enabled, Some(control), HostPlatform::Windows),
     ] {
         assert!(arguments.iter().any(|argument| argument == "-A"));
         assert!(!arguments.iter().any(|argument| argument == "-a"));
     }
     for arguments in [
         endpoint_arguments(&disabled, None),
-        program_arguments(&disabled, Some(control)),
-        profiles_arguments(&disabled, None),
-        start_daemon_arguments(&disabled, Some(control), Path::new("/tmp/zmux")),
+        program_arguments(&disabled, Some(control), HostPlatform::Windows),
+        profiles_arguments(&disabled, None, HostPlatform::Posix),
+        start_daemon_arguments(
+            &disabled,
+            Some(control),
+            Path::new("/tmp/zmux"),
+            HostPlatform::Windows,
+        ),
         master_arguments(&disabled, control),
-        bridge_arguments(&disabled),
+        bridge_arguments(&disabled, None, HostPlatform::Posix),
     ] {
         assert!(arguments.iter().any(|argument| argument == "-a"));
         assert!(!arguments.iter().any(|argument| argument == "-A"));
@@ -302,7 +333,7 @@ fn an_agent_holder_is_a_session_on_the_shared_login() {
 #[test]
 fn the_windows_bridge_is_one_login_without_forwards() {
     let target = RemoteTarget::new("pi").with_port(Some(2222));
-    let arguments = bridge_arguments(&target);
+    let arguments = bridge_arguments(&target, None, HostPlatform::Posix);
     assert_eq!(
         arguments[0..6],
         ["-T", "-o", "ClearAllForwardings=yes", "-p", "2222", "pi"]
@@ -313,8 +344,41 @@ fn the_windows_bridge_is_one_login_without_forwards() {
     assert!(!arguments.iter().any(|argument| argument == "-L"));
     assert!(!arguments.iter().any(|argument| argument == "-N"));
 
-    let linked = bridge_arguments(&RemoteTarget::new("pi").with_forward_agent(true));
+    let linked = bridge_arguments(
+        &RemoteTarget::new("pi").with_forward_agent(true),
+        None,
+        HostPlatform::Posix,
+    );
     assert!(linked.last().unwrap().contains("proxy-mux --forward-agent"));
+}
+
+#[test]
+fn a_windows_host_is_sent_powershell_rather_than_a_posix_wrapper() {
+    let target = RemoteTarget::new("thinkpad");
+    let control = Path::new("/tmp/ctl");
+    for arguments in [
+        program_arguments(&target, Some(control), HostPlatform::Windows),
+        profiles_arguments(&target, None, HostPlatform::Windows),
+        start_daemon_arguments(
+            &target,
+            Some(control),
+            Path::new(r"C:\Zetta\zmux.exe"),
+            HostPlatform::Windows,
+        ),
+        bridge_arguments(&target, Some(control), HostPlatform::Windows),
+        bridge_arguments(&target, None, HostPlatform::Windows),
+    ] {
+        let command = arguments.last().unwrap();
+        assert!(command.starts_with("powershell.exe "), "{command}");
+        assert!(!command.contains("/bin/sh"), "{command}");
+    }
+    let script = remote_host::decoded(
+        bridge_arguments(&target, None, HostPlatform::Windows)
+            .last()
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(script.contains("proxy-mux"), "{script}");
 }
 
 #[test]
@@ -819,5 +883,90 @@ fn connecting_and_requesting_costs_one_login() {
     assert_eq!(
         calls.lines().skip(4).collect::<Vec<_>>(),
         ["cancel", "shared-command", "forward"]
+    );
+}
+
+/// An `ssh` to a Windows host whose account shell is PowerShell: a master
+/// works as it does anywhere, a `/bin/sh` command fails the way PowerShell
+/// fails it, the platform probe expands `$env:OS`, and an encoded script that
+/// asks for profiles gets them.
+#[cfg(unix)]
+fn fake_windows_ssh(directory: &Path) -> (PathBuf, PathBuf) {
+    let log = directory.join("ssh.log");
+    let ssh = directory.join("ssh");
+    write_script(
+        &ssh,
+        format!(
+            r#"#!/bin/sh
+log='{log}'
+control=''; master=0; previous=''; last=''
+for argument in "$@"; do
+  test "$previous" = -S && control="$argument"
+  test "$argument" = -M && master=1
+  previous="$argument"; last="$argument"
+done
+if test "$master" = 1; then echo master >> "$log"; : > "$control"; exec sleep 60; fi
+case "$last" in
+  /bin/sh*) echo posix >> "$log"; echo "/bin/sh : The term '/bin/sh' is not recognized" >&2; exit 1;;
+  "{probe}") echo probe >> "$log"; printf 'ZMUX_OS_A%%OS%%\r\nZMUX_OS_BWindows_NT\r\n'; exit 0;;
+  powershell.exe*)
+    echo powershell >> "$log"
+    script=$(printf '%s' "${{last##* }}" | base64 -d | iconv -f UTF-16LE -t UTF-8)
+    case "$script" in *"profiles --json"*) printf '["Windows PowerShell","Command Prompt"]\r\n'; exit 0;; esac
+    exit 1;;
+esac
+exit 1
+"#,
+            log = log.display(),
+            probe = remote_host::PLATFORM_PROBE.replace('$', "\\$"),
+        ),
+    );
+    (ssh, log)
+}
+
+#[cfg(unix)]
+#[test]
+fn a_windows_host_is_found_out_once_and_then_sent_powershell() {
+    let directory = tempfile::tempdir().unwrap();
+    let (ssh, log) = fake_windows_ssh(directory.path());
+    let target = RemoteTarget::new("windows-host-detection-test");
+    let transport = RemoteTransport::for_creation_with_ssh_program(target.clone(), &ssh).unwrap();
+
+    assert_eq!(
+        transport.query_profiles().unwrap(),
+        ["Command Prompt", "Windows PowerShell"]
+    );
+    assert_eq!(remote_host::learned(&target), Some(HostPlatform::Windows));
+    assert_eq!(
+        transport.query_profiles().unwrap(),
+        ["Command Prompt", "Windows PowerShell"]
+    );
+
+    let calls = std::fs::read_to_string(&log).unwrap();
+    assert_eq!(
+        calls.lines().collect::<Vec<_>>(),
+        ["master", "posix", "probe", "powershell", "powershell"],
+        "the POSIX form is tried once, and never again once the host is known"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_posix_host_never_pays_for_the_probe() {
+    let directory = tempfile::tempdir().unwrap();
+    let daemon = CountingDaemon::start(directory.path());
+    let (ssh, log) = fake_ssh(directory.path(), &daemon.endpoint());
+    let target = RemoteTarget::new("posix-host-detection-test");
+    let transport = RemoteTransport::for_creation_with_ssh_program(target.clone(), &ssh).unwrap();
+
+    assert_eq!(transport.query_profiles().unwrap(), ["System"]);
+    transport.ensure_endpoint().unwrap();
+
+    assert_eq!(remote_host::learned(&target), Some(HostPlatform::Posix));
+    let calls = std::fs::read_to_string(&log).unwrap();
+    assert!(!calls.contains("probe"), "{calls}");
+    assert_eq!(
+        calls.lines().collect::<Vec<_>>(),
+        ["master", "shared-command", "shared-command", "forward"]
     );
 }
