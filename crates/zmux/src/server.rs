@@ -195,8 +195,11 @@ struct SharedClient {
     /// relay is better than growing the daemon until it is killed.
     relay: Relay,
     /// How much this viewer's relay had written when it was last looked at, and
-    /// when that changed. A viewer that is merely slow keeps writing; one that has
-    /// stopped reading stops writing, and only that one is dropped.
+    /// since when output has waited for it without any being written — reset by
+    /// every write and by an empty queue, so an idle viewer is never behind. A
+    /// viewer that is merely slow keeps writing; one that has stopped reading
+    /// stops writing, and only that one is dropped. See
+    /// `workers::viewer_has_stalled`.
     written_seen: usize,
     wrote_at: Instant,
     /// A client does not constrain a shared pane until its first initialized

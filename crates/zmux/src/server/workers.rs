@@ -352,19 +352,8 @@ pub(super) fn relay_backpressure(pane: &mut Pane, evicted: &mut bool) -> bool {
     let mut stalled = Vec::new();
     if let Attachment::Shared(clients) = &mut pane.attachment {
         for client in clients.iter_mut() {
-            let written = client.relay.written.load(Ordering::Relaxed);
-            if written != client.written_seen {
-                client.written_seen = written;
-                client.wrote_at = now;
-            }
             let backlog = client.relay.queued.load(Ordering::Relaxed);
-            // Checked at *any* backlog, not only past the threshold. A blocked
-            // relay drains what is queued into a socket that has room, so the
-            // backlog dips below the threshold between passes — and gating the
-            // check on the threshold meant a viewer that had stopped reading
-            // entirely was never noticed here at all, leaving the pane to stutter
-            // until the write timeout eventually killed the relay seconds later.
-            if backlog > 0 && now.duration_since(client.wrote_at) >= RELAY_STALL_TIMEOUT {
+            if viewer_has_stalled(client, backlog, now) {
                 stalled.push(client.attachment);
                 continue;
             }
@@ -379,7 +368,7 @@ pub(super) fn relay_backpressure(pane: &mut Pane, evicted: &mut bool) -> bool {
             {
                 log::warn!(
                     "dropping a shared viewer of pane {} whose backlog stopped shrinking: {} \
-                     (client {}, relaying for {}), {} bytes queued, nothing written for {:?}",
+                     (client {}, relaying for {}), {} bytes queued, none of it written for {:?}",
                     pane.id,
                     crate::process_status::describe(client.process_id),
                     client.client_id.as_str(),
@@ -408,6 +397,32 @@ pub(super) fn relay_backpressure(pane: &mut Pane, evicted: &mut bool) -> bool {
         *evicted = true;
     }
     hold
+}
+
+/// Whether a viewer has had output waiting for [`RELAY_STALL_TIMEOUT`] without
+/// its relay writing any of it.
+///
+/// The clock is how long the *backlog* has gone unserved, not how long ago the
+/// relay last wrote. An idle pane writes nothing, so measured from the last
+/// write, a viewer quiet for half a minute was "stalled" the instant its pane
+/// printed again: the new frame was queued, this pass ran before the relay
+/// thread had written it, and a viewer reading perfectly well was dropped. An
+/// empty queue is therefore progress too.
+///
+/// Checked at *any* backlog, not only past the backpressure threshold. A
+/// blocked relay drains what is queued into a socket that has room, so the
+/// backlog dips below the threshold between passes — and gating the check on
+/// the threshold meant a viewer that had stopped reading entirely was never
+/// noticed here at all, leaving the pane to stutter until the write timeout
+/// eventually killed the relay seconds later.
+pub(super) fn viewer_has_stalled(client: &mut SharedClient, backlog: usize, now: Instant) -> bool {
+    let written = client.relay.written.load(Ordering::Relaxed);
+    if written != client.written_seen || backlog == 0 {
+        client.written_seen = written;
+        client.wrote_at = now;
+        return false;
+    }
+    now.duration_since(client.wrote_at) >= RELAY_STALL_TIMEOUT
 }
 
 /// Whether the drain thread is the one reading this pane.
