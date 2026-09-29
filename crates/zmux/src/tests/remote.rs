@@ -1,5 +1,47 @@
 use super::*;
 
+/// Writes an executable test script and waits until it can be run.
+///
+/// A file just written can briefly refuse to execute (`ETXTBSY`): a process
+/// another test forks while the file is still open for writing inherits that
+/// descriptor until it execs. So run the script once, harmlessly, until the
+/// kernel lets it — after the first success no writer can appear again. The
+/// guard line is what makes that run harmless.
+#[cfg(unix)]
+fn write_script(path: &Path, content: impl AsRef<str>) {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    const PROBE: &str = "--zetta-test-probe";
+    let content = content.as_ref();
+    let body = content
+        .strip_prefix("#!/bin/sh\n")
+        .expect("test scripts are /bin/sh scripts");
+    std::fs::write(
+        path,
+        format!("#!/bin/sh\ntest \"$1\" = {PROBE} && exit 0\n{body}"),
+    )
+    .unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let run = Command::new(path)
+            .arg(PROBE)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        match run {
+            Err(error) if error.raw_os_error() == Some(26) && Instant::now() < deadline => {
+                thread::sleep(Duration::from_millis(10));
+            }
+            run => {
+                run.unwrap();
+                return;
+            }
+        }
+    }
+}
+
 #[test]
 fn remote_program_paths_use_the_remote_hosts_posix_rules() {
     assert_eq!(
@@ -13,20 +55,16 @@ fn remote_program_paths_use_the_remote_hosts_posix_rules() {
 #[cfg(unix)]
 #[test]
 fn remote_program_query_expands_a_home_shortened_path() {
-    use std::os::unix::fs::PermissionsExt as _;
-
     let home = tempfile::tempdir().unwrap();
     let shell = home.path().join("shell");
-    std::fs::write(
+    write_script(
         &shell,
         "#!/bin/sh\nprintf 'startup noise\\n'\nprintf '~/bin/zmux\\n' >&3\n",
-    )
-    .unwrap();
-    std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o700)).unwrap();
+    );
 
     let output = Command::new("/bin/sh")
         .arg("-c")
-        .arg(REMOTE_PROGRAM_COMMAND)
+        .arg(remote_program_command())
         .env("SHELL", &shell)
         .env("HOME", home.path())
         .env("PATH", home.path())
@@ -43,15 +81,11 @@ fn remote_program_query_expands_a_home_shortened_path() {
 #[cfg(unix)]
 #[test]
 fn remote_queries_use_an_existing_noninteractive_zmux() {
-    use std::os::unix::fs::PermissionsExt as _;
-
     let directory = tempfile::tempdir().unwrap();
     let zmux = directory.path().join("zmux");
-    std::fs::write(&zmux, "#!/bin/sh\nprintf '[\"System\"]\\n'\n").unwrap();
-    std::fs::set_permissions(&zmux, std::fs::Permissions::from_mode(0o700)).unwrap();
+    write_script(&zmux, "#!/bin/sh\nprintf '[\"System\"]\\n'\n");
     let shell = directory.path().join("shell");
-    std::fs::write(&shell, "#!/bin/sh\nexit 77\n").unwrap();
-    std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o700)).unwrap();
+    write_script(&shell, "#!/bin/sh\nexit 77\n");
 
     let output = Command::new("/bin/sh")
         .arg("-c")
@@ -90,28 +124,6 @@ fn a_stale_endpoint_does_not_claim_a_remote_daemon_is_running() {
     assert!(live_endpoint(directory.path()).is_err());
 }
 
-#[cfg(unix)]
-#[test]
-fn stdio_proxy_copies_daemon_bytes_without_changing_them() {
-    use std::io::{Cursor, Read as _, Write as _};
-
-    let directory = tempfile::tempdir().unwrap();
-    let socket = directory.path().join("daemon.sock");
-    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
-    let server = thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        let mut request = [0; 5];
-        stream.read_exact(&mut request).unwrap();
-        assert_eq!(&request, b"\0\xffmux");
-        stream.write_all(b"\xff\0reply").unwrap();
-    });
-    let stream = Stream::connect(&socket).unwrap();
-    let mut output = Vec::new();
-    proxy_stream(stream, Cursor::new(b"\0\xffmux".to_vec()), &mut output).unwrap();
-    assert_eq!(output, b"\xff\0reply");
-    server.join().unwrap();
-}
-
 #[test]
 fn remote_targets_keep_open_ssh_destination_syntax_intact() {
     let target = RemoteTarget::new("alias.example").with_port(Some(2222));
@@ -138,195 +150,131 @@ fn endpoint_queries_preserve_the_user_ssh_configuration() {
     let target = RemoteTarget::new("dev@example.test").with_port(Some(2222));
 
     assert_eq!(
-        endpoint_arguments(&target),
+        endpoint_arguments(&target, None),
         [
-            "-T",
-            "-p",
-            "2222",
-            "dev@example.test",
-            REMOTE_ENDPOINT_COMMAND,
+            "-T".to_owned(),
+            "-p".to_owned(),
+            "2222".to_owned(),
+            "dev@example.test".to_owned(),
+            remote_endpoint_command(),
         ]
     );
 }
 
-#[cfg(windows)]
 #[test]
-fn windows_stdio_proxy_uses_the_configured_ssh_target_without_a_forward() {
-    let target = RemoteTarget::new("pi").with_port(Some(2222));
-    let arguments = stdio_arguments(&target);
-    assert_eq!(
-        arguments[0..6],
-        ["-T", "-o", "ClearAllForwardings=yes", "-p", "2222", "pi"]
-    );
-    assert_eq!(arguments[6], REMOTE_STDIO_COMMAND);
-    assert!(!arguments.iter().any(|argument| argument == "-L"));
-    assert!(!arguments.iter().any(|argument| argument == "-N"));
+fn commands_on_a_shared_login_name_its_socket_and_add_no_forwards() {
+    let target = RemoteTarget::new("alias").with_port(Some(2222));
+    let control = Path::new("/tmp/zetta-zmux-x/ctl");
 
-    let agent_off = stdio_arguments(&RemoteTarget::new("pi").with_forward_agent(false));
-    assert!(agent_off.iter().any(|argument| argument == "-a"));
-    assert!(!agent_off.iter().any(|argument| argument == "-A"));
-}
-
-#[cfg(windows)]
-#[test]
-fn windows_agent_holder_keeps_forwarded_agent_available_to_later_panes() {
-    let target = RemoteTarget::new("pi").with_forward_agent(true);
-    let arguments = agent_holder_arguments(
-        &target,
-        Path::new("/run/user/1000/zetta/forwarded-agent.sock"),
-    );
-    assert_eq!(
-        arguments[0..5],
-        ["-T", "-o", "ClearAllForwardings=yes", "-A", "pi"]
-    );
-    assert!(arguments[5].contains("SSH_AUTH_SOCK"));
-    assert!(arguments[5].contains("exec sleep"));
-    assert!(!arguments.iter().any(|argument| argument == "-L"));
-}
-
-#[cfg(windows)]
-#[test]
-fn windows_stdio_bridge_preserves_binary_bytes_and_eof() {
-    use std::io::{Read, Write};
-
-    let directory = tempfile::tempdir().unwrap();
-    let socket = directory.path().join("stdio.sock");
-    let listener = crate::transport::Listener::bind(&socket).unwrap();
-    let mut client = Stream::connect(&socket).unwrap();
-    let (relay, _) = listener.accept().unwrap();
-    let mut child = Command::new("powershell.exe")
-        .args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            "[Console]::OpenStandardInput().CopyTo([Console]::OpenStandardOutput())",
-        ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let pump = thread::spawn(move || copy_stdio_child(&mut child, relay, "test"));
-    let payload = b"\0\xff\r\nzmux\x1b[31m";
-    client.write_all(payload).unwrap();
-    client.shutdown(Shutdown::Write).unwrap();
-    let mut echoed = Vec::new();
-    client.read_to_end(&mut echoed).unwrap();
-    assert_eq!(echoed, payload);
-    pump.join().unwrap();
-}
-
-#[cfg(windows)]
-#[test]
-fn windows_stdio_bridge_reports_the_remote_process_error() {
-    use std::io::Read as _;
-
-    let directory = tempfile::tempdir().unwrap();
-    let socket = directory.path().join("stdio.sock");
-    let listener = crate::transport::Listener::bind(&socket).unwrap();
-    let mut client = Stream::connect(&socket).unwrap();
-    let (relay, _) = listener.accept().unwrap();
-    let mut child = Command::new("powershell.exe")
-        .args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            "[Console]::Error.WriteLine('remote proxy failed'); exit 27",
-        ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let pump = thread::spawn(move || copy_stdio_child(&mut child, relay, "test"));
-    let mut output = Vec::new();
-    client.read_to_end(&mut output).unwrap();
-    assert!(output.is_empty());
-    assert!(pump.join().unwrap().contains("remote proxy failed"));
-}
-
-#[cfg(windows)]
-#[test]
-fn windows_stdio_bridge_returns_a_response_before_the_client_closes() {
-    use std::io::{Read as _, Write as _};
-
-    let directory = tempfile::tempdir().unwrap();
-    let socket = directory.path().join("stdio.sock");
-    let ready = directory.path().join("ready");
-    let listener = crate::transport::Listener::bind(&socket).unwrap();
-    let mut client = Stream::connect(&socket).unwrap();
-    let (relay, _) = listener.accept().unwrap();
-    let mut child = Command::new("powershell.exe")
-        .args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            "[IO.File]::WriteAllText($env:ZETTA_TEST_READY,'ready'); $b=New-Object byte[] 5; $n=[Console]::OpenStandardInput().Read($b,0,5); [Console]::OpenStandardOutput().Write($b,0,$n)",
-        ])
-        .env("ZETTA_TEST_READY", &ready)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let pump = thread::spawn(move || copy_stdio_child(&mut child, relay, "test"));
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while !ready.exists() {
-        assert!(Instant::now() < deadline, "the echo process did not start");
-        thread::sleep(Duration::from_millis(10));
+    for arguments in [
+        endpoint_arguments(&target, Some(control)),
+        program_arguments(&target, Some(control)),
+        profiles_arguments(&target, Some(control)),
+        start_daemon_arguments(&target, Some(control), Path::new("/opt/zmux")),
+        agent_holder_arguments(&target, control, Path::new("/run/agent.sock")),
+    ] {
+        assert_eq!(
+            arguments[..7],
+            [
+                "-T",
+                "-S",
+                "/tmp/zetta-zmux-x/ctl",
+                "-o",
+                "ControlMaster=no",
+                "-o",
+                "ClearAllForwardings=yes",
+            ]
+        );
+        assert_eq!(arguments[7..9], ["-p", "2222"]);
+        assert_eq!(arguments[9], "alias");
     }
-    client
-        .set_read_timeout(Some(Duration::from_secs(3)))
-        .unwrap();
-    client.write_all(b"hello").unwrap();
-    let mut response = [0; 5];
-    client.read_exact(&mut response).unwrap();
-    assert_eq!(&response, b"hello");
-    drop(client);
-    pump.join().unwrap();
+}
+
+#[test]
+fn the_login_is_a_foreground_master_that_runs_nothing() {
+    let target = RemoteTarget::new("alias").with_port(Some(2200));
+
+    assert_eq!(
+        master_arguments(&target, Path::new("/tmp/zetta-zmux-x/ctl")),
+        [
+            "-T",
+            "-N",
+            "-M",
+            "-S",
+            "/tmp/zetta-zmux-x/ctl",
+            "-o",
+            "ControlPersist=no",
+            "-o",
+            "ExitOnForwardFailure=yes",
+            "-p",
+            "2200",
+            "alias",
+        ]
+    );
+}
+
+#[test]
+fn forwards_are_stream_local_requests_to_the_master() {
+    let target = RemoteTarget::new("alias").with_port(Some(2200));
+
+    assert_eq!(
+        forward_request_arguments(
+            &target,
+            Path::new("/tmp/zetta-zmux-x/ctl"),
+            "forward",
+            "/tmp/zetta-zmux-x/mux-0.sock:/run/user/1000/zmux.sock",
+        ),
+        [
+            "-S",
+            "/tmp/zetta-zmux-x/ctl",
+            "-O",
+            "forward",
+            "-L",
+            "/tmp/zetta-zmux-x/mux-0.sock:/run/user/1000/zmux.sock",
+            "alias",
+        ]
+    );
 }
 
 #[test]
 fn remote_target_does_not_override_open_ssh_identity_selection() {
     let target = RemoteTarget::new("alias");
 
-    assert!(
-        !endpoint_arguments(&target)
-            .iter()
-            .any(|argument| argument == "-i")
-    );
-    assert!(
-        !forward_arguments(&target, "/tmp/local.sock:/run/zmux.sock", None)
-            .iter()
-            .any(|argument| argument == "-i")
-    );
+    for arguments in [
+        endpoint_arguments(&target, None),
+        master_arguments(&target, Path::new("/tmp/ctl")),
+        bridge_arguments(&target),
+    ] {
+        assert!(!arguments.iter().any(|argument| argument == "-i"));
+    }
 }
 
 #[test]
 fn remote_targets_explicitly_control_native_agent_forwarding() {
     let enabled = RemoteTarget::new("alias").with_forward_agent(true);
     let disabled = RemoteTarget::new("alias").with_forward_agent(false);
+    let control = Path::new("/tmp/ctl");
+    let socket = Path::new("/run/zetta/forwarded-agent.sock");
 
     for arguments in [
-        endpoint_arguments(&enabled),
-        program_arguments(&enabled),
-        profiles_arguments(&enabled),
-        start_daemon_arguments(&enabled, Path::new("/tmp/zmux")),
-        forward_arguments(
-            &enabled,
-            "/tmp/local.sock:/run/zmux.sock",
-            Some(Path::new("/run/zetta/forwarded-agent.sock")),
-        ),
+        endpoint_arguments(&enabled, None),
+        program_arguments(&enabled, Some(control)),
+        profiles_arguments(&enabled, None),
+        start_daemon_arguments(&enabled, Some(control), Path::new("/tmp/zmux")),
+        master_arguments(&enabled, control),
+        agent_holder_arguments(&enabled, control, socket),
+        bridge_arguments(&enabled),
     ] {
         assert!(arguments.iter().any(|argument| argument == "-A"));
         assert!(!arguments.iter().any(|argument| argument == "-a"));
     }
     for arguments in [
-        endpoint_arguments(&disabled),
-        program_arguments(&disabled),
-        profiles_arguments(&disabled),
-        start_daemon_arguments(&disabled, Path::new("/tmp/zmux")),
-        forward_arguments(&disabled, "/tmp/local.sock:/run/zmux.sock", None),
+        endpoint_arguments(&disabled, None),
+        program_arguments(&disabled, Some(control)),
+        profiles_arguments(&disabled, None),
+        start_daemon_arguments(&disabled, Some(control), Path::new("/tmp/zmux")),
+        master_arguments(&disabled, control),
+        bridge_arguments(&disabled),
     ] {
         assert!(arguments.iter().any(|argument| argument == "-a"));
         assert!(!arguments.iter().any(|argument| argument == "-A"));
@@ -334,41 +282,170 @@ fn remote_targets_explicitly_control_native_agent_forwarding() {
 }
 
 #[test]
-fn forwards_are_stream_local_and_do_not_request_a_shell() {
-    let target = RemoteTarget::new("alias").with_port(Some(2200));
-
-    assert_eq!(
-        forward_arguments(&target, "/tmp/local.sock:/run/user/1000/zmux.sock", None,),
-        [
-            "-T",
-            "-N",
-            "-o",
-            "ExitOnForwardFailure=yes",
-            "-p",
-            "2200",
-            "-L",
-            "/tmp/local.sock:/run/user/1000/zmux.sock",
-            "alias",
-        ]
-    );
-}
-
-#[test]
-fn an_agent_forward_keeps_a_remote_session_channel_open() {
+fn an_agent_holder_is_a_session_on_the_shared_login() {
     let target = RemoteTarget::new("alias").with_forward_agent(true);
 
-    let arguments = forward_arguments(
+    let arguments = agent_holder_arguments(
         &target,
-        "/tmp/local.sock:/run/user/1000/zmux.sock",
-        Some(Path::new("/run/user/1000/zetta/forwarded-agent.sock")),
+        Path::new("/tmp/ctl"),
+        Path::new("/run/user/1000/zetta/forwarded-agent.sock"),
     );
 
     assert!(arguments.iter().any(|argument| argument == "-A"));
-    assert!(!arguments.iter().any(|argument| argument == "-N"));
+    assert!(arguments.windows(2).any(|pair| pair == ["-S", "/tmp/ctl"]));
     let command = arguments.last().expect("the remote holder command");
     assert!(command.contains("SSH_AUTH_SOCK"));
     assert!(command.contains("/run/user/1000/zetta/forwarded-agent.sock"));
     assert!(command.contains("exec sleep"));
+}
+
+#[test]
+fn the_windows_bridge_is_one_login_without_forwards() {
+    let target = RemoteTarget::new("pi").with_port(Some(2222));
+    let arguments = bridge_arguments(&target);
+    assert_eq!(
+        arguments[0..6],
+        ["-T", "-o", "ClearAllForwardings=yes", "-p", "2222", "pi"]
+    );
+    assert_eq!(arguments[6], remote_bridge_command(false));
+    assert!(arguments[6].contains("proxy-mux"));
+    assert!(!arguments[6].contains("--forward-agent"));
+    assert!(!arguments.iter().any(|argument| argument == "-L"));
+    assert!(!arguments.iter().any(|argument| argument == "-N"));
+
+    let linked = bridge_arguments(&RemoteTarget::new("pi").with_forward_agent(true));
+    assert!(linked.last().unwrap().contains("proxy-mux --forward-agent"));
+}
+
+#[test]
+fn the_endpoint_query_names_the_program_before_the_endpoint() {
+    let endpoint = Endpoint {
+        version: ENDPOINT_VERSION,
+        protocol_version: PROTOCOL_VERSION,
+        process_id: 7,
+        socket_path: PathBuf::from("/run/user/1000/zetta/zmux.sock"),
+        token: "token".to_owned(),
+    };
+    let output = format!(
+        "\n/home/dev/.local/bin/zmux\n{}\n",
+        serde_json::to_string(&endpoint).unwrap()
+    );
+    assert_eq!(
+        parse_endpoint_output(output.as_bytes()).unwrap(),
+        (PathBuf::from("/home/dev/.local/bin/zmux"), endpoint.clone())
+    );
+    assert!(parse_endpoint_output(b"/home/dev/zmux\n").is_err());
+    assert!(parse_endpoint_output(b"zmux\n{}\n").is_err());
+    let mismatched = Endpoint {
+        protocol_version: PROTOCOL_VERSION + 1,
+        ..endpoint
+    };
+    let output = format!(
+        "/home/dev/zmux\n{}\n",
+        serde_json::to_string(&mismatched).unwrap()
+    );
+    assert!(parse_endpoint_output(output.as_bytes()).is_err());
+}
+
+/// The rc-file fallback is only used to find `zmux`: what it found is run
+/// directly, so a slow rc file runs once per query rather than twice.
+#[cfg(unix)]
+#[test]
+fn the_endpoint_query_runs_the_program_an_interactive_shell_found() {
+    let home = tempfile::tempdir().unwrap();
+    let bin = home.path().join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let zmux = bin.join("zmux");
+    write_script(
+        &zmux,
+        "#!/bin/sh\ntest \"$1 $2\" = 'endpoint --json' && printf '{\"endpoint\":1}\\n'\n",
+    );
+    let runs = home.path().join("runs");
+    let shell = home.path().join("shell");
+    write_script(
+        &shell,
+        format!(
+            "#!/bin/sh\necho run >> '{}'\nprintf 'startup noise\\n'\nprintf '~/bin/zmux\\n' >&3\n",
+            runs.display()
+        ),
+    );
+
+    let output = Command::new("/bin/sh")
+        .arg("-c")
+        .arg(remote_endpoint_command())
+        .env("SHELL", &shell)
+        .env("HOME", home.path())
+        .env("PATH", "/usr/bin:/bin")
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        format!("{}\n{{\"endpoint\":1}}\n", zmux.display())
+    );
+    assert_eq!(std::fs::read_to_string(&runs).unwrap(), "run\n");
+}
+
+#[test]
+fn shared_transports_are_one_per_target() {
+    keep_idle_transports();
+    let first = RemoteTransport::shared(RemoteTarget::new("shared-one.invalid")).unwrap();
+    let again = RemoteTransport::shared(RemoteTarget::new("shared-one.invalid")).unwrap();
+    let other_port =
+        RemoteTransport::shared(RemoteTarget::new("shared-one.invalid").with_port(Some(2222)))
+            .unwrap();
+    let other_agent =
+        RemoteTransport::shared(RemoteTarget::new("shared-one.invalid").with_forward_agent(true))
+            .unwrap();
+
+    assert!(Arc::ptr_eq(&first, &again));
+    assert!(!Arc::ptr_eq(&first, &other_port));
+    assert!(!Arc::ptr_eq(&first, &other_agent));
+    assert!(RemoteTransport::shared(RemoteTarget::new("-oProxyCommand=x")).is_err());
+
+    // Released, a process no longer shares: nothing it made outlives it.
+    release_idle_transports();
+    let unshared = RemoteTransport::shared(RemoteTarget::new("shared-one.invalid")).unwrap();
+    assert!(!Arc::ptr_eq(&first, &unshared));
+    assert_eq!(Arc::strong_count(&first), 2, "the registry let go of it");
+}
+
+/// A transport whose login and forward are already up: the login is a
+/// stand-in process, and the forward's local socket is whatever the test
+/// listens on.
+#[cfg(unix)]
+fn transport_with_forward(
+    directory: tempfile::TempDir,
+    local_socket: PathBuf,
+    endpoint: Endpoint,
+) -> RemoteTransport {
+    let child = Command::new("sleep")
+        .arg("60")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut state = RemoteState::empty();
+    state.master = Some(Master {
+        child,
+        control_path: directory.path().join("ctl"),
+        directory,
+        stderr: CapturedOutput::default(),
+    });
+    state.forward = Some(ForwardState {
+        local_socket,
+        forwarding: String::new(),
+        endpoint,
+        agent_holder: None,
+        verified_at: None,
+    });
+    RemoteTransport {
+        target: RemoteTarget::new("test"),
+        ssh_program: "ssh".into(),
+        state: Mutex::new(state),
+    }
 }
 
 #[cfg(unix)]
@@ -377,7 +454,6 @@ fn mux_probe_uses_a_different_connection_than_the_real_request() {
     use std::{
         io::ErrorKind,
         os::unix::net::UnixListener,
-        process::{Command, Stdio},
         sync::mpsc,
         thread,
         time::{Duration, Instant},
@@ -397,26 +473,7 @@ fn mux_probe_uses_a_different_connection_than_the_real_request() {
         socket_path: socket_path.clone(),
         token: "test-token".to_owned(),
     };
-    let child = Command::new("sh")
-        .args(["-c", "sleep 60"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
-    let forward = ForwardState {
-        child,
-        directory,
-        local_socket: socket_path,
-        endpoint: endpoint.clone(),
-    };
-    let transport = RemoteTransport {
-        target: RemoteTarget::new("test"),
-        ssh_program: "ssh".into(),
-        state: std::sync::Mutex::new(RemoteState {
-            forward: Some(forward),
-        }),
-    };
+    let transport = transport_with_forward(directory, socket_path, endpoint.clone());
     let (report_sender, report_receiver) = mpsc::channel::<Result<(), String>>();
     let server = thread::spawn(move || {
         let deadline = Instant::now() + Duration::from_secs(2);
@@ -510,12 +567,7 @@ fn mux_probe_uses_a_different_connection_than_the_real_request() {
 #[cfg(unix)]
 #[test]
 fn remote_attach_uses_the_transport_probe_as_its_only_readiness_check() {
-    use std::{
-        os::unix::net::UnixListener,
-        process::{Command, Stdio},
-        sync::Arc,
-        thread,
-    };
+    use std::{os::unix::net::UnixListener, sync::Arc, thread};
 
     let directory = tempfile::tempdir().unwrap();
     let socket_path = directory.path().join("forward.sock");
@@ -527,25 +579,7 @@ fn remote_attach_uses_the_transport_probe_as_its_only_readiness_check() {
         socket_path: socket_path.clone(),
         token: "test-token".to_owned(),
     };
-    let child = Command::new("sh")
-        .args(["-c", "sleep 60"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
-    let transport = RemoteTransport {
-        target: RemoteTarget::new("test"),
-        ssh_program: "ssh".into(),
-        state: std::sync::Mutex::new(RemoteState {
-            forward: Some(ForwardState {
-                child,
-                directory,
-                local_socket: socket_path,
-                endpoint: endpoint.clone(),
-            }),
-        }),
-    };
+    let transport = transport_with_forward(directory, socket_path, endpoint.clone());
     let server = thread::spawn(move || {
         let (stream, _) = listener.accept().unwrap();
         let mut probe = Connection::new(stream);
@@ -599,5 +633,191 @@ fn client_ids_are_random_and_serializable() {
     assert_eq!(
         serde_json::from_str::<crate::messages::ClientId>(&wire).unwrap(),
         first
+    );
+}
+
+/// A stand-in daemon that answers `Ping` and `List`, counting each.
+#[cfg(unix)]
+struct CountingDaemon {
+    socket: PathBuf,
+    pings: Arc<std::sync::atomic::AtomicUsize>,
+    lists: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[cfg(unix)]
+impl CountingDaemon {
+    fn start(directory: &Path) -> Self {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let socket = directory.join("daemon.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let pings = Arc::new(AtomicUsize::new(0));
+        let lists = Arc::new(AtomicUsize::new(0));
+        let (ping_counter, list_counter) = (pings.clone(), lists.clone());
+        thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(stream) = stream else { return };
+                let mut connection = Connection::new(stream);
+                let Ok((envelope, _)) = connection.receive::<Envelope>() else {
+                    continue;
+                };
+                let response = match envelope.request {
+                    Request::Ping => {
+                        ping_counter.fetch_add(1, Ordering::SeqCst);
+                        Response::Ok
+                    }
+                    Request::List => {
+                        list_counter.fetch_add(1, Ordering::SeqCst);
+                        Response::Sessions {
+                            sessions: Vec::new(),
+                            restorable: Vec::new(),
+                        }
+                    }
+                    _ => Response::Error {
+                        message: "unexpected request".to_owned(),
+                    },
+                };
+                let _ = connection.send(&response);
+            }
+        });
+        Self {
+            socket,
+            pings,
+            lists,
+        }
+    }
+
+    fn endpoint(&self) -> Endpoint {
+        Endpoint {
+            version: ENDPOINT_VERSION,
+            protocol_version: PROTOCOL_VERSION,
+            process_id: 4242,
+            socket_path: self.socket.clone(),
+            token: "test-token".to_owned(),
+        }
+    }
+
+    fn pings(&self) -> usize {
+        self.pings.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn lists(&self) -> usize {
+        self.lists.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_proven_endpoint_is_not_probed_again_until_something_fails() {
+    let directory = tempfile::tempdir().unwrap();
+    let daemon = CountingDaemon::start(directory.path());
+    let endpoint = daemon.endpoint();
+    let transport = Arc::new(transport_with_forward(
+        tempfile::tempdir().unwrap(),
+        daemon.socket.clone(),
+        endpoint.clone(),
+    ));
+    let client = crate::client::Client::from_remote_transport_for_test(transport.clone(), endpoint);
+
+    for _ in 0..5 {
+        client.list().unwrap();
+    }
+    assert_eq!(daemon.lists(), 5);
+    assert_eq!(
+        daemon.pings(),
+        1,
+        "only the first connection needed a probe"
+    );
+
+    transport.distrust();
+    client.list().unwrap();
+    assert_eq!(daemon.pings(), 2, "a distrusted endpoint is probed again");
+}
+
+/// An `ssh` that logs what it was asked to do and does just enough of it: a
+/// master creates its control path and waits, `-O forward` links the local
+/// socket to the remote one, and anything else runs the remote command
+/// locally, with a `zmux` on `PATH` that reports `endpoint`.
+#[cfg(unix)]
+fn fake_ssh(directory: &Path, endpoint: &Endpoint) -> (PathBuf, PathBuf) {
+    let bin = directory.join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let zmux = bin.join("zmux");
+    write_script(
+        &zmux,
+        format!(
+            "#!/bin/sh\ncase \"$1\" in endpoint) printf '%s\\n' '{}';; profiles) printf '[\"System\"]\\n';; esac\n",
+            serde_json::to_string(endpoint).unwrap()
+        ),
+    );
+    let log = directory.join("ssh.log");
+    let ssh = directory.join("ssh");
+    write_script(
+        &ssh,
+        format!(
+            r#"#!/bin/sh
+log='{log}'
+control=''; operation=''; forwarding=''; master=0; previous=''; last=''
+for argument in "$@"; do
+  case "$previous" in -S) control="$argument";; -O) operation="$argument";; -L) forwarding="$argument";; esac
+  test "$argument" = -M && master=1
+  previous="$argument"; last="$argument"
+done
+if test "$master" = 1; then echo master >> "$log"; : > "$control"; exec sleep 60; fi
+if test -n "$operation"; then
+  echo "$operation" >> "$log"
+  test "$operation" = forward && ln -s "${{forwarding#*:}}" "${{forwarding%%:*}}"
+  test "$operation" = cancel && rm -f "${{forwarding%%:*}}"
+  exit 0
+fi
+test -n "$control" && echo shared-command >> "$log" || echo login-command >> "$log"
+PATH='{bin}':"$PATH" exec /bin/sh -c "$last"
+"#,
+            log = log.display(),
+            bin = bin.display(),
+        ),
+    );
+    (ssh, log)
+}
+
+/// What this whole transport exists to do: one login, however many requests.
+#[cfg(unix)]
+#[test]
+fn connecting_and_requesting_costs_one_login() {
+    let directory = tempfile::tempdir().unwrap();
+    let daemon = CountingDaemon::start(directory.path());
+    let (ssh, log) = fake_ssh(directory.path(), &daemon.endpoint());
+    let transport = Arc::new(
+        RemoteTransport::for_creation_with_ssh_program(RemoteTarget::new("fake"), &ssh).unwrap(),
+    );
+
+    let endpoint = transport.ensure_endpoint().unwrap();
+    assert!(transport.control_path().is_some());
+    let client = crate::client::Client::from_remote_transport_for_test(transport.clone(), endpoint);
+    for _ in 0..4 {
+        client.list().unwrap();
+    }
+    assert_eq!(
+        transport.resolve_remote_program().unwrap(),
+        directory.path().join("bin/zmux"),
+        "the program comes back with the endpoint"
+    );
+    assert_eq!(transport.query_profiles().unwrap(), ["System"]);
+
+    let calls = std::fs::read_to_string(&log).unwrap();
+    assert_eq!(
+        calls.lines().collect::<Vec<_>>(),
+        ["master", "shared-command", "forward", "shared-command"],
+        "one login, the endpoint query, the forward, and the profile query"
+    );
+    assert_eq!(daemon.lists(), 4);
+    assert_eq!(daemon.pings(), 1);
+
+    // A refresh re-reads the endpoint over the same login.
+    transport.refresh().unwrap();
+    let calls = std::fs::read_to_string(&log).unwrap();
+    assert_eq!(
+        calls.lines().skip(4).collect::<Vec<_>>(),
+        ["cancel", "shared-command", "forward"]
     );
 }

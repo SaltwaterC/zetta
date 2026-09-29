@@ -538,7 +538,16 @@ impl io::Read for SharedReader {
                     let _ = self.size_signal.try_send(());
                     return Err(io::Error::from(io::ErrorKind::WouldBlock));
                 }
-                Ok((Event::SharedClosed { .. }, _)) => return Ok(0),
+                Ok((Event::SharedClosed { .. }, _)) => {
+                    // A replacement already waiting outranks the end of the
+                    // stream it replaces. Ending here instead left the
+                    // terminal with no reader, its replacement queued where
+                    // nothing would ever read it, and the pane frozen.
+                    if self.install_next_handoff() {
+                        continue;
+                    }
+                    return Ok(0);
+                }
                 Ok(_) => {}
                 Err(error) => {
                     // A relay failure is recoverable. Install a replacement
@@ -999,9 +1008,12 @@ impl Client {
     /// Connects to a remote daemon through a persistent OpenSSH stream-local
     /// forward. Remote clients never start or upgrade a daemon and never ask
     /// the remote host for a descriptor.
+    ///
+    /// The SSH login is the process's shared one for `target`, so a client
+    /// made moments after another (the picker's, then the attach's) reuses it.
     pub fn connect_remote(target: RemoteTarget) -> Result<Self> {
-        let remote = Arc::new(RemoteTransport::new(target)?);
-        let endpoint = remote.endpoint()?;
+        let remote = RemoteTransport::shared(target)?;
+        let endpoint = remote.ensure_endpoint()?;
         Ok(Self {
             endpoint: Mutex::new(endpoint),
             directory: PathBuf::new(),
@@ -1017,7 +1029,7 @@ impl Client {
     /// standalone remote `zmux` is bootstrapped only here; ordinary remote
     /// listing and attachment continue to require an already-running daemon.
     pub fn connect_remote_for_creation(target: RemoteTarget) -> Result<Self> {
-        let remote = Arc::new(RemoteTransport::for_creation(target)?);
+        let remote = RemoteTransport::shared(target)?;
         let endpoint = remote.ensure_daemon()?;
         Ok(Self {
             endpoint: Mutex::new(endpoint),
@@ -1110,13 +1122,23 @@ impl Client {
         self.remote.as_ref().map(|remote| remote.target())
     }
 
+    /// The control socket of the SSH login this remote client uses, for a
+    /// command that should run on the same host without logging in again.
+    /// See [`RemoteTransport::control_path`].
+    pub fn remote_control_path(&self) -> Option<PathBuf> {
+        self.remote
+            .as_ref()
+            .and_then(|remote| remote.control_path())
+    }
+
     /// Where the remote host keeps its own `zmux`.
     ///
-    /// Costs one SSH round trip, so ask once per session rather than once per
-    /// pane. It is what lets a command started outside an SSH command's
+    /// Learned with the endpoint, so normally answered without asking the
+    /// remote host again. It is what lets a command started outside an SSH command's
     /// environment — inside a Mosh server, for instance — run the same
     /// multiplexer this client is already talking to.
     pub fn resolve_remote_program(&self) -> Result<PathBuf> {
+        // Usually learned with the endpoint, and then free.
         self.remote
             .as_ref()
             .context("this client is not connected to a remote multiplexer")?
@@ -1227,7 +1249,7 @@ impl Client {
             let endpoint = self.endpoint_snapshot();
             let mut connection =
                 self.open_as_with_endpoint(request.clone(), client_process_id, &endpoint)?;
-            let (response, mut descriptors) = Self::receive(&mut connection)?;
+            let (response, mut descriptors) = self.receive(&mut connection)?;
             if matches!(
                 &response,
                 Response::Error { message } if message == "invalid multiplexer token"
@@ -1408,7 +1430,7 @@ impl Client {
         #[cfg(windows)]
         {
             let mut connection = self.open_as(Request::Attest, client_process_id)?;
-            match Self::receive(&mut connection)?.0 {
+            match self.receive(&mut connection)?.0 {
                 Response::Ok => {}
                 Response::Error { message } => anyhow::bail!("{message}"),
                 other => anyhow::bail!("unexpected response to attestation: {other:?}"),
@@ -1432,7 +1454,27 @@ impl Client {
     /// Only Windows ever asks: everywhere else the kernel already answers
     /// "which process is on the other end of this socket" about the socket
     /// itself. See [`crate::transport::PeerChallenge`].
-    fn receive(connection: &mut Connection) -> Result<(Response, Descriptors)> {
+    ///
+    /// A remote client also tells its transport what the answer proved: any
+    /// response but a token rejection shows the endpoint is current, which is
+    /// what lets the next connection skip its probe, and a rejection or a
+    /// broken connection means the next one has to be probed again.
+    fn receive(&self, connection: &mut Connection) -> Result<(Response, Descriptors)> {
+        let received = Self::receive_response(connection);
+        if let Some(remote) = &self.remote {
+            match &received {
+                Ok((Response::Error { message }, _)) if message == "invalid multiplexer token" => {
+                    remote.distrust();
+                }
+                Ok(_) => remote.confirm(&self.endpoint_snapshot()),
+                Err(error) if is_transport_error(error) => remote.distrust(),
+                Err(_) => {}
+            }
+        }
+        received
+    }
+
+    fn receive_response(connection: &mut Connection) -> Result<(Response, Descriptors)> {
         let received = connection.receive::<Response>()?;
         #[cfg(windows)]
         if let Response::AttestationRequired { handle } = received.0 {
@@ -1521,7 +1563,7 @@ impl Client {
     fn ping_with_endpoint(&self, endpoint: &Endpoint) -> Result<()> {
         let mut connection =
             self.open_as_with_endpoint(Request::Ping, std::process::id(), endpoint)?;
-        match Self::receive(&mut connection)?.0 {
+        match self.receive(&mut connection)?.0 {
             Response::Ok => Ok(()),
             Response::Error { message } => anyhow::bail!("{message}"),
             other => anyhow::bail!("unexpected response to ping: {other:?}"),
@@ -1529,12 +1571,11 @@ impl Client {
     }
 
     fn ping_until_ready(&self, deadline: Instant) -> Result<()> {
-        // `RemoteTransport::connect` already probes the forwarded daemon before
-        // returning a request stream. Running this separate ping as well would
-        // open two probe connections for every remote request and makes the
-        // remote attach path needlessly slow. Keep the local retry loop, where
-        // the endpoint socket itself is the readiness signal, but let the
-        // transport's probe be the remote one.
+        // `RemoteTransport::connect` already probes the forwarded daemon
+        // whenever nothing has recently proven it. Running this separate ping
+        // as well would add a probe to every remote request. Keep the local
+        // retry loop, where the endpoint socket itself is the readiness
+        // signal, but let the transport's probe be the remote one.
         if self.remote.is_some() {
             return Ok(());
         }
@@ -1589,7 +1630,7 @@ impl Client {
             },
             secret,
         )?;
-        match Self::receive(&mut connection)?.0 {
+        match self.receive(&mut connection)?.0 {
             Response::Ok => Ok(()),
             Response::Error { message } => anyhow::bail!("{message}"),
             other => anyhow::bail!("unexpected response to resize: {other:?}"),
@@ -1620,7 +1661,7 @@ impl Client {
             },
             secret,
         )?;
-        match Self::receive(&mut connection)?.0 {
+        match self.receive(&mut connection)?.0 {
             Response::Ok => Ok(()),
             Response::Error { message } => anyhow::bail!("{message}"),
             other => anyhow::bail!("unexpected palette response: {other:?}"),
@@ -1643,7 +1684,7 @@ impl Client {
             },
             client_process_id,
         )?;
-        match Self::receive(&mut connection)?.0 {
+        match self.receive(&mut connection)?.0 {
             Response::Ok => Ok(()),
             Response::Error { message } => anyhow::bail!("{message}"),
             other => anyhow::bail!("unexpected palette response: {other:?}"),
@@ -1691,7 +1732,7 @@ impl Client {
             std::process::id(),
         )?;
         connection.write_all(&bytes)?;
-        match Self::receive(&mut connection)?.0 {
+        match self.receive(&mut connection)?.0 {
             Response::Ok => Ok(()),
             Response::Error { message } => anyhow::bail!("{message}"),
             other => anyhow::bail!("unexpected response to snapshot: {other:?}"),
@@ -1725,7 +1766,7 @@ impl Client {
         // authority: a failed write is only reported when there is no response
         // to read.
         let written = connection.write_all(&bytes);
-        let response = match Self::receive(&mut connection) {
+        let response = match self.receive(&mut connection) {
             Ok((response, _)) => response,
             Err(error) => return Err(written.err().map_or(error, anyhow::Error::from)),
         };
@@ -1756,7 +1797,7 @@ impl Client {
         let secret = self.session_secret();
         let mut connection =
             self.open_with_session_secret(Request::SharedSnapshot { session_id }, secret.as_ref())?;
-        match Self::receive(&mut connection)?.0 {
+        match self.receive(&mut connection)?.0 {
             Response::SharedSnapshot { state } => Ok(state),
             Response::AuthenticationRequired => {
                 anyhow::bail!("the shared session requires an authentication secret")
@@ -1774,7 +1815,7 @@ impl Client {
         let secret = self.session_secret();
         let mut connection =
             self.open_with_session_secret(Request::LeaveShared { session_id }, secret.as_ref())?;
-        match Self::receive(&mut connection)?.0 {
+        match self.receive(&mut connection)?.0 {
             Response::Ok => Ok(()),
             Response::AuthenticationRequired => {
                 anyhow::bail!("the shared session requires an authentication secret")
@@ -1811,7 +1852,7 @@ impl Client {
         let secret = self.session_secret();
         let mut connection =
             self.open_with_session_secret(Request::ApplyShared(request), secret.as_ref())?;
-        match Self::receive(&mut connection)?.0 {
+        match self.receive(&mut connection)?.0 {
             Response::SharedOperationApplied { state } => Ok(SharedOperationResult::Applied(state)),
             Response::SharedConflict { state } => Ok(SharedOperationResult::Conflict(state)),
             Response::AuthenticationRequired => {
@@ -1829,7 +1870,7 @@ impl Client {
         let secret = self.session_secret();
         let mut connection =
             self.open_with_session_secret(Request::SpawnShared(request.clone()), secret.as_ref())?;
-        let (response, _) = Self::receive(&mut connection)?;
+        let (response, _) = self.receive(&mut connection)?;
         match response {
             Response::SharedSpawned {
                 session_id,
@@ -1878,7 +1919,7 @@ impl Client {
                 }
                 Err(error) => return Err(error),
             };
-            match Self::receive(&mut connection) {
+            match self.receive(&mut connection) {
                 Ok((Response::SharedCreated { session_id, state }, _)) => {
                     return Ok(SharedCreated { session_id, state });
                 }
@@ -1903,7 +1944,7 @@ impl Client {
         let secret = self.session_secret();
         let mut connection =
             self.open_with_session_secret(Request::SpawnSharedBatch(request), secret.as_ref())?;
-        match Self::receive(&mut connection)?.0 {
+        match self.receive(&mut connection)?.0 {
             Response::SharedBatchSpawned { mappings, state } => {
                 Ok(SharedBatchResult::Applied(SharedBatchSpawned {
                     mappings,
@@ -1923,7 +1964,7 @@ impl Client {
     /// Starts a process under the multiplexer and takes its terminal.
     pub fn spawn(&self, request: SpawnRequest) -> Result<AttachedPane> {
         let mut connection = self.open(Request::Spawn(request))?;
-        let (response, mut descriptors) = Self::receive(&mut connection)?;
+        let (response, mut descriptors) = self.receive(&mut connection)?;
         match response {
             Response::Spawned {
                 session_id,
@@ -2057,7 +2098,7 @@ impl Client {
         for (_, bytes) in &snapshots {
             connection.write_all(bytes)?;
         }
-        match Self::receive(&mut connection)?.0 {
+        match self.receive(&mut connection)?.0 {
             Response::Detached => Ok(()),
             Response::Error { message } => anyhow::bail!("{message}"),
             other => anyhow::bail!("unexpected response to detach: {other:?}"),
@@ -2088,7 +2129,7 @@ impl Client {
             snapshots: Vec::new(),
         };
         let mut connection = self.open_attested(Request::Detach(request), client_process_id)?;
-        match Self::receive(&mut connection)?.0 {
+        match self.receive(&mut connection)?.0 {
             Response::Detached => Ok(()),
             Response::Error { message } => anyhow::bail!("{message}"),
             other => anyhow::bail!("unexpected response to detach: {other:?}"),
@@ -2133,7 +2174,7 @@ impl Client {
             }),
             secret,
         )?;
-        match Self::receive(&mut connection)?.0 {
+        match self.receive(&mut connection)?.0 {
             Response::Ok => Ok(()),
             Response::Error { message } => anyhow::bail!("{message}"),
             other => anyhow::bail!("unexpected response to share: {other:?}"),
@@ -2149,7 +2190,7 @@ impl Client {
         secret: Option<&SessionSecret>,
     ) -> Result<Vec<BackgroundSessionSummary>> {
         let mut connection = self.open_with_session_secret(Request::List, secret)?;
-        match Self::receive(&mut connection)?.0 {
+        match self.receive(&mut connection)?.0 {
             Response::Sessions { sessions, .. } => Ok(sessions),
             Response::Error { message } => anyhow::bail!("{message}"),
             other => anyhow::bail!("unexpected response to list: {other:?}"),
@@ -2160,7 +2201,7 @@ impl Client {
         &self,
     ) -> Result<(Vec<BackgroundSessionSummary>, Vec<RestorableSessionRecord>)> {
         let mut connection = self.open(Request::List)?;
-        match Self::receive(&mut connection)?.0 {
+        match self.receive(&mut connection)?.0 {
             Response::Sessions {
                 sessions,
                 restorable,
@@ -2276,7 +2317,7 @@ impl Client {
         for snapshot in &persisted.snapshots {
             connection.write_all(&snapshot.bytes)?;
         }
-        match Self::receive(&mut connection)?.0 {
+        match self.receive(&mut connection)?.0 {
             Response::Resumed { .. } => Ok(persisted),
             Response::AuthenticationRequired => {
                 anyhow::bail!("the encrypted session is protected and needs its session secret")
@@ -2293,7 +2334,7 @@ impl Client {
 
     pub fn kill_with_secret(&self, session_id: u64, secret: Option<&SessionSecret>) -> Result<()> {
         let mut connection = self.open_with_session_secret(Request::Kill { session_id }, secret)?;
-        match Self::receive(&mut connection)?.0 {
+        match self.receive(&mut connection)?.0 {
             Response::Ok => Ok(()),
             Response::Error { message } => anyhow::bail!("{message}"),
             other => anyhow::bail!("unexpected response to kill: {other:?}"),
@@ -2331,7 +2372,7 @@ impl Client {
             },
             secret,
         )?;
-        match Self::receive(&mut connection)?.0 {
+        match self.receive(&mut connection)?.0 {
             Response::Ok => Ok(()),
             Response::Error { message } => anyhow::bail!("{message}"),
             other => anyhow::bail!("unexpected response to a session scope change: {other:?}"),
@@ -2349,7 +2390,7 @@ impl Client {
     ) -> Result<()> {
         let mut connection =
             self.open_with_session_secret(Request::Forget { session_id }, secret)?;
-        match Self::receive(&mut connection)?.0 {
+        match self.receive(&mut connection)?.0 {
             Response::Ok => Ok(()),
             Response::Error { message } => anyhow::bail!("{message}"),
             other => anyhow::bail!("unexpected response to forget: {other:?}"),
@@ -2411,7 +2452,7 @@ impl Client {
             let endpoint = self.endpoint_snapshot();
             let mut connection =
                 self.open_as_with_endpoint(request.clone(), std::process::id(), &endpoint)?;
-            let (response, _) = Self::receive(&mut connection)?;
+            let (response, _) = self.receive(&mut connection)?;
             if matches!(
                 &response,
                 Response::Error { message } if message == "invalid multiplexer token"
@@ -2477,7 +2518,7 @@ impl Client {
     /// Asks the daemon to replace itself, keeping its sessions.
     pub fn upgrade(&self) -> Result<()> {
         let mut connection = self.open(Request::Upgrade)?;
-        let response = Self::receive(&mut connection)?.0;
+        let response = self.receive(&mut connection)?.0;
         match response {
             Response::Ok => {
                 Self::wait_for_upgrade_disconnect(&mut connection)?;
@@ -2511,7 +2552,7 @@ impl Client {
 
     pub fn shutdown(&self) -> Result<()> {
         let mut connection = self.open(Request::Shutdown)?;
-        match Self::receive(&mut connection)?.0 {
+        match self.receive(&mut connection)?.0 {
             Response::Ok => Ok(()),
             Response::Error { message } => anyhow::bail!("{message}"),
             other => anyhow::bail!("unexpected response to shutdown: {other:?}"),
@@ -2531,7 +2572,7 @@ impl Client {
     ) -> Result<Vec<PaneStateReport>> {
         let mut connection =
             self.open_with_session_secret(Request::PaneStates { pane_ids }, secret)?;
-        match Self::receive(&mut connection)?.0 {
+        match self.receive(&mut connection)?.0 {
             Response::PaneStates { panes } => Ok(panes),
             Response::Error { message } => anyhow::bail!("{message}"),
             other => anyhow::bail!("unexpected response to pane states: {other:?}"),
@@ -2544,7 +2585,7 @@ impl Client {
             session_id,
             pane_id,
         })?;
-        match Self::receive(&mut connection)?.0 {
+        match self.receive(&mut connection)?.0 {
             Response::Ok => Ok(()),
             Response::Error { message } => anyhow::bail!("{message}"),
             other => anyhow::bail!("unexpected response to close pane: {other:?}"),
@@ -2600,7 +2641,7 @@ impl Client {
     /// another reconnect and two reconciling round trips.
     fn open_subscription(&self) -> Result<Connection> {
         let mut connection = self.open_ready(Request::Subscribe)?;
-        match Self::receive(&mut connection)?.0 {
+        match self.receive(&mut connection)?.0 {
             Response::Ok => {}
             Response::Error { message } => anyhow::bail!("{message}"),
             other => anyhow::bail!("unexpected response to subscribe: {other:?}"),
@@ -2638,7 +2679,7 @@ impl Client {
             session_id,
             pane_id,
         })?;
-        let (response, mut descriptors) = Self::receive(&mut connection)?;
+        let (response, mut descriptors) = self.receive(&mut connection)?;
         match response {
             Response::Attached {
                 pane_id,
@@ -2694,7 +2735,7 @@ impl Client {
             session_id,
             pane_id,
         })?;
-        match Self::receive(&mut connection)?.0 {
+        match self.receive(&mut connection)?.0 {
             Response::Ok => Ok(()),
             Response::Error { message } => anyhow::bail!("{message}"),
             other => anyhow::bail!("unexpected response to releasing a pane: {other:?}"),

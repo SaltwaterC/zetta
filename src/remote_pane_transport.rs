@@ -13,16 +13,27 @@
 //! while control stays where it is:
 //!
 //! ```text
-//! control  ssh -T -N -L … zmux.sock ─────────────▶ the remote multiplexer
-//! pane     ssh TARGET 'zosh-server new -s -- zmux relay-pane S P'
+//! login    ssh -M -S ctl TARGET            (one per remote host)
+//! control  ssh -S ctl -O forward -L … zmux.sock ──▶ the remote multiplexer
+//! pane     ssh -S ctl TARGET 'zosh-server new -s -- zmux relay-pane S P'
 //!          then UDP/SSP ───────────────────────────▶ that pane's bytes
 //! ```
 //!
-//! Three things follow, and they are why this is a module rather than a flag:
+//! On Windows, whose OpenSSH shares no connections, control is instead one
+//! `ssh TARGET zmux proxy-mux` carrying every connection (see `zmux`'s
+//! `mux_bridge.rs`), and each pane's bootstrap is a login of its own.
+//!
+//! Four things follow, and they are why this is a module rather than a flag:
 //!
 //! - **One link per pane.** Mosh carries one terminal, so each attached pane
 //!   gets its own `zosh-server` and its own relay. They are bootstrapped
-//!   concurrently, because each one is an SSH round trip.
+//!   concurrently, as sessions on the SSH login the control forward already
+//!   holds where the platform allows it (not Windows), so a pane costs a
+//!   session rather than a login.
+//! - **A pane on Mosh is never attached over SSH as well.** Every pane but
+//!   the first is bootstrapped before it is attached, and only the ones
+//!   that fall back are attached over the forward — which would otherwise
+//!   carry each pane's whole replay just to throw it away.
 //! - **A pane is on one transport or the other, decided before its terminal is
 //!   built.** Nothing switches mid-stream: a cut-over would either lose output
 //!   or write it into the scrollback twice. A pane added to a session already
@@ -173,6 +184,11 @@ impl RemotePaneStreams {
                 .unwrap_or_default(),
             fallbacks: Vec::new(),
         }
+    }
+
+    /// Whether the bootstrap put this pane on Mosh.
+    pub(crate) fn contains(&self, mux_pane_id: u64) -> bool {
+        self.streams.contains_key(&mux_pane_id)
     }
 
     /// Takes the Mosh stream for a multiplexer pane, or `None` when that pane

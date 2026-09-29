@@ -640,6 +640,7 @@ fn an_embedded_bootstrap_runs_its_command_and_names_the_bundled_zosh() {
         keep_alive: Some(250),
         forward_agent: false,
         proxy_program: Some(PathBuf::from("/opt/zetta/zosh")),
+        control_path: None,
     };
     let command = embedded_command(&request).expect("a valid request");
     let (program, arguments) = ssh_bootstrap_command(&command, &request.target);
@@ -669,6 +670,90 @@ fn an_embedded_bootstrap_runs_its_command_and_names_the_bundled_zosh() {
     assert!(
         remote.contains("command -v zosh-server") && remote.contains("'mosh-server'"),
         "a host without the bundled server still gets a stock one: {remote}"
+    );
+}
+
+/// On an embedder's login the bootstrap is a session on that connection: no
+/// new login, no proxy (OpenSSH would not run it), and none of the user's
+/// forwards requested a second time.
+#[test]
+fn a_shared_connection_bootstrap_is_a_session_on_that_login() {
+    let request = PaneBootstrapRequest {
+        target: "build-host".to_owned(),
+        ssh_port: Some(2222),
+        remote_command: vec!["/usr/local/bin/zmux".to_owned(), "relay-pane".to_owned()],
+        proxy_program: Some(PathBuf::from("/opt/zetta/zosh")),
+        control_path: Some(PathBuf::from("/tmp/zetta-zmux-x/ctl")),
+        ..PaneBootstrapRequest::default()
+    };
+    let mut command = embedded_command(&request).expect("a valid request");
+    command.control_path = request.control_path.clone();
+    command.remote_ip = RemoteIpMode::Local;
+    let (_, arguments) = ssh_bootstrap_command(&command, &request.target);
+
+    assert!(
+        arguments
+            .windows(2)
+            .any(|pair| pair == ["-S", "/tmp/zetta-zmux-x/ctl"]),
+        "{arguments:?}"
+    );
+    assert!(
+        arguments
+            .iter()
+            .any(|argument| argument == "ControlMaster=no")
+    );
+    assert!(
+        arguments
+            .iter()
+            .any(|argument| argument == "ClearAllForwardings=yes")
+    );
+    assert!(
+        !arguments
+            .iter()
+            .any(|argument| argument.contains("ProxyCommand")),
+        "{arguments:?}"
+    );
+    assert!(
+        !arguments.last().unwrap().contains("SSH_CONNECTION"),
+        "the address is already known, so the server is not asked for it"
+    );
+}
+
+#[test]
+fn a_shared_connection_is_used_only_where_its_address_is_known() {
+    let direct = "hostname 127.0.0.1\nport 2222\nuser dev\n";
+    assert_eq!(
+        shared_connection_host(direct, AddressFamily::default()).as_deref(),
+        Some("127.0.0.1")
+    );
+    let explicit_none = "hostname 127.0.0.1\nproxycommand none\nproxyjump none\n";
+    assert!(shared_connection_host(explicit_none, AddressFamily::default()).is_some());
+    for proxied in [
+        "hostname 10.0.0.5\nproxyjump bastion\n",
+        "hostname 10.0.0.5\nproxycommand nc %h %p\n",
+    ] {
+        assert_eq!(
+            shared_connection_host(proxied, AddressFamily::default()),
+            None,
+            "only the proxy knows where {proxied:?} really goes"
+        );
+    }
+    assert_eq!(
+        shared_connection_host("port 22\n", AddressFamily::default()),
+        None
+    );
+
+    let agent = PaneBootstrapRequest {
+        target: "build-host".to_owned(),
+        remote_command: vec!["zmux".to_owned()],
+        forward_agent: true,
+        control_path: Some(PathBuf::from("/tmp/ctl")),
+        ..PaneBootstrapRequest::default()
+    };
+    let command = embedded_command(&agent).expect("a valid request");
+    assert!(
+        shared_connection_command(&command, &agent).is_none(),
+        "agent forwarding captures its binding from a login of its own"
     );
 }
 

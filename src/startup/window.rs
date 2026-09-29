@@ -318,6 +318,9 @@ pub(super) fn shutdown_multiplexer_if_idle(cx: &App) {
     }
     #[cfg(feature = "zmux")]
     {
+        // Idle remote SSH logins are kept for a while in case they are
+        // wanted again; on the way out nothing is going to want them.
+        zmux::remote::release_idle_transports();
         if cx.has_global::<ZettaProcessState>() && cx.global::<ZettaProcessState>().no_mux {
             return;
         }

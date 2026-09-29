@@ -84,11 +84,15 @@ Zetta falls back to the SSH byte stream, and says so, when the remote host has
 no usable Mosh server. Native background sessions on this machine are local and
 need no transport at all.
 
-On Windows, remote session control uses the remote `zmux proxy-stdio` command
-through the system SSH client because Windows OpenSSH cannot create the local
-Unix socket forward used on Linux and macOS. Install a `zmux` build with that
-command on the remote host before connecting from Windows. SSH host aliases,
-authentication, and the optional agent-forwarding setting still use OpenSSH.
+Each remote host costs one SSH login, however many panes and requests follow.
+On Linux and macOS, Zetta keeps a private OpenSSH control connection to the
+host and runs everything else — the endpoint query, the socket forward, Zosh
+pane startup — as sessions on it. Windows OpenSSH can neither share a
+connection nor forward a local Unix socket, so there Zetta runs one remote
+`zmux proxy-mux` through the system SSH client and carries every connection
+over it; install a `zmux` build with that command on the remote host before
+connecting from Windows. SSH host aliases, authentication, and the optional
+agent-forwarding setting still use OpenSSH.
 If no remote daemon is running, the picker offers creation; creating a session
 starts a fresh daemon even when a crashed one left an endpoint file behind.
 
@@ -383,7 +387,7 @@ pressed; `Escape` cancels. The shortcut can be changed in the keymap.
 - [Configuration](docs/configuration.md): settings, projects, profiles,
   keymaps, fonts, and themes
 - [Background sessions](docs/background-sessions.md): detach, share, protect,
-  inspect, reconnect, and attach remote sessions
+  inspect, reconnect, and attach remote sessions, and where their logs go
 - [Compatibility versioning](docs/versioning.md): executable, protocol, and
   persisted-format version markers
 - [Shell integration](docs/shell-integration.md): command completion and the

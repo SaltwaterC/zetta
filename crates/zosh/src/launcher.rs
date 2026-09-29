@@ -153,6 +153,10 @@ struct MoshCommand {
     /// `None` means this process, which is what the `zosh` command wants; an
     /// embedder is some other program and has to name the bundled `zosh`.
     proxy_program: Option<PathBuf>,
+    /// An OpenSSH control socket already logged in to the target. The
+    /// bootstrap then runs as a session on that connection instead of
+    /// logging in again; see [`PaneBootstrapRequest::control_path`].
+    control_path: Option<PathBuf>,
     original_arguments: Vec<std::ffi::OsString>,
     help: bool,
     version: bool,
@@ -187,6 +191,7 @@ impl Default for MoshCommand {
             target: None,
             remote_command: Vec::new(),
             proxy_program: None,
+            control_path: None,
             original_arguments: Vec::new(),
             help: false,
             version: false,
@@ -249,6 +254,18 @@ pub struct PaneBootstrapRequest {
     /// without it the address discovery falls back to resolving the
     /// destination locally, which an alias may not answer.
     pub proxy_program: Option<PathBuf>,
+    /// An OpenSSH control socket the embedder already holds for `target`.
+    ///
+    /// With one, the bootstrap is a session on that login — a couple of round
+    /// trips rather than a whole new login per pane. OpenSSH does not run a
+    /// `ProxyCommand` for such a session, so the server's address is instead
+    /// what `ssh -G` says the login connects to, resolved here, which is what
+    /// the proxy would have reported. Where that cannot be known — the target
+    /// is reached through a configured `ProxyCommand` or `ProxyJump` — or
+    /// where agent forwarding needs a login of its own to capture its
+    /// binding, the socket is not used, and a failed shared bootstrap is tried
+    /// again with a login of its own.
+    pub control_path: Option<PathBuf>,
 }
 
 /// A Mosh endpoint, ready for [`crate::PaneSession::connect`].
@@ -286,15 +303,95 @@ pub enum PaneBootstrapOutcome {
 /// line, so it belongs on a background thread, never on a thread that draws.
 pub fn bootstrap_pane_endpoint(request: &PaneBootstrapRequest) -> Result<PaneBootstrapOutcome> {
     let command = embedded_command(request)?;
+    let mut shared_failure = None;
+    if let Some(shared) = shared_connection_command(&command, request) {
+        match bootstrap_embedded(&shared.command, &request.target, Some(&shared.host)) {
+            Ok(outcome) => return Ok(outcome),
+            Err(error) => shared_failure = Some(error),
+        }
+    }
+    let mut outcome = bootstrap_embedded(&command, &request.target, None)?;
+    if let (Some(error), PaneBootstrapOutcome::Endpoint(endpoint)) = (shared_failure, &mut outcome)
+    {
+        endpoint.diagnostics.insert(
+            0,
+            format!("the shared SSH connection could not start this pane, so it logged in again: {error:#}"),
+        );
+    }
+    Ok(outcome)
+}
+
+/// A bootstrap command that runs over the embedder's SSH login, and the
+/// address its Mosh server will be reachable at.
+struct SharedConnectionCommand {
+    command: MoshCommand,
+    host: String,
+}
+
+/// Whether this request can run over its control socket, and how.
+fn shared_connection_command(
+    command: &MoshCommand,
+    request: &PaneBootstrapRequest,
+) -> Option<SharedConnectionCommand> {
+    let control_path = request.control_path.as_ref()?;
+    // Native agent forwarding is captured from the bootstrap's own SSH
+    // process, which a session on another login never talks to the agent as.
+    if request.forward_agent {
+        return None;
+    }
+    let config = ssh_config(command, &request.target).ok()?;
+    let host = shared_connection_host(&config, command.family)?;
+    let mut shared = command.clone();
+    shared.control_path = Some(control_path.clone());
+    shared.remote_ip = RemoteIpMode::Local;
+    Some(SharedConnectionCommand {
+        command: shared,
+        host,
+    })
+}
+
+/// The address a login described by `ssh -G` output connects to, or `None`
+/// when a configured proxy stands between, so that only the proxy's own
+/// report would be the truth.
+fn shared_connection_host(config: &str, family: AddressFamily) -> Option<String> {
+    let value = |key: &str| {
+        config.lines().find_map(|line| {
+            let (name, value) = line.split_once(char::is_whitespace)?;
+            name.eq_ignore_ascii_case(key).then_some(value.trim())
+        })
+    };
+    let configured =
+        |value: Option<&str>| value.is_some_and(|value| !value.eq_ignore_ascii_case("none"));
+    if configured(value("proxycommand")) || configured(value("proxyjump")) {
+        return None;
+    }
+    let host = value("hostname")?;
+    let port = value("port")
+        .and_then(|port| port.parse::<u16>().ok())
+        .unwrap_or(22);
+    let addresses = (host, port).to_socket_addrs().ok()?.collect::<Vec<_>>();
+    Some(select_socket_address(&addresses, family)?.ip().to_string())
+}
+
+/// One embedded bootstrap: over the command's control socket with `host`
+/// already known, or as a login of its own that discovers it.
+fn bootstrap_embedded(
+    command: &MoshCommand,
+    target: &str,
+    host: Option<&str>,
+) -> Result<PaneBootstrapOutcome> {
     // The pane's emulator is not a terminal that can be asked, and there is no
     // terminal behind it that a colour probe would reach either.
     let colors = EMBEDDED_COLOR_COUNT;
-    match run_ssh_bootstrap(&command, &request.target, colors, BootstrapStdin::None)? {
+    match run_ssh_bootstrap(command, target, colors, BootstrapStdin::None)? {
         BootstrapResult::UnsupportedServer { output, status } => {
             Ok(PaneBootstrapOutcome::UnsupportedServer { output, status })
         }
         BootstrapResult::Endpoint(endpoint) => {
-            let host = select_endpoint_host(&command, &request.target, endpoint.ip.as_deref())?;
+            let host = match host {
+                Some(host) => host.to_owned(),
+                None => select_endpoint_host(command, target, endpoint.ip.as_deref())?,
+            };
             Ok(PaneBootstrapOutcome::Endpoint(PaneEndpoint {
                 host,
                 port: endpoint.port,
@@ -626,6 +723,15 @@ fn create_bootstrap_agent_relay(
 }
 
 fn resolve_ssh_agent_path(command: &MoshCommand, target: &str) -> Result<Option<PathBuf>> {
+    let config = ssh_config(command, target)?;
+    Ok(parse_forward_agent(&config)
+        .or_else(|| parse_identity_agent(&config))
+        .or_else(environment_agent_path))
+}
+
+/// What OpenSSH's configuration resolves for `target` (`ssh -G`), without
+/// connecting to anything.
+fn ssh_config(command: &MoshCommand, target: &str) -> Result<String> {
     let mut ssh = command.ssh.clone();
     let program = ssh
         .drain(..1)
@@ -640,15 +746,12 @@ fn resolve_ssh_agent_path(command: &MoshCommand, target: &str) -> Result<Option<
         .arg(target)
         .stdin(Stdio::null())
         .output()
-        .with_context(|| format!("querying {program:?} for its IdentityAgent"))?;
+        .with_context(|| format!("querying {program:?} for its configuration"))?;
     anyhow::ensure!(
         output.status.success(),
-        "{program:?} could not resolve IdentityAgent for {target:?}"
+        "{program:?} could not resolve its configuration for {target:?}"
     );
-    let config = String::from_utf8_lossy(&output.stdout);
-    Ok(parse_forward_agent(&config)
-        .or_else(|| parse_identity_agent(&config))
-        .or_else(environment_agent_path))
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 fn parse_identity_agent(config: &str) -> Option<PathBuf> {
@@ -1167,7 +1270,18 @@ fn ssh_bootstrap_command_with_colors(
     if command.forward_agent {
         arguments.push("-A".to_owned());
     }
-    if command.remote_ip == RemoteIpMode::Proxy {
+    if let Some(control_path) = &command.control_path {
+        // A session on the embedder's login. Forwards the user's
+        // configuration adds belong to that login already.
+        arguments.extend([
+            "-S".to_owned(),
+            control_path.display().to_string(),
+            "-o".to_owned(),
+            "ControlMaster=no".to_owned(),
+            "-o".to_owned(),
+            "ClearAllForwardings=yes".to_owned(),
+        ]);
+    } else if command.remote_ip == RemoteIpMode::Proxy {
         arguments.extend([
             "-S".to_owned(),
             "none".to_owned(),

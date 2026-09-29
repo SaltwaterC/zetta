@@ -704,6 +704,84 @@ fn a_shared_reader_replays_a_replacement_before_framed_events_without_duplicatio
     );
 }
 
+/// The stall this pins: the daemon retired a viewer's relay, which ends with
+/// `SharedClosed`, and the window reattached. The reader took `SharedClosed`
+/// as the end of the pane — its thread exited — while the replacement sat in
+/// the handoff queue with nothing left to read it, and the pane froze.
+#[cfg(unix)]
+#[test]
+fn a_shared_reader_moves_to_a_queued_replacement_instead_of_ending_on_shared_closed() {
+    use std::io::{Read as _, Write as _};
+
+    let (mut initial_server, initial_client) = Stream::pair().unwrap();
+    let shared =
+        SharedPane::from_connection(1, 2, 3, Connection::new(initial_client), Vec::new(), None);
+    let mut reader = shared.reader();
+
+    let (mut replacement_server, replacement_client) = Stream::pair().unwrap();
+    let replacement = SharedPane::from_connection(
+        1,
+        2,
+        3,
+        Connection::new(replacement_client),
+        b"replayed".to_vec(),
+        None,
+    );
+    shared.replace_connection_from(&replacement).unwrap();
+
+    let before = b"before";
+    let mut wire = crate::transport::encode_message(&Event::Output {
+        pane_id: 2,
+        length: before.len(),
+    })
+    .unwrap();
+    wire.extend_from_slice(before);
+    wire.extend_from_slice(
+        &crate::transport::encode_message(&Event::SharedClosed {
+            session_id: 1,
+            pane_id: 2,
+        })
+        .unwrap(),
+    );
+    initial_server.write_all(&wire).unwrap();
+    drop(initial_server);
+    let live = b"live";
+    let mut wire = crate::transport::encode_message(&Event::Output {
+        pane_id: 2,
+        length: live.len(),
+    })
+    .unwrap();
+    wire.extend_from_slice(live);
+    replacement_server.write_all(&wire).unwrap();
+
+    let mut received = vec![0; before.len() + b"replayed".len() + live.len()];
+    reader.read_exact(&mut received).unwrap();
+    assert_eq!(received, b"beforereplayedlive");
+}
+
+/// With no replacement waiting, `SharedClosed` is still the clean end of the
+/// stream a handed-back pane is drained by.
+#[cfg(unix)]
+#[test]
+fn a_shared_reader_ends_on_shared_closed_when_nothing_replaces_it() {
+    use std::io::{Read as _, Write as _};
+
+    let (mut server, client) = Stream::pair().unwrap();
+    let shared = SharedPane::from_connection(1, 2, 3, Connection::new(client), Vec::new(), None);
+    let mut reader = shared.reader();
+    server
+        .write_all(
+            &crate::transport::encode_message(&Event::SharedClosed {
+                session_id: 1,
+                pane_id: 2,
+            })
+            .unwrap(),
+        )
+        .unwrap();
+    let mut byte = [0; 1];
+    assert_eq!(reader.read(&mut byte).unwrap(), 0);
+}
+
 /// A daemon left over from an earlier build has to be reported as one, before
 /// anything is sent to it.
 ///

@@ -647,6 +647,20 @@ so `zetta mux --help` and shell completion omit them in that mode. The same
 filter applies to the standalone `zmux` command. A session kept in this mode
 remains owned by that Zetta process and cannot be shared with another process.
 
+## Logs
+
+The multiplexer writes warnings to `daemon.log` in its session directory
+(`~/.config/zetta/sessions/` on Linux), moving it to `daemon.log.1` once it
+reaches 1 MiB, so the two stay under 2 MiB together. It records a viewer
+dropped for not reading its pane, a shared stream it ended, and every time a
+process asks for a pane another window holds — which is what makes a pane
+shared — naming both processes. Zetta's own warnings go to its standard error,
+which a desktop session sends to the user journal (`journalctl --user`).
+
+`ZMUX_LOG` and `ZETTA_LOG` set each process's level: `error`, `warn` (the
+default), `info`, `debug`, `trace`, or `off`. The multiplexer reads its
+variable when it starts, so set it in the environment Zetta is launched from.
+
 ## Unexpected terminal exits
 
 Zetta closes an interactive pane automatically when its shell reports an

@@ -163,49 +163,15 @@ fn load_attached_session_data(
         canonical.pane_ids().collect::<HashSet<_>>()
     };
     let first_pane = attached_tab_pane_id(&state, first.pane_id(), session_id)?;
-    let mut additional = Vec::new();
-    for pane_state in state.panes.iter().filter(|pane| pane.id != first_pane) {
-        let Some(mux_pane_id) = pane_state.mux_pane_id else {
-            continue;
-        };
-        if !live_mux_pane_ids.contains(&mux_pane_id) {
-            continue;
-        }
-        match runtime
-            .client()
-            .attach_with_secret(session_id, Some(mux_pane_id), secret)?
-        {
-            zmux::client::AttachOutcome::Attached { pane, .. } => {
-                additional.push((pane_state.id, AttachedPaneKind::Exclusive(pane)));
-            }
-            zmux::client::AttachOutcome::SharedAttached { pane, .. } => {
-                additional.push((pane_state.id, AttachedPaneKind::Shared(pane)));
-            }
-            // The session authenticated a moment ago, so this can only mean
-            // it was taken in between. Show what was attached rather than
-            // dropping the whole tab.
-            _ => break,
-        }
-    }
-    // Bringing the panes up on Mosh is the last thing the background phase
-    // does, and it is done for every pane at once: each one is an SSH round
-    // trip, and the tab cannot be built until they have all answered.
-    let relayed = std::iter::once(&first)
-        .chain(additional.iter().map(|(_, kind)| kind))
-        .filter_map(|kind| match kind {
-            AttachedPaneKind::Shared(pane) => Some(pane.pane_id()),
-            // An exclusive pane is a descriptor this window owns, not a stream
-            // the daemon relays, so there is nothing for Mosh to carry.
-            AttachedPaneKind::Exclusive(_) => None,
-        })
+    let remaining = state
+        .panes
+        .iter()
+        .filter(|pane| pane.id != first_pane)
+        .filter_map(|pane| Some((pane.id, pane.mux_pane_id?)))
+        .filter(|(_, mux_pane_id)| live_mux_pane_ids.contains(mux_pane_id))
         .collect::<Vec<_>>();
-    let pane_streams = crate::remote_pane_transport::bootstrap_remote_pane_streams(
-        runtime.client(),
-        runtime.pane_transport(),
-        session_id,
-        secret,
-        &relayed,
-    );
+    let (additional, pane_streams) =
+        attach_remaining_panes(runtime, session_id, secret, &first, &remaining)?;
     Ok(RemoteAttachOutcome::Attached(Box::new(RemoteAttachData {
         session_id,
         state,
@@ -217,6 +183,134 @@ fn load_attached_session_data(
         runtime: runtime.clone(),
         pane_streams,
     })))
+}
+
+/// Attaches every pane of a session after the first, and brings up the Mosh
+/// links of a session whose panes travel over Zosh.
+///
+/// Over Zosh the order is reversed: every pane, the first included, is
+/// bootstrapped before any more are attached, and only the ones whose
+/// bootstrap fell back are then attached over the SSH forward. A pane that
+/// comes up on Mosh never needs the multiplexer's stream — its terminal is fed
+/// by the relay — and attaching it anyway would carry its whole replay across
+/// the link only to discard it.
+///
+/// The attaches themselves run concurrently: each is a request of its own, and
+/// on a slow link it is the round trips that add up, not the work.
+fn attach_remaining_panes(
+    runtime: &MuxRuntime,
+    session_id: u64,
+    secret: Option<&SessionSecret>,
+    first: &AttachedPaneKind,
+    remaining: &[(u64, u64)],
+) -> anyhow::Result<(Vec<(u64, AttachedPaneKind)>, RemotePaneStreams)> {
+    let transport = runtime.pane_transport();
+    // An exclusive pane is a descriptor this window owns, not a stream the
+    // daemon relays, so there is nothing for Mosh to carry. A remote session
+    // only ever attaches shared, so the first pane speaks for all of them.
+    if !transport.is_zosh() || !matches!(first, AttachedPaneKind::Shared(_)) {
+        let additional = attach_panes_concurrently(runtime, session_id, secret, remaining)?;
+        return Ok((additional, RemotePaneStreams::default()));
+    }
+    let relayed = std::iter::once(first.pane_id())
+        .chain(remaining.iter().map(|(_, mux_pane_id)| *mux_pane_id))
+        .collect::<Vec<_>>();
+    let pane_streams = crate::remote_pane_transport::bootstrap_remote_pane_streams(
+        runtime.client(),
+        transport,
+        session_id,
+        secret,
+        &relayed,
+    );
+    let fallen_back = remaining
+        .iter()
+        .copied()
+        .filter(|(_, mux_pane_id)| !pane_streams.contains(*mux_pane_id))
+        .collect::<Vec<_>>();
+    let attached = attach_panes_concurrently(runtime, session_id, secret, &fallen_back)?
+        .into_iter()
+        .collect::<HashMap<_, _>>();
+    let additional = merge_remaining_panes(
+        remaining,
+        |mux_pane_id| pane_streams.contains(mux_pane_id),
+        attached,
+        AttachedPaneKind::Relayed,
+    );
+    Ok((additional, pane_streams))
+}
+
+/// Puts the panes carried over Mosh and the ones attached over SSH back in
+/// layout order.
+///
+/// A pane that should have been attached but was not means the session was
+/// taken while the panes were attaching, and `attach_panes_concurrently`
+/// stopped at the first refusal; the tab keeps what came before it, as it did
+/// when the panes were attached one after another.
+fn merge_remaining_panes<T>(
+    remaining: &[(u64, u64)],
+    carried: impl Fn(u64) -> bool,
+    mut attached: HashMap<u64, T>,
+    relayed: impl Fn(u64) -> T,
+) -> Vec<(u64, T)> {
+    let mut merged = Vec::with_capacity(remaining.len());
+    for (pane_id, mux_pane_id) in remaining {
+        if carried(*mux_pane_id) {
+            merged.push((*pane_id, relayed(*mux_pane_id)));
+            continue;
+        }
+        let Some(kind) = attached.remove(pane_id) else {
+            break;
+        };
+        merged.push((*pane_id, kind));
+    }
+    merged
+}
+
+/// Attaches `panes` (local id, multiplexer id) concurrently, returning them
+/// in the order given.
+///
+/// The session authenticated a moment ago, so a pane that is refused can only
+/// mean it was taken in between. What was attached before the first refusal
+/// is kept rather than dropping the whole tab — the same rule as when these
+/// were attached one after another.
+fn attach_panes_concurrently(
+    runtime: &MuxRuntime,
+    session_id: u64,
+    secret: Option<&SessionSecret>,
+    panes: &[(u64, u64)],
+) -> anyhow::Result<Vec<(u64, AttachedPaneKind)>> {
+    let client = runtime.client();
+    let outcomes = std::thread::scope(|scope| {
+        let started = panes
+            .iter()
+            .map(|(_, mux_pane_id)| {
+                let mux_pane_id = *mux_pane_id;
+                scope
+                    .spawn(move || client.attach_with_secret(session_id, Some(mux_pane_id), secret))
+            })
+            .collect::<Vec<_>>();
+        started
+            .into_iter()
+            .map(|handle| {
+                handle
+                    .join()
+                    .unwrap_or_else(|_| Err(anyhow::anyhow!("attaching a pane panicked")))
+            })
+            .collect::<Vec<_>>()
+    });
+    let mut attached = Vec::with_capacity(panes.len());
+    for ((pane_id, _), outcome) in panes.iter().zip(outcomes) {
+        match outcome? {
+            zmux::client::AttachOutcome::Attached { pane, .. } => {
+                attached.push((*pane_id, AttachedPaneKind::Exclusive(pane)));
+            }
+            zmux::client::AttachOutcome::SharedAttached { pane, .. } => {
+                attached.push((*pane_id, AttachedPaneKind::Shared(pane)));
+            }
+            _ => break,
+        }
+    }
+    Ok(attached)
 }
 
 /// Reconciles the opaque tab payload with the daemon's canonical shared pane
@@ -888,6 +982,10 @@ pub(crate) enum AttachOutcomeSummary {
 pub(crate) enum AttachedPaneKind {
     Exclusive(zmux::client::AttachedPane),
     Shared(zmux::client::SharedPane),
+    /// A pane whose Mosh link came up before it was attached, so it never
+    /// was: its stream is in the attach's `RemotePaneStreams`, under this
+    /// multiplexer pane ID.
+    Relayed(u64),
 }
 
 /// What this window has to keep watching for a pane it has just built.
@@ -911,6 +1009,7 @@ impl AttachedPaneKind {
         match self {
             AttachedPaneKind::Exclusive(pane) => pane.pane_id,
             AttachedPaneKind::Shared(pane) => pane.pane_id(),
+            AttachedPaneKind::Relayed(mux_pane_id) => *mux_pane_id,
         }
     }
 }
@@ -967,6 +1066,33 @@ where
 /// Taking the Mosh stream is what releases the multiplexer's: `pane` is
 /// dropped by the caller in that case, and reading the remote host's output
 /// twice would pay for it twice.
+/// A pane whose terminal is fed by its Mosh link.
+fn build_mosh_pane(
+    build: &AttachedPaneBuild<'_>,
+    mux_pane_id: u64,
+    stream: crate::remote_pane_transport::ZoshPaneStream,
+) -> (TerminalBuilder, AttachedPaneRegistration) {
+    let (built, session) = build_zosh_pane(
+        ZoshPaneBuild {
+            title: build.title.clone(),
+            cursor_shape: build.settings.cursor_shape,
+            alternate_scroll: build.settings.alternate_scroll,
+            max_scroll_history_lines: build.settings.max_scroll_history_lines,
+            window_id: build.window_id,
+            working_directory: build.working_directory.clone(),
+            runtime: build.runtime,
+            session_id: build.session_id,
+            mux_pane_id,
+            executor: build.executor,
+        },
+        stream,
+    );
+    // Mosh owns this terminal's grid. Clamping it to the attachment's
+    // bootstrap viewport would leave it there forever because arbitrated
+    // shared-stream size frames deliberately terminate at the relay.
+    (built, AttachedPaneRegistration::Relayed(session))
+}
+
 fn build_relayed_pane<I>(
     build: &AttachedPaneBuild<'_>,
     pane: &Arc<zmux::client::SharedPane>,
@@ -978,25 +1104,7 @@ where
 {
     let mux_pane_id = pane.pane_id();
     if let Some(stream) = stream {
-        let (built, session) = build_zosh_pane(
-            ZoshPaneBuild {
-                title: build.title.clone(),
-                cursor_shape: build.settings.cursor_shape,
-                alternate_scroll: build.settings.alternate_scroll,
-                max_scroll_history_lines: build.settings.max_scroll_history_lines,
-                window_id: build.window_id,
-                working_directory: build.working_directory.clone(),
-                runtime: build.runtime,
-                session_id: build.session_id,
-                mux_pane_id,
-                executor: build.executor,
-            },
-            stream,
-        );
-        // Mosh owns this terminal's grid. Clamping it to the attachment's
-        // bootstrap viewport would leave it there forever because arbitrated
-        // shared-stream size frames deliberately terminate at the relay.
-        return (built, AttachedPaneRegistration::Relayed(session));
+        return build_mosh_pane(build, mux_pane_id, stream);
     }
     let initial_viewport = pane.take_initial_viewport();
     // The replay goes to `with_replay` below and *only* there. Prefixing the
@@ -1157,6 +1265,21 @@ impl Zetta {
                         pane_streams.take(mux_pane_id),
                         local_paste_target(),
                     );
+                    (mux_pane_id, Some(built), None, registration)
+                }
+                AttachedPaneKind::Relayed(mux_pane_id) => {
+                    let Some(stream) = pane_streams.take(mux_pane_id) else {
+                        // The background phase only names a pane `Relayed`
+                        // once its stream is in hand, so this is a pane named
+                        // twice in one tab's layout.
+                        if let Some(pane) = tab.pane_mut(pane_id) {
+                            pane.error = Some(format!(
+                                "Pane {mux_pane_id} appears twice in this session's layout"
+                            ));
+                        }
+                        continue;
+                    };
+                    let (built, registration) = build_mosh_pane(&build, mux_pane_id, stream);
                     (mux_pane_id, Some(built), None, registration)
                 }
             };

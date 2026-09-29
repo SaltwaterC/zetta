@@ -3091,6 +3091,26 @@ fn attaching_to_a_held_pane_handsover_and_makes_it_shared() {
         .expect("sending input as the holder");
     read_until_reader(&mut second_reader, "from-holder");
     read_until_reader(&mut holder_reader, "from-holder");
+
+    // A pane turning shared is logged with the process that asked for it:
+    // nothing else records who that was, and a pane nobody meant to share was
+    // found relaying with no way to tell why.
+    let log = std::fs::read_to_string(daemon.sessions_dir().join("daemon.log"))
+        .expect("the daemon keeps a log in its session directory");
+    let handover = log
+        .lines()
+        .find(|line| line.contains("so the pane becomes shared"))
+        .unwrap_or_else(|| panic!("the handover was not logged: {log}"));
+    assert!(
+        handover.contains(&format!("process {second_pid}")),
+        "the log must name the requesting process: {handover}"
+    );
+    if cfg!(target_os = "linux") {
+        assert!(
+            handover.contains("/bin/sleep 120"),
+            "the log must carry the requester's command line: {handover}"
+        );
+    }
     reap(second_process);
 }
 
@@ -4407,6 +4427,81 @@ fn shared_batch_spawns_commit_exact_geometry_and_rebase_same_target_additions() 
         panic!("a removed operation target did not return the canonical snapshot")
     };
     assert_eq!(conflict, closed);
+}
+
+/// A window recovering a failed shared stream attaches again under the same
+/// client ID, and its old stream can be torn down after the new one exists.
+/// Ending the old stream removed every attachment of that client, the
+/// replacement included, so the recovered pane went dead at once.
+#[test]
+fn ending_one_shared_stream_leaves_the_same_clients_other_attachment() {
+    let daemon = TestDaemon::start();
+    let client = daemon.client();
+    let request = CreateSharedRequest {
+        operation_id: client.next_shared_operation_id(),
+        title: "recovered".to_owned(),
+        replacement: SharedDraftLayout::Draft { draft_id: 1 },
+        panes: vec![zmux::messages::SharedPaneDraft {
+            draft_id: 1,
+            profile: "System".to_owned(),
+            command: Some(zetta_profiles::ProfileCommand::with_args(
+                "sh",
+                vec!["-c".to_owned(), "printf ready; exec cat".to_owned()],
+            )),
+            env: HashMap::new(),
+            working_directory: None,
+            inherit_working_directory_from: None,
+            load_shell_integration: false,
+            size: TerminalSize {
+                columns: 80,
+                lines: 24,
+                cell_width: 0,
+                cell_height: 0,
+            },
+            console_palette: ConsolePalette::default(),
+            metadata: BackgroundPaneSummary {
+                id: 0,
+                label: "pane".to_owned(),
+                profile: "System".to_owned(),
+                configured_command: String::new(),
+                application: "sh".to_owned(),
+                foreground_command: None,
+                terminal_title: None,
+                working_directory: None,
+                state: BackgroundPaneState::Starting,
+                exit: None,
+            },
+        }],
+        active_pane: Some(SharedPaneRef::Draft { draft_id: 1 }),
+        verifier: None,
+    };
+    let created = client.create_shared(request).unwrap();
+    let pane_id = created.state.operation_receipts[0].draft_mappings[0].pane_id;
+    let attach = || match client
+        .attach_shared_with_secret(created.session_id, pane_id, None)
+        .unwrap()
+    {
+        AttachOutcome::SharedAttached { pane, .. } => pane,
+        _other => panic!("a shared session's pane must attach shared"),
+    };
+    let failing = attach();
+    let replacement = attach();
+    let mut replacement_reader = replacement.reader();
+    replacement.send_input(b"both-attached\n").unwrap();
+    read_until_reader(&mut replacement_reader, "both-attached");
+
+    // The old stream goes after its replacement exists, as it does when the
+    // daemon notices the failure late.
+    drop(failing);
+    std::thread::sleep(Duration::from_millis(500));
+
+    replacement
+        .send_input(b"still-attached\n")
+        .expect("the replacement must still be shared");
+    read_until_reader(&mut replacement_reader, "still-attached");
+    drop(replacement_reader);
+    drop(replacement);
+    client.kill(created.session_id).unwrap();
 }
 
 #[test]

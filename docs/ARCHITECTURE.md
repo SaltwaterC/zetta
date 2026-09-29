@@ -302,6 +302,8 @@ without that feature, so no call site needs a feature predicate:
 
 - `mux_stub.rs`: no-`zmux` application shims. The terminal-spawn path is shared
   by both builds; here these values deliberately do nothing
+- `logging.rs`: the GUI process's `log` sink (stderr, so the user journal);
+  subcommands deliberately install none
 - `local_sessions.rs`: the part of the background-session protocol a no-`zmux`
   build needs. Such a build still owns detached sessions in the Zetta process,
   so these types mirror the application-facing pieces of the shared protocol

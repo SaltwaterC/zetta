@@ -420,6 +420,7 @@ fn launch_gui(
     project: StartupProject,
     activation_token: Option<String>,
 ) -> Result<()> {
+    crate::logging::init_gui_log();
     let profiling = args.mode == StartupMode::TerminalRenderingProfile;
     if profiling && args.profile_external_terminal {
         return workload::run_terminal_rendering_workload(
@@ -628,6 +629,10 @@ fn initialize_process_state(
         windows_integration::start_handoff_server(handoff_control_tx)
             .expect("failed to start the Windows terminal handoff server");
     }
+    // The picker's SSH login is still wanted by the attach that follows it,
+    // so this process keeps idle ones; the quit paths release them.
+    #[cfg(feature = "zmux")]
+    zmux::remote::keep_idle_transports();
     let quit_subscription = cx.on_app_quit(|cx| {
         if cx.has_global::<ZettaProcessState>() {
             cx.global::<ZettaProcessState>()

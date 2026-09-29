@@ -515,3 +515,41 @@ fn restore_test_views(
         }
     }
 }
+
+#[test]
+fn mosh_carried_and_ssh_attached_panes_keep_their_layout_order() {
+    // (local pane, multiplexer pane); 20 and 40 came up on Mosh.
+    let remaining = [(2, 20), (3, 30), (4, 40), (5, 50)];
+    let attached = HashMap::from([(3, "ssh 30".to_owned()), (5, "ssh 50".to_owned())]);
+
+    let merged = merge_remaining_panes(
+        &remaining,
+        |mux_pane_id| matches!(mux_pane_id, 20 | 40),
+        attached,
+        |mux_pane_id| format!("mosh {mux_pane_id}"),
+    );
+
+    assert_eq!(
+        merged,
+        [
+            (2, "mosh 20".to_owned()),
+            (3, "ssh 30".to_owned()),
+            (4, "mosh 40".to_owned()),
+            (5, "ssh 50".to_owned()),
+        ]
+    );
+}
+
+#[test]
+fn a_pane_refused_over_ssh_ends_the_tab_where_it_would_have_been() {
+    let remaining = [(2, 20), (3, 30), (4, 40)];
+    // 30 fell back to SSH and was refused: the session was taken meanwhile.
+    let merged = merge_remaining_panes(
+        &remaining,
+        |mux_pane_id| mux_pane_id != 30,
+        HashMap::<u64, String>::new(),
+        |mux_pane_id| format!("mosh {mux_pane_id}"),
+    );
+
+    assert_eq!(merged, [(2, "mosh 20".to_owned())]);
+}

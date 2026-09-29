@@ -1662,6 +1662,7 @@ impl Zetta {
         if !self.shared_stream_is_replaceable(session_id, pane_id) {
             return Task::ready(());
         }
+        log::warn!("shared stream for session {session_id} pane {pane_id} failed; reattaching it");
         let executor = cx.background_executor().clone();
         cx.spawn_in(window, async move |this, cx| {
             for delay in [
@@ -1713,7 +1714,7 @@ impl Zetta {
                     })
                     .unwrap_or(false);
                 if !replaced {
-                    log::debug!(
+                    log::warn!(
                         "shared pane {pane_id} of session {session_id} had nowhere to put a \
                          replacement stream; leaving it as it is"
                     );
@@ -1885,7 +1886,7 @@ impl Zetta {
             return false;
         };
         if let Err(error) = pane.replace_connection_from(&replacement) {
-            log::debug!(
+            log::warn!(
                 "could not replace shared stream for session {session_id} pane {mux_pane_id}: {error:#}"
             );
             return false;

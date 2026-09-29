@@ -233,17 +233,18 @@ pub(super) fn queue_for_shared_clients(
                 .relay
                 .queued
                 .fetch_sub(frame.len(), Ordering::Relaxed);
-            failed.push(client.client_id.clone());
+            client.relay.evict();
+            failed.push(client.attachment);
         }
     }
     if failed.is_empty() {
         return;
     }
-    log::debug!(
+    log::warn!(
         "dropped {} shared client(s) that stopped keeping up",
         failed.len()
     );
-    clients.retain(|client| !failed.contains(&client.client_id));
+    clients.retain(|client| !failed.contains(&client.attachment));
     collapse_empty_shared(attachment, handover_waiters);
 }
 

@@ -365,7 +365,7 @@ pub(super) fn relay_backpressure(pane: &mut Pane, evicted: &mut bool) -> bool {
             // entirely was never noticed here at all, leaving the pane to stutter
             // until the write timeout eventually killed the relay seconds later.
             if backlog > 0 && now.duration_since(client.wrote_at) >= RELAY_STALL_TIMEOUT {
-                stalled.push(client.client_id.clone());
+                stalled.push(client.attachment);
                 continue;
             }
             if backlog >= RELAY_BACKPRESSURE_BYTES {
@@ -373,11 +373,21 @@ pub(super) fn relay_backpressure(pane: &mut Pane, evicted: &mut bool) -> bool {
             }
         }
         if !stalled.is_empty() {
-            log::debug!(
-                "dropping {} shared viewer(s) whose backlog stopped shrinking",
-                stalled.len()
+            log::warn!(
+                "dropping {} shared viewer(s) of pane {} whose backlog stopped shrinking",
+                stalled.len(),
+                pane.id
             );
-            clients.retain(|client| !stalled.contains(&client.client_id));
+            // Before they leave the set: the flag is what makes each relay end
+            // its stream as broken, so the viewer reattaches, instead of as
+            // finished, which would leave its terminal with nothing reading.
+            for client in clients
+                .iter()
+                .filter(|client| stalled.contains(&client.attachment))
+            {
+                client.relay.evict();
+            }
+            clients.retain(|client| !stalled.contains(&client.attachment));
         }
     }
     if !stalled.is_empty() {
@@ -580,7 +590,7 @@ pub(super) fn filter_clipboard_output<'a>(
 
 /// Returns a pane whose last shared client has gone to being unheld.
 ///
-/// Only [`remove_shared_client`] used to do this, so a client dropped for being
+/// Only [`remove_shared_attachment`] used to do this, so a client dropped for being
 /// unwritable — a wedged viewer past the relay's write timeout — left the pane
 /// "shared with nobody": still drained, but never exclusively attachable again
 /// and never pruned, because both require [`Attachment::None`].

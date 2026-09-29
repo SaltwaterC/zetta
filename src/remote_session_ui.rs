@@ -934,13 +934,24 @@ impl Zetta {
         let task = cx.spawn_in(window, async move |this, cx| {
             let result = cx
                 .background_spawn(async move {
-                    let profiles = zmux::remote::RemoteTransport::for_creation(target.clone())
-                        .and_then(|transport| transport.query_profiles())
-                        .context("discovering remote profiles");
-                    let sessions = zmux::client::Client::connect_remote(target)
-                        .and_then(|client| client.list())
-                        .context("listing remote sessions");
-                    RemoteSessionDiscovery { profiles, sessions }
+                    // Both ride the same shared SSH login, and neither needs
+                    // the other's answer, so the second costs a session on
+                    // that login rather than a wait for the first.
+                    let profiles_target = target.clone();
+                    std::thread::scope(|scope| {
+                        let profiles = scope.spawn(move || {
+                            zmux::remote::RemoteTransport::shared(profiles_target)
+                                .and_then(|transport| transport.query_profiles())
+                                .context("discovering remote profiles")
+                        });
+                        let sessions = zmux::client::Client::connect_remote(target)
+                            .and_then(|client| client.list())
+                            .context("listing remote sessions");
+                        let profiles = profiles.join().unwrap_or_else(|_| {
+                            Err(anyhow::anyhow!("discovering remote profiles panicked"))
+                        });
+                        RemoteSessionDiscovery { profiles, sessions }
+                    })
                 })
                 .await;
             this.update_in(cx, |this, window, cx| {

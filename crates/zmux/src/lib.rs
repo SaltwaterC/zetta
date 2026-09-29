@@ -14,6 +14,7 @@ pub mod auth;
 pub mod auto_protect;
 pub mod catalog;
 pub mod headless;
+pub mod logging;
 pub mod paths;
 #[cfg(feature = "session-persistence")]
 pub mod persistence;
@@ -27,6 +28,7 @@ pub mod retention;
 
 pub mod client;
 pub mod messages;
+mod mux_bridge;
 #[cfg(windows)]
 pub mod pty_host;
 pub mod secret_prompt;
@@ -115,8 +117,8 @@ fn usage(no_mux: bool) -> String {
                 "Print the running daemon endpoint as machine-readable JSON",
             ),
             (
-                "proxy-stdio",
-                "Carry one local daemon connection over stdin and stdout for\nremote clients using Windows OpenSSH; run by Zetta, not by hand",
+                "proxy-mux [--forward-agent]",
+                "Carry every daemon connection of one remote client over stdin\nand stdout, for clients using Windows OpenSSH; with\n--forward-agent, link the agent that SSH session forwarded for\nthis host's shells. Run by Zetta, not by hand",
             ),
             (
                 "attach SSH_TARGET SESSION_ID",
@@ -1007,7 +1009,7 @@ pub fn run_with_defaults(arguments: &[OsString], defaults: ClientDefaults) -> Re
                 );
                 return Ok(());
             }
-            value @ ("list" | "profiles" | "create" | "endpoint" | "proxy-stdio" | "attach"
+            value @ ("list" | "profiles" | "create" | "endpoint" | "proxy-mux" | "attach"
             | "stop" | "reconnect" | "resume" | "share" | "unshare" | "kill"
             | "forget" | "relay-pane")
                 if command.is_none() =>
@@ -1072,8 +1074,9 @@ pub fn run_with_defaults(arguments: &[OsString], defaults: ClientDefaults) -> Re
         "--keep-alive holds a Zosh link open, so it needs --protocol zosh"
     );
     anyhow::ensure!(
-        remote_forward_agent.is_none() || command.as_deref() == Some("attach"),
-        "agent-forwarding options are only valid with attach"
+        remote_forward_agent.is_none()
+            || matches!(command.as_deref(), Some("attach" | "proxy-mux")),
+        "agent-forwarding options are only valid with attach and proxy-mux"
     );
     anyhow::ensure!(!expect_port, "--port requires a value");
     anyhow::ensure!(
@@ -1207,6 +1210,7 @@ pub fn run_with_defaults(arguments: &[OsString], defaults: ClientDefaults) -> Re
     }
 
     if daemon {
+        logging::init_daemon_log(&paths::session_catalog_dir());
         #[cfg(unix)]
         return server::run(retention, daemon_options, resume_from, resume_listener);
         #[cfg(windows)]
@@ -1250,18 +1254,18 @@ pub fn run_with_defaults(arguments: &[OsString], defaults: ClientDefaults) -> Re
             println!("{}", serde_json::to_string(&endpoint)?);
             Ok(())
         }
-        Some("proxy-stdio") => {
+        Some("proxy-mux") => {
             anyhow::ensure!(
                 remote_target.is_none() && port.is_none(),
-                "proxy-stdio is a local daemon command"
+                "proxy-mux is a local daemon command"
             );
             #[cfg(unix)]
             {
-                remote::run_stdio_proxy()
+                remote::run_mux_proxy(remote_forward_agent == Some(true))
             }
             #[cfg(not(unix))]
             {
-                anyhow::bail!("proxy-stdio requires a Unix daemon host")
+                anyhow::bail!("proxy-mux requires a Unix daemon host")
             }
         }
         Some("attach") => {

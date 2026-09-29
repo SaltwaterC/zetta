@@ -123,8 +123,8 @@ pub(super) fn bootstrap(
             vec!["A local session's panes are already local, so Zosh has nothing to carry.".into()],
         );
     };
-    // One round trip for the whole session rather than one per pane: the relay
-    // is the same executable for every one of them.
+    // Learned with the endpoint, so normally free; the relay is the same
+    // executable for every pane.
     let program = match client.resolve_remote_program() {
         Ok(program) => program,
         Err(error) => {
@@ -145,15 +145,38 @@ pub(super) fn bootstrap(
         forward_agent,
         secret: secret.map(|secret| secret.expose().to_owned()),
         viewer: client.client_id().as_str().to_owned(),
+        control_path: client.remote_control_path(),
     };
 
+    // Sessions on one SSH connection count against the server's
+    // `MaxSessions` (ten by default), and the agent holder is one of them.
+    // Separate logins have no such limit.
+    let wave = if request.control_path.is_some() {
+        SHARED_BOOTSTRAPS_AT_ONCE
+    } else {
+        mux_pane_ids.len().max(1)
+    };
     let mut streams = HashMap::new();
     let mut fallbacks = Vec::new();
+    for panes in mux_pane_ids.chunks(wave) {
+        bootstrap_wave(&request, panes, &mut streams, &mut fallbacks);
+    }
+    (streams, fallbacks)
+}
+
+/// How many pane bootstraps run at once over a shared SSH connection.
+const SHARED_BOOTSTRAPS_AT_ONCE: usize = 6;
+
+fn bootstrap_wave(
+    request: &PaneRequest,
+    mux_pane_ids: &[u64],
+    streams: &mut HashMap<u64, ZoshPaneStream>,
+    fallbacks: &mut Vec<String>,
+) {
     std::thread::scope(|scope| {
         let started = mux_pane_ids
             .iter()
             .map(|mux_pane_id| {
-                let request = &request;
                 let mux_pane_id = *mux_pane_id;
                 (
                     mux_pane_id,
@@ -173,7 +196,6 @@ pub(super) fn bootstrap(
             }
         }
     });
-    (streams, fallbacks)
 }
 
 /// Everything a pane's bootstrap needs that is the same for every pane in the
@@ -198,6 +220,10 @@ struct PaneRequest {
     /// matches a control request against it, so on the remote command line it
     /// would let any account on that host pose as this window.
     viewer: String,
+    /// The control socket of the SSH login the session's control traffic
+    /// already uses, so a pane's bootstrap is a session on it rather than a
+    /// login of its own. `None` on Windows.
+    control_path: Option<PathBuf>,
 }
 
 /// Brings up one pane, or says why it could not be.
@@ -271,6 +297,7 @@ fn bootstrap_endpoint(
         keep_alive: request.keep_alive_ms,
         forward_agent: request.forward_agent,
         proxy_program: bundled_zosh_program(),
+        control_path: request.control_path.clone(),
     });
     match bootstrap {
         Ok(zosh::PaneBootstrapOutcome::Endpoint(endpoint)) => {

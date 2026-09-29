@@ -165,6 +165,12 @@ enum Attachment {
 struct SharedClient {
     process_id: u32,
     client_id: ClientId,
+    /// This one attachment, among any others the same client has. A client
+    /// that recovers a failed stream attaches again under the same
+    /// [`ClientId`] before its old stream has necessarily been torn down, so
+    /// ending a stream must remove the attachment that stream served — by
+    /// client ID, it also removed the replacement.
+    attachment: u64,
     stream_only: bool,
     /// The client this one is relaying the pane to, when it is a relay rather
     /// than the viewer itself. Set by `zmux relay-pane`, which reads a pane on

@@ -10,6 +10,7 @@ mod http_server;
 mod image_paste;
 #[cfg(not(feature = "zmux"))]
 mod local_sessions;
+mod logging;
 #[cfg(not(feature = "zmux"))]
 mod zmux {
     pub(crate) mod remote {

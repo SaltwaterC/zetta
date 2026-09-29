@@ -211,6 +211,20 @@ pub(super) fn attach(
     // up attaching: the holder's own re-attach joins the same shared set.
     match pane.attachment {
         Attachment::Exclusive(holder) => {
+            // The one way a pane nobody shared becomes shared: a second
+            // process asking for it. Named in full, because the process that
+            // asks is not otherwise recorded anywhere, and a pane silently
+            // turned shared is how a window ended up relaying panes it had
+            // only ever split.
+            log::warn!(
+                "{} asked for session {session_id} pane {pane_id}, held by {}; \
+                 revoking it so the pane becomes shared (client {}, stream only: \
+                 {stream_only}, relaying for: {})",
+                crate::process_status::describe(client_process_id),
+                crate::process_status::describe(holder),
+                client_id.as_str(),
+                relaying_for.as_ref().map_or("nobody", ClientId::as_str),
+            );
             // Ask the holder to hand the terminal over, and wait for its
             // snapshot. The wait releases the sessions lock, so the snapshot
             // handler can change the pane's attachment and notify us.
@@ -538,6 +552,7 @@ pub(super) fn attach_shared(
     // output was read: the reader holds the sessions lock, and a socket write
     // under that lock is a viewer's stall becoming everybody's.
     let relay = spawn_relay(connection, session_id, pane_id, client_process_id)?;
+    let attachment = next_shared_attachment();
     let Attachment::Shared(clients) = &mut pane.attachment else {
         unreachable!("the attachment was just checked to be shared");
     };
@@ -547,6 +562,7 @@ pub(super) fn attach_shared(
     clients.push(SharedClient {
         process_id: client_process_id,
         client_id: client_id.clone(),
+        attachment,
         stream_only,
         relaying_for,
         relay,
@@ -605,13 +621,15 @@ pub(super) fn attach_shared(
     // Serve the shared connection until the client goes away.
     let result = serve_shared(
         daemon,
-        session_id,
-        pane_id,
-        client_process_id,
-        client_id.clone(),
+        SharedStream {
+            session_id,
+            pane_id,
+            client_process_id,
+            attachment,
+        },
         connection,
     );
-    remove_shared_client(daemon, session_id, pane_id, &client_id);
+    remove_shared_attachment(daemon, session_id, pane_id, attachment);
     if let Err(error) = &result {
         log::debug!(
             "shared stream for session {session_id} pane {pane_id} failed for client {}: {error:#}",
@@ -637,8 +655,19 @@ pub(super) fn attach_shared(
 /// has fallen — a burst arriving as many small frames hit a frame limit while
 /// barely a kilobyte outstanding, and the viewer was dropped for being slow for
 /// an instant.
+/// Hands out [`SharedClient::attachment`] identities. Process-wide and never
+/// reused, so no two attachments the daemon has served compare equal.
+fn next_shared_attachment() -> u64 {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
 pub(super) struct Relay {
     pub(super) frames: async_channel::Sender<Arc<[u8]>>,
+    /// Set when the daemon gives up on this viewer rather than the viewer
+    /// leaving. Read by the relay thread once its queue closes, to decide how
+    /// the stream ends: see [`relay_loop`].
+    pub(super) evicted: Arc<AtomicBool>,
     pub(super) queued: Arc<AtomicUsize>,
     /// Bytes this relay has actually written, ever increasing.
     ///
@@ -648,6 +677,14 @@ pub(super) struct Relay {
     /// evicted exactly the viewer that had to be waited for; a viewer whose socket
     /// is full writes nothing at all, which this shows plainly.
     pub(super) written: Arc<AtomicUsize>,
+}
+
+impl Relay {
+    /// Marks this viewer as dropped by the daemon, before its queue is closed
+    /// by removing it from the shared set.
+    pub(super) fn evict(&self) {
+        self.evicted.store(true, Ordering::Release);
+    }
 }
 
 /// How far behind a viewer may fall before its pane stops being read.
@@ -693,15 +730,20 @@ pub(super) fn spawn_relay(
     let (sender, frames) = async_channel::unbounded::<Arc<[u8]>>();
     let queued = Arc::new(AtomicUsize::new(0));
     let written = Arc::new(AtomicUsize::new(0));
-    let (loop_queued, loop_written) = (queued.clone(), written.clone());
+    let evicted = Arc::new(AtomicBool::new(false));
+    let (loop_queued, loop_written, loop_evicted) =
+        (queued.clone(), written.clone(), evicted.clone());
     std::thread::Builder::new()
         .name("zmux relay".to_owned())
         .spawn(move || {
             relay_loop(
                 writer,
                 frames,
-                loop_queued,
-                loop_written,
+                RelayProgress {
+                    queued: loop_queued,
+                    written: loop_written,
+                    evicted: loop_evicted,
+                },
                 session_id,
                 pane_id,
             )
@@ -709,9 +751,17 @@ pub(super) fn spawn_relay(
         .with_context(|| format!("starting the relay for client {client_process_id}"))?;
     Ok(Relay {
         frames: sender,
+        evicted,
         queued,
         written,
     })
+}
+
+/// The relay thread's half of the counters in [`Relay`].
+pub(super) struct RelayProgress {
+    pub(super) queued: Arc<AtomicUsize>,
+    pub(super) written: Arc<AtomicUsize>,
+    pub(super) evicted: Arc<AtomicBool>,
 }
 
 /// Writes one shared client's frames, off the sessions lock.
@@ -721,14 +771,26 @@ pub(super) fn spawn_relay(
 /// is what a viewer that has gone away looks like. [`RELAY_WRITE_TIMEOUT`] still
 /// bounds a wedged write, but it now stalls this one client's relay and nothing
 /// else.
+///
+/// How it ends is what the client acts on. [`Event::SharedClosed`] is a clean
+/// end of stream — the pane was handed back, the client left, the pane went —
+/// and a terminal reading it finishes. Anything else is a broken stream, which
+/// a client recovers by attaching again. A viewer the daemon *evicted* is the
+/// second kind even though its queue simply closed: it did not ask to go, and
+/// telling it the stream ended cleanly is what left a pane with no reader and
+/// its replacement stream unread.
 pub(super) fn relay_loop(
     mut writer: Connection,
     frames: async_channel::Receiver<Arc<[u8]>>,
-    queued: Arc<AtomicUsize>,
-    written: Arc<AtomicUsize>,
+    progress: RelayProgress,
     session_id: u64,
     pane_id: u64,
 ) {
+    let RelayProgress {
+        queued,
+        written,
+        evicted,
+    } = progress;
     let mut failed = false;
     while let Ok(frame) = frames.recv_blocking() {
         let result = writer.write_all(&frame);
@@ -737,7 +799,7 @@ pub(super) fn relay_loop(
             written.fetch_add(frame.len(), Ordering::Relaxed);
         }
         if let Err(error) = result {
-            log::debug!("a shared client stopped accepting output: {error:#}");
+            log::warn!("a shared client stopped accepting output: {error:#}");
             failed = true;
             break;
         }
@@ -750,11 +812,20 @@ pub(super) fn relay_loop(
     // arrive. Returning early on a write error skipped this, which is how a viewer
     // the daemon had given up on was left with a half-drawn screen, no message and
     // no end of stream — a pane frozen with nothing to say why.
-    if failed {
+    let evicted = evicted.load(Ordering::Acquire);
+    if evicted {
+        log::warn!(
+            "shared viewer of session {session_id} pane {pane_id} was evicted; ending its \
+             stream so it reattaches"
+        );
+    }
+    if failed || evicted {
         // The serve loop owns another clone of this socket; closing only the
         // write half would leave it blocked forever waiting for a request, so
         // it could never remove the failed viewer or announce the recoverable
-        // stream event on the subscription.
+        // stream event on the subscription. For an evicted viewer that is the
+        // point: the serve loop ending is what reports the stream failed, so
+        // the client recovers now rather than on its next keystroke.
         let _ = writer.stream().shutdown(std::net::Shutdown::Both);
     } else {
         // A normal retirement has to be distinguishable from a broken relay.
@@ -772,14 +843,28 @@ pub(super) fn relay_loop(
 
 /// Serves one client's shared connection: its input is written to the pane
 /// and its size reports feed the pane's size arbitration.
+/// Which shared stream a serve loop is serving.
+#[derive(Clone, Copy)]
+pub(super) struct SharedStream {
+    pub(super) session_id: u64,
+    pub(super) pane_id: u64,
+    pub(super) client_process_id: u32,
+    /// The [`SharedClient::attachment`] this stream is, which is what its
+    /// input and size reports are attributed to.
+    pub(super) attachment: u64,
+}
+
 pub(super) fn serve_shared(
     daemon: &Arc<Daemon>,
-    session_id: u64,
-    pane_id: u64,
-    client_process_id: u32,
-    client_id: ClientId,
+    stream: SharedStream,
     connection: &mut Connection,
 ) -> Result<()> {
+    let SharedStream {
+        session_id,
+        pane_id,
+        client_process_id,
+        attachment,
+    } = stream;
     loop {
         let (request, _) = connection.receive::<Request>()?;
         match request {
@@ -797,7 +882,7 @@ pub(super) fn serve_shared(
                     Attachment::Shared(clients) => {
                         let Some(client) = clients
                             .iter_mut()
-                            .find(|client| client.client_id == client_id)
+                            .find(|client| client.attachment == attachment)
                         else {
                             anyhow::bail!("client {client_process_id} is not shared on {pane_id}");
                         };
@@ -860,7 +945,7 @@ pub(super) fn serve_shared(
                 let reported = if let Attachment::Shared(clients) = &mut pane.attachment {
                     if let Some(client) = clients
                         .iter_mut()
-                        .find(|client| client.client_id == client_id)
+                        .find(|client| client.attachment == attachment)
                     {
                         client.size = Some((columns, lines));
                         Some((columns, lines))
@@ -1255,13 +1340,14 @@ pub(super) fn subscriber_relay_for_process(
         .map(|subscriber| Arc::clone(&subscriber.relay))
 }
 
-/// Drops a client from a pane's shared set, ending shared mode when it was
-/// the last one.
-pub(super) fn remove_shared_client(
+/// Drops one attachment from a pane's shared set, ending shared mode when it
+/// was the last one. Other attachments of the same client — a replacement
+/// for this very stream, say — stay.
+pub(super) fn remove_shared_attachment(
     daemon: &Arc<Daemon>,
     session_id: u64,
     pane_id: u64,
-    client_id: &ClientId,
+    attachment: u64,
 ) {
     let mut sessions = daemon.sessions.lock().unwrap();
     let Some(session) = sessions.iter_mut().find(|session| session.id == session_id) else {
@@ -1278,7 +1364,7 @@ pub(super) fn remove_shared_client(
     };
     if let Attachment::Shared(clients) = &mut pane.attachment {
         let before = clients.len();
-        clients.retain(|client| &client.client_id != client_id);
+        clients.retain(|client| client.attachment != attachment);
         if clients.is_empty() && pane.handover_waiters == 0 {
             pane.attachment = Attachment::None;
             pane.attachment_client_id = None;
@@ -1411,3 +1497,7 @@ pub(super) fn snapshot(
     wake_drain(daemon);
     connection.send(&Response::Ok)
 }
+
+#[cfg(test)]
+#[path = "../tests/server/attachment.rs"]
+mod tests;

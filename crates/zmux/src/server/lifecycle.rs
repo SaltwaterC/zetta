@@ -2089,7 +2089,7 @@ pub(super) fn apply_shared(
 }
 
 /// Explicit leave for callers that want a request acknowledgement. Dropping a
-/// shared data connection follows the same path through `remove_shared_client`;
+/// shared data connection follows the same path through `remove_shared_attachment`;
 /// this request is useful during orderly window shutdown and never kills a pane.
 pub(super) fn leave_shared(
     daemon: &Arc<Daemon>,
@@ -2769,7 +2769,7 @@ pub(super) fn close_pane(
             pane.attachment_client_id = None;
         }
         // A shared client leaves by closing its own data-plane connection,
-        // which is what `remove_shared_client` acts on; releasing the whole
+        // which is what `remove_shared_attachment` acts on; releasing the whole
         // pane here would evict the other viewers too.
         _ => anyhow::bail!("client {client_process_id} does not hold pane {pane_id}"),
     }

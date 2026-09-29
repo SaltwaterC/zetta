@@ -9,6 +9,7 @@ fn request(secret: Option<&str>) -> PaneRequest {
         keep_alive_ms: Some(500),
         secret: secret.map(str::to_owned),
         viewer: "c0ffee".to_owned(),
+        control_path: None,
     }
 }
 
