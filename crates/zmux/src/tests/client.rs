@@ -759,6 +759,56 @@ fn a_shared_reader_moves_to_a_queued_replacement_instead_of_ending_on_shared_clo
     assert_eq!(received, b"beforereplayedlive");
 }
 
+/// A holder that applies no grid can let go of a size frame it never matched,
+/// and the stream then carries on with what was queued behind it.
+#[cfg(unix)]
+#[test]
+fn a_held_size_frame_can_be_released_without_a_match() {
+    use std::io::{Read as _, Write as _};
+
+    let (mut server, client) = Stream::pair().unwrap();
+    let shared = SharedPane::from_connection(1, 2, 3, Connection::new(client), Vec::new(), None);
+    let mut reader = shared.reader();
+    let output = b"after";
+    let mut wire = crate::transport::encode_message(&Event::Size {
+        session_id: 1,
+        pane_id: 2,
+        revision: SessionRevision(4),
+        columns: 90,
+        lines: 30,
+    })
+    .unwrap();
+    wire.extend_from_slice(
+        &crate::transport::encode_message(&Event::Output {
+            pane_id: 2,
+            length: output.len(),
+        })
+        .unwrap(),
+    );
+    wire.extend_from_slice(output);
+    server.write_all(&wire).unwrap();
+
+    let mut byte = [0; 1];
+    assert_eq!(
+        reader.read(&mut byte).unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+    // Held: a release for some other frame does not let go of it.
+    shared.finish_size_application((SessionRevision(3), 90, 30));
+    assert_eq!(
+        reader.read(&mut byte).unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+    assert_eq!(
+        shared.release_size_hold(),
+        Some((SessionRevision(4), 90, 30))
+    );
+    assert_eq!(shared.release_size_hold(), None);
+    let mut received = vec![0; output.len()];
+    reader.read_exact(&mut received).unwrap();
+    assert_eq!(received, output);
+}
+
 /// With no replacement waiting, `SharedClosed` is still the clean end of the
 /// stream a handed-back pane is drained by.
 #[cfg(unix)]

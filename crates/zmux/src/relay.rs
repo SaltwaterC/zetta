@@ -487,12 +487,27 @@ impl SizeReports {
     /// observed the size boundary, so the shared reader may continue to the
     /// redraw queued after it.
     fn observe_arbitrated(&self) {
-        let Some(&(arbitrated, columns, lines)) = self.pane.take_revisioned_sizes().last() else {
-            return;
-        };
-        self.revision.store(arbitrated.0, Ordering::Release);
-        self.pane
-            .finish_size_application((arbitrated, columns, lines));
+        if let Some(&(arbitrated, columns, lines)) = self.pane.take_revisioned_sizes().last() {
+            self.revision.store(arbitrated.0, Ordering::Release);
+            self.pane
+                .finish_size_application((arbitrated, columns, lines));
+        }
+        // Whatever frame is still holding the stream is released too. The hold
+        // is for a terminal that must apply a grid before the output drawn for
+        // it, and this relay applies none. Waiting on the exact release is how
+        // a relay once stopped reading its pane — every read answered "nothing
+        // yet" without touching the socket — until the daemon gave up on it.
+        if let Some(held) = self.pane.release_size_hold() {
+            log::warn!(
+                "relaying session {} pane {}: released output held behind a size frame \
+                 ({} columns, {} lines, revision {}) that was never matched",
+                self.session_id,
+                self.pane.pane_id(),
+                held.1,
+                held.2,
+                (held.0).0
+            );
+        }
     }
 
     /// Reports the terminal's current size at the session's current revision.

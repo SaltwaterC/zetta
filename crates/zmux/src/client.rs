@@ -410,6 +410,29 @@ impl SharedPane {
         }
     }
 
+    /// The size frame the reader is holding the stream behind, if any.
+    pub fn held_size_frame(&self) -> Option<(SessionRevision, u16, u16)> {
+        *self
+            .pending_size_frame
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Releases the stream whatever size frame holds it, and says which one
+    /// did. For a holder that applies no grid of its own — `zmux relay-pane`,
+    /// whose terminal Mosh sizes — there is nothing to wait for, and waiting on
+    /// an exact match is a hold that one missed release makes permanent.
+    pub fn release_size_hold(&self) -> Option<(SessionRevision, u16, u16)> {
+        let mut pending = self
+            .pending_size_frame
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let released = pending.take();
+        self.size_application_pending
+            .store(false, Ordering::Release);
+        released
+    }
+
     fn from_connection(
         session_id: u64,
         pane_id: u64,
