@@ -1,4 +1,7 @@
-use std::{env, path::Path, process::Command};
+use std::{env, path::Path};
+
+#[path = "build_support/conpty_tools.rs"]
+mod conpty_tools;
 
 const CONPTY_PACKAGE_URL: &str = "https://github.com/microsoft/terminal/releases/download/v1.24.10621.0/Microsoft.Windows.Console.ConPTY.1.24.260303001.nupkg";
 const CONPTY_PACKAGE_ID: &str = "1.24.260303001";
@@ -15,7 +18,12 @@ fn main() {
     // Increase stack size for Windows to avoid stack overflow in debug builds
     // Default is 1MB, increase to 8MB
     if env::var("PROFILE").as_deref() == Ok("debug") {
-        println!("cargo:rustc-link-arg=/STACK:8388608");
+        let flag = if env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("gnu") {
+            "-Wl,--stack,8388608"
+        } else {
+            "/STACK:8388608"
+        };
+        println!("cargo:rustc-link-arg={flag}");
     }
 
     let icon = "assets/icons/zetta-terminal-icon.ico";
@@ -132,17 +140,9 @@ fn stage_conpty_runtime() {
         std::fs::create_dir_all(&cache_dir).expect("failed to create the ConPTY cache");
         let archive = out_dir.join("conpty.nupkg.zip");
         let extracted = out_dir.join("conpty");
-        run_powershell(&format!(
-            "$ProgressPreference = 'SilentlyContinue'; Invoke-WebRequest -Uri '{}' -OutFile '{}'",
-            CONPTY_PACKAGE_URL,
-            powershell_path(&archive)
-        ));
-        verify_sha256(&archive, CONPTY_PACKAGE_SHA256);
-        run_powershell(&format!(
-            "$ProgressPreference = 'SilentlyContinue'; Expand-Archive -LiteralPath '{}' -DestinationPath '{}' -Force",
-            powershell_path(&archive),
-            powershell_path(&extracted)
-        ));
+        conpty_tools::download(CONPTY_PACKAGE_URL, &archive);
+        conpty_tools::verify_sha256(&archive, CONPTY_PACKAGE_SHA256);
+        conpty_tools::extract(&archive, &extracted);
 
         copy_runtime(
             &extracted
@@ -175,40 +175,4 @@ fn copy_runtime(source: &Path, target: &Path) {
             target.display()
         )
     });
-}
-
-fn run_powershell(script: &str) {
-    let status = Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", script])
-        .status()
-        .expect("failed to start PowerShell while staging ConPTY");
-    assert!(status.success(), "PowerShell failed while staging ConPTY");
-}
-
-fn verify_sha256(path: &Path, expected: &str) {
-    let output = Command::new("certutil")
-        .arg("-hashfile")
-        .arg(path)
-        .arg("SHA256")
-        .output()
-        .expect("failed to start certutil while verifying ConPTY");
-    assert!(
-        output.status.success(),
-        "certutil failed while verifying ConPTY"
-    );
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let actual = stdout
-        .lines()
-        .map(str::trim)
-        .find(|line| line.len() == 64 && line.bytes().all(|byte| byte.is_ascii_hexdigit()))
-        .expect("certutil did not return a SHA256 hash");
-    assert!(
-        actual.eq_ignore_ascii_case(expected),
-        "ConPTY package checksum mismatch: expected {expected}, got {actual}"
-    );
-}
-
-fn powershell_path(path: &Path) -> String {
-    path.display().to_string().replace('\'', "''")
 }

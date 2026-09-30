@@ -8,6 +8,9 @@ shortcuts expected from a complete terminal application.
 Zetta currently supports Linux, Windows, and macOS. All platforms are targets
 for active development.
 
+Windows code can also be checked from Linux/WSL2 with `make check-windows`;
+see the [cross-check prerequisites](docs/installation.md#windows).
+
 Clipboard builds also ship standalone `zcopy` and `zpaste` commands. `zetta copy` and `zetta paste` forward to these sibling executables.
 In an interactive SSH or zosh pane, the helpers use the clipboard of the
 displaying Zetta window. Remote paste needs **Allow Remote Clipboard Paste**

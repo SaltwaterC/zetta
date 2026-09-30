@@ -185,6 +185,23 @@ The build target locates the Visual Studio C++ toolchain with `vswhere.exe` and
 initializes its x64 build environment automatically. The **Desktop development
 with C++** workload must be installed.
 
+To check the Windows GNU target from Linux, including WSL2, install the Rust
+target and Linux-hosted MinGW-w64 tools. On Debian/Ubuntu:
+
+```sh
+rustup target add x86_64-pc-windows-gnu
+sudo apt install mingw-w64 curl unzip coreutils
+make check-windows
+```
+
+The build script downloads the pinned ConPTY package, verifies its SHA-256,
+and stages `conpty.dll` and `OpenConsole.exe` beside the target executables.
+Native Windows uses PowerShell and certutil; Linux/WSL uses curl, unzip and
+sha256sum (or shasum). Windows executables and WSL interoperability are not
+required for this cross-check. The initial download requires network access;
+later builds reuse the versioned ConPTY cache in the Cargo target directory.
+`make check-windows` compiles Windows code and tests but does not run them.
+
 The build produces the following runtime files in `target\debug`:
 
 - `zetta.exe`, the console executable
