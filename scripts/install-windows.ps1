@@ -605,8 +605,16 @@ function Invoke-MuxUpgrade {
         return
     }
 
-    $output = @(& $installedMuxBinary --upgrade 2>&1)
-    $exitCode = $LASTEXITCODE
+    # Windows PowerShell turns redirected native stderr into ErrorRecords.
+    # Capture those before deciding whether the exit status is an error.
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        $output = @(& $installedMuxBinary --upgrade 2>&1)
+        $exitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
     if ($exitCode -eq 0) {
         foreach ($line in $output) {
             Write-Host $line

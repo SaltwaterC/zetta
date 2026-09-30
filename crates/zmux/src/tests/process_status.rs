@@ -36,7 +36,7 @@ fn a_parent_is_read_past_a_command_name_with_spaces_and_parentheses() {
     assert_eq!(parent_from_stat("garbage"), None);
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[test]
 fn this_process_is_described_with_its_command_and_parent() {
     let described = describe(std::process::id());
@@ -44,7 +44,16 @@ fn this_process_is_described_with_its_command_and_parent() {
         described.starts_with(&format!("process {} (", std::process::id())),
         "{described}"
     );
-    if cfg!(target_os = "linux") {
-        assert!(described.contains(", child of "), "{described}");
-    }
+    assert!(described.contains(", child of "), "{described}");
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+#[test]
+fn this_process_description_has_its_pid_without_requiring_procfs() {
+    // Command and parent details are best effort on Unix hosts without /proc.
+    let described = describe(std::process::id());
+    assert!(
+        described.starts_with(&format!("process {}", std::process::id())),
+        "{described}"
+    );
 }

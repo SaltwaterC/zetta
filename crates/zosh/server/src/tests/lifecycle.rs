@@ -85,6 +85,9 @@ fn bootstrap_child_does_not_inherit_the_ssh_output_pipe() {
                 "--nocapture",
             ])
             .env(CHILD_MARKER, "1")
+            // This tests handle inheritance in a local launch. Running the
+            // suite through SSH must not select the production SSH-job guard.
+            .env_remove("SSH_CONNECTION")
             .output()
             .unwrap();
         sender.send(output).unwrap();
