@@ -3,11 +3,38 @@
 
 use std::io::Write as _;
 use std::os::unix::fs::PermissionsExt as _;
+use std::path::Path;
 use std::process::{Command, Stdio};
 
-fn staged_zetta(directory: &std::path::Path) -> std::path::PathBuf {
+fn wait_until_executable(path: &Path, probe: &str) {
+    // A parallel test can fork while this file is open for writing and briefly
+    // keep that descriptor alive. Once a probe runs, no writer can reappear.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let run = Command::new(path)
+            .arg(probe)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        match run {
+            Err(error)
+                if error.kind() == std::io::ErrorKind::ExecutableFileBusy
+                    && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            run => {
+                assert!(run.unwrap().success(), "the probe run of {path:?} failed");
+                return;
+            }
+        }
+    }
+}
+
+fn staged_zetta(directory: &Path) -> std::path::PathBuf {
     let binary = directory.join("zetta");
     std::fs::copy(env!("CARGO_BIN_EXE_zetta"), &binary).unwrap();
+    wait_until_executable(&binary, "--version");
     binary
 }
 
@@ -18,12 +45,13 @@ fn copy_proxy_forwards_arguments_and_standard_streams() {
     let helper = directory.path().join("zcopy");
     std::fs::write(
         &helper,
-        "#!/bin/sh\nprintf 'args:%s,%s\\n' \"$1\" \"$2\"\ncat\nprintf 'helper stderr\\n' >&2\n",
+        "#!/bin/sh\ntest \"$1\" = --zetta-test-probe && exit 0\nprintf 'args:%s,%s\\n' \"$1\" \"$2\"\ncat\nprintf 'helper stderr\\n' >&2\n",
     )
     .unwrap();
     let mut permissions = std::fs::metadata(&helper).unwrap().permissions();
     permissions.set_mode(0o755);
     std::fs::set_permissions(&helper, permissions).unwrap();
+    wait_until_executable(&helper, "--zetta-test-probe");
 
     let mut child = Command::new(&zetta)
         .args(["copy", "-pboard", "general"])

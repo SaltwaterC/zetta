@@ -449,7 +449,7 @@ fn the_endpoint_query_runs_the_program_an_interactive_shell_found() {
         .arg(remote_endpoint_command())
         .env("SHELL", &shell)
         .env("HOME", home.path())
-        .env("PATH", "/usr/bin:/bin")
+        .env("PATH", home.path())
         .output()
         .unwrap();
 
