@@ -74,6 +74,9 @@ zosh. The launcher prefers `zosh-server` through SSH, falls back to the stock
 `mosh-server` when it is unavailable, and uses plain SSH only when neither
 remote server is clearly usable.
 
+The Windows client follows the remote shell's application cursor mode for
+arrows, Home, and End, including Zsh/Prezto history substring search bindings.
+
 `zosh --forward-agent USER@HOST` forwards the selected local SSH agent through
 the bundled server. On Windows the client can use the OpenSSH service pipe even
 when `SSH_AUTH_SOCK` is unset, and a Windows host can run `zosh-server.exe`

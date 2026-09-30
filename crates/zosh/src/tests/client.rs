@@ -144,19 +144,60 @@ fn control_and_special_keys_are_encoded_as_terminal_bytes() {
     assert_eq!(control_byte('c'), Some(3));
     assert_eq!(control_byte('['), Some(0x1b));
     assert_eq!(
-        key_bytes(crossterm::event::KeyEvent::new(
-            crossterm::event::KeyCode::Enter,
-            crossterm::event::KeyModifiers::NONE,
-        )),
+        key_bytes(
+            crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Enter,
+                crossterm::event::KeyModifiers::NONE,
+            ),
+            false
+        ),
         b"\r".to_vec()
     );
     assert_eq!(
-        key_bytes(crossterm::event::KeyEvent::new(
-            crossterm::event::KeyCode::F(1),
-            crossterm::event::KeyModifiers::NONE,
-        )),
+        key_bytes(
+            crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::F(1),
+                crossterm::event::KeyModifiers::NONE,
+            ),
+            false
+        ),
         b"\x1bOP".to_vec()
     );
     assert_eq!(control_byte(' '), Some(0));
     assert_eq!(control_byte('?'), Some(0x7f));
+}
+
+#[cfg(not(unix))]
+#[test]
+fn windows_cursor_keys_follow_remote_application_cursor_mode() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use mosh_rs::Screen as _;
+
+    let mut screen = DisplayScreen::new(24, 80);
+    for (mode, prefix) in [
+        (&b""[..], b'['),
+        (&b"\x1b[?1h"[..], b'O'),
+        (&b"\x1b[?1l"[..], b'['),
+    ] {
+        screen.feed(mode);
+        for (code, final_byte) in [
+            (KeyCode::Up, b'A'),
+            (KeyCode::Down, b'B'),
+            (KeyCode::Right, b'C'),
+            (KeyCode::Left, b'D'),
+            (KeyCode::Home, b'H'),
+            (KeyCode::End, b'F'),
+        ] {
+            let mut escape = EscapeState::new(EscapeKey::default());
+            let bytes = key_bytes(
+                KeyEvent::new(code, KeyModifiers::NONE),
+                screen.application_cursor(),
+            );
+            assert_eq!(
+                process_input_bytes(&mut escape, &bytes),
+                (vec![0x1b, prefix, final_byte], None),
+                "{code:?} with mode {mode:?}",
+            );
+        }
+    }
 }

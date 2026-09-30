@@ -1104,7 +1104,7 @@ fn read_event(
     let event = event::read().context("reading terminal input")?;
     match event {
         Event::Key(key) if key.kind == KeyEventKind::Press || key.kind == KeyEventKind::Repeat => {
-            let bytes = key_bytes(key);
+            let bytes = key_bytes(key, session.displayed().application_cursor());
             let (send, action) = escape.feed_all(&bytes);
             if !send.is_empty() {
                 session.send_input(&send);
@@ -1126,7 +1126,26 @@ fn read_event(
 }
 
 #[cfg(not(unix))]
-pub(crate) fn key_bytes(key: KeyEvent) -> Vec<u8> {
+pub(crate) fn key_bytes(key: KeyEvent, application_cursor: bool) -> Vec<u8> {
+    // Windows supplies decoded console events, so reconstruct the sequence
+    // using the remote terminal's DECCKM state. Unix forwards these bytes
+    // directly from the local terminal, whose mode follows the screen diff.
+    let cursor_key = match key.code {
+        KeyCode::Up => Some(b'A'),
+        KeyCode::Down => Some(b'B'),
+        KeyCode::Right => Some(b'C'),
+        KeyCode::Left => Some(b'D'),
+        KeyCode::Home => Some(b'H'),
+        KeyCode::End => Some(b'F'),
+        _ => None,
+    };
+    if let Some(final_byte) = cursor_key {
+        return vec![
+            0x1b,
+            if application_cursor { b'O' } else { b'[' },
+            final_byte,
+        ];
+    }
     match key.code {
         KeyCode::Char(character) if key.modifiers.contains(KeyModifiers::CONTROL) => {
             control_byte(character).into_iter().collect()
@@ -1143,12 +1162,6 @@ pub(crate) fn key_bytes(key: KeyEvent) -> Vec<u8> {
         KeyCode::BackTab => b"\x1b[Z".to_vec(),
         KeyCode::Esc => vec![0x1b],
         KeyCode::Null => vec![0],
-        KeyCode::Up => b"\x1b[A".to_vec(),
-        KeyCode::Down => b"\x1b[B".to_vec(),
-        KeyCode::Right => b"\x1b[C".to_vec(),
-        KeyCode::Left => b"\x1b[D".to_vec(),
-        KeyCode::Home => b"\x1b[H".to_vec(),
-        KeyCode::End => b"\x1b[F".to_vec(),
         KeyCode::PageUp => b"\x1b[5~".to_vec(),
         KeyCode::PageDown => b"\x1b[6~".to_vec(),
         KeyCode::Delete => b"\x1b[3~".to_vec(),
