@@ -1362,39 +1362,63 @@ pub(super) fn remove_shared_attachment(
     let Some(pane) = session.panes.iter_mut().find(|pane| pane.id == pane_id) else {
         return;
     };
-    if let Attachment::Shared(clients) = &mut pane.attachment {
-        let before = clients.len();
-        clients.retain(|client| client.attachment != attachment);
-        if clients.is_empty() && pane.handover_waiters == 0 {
-            pane.attachment = Attachment::None;
-            pane.attachment_client_id = None;
-            // Nobody is left to claim the handover, and the next one records
-            // its own.
-            pane.handed_over = None;
-        } else if clients.len() != before {
-            // A smaller set may want a bigger pane.
-            let (columns, lines) = effective_size(pane);
-            if (columns, lines) != (pane.size.columns, pane.size.lines) {
-                apply_size(daemon, pane, columns, lines);
-                broadcast_size(
-                    session_id,
-                    pane_id,
-                    revision,
-                    &mut pane.attachment,
-                    pane.handover_waiters,
-                    columns,
-                    lines,
-                );
-            }
-            // Down to one viewer: relaying to a single client is the daemon doing
-            // work the client can do better itself, so offer it the terminal.
-            offer_exclusive_if_alone(daemon, session_id, pane);
+    let removed = match &mut pane.attachment {
+        Attachment::Shared(clients) => {
+            let before = clients.len();
+            clients.retain(|client| client.attachment != attachment);
+            clients.len() != before
         }
-    }
+        _ => false,
+    };
+    settle_shared_departure(daemon, session_id, revision, pane, removed);
     drop(sessions);
     prune_exited_panes(daemon);
     publish(daemon);
     wake_drain(daemon);
+}
+
+/// Settles a shared pane after viewers were taken out of its set.
+///
+/// Every way a viewer leaves has to come through here: closing its data stream
+/// and an explicit leave both race to remove it, and whichever arrives second
+/// finds nothing to remove. Only the explicit leave used to skip this, so a tab
+/// closed on the smallest client left the pane at that client's size for good,
+/// because its data stream then dropped out of a set it was no longer in.
+pub(super) fn settle_shared_departure(
+    daemon: &Arc<Daemon>,
+    session_id: u64,
+    revision: crate::messages::SessionRevision,
+    pane: &mut Pane,
+    removed: bool,
+) {
+    let Attachment::Shared(clients) = &pane.attachment else {
+        return;
+    };
+    if clients.is_empty() && pane.handover_waiters == 0 {
+        pane.attachment = Attachment::None;
+        pane.attachment_client_id = None;
+        // Nobody is left to claim the handover, and the next one records
+        // its own.
+        pane.handed_over = None;
+    } else if removed {
+        // A smaller set may want a bigger pane.
+        let (columns, lines) = effective_size(pane);
+        if (columns, lines) != (pane.size.columns, pane.size.lines) {
+            apply_size(daemon, pane, columns, lines);
+            broadcast_size(
+                session_id,
+                pane.id,
+                revision,
+                &mut pane.attachment,
+                pane.handover_waiters,
+                columns,
+                lines,
+            );
+        }
+        // Down to one viewer: relaying to a single client is the daemon doing
+        // work the client can do better itself, so offer it the terminal.
+        offer_exclusive_if_alone(daemon, session_id, pane);
+    }
 }
 
 /// A client gives the daemon the screen it is showing.

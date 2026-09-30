@@ -3446,6 +3446,128 @@ fn shared_clients_are_sized_to_the_smallest_of_them() {
 
 /// Input a shared client sends reaches the pane, and the pane's exit reports
 /// that it was typed into — which is the multiplexer's own attribution.
+/// Sends one request as a named client on a fresh connection, the way a remote
+/// window does, so the daemon attributes it to that client and nobody else.
+fn connect_as(daemon: &TestDaemon, client_id: &str, request: Request) -> Connection {
+    let endpoint: zmux::transport::Endpoint =
+        serde_json::from_slice(&std::fs::read(daemon.sessions_dir().join("zmux.json")).unwrap())
+            .unwrap();
+    let mut connection = Connection::new(Stream::connect(&endpoint.socket_path).unwrap());
+    connection
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    connection
+        .send(&Envelope {
+            version: zmux::messages::PROTOCOL_VERSION,
+            token: endpoint.token,
+            client_process_id: std::process::id(),
+            client_id: ClientId::new(client_id),
+            stream_only: true,
+            session_secret: None,
+            request,
+        })
+        .unwrap();
+    connection
+}
+
+/// A window that closes a shared tab says so before its data streams drop, and
+/// the leave is then what takes it out of the set. The pane must grow back to
+/// the viewers that remain at that point, not wait for a stream drop that will
+/// find nothing left to remove.
+#[test]
+fn leaving_a_shared_session_lets_the_pane_grow_back_to_the_remaining_viewer() {
+    let daemon = TestDaemon::start();
+    let client = daemon.client();
+    let subscription = client.subscribe().unwrap();
+    let _reporters = subscription.exits.clone();
+    let revokes = subscription.revokes.clone();
+
+    let pane = client
+        .spawn(spawn_request(None, "printf ready; sleep 120"))
+        .unwrap();
+    let descriptor = std::fs::File::from(pane.descriptor);
+    read_until(&descriptor, "ready");
+    share_session(&client, pane.session_id, pane.pane_id);
+    let (revoke_tx, revoke_rx) = async_channel::unbounded();
+    revokes.register(pane.pane_id, revoke_tx);
+    let holder = std::thread::spawn({
+        let client = daemon.client();
+        let session_id = pane.session_id;
+        let pane_id = pane.pane_id;
+        move || {
+            revoke_rx
+                .recv_blocking()
+                .expect("the daemon must ask for the pane");
+            drop(descriptor);
+            client
+                .send_snapshot(session_id, pane_id, b"ready-screen".to_vec(), 80, 24)
+                .unwrap();
+            match client
+                .attach_as(
+                    session_id,
+                    pane_id,
+                    std::process::id(),
+                    Some(TEST_SECRET.to_owned()),
+                )
+                .unwrap()
+            {
+                AttachOutcome::SharedAttached { pane, .. } => pane,
+                _other => panic!("the holder must re-attach in shared mode"),
+            }
+        }
+    });
+
+    let mut small = connect_as(
+        &daemon,
+        "small-viewer",
+        Request::Attach {
+            session_id: pane.session_id,
+            pane_id: Some(pane.pane_id),
+            secret: Some(TEST_SECRET.to_owned()),
+            force_shared: false,
+            relaying_for: None,
+        },
+    );
+    let (response, _) = small.receive::<Response>().unwrap();
+    let Response::SharedAttached { replay_length, .. } = response else {
+        panic!("the small viewer must attach as shared: {response:?}");
+    };
+    small.read_exact(replay_length).unwrap();
+    let holder_pane = holder.join().expect("the holder's handover failed");
+    let mut holder_reader = holder_pane.reader();
+
+    let revision = client.shared_snapshot(pane.session_id).unwrap().revision;
+    holder_pane
+        .send_resize_for_revision(revision, 120, 40)
+        .expect("reporting the holder's size");
+    small
+        .send(&Request::Resize {
+            session_id: pane.session_id,
+            pane_id: pane.pane_id,
+            revision: Some(revision),
+            columns: 60,
+            lines: 20,
+        })
+        .unwrap();
+    wait_for_shared_size(&mut holder_reader, &holder_pane, (60, 20));
+
+    // The small viewer's data stream stays open: the leave alone has to do it.
+    let mut leave = connect_as(
+        &daemon,
+        "small-viewer",
+        Request::LeaveShared {
+            session_id: pane.session_id,
+        },
+    );
+    let (response, _) = leave.receive::<Response>().unwrap();
+    assert!(
+        matches!(response, Response::Ok),
+        "leaving was refused: {response:?}"
+    );
+    wait_for_shared_size(&mut holder_reader, &holder_pane, (120, 40));
+    drop(small);
+}
+
 #[test]
 fn shared_input_is_attributed_when_the_pane_exits() {
     let daemon = TestDaemon::start();

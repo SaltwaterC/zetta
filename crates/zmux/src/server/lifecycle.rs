@@ -2163,14 +2163,22 @@ pub(super) fn leave_shared(
         session_control_authorized(session, peer_process_id, session_secret),
         "shared session {session_id} is not authorized for this client"
     );
+    let revision = session
+        .shared_state
+        .as_ref()
+        .map_or(crate::messages::SessionRevision::INITIAL, |state| {
+            state.revision
+        });
     for pane in &mut session.panes {
-        if let Attachment::Shared(clients) = &mut pane.attachment {
-            clients.retain(|client| client.client_id != client_id);
-            if clients.is_empty() {
-                pane.attachment = Attachment::None;
-                pane.attachment_client_id = None;
+        let removed = match &mut pane.attachment {
+            Attachment::Shared(clients) => {
+                let before = clients.len();
+                clients.retain(|client| client.client_id != client_id);
+                clients.len() != before
             }
-        }
+            _ => false,
+        };
+        settle_shared_departure(daemon, session_id, revision, pane, removed);
     }
     drop(sessions);
     daemon.sessions_condvar.notify_all();
