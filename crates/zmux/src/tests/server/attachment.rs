@@ -46,11 +46,15 @@ fn an_evicted_relay_ends_its_stream_as_broken_and_wakes_its_serve_loop() {
     );
     // The serve loop reads the same socket. It has to see the end too, since
     // its ending is what reports the stream failed and prompts the client to
-    // reattach now rather than on its next keystroke.
+    // reattach now rather than on its next keystroke. Unix reports EOF after
+    // local read shutdown; Winsock can instead report WSAESHUTDOWN (10058).
+    // Both end the serve loop, but a timeout or an unrelated error must fail.
     let mut byte = [0; 1];
-    assert_eq!(
-        serve.stream().try_clone().unwrap().read(&mut byte).unwrap(),
-        0
+    let read = serve.stream().try_clone().unwrap().read(&mut byte);
+    assert!(
+        matches!(&read, Ok(0))
+            || matches!(&read, Err(error) if cfg!(windows) && error.raw_os_error() == Some(10058)),
+        "an evicted relay must end its serve loop's read: {read:?}"
     );
 }
 

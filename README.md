@@ -62,6 +62,11 @@ enabled in that tab's menu; it is off by default.
 
 ## Quick start
 
+On Windows, installs retain locked executable and runtime backups while older
+windows or background sessions still use them. Opening a new window does not
+stop those sessions. Later installs remove the backups once they are released;
+`zmux --upgrade` preserves sessions and can leave their console runtime in use.
+
 The build also produces `zosh`, Zetta's standalone cross-platform client,
 and the bundled Rust `zosh-server`. Run either zosh USER@HOST or zetta mosh
 USER@HOST for interactive remote shells; zetta mosh is a transparent proxy to

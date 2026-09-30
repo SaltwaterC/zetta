@@ -120,6 +120,37 @@ function Get-VersionedPath([string]$Path, [string]$Version) {
     return Join-Path $directory "$fileName.$Version$extension"
 }
 
+# Only installer-owned backup names qualify; do not glob unrelated files.
+function Get-RollbackPaths([string]$Path) {
+    $oldPath = Get-VersionedPath $Path "old"
+    if (Test-Path -LiteralPath $oldPath -PathType Leaf) {
+        $oldPath
+    }
+    $directory = Split-Path -Parent $Path
+    if (Test-Path -LiteralPath $directory -PathType Container) {
+        $stem = [regex]::Escape([System.IO.Path]::GetFileNameWithoutExtension($Path))
+        $extension = [regex]::Escape([System.IO.Path]::GetExtension($Path))
+        Get-ChildItem -LiteralPath $directory -File | Where-Object {
+            $_.Name -match "^$stem\.old\.[0-9a-f]{32}$extension$"
+        } | ForEach-Object { $_.FullName }
+    }
+}
+
+function Get-AvailableRollbackPath([string]$Path) {
+    foreach ($backup in @(Get-RollbackPaths $Path)) {
+        try {
+            Remove-Item -LiteralPath $backup -Force
+        } catch {
+            Write-Host "Retained previous version at $backup"
+        }
+    }
+    $oldPath = Get-VersionedPath $Path "old"
+    if (Test-Path -LiteralPath $oldPath) {
+        return Get-VersionedPath $Path ("old." + [Guid]::NewGuid().ToString("N"))
+    }
+    return $oldPath
+}
+
 function Get-InstallFiles {
     $files = @(
         [pscustomobject]@{ Source = $SourceBinary; Destination = $installedBinary },
@@ -470,16 +501,15 @@ function Install-Binary {
         $previousPtyVersionMarker = [System.IO.File]::ReadAllBytes($installedPtyVersionMarker)
     }
 
-    # A running Windows image cannot be overwritten, but it can be renamed.
-    # Remove the previous generation before staging so a failed cleanup leaves
-    # the current installation untouched.
+    # Running images can survive more than one upgrade. Keep locked backups
+    # and reserve a separate rollback path for this transaction.
+    $rollbackPaths = @{}
     foreach ($file in $filesToInstall) {
-        foreach ($version in @("new", "old")) {
-            $versionedPath = Get-VersionedPath $file.Destination $version
-            if (Test-Path -LiteralPath $versionedPath) {
-                Remove-Item -LiteralPath $versionedPath -Force
-            }
+        $stagedPath = Get-VersionedPath $file.Destination "new"
+        if (Test-Path -LiteralPath $stagedPath) {
+            Remove-Item -LiteralPath $stagedPath -Force
         }
+        $rollbackPaths[$file.Destination] = Get-AvailableRollbackPath $file.Destination
     }
 
     try {
@@ -502,7 +532,7 @@ function Install-Binary {
     try {
         foreach ($file in $filesToInstall) {
             if (Test-Path -LiteralPath $file.Destination) {
-                $oldPath = Get-VersionedPath $file.Destination "old"
+                $oldPath = $rollbackPaths[$file.Destination]
                 Move-Item -LiteralPath $file.Destination -Destination $oldPath
                 $archivedFiles += $file
             }
@@ -525,7 +555,7 @@ function Install-Binary {
             }
         }
         foreach ($file in $archivedFiles) {
-            $oldPath = Get-VersionedPath $file.Destination "old"
+            $oldPath = $rollbackPaths[$file.Destination]
             if (Test-Path -LiteralPath $oldPath) {
                 try {
                     Move-Item -LiteralPath $oldPath -Destination $file.Destination
@@ -558,7 +588,7 @@ function Install-Binary {
     }
 
     foreach ($file in $archivedFiles) {
-        $oldPath = Get-VersionedPath $file.Destination "old"
+        $oldPath = $rollbackPaths[$file.Destination]
         try {
             Remove-Item -LiteralPath $oldPath -Force
         } catch {
@@ -659,11 +689,9 @@ function Uninstall-Binary {
     }
     $filesToRemove += [pscustomobject]@{ Source = $null; Destination = $legacyMoshServerBinary }
     foreach ($file in $filesToRemove) {
-        foreach ($installedFile in @(
-            $file.Destination,
-            (Get-VersionedPath $file.Destination "new"),
-            (Get-VersionedPath $file.Destination "old")
-        )) {
+        $installedPaths = @($file.Destination, (Get-VersionedPath $file.Destination "new"))
+        $installedPaths += @(Get-RollbackPaths $file.Destination)
+        foreach ($installedFile in $installedPaths) {
             if (Test-Path -LiteralPath $installedFile) {
                 Remove-Item -LiteralPath $installedFile -Force
                 Write-Host "Removed $installedFile"
