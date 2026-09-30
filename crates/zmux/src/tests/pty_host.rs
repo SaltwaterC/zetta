@@ -138,3 +138,15 @@ fn screen_buffer_update_changes_only_palette_color_bits_and_window_convention() 
     assert_eq!(info.srWindow.Right, 80);
     assert_eq!(info.srWindow.Bottom, 24);
 }
+
+#[test]
+fn openssh_handle_state_is_recognised_by_its_suffix() {
+    use std::ffi::OsStr;
+
+    assert!(is_openssh_handle_state(OsStr::new(
+        "c28fc6f98a2c44abbbd89d6a3037d0d9_POSIX_FD_STATE"
+    )));
+    assert!(is_openssh_handle_state(OsStr::new("other_posix_fd_state")));
+    assert!(!is_openssh_handle_state(OsStr::new("SSH_AUTH_SOCK")));
+    assert!(!is_openssh_handle_state(OsStr::new("POSIX_FD_STATE_EXTRA")));
+}

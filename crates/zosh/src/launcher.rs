@@ -1876,7 +1876,16 @@ fn finish_target(
 ) -> Result<MoshCommand> {
     anyhow::ensure!(command.target.is_none(), "duplicate Mosh target");
     command.target = Some(arguments[index].to_string_lossy().into_owned());
-    command.remote_command = arguments[index + 1..]
+    // `HOST -- COMMAND` is Mosh's form, and the separator is not part of the
+    // command: the server invocation adds its own before it. Kept, it made the
+    // server run a program named `--`, which failed only after the client had
+    // associated, so the session hung on "Last contact" instead of erroring.
+    let rest = &arguments[index + 1..];
+    let rest = match rest.first() {
+        Some(first) if first == "--" => &rest[1..],
+        _ => rest,
+    };
+    command.remote_command = rest
         .iter()
         .map(|argument| argument.to_string_lossy().into_owned())
         .collect();

@@ -350,3 +350,15 @@ fn colour_configuration_preserves_inherited_locales_and_explicit_overrides() {
         assert_eq!(command.get_env(name), Some(std::ffi::OsStr::new(value)));
     }
 }
+
+#[test]
+fn openssh_handle_state_is_recognised_by_its_suffix() {
+    use std::ffi::OsStr;
+
+    assert!(is_openssh_handle_state(OsStr::new(
+        "c28fc6f98a2c44abbbd89d6a3037d0d9_POSIX_FD_STATE"
+    )));
+    assert!(is_openssh_handle_state(OsStr::new("other_posix_fd_state")));
+    assert!(!is_openssh_handle_state(OsStr::new("SSH_AUTH_SOCK")));
+    assert!(!is_openssh_handle_state(OsStr::new("POSIX_FD_STATE_EXTRA")));
+}

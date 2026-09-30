@@ -919,6 +919,15 @@ fn configure_child_environment(
     // It is not valid after the bootstrap connection closes, so always remove
     // it and add the private Zosh socket only after negotiation.
     command.env_remove("SSH_AUTH_SOCK");
+    // Windows OpenSSH describes a child's standard handles to it in a private
+    // variable. sshd set one for this server; handed on, it makes every
+    // `ssh.exe` the shell starts treat a pipe on its stdin as whatever sshd's
+    // handles were, and never read it — `git fetch` hung after `exec`.
+    for (name, _) in std::env::vars_os() {
+        if is_openssh_handle_state(&name) {
+            command.env_remove(name);
+        }
+    }
     if let Some(agent_socket) = agent_socket {
         command.env("SSH_AUTH_SOCK", agent_socket.as_os_str());
     }
@@ -935,6 +944,15 @@ fn configure_child_environment(
     for (name, value) in &cfg.locale_env {
         command.env(name, value);
     }
+}
+
+/// Win32-OpenSSH's `<GUID>_POSIX_FD_STATE`: meaningful only to the process
+/// sshd created, and wrong for anything that inherits it. Matched by suffix so
+/// a rebuilt OpenSSH with another prefix is still caught.
+fn is_openssh_handle_state(name: &std::ffi::OsStr) -> bool {
+    name.to_string_lossy()
+        .to_ascii_uppercase()
+        .ends_with("_POSIX_FD_STATE")
 }
 
 fn bind_udp(bind_ip: Option<IpAddr>, low: u16, high: u16) -> Result<(UdpSocket, u16)> {

@@ -24,7 +24,6 @@ moshcatty = { git = "https://github.com/binaricat/MoshCatty.git", rev = "554b9d3
 
 [patch.crates-io]
 vt100 = { path = "../../vt100" }
-portable-pty = { path = "../../portable-pty" }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

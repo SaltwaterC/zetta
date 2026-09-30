@@ -52,7 +52,7 @@ fn launcher_parser_accepts_the_stock_option_surface() {
     assert!(!command.init);
     assert_eq!(command.remote_ip, RemoteIpMode::Remote);
     assert_eq!(command.target.as_deref(), Some("adsb"));
-    assert_eq!(command.remote_command, ["--", "zsh", "-lc", "printf hello"]);
+    assert_eq!(command.remote_command, ["zsh", "-lc", "printf hello"]);
 }
 
 #[test]
@@ -255,8 +255,24 @@ fn port_and_server_arguments_preserve_ranges_and_command() {
 }
 
 #[test]
-fn launcher_preserves_a_literal_separator_after_the_target() {
+fn launcher_consumes_the_separator_after_the_target() {
     let command = parse_args(args(&["host", "--", "zsh"])).unwrap();
+    assert_eq!(command.remote_command, ["zsh"]);
+    // The server invocation adds one separator of its own, and only one.
+    let arguments = server_arguments(&command);
+    assert_eq!(
+        arguments
+            .iter()
+            .filter(|argument| *argument == "--")
+            .count(),
+        1
+    );
+    assert!(arguments.ends_with(&["--".to_owned(), "zsh".to_owned()]));
+}
+
+#[test]
+fn launcher_passes_a_second_separator_through_to_the_command() {
+    let command = parse_args(args(&["host", "--", "--", "zsh"])).unwrap();
     assert_eq!(command.remote_command, ["--", "zsh"]);
 }
 

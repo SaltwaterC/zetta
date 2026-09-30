@@ -797,6 +797,17 @@ fn start_watcher(host: Arc<Host>) {
     });
 }
 
+/// Win32-OpenSSH's `<GUID>_POSIX_FD_STATE`, which sshd sets to describe a
+/// child's standard handles to that child alone. A shell that inherits it
+/// passes it on, and the next `ssh.exe` then misreads a pipe on its stdin and
+/// never reads it: `git fetch` in a pane of a daemon started over SSH hung
+/// after `exec`. Matched by suffix so a rebuilt OpenSSH's prefix is caught.
+fn is_openssh_handle_state(name: &std::ffi::OsStr) -> bool {
+    name.to_string_lossy()
+        .to_ascii_uppercase()
+        .ends_with("_POSIX_FD_STATE")
+}
+
 /// Starts a host if there is not one already, and returns a client for it.
 pub fn ensure_running(directory: &Path) -> Result<HostClient> {
     if let Some(client) = HostClient::connect(directory)? {
@@ -817,6 +828,13 @@ pub fn ensure_running(directory: &Path) -> Result<HostClient> {
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
+    // Every pane's environment starts from this process's, so this is where
+    // a daemon started over SSH drops what sshd meant only for its own child.
+    for (name, _) in std::env::vars_os() {
+        if is_openssh_handle_state(&name) {
+            command.env_remove(name);
+        }
+    }
     if let Ok(directory) = std::env::current_dir() {
         command.current_dir(tty::windows::normalize_working_directory(&directory));
     }
