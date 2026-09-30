@@ -47,12 +47,22 @@ function Test-TranscriptPlanMode {
         return $false
     }
 
+    $reader = $null
+    $stream = $null
     try {
         if (-not (Test-Path -LiteralPath $TranscriptPath -PathType Leaf)) {
             return $false
         }
 
-        foreach ($line in [System.IO.File]::ReadLines($TranscriptPath)) {
+        # Codex keeps the transcript open for writing throughout the turn.
+        $stream = [System.IO.FileStream]::new(
+            $TranscriptPath,
+            [System.IO.FileMode]::Open,
+            [System.IO.FileAccess]::Read,
+            ([System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete)
+        )
+        $reader = [System.IO.StreamReader]::new($stream, [System.Text.Encoding]::UTF8)
+        while ($null -ne ($line = $reader.ReadLine())) {
             if ([string]::IsNullOrWhiteSpace($line)) {
                 continue
             }
@@ -79,6 +89,12 @@ function Test-TranscriptPlanMode {
         }
     } catch {
         return $false
+    } finally {
+        if ($null -ne $reader) {
+            $reader.Dispose()
+        } elseif ($null -ne $stream) {
+            $stream.Dispose()
+        }
     }
 
     return $false
