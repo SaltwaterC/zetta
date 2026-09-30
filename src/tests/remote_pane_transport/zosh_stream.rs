@@ -10,6 +10,7 @@ fn request(secret: Option<&str>) -> PaneRequest {
         secret: secret.map(str::to_owned),
         viewer: "c0ffee".to_owned(),
         control_path: None,
+        windows_host: false,
     }
 }
 

@@ -136,9 +136,12 @@ struct MoshCommand {
     scrollback_kib: u32,
     /// Opt in to the authenticated Zosh SSH-agent forwarding extension.
     forward_agent: bool,
-    /// Pane relays require a POSIX remote host; avoid a redundant SSH probe
-    /// for every pane in a shared session.
+    /// An embedder already knows the host's platform, so no SSH probe is spent
+    /// on every pane of a shared session: see [`Self::windows_host`].
     embedded: bool,
+    /// For an embedded command, the host is Windows: bootstrap its server
+    /// through PowerShell rather than a POSIX shell.
+    windows_host: bool,
     family: AddressFamily,
     port: Option<PortRequest>,
     bind_server: BindServer,
@@ -182,6 +185,7 @@ impl Default for MoshCommand {
             scrollback_kib: client::SCROLLBACK_DEFAULT_KIB,
             forward_agent: false,
             embedded: false,
+            windows_host: false,
             family: AddressFamily::default(),
             port: None,
             bind_server: BindServer::default(),
@@ -283,6 +287,11 @@ pub struct PaneBootstrapRequest {
     /// without a shutdown (a crash, a lost machine) leaves a server, and
     /// whatever it runs, waiting for good.
     pub server_network_timeout: Option<Duration>,
+    /// The host is Windows, whose account shell is PowerShell or cmd, so its
+    /// server is started with the Windows bootstrap. An embedder learns this
+    /// from the connection it already has, which spares every pane the probe
+    /// the standalone command makes.
+    pub windows_host: bool,
 }
 
 /// A Mosh endpoint, ready for [`crate::PaneSession::connect`].
@@ -442,6 +451,7 @@ fn embedded_command(request: &PaneBootstrapRequest) -> Result<MoshCommand> {
         keep_alive: request.keep_alive,
         forward_agent: request.forward_agent,
         embedded: true,
+        windows_host: request.windows_host,
         remote_command: request.remote_command.clone(),
         proxy_program: request.proxy_program.clone(),
         server_network_timeout: request.server_network_timeout,
@@ -806,7 +816,9 @@ fn run_ssh_bootstrap(
     colors: u16,
     stdin: BootstrapStdin,
 ) -> Result<BootstrapResult> {
-    let platform = if command.embedded {
+    let platform = if command.embedded && command.windows_host {
+        remote_platform::RemotePlatform::Windows
+    } else if command.embedded {
         remote_platform::RemotePlatform::Posix
     } else {
         remote_platform::probe(command, target)?

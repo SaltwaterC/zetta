@@ -642,6 +642,7 @@ fn an_embedded_bootstrap_runs_its_command_and_names_the_bundled_zosh() {
         proxy_program: Some(PathBuf::from("/opt/zetta/zosh")),
         control_path: None,
         server_network_timeout: None,
+        windows_host: false,
     };
     let command = embedded_command(&request).expect("a valid request");
     let (program, arguments) = ssh_bootstrap_command(&command, &request.target);

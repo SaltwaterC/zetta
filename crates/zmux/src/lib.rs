@@ -21,7 +21,6 @@ pub mod persistence;
 mod process_status;
 pub mod protocol;
 pub mod reconnect;
-#[cfg(unix)]
 pub mod relay;
 pub mod remote;
 mod remote_host;
@@ -1301,20 +1300,12 @@ pub fn run_with_defaults(arguments: &[OsString], defaults: ClientDefaults) -> Re
                 anyhow::bail!("relayed session IDs must be numeric");
             };
             let pane_id = relay_pane.context("relay-pane requires a pane ID")?;
-            #[cfg(unix)]
-            {
-                relay::run(relay::RelayOptions {
-                    session_id,
-                    pane_id,
-                    secret_from_stdin: relay_secret_stdin,
-                    viewer_from_stdin: relay_viewer_stdin,
-                })
-            }
-            #[cfg(not(unix))]
-            {
-                let _ = (session_id, pane_id, relay_secret_stdin, relay_viewer_stdin);
-                anyhow::bail!("relaying a pane needs a POSIX terminal, which this host is not")
-            }
+            relay::run(relay::RelayOptions {
+                session_id,
+                pane_id,
+                secret_from_stdin: relay_secret_stdin,
+                viewer_from_stdin: relay_viewer_stdin,
+            })
         }
         Some("reconnect") => {
             let session = session.context_missing()?;

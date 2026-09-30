@@ -135,17 +135,6 @@ pub(super) fn bootstrap(
             vec!["A local session's panes are already local, so Zosh has nothing to carry.".into()],
         );
     };
-    // `zmux relay-pane` is Unix-only, so there is nothing for a Windows host's
-    // Mosh server to run.
-    if client.remote_host_is_windows() {
-        return (
-            HashMap::new(),
-            vec![format!(
-                "{} is a Windows host, which cannot relay a pane over Zosh yet, so its panes stayed on SSH.",
-                target.destination()
-            )],
-        );
-    }
     // Learned with the endpoint, so normally free; the relay is the same
     // executable for every pane.
     let program = match client.resolve_remote_program() {
@@ -169,6 +158,8 @@ pub(super) fn bootstrap(
         secret: secret.map(|secret| secret.expose().to_owned()),
         viewer: client.client_id().as_str().to_owned(),
         control_path: client.remote_control_path(),
+        // Known by now: resolving the program ran something there.
+        windows_host: client.remote_host_is_windows(),
     };
 
     // Sessions on one SSH connection count against the server's
@@ -247,6 +238,8 @@ struct PaneRequest {
     /// already uses, so a pane's bootstrap is a session on it rather than a
     /// login of its own. `None` on Windows.
     control_path: Option<PathBuf>,
+    /// The host is Windows, so its Zosh server is started through PowerShell.
+    windows_host: bool,
 }
 
 /// Brings up one pane, or says why it could not be.
@@ -322,6 +315,7 @@ fn bootstrap_endpoint(
         proxy_program: bundled_zosh_program(),
         control_path: request.control_path.clone(),
         server_network_timeout: Some(SERVER_NETWORK_TIMEOUT),
+        windows_host: request.windows_host,
     });
     match bootstrap {
         Ok(zosh::PaneBootstrapOutcome::Endpoint(endpoint)) => {

@@ -1,4 +1,6 @@
 use super::*;
+#[cfg(unix)]
+use std::fs;
 
 #[cfg(unix)]
 #[test]

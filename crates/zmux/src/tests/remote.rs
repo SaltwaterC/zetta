@@ -135,7 +135,17 @@ fn a_stale_endpoint_does_not_claim_a_remote_daemon_is_running() {
     let listener = crate::transport::Listener::bind(&socket).unwrap();
     assert_eq!(live_endpoint(directory.path()).unwrap(), endpoint);
     drop(listener);
-    assert!(live_endpoint(directory.path()).is_err());
+    // A process another test forks while the listener is open holds a copy of
+    // it until that child execs, so the socket can accept for a moment after
+    // the drop. It stops once that copy is gone.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while live_endpoint(directory.path()).is_ok() {
+        assert!(
+            Instant::now() < deadline,
+            "a dropped listener still reads as a live daemon"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
 }
 
 #[test]

@@ -84,7 +84,17 @@ pub(super) fn windows_bootstrap_command(
     if command.forward_agent {
         arguments.push("-A".to_owned());
     }
-    if command.remote_ip == RemoteIpMode::Proxy {
+    if let Some(control_path) = &command.control_path {
+        // A session on the embedder's login, as the POSIX bootstrap makes one.
+        arguments.extend([
+            "-S".to_owned(),
+            control_path.display().to_string(),
+            "-o".to_owned(),
+            "ControlMaster=no".to_owned(),
+            "-o".to_owned(),
+            "ClearAllForwardings=yes".to_owned(),
+        ]);
+    } else if command.remote_ip == RemoteIpMode::Proxy {
         arguments.extend([
             "-S".to_owned(),
             "none".to_owned(),

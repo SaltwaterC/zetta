@@ -101,3 +101,43 @@ fn encoded_windows_bootstrap_runs_under_cmd_and_powershell() {
         );
     }
 }
+
+/// A Windows host's panes: the embedder says the host is Windows, so the pane
+/// is bootstrapped through PowerShell with no probe of its own, and over the
+/// embedder's login when it has one — as a POSIX host's panes are.
+#[test]
+fn an_embedded_windows_pane_is_bootstrapped_over_the_shared_login() {
+    let request = PaneBootstrapRequest {
+        target: "thinkpad".to_owned(),
+        remote_command: vec![
+            r"C:\Users\dev\AppData\Local\Programs\Zetta\zmux.exe".to_owned(),
+            "relay-pane".to_owned(),
+            "1".to_owned(),
+            "2".to_owned(),
+            "--viewer-stdin".to_owned(),
+        ],
+        control_path: Some(PathBuf::from("/tmp/zetta-zmux-x/ctl")),
+        windows_host: true,
+        ..PaneBootstrapRequest::default()
+    };
+    let mut command = embedded_command(&request).unwrap();
+    assert!(command.embedded && command.windows_host);
+    command.control_path = request.control_path.clone();
+    command.remote_ip = RemoteIpMode::Local;
+
+    let (_, arguments) = windows_bootstrap_command(&command, "thinkpad", 256).unwrap();
+    assert!(
+        arguments
+            .windows(2)
+            .any(|pair| pair == ["-S", "/tmp/zetta-zmux-x/ctl"]),
+        "{arguments:?}"
+    );
+    assert!(arguments.contains(&"ControlMaster=no".to_owned()));
+    let script = windows_remote_script(&command, 256).unwrap();
+    assert!(script.contains("Get-Command zosh-server.exe"), "{script}");
+    assert!(script.contains("'relay-pane'"), "{script}");
+    assert!(
+        script.contains(r"'C:\Users\dev\AppData\Local\Programs\Zetta\zmux.exe'"),
+        "{script}"
+    );
+}
