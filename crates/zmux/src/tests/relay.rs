@@ -123,3 +123,53 @@ fn split_secret_line(input: &[u8]) -> Option<(String, Vec<u8>)> {
     let secret = read_secret_from(&mut remaining).ok()?;
     Some((secret.expose().to_owned(), remaining.to_vec()))
 }
+
+#[test]
+fn a_relay_publishes_its_agent_pipe_for_the_windows_daemon() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("forwarded-agent-7.target");
+    let target = r"\\.\pipe\zosh-agent-1-abc".to_owned();
+
+    let published = agent_target::ForwardedAgentTarget::publish(target.clone(), path.clone())
+        .unwrap()
+        .expect("a named pipe is published");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), target);
+
+    drop(published);
+    assert!(!path.exists());
+}
+
+#[test]
+fn an_older_relay_does_not_remove_a_newer_agent_target() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("forwarded-agent-7.target");
+    let first = agent_target::ForwardedAgentTarget::publish(
+        r"\\.\pipe\zosh-agent-1-first".to_owned(),
+        path.clone(),
+    )
+    .unwrap();
+    let second_target = r"\\.\pipe\zosh-agent-2-second".to_owned();
+    let second =
+        agent_target::ForwardedAgentTarget::publish(second_target.clone(), path.clone()).unwrap();
+
+    drop(first);
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), second_target);
+    drop(second);
+    assert!(!path.exists());
+}
+
+#[test]
+fn a_relay_never_points_a_pane_agent_at_a_daemon_pipe() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("forwarded-agent-7.target");
+    let own_pipe = crate::paths::pane_forwarded_agent_pipe(7);
+
+    for target in [
+        own_pipe.to_string_lossy().into_owned(),
+        "/tmp/ssh-agent.sock".to_owned(),
+    ] {
+        let published = agent_target::ForwardedAgentTarget::publish(target, path.clone()).unwrap();
+        assert!(published.is_none());
+    }
+    assert!(!path.exists());
+}

@@ -1369,8 +1369,9 @@ pub fn run_mux_proxy(link_agent: bool) -> Result<()> {
     crate::mux_bridge::serve(io::stdin(), io::stdout(), connect, info)
 }
 
-/// A Windows host's shells have no forwarded-agent name to find: agent
-/// forwarding into daemon-owned shells is Unix-only for now.
+/// Not linked on a Windows host yet. Its shells do have a stable agent name —
+/// a daemon-served pipe (`server/agent_pipe.rs`) — but only a Zosh relay
+/// publishes a target for it; an agent forwarded over this SSH session is not.
 #[cfg(windows)]
 fn link_forwarded_agent() {
     log::debug!("forwarded agents are not linked for a Windows host's shells");

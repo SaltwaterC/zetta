@@ -515,6 +515,15 @@ pub(super) fn adopt_handover(
             let conout = handles.remove(0);
             let (pty, child_events) = tty::attach(conout, conin, child_pid)
                 .context("attaching an adopted pseudoconsole to the daemon")?;
+            // The previous daemon's listener dies with it; the shell still has
+            // this pane's pipe name. What it fell back to did not survive the
+            // handover, so this daemon's own agent stands in.
+            super::agent_pipe::serve(
+                pane.id,
+                std::env::var_os("SSH_AUTH_SOCK")
+                    .filter(|path| !path.is_empty())
+                    .map(PathBuf::from),
+            );
             let retention = *daemon.retention.lock().unwrap();
             let mut retained = retention.new_retained(pane.columns, pane.lines);
             retained.seed(pane.retained);

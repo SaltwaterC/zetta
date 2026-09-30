@@ -100,8 +100,10 @@ connecting from Windows. A Windows *host* refuses socket forwarding too, so
 every client reaches one through the same bridge — from Linux and macOS as a
 session on the control connection — and is sent PowerShell rather than POSIX
 shell commands; its Zosh panes run `zosh-server.exe` and relay through the
-Windows console. Agent forwarding into its shells is not supported yet. SSH host aliases,
-authentication, and the optional agent-forwarding setting still use OpenSSH.
+Windows console. Each shell there is given its own agent pipe, which the
+daemon relays to the agent a Zosh pane forwarded, or to the host's own agent
+when none is attached. Forwarding over a native SSH pane is not linked there
+yet. SSH host aliases, authentication, and the optional agent-forwarding setting still use OpenSSH.
 If no remote daemon is running, the picker offers creation; creating a session
 starts a fresh daemon even when a crashed one left an endpoint file behind.
 

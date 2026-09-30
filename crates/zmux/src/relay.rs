@@ -62,6 +62,8 @@ use anyhow::{Context as _, Result};
 
 #[cfg(unix)]
 mod agent_link;
+#[cfg(any(windows, test))]
+mod agent_target;
 #[cfg(unix)]
 #[path = "relay/terminal_unix.rs"]
 mod terminal;
@@ -71,6 +73,8 @@ mod terminal;
 
 #[cfg(unix)]
 use agent_link::ForwardedAgentLink;
+#[cfg(windows)]
+use agent_target::ForwardedAgentTarget as ForwardedAgentLink;
 use terminal::RawMode;
 
 use crate::{
@@ -137,9 +141,9 @@ pub fn run(options: RelayOptions) -> Result<()> {
     // The Zosh server gives this relay its private forwarded-agent socket. A
     // pane shell predates the relay, so it inherits a stable name owned by the
     // daemon instead; point that name at this session for as long as the relay
-    // lives. Failure is deliberately non-fatal: pane transport must continue
+    // lives — a symlink on Unix, a target file the daemon's pipe reads on
+    // Windows. Failure is deliberately non-fatal: pane transport must continue
     // when agent forwarding is unavailable.
-    #[cfg(unix)]
     let _agent_link = match ForwardedAgentLink::install(options.pane_id) {
         Ok(link) => link,
         Err(error) => {

@@ -1637,6 +1637,8 @@ fn spawn_connection(daemon: Arc<Daemon>, stream: Stream, token: String) {
     }
 }
 
+#[cfg(any(windows, test))]
+mod agent_pipe;
 mod attachment;
 mod dispatch;
 mod image_store;

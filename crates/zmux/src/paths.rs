@@ -82,6 +82,46 @@ pub fn pane_forwarded_agent_fallback(pane_id: u64) -> PathBuf {
     session_catalog_dir().join(format!("forwarded-agent-{pane_id}.fallback"))
 }
 
+/// Where a Zosh relay publishes its private agent pipe for one pane.
+///
+/// A Windows host cannot point a stable name at a named pipe the way a Unix
+/// host symlinks a socket, so the daemon serves the stable name itself (see
+/// [`pane_forwarded_agent_pipe`]) and reads this file on every connection to
+/// learn where to relay it. The file holds a single pipe path; its absence
+/// means no relay is carrying an agent for the pane right now.
+#[cfg(any(windows, test))]
+pub fn pane_forwarded_agent_target(pane_id: u64) -> PathBuf {
+    session_catalog_dir().join(format!("forwarded-agent-{pane_id}.target"))
+}
+
+/// The stable named pipe a daemon-owned pane on Windows is given as its
+/// `SSH_AUTH_SOCK`.
+///
+/// The pipe namespace is machine-wide, so the name is scoped by the session
+/// directory: that keeps two accounts, and a development daemon beside an
+/// installed one, from claiming each other's names.
+#[cfg(any(windows, test))]
+pub fn pane_forwarded_agent_pipe(pane_id: u64) -> PathBuf {
+    pane_forwarded_agent_pipe_in(&session_catalog_dir(), pane_id)
+}
+
+#[cfg(any(windows, test))]
+pub(crate) const PANE_AGENT_PIPE_PREFIX: &str = r"\\.\pipe\zmux-agent-";
+
+#[cfg(any(windows, test))]
+fn pane_forwarded_agent_pipe_in(session_dir: &Path, pane_id: u64) -> PathBuf {
+    // FNV-1a over the lowercased path: Windows paths compare case-insensitively,
+    // and this only has to be stable, not secret.
+    let scope = session_dir
+        .to_string_lossy()
+        .to_lowercase()
+        .bytes()
+        .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+        });
+    PathBuf::from(format!("{PANE_AGENT_PIPE_PREFIX}{scope:016x}-{pane_id}"))
+}
+
 fn is_target_debug_binary(path: &Path) -> bool {
     let mut saw_target = false;
     for component in path.components() {

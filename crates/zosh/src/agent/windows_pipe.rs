@@ -3,33 +3,43 @@
 use std::io;
 use windows::{
     Win32::{
-        Foundation::{HANDLE, HLOCAL, INVALID_HANDLE_VALUE, LocalFree},
+        Foundation::{CloseHandle, HANDLE, HLOCAL, INVALID_HANDLE_VALUE, LocalFree},
         Security::{
             Authorization::{
-                ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+                ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
+                SDDL_REVISION_1,
             },
-            PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES,
+            GetTokenInformation, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, TOKEN_QUERY,
+            TOKEN_USER, TokenUser,
         },
         Storage::FileSystem::PIPE_ACCESS_DUPLEX,
-        System::Pipes::{
-            CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE,
-            PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
+        System::{
+            Pipes::{
+                CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE,
+                PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
+            },
+            Threading::{GetCurrentProcess, OpenProcessToken},
         },
     },
-    core::{BOOL, PCWSTR, w},
+    core::{BOOL, PCWSTR, PWSTR},
 };
 
 pub(super) fn create(name: PCWSTR, buffer_size: u32) -> io::Result<HANDLE> {
+    let sddl = user_only_descriptor()?
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
     let mut descriptor = PSECURITY_DESCRIPTOR(std::ptr::null_mut());
     unsafe {
         ConvertStringSecurityDescriptorToSecurityDescriptorW(
-            w!("D:P(A;;GA;;;OW)(A;;GA;;;SY)"),
+            PCWSTR(sddl.as_ptr()),
             SDDL_REVISION_1,
             &mut descriptor,
             None,
         )
     }
     .map_err(io::Error::other)?;
+
     let attributes = SECURITY_ATTRIBUTES {
         nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
         lpSecurityDescriptor: descriptor.0,
@@ -50,4 +60,36 @@ pub(super) fn create(name: PCWSTR, buffer_size: u32) -> io::Result<HANDLE> {
     let error = (handle == INVALID_HANDLE_VALUE).then(io::Error::last_os_error);
     unsafe { LocalFree(Some(HLOCAL(descriptor.0))) };
     error.map_or(Ok(handle), Err)
+}
+
+/// A DACL granting this account and SYSTEM, by the account's own SID.
+///
+/// Not `OW` (owner rights): an elevated token's default owner is the
+/// Administrators group, so a pipe created under an elevated SSH login refused
+/// the same account's non-elevated processes — among them a `zmux` daemon
+/// started from the desktop, which relays a remote pane's agent to this pipe.
+fn user_only_descriptor() -> io::Result<String> {
+    unsafe {
+        let mut token = HANDLE::default();
+        OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token).map_err(io::Error::other)?;
+        let mut length = 0_u32;
+        let _ = GetTokenInformation(token, TokenUser, None, 0, &mut length);
+        // `u64`s, so the buffer is aligned for the `TOKEN_USER` read below.
+        let mut buffer = vec![0_u64; (length as usize).div_ceil(8)];
+        let queried = GetTokenInformation(
+            token,
+            TokenUser,
+            Some(buffer.as_mut_ptr().cast()),
+            length,
+            &mut length,
+        );
+        let _ = CloseHandle(token);
+        queried.map_err(io::Error::other)?;
+        let user = &*buffer.as_ptr().cast::<TOKEN_USER>();
+        let mut sid = PWSTR::null();
+        ConvertSidToStringSidW(user.User.Sid, &mut sid).map_err(io::Error::other)?;
+        let text = sid.to_string().map_err(io::Error::other);
+        LocalFree(Some(HLOCAL(sid.0.cast())));
+        Ok(format!("D:P(A;;GA;;;{})(A;;GA;;;SY)", text?))
+    }
 }

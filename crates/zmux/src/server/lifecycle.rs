@@ -167,7 +167,7 @@ fn read_until(file: &mut std::fs::File, needle: &str, deadline: Instant) -> Resu
 /// came up believing its terminal had no colour.
 fn shared_draft_process(
     draft: &crate::messages::SharedPaneDraft,
-    #[cfg_attr(not(unix), expect(unused_variables))] pane_id: u64,
+    pane_id: u64,
 ) -> (zetta_profiles::ProfileCommand, HashMap<String, String>) {
     let command = draft
         .command
@@ -207,6 +207,13 @@ fn shared_draft_process(
     env.insert(
         "SSH_AUTH_SOCK".to_owned(),
         crate::paths::pane_forwarded_agent_socket(pane_id)
+            .to_string_lossy()
+            .into_owned(),
+    );
+    #[cfg(windows)]
+    env.insert(
+        "SSH_AUTH_SOCK".to_owned(),
+        crate::paths::pane_forwarded_agent_pipe(pane_id)
             .to_string_lossy()
             .into_owned(),
     );
@@ -284,6 +291,9 @@ fn start_shared_draft(
     let (command, env) = shared_draft_process(draft, pane_id);
     #[cfg(unix)]
     prepare_pane_agent_links(pane_id, &agent_fallback);
+    // Before the shell starts, so its first `ssh` finds the pipe listening.
+    #[cfg(windows)]
+    super::agent_pipe::serve(pane_id, pane_agent_fallback(&draft.env));
     #[cfg(unix)]
     let bootstrap_command = command.clone();
     let working_directory = pane_start_directory(draft.working_directory.clone().or_else(|| {
@@ -364,6 +374,17 @@ fn pane_agent_fallback(env: &HashMap<String, String>) -> PathBuf {
         .map_or_else(crate::paths::forwarded_agent_socket, PathBuf::from)
 }
 
+/// The agent a Windows pane would have used had the daemon not given it a
+/// pipe of its own: the requester's, else the daemon's, else none, which leaves
+/// Windows OpenSSH's default.
+#[cfg(windows)]
+fn pane_agent_fallback(env: &HashMap<String, String>) -> Option<PathBuf> {
+    env.get("SSH_AUTH_SOCK")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("SSH_AUTH_SOCK").map(PathBuf::from))
+        .filter(|path| !path.as_os_str().is_empty())
+}
+
 #[cfg(unix)]
 fn prepare_pane_agent_links(pane_id: u64, fallback_target: &Path) {
     use std::os::unix::fs::symlink;
@@ -402,7 +423,14 @@ pub(super) fn remove_pane_agent_links(pane_id: u64) {
     }
 }
 
-#[cfg(not(unix))]
+/// Stops serving a discarded pane's agent pipe; see the Unix counterpart for
+/// why this is not a `Drop`.
+#[cfg(windows)]
+pub(super) fn remove_pane_agent_links(pane_id: u64) {
+    super::agent_pipe::stop(pane_id);
+}
+
+#[cfg(not(any(unix, windows)))]
 pub(super) fn remove_pane_agent_links(_pane_id: u64) {}
 
 fn close_provisional_shared_panes(daemon: &Arc<Daemon>, panes: Vec<ProvisionalSharedPane>) {

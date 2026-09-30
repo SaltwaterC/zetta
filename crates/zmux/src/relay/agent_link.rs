@@ -1,7 +1,8 @@
 //! Pointing a pane's stable forwarded-agent name at this relay's agent.
 //!
-//! Unix-only: the name is a symlink to an `SSH_AUTH_SOCK` socket, and a
-//! Windows host's shells find their agent some other way.
+//! Unix-only: the name is a symlink to an `SSH_AUTH_SOCK` socket. A named pipe
+//! cannot be symlinked, so a Windows relay publishes a target file for the
+//! daemon's pipe instead (`agent_target.rs`).
 
 use std::{
     ffi::OsString,
