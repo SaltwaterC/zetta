@@ -1464,10 +1464,39 @@ fn protected_disk_resume_preserves_failed_authentication_backoff() {
             .contains("authentication failed")
     );
 
-    // Establish a two-second window so a busy test machine cannot let the
-    // daemon restart consume the entire one-second first-failure window before
-    // the post-restart assertion below runs.
-    std::thread::sleep(Duration::from_millis(1_100));
+    let sessions_dir = daemon.sessions_dir();
+    let authentication_path =
+        sessions_dir.join(format!("persistence/session-{}-auth.age", pane.session_id));
+    let read_authentication = || -> serde_json::Value {
+        let ciphertext = std::fs::read(&authentication_path).unwrap();
+        serde_json::from_slice(&age::decrypt(&identity, &ciphertext).unwrap()).unwrap()
+    };
+    let update_backoff = |updated_at, backoff_seconds| {
+        let metadata = read_authentication();
+        let mut store = PersistenceStore::open_with_recovery(&sessions_dir, None)
+            .unwrap()
+            .unwrap();
+        store
+            .update_authentication(
+                pane.session_id,
+                updated_at,
+                metadata["failed_authentications"]
+                    .as_u64()
+                    .unwrap()
+                    .try_into()
+                    .unwrap(),
+                backoff_seconds,
+            )
+            .unwrap();
+    };
+    let metadata = read_authentication();
+    assert_eq!(metadata["failed_authentications"], 1);
+    assert_eq!(metadata["backoff_seconds"], 1);
+
+    // Expire the persisted refusal window explicitly: sleeping depends on the
+    // wall clock advancing and cannot distinguish a refused attempt from a
+    // checked wrong secret, since both return AuthenticationFailed.
+    update_backoff(0, 1);
     let wrong = client.resume_with_secret(
         pane.session_id,
         std::slice::from_ref(&identity_path),
@@ -1480,17 +1509,13 @@ fn protected_disk_resume_preserves_failed_authentication_backoff() {
             .contains("authentication failed")
     );
 
-    let ciphertext = std::fs::read(
-        daemon
-            .sessions_dir()
-            .join(format!("persistence/session-{}-auth.age", pane.session_id)),
-    )
-    .unwrap();
-    let metadata: serde_json::Value =
-        serde_json::from_slice(&age::decrypt(&identity, &ciphertext).unwrap()).unwrap();
+    let metadata = read_authentication();
     assert_eq!(metadata["failed_authentications"], 2);
     assert!(metadata["backoff_seconds"].as_u64().unwrap() >= 2);
 
+    // Give the restart ample time without weakening the refusal assertion.
+    // The daemon already wrote the real doubled delay, checked above.
+    update_backoff(metadata["updated_at"].as_u64().unwrap(), 30);
     daemon.restart_with_recovery();
     let client = daemon.client();
     let immediate = client.resume_with_secret(
@@ -1504,7 +1529,8 @@ fn protected_disk_resume_preserves_failed_authentication_backoff() {
             .to_string()
             .contains("authentication failed")
     );
-    std::thread::sleep(Duration::from_secs(3));
+    assert_eq!(read_authentication()["failed_authentications"], 2);
+    update_backoff(0, 2);
     client
         .resume_with_secret(
             pane.session_id,
