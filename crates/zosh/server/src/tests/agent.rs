@@ -98,6 +98,43 @@ fn unix_agent_socket_bridges_ordered_frames_and_cleans_up() {
     assert!(!path.exists(), "the private agent socket must be removed");
 }
 
+#[cfg(unix)]
+#[test]
+fn unix_agent_connection_waits_for_a_frame_written_after_accept() {
+    use std::os::unix::net::UnixStream;
+    use std::time::Duration;
+
+    let mut server = AgentServer::new();
+    let path = server.socket_path().unwrap().to_path_buf();
+    let mut client = UnixStream::connect(&path).unwrap();
+    // Accept while the socket is still empty, as it is when ssh connects and
+    // only then composes its request. On macOS an accepted socket inherits the
+    // listener's O_NONBLOCK, and a reader that kept it saw WouldBlock here.
+    server.poll();
+    std::thread::sleep(Duration::from_millis(50));
+    server.poll();
+    client.write_all(&frame(&[11])).unwrap();
+
+    let saw_request = (0..100).any(|_| {
+        server.poll();
+        let records = server.records();
+        assert!(
+            !records
+                .iter()
+                .any(|record| matches!(record, AgentHostRecord::Close { .. })),
+            "the connection closed before its request arrived"
+        );
+        records
+            .iter()
+            .any(|record| matches!(record, AgentHostRecord::Request { .. }))
+            || {
+                std::thread::sleep(Duration::from_millis(10));
+                false
+            }
+    });
+    assert!(saw_request);
+}
+
 #[cfg(windows)]
 #[test]
 fn windows_agent_pipe_is_ready_and_bridges_a_complete_frame() {

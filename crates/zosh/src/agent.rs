@@ -722,6 +722,11 @@ fn relay_accept_loop(
     while !stop.load(Ordering::Acquire) {
         match listener.accept() {
             Ok((stream, _)) => {
+                // An accepted socket inherits the listener's O_NONBLOCK on
+                // macOS and the BSDs, and the relay reads it blocking.
+                if stream.set_nonblocking(false).is_err() {
+                    continue;
+                }
                 let agent_path = agent_path.clone();
                 let binding = Arc::clone(&binding);
                 thread::spawn(move || relay_connection(stream, &agent_path, &binding));

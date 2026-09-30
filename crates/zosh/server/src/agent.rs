@@ -327,7 +327,14 @@ impl AgentServer {
         for _ in 0..MAX_CONNECTIONS {
             match listener.accept() {
                 Ok((stream, _)) => {
-                    if self.connections.len() >= MAX_CONNECTIONS {
+                    // BSD-derived kernels (macOS included) hand back an
+                    // accepted socket that inherits the listener's
+                    // O_NONBLOCK, which Linux never does. The connection
+                    // thread reads with blocking `read_exact`, so on macOS it
+                    // would see `WouldBlock` at once and drop the client.
+                    if self.connections.len() >= MAX_CONNECTIONS
+                        || stream.set_nonblocking(false).is_err()
+                    {
                         continue;
                     }
                     let connection_id = self.next_connection_id;
