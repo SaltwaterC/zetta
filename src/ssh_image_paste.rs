@@ -11,6 +11,13 @@
 //! Mosh pane into the invocation the OpenSSH path above already knows how to
 //! upload through — Mosh's own UDP `-p`/`--port` deliberately plays no part in
 //! it, because the auxiliary connection is taken from `--ssh` alone.
+//!
+//! Windows WSL profiles also lack access to the desktop image clipboard. When
+//! no SSH or Mosh target is reported, `wsl` stages the image in that profile's
+//! distribution instead of asking its Linux application to read the clipboard.
+
+#[cfg(any(windows, test))]
+mod wsl;
 
 use std::{
     collections::HashMap,
@@ -34,7 +41,10 @@ use terminal::{ImagePasteHandler, ImagePasteResult};
 use crate::image_paste::normalize_image;
 
 #[cfg(windows)]
-use crate::{cygwin_profile, is_wsl_shell, msys2_profile};
+use crate::{cygwin_profile, msys2_profile};
+
+#[cfg(any(windows, test))]
+use crate::is_wsl_shell;
 
 #[cfg(windows)]
 use std::path::Path;
@@ -47,8 +57,8 @@ const IMAGE_FILE_NAME: &str = "image.png";
 static NEXT_SENTINEL_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Resolves clipboard images for a local terminal whose foreground process may
-/// be an OpenSSH client. Unsupported foreground processes return the native
-/// shortcut so they retain the ordinary local-paste behavior.
+/// be an OpenSSH client. A Windows WSL profile stages otherwise-local images
+/// inside its distribution; other local profiles retain the native shortcut.
 pub(crate) struct SshImagePasteHandler {
     execution: SshExecution,
     cleanup: Arc<CleanupRegistry>,
@@ -84,11 +94,15 @@ impl SshImagePasteHandler {
             .context("uploading clipboard image over SSH")?;
         let path = extract_remote_path(&output, &sentinel, &platform)?;
         let directory = remote_directory(&path).context("remote image path has no directory")?;
+        let command = match &platform {
+            RemotePlatform::Posix => posix_cleanup_command(&directory),
+            RemotePlatform::PowerShell(executable) => {
+                powershell_remote_command(executable, &powershell_cleanup_script(&directory))
+            }
+        };
         self.cleanup.push(CleanupEntry {
-            execution: self.execution.clone(),
-            invocation,
-            platform,
-            directory,
+            launch: self.execution.launch_spec(&invocation, command),
+            timeout: SSH_TRANSFER_TIMEOUT,
         });
         Ok(path)
     }
@@ -137,6 +151,12 @@ impl ImagePasteHandler for SshImagePasteHandler {
         foreground_process: Option<&[String]>,
     ) -> Result<ImagePasteResult> {
         let Some(argv) = foreground_process.and_then(foreground_invocation) else {
+            #[cfg(any(windows, test))]
+            if is_wsl_shell(&self.execution.shell) {
+                return self
+                    .stage_wsl_image(image)
+                    .map(ImagePasteResult::ResolvedPath);
+            }
             // The one failure this module has no way to report: keeping the
             // native chord is right for a genuinely local pane and useless for
             // anything else, and the two are indistinguishable from here. Say
@@ -167,15 +187,21 @@ impl SshExecution {
         input: Vec<u8>,
     ) -> Result<Vec<u8>> {
         let launch = self.launch_spec(invocation, remote_command);
-        run_ssh_process(launch, input, SSH_TRANSFER_TIMEOUT)
+        run_image_paste_process(launch, input, SSH_TRANSFER_TIMEOUT)
     }
 
     fn launch_spec(&self, invocation: &OpenSshInvocation, remote_command: String) -> LaunchSpec {
+        #[cfg(any(windows, test))]
+        if is_wsl_shell(&self.shell) {
+            return wsl::ssh_launch_spec(
+                &self.environment,
+                &self.shell,
+                invocation,
+                remote_command,
+            );
+        }
         #[cfg(windows)]
         {
-            if is_wsl_shell(&self.shell) {
-                return wsl_launch_spec(&self.environment, &self.shell, invocation, remote_command);
-            }
             if let Some((root, _)) = msys2_profile(&self.shell) {
                 return msys2_launch_spec(&self.environment, &root, invocation, remote_command);
             }
@@ -266,33 +292,25 @@ impl Drop for CleanupRegistry {
             return;
         }
         let result = thread::Builder::new()
-            .name("ssh-image-paste-cleanup".to_owned())
+            .name("image-paste-cleanup".to_owned())
             .spawn(move || {
                 for entry in entries {
-                    let command = match &entry.platform {
-                        RemotePlatform::Posix => posix_cleanup_command(&entry.directory),
-                        RemotePlatform::PowerShell(executable) => powershell_remote_command(
-                            executable,
-                            &powershell_cleanup_script(&entry.directory),
-                        ),
-                    };
-                    if let Err(error) = entry.execution.run(&entry.invocation, command, Vec::new())
+                    if let Err(error) =
+                        run_image_paste_process(entry.launch, Vec::new(), entry.timeout)
                     {
-                        log::debug!("could not remove remote image directory: {error:#}");
+                        log::debug!("could not remove staged image directory: {error:#}");
                     }
                 }
             });
         if let Err(error) = result {
-            log::debug!("could not start remote image cleanup: {error}");
+            log::debug!("could not start image cleanup: {error}");
         }
     }
 }
 
 struct CleanupEntry {
-    execution: SshExecution,
-    invocation: OpenSshInvocation,
-    platform: RemotePlatform,
-    directory: String,
+    launch: LaunchSpec,
+    timeout: Duration,
 }
 
 /// The auxiliary SSH connection a foreground process's clipboard image has to
@@ -801,7 +819,8 @@ fn remote_directory(path: &str) -> Option<String> {
     (separator > 0).then(|| path[..separator].to_owned())
 }
 
-fn run_ssh_process(spec: LaunchSpec, input: Vec<u8>, timeout: Duration) -> Result<Vec<u8>> {
+fn run_image_paste_process(spec: LaunchSpec, input: Vec<u8>, timeout: Duration) -> Result<Vec<u8>> {
+    let deadline = Instant::now() + timeout;
     let mut command = util::command::new_std_command(&spec.program);
     command
         .args(&spec.args)
@@ -816,41 +835,43 @@ fn run_ssh_process(spec: LaunchSpec, input: Vec<u8>, timeout: Duration) -> Resul
         match command.spawn() {
             Ok(process) => break process,
             Err(error) if error.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                if Instant::now() >= deadline {
+                    bail!("starting image-paste process timed out after {timeout:?}");
+                }
                 thread::sleep(Duration::from_millis(20));
             }
             Err(error) => {
                 return Err(error)
-                    .with_context(|| format!("starting auxiliary SSH client {}", spec.program));
+                    .with_context(|| format!("starting image-paste process {}", spec.program));
             }
         }
     };
     let mut stdout = child
         .stdout
         .take()
-        .context("auxiliary SSH stdout is unavailable")?;
+        .context("image-paste stdout is unavailable")?;
     let reader = thread::Builder::new()
-        .name("ssh-image-paste-reader".to_owned())
+        .name("image-paste-reader".to_owned())
         .spawn(move || {
             let mut output = Vec::new();
             let result = stdout.read_to_end(&mut output);
             (result, output)
         })
-        .context("starting auxiliary SSH reader")?;
+        .context("starting image-paste reader")?;
     let mut stdin = child
         .stdin
         .take()
-        .context("auxiliary SSH stdin is unavailable")?;
+        .context("image-paste stdin is unavailable")?;
     let writer = thread::Builder::new()
-        .name("ssh-image-paste-writer".to_owned())
+        .name("image-paste-writer".to_owned())
         .spawn(move || stdin.write_all(&input))
-        .context("starting auxiliary SSH writer")?;
+        .context("starting image-paste writer")?;
 
-    let deadline = Instant::now() + timeout;
     let mut timed_out = false;
     let status = loop {
         if let Some(status) = child
             .try_wait()
-            .context("waiting for auxiliary SSH client")?
+            .context("waiting for image-paste process")?
         {
             break status;
         }
@@ -859,49 +880,26 @@ fn run_ssh_process(spec: LaunchSpec, input: Vec<u8>, timeout: Duration) -> Resul
             child.kill().ok();
             break child
                 .wait()
-                .context("stopping timed-out auxiliary SSH client")?;
+                .context("stopping timed-out image-paste process")?;
         }
         thread::sleep(Duration::from_millis(10));
     };
     let write_result = writer
         .join()
-        .map_err(|_| anyhow::anyhow!("auxiliary SSH writer panicked"))?;
+        .map_err(|_| anyhow::anyhow!("image-paste writer panicked"))?;
     let (read_result, output) = reader
         .join()
-        .map_err(|_| anyhow::anyhow!("auxiliary SSH reader panicked"))?;
-    read_result.context("reading auxiliary SSH output")?;
+        .map_err(|_| anyhow::anyhow!("image-paste reader panicked"))?;
+    read_result.context("reading image-paste output")?;
     if timed_out {
-        bail!("auxiliary SSH transfer timed out after {timeout:?}");
+        bail!("image-paste transfer timed out after {timeout:?}");
     }
-    write_result.context("sending clipboard image to auxiliary SSH")?;
+    write_result.context("sending clipboard image to image-paste process")?;
     anyhow::ensure!(
         status.success(),
-        "auxiliary SSH client exited with status {status}"
+        "image-paste process exited with status {status}"
     );
     Ok(output)
-}
-
-#[cfg(windows)]
-fn wsl_launch_spec(
-    environment: &HashMap<String, String>,
-    shell: &Shell,
-    invocation: &OpenSshInvocation,
-    remote_command: String,
-) -> LaunchSpec {
-    let (program, shell_args) = shell.program_and_args();
-    let exec_index = shell_args.iter().position(|argument| {
-        argument.eq_ignore_ascii_case("--exec") || argument.eq_ignore_ascii_case("-e")
-    });
-    let mut args = shell_args[..exec_index.unwrap_or(shell_args.len())].to_vec();
-    args.push("--exec".to_owned());
-    args.push(invocation.executable.clone());
-    args.extend(invocation.batch_args(remote_command));
-    LaunchSpec {
-        program,
-        args,
-        environment: environment.clone(),
-        working_directory: None,
-    }
 }
 
 #[cfg(windows)]
@@ -964,5 +962,5 @@ fn prepend_windows_path(environment: &mut HashMap<String, String>, prefixes: &[P
 }
 
 #[cfg(test)]
-#[path = "tests/ssh_image_paste.rs"]
+#[path = "tests/ssh_image_paste/mod.rs"]
 mod tests;

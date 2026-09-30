@@ -824,6 +824,7 @@ fn tab_icon_control_requests_decode_names_and_allow_clearing() {
     assert_eq!(
         decode_control_request(&mut icon_request, "token"),
         Some(ControlRequestCommand::SetTabIcon {
+            attention_id: None,
             icon: Some(ui::IconName::Terminal),
             queue: false,
         })
@@ -833,6 +834,7 @@ fn tab_icon_control_requests_decode_names_and_allow_clearing() {
     assert_eq!(
         decode_control_request(&mut clear_request, "token"),
         Some(ControlRequestCommand::SetTabIcon {
+            attention_id: None,
             icon: None,
             queue: false
         })
@@ -846,6 +848,7 @@ fn tab_icon_control_requests_decode_names_and_allow_clearing() {
     assert_eq!(
         decode_control_request(&mut queued_request, "token"),
         Some(ControlRequestCommand::SetTabIcon {
+            attention_id: None,
             icon: None,
             queue: true
         })
@@ -853,16 +856,50 @@ fn tab_icon_control_requests_decode_names_and_allow_clearing() {
 }
 
 #[test]
-fn tab_icon_reset_control_requests_only_allow_queue() {
+fn tab_icon_control_requests_preserve_the_originating_tab_and_reject_zero() {
+    for command in ["set_tab_icon", "reset_tab_icon"] {
+        let mut targeted = request("token", command);
+        targeted.attention_id = Some(42);
+        targeted.queue = Some(true);
+        let decoded = decode_control_request(&mut targeted, "token").unwrap();
+        match decoded {
+            ControlRequestCommand::SetTabIcon {
+                attention_id,
+                queue,
+                ..
+            }
+            | ControlRequestCommand::ResetTabIcon {
+                attention_id,
+                queue,
+            } => {
+                assert_eq!(attention_id, Some(42));
+                assert!(queue);
+            }
+            _ => panic!("unexpected tab icon command"),
+        }
+        let mut invalid = request("token", command);
+        invalid.attention_id = Some(0);
+        assert_eq!(decode_control_request(&mut invalid, "token"), None);
+    }
+}
+
+#[test]
+fn tab_icon_reset_control_requests_allow_queue_and_tab_target() {
     assert_eq!(
         decode_control_request(&mut request("token", "reset_tab_icon"), "token"),
-        Some(ControlRequestCommand::ResetTabIcon { queue: false })
+        Some(ControlRequestCommand::ResetTabIcon {
+            attention_id: None,
+            queue: false
+        })
     );
     let mut queued_request = request("token", "reset_tab_icon");
     queued_request.queue = Some(true);
     assert_eq!(
         decode_control_request(&mut queued_request, "token"),
-        Some(ControlRequestCommand::ResetTabIcon { queue: true })
+        Some(ControlRequestCommand::ResetTabIcon {
+            attention_id: None,
+            queue: true
+        })
     );
 
     for mut invalid_request in [
@@ -875,7 +912,7 @@ fn tab_icon_reset_control_requests_only_allow_queue() {
             ..request("token", "reset_tab_icon")
         },
         ControlRequest {
-            attention_id: Some(42),
+            attention_id: Some(0),
             ..request("token", "reset_tab_icon")
         },
     ] {

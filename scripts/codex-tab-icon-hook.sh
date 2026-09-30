@@ -15,6 +15,42 @@ case "$state" in
         ;;
 esac
 
+# WSL's Windows children inherit the environment of the original Windows
+# launcher. Clearing a stale Windows process ID only in this Linux process
+# cannot clear that inherited value. Use the Windows hook, which checks and
+# clears the ID in Windows before sending the request.
+case "${ZETTA_HOST_EXECUTABLE:-}" in
+    *.exe)
+        if [ -n "${WSL_DISTRO_NAME:-}" ] && command -v wslpath >/dev/null 2>&1; then
+            powershell=$(command -v powershell.exe || true)
+            if [ -z "$powershell" ]; then
+                powershell=/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe
+            fi
+            hook_directory=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+            windows_hook="$hook_directory/codex-tab-icon-hook.ps1"
+            if [ -x "$powershell" ] && [ -f "$windows_hook" ]; then
+                # Existing WSL panes may still have one-way /u entries. Pass
+                # this pane's identity back to Windows, replacing inherited
+                # entries rather than appending duplicates with other flags.
+                WSLENV=$(printf '%s\n' "${WSLENV:-}" | awk -F: '
+                    {
+                        for (i = 1; i <= NF; i++) {
+                            split($i, entry, "/")
+                            if ($i != "" && entry[1] != "ZETTA_PROCESS_ID" && entry[1] != "ZETTA_ATTENTION_ID") {
+                                printf "%s:", $i
+                            }
+                        }
+                        printf "ZETTA_PROCESS_ID:ZETTA_ATTENTION_ID"
+                    }
+                ')
+                export WSLENV
+                windows_hook=$(wslpath -w "$windows_hook") &&
+                    exec "$powershell" -NoProfile -ExecutionPolicy Bypass -File "$windows_hook" "$state"
+            fi
+        fi
+        ;;
+esac
+
 # UserPromptSubmit does not expose collaboration mode. Use the transcript as
 # a best-effort bridge, and only trust a plan record for the current turn.
 transcript_has_plan_with_jq() {
@@ -215,15 +251,18 @@ fi
 
 attempt=1
 invoke_tabicon() {
+    # Hooks have a short deadline, including when WSL calls the Windows host.
+    # Acknowledge queueing rather than waiting for the UI to apply the icon,
+    # matching the PowerShell hook.
     if [ "$state" = reset ]; then
-        "$zetta_command" tabicon --reset
+        "$zetta_command" tabicon --queue --reset
     else
-        "$zetta_command" tabicon "$icon"
+        "$zetta_command" tabicon --queue "$icon"
     fi
 }
 
 while [ "$attempt" -le 5 ]; do
-    if invoke_tabicon >/dev/null 2>&1; then
+    if error=$(invoke_tabicon 2>&1); then
         exit 0
     fi
     if [ "$attempt" -lt 5 ]; then
@@ -233,5 +272,8 @@ while [ "$attempt" -le 5 ]; do
 done
 
 warn "could not update the Zetta tab icon"
+if [ -n "$error" ]; then
+    warn "$error"
+fi
 
 exit 0

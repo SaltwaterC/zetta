@@ -133,12 +133,12 @@ fn help_text_uses_title_case_and_lists_built_in_features() {
     }
     assert!(help.contains("zetta tabicon [OPTIONS] ICON"));
     assert!(help.contains("zetta tabicon --reset"));
-    assert!(help.contains("Set the active tab's icon override"));
+    assert!(help.contains("Set the originating tab's icon override"));
     assert!(tab_icon_help().contains("per-tab icon override"));
     assert!(tab_icon_help().contains("--reset"));
     assert!(tab_icon_help().contains("-q, --queue"));
     assert!(tab_icon_help().contains("zetta tabicon [--queue] --reset"));
-    assert!(tab_icon_help().contains("active project's effective icon"));
+    assert!(tab_icon_help().contains("originating tab's project icon"));
     assert!(tab_icon_help().contains("never written to user or project configuration"));
     assert!(help.contains("zetta attention [OPTIONS] [SUMMARY] [BODY]"));
     assert!(help.contains("Mark the originating tab as needing attention"));

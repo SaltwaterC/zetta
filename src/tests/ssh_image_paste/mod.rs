@@ -538,7 +538,7 @@ mod process_tests {
             ]),
         );
 
-        let output = run_ssh_process(
+        let output = run_image_paste_process(
             spec,
             b"\x89PNG\r\n\x1a\nimage".to_vec(),
             Duration::from_secs(5),
@@ -555,7 +555,7 @@ mod process_tests {
     #[test]
     fn auxiliary_ssh_processes_have_a_hard_timeout() {
         let executable = temporary_executable("#!/bin/sh\nexec sleep 2\n");
-        let error = run_ssh_process(
+        let error = run_image_paste_process(
             fake_spec(&executable.0, HashMap::new()),
             Vec::new(),
             Duration::from_millis(40),

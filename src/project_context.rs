@@ -710,16 +710,20 @@ impl Zetta {
         }
     }
 
-    pub(crate) fn reset_active_project_tab_icon(&mut self) -> bool {
+    pub(crate) fn reset_project_tab_icon_at(&mut self, tab_index: usize) -> bool {
         let default_tab_icon = self.launch_config.default_tab_icon;
-        let project = self.active_project_config().cloned();
+        let project = self
+            .tabs
+            .get(tab_index)
+            .and_then(|tab| self.project_config_for_tab(tab.id))
+            .cloned();
         let policy = self
             .tabs
-            .get(self.active_tab)
+            .get(tab_index)
             .map_or(ProjectContextPolicy::Local, |tab| {
                 self.project_context_policy(tab.id)
             });
-        let Some(tab) = self.tabs.get_mut(self.active_tab) else {
+        let Some(tab) = self.tabs.get_mut(tab_index) else {
             return false;
         };
         if policy.is_remote() {

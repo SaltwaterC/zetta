@@ -106,20 +106,8 @@ fn dispatch(command: ProcessControlCommand, cx: &mut AsyncApp) {
         } => {
             let _ = completion.send(cx.update(|cx| list_pane_labels(attention_id, cx)));
         }
-        ProcessControlCommand::SetTabIcon { icon, completion } => {
-            let _ = completion.send(cx.update(|cx| {
-                with_any_window(cx, |zetta, _, cx| {
-                    zetta.set_active_tab_icon_from_cli(icon, cx)
-                })
-                .unwrap_or(false)
-            }));
-        }
-        ProcessControlCommand::ResetTabIcon { completion } => {
-            let _ = completion.send(cx.update(|cx| {
-                with_any_window(cx, |zetta, _, cx| zetta.reset_active_tab_icon_from_cli(cx))
-                    .unwrap_or(false)
-            }));
-        }
+        command @ (ProcessControlCommand::SetTabIcon { .. }
+        | ProcessControlCommand::ResetTabIcon { .. }) => dispatch_tab_icon_command(command, cx),
         ProcessControlCommand::SetTheme {
             scope,
             theme,
@@ -293,6 +281,57 @@ fn with_any_window<T>(
     gpui::WindowHandle::<Zetta>::new(window_id)
         .update(cx, handler)
         .ok()
+}
+
+fn dispatch_tab_icon_command(command: ProcessControlCommand, cx: &mut AsyncApp) {
+    match command {
+        ProcessControlCommand::SetTabIcon {
+            attention_id,
+            icon,
+            completion,
+        } => {
+            let _ = completion.send(cx.update(|cx| {
+                with_tab_icon_target(attention_id, cx, |zetta, cx| {
+                    zetta.set_tab_icon_from_cli(attention_id, icon, cx)
+                })
+            }));
+        }
+        ProcessControlCommand::ResetTabIcon {
+            attention_id,
+            completion,
+        } => {
+            let _ = completion.send(cx.update(|cx| {
+                with_tab_icon_target(attention_id, cx, |zetta, cx| {
+                    zetta.reset_tab_icon_from_cli(attention_id, cx)
+                })
+            }));
+        }
+        _ => unreachable!("only tab icon commands are dispatched here"),
+    }
+}
+
+/// A hook addresses its own visible tab without changing window or tab focus.
+/// A missing explicit target must never fall back to another active tab.
+fn with_tab_icon_target(
+    attention_id: Option<u64>,
+    cx: &mut App,
+    handler: impl FnOnce(&mut Zetta, &mut Context<Zetta>) -> bool,
+) -> bool {
+    if !accepting_control_requests(cx) {
+        return false;
+    }
+    if let Some(attention_id) = attention_id {
+        for entity in process_zetta_entities(cx) {
+            if entity
+                .read(cx)
+                .has_visible_tab_by_attention_id(attention_id)
+            {
+                return entity.update(cx, handler);
+            }
+        }
+        return false;
+    }
+    with_any_window(cx, |zetta, _, cx| handler(zetta, cx)).unwrap_or(false)
 }
 
 #[cfg(windows)]

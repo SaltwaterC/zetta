@@ -197,8 +197,8 @@ fn allowed_control_fields(command: &str) -> Option<ControlFields> {
         }
         "reconnect_session" => RUNNER_ID | SESSION_ID | SECRET | ATTENTION_ID,
         "resume_disk_session" => SESSION_ID | SECRET | CONFIG_PATH,
-        "set_tab_icon" => UNREAD_STYLE | QUEUE,
-        "reset_tab_icon" => QUEUE,
+        "set_tab_icon" => UNREAD_STYLE | QUEUE | ATTENTION_ID,
+        "reset_tab_icon" => QUEUE | ATTENTION_ID,
         "set_theme" => UNREAD_STYLE | SCOPE,
         "list_themes" => {
             PANE_OVERLAY
@@ -534,18 +534,28 @@ fn decode_session_command(request: &mut ControlRequest) -> Option<ControlRequest
 fn decode_appearance_command(request: &mut ControlRequest) -> Option<ControlRequestCommand> {
     match request.command.as_str() {
         "set_tab_icon" => {
+            if request.attention_id == Some(0) {
+                return None;
+            }
             let icon = match request.icon.take() {
                 Some(icon) => Some(icon.parse().ok()?),
                 None => None,
             };
             Some(ControlRequestCommand::SetTabIcon {
+                attention_id: request.attention_id.take(),
                 icon,
                 queue: request.queue.take().unwrap_or(false),
             })
         }
-        "reset_tab_icon" => Some(ControlRequestCommand::ResetTabIcon {
-            queue: request.queue.take().unwrap_or(false),
-        }),
+        "reset_tab_icon" => {
+            if request.attention_id == Some(0) {
+                return None;
+            }
+            Some(ControlRequestCommand::ResetTabIcon {
+                attention_id: request.attention_id.take(),
+                queue: request.queue.take().unwrap_or(false),
+            })
+        }
         "set_theme" => {
             let scope = match request.scope.take()?.as_str() {
                 "pane" => crate::ThemeScope::Pane,

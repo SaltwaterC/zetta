@@ -291,7 +291,11 @@ honours neither `Window::request_autoscroll` nor `ScrollHandle::scroll_to_item`)
   through a second, batch-mode SSH connection and pastes the resulting remote
   path. A Mosh session reaches the same problem differently: `zosh` is launcher
   and client in one process, so its argument vector still names the SSH command
-  and target it bootstrapped through
+  and target it bootstrapped through. The Windows-only
+  `ssh_image_paste/wsl.rs` fallback stages otherwise-local images inside the
+  WSL profile's distribution and user, since its applications cannot read the
+  Windows image clipboard; both routes share the ordered input worker and
+  asynchronous staging cleanup
 - `image_paste.rs`: clipboard image validation and PNG normalization shared by
   the image stores
 

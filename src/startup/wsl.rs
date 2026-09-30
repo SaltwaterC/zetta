@@ -25,7 +25,6 @@ fn add_wslenv_entry(wslenv: &mut String, variable: &str) {
     wslenv.push_str(variable);
 }
 
-#[cfg(windows)]
 fn set_wslenv_entry(wslenv: &mut String, variable: &str) {
     let name = variable.split('/').next().unwrap();
     let inherited = std::mem::take(wslenv);
@@ -59,14 +58,18 @@ where
         .or_else(|| env::var("WSLENV").ok())
         .unwrap_or_default();
 
+    // Host CLI requests must carry the current pane's IDs back to Windows.
+    // /u alone leaves Windows children with the WSL launcher's inherited IDs,
+    // which can belong to a different tab or an older Zetta process.
     for variable in [
-        "ZETTA_PROCESS_ID/u",
-        "ZETTA_ATTENTION_ID/u",
-        "ZETTA_PANE_ID/u",
-        "ZETTA_PANE_ROUTING_ID/u",
-        "ZETTA_THEME/u",
-        "ZETTA_NO_MUX/u",
+        "ZETTA_PROCESS_ID",
+        "ZETTA_ATTENTION_ID",
+        "ZETTA_PANE_ID",
+        "ZETTA_PANE_ROUTING_ID",
     ] {
+        set_wslenv_entry(&mut wslenv, variable);
+    }
+    for variable in ["ZETTA_THEME/u", "ZETTA_NO_MUX/u"] {
         add_wslenv_entry(&mut wslenv, variable);
     }
 

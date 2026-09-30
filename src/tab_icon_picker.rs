@@ -188,29 +188,36 @@ impl Zetta {
         self.open_tab_icon_picker(self.active_tab, window, cx);
     }
 
-    pub(crate) fn set_active_tab_icon_from_cli(
+    pub(crate) fn set_tab_icon_from_cli(
         &mut self,
+        attention_id: Option<u64>,
         icon: Option<IconName>,
         cx: &mut Context<Self>,
     ) -> bool {
-        let tab_id = self.tabs.get(self.active_tab).map(|tab| tab.id);
-        let Some(tab) = self.tabs.get_mut(self.active_tab) else {
+        let Some(index) = tab_icon_target_index(&self.tabs, self.active_tab, attention_id) else {
             return false;
         };
+        let tab = &mut self.tabs[index];
+        let tab_id = tab.id;
         tab.set_icon_override(icon);
-        if let Some(tab_id) = tab_id {
-            self.sync_shared_tab_state(tab_id, cx);
-        }
+        self.sync_shared_tab_state(tab_id, cx);
         cx.notify();
         true
     }
 
-    pub(crate) fn reset_active_tab_icon_from_cli(&mut self, cx: &mut Context<Self>) -> bool {
-        let reset = self.reset_active_project_tab_icon();
+    pub(crate) fn reset_tab_icon_from_cli(
+        &mut self,
+        attention_id: Option<u64>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(index) = tab_icon_target_index(&self.tabs, self.active_tab, attention_id) else {
+            return false;
+        };
+        let reset = self.reset_project_tab_icon_at(index);
         if !reset {
             return false;
         }
-        if let Some(tab_id) = self.tabs.get(self.active_tab).map(|tab| tab.id) {
+        if let Some(tab_id) = self.tabs.get(index).map(|tab| tab.id) {
             self.sync_shared_tab_state(tab_id, cx);
         }
         cx.notify();
@@ -470,6 +477,18 @@ impl Zetta {
         } else {
             cx.notify();
         }
+    }
+}
+
+/// Resolve a hook's originating tab; only callers without a tab ID use focus.
+fn tab_icon_target_index(
+    tabs: &[Tab],
+    active_tab: usize,
+    attention_id: Option<u64>,
+) -> Option<usize> {
+    match attention_id {
+        Some(attention_id) => tabs.iter().position(|tab| tab.attention_id == attention_id),
+        None => (active_tab < tabs.len()).then_some(active_tab),
     }
 }
 

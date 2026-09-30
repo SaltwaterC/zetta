@@ -196,7 +196,10 @@ pub(crate) fn help_text(profiles: &[Profile]) -> String {
             "Create, integrate, synchronize, configure, or abort Git worktrees",
         ),
         ("splits", "List configured pane split templates"),
-        ("tabicon", "Set the active tab's icon override or reset it"),
+        (
+            "tabicon",
+            "Set the originating tab's icon override or reset it",
+        ),
         (
             "theme",
             "Non-persistently change the active pane or tab's theme",
@@ -447,7 +450,7 @@ pub(crate) fn tab_icon_help() -> String {
         ("-h, --help", "Print help"),
     ]);
     format!(
-        "Set the active tab's per-tab icon override through the running Zetta process\n\nUsage: zetta tabicon [OPTIONS] ICON\n       zetta tabicon [--queue] --reset\n       zetta tabicon --list\n\nICON is a built-in icon name. Use none to explicitly hide the icon. Use --reset to clear the explicit override and use the active project's effective icon, or the configured application default outside a project and in remote sessions. The choice remains with the logical tab across project changes and background/shared-session handoffs, and is never written to user or project configuration. By default this command waits for application acknowledgment; --queue returns once Zetta accepts the request into its command queue. The icon list is fetched dynamically with --list.\n\nOptions:\n{options}"
+        "Set the originating tab's per-tab icon override through the running Zetta process\n\nUsage: zetta tabicon [OPTIONS] ICON\n       zetta tabicon [--queue] --reset\n       zetta tabicon --list\n\nICON is a built-in icon name. Use none to explicitly hide the icon. Use --reset to clear the explicit override and use the originating tab's project icon, or the configured application default outside a project and in remote sessions. Requests from a Zetta pane target that pane's tab, even when another tab or window is active; requests without a pane identity use an active tab. The choice remains with the logical tab across project changes and background/shared-session handoffs, and is never written to user or project configuration. By default this command waits for application acknowledgment; --queue returns once Zetta accepts the request into its command queue. The icon list is fetched dynamically with --list.\n\nOptions:\n{options}"
     )
 }
 

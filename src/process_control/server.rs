@@ -429,16 +429,30 @@ fn apply_appearance_command(
     response: &mut ControlResponse,
 ) -> &'static str {
     match command {
-        ControlRequestCommand::SetTabIcon { icon, queue } => {
-            let build = |completion| ProcessControlCommand::SetTabIcon { icon, completion };
+        ControlRequestCommand::SetTabIcon {
+            attention_id,
+            icon,
+            queue,
+        } => {
+            let build = |completion| ProcessControlCommand::SetTabIcon {
+                attention_id,
+                icon,
+                completion,
+            };
             if queue {
                 dispatch.queue(build)
             } else {
                 dispatch.send(build)
             }
         }
-        ControlRequestCommand::ResetTabIcon { queue } => {
-            let build = |completion| ProcessControlCommand::ResetTabIcon { completion };
+        ControlRequestCommand::ResetTabIcon {
+            attention_id,
+            queue,
+        } => {
+            let build = |completion| ProcessControlCommand::ResetTabIcon {
+                attention_id,
+                completion,
+            };
             if queue {
                 dispatch.queue(build)
             } else {

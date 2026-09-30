@@ -252,9 +252,10 @@ integration.
 Tab names follow the active terminal process. Press `Ctrl-Shift-R` or double-click
 a tab to set a persistent name. Use `Ctrl-Shift-Y` or the tab context menu
 to choose a tab icon. Submit an empty name to resume automatic naming.
-From a Zetta pane, `zetta tabicon ICON` changes the active tab icon;
+From a Zetta pane, `zetta tabicon ICON` changes that pane's tab icon,
+even when another tab is active;
 `zetta tabicon none` explicitly hides it, and `zetta tabicon --reset` (or `-r`)
-clears the override so the active project's icon, or the configured application
+clears the override so that tab's project icon, or the configured application
 default outside a project and in remote sessions, is used. `zetta tabicon --list` prints the available
 built-in icon names.
 Add `-q` or `--queue` when setting or resetting an icon to return once Zetta
@@ -834,8 +835,13 @@ image, not a description of it. What that means depends on where the pane's
 process is running, because a program on another machine cannot read this
 desktop's clipboard:
 
-- A **local** pane receives the native image-paste chord, so a terminal
+- A **native local** pane receives the native image-paste chord, so a terminal
   application reads the clipboard itself, as it would under any terminal.
+- A **WSL profile on Windows** writes the image into a private temporary
+  directory inside that profile's distribution and pastes its Linux path.
+  This lets applications such as Codex use the Windows clipboard image without
+  reading the Linux clipboard. The profile's distribution and user are
+  preserved, and staged images are removed when the pane closes.
 - A pane running **`ssh`** gets the image uploaded over a second, batch-mode SSH
   connection to the same target, into a private temporary directory there. What
   is pasted is the remote path. The directory is removed when the pane closes.

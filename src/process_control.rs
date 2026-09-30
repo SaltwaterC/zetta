@@ -122,7 +122,9 @@ pub(crate) use server::ProcessControlServer;
 /// send them asks for the same SSH byte stream every earlier client did.
 /// 6 adds an optional SSH-agent forwarding override, whose absence preserves
 /// the configured default.
-pub(crate) const CONTROL_VERSION: u32 = 6;
+/// 7 lets tab-icon set and reset requests address their originating tab by
+/// attention ID, so background shell hooks cannot change another active tab.
+pub(crate) const CONTROL_VERSION: u32 = 7;
 // A 64 KiB argv payload can expand substantially when it contains many
 // one-character arguments and each value is represented as JSON. Keep enough
 // framing headroom for that worst case as well as the endpoint token.
@@ -292,10 +294,12 @@ pub(crate) enum ProcessControlCommand {
         completion: Sender<ReconnectSessionResult>,
     },
     SetTabIcon {
+        attention_id: Option<u64>,
         icon: Option<IconName>,
         completion: Sender<bool>,
     },
     ResetTabIcon {
+        attention_id: Option<u64>,
         completion: Sender<bool>,
     },
     SetTheme {
@@ -406,10 +410,12 @@ enum ControlRequestCommand {
         secret: Option<SessionSecret>,
     },
     SetTabIcon {
+        attention_id: Option<u64>,
         icon: Option<IconName>,
         queue: bool,
     },
     ResetTabIcon {
+        attention_id: Option<u64>,
         queue: bool,
     },
     SetTheme {

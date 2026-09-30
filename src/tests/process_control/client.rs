@@ -68,11 +68,17 @@ fn control_server_delivers_a_token_authenticated_tab_icon_reset_request() {
         serde_json::from_slice(&fs::read(endpoint_path).unwrap()).unwrap();
     assert_eq!(endpoint.version, CONTROL_VERSION);
 
-    let client = thread::spawn(move || send_reset_tab_icon_request(&endpoint, false).unwrap());
+    let client =
+        thread::spawn(move || send_reset_tab_icon_request(&endpoint, Some(42), false).unwrap());
     let command = futures::executor::block_on(received.next()).unwrap();
-    let ProcessControlCommand::ResetTabIcon { completion } = command else {
+    let ProcessControlCommand::ResetTabIcon {
+        attention_id,
+        completion,
+    } = command
+    else {
         panic!("unexpected process control command");
     };
+    assert_eq!(attention_id, Some(42));
     assert!(
         !client.is_finished(),
         "default tabicon should wait for UI completion"
@@ -92,18 +98,27 @@ fn queued_tab_icons_acknowledge_before_ui_completion_and_keep_request_order() {
 
     // Leave the application's completion channels unanswered. Both requests
     // must still return, and the application sees the set before the reset.
-    assert!(send_set_tab_icon_request(&endpoint, Some(IconName::Terminal), true).unwrap());
-    assert!(send_reset_tab_icon_request(&endpoint, true).unwrap());
+    assert!(
+        send_set_tab_icon_request(&endpoint, Some(42), Some(IconName::Terminal), true).unwrap()
+    );
+    assert!(send_reset_tab_icon_request(&endpoint, Some(43), true).unwrap());
     let first = futures::executor::block_on(received.next()).unwrap();
     let second = futures::executor::block_on(received.next()).unwrap();
     assert!(matches!(
         first,
         ProcessControlCommand::SetTabIcon {
+            attention_id: Some(42),
             icon: Some(IconName::Terminal),
             ..
         }
     ));
-    assert!(matches!(second, ProcessControlCommand::ResetTabIcon { .. }));
+    assert!(matches!(
+        second,
+        ProcessControlCommand::ResetTabIcon {
+            attention_id: Some(43),
+            ..
+        }
+    ));
 }
 
 #[test]
@@ -115,8 +130,10 @@ fn queued_tab_icon_reports_an_unavailable_endpoint() {
         socket_path: directory.path().join("missing.sock"),
         token: "token".to_owned(),
     };
-    assert!(send_set_tab_icon_request(&endpoint, Some(IconName::Terminal), true).is_err());
-    assert!(send_reset_tab_icon_request(&endpoint, true).is_err());
+    assert!(
+        send_set_tab_icon_request(&endpoint, Some(42), Some(IconName::Terminal), true).is_err()
+    );
+    assert!(send_reset_tab_icon_request(&endpoint, Some(43), true).is_err());
 }
 
 #[test]

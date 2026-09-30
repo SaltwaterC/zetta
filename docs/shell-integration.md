@@ -146,9 +146,22 @@ the integration was generated is therefore available without rerunning
 Tab-icon completion is dynamic too: completing `zetta tabicon` runs
 `zetta tabicon --list` at completion time, so the generated script does not
 embed the built-in icon list. Use `zetta tabicon ICON` (or
-`zetta tabicon --icon ICON`) from a Zetta pane; `none` hides the active tab
-icon. Use `zetta tabicon --reset` (or `-r`) to clear that explicit override;
+`zetta tabicon --icon ICON`) from a Zetta pane; `none` hides that pane's tab
+icon. Set and reset requests target the invoking pane's tab, so hooks in a
+background tab cannot change the tab you are viewing. Use `zetta tabicon --reset`
+(or `-r`) to clear that explicit override;
 completion stops suggesting icon names after reset.
+
+The repository's `.codex/hooks.json` uses `ai_open_ai` while Codex is idle,
+`ai_open_ai_compat` during a regular turn, and `ai_open_ai_gpt_sub` during a
+planning turn. When running Codex in multiple Zetta tabs, launch each session
+with `codex --no-daemon`, or resume it with `codex resume --no-daemon`.
+Codex's shared app-server daemon runs hooks with its own startup environment,
+so it can retain an old `ZETTA_PROCESS_ID` and give every session the same
+`ZETTA_ATTENTION_ID`. Restarting only the CLI does not refresh those values.
+The installed Codex 0.159.2 CLI's `--no-daemon` option uses a server belonging
+to that CLI, even when the shared daemon is already running, so each hook
+inherits its originating tab's identity.
 
 Theme completion works the same way: completing `zetta theme pane` or
 `zetta theme tab` runs `zetta theme <scope> --list` at completion time against

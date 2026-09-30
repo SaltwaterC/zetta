@@ -313,7 +313,7 @@ fn shares_attention_target_environment_with_wsl() {
     assert_eq!(
         environment.get("WSLENV").map(String::as_str),
         Some(
-            "ZETTA_PROCESS_ID/u:ZETTA_ATTENTION_ID/u:ZETTA_PANE_ID/u:ZETTA_PANE_ROUTING_ID/u:ZETTA_THEME/u:ZETTA_NO_MUX/u",
+            "ZETTA_PROCESS_ID:ZETTA_ATTENTION_ID:ZETTA_PANE_ID:ZETTA_PANE_ROUTING_ID:ZETTA_THEME/u:ZETTA_NO_MUX/u",
         )
     );
 }
@@ -330,9 +330,37 @@ fn preserves_existing_wslenv_entries_without_duplicates() {
     assert_eq!(
         environment.get("WSLENV").map(String::as_str),
         Some(
-            "PATH/l:ZETTA_PROCESS_ID/l:USER/u:ZETTA_ATTENTION_ID/u:ZETTA_PANE_ID/u:ZETTA_PANE_ROUTING_ID/u:ZETTA_THEME/u:ZETTA_NO_MUX/u",
+            "PATH/l:ZETTA_PROCESS_ID:USER/u:ZETTA_ATTENTION_ID:ZETTA_PANE_ID:ZETTA_PANE_ROUTING_ID:ZETTA_THEME/u:ZETTA_NO_MUX/u",
         )
     );
+}
+
+#[test]
+fn wsl_routing_ids_override_one_way_or_translated_entries_without_duplicates() {
+    let mut environment = HashMap::from([(
+        "WSLENV".to_owned(),
+        "USER/u:ZETTA_PROCESS_ID/u:ZETTA_ATTENTION_ID/up:ZETTA_PROCESS_ID/l:ZETTA_PANE_ID/w:ZETTA_PANE_ROUTING_ID/p".to_owned(),
+    )]);
+    add_wsl_environment_variables(&mut environment);
+    let entries = environment["WSLENV"].split(':').collect::<Vec<_>>();
+    for name in [
+        "ZETTA_PROCESS_ID",
+        "ZETTA_ATTENTION_ID",
+        "ZETTA_PANE_ID",
+        "ZETTA_PANE_ROUTING_ID",
+    ] {
+        let matching = entries
+            .iter()
+            .copied()
+            .filter(|entry| entry.split('/').next() == Some(name))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            matching,
+            [name],
+            "routing IDs must travel unchanged in both directions"
+        );
+    }
+    assert!(entries.contains(&"USER/u"));
 }
 
 #[test]
@@ -398,7 +426,7 @@ fn wsl_environment_normalizes_the_host_executable_wslenv_entry_once() {
     assert_eq!(
         environment.get("WSLENV").map(String::as_str),
         Some(
-            "ZETTA_HOST_EXECUTABLE/up:USER/u:ZETTA_PROCESS_ID/u:ZETTA_ATTENTION_ID/u:ZETTA_PANE_ID/u:ZETTA_PANE_ROUTING_ID/u:ZETTA_THEME/u:ZETTA_NO_MUX/u",
+            "ZETTA_HOST_EXECUTABLE/up:USER/u:ZETTA_PROCESS_ID:ZETTA_ATTENTION_ID:ZETTA_PANE_ID:ZETTA_PANE_ROUTING_ID:ZETTA_THEME/u:ZETTA_NO_MUX/u",
         )
     );
     assert_eq!(

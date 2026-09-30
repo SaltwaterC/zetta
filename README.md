@@ -21,6 +21,8 @@ enabled in that tab's menu; it is off by default.
 - Automatically detected shells, including Homebrew-installed shells on
   macOS and Linux, plus first-class WSL/MSYS2/Cygwin profiles with working
   directory tracking
+- Image paste into Windows WSL profiles stages a PNG inside the selected
+  distribution and pastes its Linux path for applications such as Codex
 - Detachable background sessions, held by the `zmux` multiplexer so they
   outlive Zetta itself,
   with retained diagnostics for unexpected terminal exits
@@ -204,8 +206,9 @@ On macOS, `zntfy` in a packaged Zetta app submits through the app's main
 executable so notifications retain Zetta's icon and click-to-tab routing.
 An unbundled development build uses the script host and cannot route clicks.
 From a Zetta pane, `zetta tabicon ICON` sets a per-tab icon override on the
-active tab (`none` explicitly hides its icon); `zetta tabicon --reset` (or `-r`)
-clears that override so the active project's effective icon, or the configured
+originating tab, even when another tab is active (`none` explicitly hides its
+icon); `zetta tabicon --reset` (or `-r`) clears that override so the tab's
+project's effective icon, or the configured
 application default outside a project and in remote sessions, is used. The choice is kept with the
 logical tab but is not written to user or project configuration.
 Add `-q` or `--queue` to either tab icon change to return as soon as Zetta
