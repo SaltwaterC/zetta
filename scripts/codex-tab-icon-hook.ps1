@@ -1,5 +1,6 @@
 param(
-    [string] $State = ""
+    [string] $State = "",
+    [string] $WslDistribution = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -33,6 +34,20 @@ function Get-PropertyValue {
     return $property.Value
 }
 
+function ConvertTo-HostTranscriptPath {
+    param(
+        [string] $Path,
+        [string] $Distribution
+    )
+
+    if (-not [string]::IsNullOrWhiteSpace($Distribution) -and
+        $Path.StartsWith('/') -and -not $Path.StartsWith('//')) {
+        return "\\wsl.localhost\$Distribution" + $Path.Replace('/', '\')
+    }
+
+    return $Path
+}
+
 # UserPromptSubmit does not expose collaboration mode. Use the transcript as
 # a best-effort bridge, and only trust a plan record for the current turn.
 function Test-TranscriptPlanMode {
@@ -50,6 +65,9 @@ function Test-TranscriptPlanMode {
     $reader = $null
     $stream = $null
     try {
+        # WSL passes a Linux path in the JSON payload. Windows can read the
+        # same file through the distribution's UNC share, without spawning WSL.
+        $TranscriptPath = ConvertTo-HostTranscriptPath $TranscriptPath $WslDistribution
         if (-not (Test-Path -LiteralPath $TranscriptPath -PathType Leaf)) {
             return $false
         }

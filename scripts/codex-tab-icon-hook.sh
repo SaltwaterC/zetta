@@ -45,7 +45,7 @@ case "${ZETTA_HOST_EXECUTABLE:-}" in
                 ')
                 export WSLENV
                 windows_hook=$(wslpath -w "$windows_hook") &&
-                    exec "$powershell" -NoProfile -ExecutionPolicy Bypass -File "$windows_hook" "$state"
+                    exec "$powershell" -NoProfile -ExecutionPolicy Bypass -File "$windows_hook" "$state" -WslDistribution "$WSL_DISTRO_NAME"
             fi
         fi
         ;;

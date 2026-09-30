@@ -1,5 +1,6 @@
 param(
-    [string] $HookPath = (Join-Path $PSScriptRoot 'codex-tab-icon-hook.ps1')
+    [string] $HookPath = (Join-Path $PSScriptRoot 'codex-tab-icon-hook.ps1'),
+    [string] $WslDistribution = ""
 )
 
 $ErrorActionPreference = 'Stop'
@@ -12,18 +13,24 @@ $transcript = [IO.Path]::GetTempFileName()
 $originalExecutable = $env:ZETTA_HOST_EXECUTABLE
 $originalProcessId = $env:ZETTA_PROCESS_ID
 $originalOutput = $env:ZETTA_HOOK_TEST_OUTPUT
+$wslTemporary = $null
 
 function Assert-PromptIcon {
     param(
         [hashtable] $Payload,
         [string] $Icon,
-        [string] $Description
+        [string] $Description,
+        [string] $Distribution = ""
     )
 
     # Clear the last result so a hook that never invokes Zetta cannot pass.
     Set-Content -LiteralPath $output -Value ''
+    $arguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $hook, 'prompt')
+    if (-not [string]::IsNullOrWhiteSpace($Distribution)) {
+        $arguments += @('-WslDistribution', $Distribution)
+    }
     $Payload | ConvertTo-Json -Compress |
-        powershell.exe -NoProfile -ExecutionPolicy Bypass -File $hook prompt
+        powershell.exe @arguments
     if ($LASTEXITCODE -ne 0 -or
         (Get-Content -LiteralPath $output -Raw).Trim() -ne "$PID|tabicon --queue $Icon") {
         throw $Description
@@ -87,6 +94,39 @@ exit /b 0
             $writer.Dispose()
         }
     }
+    if (-not [string]::IsNullOrWhiteSpace($WslDistribution)) {
+        $directoryName = 'zetta-hook-' + [Guid]::NewGuid().ToString('N')
+        $wslTemporary = "\\wsl.localhost\$WslDistribution\tmp\$directoryName"
+        New-Item -ItemType Directory -Path $wslTemporary | Out-Null
+        $wslTranscript = Join-Path $wslTemporary 'planning transcript.jsonl'
+        $wslPrompt = @{
+            hook_event_name = 'UserPromptSubmit'
+            permission_mode = 'default'
+            transcript_path = "/tmp/$directoryName/planning transcript.jsonl"
+            turn_id = 'current-turn'
+        }
+        Set-Content -LiteralPath $wslTranscript -Encoding UTF8 -Value @(
+            '{"payload":{"type":"task_started","turn_id":"earlier-turn","collaboration_mode_kind":"plan"}}'
+            'malformed JSON'
+            '{"payload":{"type":"task_started","turn_id":"current-turn","collaboration_mode_kind":"default"}}'
+            '{"payload":'
+        )
+        Assert-PromptIcon $wslPrompt 'ai_open_ai_compat' 'An earlier WSL Plan turn changed the current regular turn icon.' $WslDistribution
+        Add-Content -LiteralPath $wslTranscript -Encoding UTF8 -Value @(
+            '{"payload":{"type":"task_started","turn_id":"current-turn","collaboration_mode_kind":"plan"}}'
+            '{"payload":'
+        )
+        Assert-PromptIcon $wslPrompt 'ai_open_ai_gpt_sub' 'A Linux transcript path with spaces did not select the planning icon.' $WslDistribution
+        $wslPrompt.transcript_path = $wslTranscript
+        Assert-PromptIcon $wslPrompt 'ai_open_ai_gpt_sub' 'An existing UNC transcript path was changed by WSL translation.' $WslDistribution
+        $wslPrompt.transcript_path = $transcript
+        Assert-PromptIcon $wslPrompt 'ai_open_ai_gpt_sub' 'A native Windows transcript path was changed by WSL translation.' $WslDistribution
+        $wslPrompt.transcript_path = "/tmp/$directoryName/missing.jsonl"
+        Assert-PromptIcon $wslPrompt 'ai_open_ai_compat' 'A missing WSL transcript did not select the regular working icon.' $WslDistribution
+        $wslPrompt.transcript_path = "/tmp/$directoryName/planning transcript.jsonl"
+        $wslPrompt.turn_id = 'missing-turn'
+        Assert-PromptIcon $wslPrompt 'ai_open_ai_compat' 'A WSL transcript without the current turn selected the planning icon.' $WslDistribution
+    }
     & $hook reset
     if ((Get-Content -LiteralPath $output -Raw).Trim() -ne "$PID|tabicon --queue --reset") {
         throw 'The session-end hook did not queue the icon reset.'
@@ -96,4 +136,9 @@ exit /b 0
     $env:ZETTA_PROCESS_ID = $originalProcessId
     $env:ZETTA_HOOK_TEST_OUTPUT = $originalOutput
     Remove-Item -LiteralPath $temporaryFile, $fakeZetta, $output, $transcript -ErrorAction SilentlyContinue
+    if ($null -ne $wslTemporary) {
+        Remove-Item -LiteralPath $wslTemporary -Recurse -Force -ErrorAction SilentlyContinue
+    }
 }
+
+Write-Output 'Codex PowerShell tab-icon hook checks passed.'

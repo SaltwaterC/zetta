@@ -54,22 +54,25 @@ cat > "$temporary/powershell.exe" <<'POWERSHELL'
 printf '%s\n' "$*" > "$ZETTA_HOOK_TEST_OUTPUT"
 cat > "$ZETTA_HOOK_TEST_OUTPUT.payload"
 printf '%s\n' "$WSLENV" > "$ZETTA_HOOK_TEST_OUTPUT.wslenv"
+printf '%s\n' "$@" > "$ZETTA_HOOK_TEST_OUTPUT.arguments"
 POWERSHELL
 chmod +x "$temporary/wslpath" "$temporary/powershell.exe"
 export ZETTA_HOST_EXECUTABLE="$temporary/host.exe"
-export WSL_DISTRO_NAME=Ubuntu
+export WSL_DISTRO_NAME='Ubuntu Development'
 export WSLENV='USER/u:ZETTA_PROCESS_ID/u:ZETTA_ATTENTION_ID/up:ZETTA_PROCESS_ID/l'
 mkdir "$temporary/hook scripts"
 cp "$hook" "$temporary/hook scripts/codex-tab-icon-hook.sh"
 touch "$temporary/hook scripts/codex-tab-icon-hook.ps1"
+payload='{"permission_mode":"default","transcript_path":"/tmp/planning transcript.jsonl","turn_id":"current-turn"}'
 for state in idle prompt reset; do
     rm -f -- "$ZETTA_HOOK_TEST_OUTPUT" "$ZETTA_HOOK_TEST_OUTPUT.payload"
-    printf '%s\n' '{"permission_mode":"plan"}' |
+    printf '%s\n' "$payload" |
         sh "$temporary/hook scripts/codex-tab-icon-hook.sh" "$state"
-    expected="-NoProfile -ExecutionPolicy Bypass -File $temporary/hook scripts/codex-tab-icon-hook.ps1 $state"
+    expected="-NoProfile -ExecutionPolicy Bypass -File $temporary/hook scripts/codex-tab-icon-hook.ps1 $state -WslDistribution $WSL_DISTRO_NAME"
     [ "$(cat "$ZETTA_HOOK_TEST_OUTPUT")" = "$expected" ]
-    [ "$(cat "$ZETTA_HOOK_TEST_OUTPUT.payload")" = '{"permission_mode":"plan"}' ]
+    [ "$(cat "$ZETTA_HOOK_TEST_OUTPUT.payload")" = "$payload" ]
     [ "$(cat "$ZETTA_HOOK_TEST_OUTPUT.wslenv")" = 'USER/u:ZETTA_PROCESS_ID:ZETTA_ATTENTION_ID' ]
+    [ "$(tail -n 1 "$ZETTA_HOOK_TEST_OUTPUT.arguments")" = "$WSL_DISTRO_NAME" ]
 done
 
 printf '%s\n' 'Codex shell tab-icon hook checks passed.'
