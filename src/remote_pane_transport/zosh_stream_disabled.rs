@@ -50,10 +50,14 @@ pub(super) fn bootstrap(
     _forward_agent: bool,
     _session_id: u64,
     _secret: Option<&SessionSecret>,
-    _mux_pane_ids: &[u64],
-) -> (HashMap<u64, ZoshPaneStream>, Vec<String>) {
+    mux_pane_ids: &[u64],
+) -> (HashMap<u64, ZoshPaneStream>, Vec<(u64, String)>) {
+    let reason = "This build has no bundled Zosh client, so the pane stayed on SSH.";
     (
         HashMap::new(),
-        vec!["This build has no bundled Zosh client, so the panes stayed on SSH.".to_owned()],
+        mux_pane_ids
+            .iter()
+            .map(|mux_pane_id| (*mux_pane_id, reason.to_owned()))
+            .collect(),
     )
 }

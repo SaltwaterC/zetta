@@ -26,6 +26,30 @@ use crate::remote_pane_transport::{
     ZoshPaneEntry, ZoshPaneHandle, ZoshPaneStream, ZoshTerminalParts,
 };
 
+impl Zetta {
+    /// Marks a pane of a Zosh session as carried over SSH instead, and says
+    /// why, for a pane that arrived on its own rather than with an attach —
+    /// which reports its fallbacks together once the tab is built.
+    pub(crate) fn note_transport_fallback(
+        &mut self,
+        tab_id: u64,
+        pane_id: u64,
+        reason: &str,
+        cx: &mut Context<Self>,
+    ) {
+        log::warn!("remote pane transport fell back: {reason}");
+        if let Some(pane) = self
+            .tabs
+            .iter_mut()
+            .find(|tab| tab.id == tab_id)
+            .and_then(|tab| tab.pane_mut(pane_id))
+        {
+            pane.transport_fallback = Some(reason.to_owned().into());
+        }
+        self.show_notice(reason.to_owned(), cx);
+    }
+}
+
 /// What building a Mosh-carried pane needs that is not the stream itself.
 ///
 /// A bundle because two paths build one — a session being attached, and a pane

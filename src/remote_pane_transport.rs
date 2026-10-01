@@ -168,22 +168,26 @@ impl RemotePaneTransport {
 
 /// The panes a bootstrap put on Mosh, and what happened to the ones it could
 /// not.
+///
+/// A reason is kept against the pane it is about, because a pane that fell
+/// back is marked as being on SSH for as long as it is shown: a one-off notice
+/// is gone before anyone wonders why one pane of a Zosh session stalls with
+/// the SSH forward while its neighbours roam.
 #[derive(Default)]
 pub(crate) struct RemotePaneStreams {
     streams: HashMap<u64, ZoshPaneStream>,
-    fallbacks: Vec<String>,
+    fallbacks: Vec<(u64, String)>,
 }
 
 impl RemotePaneStreams {
-    /// The streams for a single pane, for one that arrived on its own rather
-    /// than with the session it belongs to.
-    pub(crate) fn one(mux_pane_id: u64, stream: Option<ZoshPaneStream>) -> Self {
-        Self {
-            streams: stream
-                .map(|stream| HashMap::from([(mux_pane_id, stream)]))
-                .unwrap_or_default(),
-            fallbacks: Vec::new(),
-        }
+    /// Why this multiplexer pane stayed on SSH, when a Zosh bootstrap was
+    /// tried for it and failed. `None` for a pane on Mosh, and for every pane
+    /// of a session that chose SSH: nothing fell back there.
+    pub(crate) fn fallback(&self, mux_pane_id: u64) -> Option<&str> {
+        self.fallbacks
+            .iter()
+            .find(|(pane, _)| *pane == mux_pane_id)
+            .map(|(_, reason)| reason.as_str())
     }
 
     /// Whether the bootstrap put this pane on Mosh.
@@ -200,8 +204,8 @@ impl RemotePaneStreams {
 
     /// Why panes fell back, one sentence each, in the order they were
     /// bootstrapped.
-    pub(crate) fn fallbacks(&self) -> &[String] {
-        &self.fallbacks
+    pub(crate) fn fallbacks(&self) -> impl Iterator<Item = &str> {
+        self.fallbacks.iter().map(|(_, reason)| reason.as_str())
     }
 }
 
@@ -245,25 +249,21 @@ pub(crate) fn bootstrap_remote_pane_streams(
 ///
 /// The session's transport is not chosen again here — a session whose panes
 /// travel over Mosh has to carry the ones added later the same way, or closing
-/// the SSH forward would take half a tab with it. `None` means this pane stays
-/// on the multiplexer's byte stream, either because that is what the session
-/// uses or because its bootstrap failed; the reason is logged, since a pane
-/// arriving is not the moment to interrupt anybody.
+/// the SSH forward would take half a tab with it. A pane with no stream in the
+/// result stays on the multiplexer's byte stream, either because that is what
+/// the session uses or because its bootstrap failed, which the result's
+/// fallback says.
 ///
 /// Blocking, like the bootstrap it delegates to.
 pub(crate) fn bootstrap_spawned_pane(
     runtime: &crate::mux::MuxRuntime,
     session_id: u64,
     mux_pane_id: u64,
-) -> Option<ZoshPaneStream> {
-    let transport = runtime.pane_transport();
-    if !transport.is_zosh() {
-        return None;
-    }
+) -> RemotePaneStreams {
     let secret = runtime.session_secret();
-    let mut streams = bootstrap_remote_pane_streams(
+    let streams = bootstrap_remote_pane_streams(
         runtime.client(),
-        transport,
+        runtime.pane_transport(),
         session_id,
         secret.as_ref(),
         &[mux_pane_id],
@@ -271,7 +271,7 @@ pub(crate) fn bootstrap_spawned_pane(
     for reason in streams.fallbacks() {
         log::warn!("a pane added to a Zosh session stayed on SSH: {reason}");
     }
-    streams.take(mux_pane_id)
+    streams
 }
 
 #[cfg(test)]

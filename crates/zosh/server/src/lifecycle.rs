@@ -19,6 +19,17 @@ pub fn detach_after_connect_line() -> Result<()> {
     // This runs before any worker thread or PTY child exists. fork(2) is
     // therefore used in the conventional single-threaded daemonization window.
     unsafe {
+        // The parent exits the moment it has forked, and it is the session
+        // leader SSH started the bootstrap as: the kernel hangs up that
+        // session's process group as it goes. Until the child below has
+        // called setsid it is still in that group, and a hangup there killed
+        // it a few times in every hundred — after MOSH CONNECT had already
+        // gone out, so the client sent its datagrams to a port nobody held
+        // and the pane it was for stayed blank. Ignored across the window and
+        // restored once this process has a session of its own, because an
+        // ignored disposition survives exec and the pane's programs must not
+        // inherit it.
+        let hangup = libc::signal(libc::SIGHUP, libc::SIG_IGN);
         let pid = libc::fork();
         if pid < 0 {
             bail!("fork failed: {}", std::io::Error::last_os_error());
@@ -39,6 +50,9 @@ pub fn detach_after_connect_line() -> Result<()> {
         }
         if pid > 0 {
             libc::_exit(0);
+        }
+        if hangup != libc::SIG_ERR {
+            libc::signal(libc::SIGHUP, hangup);
         }
 
         let devnull = CString::new("/dev/null").unwrap();
@@ -318,6 +332,6 @@ fn has_lifecycle_flag(args: &[OsString], needle: &str) -> bool {
     false
 }
 
-#[cfg(all(test, windows))]
+#[cfg(test)]
 #[path = "tests/lifecycle.rs"]
 mod tests;

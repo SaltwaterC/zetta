@@ -176,9 +176,13 @@ What moves and what does not:
   has not been told — a remote host without shell integration — it sends
   nothing and the remote daemon inherits from the pane being split, which it
   can read because it is that process's parent.
-- **Falling back is automatic.** A host with no usable Mosh server, no `zmux`
-  on the path its shell resolves, or no reachable UDP port attaches that pane
-  over the SSH byte stream and says so. The session still opens.
+- **Falling back is automatic, and marked.** A host with no usable Mosh
+  server, no `zmux` on the path its shell resolves, or a Mosh server that never
+  answers within fifteen seconds attaches that pane over the SSH byte stream.
+  The session still opens. A notice says why when it happens, and the pane
+  keeps a small **SSH** chip in its bottom-left corner for as long as it is
+  shown — hover it for the reason — since a pane on SSH stalls with the forward
+  while its neighbours roam.
 
 The requirements are the ones `zosh` already has, plus a `zmux` on the remote
 host new enough to have `relay-pane`; the relay needs a POSIX pty, so a Windows

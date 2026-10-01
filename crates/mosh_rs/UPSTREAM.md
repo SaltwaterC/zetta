@@ -103,6 +103,12 @@ terminal.
   repository's vt100 fork, so `Cargo.toml` patches crates.io to it, as the
   root package, zosh and zosh-server already do.
 
+**Reachability.** `src/session.rs`: `MoshSession::heard_from_server`, set
+by the first datagram that decrypts as the server's. Zetta's pane bootstrap
+waits on it, because a Mosh client whose packets never arrive otherwise looks
+like a working session with nothing to show — and its server gives up on it
+a minute later, leaving the pane blank for good.
+
 Nothing else changed, and with the keep-alive off every upstream test
 still passes unmodified.
 

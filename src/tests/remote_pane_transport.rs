@@ -64,3 +64,26 @@ fn the_configured_protocol_is_what_a_session_starts_on() {
         None
     );
 }
+
+/// A fallback is marked on the pane it happened to, so the reason has to stay
+/// with that pane: a neighbour that came up on Mosh, or a pane the bootstrap
+/// never tried, must not be marked with it.
+#[test]
+fn a_fallback_reason_belongs_to_the_pane_it_names() {
+    let streams = RemotePaneStreams {
+        streams: HashMap::new(),
+        fallbacks: vec![
+            (4, "pane 4 never answered".to_owned()),
+            (7, "pane 7 could not start".to_owned()),
+        ],
+    };
+    assert_eq!(streams.fallback(4), Some("pane 4 never answered"));
+    assert_eq!(streams.fallback(7), Some("pane 7 could not start"));
+    assert_eq!(streams.fallback(3), None);
+    assert_eq!(
+        streams.fallbacks().collect::<Vec<_>>(),
+        ["pane 4 never answered", "pane 7 could not start"],
+        "the notice still reports every pane, in bootstrap order"
+    );
+    assert_eq!(RemotePaneStreams::default().fallback(4), None);
+}

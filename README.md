@@ -93,8 +93,8 @@ listing, attaching, spawning panes, layout and exit reports — is framed JSON
 and stays on SSH, but each attached pane is a terminal, so choosing Zosh in the
 remote-session picker (or `zmux attach HOST ID --protocol zosh`) gives every
 pane a Mosh link of its own and the roaming and keep-alive that come with it.
-Zetta falls back to the SSH byte stream, and says so, when the remote host has
-no usable Mosh server. Native background sessions on this machine are local and
+Zetta falls back to the SSH byte stream when a pane's Mosh link cannot be
+brought up, and marks that pane with an **SSH** chip whose tooltip says why. Native background sessions on this machine are local and
 need no transport at all.
 
 Each remote host costs one SSH login, however many panes and requests follow.

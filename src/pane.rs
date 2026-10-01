@@ -134,6 +134,11 @@ pub(crate) struct TerminalPane {
     /// intentionally not part of [`PaneLayout`]: only the selected entry is
     /// expanded, while the others occupy compact status rows.
     pub(crate) stack: PaneStack,
+    /// Why this pane of a Zosh session is carried over SSH instead, when its
+    /// Mosh bootstrap failed. Shown on the pane for as long as it lives, since
+    /// a pane on SSH stalls with the forward while its neighbours roam, and a
+    /// notice is long gone by the time that is noticed.
+    pub(crate) transport_fallback: Option<gpui::SharedString>,
 }
 
 pub(crate) fn select_current_directory(
@@ -297,6 +302,7 @@ impl TerminalPane {
             worktree_detection_generation: 0,
             worktree_detection_can_clear: false,
             stack: PaneStack::default(),
+            transport_fallback: None,
         }
     }
 

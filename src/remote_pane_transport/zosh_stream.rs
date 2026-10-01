@@ -34,6 +34,17 @@ const INITIAL_PANE_SIZE: (u16, u16) = (80, 24);
 /// still a viewer of its pane. A day outlasts a laptop asleep overnight.
 const SERVER_NETWORK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
 
+/// How long a pane's bootstrap waits for its Mosh server to answer before the
+/// pane stays on SSH instead.
+///
+/// Mosh is UDP, so a link whose datagrams never arrive connects exactly like
+/// one that works. Shown anyway, such a pane was blank for good: its server
+/// gave up on a client it never heard from a minute later and killed the relay,
+/// and nothing told the window. Generous against a slow link, because it is
+/// only ever waited out by a pane that would otherwise have been dead, and well
+/// inside the server's own minute.
+const SERVER_ANSWER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
 /// What a pane holds on to for as long as it is shown. Dropping it ends the
 /// Mosh session, which is what closing the pane should do.
 pub(crate) type ZoshPaneHandle = zosh::PaneSession;
@@ -120,7 +131,7 @@ impl PtyControl for ZoshPtyControl {
 }
 
 /// Brings up every pane concurrently, returning the ones that came up and a
-/// sentence for each one that did not.
+/// sentence for each one that did not, keyed by the pane it is about.
 pub(super) fn bootstrap(
     client: &zmux::client::Client,
     keep_alive_ms: Option<u64>,
@@ -128,11 +139,20 @@ pub(super) fn bootstrap(
     session_id: u64,
     secret: Option<&SessionSecret>,
     mux_pane_ids: &[u64],
-) -> (HashMap<u64, ZoshPaneStream>, Vec<String>) {
+) -> (HashMap<u64, ZoshPaneStream>, Vec<(u64, String)>) {
+    // A reason that holds for the whole session holds for each of its panes.
+    let every_pane = |reason: String| {
+        mux_pane_ids
+            .iter()
+            .map(|mux_pane_id| (*mux_pane_id, reason.clone()))
+            .collect()
+    };
     let Some(target) = client.remote_target().cloned() else {
         return (
             HashMap::new(),
-            vec!["A local session's panes are already local, so Zosh has nothing to carry.".into()],
+            every_pane(
+                "A local session's panes are already local, so Zosh has nothing to carry.".into(),
+            ),
         );
     };
     // Learned with the endpoint, so normally free; the relay is the same
@@ -142,10 +162,10 @@ pub(super) fn bootstrap(
         Err(error) => {
             return (
                 HashMap::new(),
-                vec![format!(
+                every_pane(format!(
                     "Could not find zmux on {}, so its panes stayed on SSH: {error:#}",
                     target.destination()
-                )],
+                )),
             );
         }
     };
@@ -185,7 +205,7 @@ fn bootstrap_wave(
     request: &PaneRequest,
     mux_pane_ids: &[u64],
     streams: &mut HashMap<u64, ZoshPaneStream>,
-    fallbacks: &mut Vec<String>,
+    fallbacks: &mut Vec<(u64, String)>,
 ) {
     std::thread::scope(|scope| {
         let started = mux_pane_ids
@@ -203,9 +223,12 @@ fn bootstrap_wave(
                 Ok(Ok(stream)) => {
                     streams.insert(mux_pane_id, stream);
                 }
-                Ok(Err(reason)) => fallbacks.push(reason),
-                Err(_) => fallbacks.push(format!(
-                    "Bootstrapping pane {mux_pane_id} over Zosh panicked, so it stayed on SSH."
+                Ok(Err(reason)) => fallbacks.push((mux_pane_id, reason)),
+                Err(_) => fallbacks.push((
+                    mux_pane_id,
+                    format!(
+                        "Bootstrapping pane {mux_pane_id} over Zosh panicked, so it stayed on SSH."
+                    ),
                 )),
             }
         }
@@ -295,6 +318,19 @@ fn bootstrap_one(request: &PaneRequest, mux_pane_id: u64) -> Result<ZoshPaneStre
         writeln!(writer, "{}", request.viewer).map_err(|error| {
             format!("Could not identify this window to pane {mux_pane_id}'s relay: {error}")
         })?;
+    }
+    // Dropping the session on the way out shuts its server down, so a pane
+    // that falls back leaves no relay behind it.
+    if !session.wait_for_server(SERVER_ANSWER_TIMEOUT) {
+        return Err(format!(
+            "The Zosh server for pane {mux_pane_id} never answered from {}:{}, so the pane \
+             stayed on SSH{}",
+            endpoint.host,
+            endpoint.port,
+            session
+                .error()
+                .map_or_else(String::new, |error| format!(": {error}"))
+        ));
     }
     Ok(ZoshPaneStream {
         session: Arc::new(session),

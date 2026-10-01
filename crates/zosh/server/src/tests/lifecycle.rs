@@ -124,3 +124,95 @@ fn child_command_line_quotes_windows_paths_and_quotes() {
     );
     assert_eq!(quoted(r#"a"b"#), r#""a\"b""#);
 }
+
+/// `ssh -tt` starts the bootstrap as the leader of a session whose controlling
+/// terminal is a pty, and the leader exits the moment it has forked. That
+/// hangs the terminal up, and the kernel signals its foreground process group
+/// — which the forked child is still in until it calls setsid. A server lost
+/// that race a few times in a hundred, after MOSH CONNECT had gone out, and
+/// the pane it was for stayed blank. Run enough times that the race would show.
+#[cfg(unix)]
+#[test]
+fn a_detached_server_survives_its_bootstrap_session_hanging_up() {
+    use std::os::unix::process::CommandExt as _;
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    const CHILD_MARKER: &str = "ZOSH_TEST_DETACH_SURVIVAL_FILE";
+    if let Some(path) = std::env::var_os(CHILD_MARKER) {
+        // Only the detached process comes back from this; the leader exits.
+        detach_after_connect_line().unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+        std::fs::write(&path, b"survived").unwrap();
+        std::process::exit(0);
+    }
+
+    let directory = std::env::temp_dir().join(format!("zosh-detach-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let attempts = 40;
+    let mut lost = Vec::new();
+    for attempt in 0..attempts {
+        let (mut master, mut slave) = (0, 0);
+        // SAFETY: openpty fills in both descriptors.
+        let opened = unsafe {
+            libc::openpty(
+                &raw mut master,
+                &raw mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                std::ptr::null(),
+            )
+        };
+        assert_eq!(opened, 0, "openpty: {}", std::io::Error::last_os_error());
+        // SAFETY: both descriptors were just opened and are owned here.
+        let (master, slave) = unsafe {
+            use std::os::fd::FromRawFd as _;
+            (
+                std::fs::File::from_raw_fd(master),
+                std::fs::File::from_raw_fd(slave),
+            )
+        };
+        let marker = directory.join(attempt.to_string());
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "lifecycle::tests::a_detached_server_survives_its_bootstrap_session_hanging_up",
+                "--test-threads=1",
+            ])
+            .env(CHILD_MARKER, &marker)
+            .stdin(Stdio::from(slave.try_clone().unwrap()))
+            .stdout(Stdio::from(slave.try_clone().unwrap()))
+            .stderr(Stdio::from(slave));
+        // SAFETY: only async-signal-safe calls between fork and exec.
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() < 0 || libc::ioctl(0, libc::TIOCSCTTY as _, 0) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let mut leader = command.spawn().unwrap();
+        // Drained, so the leader's writes to its terminal never block.
+        let drain = std::thread::spawn(move || {
+            let mut master = master;
+            let _ = std::io::copy(&mut master, &mut std::io::sink());
+        });
+        leader.wait().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !marker.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        if !marker.exists() {
+            lost.push(attempt);
+        }
+        drop(drain);
+    }
+    let _ = std::fs::remove_dir_all(&directory);
+    assert!(
+        lost.is_empty(),
+        "{} of {attempts} detached servers died with their bootstrap session: attempts {lost:?}",
+        lost.len()
+    );
+}

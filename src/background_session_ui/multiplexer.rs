@@ -46,14 +46,19 @@ impl Zetta {
     /// works — so this is a notice rather than an error, and the first reason
     /// is the one shown: they are almost always the same reason repeated once
     /// per pane, and the rest are in the log.
-    fn report_transport_fallbacks(&mut self, fallbacks: &[String], cx: &mut Context<Self>) {
-        let Some(first) = fallbacks.first() else {
-            return;
-        };
+    pub(super) fn report_transport_fallbacks<'a>(
+        &mut self,
+        fallbacks: impl Iterator<Item = &'a str>,
+        cx: &mut Context<Self>,
+    ) {
+        let mut first = None;
         for reason in fallbacks {
             log::warn!("remote pane transport fell back: {reason}");
+            first.get_or_insert(reason);
         }
-        self.show_notice(first.clone(), cx);
+        if let Some(first) = first {
+            self.show_notice(first.to_owned(), cx);
+        }
     }
 }
 
@@ -1268,6 +1273,11 @@ impl Zetta {
                 AttachedPaneKind::Shared(pane) => {
                     let pane = Arc::new(pane);
                     let mux_pane_id = pane.pane_id();
+                    if let Some(reason) = pane_streams.fallback(mux_pane_id)
+                        && let Some(pane) = tab.pane_mut(pane_id)
+                    {
+                        pane.transport_fallback = Some(reason.to_owned().into());
+                    }
                     let (built, registration) = build_relayed_pane(
                         &build,
                         &pane,

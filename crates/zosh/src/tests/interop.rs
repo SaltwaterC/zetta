@@ -447,6 +447,16 @@ fn connect_test_pane(keep_alive: Option<u64>) -> (PaneSession, Arc<Mutex<Vec<u8>
     (pane, shown)
 }
 
+/// A pane whose server is reachable is heard from promptly, which is what an
+/// embedder waits on before it shows the pane.
+#[test]
+#[ignore = "requires ZOSH_TEST_SERVER pointing at the bundled Mosh server"]
+fn a_reachable_server_is_heard_from() {
+    let (pane, _shown) = connect_test_pane(None);
+    assert!(pane.wait_for_server(Duration::from_secs(5)));
+    drop(pane);
+}
+
 /// An idle pane sleeps until something is due: the old loop capped every
 /// wait at 100 ms and so made ten passes a second whatever the link was
 /// doing, on every pane at once.

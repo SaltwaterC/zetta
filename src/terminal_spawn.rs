@@ -93,6 +93,9 @@ struct SpawnedTerminal {
     /// what feeds the terminal, and what is registered for it.
     #[cfg(feature = "zmux")]
     zosh_session: Option<Arc<crate::remote_pane_transport::ZoshPaneHandle>>,
+    /// Why this pane of a Zosh session stayed on SSH, when it did.
+    #[cfg(feature = "zmux")]
+    transport_fallback: Option<String>,
     #[cfg(feature = "zmux")]
     shared_runtime: Option<crate::mux::MuxRuntime>,
     #[cfg(feature = "zmux")]
@@ -210,13 +213,15 @@ struct SharedPaneTerminal<'a> {
 /// Over the multiplexer's own stream unless the session's panes travel over
 /// Mosh, in which case this brings up that pane's link and hands back the
 /// session to keep: the multiplexer's stream for it is then released with the
-/// `SharedPane` the caller drops.
+/// `SharedPane` the caller drops. A Mosh link that could not be brought up
+/// leaves the pane on the multiplexer's stream, and hands back why.
 #[cfg(feature = "zmux")]
 fn build_shared_pane_terminal(
     build: SharedPaneTerminal<'_>,
 ) -> (
     TerminalBuilder,
     Option<Arc<crate::remote_pane_transport::ZoshPaneHandle>>,
+    Option<String>,
 ) {
     let SharedPaneTerminal {
         pane,
@@ -233,9 +238,9 @@ fn build_shared_pane_terminal(
     // A pane added to a session whose panes travel over Mosh travels the same
     // way: half a tab on a transport the other half is not on would come apart
     // the moment either one was interrupted.
-    if let Some(stream) =
-        crate::remote_pane_transport::bootstrap_spawned_pane(runtime, session_id, mux_pane_id)
-    {
+    let mut streams =
+        crate::remote_pane_transport::bootstrap_spawned_pane(runtime, session_id, mux_pane_id);
+    if let Some(stream) = streams.take(mux_pane_id) {
         let (built, session) = crate::background_session_ui::zosh_panes::build_zosh_pane(
             crate::background_session_ui::zosh_panes::ZoshPaneBuild {
                 title,
@@ -254,8 +259,9 @@ fn build_shared_pane_terminal(
         // The relay reports this window's Mosh size to the multiplexer. Its
         // attachment viewport is only a bootstrap value and, unlike an SSH
         // shared stream, no later viewport frames arrive here to replace it.
-        return (built, Some(session));
+        return (built, Some(session), None);
     }
+    let fallback = streams.fallback(mux_pane_id).map(str::to_owned);
     let initial_viewport = pane.take_initial_viewport();
     let built = TerminalBuilder::new_byte_stream(
         Box::new(pane.reader()),
@@ -280,7 +286,7 @@ fn build_shared_pane_terminal(
         mux_pane_id,
         runtime.session_secret(),
     ));
-    (built, None)
+    (built, None, fallback)
 }
 
 #[cfg(feature = "zmux")]
@@ -357,16 +363,17 @@ fn build_shared_terminal_batch(
                 working_directory: launch.working_directory.clone(),
             },
         );
-        let (builder, zosh_session) = build_shared_pane_terminal(SharedPaneTerminal {
-            pane: &pane,
-            runtime: &runtime,
-            title: launch.title.clone(),
-            cursor_shape: launch.cursor_shape,
-            alternate_scroll: launch.alternate_scroll,
-            max_scroll_history_lines: launch.max_scroll_history_lines,
-            working_directory: launch.working_directory.clone(),
-            executor: terminal_executor,
-        });
+        let (builder, zosh_session, transport_fallback) =
+            build_shared_pane_terminal(SharedPaneTerminal {
+                pane: &pane,
+                runtime: &runtime,
+                title: launch.title.clone(),
+                cursor_shape: launch.cursor_shape,
+                alternate_scroll: launch.alternate_scroll,
+                max_scroll_history_lines: launch.max_scroll_history_lines,
+                working_directory: launch.working_directory.clone(),
+                executor: terminal_executor,
+            });
         let builder = builder
             .with_image_paste_handler(image_paste_handler)
             .with_init_command_startup_shell(launch.shell);
@@ -383,6 +390,7 @@ fn build_shared_terminal_batch(
                 mux_provider: None,
                 shared_pane: Some(pane),
                 zosh_session,
+                transport_fallback,
                 shared_runtime: Some(runtime.clone()),
                 shared_state: None,
                 shell_integration_startup_command: launch.shell_integration_startup_command,
@@ -1452,6 +1460,8 @@ impl Zetta {
             #[cfg(feature = "zmux")]
             zosh_session: None,
             #[cfg(feature = "zmux")]
+            transport_fallback: None,
+            #[cfg(feature = "zmux")]
             shared_runtime: None,
             #[cfg(feature = "zmux")]
             shared_state: None,
@@ -1753,16 +1763,17 @@ impl Zetta {
                     working_directory: working_directory.clone(),
                 },
             );
-            let (builder, zosh_session) = build_shared_pane_terminal(SharedPaneTerminal {
-                pane: &pane,
-                runtime: &runtime,
-                title,
-                cursor_shape,
-                alternate_scroll,
-                max_scroll_history_lines,
-                working_directory,
-                executor: &terminal_executor,
-            });
+            let (builder, zosh_session, transport_fallback) =
+                build_shared_pane_terminal(SharedPaneTerminal {
+                    pane: &pane,
+                    runtime: &runtime,
+                    title,
+                    cursor_shape,
+                    alternate_scroll,
+                    max_scroll_history_lines,
+                    working_directory,
+                    executor: &terminal_executor,
+                });
             let builder = builder
                 .with_image_paste_handler(image_paste_handler)
                 .with_init_command_startup_shell(startup_shell);
@@ -1779,6 +1790,7 @@ impl Zetta {
                     mux_provider: None,
                     shared_pane: Some(pane),
                     zosh_session,
+                    transport_fallback,
                     shared_runtime: Some(runtime),
                     shared_state: Some(committed_state),
                     shell_integration_startup_command,
@@ -2168,6 +2180,7 @@ impl Zetta {
 struct SpawnedSharedPane<'a> {
     shared_pane: &'a Arc<zmux::client::SharedPane>,
     zosh_session: Option<Arc<crate::remote_pane_transport::ZoshPaneHandle>>,
+    transport_fallback: Option<String>,
     runtime: &'a crate::mux::MuxRuntime,
     terminal: &'a Entity<Terminal>,
 }
@@ -2190,6 +2203,7 @@ impl Zetta {
         let SpawnedSharedPane {
             shared_pane,
             zosh_session,
+            transport_fallback,
             runtime,
             terminal,
         } = pane;
@@ -2198,6 +2212,9 @@ impl Zetta {
         match zosh_session {
             Some(session) => self.register_zosh_pane(ids, session, runtime, window, cx),
             None => {
+                if let Some(reason) = transport_fallback {
+                    self.note_transport_fallback(tab_id, pane_id, &reason, cx);
+                }
                 self.register_shared_pane(ids, shared_pane, runtime, window, cx);
                 // A pane spawned into a shared session is wired up here rather
                 // than in `connect_terminal_view`, which is what subscribes the
@@ -2243,6 +2260,8 @@ impl Zetta {
             shared_pane,
             #[cfg(feature = "zmux")]
             zosh_session,
+            #[cfg(feature = "zmux")]
+            transport_fallback,
             #[cfg(feature = "zmux")]
             shared_runtime,
             #[cfg(feature = "zmux")]
@@ -2359,6 +2378,7 @@ impl Zetta {
                 SpawnedSharedPane {
                     shared_pane,
                     zosh_session,
+                    transport_fallback,
                     runtime,
                     terminal: &terminal,
                 },

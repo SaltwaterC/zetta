@@ -43,6 +43,45 @@ fn pane_status_badge(label: String, colors: &ThemeColors) -> gpui::Div {
         .child(label)
 }
 
+/// Marks a pane of a Zosh session that is carried over SSH instead, in its
+/// bottom-left corner — the mode badges own the bottom-right, the pane controls
+/// the top. Always shown rather than on hover: the point is to explain a pane
+/// that stalls with the SSH forward while its neighbours roam, and nobody
+/// hovers a pane to find out why it is behaving differently before it does.
+/// The reason it fell back is in the tooltip.
+fn pane_transport_fallback_badge(
+    pane_id: u64,
+    reason: gpui::SharedString,
+    colors: &ThemeColors,
+    warning_color: gpui::Hsla,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(("pane-transport-fallback", pane_id as usize))
+        .debug_selector(|| format!("pane-transport-fallback-{pane_id}"))
+        .absolute()
+        .left(px(6.))
+        .bottom(px(6.))
+        .flex()
+        .items_center()
+        .gap_1()
+        .px_1()
+        .rounded_sm()
+        .border_1()
+        .border_color(colors.border)
+        .bg(colors.status_bar_background)
+        .child(
+            Icon::new(IconName::Warning)
+                .size(IconSize::XSmall)
+                .color(Color::Custom(warning_color)),
+        )
+        .child(
+            Label::new("SSH")
+                .size(LabelSize::XSmall)
+                .color(Color::Custom(colors.text_muted)),
+        )
+        .tooltip(Tooltip::text(reason))
+}
+
 /// A pane's overlay text, positioned against the pane's top-right corner.
 ///
 /// The vertical offset is per font size on purpose: the line box sits on the
@@ -376,7 +415,12 @@ impl Zetta {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let PaneLayoutContext { tab, colors, .. } = context;
+        let PaneLayoutContext {
+            tab,
+            colors,
+            warning_color,
+            ..
+        } = context;
         let Some(pane) = tab.pane(pane_id) else {
             return div().size_full().into_any_element();
         };
@@ -443,6 +487,14 @@ impl Zetta {
                     element.child(pane_status_badge(overlay_label, colors))
                 },
             )
+            .when_some(pane.transport_fallback.clone(), |element, reason| {
+                element.child(pane_transport_fallback_badge(
+                    pane_id,
+                    reason,
+                    colors,
+                    warning_color,
+                ))
+            })
             .when_some(tab.displayed_pane_overlay(pane_id), |element, overlay| {
                 element.child(pane_overlay_element(
                     pane_id,
@@ -507,6 +559,7 @@ impl Zetta {
             colors,
             error_color,
             corner_radius,
+            ..
         } = context;
         let pane_id = pane.id;
         let corner_radii = edges.client_corner_radii(window, corner_radius);
@@ -923,6 +976,9 @@ pub(crate) struct PaneLayoutContext<'a> {
     pub(crate) tab: &'a Tab,
     pub(crate) colors: &'a ThemeColors,
     pub(crate) error_color: gpui::Hsla,
+    /// The tab theme's warning colour, for a pane that is working but not the
+    /// way it was asked to.
+    pub(crate) warning_color: gpui::Hsla,
     pub(crate) corner_radius: Pixels,
 }
 

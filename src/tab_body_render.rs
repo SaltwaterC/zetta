@@ -94,6 +94,7 @@ impl Zetta {
                 let tab_theme = self.theme_for_tab(tab, cx);
                 let tab_colors = tab_theme.colors();
                 let tab_error_color = tab_theme.status().error;
+                let tab_warning_color = tab_theme.status().warning;
                 let layout = tab.visible_layout();
                 let maximized_pane = tab.maximized_pane.and_then(|pane_id| {
                     tab.pane(pane_id).map(|pane| MaximizedPane {
@@ -139,6 +140,7 @@ impl Zetta {
                                 tab,
                                 colors: tab_colors,
                                 error_color: tab_error_color,
+                                warning_color: tab_warning_color,
                                 corner_radius,
                             },
                             layout,

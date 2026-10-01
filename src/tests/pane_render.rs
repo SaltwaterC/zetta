@@ -124,3 +124,111 @@ fn pane_window_edges_follow_split_direction() {
     assert!(left.left && left.bottom && !left.right);
     assert!(!right.left && right.bottom && right.right);
 }
+
+/// A pane of a Zosh session that fell back to SSH says so on the pane itself,
+/// in its bottom-left corner, for as long as it is shown — and a pane that did
+/// not fall back shows nothing there.
+#[gpui::test]
+fn a_pane_that_fell_back_to_ssh_is_marked_in_its_corner(cx: &mut gpui::TestAppContext) {
+    cx.update(|cx| {
+        theme_settings::init(theme::LoadThemes::JustBase, cx);
+        TerminalSettings::init(cx);
+    });
+    let window_size = size(px(800.), px(600.));
+    let window = cx.open_window(window_size, |window, cx| {
+        let mut config = Config::defaults(None, None);
+        // No profiles, so `Zetta::new` opens no tab of its own and spawns no
+        // shell; the test builds the one pane it needs.
+        config.profiles.clear();
+        Zetta::new(
+            config,
+            None,
+            ZettaLaunchOptions {
+                no_mux: true,
+                ..Default::default()
+            },
+            window,
+            cx,
+        )
+    });
+    let pane_id = window
+        .update(cx, |zetta, _, _| {
+            let profile = Profile {
+                name: "System".to_owned(),
+                command: task::Shell::System,
+                theme: None,
+                dark_theme: None,
+                icon: ProfileIcon::Zetta,
+            };
+            let pane_id = zetta.next_pane_id;
+            zetta.next_pane_id += 1;
+            let tab_id = zetta.next_tab_id;
+            zetta.next_tab_id += 1;
+            zetta.tabs.push(Tab {
+                id: tab_id,
+                attention_id: tab_id,
+                attention: None,
+                panes: vec![TerminalPane::new(pane_id, profile).with_label_number(1)],
+                pane_indices: HashMap::from([(pane_id, 0)]),
+                next_pane_label: 2,
+                theme_override: None,
+                layout: PaneLayout::Pane(pane_id),
+                active_pane: pane_id,
+                focus_history: vec![pane_id],
+                maximized_pane: None,
+                minimized_panes: Vec::new(),
+                selected_minimized_pane: None,
+                broadcast_input: false,
+                silent_mode: false,
+                close_policy: TabClosePolicy::Close,
+                shared: false,
+                custom_title: None,
+                worktree_seed_title: None,
+                process_title: None,
+                icon: Some(IconName::Terminal),
+                icon_override: TabIconOverride::None,
+                pinned: false,
+                renaming_pane: None,
+                rename_buffer: None,
+                editing_overlay_pane: None,
+                overlay_buffer: None,
+                overlay_style_picker: None,
+            });
+            zetta.active_tab = zetta.tabs.len() - 1;
+            pane_id
+        })
+        .unwrap();
+    let mut cx = gpui::VisualTestContext::from_window(*window, cx);
+    cx.run_until_parked();
+    // `debug_bounds` looks selectors up by `&'static str`.
+    let selector: &'static str = format!("pane-transport-fallback-{pane_id}").leak();
+    assert!(
+        cx.debug_bounds(selector).is_none(),
+        "a pane that did not fall back is not marked"
+    );
+
+    window
+        .update(&mut cx, |zetta, _, cx| {
+            let tab = &mut zetta.tabs[zetta.active_tab];
+            tab.pane_mut(pane_id).unwrap().transport_fallback =
+                Some("The Zosh server never answered".into());
+            cx.notify();
+        })
+        .unwrap();
+    cx.run_until_parked();
+    let badge = cx
+        .debug_bounds(selector)
+        .expect("a pane that fell back is marked");
+    assert!(
+        badge.left() < px(24.),
+        "the marker sits on the left: {badge:?}"
+    );
+    assert!(
+        badge.bottom() > window_size.height - px(24.),
+        "the marker sits at the bottom: {badge:?}"
+    );
+    assert!(
+        badge.size.width < px(120.),
+        "the marker is a chip, not a bar: {badge:?}"
+    );
+}

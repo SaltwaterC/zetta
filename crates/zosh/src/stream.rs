@@ -28,6 +28,7 @@ use std::{
         mpsc::{self, Receiver, Sender, TryRecvError},
     },
     thread::{self, JoinHandle},
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context as _, Result};
@@ -92,6 +93,7 @@ pub struct PaneSession {
     reader: Option<PaneReader>,
     finished: Arc<AtomicBool>,
     error: Arc<Mutex<Option<String>>>,
+    answer: Arc<Answer>,
     thread: Option<JoinHandle<()>>,
     #[cfg_attr(
         not(all(test, unix)),
@@ -158,6 +160,7 @@ impl PaneSession {
         let output = Arc::new(OutputPipe::default());
         let finished = Arc::new(AtomicBool::new(false));
         let error = Arc::new(Mutex::new(None));
+        let answer = Arc::new(Answer::default());
         let (commands, command_receiver) = mpsc::channel();
         let passes = PassCounter::default();
 
@@ -168,12 +171,14 @@ impl PaneSession {
                 let output = output.clone();
                 let finished = finished.clone();
                 let error = error.clone();
+                let answer = answer.clone();
                 let passes = passes.clone();
                 move || {
                     let ends = LoopEnds {
                         commands: &command_receiver,
                         wake: &wake,
                         output: &output,
+                        answer: &answer,
                         passes: &passes,
                     };
                     let result = drive(session, (columns, rows), agent_settings, ends);
@@ -184,6 +189,7 @@ impl PaneSession {
                             Some(format!("{failure:#}"));
                     }
                     finished.store(true, Ordering::SeqCst);
+                    answer.end();
                     output.close();
                 }
             })
@@ -195,6 +201,7 @@ impl PaneSession {
             reader: Some(PaneReader { pipe: output }),
             finished,
             error,
+            answer,
             thread: Some(thread),
             passes,
         })
@@ -226,6 +233,18 @@ impl PaneSession {
     /// mixed.
     pub fn resize(&self, columns: u16, rows: u16) {
         self.send(Command::Resize(columns.max(1), rows.max(1)));
+    }
+
+    /// Waits until the server has been heard from, and says whether it was.
+    ///
+    /// [`Self::connect`] cannot know: Mosh is UDP, so a session whose
+    /// datagrams go nowhere starts exactly like one that works. This is how an
+    /// embedder finds out before it shows the pane, rather than leaving it
+    /// blank while the server waits a minute for a client that never arrives
+    /// and then gives up. `false` once `timeout` passes or the session ends
+    /// without an answer.
+    pub fn wait_for_server(&self, timeout: Duration) -> bool {
+        self.answer.wait(timeout)
     }
 
     /// Whether the session loop has ended, for any reason.
@@ -263,6 +282,61 @@ impl Drop for PaneSession {
         // it. A reader still held elsewhere keeps draining until then; one
         // dropped along with this handle abandons the pipe itself.
         drop(self.thread.take());
+    }
+}
+
+/// Whether a session's server has answered, for [`PaneSession::wait_for_server`].
+#[derive(Default)]
+struct Answer {
+    state: Mutex<AnswerState>,
+    changed: Condvar,
+}
+
+#[derive(Default)]
+struct AnswerState {
+    heard: bool,
+    ended: bool,
+}
+
+impl Answer {
+    fn heard(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !state.heard {
+            state.heard = true;
+            self.changed.notify_all();
+        }
+    }
+
+    /// The loop is gone, so nothing will be heard any more.
+    fn end(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.ended = true;
+        self.changed.notify_all();
+    }
+
+    fn wait(&self, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        while !state.heard && !state.ended {
+            let Some(left) = deadline.checked_duration_since(Instant::now()) else {
+                break;
+            };
+            state = self
+                .changed
+                .wait_timeout(state, left)
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .0;
+        }
+        state.heard
     }
 }
 
@@ -313,6 +387,7 @@ struct LoopEnds<'a> {
     commands: &'a Receiver<Command>,
     wake: &'a Wake,
     output: &'a Arc<OutputPipe>,
+    answer: &'a Answer,
     passes: &'a PassCounter,
 }
 
@@ -334,6 +409,7 @@ fn drive(
         commands,
         wake,
         output,
+        answer,
         passes,
     } = ends;
     let mut sink = OutputSink {
@@ -352,6 +428,9 @@ fn drive(
     session.send_resize(i32::from(size.0), i32::from(size.1));
     let mut embedder = Embedder::Present;
     let mut waiter = Waiter::default();
+    // Announced once: the loop passes several times a second, and the answer
+    // never goes back to unheard.
+    let mut answered = false;
     loop {
         let wait = wait::earliest_ms([Some(session.next_wake_ms()), agent.wait_ms()]);
         waiter
@@ -368,6 +447,10 @@ fn drive(
             );
         }
         let events = session.pump_ready().context("pumping the Mosh session")?;
+        if !answered && session.heard_from_server() {
+            answered = true;
+            answer.heard();
+        }
         for command in agent.handle_events(&events) {
             apply_agent_command(&mut session, command);
         }

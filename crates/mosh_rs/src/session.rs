@@ -161,6 +161,10 @@ pub struct MoshSession<S: Screen> {
     last_roundtrip_success: u64,
     /// Set once the peer's shutdown state has been seen.
     peer_shut_down: bool,
+    /// Set by the first datagram that decrypts as the server's. Until then
+    /// nothing says the server is reachable at all: a client whose packets
+    /// never arrive looks exactly like one whose server has nothing to say.
+    heard_from_server: bool,
     /// Query IDs already handed to the outer terminal. Host states are
     /// cumulative, so the same query can arrive in several accepted states.
     seen_terminal_queries: HashSet<u64>,
@@ -200,6 +204,7 @@ impl<S: Screen> MoshSession<S> {
             prediction: PredictionEngine::new(),
             last_roundtrip_success: 0,
             peer_shut_down: false,
+            heard_from_server: false,
             seen_terminal_queries: HashSet::new(),
             seen_agent_records: HashSet::new(),
         })
@@ -303,6 +308,13 @@ impl<S: Screen> MoshSession<S> {
             since_heard_ms: now.saturating_sub(self.sender.last_heard()),
             since_ack_ms: now.saturating_sub(self.sender.sent_state_acked_timestamp()),
         }
+    }
+
+    /// Whether anything has arrived from the server yet. A session is
+    /// usable once this holds; until then its datagrams may be going
+    /// nowhere.
+    pub fn heard_from_server(&self) -> bool {
+        self.heard_from_server
     }
 
     /// The prediction engine, to ask what it is currently doing.
@@ -720,6 +732,7 @@ impl<S: Screen> MoshSession<S> {
         if incoming.direction != Direction::ToClient {
             return Err(MoshError::WrongDirection);
         }
+        self.heard_from_server = true;
         let packet = Packet::from_plaintext(&incoming.plaintext)?;
         let now = self.now();
         self.packets.accept(now, incoming.seq, &packet, false);

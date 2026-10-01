@@ -1631,13 +1631,10 @@ impl Zetta {
                     Some(runtime) => {
                         // An SSH round trip, so not on the thread that draws.
                         cx.background_spawn(async move {
-                            crate::remote_pane_transport::RemotePaneStreams::one(
+                            crate::remote_pane_transport::bootstrap_spawned_pane(
+                                &runtime,
+                                session_id,
                                 mux_pane_id,
-                                crate::remote_pane_transport::bootstrap_spawned_pane(
-                                    &runtime,
-                                    session_id,
-                                    mux_pane_id,
-                                ),
                             )
                         })
                         .await
@@ -2060,6 +2057,7 @@ impl Zetta {
             cx,
         );
         self.tabs.insert(tab_index, tab);
+        self.report_transport_fallbacks(pane_streams.fallbacks(), cx);
         let view = self
             .tabs
             .iter()

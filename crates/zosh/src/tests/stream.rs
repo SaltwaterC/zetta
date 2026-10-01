@@ -175,3 +175,33 @@ fn an_open_channel_is_drained_without_waiting() {
     assert!(matches!(applied.as_slice(), [Command::Resize(80, 24)]));
     drop(sender);
 }
+
+/// Mosh is UDP, so a session whose datagrams go nowhere connects as readily
+/// as one that works. Waiting for the server is how an embedder tells them
+/// apart, and a server that never answers has to come back as `false` rather
+/// than as a pane that stays blank.
+#[test]
+fn a_server_that_never_answers_is_reported_as_unheard() {
+    // Bound, so the datagrams have somewhere to land, and never read.
+    let silent = std::net::UdpSocket::bind("127.0.0.1:0").expect("binding a silent socket");
+    let port = silent
+        .local_addr()
+        .expect("the silent socket's port")
+        .port();
+    let key = Base64Key::from_printable(&"A".repeat(22)).expect("a canonical all-zero key");
+    let pane = PaneSession::connect(
+        "127.0.0.1",
+        port,
+        &key,
+        80,
+        24,
+        PaneSessionSettings::default(),
+    )
+    .expect("a UDP session connects whether or not anything answers");
+    let started = Instant::now();
+    assert!(!pane.wait_for_server(Duration::from_millis(300)));
+    assert!(
+        started.elapsed() >= Duration::from_millis(300),
+        "the wait gave up before its timeout"
+    );
+}
