@@ -54,10 +54,17 @@ const SEEN_SEQ_CAP: usize = 512;
 pub(crate) const RECEIVED_STATE_CAP: usize = 1024;
 const RECEIVER_QUENCH_INTERVAL: Duration = Duration::from_secs(15);
 
+/// A complete remote state SSP accepted, with the numbering a receiver needs
+/// to place its diff: the diff is relative to `old_num`, not to whatever the
+/// receiver last saw.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ReceivedStateDiff {
+pub struct ReceivedStateDiff {
     pub old_num: u64,
     pub new_num: u64,
+    /// The peer's acknowledgement of our states, as this instruction
+    /// carried it.
+    pub ack_num: u64,
+    /// The highest throwaway watermark the peer has announced so far.
     pub throwaway_num: u64,
     pub diff: Vec<u8>,
 }
@@ -209,6 +216,21 @@ impl Transport {
         self.set_pending_from(self.acked_by_remote, diff)
     }
 
+    /// Queue `diff`, computed from `old_num`, and only from it: `None`, with
+    /// nothing queued, when `old_num` is neither acknowledged nor a state
+    /// that has been sent. [`Self::set_pending_from`] would quietly take the
+    /// acknowledged state as the base instead, which is right for a caller
+    /// that resends everything anyway and wrong for one whose diff only
+    /// makes sense from the base it named.
+    pub fn set_pending_on(&mut self, old_num: u64, diff: Vec<u8>) -> Option<u64> {
+        let known = old_num == self.acked_by_remote
+            || self
+                .outbound_states
+                .iter()
+                .any(|state| state.new_num == old_num && state.last_sent.is_some());
+        (known && !self.shutdown_in_progress).then(|| self.set_pending_from(old_num, diff))
+    }
+
     pub(crate) fn set_pending_from(&mut self, old_num: u64, diff: Vec<u8>) -> u64 {
         if self.shutdown_in_progress {
             return self.sent_num;
@@ -238,7 +260,11 @@ impl Transport {
         self.sent_num
     }
 
-    pub(crate) fn prospective_base_num(&self) -> Option<u64> {
+    /// The newest state the peer has probably received: sent recently
+    /// enough that its acknowledgement could still be on the way. A diff
+    /// from it does not repeat what that state already carried, which is
+    /// what stock Mosh's `assumed_receiver_state` is for.
+    pub fn prospective_base_num(&self) -> Option<u64> {
         let now = Instant::now();
         let maximum_age = self.rto + ACK_DELAY;
         let mut candidate = None;
@@ -253,7 +279,11 @@ impl Transport {
         candidate
     }
 
-    pub(crate) fn prospective_chain_expired(&self) -> bool {
+    /// Whether the newest queued state is built on a base that is neither
+    /// acknowledged nor recent enough to assume, in which case the peer may
+    /// never be able to apply it and the next state should be built from
+    /// the acknowledged one.
+    pub fn prospective_chain_expired(&self) -> bool {
         let Some(latest) = self.outbound_states.back() else {
             return false;
         };
@@ -416,7 +446,11 @@ impl Transport {
         matched.is_some()
     }
 
-    fn send_interval(&self) -> Duration {
+    /// Stock Mosh's frame interval: half the smoothed round trip, between
+    /// 20 and 250 ms. Public so a server that builds its own frames can
+    /// build them at the rate they may be sent, rather than build every one
+    /// and have all but the newest discarded.
+    pub fn send_interval(&self) -> Duration {
         let half_ms = if self.rtt_init {
             self.srtt.as_nanos().div_ceil(2_000_000) as u64
         } else {
@@ -666,7 +700,7 @@ impl Transport {
 
     /// Process a datagram and retain the SSP numbering needed to reconstruct
     /// the peer's complete remote state.
-    pub(crate) fn recv_state(&mut self, wire: &[u8]) -> Option<ReceivedStateDiff> {
+    pub fn recv_state(&mut self, wire: &[u8]) -> Option<ReceivedStateDiff> {
         self.recv_state_with_congestion(wire, false)
     }
 
@@ -821,6 +855,7 @@ impl Transport {
         Some(ReceivedStateDiff {
             old_num: ti.old_num,
             new_num: ti.new_num,
+            ack_num: ti.ack_num,
             throwaway_num: self.throwaway_num,
             diff: ti.diff,
         })

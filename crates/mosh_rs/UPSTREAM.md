@@ -95,6 +95,14 @@ terminal.
   front end that waits by itself needs no ceiling of its own to keep the
   prediction timers honest.
 
+- `src/screen/vt100_screen.rs`: `Vt100Screen::feed` resumes from the
+  screen it holds (`vt100::Parser::from_screen`) instead of replaying
+  `state_formatted` into a fresh parser, and an empty feed does nothing.
+  With the vt100 fork's shared rows, a state then shares every row its
+  diff did not touch with the state it came from. This needs the
+  repository's vt100 fork, so `Cargo.toml` patches crates.io to it, as the
+  root package, zosh and zosh-server already do.
+
 Nothing else changed, and with the keep-alive off every upstream test
 still passes unmodified.
 

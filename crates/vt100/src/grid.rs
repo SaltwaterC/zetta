@@ -5,7 +5,10 @@ pub struct Grid {
     size: Size,
     pos: Pos,
     saved_pos: Pos,
-    rows: Vec<crate::row::Row>,
+    /// Shared between clones and copied only when written, the way Mosh's
+    /// own framebuffer holds its rows: a copy of a screen is a copy of its
+    /// row pointers, and a diff skips any row two screens still share.
+    rows: Vec<std::sync::Arc<crate::row::Row>>,
     scroll_top: u16,
     scroll_bottom: u16,
     origin_mode: bool,
@@ -48,15 +51,23 @@ impl Grid {
         if self.rows.is_empty() {
             self.rows.extend(
                 std::iter::repeat_with(|| {
-                    crate::row::Row::new(self.size.cols)
+                    std::sync::Arc::new(crate::row::Row::new(self.size.cols))
                 })
                 .take(usize::from(self.size.rows)),
             );
         }
     }
 
-    fn new_row(&self) -> crate::row::Row {
-        crate::row::Row::new(self.size.cols)
+    fn new_row(&self) -> std::sync::Arc<crate::row::Row> {
+        std::sync::Arc::new(crate::row::Row::new(self.size.cols))
+    }
+
+    /// Unwraps row `index`, copying it first only if it is shared and
+    /// actually wrapped.
+    fn unwrap_row(&mut self, index: usize) {
+        if self.rows[index].wrapped() {
+            std::sync::Arc::make_mut(&mut self.rows[index]).wrap(false);
+        }
     }
 
     pub fn clear(&mut self) {
@@ -77,8 +88,8 @@ impl Grid {
 
     pub fn set_size(&mut self, size: Size) {
         if size.cols != self.size.cols {
-            for row in &mut self.rows {
-                row.wrap(false);
+            for index in 0..self.rows.len() {
+                self.unwrap_row(index);
             }
         }
 
@@ -88,7 +99,12 @@ impl Grid {
 
         self.size = size;
         for row in &mut self.rows {
-            row.resize(size.cols, crate::Cell::new());
+            // `Row::resize` also unwraps, so a row that already fits is left
+            // shared only when there is nothing to unwrap either.
+            if row.cols() != size.cols || row.wrapped() {
+                std::sync::Arc::make_mut(row)
+                    .resize(size.cols, crate::Cell::new());
+            }
         }
         self.rows.resize(usize::from(size.rows), self.new_row());
 
@@ -151,18 +167,31 @@ impl Grid {
             .chain(
                 self.rows
                     .iter()
+                    .map(|row| &**row)
                     .take(rows_len.saturating_sub(self.scrollback_offset)),
             )
     }
 
-    pub fn drawing_rows(&self) -> impl Iterator<Item = &crate::row::Row> {
-        self.rows.iter()
+    /// Gives every row a copy of its own, for a test that needs a screen
+    /// sharing nothing.
+    #[cfg(test)]
+    pub fn unshare_rows(&mut self) {
+        for row in &mut self.rows {
+            *row = std::sync::Arc::new(crate::row::Row::clone(row));
+        }
     }
 
+    pub fn drawing_rows(&self) -> impl Iterator<Item = &crate::row::Row> {
+        self.rows.iter().map(|row| &**row)
+    }
+
+    /// Every row, each copied first if it is shared. Only for a change that
+    /// really touches every row; one that touches some should go through
+    /// [`Self::drawing_row_mut`].
     pub fn drawing_rows_mut(
         &mut self,
     ) -> impl Iterator<Item = &mut crate::row::Row> {
-        self.rows.iter_mut()
+        self.rows.iter_mut().map(std::sync::Arc::make_mut)
     }
 
     pub fn visible_row(&self, row: u16) -> Option<&crate::row::Row> {
@@ -177,7 +206,9 @@ impl Grid {
         &mut self,
         row: u16,
     ) -> Option<&mut crate::row::Row> {
-        self.drawing_rows_mut().nth(usize::from(row))
+        self.rows
+            .get_mut(usize::from(row))
+            .map(std::sync::Arc::make_mut)
     }
 
     pub fn current_row_mut(&mut self) -> &mut crate::row::Row {
@@ -272,9 +303,25 @@ impl Grid {
         let mut prev_pos = prev.pos;
         let mut wrapping = false;
         let mut prev_wrapping = false;
+        // With neither screen scrolled back, the visible rows are `rows`
+        // itself, so two screens that still share a row can be seen to.
+        let shared =
+            self.scrollback_offset == 0 && prev.scrollback_offset == 0;
         for (i, (row, prev_row)) in
             self.visible_rows().zip(prev.visible_rows()).enumerate()
         {
+            // A row both screens share is identical, and the row diff of
+            // identical rows writes nothing and moves nothing — unless the
+            // rows above them differ in wrapping, which is the one thing
+            // that makes an unchanged row redraw its first cell.
+            if shared
+                && wrapping == prev_wrapping
+                && std::sync::Arc::ptr_eq(&self.rows[i], &prev.rows[i])
+            {
+                wrapping = row.wrapped();
+                prev_wrapping = prev_row.wrapped();
+                continue;
+            }
             // we limit the number of cols to a u16 (see Size), so
             // visible_rows() can never return more rows than will fit
             let i = i.try_into().unwrap();
@@ -558,7 +605,7 @@ impl Grid {
             self.rows.remove(usize::from(self.scroll_bottom));
             self.rows.insert(usize::from(self.pos.row), self.new_row());
             // self.scroll_bottom is maintained to always be a valid row
-            self.rows[usize::from(self.scroll_bottom)].wrap(false);
+            self.unwrap_row(usize::from(self.scroll_bottom));
         }
     }
 
@@ -574,7 +621,11 @@ impl Grid {
         for _ in 0..(count.min(self.size.rows - self.scroll_top)) {
             self.rows
                 .insert(usize::from(self.scroll_bottom) + 1, self.new_row());
-            let removed = self.rows.remove(usize::from(self.scroll_top));
+            // `Arc::unwrap_or_clone`, which is newer than this crate's MSRV.
+            let removed = std::sync::Arc::try_unwrap(
+                self.rows.remove(usize::from(self.scroll_top)),
+            )
+            .unwrap_or_else(|shared| crate::row::Row::clone(&shared));
             if self.scroll_region_active() {
                 // A row pushed out of a scroll region is discarded
                 // rather than remembered: that is the region's whole
@@ -633,7 +684,7 @@ impl Grid {
             self.rows
                 .insert(usize::from(self.scroll_top), self.new_row());
             // self.scroll_bottom is maintained to always be a valid row
-            self.rows[usize::from(self.scroll_bottom)].wrap(false);
+            self.unwrap_row(usize::from(self.scroll_bottom));
         }
     }
 

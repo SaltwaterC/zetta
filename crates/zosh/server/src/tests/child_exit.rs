@@ -40,7 +40,7 @@ fn spawn_exiting_with(
 #[test]
 fn the_watch_wakes_the_loop_and_leaves_the_exit_status_to_its_owner() {
     let (mut child, _master) = spawn_exiting_with(3);
-    let watch = ChildExitWatch::start(child.as_ref(), thread::current())
+    let watch = ChildExitWatch::start(child.as_ref(), crate::wake::Waker::current_thread())
         .expect("this platform can watch a PTY child");
     assert!(!watch.exited(), "the child has not exited yet");
 

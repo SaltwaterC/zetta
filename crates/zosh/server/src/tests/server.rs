@@ -1,4 +1,7 @@
 use super::*;
+use std::sync::mpsc;
+#[cfg(unix)]
+use std::thread;
 
 #[cfg(windows)]
 #[test]
@@ -97,26 +100,26 @@ fn an_announced_keep_alive_interval_is_clamped_before_it_is_believed() {
 
 #[test]
 fn bounded_pty_drain_reports_remaining_work() {
-    let (sender, receiver) = mpsc::sync_channel(128);
+    let (sender, events) = mpsc::sync_channel(128);
     let (writes, _write_rx) = mpsc::sync_channel(1);
     for frame in 1..=128 {
         sender.send(PtyEvent::InputWritten(frame)).unwrap();
     }
+    let mut pty = PtyIo::Threads { events, writes };
     let mut terminal = TerminalState::new(24, 80);
     let mut responder = QueryResponder::new();
     let mut echo = EchoAcknowledgements::default();
     let progress = drain_pty_events(
-        &receiver,
+        &mut pty,
         &mut terminal,
         &mut responder,
         true,
-        &writes,
         &mut echo,
         false,
     )
     .unwrap();
     assert!(progress.budget_exhausted);
-    assert!(receiver.try_recv().is_ok());
+    assert!(pty.next_event().is_some());
 }
 use moshcatty::transport::Transport;
 
@@ -141,15 +144,11 @@ fn late_ack_waits_for_grace_and_new_input_does_not_postpone_old_input() {
     assert!(echo.pending.is_empty());
 }
 
-struct ControlledWriter {
-    entered: SyncSender<()>,
-    release: Receiver<()>,
-}
-
 #[test]
 fn unrelated_or_partial_output_does_not_confirm_recent_input() {
-    let (event_tx, event_rx) = mpsc::sync_channel(4);
-    let (write_tx, _write_rx) = mpsc::sync_channel(4);
+    let (event_tx, events) = mpsc::sync_channel(4);
+    let (writes, _write_rx) = mpsc::sync_channel(4);
+    let mut pty = PtyIo::Threads { events, writes };
     let mut terminal = TerminalState::new(24, 80);
     let mut responder = QueryResponder::new();
     let mut echo = EchoAcknowledgements::default();
@@ -159,11 +158,10 @@ fn unrelated_or_partial_output_does_not_confirm_recent_input() {
     for bytes in [b"old output".as_slice(), b"\x1b[", b"K"] {
         event_tx.send(PtyEvent::Output(bytes.to_vec())).unwrap();
         let progress = drain_pty_events(
-            &event_rx,
+            &mut pty,
             &mut terminal,
             &mut responder,
             true,
-            &write_tx,
             &mut echo,
             false,
         )
@@ -175,47 +173,6 @@ fn unrelated_or_partial_output_does_not_confirm_recent_input() {
     assert_eq!(echo.advance(written_at + ECHO_DELAY), 9);
 }
 
-impl Write for ControlledWriter {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        self.entered.send(()).unwrap();
-        self.release.recv().unwrap();
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-#[test]
-fn input_completion_follows_actual_write_not_enqueue_or_unrelated_output() {
-    let (entered_tx, entered_rx) = mpsc::sync_channel(1);
-    let (release_tx, release_rx) = mpsc::sync_channel(1);
-    let (write_tx, write_rx) = mpsc::sync_channel(4);
-    let (event_tx, event_rx) = mpsc::sync_channel(4);
-    spawn_pty_writer(
-        Box::new(ControlledWriter {
-            entered: entered_tx,
-            release: release_rx,
-        }),
-        write_rx,
-        WakingSender::to_current(event_tx.clone()),
-    );
-    queue_pty_write(&write_tx, b"x".to_vec()).unwrap();
-    queue_pty_request(&write_tx, PtyWrite::InputFrame(9)).unwrap();
-    entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-    event_tx
-        .send(PtyEvent::Output(b"old output".to_vec()))
-        .unwrap();
-    assert!(matches!(event_rx.try_recv(), Ok(PtyEvent::Output(_))));
-    assert!(matches!(event_rx.try_recv(), Err(TryRecvError::Empty)));
-    release_tx.send(()).unwrap();
-    assert!(matches!(
-        event_rx.recv_timeout(Duration::from_secs(5)),
-        Ok(PtyEvent::InputWritten(9))
-    ));
-}
-
 #[test]
 fn coalesced_screen_update_retains_echo_ack() {
     let key = [0x36; 16];
@@ -223,11 +180,11 @@ fn coalesced_screen_update_retains_echo_ack() {
     let mut client = Transport::new_client(Ocb::new(&key).unwrap());
     let mut terminal = TerminalState::new(24, 80);
     terminal.process(b"x");
-    server.set_pending(host_update(&terminal, 7, &[]).unwrap());
+    server.set_pending(host_update(&terminal, None, 7, &[]).unwrap());
     // A second PTY chunk arrives before tick sends the first update. The SSP
     // transport discards that unsent state, including its echo instruction.
     terminal.process(b"y");
-    server.set_pending(host_update(&terminal, 7, &[]).unwrap());
+    server.set_pending(host_update(&terminal, None, 7, &[]).unwrap());
     let datagrams = server.tick();
     assert!(!datagrams.is_empty());
     let payload = datagrams
@@ -387,6 +344,7 @@ fn wake_sources<'a>(
         terminal,
         echo,
         child_poll: None,
+        frame_due: None,
     }
 }
 
@@ -561,9 +519,6 @@ fn an_idle_session_sleeps_instead_of_polling_and_still_answers_at_once() {
 
     let key = [0x24u8; 16];
     let server_socket = UdpSocket::bind("127.0.0.1:0").unwrap();
-    server_socket
-        .set_write_timeout(Some(UDP_SEND_TIMEOUT))
-        .unwrap();
     let server_addr = server_socket.local_addr().unwrap();
     let cfg = Config {
         command: vec!["cat".into()],
@@ -628,4 +583,250 @@ fn an_idle_session_sleeps_instead_of_polling_and_still_answers_at_once() {
         pump(&mut client, &socket, server_addr, Duration::from_millis(50));
     }
     session.join().unwrap().unwrap();
+}
+
+const SCREEN: Owed = Owed {
+    screen: true,
+    echo: false,
+};
+const ECHO: Owed = Owed {
+    screen: false,
+    echo: true,
+};
+const BOTH: Owed = Owed {
+    screen: true,
+    echo: true,
+};
+const NOTHING: Owed = Owed {
+    screen: false,
+    echo: false,
+};
+
+#[test]
+fn a_burst_of_output_waits_for_the_collect_window_and_becomes_one_frame() {
+    let mut frames = FramePacer::default();
+    let interval = Duration::from_millis(20);
+    let start = Instant::now();
+    assert_eq!(frames.due(NOTHING, start, interval), None);
+
+    // The first byte of a redraw starts the window; later ones do not move it.
+    let due = frames.due(SCREEN, start, interval).unwrap();
+    assert_eq!(due, start + FRAME_MINDELAY);
+    let later = start + Duration::from_millis(5);
+    assert_eq!(frames.due(SCREEN, later, interval), Some(due));
+}
+
+#[test]
+fn frames_after_the_first_are_held_to_the_frame_interval() {
+    let mut frames = FramePacer::default();
+    let interval = Duration::from_millis(40);
+    let start = Instant::now();
+    frames.due(SCREEN, start, interval);
+    frames.sent(start + FRAME_MINDELAY);
+
+    // A program still writing is sent at the link's pace, not its own.
+    let next = start + Duration::from_millis(10);
+    assert_eq!(
+        frames.due(SCREEN, next, interval),
+        Some(start + FRAME_MINDELAY + interval)
+    );
+    // After a quiet spell the collect window is all that is left.
+    let quiet = start + Duration::from_secs(1);
+    frames.settled();
+    assert_eq!(frames.due(NOTHING, quiet, interval), None);
+    assert_eq!(
+        frames.due(SCREEN, quiet, interval),
+        Some(quiet + FRAME_MINDELAY)
+    );
+}
+
+#[test]
+fn an_echo_acknowledgement_waits_for_a_screen_change_to_ride_with() {
+    let mut frames = FramePacer::default();
+    let interval = Duration::from_millis(20);
+    let start = Instant::now();
+    // Due on its own, it would wait the whole piggyback window...
+    assert_eq!(
+        frames.due(ECHO, start, interval),
+        Some(start + ECHO_PIGGYBACK)
+    );
+    // ...but the screen changing inside it brings the frame forward, and the
+    // acknowledgement goes with that frame.
+    let typed = start + Duration::from_millis(10);
+    assert_eq!(
+        frames.due(BOTH, typed, interval),
+        Some(typed + FRAME_MINDELAY)
+    );
+}
+
+#[test]
+fn an_echo_acknowledgement_alone_still_goes_out() {
+    let mut frames = FramePacer::default();
+    let interval = Duration::from_millis(20);
+    let start = Instant::now();
+    let due = frames.due(ECHO, start, interval).unwrap();
+    // Waiting does not move it: when typing has stopped, it is sent.
+    assert_eq!(
+        frames.due(ECHO, start + Duration::from_millis(29), interval),
+        Some(due)
+    );
+    assert!(due <= start + ECHO_PIGGYBACK);
+}
+
+#[test]
+fn an_owed_frame_is_a_deadline_the_loop_wakes_for() {
+    let (transport, terminal, echo) = (
+        test_transport(),
+        TerminalState::new(24, 80),
+        EchoAcknowledgements::default(),
+    );
+    let due = Instant::now() + FRAME_MINDELAY;
+    let sources = WakeSources {
+        frame_due: Some(due),
+        ..wake_sources(&transport, &terminal, &echo)
+    };
+    assert_eq!(next_wake(sources).earliest(), Some(due));
+}
+
+/// A master that records the sizes it is set to, for checking which resizes
+/// reach the program.
+struct RecordingMaster(std::sync::Mutex<Vec<(u16, u16)>>);
+
+impl portable_pty::MasterPty for RecordingMaster {
+    fn resize(&self, size: PtySize) -> Result<(), anyhow::Error> {
+        self.0.lock().unwrap().push((size.rows, size.cols));
+        Ok(())
+    }
+    fn get_size(&self) -> Result<PtySize, anyhow::Error> {
+        Ok(PtySize::default())
+    }
+    fn try_clone_reader(&self) -> Result<Box<dyn std::io::Read + Send>, anyhow::Error> {
+        unimplemented!("not read in this test")
+    }
+    fn take_writer(&self) -> Result<Box<dyn std::io::Write + Send>, anyhow::Error> {
+        unimplemented!("not written in this test")
+    }
+    #[cfg(unix)]
+    fn process_group_leader(&self) -> Option<libc::pid_t> {
+        None
+    }
+    #[cfg(unix)]
+    fn as_raw_fd(&self) -> Option<std::os::fd::RawFd> {
+        None
+    }
+    #[cfg(unix)]
+    fn tty_name(&self) -> Option<std::path::PathBuf> {
+        None
+    }
+}
+
+#[test]
+fn a_run_of_resizes_reaches_the_program_as_the_last_one() {
+    let master = RecordingMaster(std::sync::Mutex::new(Vec::new()));
+    let (writes, written) = mpsc::sync_channel(16);
+    let (_events_tx, events) = mpsc::sync_channel(1);
+    let mut pty = PtyIo::Threads { events, writes };
+    let mut terminal = TerminalState::new(24, 80);
+    let mut dirty = false;
+    let resize = |cols, rows| UserEvent::Resize { cols, rows };
+    apply_user_events(
+        vec![
+            UserEvent::Byte(b'a'),
+            resize(80, 24),
+            resize(90, 30),
+            resize(100, 40),
+            UserEvent::Byte(b'b'),
+            resize(70, 20),
+        ],
+        3,
+        &master,
+        &mut terminal,
+        &mut pty,
+        &mut dirty,
+    )
+    .unwrap();
+    // A dragged edge: the sizes in between were gone before any byte could
+    // see them. The one a byte follows, and the last, are what the program
+    // gets — in order with that byte.
+    assert_eq!(*master.0.lock().unwrap(), [(40, 100), (20, 70)]);
+    assert_eq!(terminal.size(), (20, 70));
+    assert!(dirty);
+    let order: Vec<_> = written
+        .try_iter()
+        .map(|write| match write {
+            PtyWrite::Bytes(bytes) => String::from_utf8(bytes).unwrap(),
+            PtyWrite::InputFrame(frame) => format!("frame {frame}"),
+        })
+        .collect();
+    assert_eq!(order, ["a", "b", "frame 3"]);
+}
+
+#[test]
+fn a_superseded_resize_is_still_checked() {
+    let master = RecordingMaster(std::sync::Mutex::new(Vec::new()));
+    let (writes, _written) = mpsc::sync_channel(16);
+    let (_events_tx, events) = mpsc::sync_channel(1);
+    let mut pty = PtyIo::Threads { events, writes };
+    let mut terminal = TerminalState::new(24, 80);
+    let mut dirty = false;
+    let result = apply_user_events(
+        vec![
+            UserEvent::Resize { cols: 0, rows: 0 },
+            UserEvent::Resize { cols: 80, rows: 24 },
+        ],
+        1,
+        &master,
+        &mut terminal,
+        &mut pty,
+        &mut dirty,
+    );
+    assert!(
+        result.is_err(),
+        "an unreasonable size is refused wherever it is"
+    );
+}
+
+/// End to end through the transport: with the first frame sent but not yet
+/// acknowledged, the next is diffed from it, and the client applying it to
+/// that state sees the whole screen.
+#[test]
+fn a_frame_after_an_unacknowledged_one_builds_on_it() {
+    let key = [0x47; 16];
+    let mut server = ServerTransport::new(Ocb::new(&key).unwrap());
+    let mut client = Transport::new_client(Ocb::new(&key).unwrap());
+    let mut terminal = TerminalState::new(5, 20);
+    let mut peer_states = std::collections::HashMap::from([(0, vt100::Parser::new(5, 20, 0))]);
+    let mut deliver = |datagrams: Vec<Vec<u8>>, terminal: &TerminalState| -> (u64, u64) {
+        let mut accepted = None;
+        for datagram in datagrams {
+            if let Some(state) = client.recv_state(&datagram) {
+                accepted = Some(state);
+            }
+        }
+        let state = accepted.expect("a complete state");
+        let host = moshcatty::pb::HostInstruction::decode_message(&state.diff).unwrap();
+        let mut screen = vt100::Parser::from_screen(peer_states[&state.old_num].screen().clone());
+        for instruction in host {
+            screen.process(&instruction.hoststring);
+        }
+        assert_eq!(screen.screen().contents(), terminal.screen_contents());
+        peer_states.insert(state.new_num, screen);
+        (state.old_num, state.new_num)
+    };
+
+    terminal.process(b"first");
+    let one = queue_frame(&mut server, &terminal, None, 0).expect("a frame");
+    terminal.snapshot_for_state(one);
+    let (base, num) = deliver(server.tick(), &terminal);
+    assert_eq!((base, num), (0, one));
+
+    terminal.process(b"\r\nsecond");
+    let two = queue_frame(&mut server, &terminal, None, 0).expect("a frame");
+    terminal.snapshot_for_state(two);
+    let (base, num) = deliver(server.tick(), &terminal);
+    assert_eq!(num, two);
+    assert_eq!(
+        base, one,
+        "the second frame builds on the unacknowledged first"
+    );
 }

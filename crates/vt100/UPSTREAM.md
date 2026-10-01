@@ -26,6 +26,21 @@ Mosh state only ever describes one screen. It is off by default, so nothing
 that does not ask for it pays for it, and a scroll region or an alternate
 screen deliberately evicts nothing.
 
+Zetta also shares rows between screens the way Mosh's own framebuffer does.
+`Grid` holds its rows behind `Arc` and copies one only when it is written
+(`drawing_row_mut` and `drawing_rows_mut` go through `Arc::make_mut`, and a
+mutation that would change nothing leaves a row shared), so cloning a screen
+copies row pointers. `Grid::write_contents_diff` skips a row both screens still
+share, which writes nothing and moves nothing, unless the rows above them differ
+in wrapping, the one case where an unchanged row redraws its first cell.
+`zosh-server` snapshots a screen for every frame and diffs it against the
+acknowledged one, and both had been copying and comparing every cell; the
+`shared_row_tests` in `screen.rs` pin that skipping gives exactly the bytes a
+cell-by-cell diff does. `Parser::from_screen` and `Parser::into_screen` let a
+caller carry on from a screen it already has rather than replay
+`state_formatted` into a fresh parser, which re-parsed the whole screen and
+shared none of its rows; the Mosh client feeds every state it receives that way.
+
 `rustfmt.toml` pins upstream's own `max_width`. Without it the workspace
 default reformats every file the fork tracks, which buries these changes in
 merge friction; it is a no-op against the unmodified source.

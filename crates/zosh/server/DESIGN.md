@@ -75,18 +75,33 @@ clamped before it is believed, because it arrives over the network.
 
 ## Session loop
 
-The loop waits on nothing itself. Each input has a thread that blocks on it and
-wakes the loop through `wake::WakingSender`, which unparks after publishing so
-an event sent while the loop is still draining leaves a park token behind:
+On Unix the loop reads and writes its UDP socket and its PTY master itself,
+nonblocking, and waits for either in one `poll`, the way stock mosh-server
+waits in one `select` (`session_io.rs`). What still has a thread of its own
+wakes the loop through a pipe in that same `poll`:
 
-| Input | Thread |
-| --- | --- |
-| UDP datagrams | `zosh-udp-reader`, blocking on a clone of the socket |
-| PTY output, input-write completions | the PTY reader and writer |
-| agent connections and frames | the agent listener and one thread per connection |
-| the child's exit | `zosh-child-exit` (`child_exit.rs`) |
+| Input | Unix | Windows |
+| --- | --- | --- |
+| UDP datagrams | the loop | `zosh-udp-reader`, blocking on a clone of the socket |
+| PTY output, input-write completions | the loop | the PTY reader and writer |
+| agent connections and frames | the agent listener and one thread per connection | the same |
+| the child's exit | `zosh-child-exit` (`child_exit.rs`) | the same |
 
-Everything else is a clock, and `next_wake` parks the loop until the earliest
+The threads publish through `wake::WakingSender`, which wakes the loop after
+publishing, so an event sent while the loop is still draining leaves a pending
+wake-up behind. On Windows a ConPTY's pipes cannot be waited on together with a
+socket, so there every input has a thread and the loop parks. Unix ran that way
+too until a profile of a scrolling htop found half the server's time in the
+kernel, a third of it futex wake-ups and the context switches around them; it
+now matches stock mosh-server to within about a fifth while scrolling, and
+undercuts it idle and while resizing.
+
+A run of resizes in one client state reaches the program as the last of them
+(`apply_user_events`): a dragged pane edge sends many, and each one applied is a
+SIGWINCH and a whole-screen redraw for a size that is already gone. Each is
+still checked.
+
+Everything else is a clock, and `next_wake` puts the loop to sleep until the earliest
 one: the transport's own timers (`Transport::next_deadline`, the reason
 `crates/moshcatty` is forked), the echo-acknowledgement grace period, the
 keep-alive, the association and network timeouts, the scrollback stall and the
@@ -109,6 +124,34 @@ duplicated process handle on Windows), so the loop still owns it and kills it
 the way `portable_pty` does. PTY end of file cannot stand in for this: a
 background job can hold the terminal open after the shell exits, and a ConPTY's
 output stays open until the pseudoconsole is closed.
+
+Frames are built at stock Mosh's pace, not whenever the screen changes
+(`FramePacer`): no sooner than 8 ms after the screen first changed, so a
+program's redraw arriving in several reads is one frame, and no sooner than
+the transport's frame interval after the last one. Building a frame is the
+expensive part — a diff of the whole screen and a snapshot — and the server
+transport would send every one it was given. Snapshots share their screen
+behind `Arc`, so acknowledging a state does not copy it again and a frame
+that changed nothing on screen holds the previous one; within a screen the
+vt100 fork shares rows between copies, so a snapshot copies row pointers and
+the diff against the acknowledged screen skips the rows it still shares.
+
+Each frame is a diff from the newest state the client has probably received
+(`ServerTransport::frame_base`, Mosh's assumed receiver state), not from the
+one it has acknowledged: a state sent within the retransmission timeout is
+taken as held, and a frame diffed from it carries only what changed since.
+Diffing from the acknowledged state instead resent everything since the last
+acknowledgement in every frame, which with history being carried over a slow
+link was every unacknowledged scrolled-off row each time. `queue_frame` falls
+back to the acknowledged state when there is no snapshot of the assumed one or
+the transport will not take it as a base, and once the newest frame's base has
+aged past assuming (`frame_base_expired`) the next frame is rebuilt from the
+acknowledged state, so a lost base costs one rebuild rather than a stuck screen.
+
+An echo acknowledgement with no screen change to go with it waits up to 30 ms
+for one (`ECHO_PIGGYBACK`). Each key's acknowledgement falls due between two
+screen updates, and sent on its own it was a third of all frames while typing;
+stock mosh-server, measured the same way, sends one frame per key.
 
 UDP sends share the reader's blocking socket, so they are bounded by a 2 ms send
 timeout instead; one that cannot go out fails the way a nonblocking send did,

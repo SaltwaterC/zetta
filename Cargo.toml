@@ -47,7 +47,7 @@ clipboard = ["dep:zclip"]
 worktree = ["dep:zwt", "zwt/recursive-submodules"]
 zosh = ["zosh-client", "zosh-server"]
 zosh-client = ["dep:zosh"]
-zosh-server = ["dep:flate2", "dep:moshcatty", "dep:portable-pty", "dep:vt100", "dep:zclip"]
+zosh-server = ["dep:moshcatty", "dep:portable-pty", "dep:vt100", "dep:zclip"]
 
 [[bin]]
 name = "zetta-gui"
@@ -98,7 +98,6 @@ log = "0.4"
 async-compression = { version = "0.4", features = ["gzip", "futures-io"] }
 async-tar = "0.6"
 assets = { path = "crates/assets" }
-flate2 = { version = "1", optional = true }
 futures = "0.3"
 getrandom = "0.3"
 gpui = { path = "crates/gpui", features = ["profiler"] }

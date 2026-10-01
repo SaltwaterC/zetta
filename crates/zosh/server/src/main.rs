@@ -4,6 +4,7 @@ mod child_exit;
 mod lifecycle;
 mod protocol;
 mod server;
+mod session_io;
 mod sleep_guard;
 mod terminal_state;
 mod timing;

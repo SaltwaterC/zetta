@@ -4,11 +4,12 @@ use crate::child_exit::{self, ChildExitWatch};
 #[cfg(any(unix, windows))]
 use crate::lifecycle;
 use crate::protocol::{AgentHostRecord, ServerTransport, encode_host_message_with_agent};
+use crate::session_io::{LoopWait, PTY_CHUNK, PtyEvent, PtyIo, PtyWrite, UdpIo};
 use crate::sleep_guard::{self, IdleSleepGuard};
 use crate::terminal_state::{QueryResponder, TerminalState};
 use crate::timing;
 use crate::user_stream::{UserEvent, UserStreamTracker};
-use crate::wake::{WakeDeadline, WakingSender};
+use crate::wake::{WakeDeadline, Waker};
 use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD_NO_PAD;
@@ -16,13 +17,11 @@ use moshcatty::Ocb;
 use moshcatty::pb::HostInstruction;
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use std::collections::VecDeque;
-use std::io::{Read, Write};
+use std::io::Write;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 use std::path::Path;
 #[cfg(test)]
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
-use std::thread;
 use std::time::{Duration, Instant};
 
 const INITIAL_ROWS: u16 = 24;
@@ -32,18 +31,22 @@ const IO_BUDGET: Duration = Duration::from_millis(2);
 // Match stock Mosh's late acknowledgement grace period. PTY output is not
 // proof that the shell has processed a particular input frame.
 const ECHO_DELAY: Duration = Duration::from_millis(50);
+// Stock Mosh's SEND_MINDELAY: how long a frame waits after the screen first
+// changes, so the rest of a burst of output lands in the same frame. A
+// program redrawing a screen writes it in several reads' worth of bytes, and
+// without this each one became a frame of its own.
+const FRAME_MINDELAY: Duration = Duration::from_millis(8);
+// How long an echo acknowledgement with no screen change to go with it waits
+// for one. While someone types, each key's acknowledgement falls due between
+// two screen updates, and sent on its own it was a third of all frames. Long
+// enough to reach the next update at key-repeat speed; short enough not to
+// push a slow link's prediction confirmations towards Mosh's 250 ms glitch
+// threshold.
+const ECHO_PIGGYBACK: Duration = Duration::from_millis(30);
 const MAX_ROWS: u16 = 1024;
 const MAX_COLS: u16 = 1024;
 const MAX_CELLS: u32 = 262_144;
 const UDP_BUFFER: usize = 65_535;
-const UDP_QUEUE_DEPTH: usize = 256;
-// The UDP reader thread blocks on the socket, and a socket's blocking mode is
-// shared by every handle to it, so the loop's sends block too. This bounds
-// them instead: a send that cannot go out at once fails the way a nonblocking
-// one would, and SSP retransmits it.
-const UDP_SEND_TIMEOUT: Duration = IO_BUDGET;
-const PTY_CHUNK: usize = 8192;
-const PTY_QUEUE_DEPTH: usize = 256;
 // Bounds on a client-announced keep-alive interval. The client validates its
 // own, but this one arrives over the network, so it is clamped rather than
 // trusted: the floor is Mosh's minimum frame interval and the ceiling its
@@ -68,8 +71,8 @@ const SCROLLBACK_STALL: Duration = KEEP_ALIVE_LINGER;
 struct PtySession {
     child: Box<dyn portable_pty::Child + Send + Sync>,
     master: Box<dyn portable_pty::MasterPty>,
-    event_rx: Receiver<PtyEvent>,
-    write_tx: SyncSender<PtyWrite>,
+    /// The loop's end of `master`.
+    io: PtyIo,
     exited: bool,
     /// Wakes the loop when the child exits. Without one the child is polled
     /// every `child_exit::FALLBACK_POLL`, from `next_child_poll`.
@@ -107,9 +110,6 @@ impl PtySession {
 pub fn run(mut cfg: Config) -> Result<()> {
     let timing_file = timing::open()?;
     let (socket, port) = bind_udp(cfg.bind_ip, cfg.port_low, cfg.port_high)?;
-    socket
-        .set_write_timeout(Some(UDP_SEND_TIMEOUT))
-        .context("bounding UDP sends")?;
 
     let mut key = [0u8; 16];
     getrandom::fill(&mut key).map_err(|error| anyhow!("generating Mosh session key: {error}"))?;
@@ -155,14 +155,17 @@ pub fn run(mut cfg: Config) -> Result<()> {
     result
 }
 
-/// The session loop. Every input reaches it through a thread that wakes it
-/// (see `wake`), and between inputs it sleeps until the next timer it owes
+/// The session loop. It waits for its socket, its PTY and whatever wakes it
+/// (see `session_io`), and between them sleeps until the next timer it owes
 /// anything to (`next_wake`), so an idle session costs a wakeup per heartbeat
 /// or keep-alive rather than one every few milliseconds.
 fn serve_session(cfg: Config, socket: UdpSocket, mut transport: ServerTransport) -> Result<()> {
-    // Threads that feed the loop wake the thread that creates them, so this
-    // has to happen here, after the Unix bootstrap has forked.
-    let udp_events = spawn_udp_reader(&socket)?;
+    // Built here, after the Unix bootstrap has forked: the Windows readers
+    // are threads, and a thread must never cross a fork.
+    let mut wait = LoopWait::new().context("creating the session loop's wake-up")?;
+    let waker = wait.waker();
+    let mut udp = UdpIo::new(socket, &waker).context("setting up the UDP socket")?;
+    let mut udp_buf = vec![0u8; UDP_BUFFER];
     // The first authenticated user state decides whether this is a Zosh peer
     // that negotiated forwarding. Until then no child, PTY, or agent socket
     // exists, so an inherited bootstrap SSH_AUTH_SOCK cannot leak into a
@@ -196,6 +199,7 @@ fn serve_session(cfg: Config, socket: UdpSocket, mut transport: ServerTransport)
     // The last time a send was attempted and nothing left, which keeps a
     // keep-alive that cannot go out from waking the loop continuously.
     let mut send_failed_at: Option<Instant> = None;
+    let mut frames = FramePacer::default();
     let mut sleep_guard = IdleSleepGuard::new();
 
     loop {
@@ -222,12 +226,12 @@ fn serve_session(cfg: Config, socket: UdpSocket, mut transport: ServerTransport)
         let pty_progress = if hold_for_scrollback {
             PtyProgress::default()
         } else if let Some(session) = pty.as_mut() {
+            session.io.flush();
             drain_pty_events(
-                &session.event_rx,
+                &mut session.io,
                 &mut terminal,
                 &mut responder,
                 clipboard_supported,
-                &session.write_tx,
                 &mut echo,
                 cfg.verbose > 0,
             )?
@@ -254,9 +258,10 @@ fn serve_session(cfg: Config, socket: UdpSocket, mut transport: ServerTransport)
             if udp_started.elapsed() >= IO_BUDGET {
                 break;
             }
-            match udp_events.try_recv() {
-                Ok(UdpEvent::Datagram { bytes, from: addr }) => {
-                    let outcome = transport.receive(&bytes)?;
+            match udp.recv(&mut udp_buf) {
+                Ok(Some((length, addr))) => {
+                    let bytes = &udp_buf[..length];
+                    let outcome = transport.receive(bytes)?;
                     if outcome.authenticated {
                         timing::record("udp_authenticated", bytes.len() as u64, 0);
                         peer = Some(addr);
@@ -320,11 +325,12 @@ fn serve_session(cfg: Config, socket: UdpSocket, mut transport: ServerTransport)
                                     .any(|event| matches!(event, UserEvent::AgentHello { .. }));
                                 agent_decided = true;
                                 if cfg.forward_agent && requested {
-                                    agent_server = Some(AgentServer::new(thread::current()));
+                                    agent_server = Some(AgentServer::new(waker.clone()));
                                 }
                                 pty = Some(spawn_pty_session(
                                     &cfg,
                                     agent_server.as_ref().and_then(|agent| agent.socket_path()),
+                                    &waker,
                                 )?);
                             }
                             let events = accepted.events;
@@ -355,27 +361,24 @@ fn serve_session(cfg: Config, socket: UdpSocket, mut transport: ServerTransport)
                                     )
                                 })
                                 .collect();
-                            if let Some(session) = pty.as_ref() {
+                            if let Some(session) = pty.as_mut() {
                                 apply_user_events(
                                     terminal_events,
                                     accepted.frame,
                                     session.master.as_ref(),
                                     &mut terminal,
-                                    &session.write_tx,
+                                    &mut session.io,
                                     &mut dirty,
                                 )?;
                             }
                         }
                     }
                 }
-                Ok(UdpEvent::Failed(error)) => {
-                    return Err(error).context("receiving UDP datagram");
-                }
-                Err(TryRecvError::Empty) => {
+                Ok(None) => {
                     udp_budget_exhausted = false;
                     break;
                 }
-                Err(TryRecvError::Disconnected) => bail!("the UDP reader stopped"),
+                Err(error) => return Err(error).context("receiving UDP datagram"),
             }
         }
 
@@ -411,18 +414,35 @@ fn serve_session(cfg: Config, socket: UdpSocket, mut transport: ServerTransport)
             // Build a cumulative HostMessage from the peer's acknowledged
             // visual base. SSP may discard an unsent intermediate state; every
             // newer state is independently valid from the acknowledged base.
-            if !local_shutdown && !remote_shutdown && (dirty || confirmed_echo > enqueued_echo) {
-                let agent_records = agent_server
-                    .as_ref()
-                    .map_or_else(Vec::new, AgentServer::records);
-                if let Some(payload) = host_update(&terminal, confirmed_echo, &agent_records) {
-                    let state_num = transport.set_pending(payload);
+            //
+            // Built only once one may go out (see `FramePacer`): the
+            // transport sends a new state the moment it has one, so a frame
+            // built sooner is a frame sent sooner, and each costs a diff of
+            // the whole screen, a snapshot and a datagram.
+            let owed = Owed {
+                screen: !local_shutdown && !remote_shutdown && dirty,
+                echo: !local_shutdown && !remote_shutdown && confirmed_echo > enqueued_echo,
+            };
+            let now = Instant::now();
+            if frames
+                .due(owed, now, transport.send_interval())
+                .is_some_and(|due| now >= due)
+            {
+                if let Some(state_num) = queue_frame(
+                    &mut transport,
+                    &terminal,
+                    agent_server.as_ref(),
+                    confirmed_echo,
+                ) {
                     timing::record("host_update", state_num, confirmed_echo);
                     terminal.snapshot_for_state(state_num);
                     if let Some(agent) = agent_server.as_mut() {
                         agent.snapshot_for_state(state_num);
                     }
                     enqueued_echo = enqueued_echo.max(confirmed_echo);
+                    frames.sent(now);
+                } else {
+                    frames.settled();
                 }
                 dirty = false;
             }
@@ -445,7 +465,7 @@ fn serve_session(cfg: Config, socket: UdpSocket, mut transport: ServerTransport)
                 transport.force_next_send();
             }
 
-            match send_updates(&mut transport, &socket, peer, cfg.verbose > 1) {
+            match send_updates(&mut transport, &udp, peer, cfg.verbose > 1) {
                 SendOutcome::Sent => {
                     last_send = Instant::now();
                     send_failed_at = None;
@@ -496,20 +516,27 @@ fn serve_session(cfg: Config, socket: UdpSocket, mut transport: ServerTransport)
         }
 
         // If the transport tells us queue compaction invalidated an older branch,
+        // or the newest frame rests on a base too old to assume the peer has,
         // rebuild from the current ACK base on the next pass.
-        if transport.take_rebase_required() {
+        if transport.take_rebase_required() || transport.frame_base_expired() {
             dirty = true;
         }
 
-        // A producer unparks after publishing an event. The park token also
-        // covers events published between draining the queue and this wait.
-        // Never wait while this pass has left work behind: a bounded drain
-        // that stopped early, PTY output that was held back for a scrollback
-        // budget this pass's acknowledgements have since freed, or a host
-        // update that became owed after the update was built.
+        // A producer wakes the loop after publishing an event, and a pending
+        // wake-up also covers events published between draining the queue
+        // and this wait. Never wait while this pass has left work behind: a
+        // bounded drain
+        // that stopped early, or PTY output that was held back for a
+        // scrollback budget this pass's acknowledgements have since freed. A
+        // frame that is owed is a deadline like any other: `frame_due`.
         let pty_backlog = hold_for_scrollback && !terminal.scrollback_over_budget();
-        let update_owed = associated && !local_shutdown && !remote_shutdown && dirty;
-        if !pty_progress.budget_exhausted && !udp_budget_exhausted && !pty_backlog && !update_owed {
+        let sending = associated && !local_shutdown && !remote_shutdown;
+        let owed = Owed {
+            screen: sending && dirty,
+            echo: sending && confirmed_echo > enqueued_echo,
+        };
+        let frame_due = frames.due(owed, Instant::now(), transport.send_interval());
+        if !pty_progress.budget_exhausted && !udp_budget_exhausted && !pty_backlog {
             let wake = next_wake(WakeSources {
                 now: Instant::now(),
                 associated,
@@ -522,9 +549,21 @@ fn serve_session(cfg: Config, socket: UdpSocket, mut transport: ServerTransport)
                 terminal: &terminal,
                 echo: &echo,
                 child_poll: pty.as_ref().and_then(PtySession::child_poll_deadline),
+                frame_due,
             });
+            // The program is held back while the client is behind on its
+            // scrollback (see the top of the pass), and then its output must
+            // not end the wait: the stall deadline is what ends that.
+            let holding = terminal.scrollback_over_budget()
+                && transport.last_recv().elapsed() < SCROLLBACK_STALL;
             loop_timing.parking(wake.earliest());
-            wake.park();
+            wait.wait(
+                wake,
+                &udp,
+                pty.as_ref().map(|session| &session.io),
+                !holding,
+            )
+            .context("waiting for the network or the PTY")?;
         }
     }
 
@@ -558,6 +597,8 @@ struct WakeSources<'a> {
     terminal: &'a TerminalState,
     echo: &'a EchoAcknowledgements,
     child_poll: Option<Instant>,
+    /// When an owed frame may be built; consumed by the pass that builds it.
+    frame_due: Option<Instant>,
 }
 
 /// The instant the loop next has to wake for if nothing arrives first: the
@@ -574,6 +615,7 @@ fn next_wake(sources: WakeSources<'_>) -> WakeDeadline {
     let mut wake = WakeDeadline::default();
     wake.at(sources.echo.next_due());
     wake.at(sources.child_poll);
+    wake.at(sources.frame_due);
     if sources.terminal.scrollback_over_budget() {
         // Once passed, the pass stops holding the program back for the
         // client, which is all this deadline is for.
@@ -630,6 +672,73 @@ fn keep_alive_deadline(
     (due < last_recv + KEEP_ALIVE_LINGER).then_some(due)
 }
 
+/// What a frame would carry if one were built now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Owed {
+    /// The screen, or something else only a frame can carry, has changed.
+    screen: bool,
+    /// An echo acknowledgement has fallen due.
+    echo: bool,
+}
+
+/// When the next frame may be built, the way stock Mosh's sender decides when
+/// the next state may go out: no sooner than `FRAME_MINDELAY` after the
+/// screen first changed, so a burst of output is one frame, and no sooner
+/// than the transport's frame interval after the last frame, so a program
+/// writing continuously is sent at the rate the link can show it rather than
+/// at the rate it writes. An echo acknowledgement on its own waits up to
+/// `ECHO_PIGGYBACK` for a screen change to travel with.
+///
+/// The transport would pace states itself if asked, but only by holding back
+/// states already built; building them is the expensive part.
+#[derive(Debug, Default)]
+struct FramePacer {
+    /// When the screen first changed since the last frame was built.
+    screen_since: Option<Instant>,
+    /// When an echo acknowledgement first fell due since then.
+    echo_since: Option<Instant>,
+    last_frame: Option<Instant>,
+}
+
+impl FramePacer {
+    /// When the owed frame may be built, or `None` when none is owed.
+    fn due(&mut self, owed: Owed, now: Instant, interval: Duration) -> Option<Instant> {
+        if !owed.screen {
+            self.screen_since = None;
+        }
+        if !owed.echo {
+            self.echo_since = None;
+        }
+        let screen = owed
+            .screen
+            .then(|| *self.screen_since.get_or_insert(now) + FRAME_MINDELAY);
+        let echo = owed
+            .echo
+            .then(|| *self.echo_since.get_or_insert(now) + ECHO_PIGGYBACK);
+        let collected = match (screen, echo) {
+            (Some(screen), Some(echo)) => screen.min(echo),
+            (Some(at), None) | (None, Some(at)) => at,
+            (None, None) => return None,
+        };
+        Some(
+            self.last_frame
+                .map_or(collected, |last| collected.max(last + interval)),
+        )
+    }
+
+    /// A frame was built and handed to the transport.
+    fn sent(&mut self, now: Instant) {
+        self.last_frame = Some(now);
+        self.settled();
+    }
+
+    /// What was owed turned out to need no frame at all.
+    fn settled(&mut self) {
+        self.screen_since = None;
+        self.echo_since = None;
+    }
+}
+
 /// What a call to `send_updates` did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SendOutcome {
@@ -646,7 +755,7 @@ enum SendOutcome {
 /// the transport built but could not send must not restart it.
 fn send_updates(
     transport: &mut ServerTransport,
-    socket: &UdpSocket,
+    socket: &UdpIo,
     peer: Option<SocketAddr>,
     verbose: bool,
 ) -> SendOutcome {
@@ -692,11 +801,10 @@ fn send_updates(
 }
 
 fn drain_pty_events(
-    events: &Receiver<PtyEvent>,
+    pty: &mut PtyIo,
     terminal: &mut TerminalState,
     responder: &mut QueryResponder,
     clipboard_supported: bool,
-    writes: &SyncSender<PtyWrite>,
     echo: &mut EchoAcknowledgements,
     verbose: bool,
 ) -> Result<PtyProgress> {
@@ -710,8 +818,8 @@ fn drain_pty_events(
         if started.elapsed() >= IO_BUDGET {
             break;
         }
-        match events.try_recv() {
-            Ok(PtyEvent::Output(bytes)) => {
+        match pty.next_event() {
+            Some(PtyEvent::Output(bytes)) => {
                 timing::record("pty_output_apply", bytes.len() as u64, 0);
                 terminal.process(&bytes);
                 let replies = responder.feed(&bytes, terminal.cursor_position(), terminal.size());
@@ -722,8 +830,7 @@ fn drain_pty_events(
                     if terminal.add_query(query.clone()) == 0
                         && let Some(frame) = zclip::protocol::Frame::parse(&query)
                     {
-                        queue_pty_write(
-                            writes,
+                        pty.queue(PtyWrite::Bytes(
                             zclip::protocol::Frame {
                                 id: frame.id,
                                 message: zclip::protocol::Message::Error(
@@ -731,21 +838,21 @@ fn drain_pty_events(
                                 ),
                             }
                             .encode(),
-                        )?;
+                        ))?;
                     }
                 }
                 progress.dirty = true;
                 for reply in replies {
-                    queue_pty_write(writes, reply)?;
+                    pty.queue(PtyWrite::Bytes(reply))?;
                 }
             }
-            Ok(PtyEvent::InputWritten(frame)) => {
+            Some(PtyEvent::InputWritten(frame)) => {
                 timing::record("input_written_observed", frame, 0);
                 // Start the grace period on observation, allowing queued reader
                 // events to drain before the frame becomes eligible for ACK.
                 echo.written(frame, Instant::now());
             }
-            Ok(PtyEvent::Error(error)) => {
+            Some(PtyEvent::Error(error)) => {
                 if verbose {
                     eprintln!("zosh-server-rs: PTY I/O ended: {error}");
                 }
@@ -753,12 +860,12 @@ fn drain_pty_events(
                 progress.budget_exhausted = false;
                 break;
             }
-            Ok(PtyEvent::Eof) | Err(TryRecvError::Disconnected) => {
+            Some(PtyEvent::Eof) => {
                 progress.ended = true;
                 progress.budget_exhausted = false;
                 break;
             }
-            Err(TryRecvError::Empty) => {
+            None => {
                 progress.budget_exhausted = false;
                 break;
             }
@@ -767,8 +874,39 @@ fn drain_pty_events(
     Ok(progress)
 }
 
+/// Build a frame and queue it, diffed from the state the peer has probably
+/// received when that state can be diffed from, and from the acknowledged one
+/// otherwise. Returns the new state's number, or `None` when the frame turned
+/// out to carry nothing.
+fn queue_frame(
+    transport: &mut ServerTransport,
+    terminal: &TerminalState,
+    agent: Option<&AgentServer>,
+    confirmed_echo: u64,
+) -> Option<u64> {
+    let records = |base| agent.map_or_else(Vec::new, |agent| agent.records_after(base));
+    if let Some(assumed) = transport
+        .frame_base()
+        .filter(|state| terminal.has_snapshot(*state))
+    {
+        let base = Some(assumed);
+        // Nothing has changed since a state the peer probably has: there is
+        // nothing to send, and if that state was lost the transport resends
+        // it.
+        let payload = host_update(terminal, base, confirmed_echo, &records(base))?;
+        if let Some(state) = transport.set_pending_on(base, payload) {
+            return Some(state);
+        }
+        // The transport no longer accepts that base; build from the
+        // acknowledged one instead.
+    }
+    let payload = host_update(terminal, None, confirmed_echo, &records(None))?;
+    transport.set_pending_on(None, payload)
+}
+
 fn host_update(
     terminal: &TerminalState,
+    base: Option<u64>,
     confirmed_echo: u64,
     agent_records: &[AgentHostRecord],
 ) -> Option<Vec<u8>> {
@@ -786,7 +924,8 @@ fn host_update(
             echo_ack_num: confirmed_echo.min(i64::MAX as u64) as i64,
         });
     }
-    if let Some((rows, cols)) = terminal.resize_from_ack() {
+    let frame = terminal.frame_from(base)?;
+    if let Some((rows, cols)) = frame.resize {
         instructions.push(HostInstruction {
             hoststring: Vec::new(),
             width: i32::from(cols),
@@ -794,7 +933,7 @@ fn host_update(
             echo_ack_num: -1,
         });
     }
-    let host_bytes = terminal.diff_from_ack();
+    let host_bytes = frame.host_bytes;
     if !host_bytes.is_empty() {
         instructions.push(HostInstruction {
             hoststring: host_bytes,
@@ -803,8 +942,7 @@ fn host_update(
             echo_ack_num: -1,
         });
     }
-    let update =
-        encode_host_message_with_agent(&instructions, terminal.queries_from_ack(), agent_records);
+    let update = encode_host_message_with_agent(&instructions, frame.queries, agent_records);
     timing::slow("host_diff_slow", phase);
     (!update.is_empty()).then_some(update)
 }
@@ -814,36 +952,44 @@ fn apply_user_events(
     input_frame: u64,
     master: &dyn portable_pty::MasterPty,
     terminal: &mut TerminalState,
-    pty_write_tx: &SyncSender<PtyWrite>,
+    pty: &mut PtyIo,
     dirty: &mut bool,
 ) -> Result<()> {
     let mut keys = Vec::with_capacity(PTY_CHUNK);
     let mut any_keys = false;
 
-    let flush_keys = |keys: &mut Vec<u8>| -> Result<()> {
+    let flush_keys = |pty: &mut PtyIo, keys: &mut Vec<u8>| -> Result<()> {
         if keys.is_empty() {
             return Ok(());
         }
-        queue_pty_write(pty_write_tx, std::mem::take(keys))?;
+        pty.queue(PtyWrite::Bytes(std::mem::take(keys)))?;
         *keys = Vec::with_capacity(PTY_CHUNK);
         Ok(())
     };
 
-    for event in events {
+    let mut events = events.into_iter().peekable();
+    while let Some(event) = events.next() {
         match event {
             UserEvent::Byte(byte) => {
                 any_keys = true;
                 keys.push(byte);
                 if keys.len() >= PTY_CHUNK {
-                    flush_keys(&mut keys)?;
+                    flush_keys(pty, &mut keys)?;
                 }
             }
             UserEvent::Resize { cols, rows } => {
                 // Preserve UserStream ordering: bytes before a resize must reach
                 // the PTY before the resize, and bytes after it must see the new
                 // terminal dimensions.
-                flush_keys(&mut keys)?;
+                flush_keys(pty, &mut keys)?;
                 validate_terminal_size(rows, cols)?;
+                // A resize the next event replaces is never seen by anything:
+                // no byte reaches the program between the two. A dragged pane
+                // edge sends a run of them, and each one applied is a SIGWINCH
+                // and a whole-screen redraw for a size that is already gone.
+                if matches!(events.peek(), Some(UserEvent::Resize { .. })) {
+                    continue;
+                }
                 master
                     .resize(PtySize {
                         rows,
@@ -859,8 +1005,8 @@ fn apply_user_events(
                 // A response is a PTY byte stream event, not keyboard input;
                 // flush preceding keys so the remote process sees the exact
                 // UserStream order and do not attach an echo acknowledgement.
-                flush_keys(&mut keys)?;
-                queue_pty_write(pty_write_tx, bytes)?;
+                flush_keys(pty, &mut keys)?;
+                pty.queue(PtyWrite::Bytes(bytes))?;
             }
             UserEvent::AgentHello { .. } | UserEvent::AgentResponse { .. } => {
                 // Negotiation and agent frames are consumed by the session
@@ -869,10 +1015,10 @@ fn apply_user_events(
         }
     }
 
-    flush_keys(&mut keys)?;
+    flush_keys(pty, &mut keys)?;
     if any_keys {
         timing::record("input_queued", input_frame, 0);
-        queue_pty_request(pty_write_tx, PtyWrite::InputFrame(input_frame))?;
+        pty.queue(PtyWrite::InputFrame(input_frame))?;
     }
     Ok(())
 }
@@ -887,116 +1033,11 @@ fn validate_terminal_size(rows: u16, cols: u16) -> Result<()> {
     Ok(())
 }
 
-fn queue_pty_write(tx: &SyncSender<PtyWrite>, data: Vec<u8>) -> Result<()> {
-    queue_pty_request(tx, PtyWrite::Bytes(data))
-}
-
-fn queue_pty_request(tx: &SyncSender<PtyWrite>, request: PtyWrite) -> Result<()> {
-    match tx.try_send(request) {
-        Ok(()) => Ok(()),
-        Err(TrySendError::Full(_)) => {
-            bail!("PTY input queue saturated; child is not consuming terminal input")
-        }
-        Err(TrySendError::Disconnected(_)) => bail!("PTY writer has stopped"),
-    }
-}
-
-/// What the UDP reader thread hands the session loop.
-enum UdpEvent {
-    Datagram {
-        bytes: Vec<u8>,
-        from: SocketAddr,
-    },
-    /// The socket failed; the reader has stopped.
-    Failed(std::io::Error),
-}
-
-/// Starts the thread that blocks on the session's UDP socket, waking the
-/// calling thread — the session loop — with each datagram.
-fn spawn_udp_reader(socket: &UdpSocket) -> Result<Receiver<UdpEvent>> {
-    let socket = socket
-        .try_clone()
-        .context("cloning the UDP socket for its reader")?;
-    let (sender, events) = mpsc::sync_channel(UDP_QUEUE_DEPTH);
-    let sender = WakingSender::to_current(sender);
-    thread::Builder::new()
-        .name("zosh-udp-reader".to_owned())
-        .spawn(move || {
-            let mut buf = vec![0u8; UDP_BUFFER];
-            loop {
-                let event = match socket.recv_from(&mut buf) {
-                    Ok((n, from)) => UdpEvent::Datagram {
-                        bytes: buf[..n].to_vec(),
-                        from,
-                    },
-                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-                    Err(error) => UdpEvent::Failed(error),
-                };
-                let failed = matches!(event, UdpEvent::Failed(_));
-                if sender.send(event).is_err() || failed {
-                    return;
-                }
-            }
-        })
-        .context("starting the UDP reader")?;
-    Ok(events)
-}
-
-fn spawn_pty_reader(mut reader: Box<dyn Read + Send>, tx: WakingSender<PtyEvent>) {
-    thread::spawn(move || {
-        let mut buf = [0u8; PTY_CHUNK];
-        loop {
-            match reader.read(&mut buf) {
-                Ok(0) => {
-                    timing::record("pty_eof", 0, 0);
-                    let _ = tx.send(PtyEvent::Eof);
-                    break;
-                }
-                Ok(n) => {
-                    timing::record("pty_read", n as u64, 0);
-                    if tx.send(PtyEvent::Output(buf[..n].to_vec())).is_err() {
-                        break;
-                    }
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(error) => {
-                    let _ = tx.send(PtyEvent::Error(error.to_string()));
-                    break;
-                }
-            }
-        }
-    });
-}
-
-fn spawn_pty_writer(
-    mut writer: Box<dyn Write + Send>,
-    rx: Receiver<PtyWrite>,
-    event_tx: WakingSender<PtyEvent>,
-) {
-    thread::spawn(move || {
-        while let Ok(request) = rx.recv() {
-            match request {
-                PtyWrite::Bytes(data) => {
-                    timing::record("pty_write_begin", data.len() as u64, 0);
-                    if let Err(error) = writer.write_all(&data) {
-                        timing::record("pty_write_error", 0, 0);
-                        let _ = event_tx.send(PtyEvent::Error(error.to_string()));
-                        return;
-                    }
-                    timing::record("pty_write_end", data.len() as u64, 0);
-                }
-                PtyWrite::InputFrame(frame) => {
-                    timing::record("input_written", frame, 0);
-                    if event_tx.send(PtyEvent::InputWritten(frame)).is_err() {
-                        return;
-                    }
-                }
-            }
-        }
-    });
-}
-
-fn spawn_pty_session(cfg: &Config, agent_socket: Option<&Path>) -> Result<PtySession> {
+fn spawn_pty_session(
+    cfg: &Config,
+    agent_socket: Option<&Path>,
+    waker: &Waker,
+) -> Result<PtySession> {
     let pty_system = native_pty_system();
     let pair = pty_system
         .openpty(PtySize {
@@ -1013,23 +1054,13 @@ fn spawn_pty_session(cfg: &Config, agent_socket: Option<&Path>) -> Result<PtySes
         .spawn_command(command)
         .context("spawning shell/command in PTY")?;
     drop(pair.slave);
-    let reader = pair
-        .master
-        .try_clone_reader()
-        .context("cloning PTY reader")?;
-    let writer = pair.master.take_writer().context("taking PTY writer")?;
     let master = pair.master;
-    let (event_tx, event_rx) = mpsc::sync_channel::<PtyEvent>(PTY_QUEUE_DEPTH);
-    let event_sender = WakingSender::to_current(event_tx);
-    let exit_watch = ChildExitWatch::start(child.as_ref(), thread::current());
-    let (write_tx, write_rx) = mpsc::sync_channel::<PtyWrite>(PTY_QUEUE_DEPTH);
-    spawn_pty_reader(reader, event_sender.clone());
-    spawn_pty_writer(writer, write_rx, event_sender);
+    let io = PtyIo::open(master.as_ref(), waker)?;
+    let exit_watch = ChildExitWatch::start(child.as_ref(), waker.clone());
     Ok(PtySession {
         child,
         master,
-        event_rx,
-        write_tx,
+        io,
         exited: false,
         exit_watch,
         next_child_poll: Instant::now() + child_exit::FALLBACK_POLL,
@@ -1194,18 +1225,6 @@ fn configured_network_timeout() -> Option<Duration> {
     let value = std::env::var("MOSH_SERVER_NETWORK_TMOUT").ok()?;
     let seconds = value.parse::<u64>().ok()?;
     (seconds > 0).then(|| Duration::from_secs(seconds))
-}
-
-enum PtyEvent {
-    Output(Vec<u8>),
-    InputWritten(u64),
-    Eof,
-    Error(String),
-}
-
-enum PtyWrite {
-    Bytes(Vec<u8>),
-    InputFrame(u64),
 }
 
 #[derive(Default)]

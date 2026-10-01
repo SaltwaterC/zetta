@@ -187,3 +187,29 @@ fn a_kept_compressor_writes_what_a_fresh_encoder_would() {
         assert_eq!(zlib_decompress(&compressed).unwrap(), payload);
     }
 }
+
+#[test]
+fn a_diff_is_queued_only_on_the_base_it_was_computed_from() {
+    // Zetta's other addition here: a server that diffs from the state the
+    // peer has probably received must not have that base silently swapped
+    // for the acknowledged one.
+    let (mut server, _) = pair();
+    assert!(
+        server.set_pending_on(7, b"x".to_vec()).is_none(),
+        "never sent"
+    );
+    let first = server
+        .set_pending_on(0, b"a".to_vec())
+        .expect("the acked base");
+    // Queued but not sent yet: nothing can have received it.
+    assert!(server.set_pending_on(first, b"b".to_vec()).is_none());
+    assert!(!server.tick().is_empty());
+    assert_eq!(server.prospective_base_num(), Some(first));
+    let second = server
+        .set_pending_on(first, b"b".to_vec())
+        .expect("a sent state");
+    assert_eq!(server.outbound_states.back().unwrap().old_num, first);
+    assert!(second > first);
+    server.start_shutdown();
+    assert!(server.set_pending_on(0, b"c".to_vec()).is_none());
+}

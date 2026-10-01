@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, VecDeque};
+use std::sync::Arc;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD_NO_PAD;
@@ -48,7 +49,10 @@ const SCROLLBACK_FLAG_WRAPPED: u8 = 0b0000_0001;
 
 #[derive(Clone)]
 struct TerminalSnapshot {
-    screen: vt100::Screen,
+    /// Shared, not copied: acknowledging a state makes its screen the base
+    /// without another copy, and a state sent with the screen unchanged
+    /// (an echo acknowledgement, an agent record) holds the one before it.
+    screen: Arc<vt100::Screen>,
     scrollback_clear_count: u64,
     /// How many rows had scrolled off the top when this state was sent. Rows
     /// below it are ones the peer has, so acknowledging the state is what
@@ -353,13 +357,35 @@ fn first_parameter_is_three(parameters: &[u8]) -> bool {
     value == 3
 }
 
+/// What a frame from some base carries for the terminal.
+pub struct TerminalFrame<'a> {
+    /// The size to tell the peer about first, when it differs from the base's.
+    pub resize: Option<(u16, u16)>,
+    pub host_bytes: Vec<u8>,
+    /// Queries the base did not already carry.
+    pub queries: &'a [TerminalQuery],
+}
+
+/// What a frame is diffed from: the parts of a held state a diff reads.
+struct Base<'a> {
+    screen: &'a vt100::Screen,
+    scrollback_clear_count: u64,
+    evicted_total: u64,
+    title: Option<&'a str>,
+    /// How many of the pending queries the base already carried.
+    query_count: usize,
+}
+
 /// Authoritative server-side terminal state. Mosh synchronizes terminal state,
 /// not a byte stream; `vt100::Screen::state_diff` gives us idempotent terminal
 /// mutations suitable for HostBytes SSP states.
 pub struct TerminalState {
     parser: vt100::Parser,
-    base_screen: vt100::Screen,
+    base_screen: Arc<vt100::Screen>,
     base_num: u64,
+    /// The screen as of the newest snapshot, while the parser's has not
+    /// changed since; cleared by anything that changes it.
+    unchanged_screen: Option<Arc<vt100::Screen>>,
     scrollback_detector: ScrollbackClearDetector,
     scrollback_clear_count: u64,
     base_scrollback_clear_count: u64,
@@ -403,11 +429,12 @@ impl TerminalState {
         let mut parser = vt100::Parser::new(rows, cols, 0);
         // On from the first byte: see SCROLLBACK_BUDGET_PROVISIONAL.
         parser.screen_mut().set_capture_evicted_rows(true);
-        let base_screen = parser.screen().clone();
+        let base_screen = Arc::new(parser.screen().clone());
         Self {
             parser,
             base_screen,
             base_num: 0,
+            unchanged_screen: None,
             scrollback_detector: ScrollbackClearDetector::default(),
             scrollback_clear_count: 0,
             base_scrollback_clear_count: 0,
@@ -430,6 +457,9 @@ impl TerminalState {
         let cleared = self.scrollback_detector.feed(bytes);
         self.scrollback_clear_count = self.scrollback_clear_count.wrapping_add(cleared);
         self.title_scanner.feed(bytes);
+        if !bytes.is_empty() {
+            self.unchanged_screen = None;
+        }
         self.parser.process(bytes);
         if cleared > 0 {
             // The program asked for the history to be thrown away, so rows
@@ -452,7 +482,7 @@ impl TerminalState {
     pub fn set_scrollback_budget(&mut self, budget: usize) {
         self.scrollback_budget = budget.clamp(SCROLLBACK_BUDGET_MIN, SCROLLBACK_BUDGET_MAX);
         self.scrollback_announced = true;
-        self.parser.screen_mut().set_capture_evicted_rows(true);
+        self.screen_mut().set_capture_evicted_rows(true);
     }
 
     /// Stops carrying scrolled-off rows and forgets the ones collected so far.
@@ -464,7 +494,7 @@ impl TerminalState {
         self.scrollback_announced = false;
         self.pending_scrollback.clear();
         self.pending_scrollback_bytes = 0;
-        self.parser.screen_mut().set_capture_evicted_rows(false);
+        self.screen_mut().set_capture_evicted_rows(false);
     }
 
     /// Whether the unacknowledged rows have reached the client's budget.
@@ -496,7 +526,7 @@ impl TerminalState {
         if self.scrollback_budget == 0 {
             return;
         }
-        let (first, rows) = self.parser.screen_mut().take_evicted_rows();
+        let (first, rows) = self.screen_mut().take_evicted_rows();
         for (offset, row) in rows.into_iter().enumerate() {
             let row = PendingRow {
                 index: first + offset as u64,
@@ -519,7 +549,14 @@ impl TerminalState {
     }
 
     pub fn resize(&mut self, rows: u16, cols: u16) {
-        self.parser.screen_mut().set_size(rows, cols);
+        self.screen_mut().set_size(rows, cols);
+    }
+
+    /// The parser's screen, for a change to it: the next snapshot has to be
+    /// a fresh copy rather than the last one again.
+    fn screen_mut(&mut self) -> &mut vt100::Screen {
+        self.unchanged_screen = None;
+        self.parser.screen_mut()
     }
 
     pub fn size(&self) -> (u16, u16) {
@@ -547,17 +584,50 @@ impl TerminalState {
         id
     }
 
-    /// Queries not yet covered by the client's acknowledged terminal state.
-    pub fn queries_from_ack(&self) -> &[TerminalQuery] {
-        &self.pending_queries
+    /// Whether a frame can be diffed from `state`: one this side sent and
+    /// still holds a snapshot of.
+    pub fn has_snapshot(&self, state: u64) -> bool {
+        self.snapshots.contains_key(&state)
     }
 
-    /// Produce a cumulative terminal-state transform from the screen associated
-    /// with the peer's latest acknowledged SSP state to the current screen.
-    pub fn diff_from_ack(&self) -> Vec<u8> {
+    /// What the peer holds if it holds `base`: the acknowledged state for
+    /// `None`, otherwise a state this side sent. `None` for a state with no
+    /// snapshot.
+    fn base(&self, base: Option<u64>) -> Option<Base<'_>> {
+        let Some(state) = base else {
+            return Some(Base {
+                screen: &self.base_screen,
+                scrollback_clear_count: self.base_scrollback_clear_count,
+                evicted_total: self.base_evicted_total,
+                title: self.base_title.as_deref(),
+                query_count: 0,
+            });
+        };
+        let snapshot = self.snapshots.get(&state)?;
+        Some(Base {
+            screen: &snapshot.screen,
+            scrollback_clear_count: snapshot.scrollback_clear_count,
+            evicted_total: snapshot.evicted_total,
+            title: snapshot.title.as_deref(),
+            query_count: snapshot.query_count.min(self.pending_queries.len()),
+        })
+    }
+
+    /// The cumulative transform from `base` — the acknowledged state for
+    /// `None`, or a state this side sent — to the terminal as it is now, or
+    /// `None` when there is no snapshot of `base` to diff from.
+    ///
+    /// Diffing from a state the peer has probably received rather than from
+    /// the one it has acknowledged is what stock Mosh does, and it is what
+    /// keeps a frame from carrying everything since the last acknowledgement
+    /// again: on a slow link, with history being carried, that was every
+    /// unacknowledged scrolled-off row in every frame.
+    pub fn frame_from(&self, base: Option<u64>) -> Option<TerminalFrame<'_>> {
+        let base = self.base(base)?;
         let current = self.parser.screen();
-        let mut diff = if current.size() == self.base_screen.size() {
-            current.state_diff(&self.base_screen)
+        let resize = (current.size() != base.screen.size()).then(|| current.size());
+        let mut diff = if resize.is_none() {
+            current.state_diff(base.screen)
         } else {
             // CompleteTerminal sends an explicit Resize instruction before the
             // visual repaint. A full repaint is safer than a cross-size delta.
@@ -569,14 +639,19 @@ impl TerminalState {
         // rows to show for it: the number is how the client knows where the
         // screen it is about to be shown sits in the session's output, and a
         // count that moved with nothing attached is exactly the case where it
-        // must be told that something went missing.
-        if self.scrollback_announced && self.evicted_total() != self.base_evicted_total {
-            let mut marked = scrollback_marker(&self.pending_scrollback, self.evicted_total());
+        // must be told that something went missing. Rows `base` already
+        // carried are left out.
+        if self.scrollback_announced && self.evicted_total() != base.evicted_total {
+            let rows = self
+                .pending_scrollback
+                .iter()
+                .skip_while(|row| row.index < base.evicted_total);
+            let mut marked = scrollback_marker(rows, self.evicted_total());
             marked.append(&mut diff);
             diff = marked;
         }
 
-        if self.scrollback_clear_count != self.base_scrollback_clear_count {
+        if self.scrollback_clear_count != base.scrollback_clear_count {
             let marker = scrollback_clear_marker(self.scrollback_clear_count);
             let mut marked = Vec::with_capacity(marker.len() + diff.len());
             marked.extend_from_slice(&marker);
@@ -590,24 +665,41 @@ impl TerminalState {
         // title, so a session whose titles are dropped is one whose panes
         // never learn where they are.
         let title = self.title_scanner.title();
-        if title.is_some() && title != self.base_title.as_deref() {
+        if title.is_some() && title != base.title {
             let mut titled = title_escape(title.unwrap_or_default());
             titled.append(&mut diff);
             diff = titled;
         }
-        diff
+        Some(TerminalFrame {
+            resize,
+            host_bytes: diff,
+            queries: &self.pending_queries[base.query_count..],
+        })
     }
 
-    pub fn resize_from_ack(&self) -> Option<(u16, u16)> {
-        let current = self.parser.screen();
-        (current.size() != self.base_screen.size()).then(|| current.size())
+    /// Queries not yet covered by the client's acknowledged terminal state.
+    #[cfg(test)]
+    pub fn queries_from_ack(&self) -> &[TerminalQuery] {
+        &self.pending_queries
+    }
+
+    /// [`Self::frame_from`] the acknowledged state, screen bytes only.
+    #[cfg(test)]
+    pub fn diff_from_ack(&self) -> Vec<u8> {
+        self.frame_from(None)
+            .expect("the acknowledged state is always held")
+            .host_bytes
     }
 
     pub fn snapshot_for_state(&mut self, state_num: u64) {
+        let screen = Arc::clone(
+            self.unchanged_screen
+                .get_or_insert_with(|| Arc::new(self.parser.screen().clone())),
+        );
         self.snapshots.insert(
             state_num,
             TerminalSnapshot {
-                screen: self.parser.screen().clone(),
+                screen,
                 scrollback_clear_count: self.scrollback_clear_count,
                 evicted_total: self.evicted_total(),
                 title: self.title_scanner.title().map(str::to_owned),
@@ -636,7 +728,7 @@ impl TerminalState {
             .next_back()
             .map_or(0, |(_, snapshot)| snapshot.query_count);
         if let Some((_, snapshot)) = self.snapshots.range(..=ack_num).next_back() {
-            self.base_screen = snapshot.screen.clone();
+            self.base_screen = Arc::clone(&snapshot.screen);
             self.base_scrollback_clear_count = snapshot.scrollback_clear_count;
             self.base_title = snapshot.title.clone();
             // The rows that state carried are rows the peer now has, so they
@@ -676,6 +768,11 @@ impl TerminalState {
     }
 
     #[cfg(test)]
+    pub fn screen_contents(&self) -> String {
+        self.parser.screen().contents()
+    }
+
+    #[cfg(test)]
     pub fn scrollback_clear_count(&self) -> u64 {
         self.scrollback_clear_count
     }
@@ -708,9 +805,10 @@ fn title_escape(title: &str) -> Vec<u8> {
 /// many bytes of contents. Base64 keeps it inside an OSC string, which is
 /// what lets a Mosh implementation that has never heard of the extension
 /// discard it as an unknown OSC rather than draw it.
-fn scrollback_marker(rows: &VecDeque<PendingRow>, total: u64) -> Vec<u8> {
-    let first = rows.front().map_or(total, |row| row.index);
-    let mut payload = Vec::with_capacity(rows.iter().map(PendingRow::cost).sum::<usize>());
+fn scrollback_marker<'a>(rows: impl Iterator<Item = &'a PendingRow>, total: u64) -> Vec<u8> {
+    let rows: Vec<&PendingRow> = rows.collect();
+    let first = rows.first().map_or(total, |row| row.index);
+    let mut payload = Vec::with_capacity(rows.iter().map(|row| row.cost()).sum::<usize>());
     for row in rows {
         payload.push(if row.wrapped {
             SCROLLBACK_FLAG_WRAPPED
@@ -1510,13 +1608,92 @@ mod tests {
             wrapped: true,
         });
         assert_eq!(
-            scrollback_marker(&rows, 8),
+            scrollback_marker(rows.iter(), 8),
             b"\x1b]777;zosh-scrollback;7;AQAAAAJoaQ\x07".to_vec()
         );
         // No rows, but a count that moved: the first index is the count.
         assert_eq!(
-            scrollback_marker(&VecDeque::new(), 12),
+            scrollback_marker(std::iter::empty(), 12),
             b"\x1b]777;zosh-scrollback;12;\x07".to_vec()
         );
+    }
+
+    // ------------------------------------------------------------------ //
+    // Frames diffed from a state the peer has probably received rather
+    // than from the acknowledged one.
+    // ------------------------------------------------------------------ //
+
+    fn host_bytes(state: &TerminalState, base: Option<u64>) -> Vec<u8> {
+        state.frame_from(base).expect("a held base").host_bytes
+    }
+
+    #[test]
+    fn a_frame_from_a_sent_state_rebuilds_the_screen_on_top_of_it() {
+        let mut state = TerminalState::new(5, 20);
+        state.process(b"first");
+        let first = host_bytes(&state, None);
+        state.snapshot_for_state(1);
+        state.process(b"\r\nsecond");
+        let second = host_bytes(&state, Some(1));
+        assert!(
+            !String::from_utf8_lossy(&second).contains("first"),
+            "what the base already shows is not sent again: {second:?}"
+        );
+        // The peer applies it to the state it was diffed from.
+        let mut peer = vt100::Parser::new(5, 20, 0);
+        peer.process(&first);
+        peer.process(&second);
+        assert_eq!(peer.screen().contents(), state.parser.screen().contents());
+    }
+
+    #[test]
+    fn rows_a_sent_state_carried_are_not_carried_again() {
+        let mut state = TerminalState::new(3, 20);
+        state.set_scrollback_budget(64 * 1024);
+        state.process(b"r0\r\nr1\r\nr2\r\nr3\r\nr4");
+        state.snapshot_for_state(1);
+        let carried = state.evicted_total();
+        state.process(b"\r\nr5\r\nr6");
+
+        let (first, rows) = read_scrollback(&host_bytes(&state, Some(1))).expect("a marker");
+        assert_eq!(first, carried, "only what scrolled off after the base");
+        assert_eq!(rows.len() as u64, state.evicted_total() - carried);
+        // From the acknowledged state, everything still unacknowledged.
+        let (first, rows) = read_scrollback(&host_bytes(&state, None)).expect("a marker");
+        assert_eq!(first, 0);
+        assert_eq!(rows.len() as u64, state.evicted_total());
+    }
+
+    #[test]
+    fn what_a_sent_state_carried_is_not_restated() {
+        let mut state = TerminalState::new(5, 20);
+        state.process(b"\x1b]0;a title\x07x");
+        assert_eq!(state.add_query(b"\x1b]11;?\x07".to_vec()), 1);
+        state.snapshot_for_state(1);
+        state.process(b"y");
+        let frame = state.frame_from(Some(1)).expect("a held base");
+        assert!(!String::from_utf8_lossy(&frame.host_bytes).contains("\u{1b}]0;"));
+        assert!(frame.queries.is_empty());
+
+        assert_eq!(state.add_query(b"\x1b]10;?\x07".to_vec()), 2);
+        let frame = state.frame_from(Some(1)).expect("a held base");
+        assert_eq!(
+            frame
+                .queries
+                .iter()
+                .map(|query| query.id)
+                .collect::<Vec<_>>(),
+            [2]
+        );
+        // The acknowledged state carried none of it.
+        assert_eq!(state.frame_from(None).unwrap().queries.len(), 2);
+    }
+
+    #[test]
+    fn a_base_with_no_snapshot_has_no_frame() {
+        let state = TerminalState::new(5, 20);
+        assert!(state.frame_from(Some(9)).is_none());
+        assert!(!state.has_snapshot(9));
+        assert!(state.frame_from(None).is_some());
     }
 }

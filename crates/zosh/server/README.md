@@ -119,10 +119,10 @@ intermittent colour report.
 
 ### Opt-in timing diagnostics
 
-The server loop is event driven: UDP datagrams, PTY output, input-write
-completions, agent connections and the child's exit each wake it from a thread
-of their own, and between them it sleeps until the next timer it owes anything
-to (see `DESIGN.md`). UDP and PTY draining each yield after a 2 ms work budget
+The server loop is event driven: on Unix it waits in one `poll` on its UDP
+socket, its PTY and a wake-up pipe for the agent and child-exit threads; on
+Windows each input wakes it from a thread of its own. Between them it sleeps
+until the next timer it owes anything to (see `DESIGN.md`). UDP and PTY draining each yield after a 2 ms work budget
 (checked between items), retaining their packet/event count limits. A
 budget-limited pass does not sleep; individual terminal-processing or transport
 operations can exceed the budget.

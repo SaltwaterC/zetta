@@ -51,12 +51,19 @@ fn color_of(color: vt100::Color) -> Color {
 
 impl Screen for Vt100Screen {
     fn feed(&mut self, bytes: &[u8]) {
+        if bytes.is_empty() {
+            return;
+        }
         self.titles.feed(bytes);
-        let (rows, cols) = self.inner.size();
-        let mut parser = vt100::Parser::new(rows, cols, 0);
-        parser.process(&self.inner.state_formatted());
+        // Carry on from the screen itself rather than replaying it into a
+        // fresh parser: the replay serialized and re-parsed the whole screen
+        // for every state received, and gave every row a fresh copy, so a
+        // state shared none of its rows with the one it came from and every
+        // diff between them compared every cell. A clone is a copy of row
+        // pointers, and only the rows the bytes write to are copied.
+        let mut parser = vt100::Parser::from_screen(self.inner.clone());
         parser.process(bytes);
-        self.inner = parser.screen().clone();
+        self.inner = parser.into_screen();
     }
 
     fn resize(&mut self, rows: u16, cols: u16) {

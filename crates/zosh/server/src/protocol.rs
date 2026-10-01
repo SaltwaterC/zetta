@@ -7,14 +7,10 @@
 //! prevents the PTY layer from replaying a cumulative/retransmitted UserStream.
 
 use crate::terminal_state::TerminalQuery;
-use anyhow::{Result, anyhow};
-use flate2::read::ZlibDecoder;
+use anyhow::Result;
 use moshcatty::Ocb;
-use moshcatty::crypto::{DIR_TO_CLIENT, DIR_TO_SERVER};
-use moshcatty::fragment::{Assembler, Fragment, MAX_INSTRUCTION_BYTES};
-use moshcatty::pb::{HostInstruction, TransportInstruction};
+use moshcatty::pb::HostInstruction;
 use moshcatty::transport::Transport;
-use std::io::Read;
 use std::time::Instant;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -154,68 +150,74 @@ fn append_varint(buffer: &mut Vec<u8>, mut value: u64) {
 /// raw diff bytes.
 pub struct ServerTransport {
     inner: Transport,
-    observer: WireStateObserver,
 }
 
 impl ServerTransport {
     pub fn new(ocb: Ocb) -> Self {
         Self {
-            observer: WireStateObserver::new(ocb.clone()),
             inner: Transport::new_server(ocb),
         }
     }
 
     pub fn receive(&mut self, packet: &[u8]) -> Result<ReceiveOutcome> {
-        // Observe the same authenticated wire instruction before feeding it to
-        // SSP.  The observer does not decide acceptance; the canonical SSP
-        // implementation below still owns replay, old-state, ACK and quench
-        // semantics.
-        let observed = self.observer.observe(packet);
+        // The canonical SSP receiver owns replay, old-state, ACK and quench
+        // semantics, and hands back the numbering a server needs alongside
+        // the diff. Each datagram is opened and decompressed once.
         let before = self.inner.last_recv();
         let had_state = self.inner.has_received_authenticated();
-        let accepted_diff = self.inner.recv(packet);
+        let accepted = self.inner.recv_state(packet);
         let authenticated = self.inner.last_recv() > before
             || (!had_state && self.inner.has_received_authenticated());
-
-        let state = match accepted_diff {
-            None => None,
-            Some(diff) => {
-                let instruction = observed.ok_or_else(|| {
-                    anyhow!(
-                        "Mosh SSP accepted a complete state that the server state observer did not reconstruct"
-                    )
-                })?;
-
-                // The observer is diagnostic/state metadata only.  The diff
-                // returned by the canonical SSP receiver remains authoritative.
-                if instruction.diff != diff {
-                    return Err(anyhow!(
-                        "Mosh SSP state observer diverged from the accepted UserStream diff"
-                    ));
-                }
-
-                Some(ReceivedState {
-                    old_num: instruction.old_num,
-                    new_num: instruction.new_num,
-                    ack_num: instruction.ack_num,
-                    throwaway_num: instruction.throwaway_num,
-                    diff,
-                })
-            }
-        };
-
+        let state = accepted.map(|state| ReceivedState {
+            old_num: state.old_num,
+            new_num: state.new_num,
+            ack_num: state.ack_num,
+            throwaway_num: state.throwaway_num,
+            diff: state.diff,
+        });
         Ok(ReceiveOutcome {
             authenticated,
             state,
         })
     }
 
+    #[cfg(test)]
     pub fn set_pending(&mut self, diff: Vec<u8>) -> u64 {
         self.inner.set_pending(diff)
     }
 
+    /// The state a new frame should be diffed from: the newest one the peer
+    /// has probably received, or `None` for the acknowledged one — always so
+    /// once the newest queued state's base has aged past assuming.
+    pub fn frame_base(&self) -> Option<u64> {
+        if self.inner.prospective_chain_expired() {
+            return None;
+        }
+        self.inner
+            .prospective_base_num()
+            .filter(|state| *state != self.inner.acked_by_remote())
+    }
+
+    /// Whether the newest queued state rests on a base the peer may never
+    /// have had, so the next frame has to be built from the acknowledged one.
+    pub fn frame_base_expired(&self) -> bool {
+        self.inner.prospective_chain_expired()
+    }
+
+    /// Queue a frame diffed from `base` (`None`: the acknowledged state), and
+    /// only from it; `None` when that base can no longer be named.
+    pub fn set_pending_on(&mut self, base: Option<u64>, diff: Vec<u8>) -> Option<u64> {
+        let base = base.unwrap_or_else(|| self.inner.acked_by_remote());
+        self.inner.set_pending_on(base, diff)
+    }
+
     pub fn tick(&mut self) -> Vec<Vec<u8>> {
         self.inner.tick()
+    }
+
+    /// The pace frames may go out at; see `Transport::send_interval`.
+    pub fn send_interval(&self) -> std::time::Duration {
+        self.inner.send_interval()
     }
 
     /// When `tick` next has anything to do; see `Transport::next_deadline`.
@@ -270,48 +272,6 @@ impl ServerTransport {
     pub fn counterparty_shutdown_ack_sent(&self) -> bool {
         self.inner.counterparty_shutdown_ack_sent()
     }
-}
-
-/// Side-car decoder for the metadata hidden by the current dependency's
-/// diff-only receive convenience API.  It uses the exact same public OCB,
-/// fragment and protobuf codecs; SSP acceptance remains exclusively in
-/// `Transport::recv` above.
-struct WireStateObserver {
-    ocb: Ocb,
-    assembler: Assembler,
-}
-
-impl WireStateObserver {
-    fn new(ocb: Ocb) -> Self {
-        Self {
-            ocb,
-            assembler: Assembler::new(),
-        }
-    }
-
-    fn observe(&mut self, packet: &[u8]) -> Option<TransportInstruction> {
-        let (dir_seq, plaintext) = self.ocb.open_datagram(packet)?;
-        // A server accepts only client -> server packets. Keep the observer's
-        // fragment stream aligned with the canonical SSP receiver even if a
-        // valid session-key holder reflects a server packet back at us.
-        if dir_seq & DIR_TO_CLIENT != DIR_TO_SERVER {
-            return None;
-        }
-        // Mosh encrypted plaintext begins with timestamp + timestamp_reply.
-        let fragment_bytes = plaintext.get(4..)?;
-        let fragment = Fragment::decode(fragment_bytes).ok()?;
-        let compressed = self.assembler.add(fragment)?;
-        let protobuf = decompress_bounded(&compressed)?;
-        TransportInstruction::decode(&protobuf).ok()
-    }
-}
-
-fn decompress_bounded(compressed: &[u8]) -> Option<Vec<u8>> {
-    let decoder = ZlibDecoder::new(compressed);
-    let mut limited = decoder.take((MAX_INSTRUCTION_BYTES as u64) + 1);
-    let mut out = Vec::new();
-    limited.read_to_end(&mut out).ok()?;
-    (out.len() <= MAX_INSTRUCTION_BYTES).then_some(out)
 }
 
 #[cfg(test)]

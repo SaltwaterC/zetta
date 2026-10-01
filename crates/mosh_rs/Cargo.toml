@@ -46,3 +46,9 @@ unicode-width = "0.2"
 # by the integration suite in `tests/`, is not carried by this fork; see
 # UPSTREAM.md.
 hex = "0.4"
+
+# The repository's vt100 fork, as the root package, zosh and zosh-server use:
+# `Vt100Screen::feed` resumes from the screen it has (`Parser::from_screen`)
+# rather than replaying it, which upstream vt100 cannot do.
+[patch.crates-io]
+vt100 = { path = "../vt100" }

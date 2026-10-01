@@ -49,7 +49,7 @@ fn unix_agent_socket_bridges_ordered_frames_and_cleans_up() {
     use std::os::unix::net::UnixStream;
     use std::time::Duration;
 
-    let mut server = AgentServer::new(std::thread::current());
+    let mut server = AgentServer::new(crate::wake::Waker::current_thread());
     let path = server.socket_path().unwrap().to_path_buf();
     let socket_mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
     let directory_mode = fs::metadata(path.parent().unwrap())
@@ -69,7 +69,7 @@ fn unix_agent_socket_bridges_ordered_frames_and_cleans_up() {
     let request = (0..100).find_map(|_| {
         server.poll();
         let request = server
-            .records()
+            .records_after(None)
             .into_iter()
             .find_map(|record| match record {
                 AgentHostRecord::Request {
@@ -104,7 +104,7 @@ fn unix_agent_connection_waits_for_a_frame_written_after_accept() {
     use std::os::unix::net::UnixStream;
     use std::time::Duration;
 
-    let mut server = AgentServer::new(std::thread::current());
+    let mut server = AgentServer::new(crate::wake::Waker::current_thread());
     let path = server.socket_path().unwrap().to_path_buf();
     let mut client = UnixStream::connect(&path).unwrap();
     // Accept while the socket is still empty, as it is when ssh connects and
@@ -117,7 +117,7 @@ fn unix_agent_connection_waits_for_a_frame_written_after_accept() {
 
     let saw_request = (0..100).any(|_| {
         server.poll();
-        let records = server.records();
+        let records = server.records_after(None);
         assert!(
             !records
                 .iter()
@@ -140,7 +140,7 @@ fn unix_agent_connection_waits_for_a_frame_written_after_accept() {
 fn windows_agent_pipe_is_ready_and_bridges_a_complete_frame() {
     use std::time::Instant;
 
-    let mut server = AgentServer::new(std::thread::current());
+    let mut server = AgentServer::new(crate::wake::Waker::current_thread());
     let path = server.socket_path().expect("private pipe").to_path_buf();
     let mut client = OpenOptions::new()
         .read(true)
@@ -152,17 +152,18 @@ fn windows_agent_pipe_is_ready_and_bridges_a_complete_frame() {
     let deadline = Instant::now() + Duration::from_secs(2);
     let request = loop {
         server.poll();
-        if let Some(request) = server
-            .records()
-            .into_iter()
-            .find_map(|record| match record {
-                AgentHostRecord::Request {
-                    id,
-                    connection_id,
-                    frame,
-                } => Some((id, connection_id, frame)),
-                _ => None,
-            })
+        if let Some(request) =
+            server
+                .records_after(None)
+                .into_iter()
+                .find_map(|record| match record {
+                    AgentHostRecord::Request {
+                        id,
+                        connection_id,
+                        frame,
+                    } => Some((id, connection_id, frame)),
+                    _ => None,
+                })
         {
             break request;
         }

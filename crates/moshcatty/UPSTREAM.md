@@ -80,6 +80,27 @@ encoder's (`a_kept_compressor_writes_what_a_fresh_encoder_would`, in the same
 test file). `zlib_compress` is kept, `#[cfg(test)]`, because upstream's tests
 build fixtures with it.
 
+**`Transport::recv_state` and `ReceivedStateDiff` are public**, and the struct
+carries the instruction's `ack_num`. A server needs a received state's numbering
+as well as its diff, and before this `zosh-server` decrypted, reassembled and
+decompressed every datagram a second time to recover it.
+
+**Assumed receiver state.** `Transport::prospective_base_num` and
+`prospective_chain_expired` are public, and `Transport::set_pending_on` queues
+a diff on the base it names or refuses it (`None`) — unlike
+`set_pending_from`, which quietly substitutes the acknowledged state, right for
+a caller that resends everything and wrong for one whose diff only makes sense
+from the base it named. `zosh-server` diffs each frame from the newest state
+the client has probably received, as stock Mosh does, rather than from the
+acknowledged one; carrying scrolled-off history over a 100 ms link, that cut
+what each frame resent from 42 KiB/s to 16 KiB/s.
+
+**`Transport::send_interval` is public**, unchanged otherwise. The server
+transport sends a new state the moment it has one, and `zosh-server` builds
+frames at stock Mosh's pace (`FramePacer` in `server.rs`) using this interval
+rather than building every frame and letting the transport drop all but the
+newest.
+
 Nothing else changed, and every upstream test still passes unmodified.
 
 See `../UPSTREAM_AUDIT.md` for the fork inventory.

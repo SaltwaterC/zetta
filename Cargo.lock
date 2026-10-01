@@ -10823,7 +10823,6 @@ dependencies = [
  "block2 0.6.2",
  "busy-v",
  "embed-resource",
- "flate2",
  "futures",
  "getrandom 0.3.4",
  "gpui",

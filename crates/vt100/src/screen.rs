@@ -1598,3 +1598,110 @@ mod evicted_row_tests {
         assert!(first > 0, "the oldest rows were dropped");
     }
 }
+
+#[cfg(test)]
+mod shared_row_tests {
+    //! Zetta's addition: rows shared between clones, and the diff that skips
+    //! the rows two screens still share. See `UPSTREAM.md`.
+
+    /// The same screen with none of its rows shared with anything.
+    fn unshared(screen: &crate::Screen) -> crate::Screen {
+        let mut copy = screen.clone();
+        copy.grid.unshare_rows();
+        copy.alternate_grid.unshare_rows();
+        copy
+    }
+
+    fn parser_with(bytes: &[u8]) -> crate::Parser {
+        let mut parser = crate::Parser::new(6, 12, 0);
+        parser.process(bytes);
+        parser
+    }
+
+    #[test]
+    fn a_clone_is_unaffected_by_what_is_written_after_it() {
+        let mut parser = parser_with(b"first\r\nsecond");
+        let before = parser.screen().clone();
+        parser.process(b"\x1b[1;1Hchanged");
+        assert_eq!(before.contents(), "first\nsecond");
+        assert_eq!(parser.screen().contents(), "changed\nsecond");
+    }
+
+    /// The property the fast path rests on: skipping shared rows gives
+    /// exactly the bytes a cell-by-cell diff of unshared screens gives.
+    #[test]
+    fn a_diff_over_shared_rows_is_the_diff_of_unshared_ones() {
+        let base: &[u8] =
+            b"a line that wraps past twelve\r\nshort\r\n\x1b[31mred\x1b[m";
+        let edits: &[&[u8]] = &[
+            b"",
+            b"\x1b[5;1Hx",
+            b"\x1b[2;1H\x1b[2K",
+            // Unwrapping the first row changes how the row below it is
+            // drawn, though that row itself is shared.
+            b"\x1b[1;12H\x1b[K",
+            b"\x1b[6;1Hand another long one that wraps",
+            b"\x1b[3;3H\x1b[1@",
+            b"\x1b[2;5r\x1b[5;1H\n\x1b[r",
+            b"\x1b[?1049hon the alternate screen",
+            b"\x1bc",
+        ];
+        for edit in edits {
+            let mut parser = parser_with(base);
+            let prev = parser.screen().clone();
+            parser.process(edit);
+            let next = parser.screen();
+            assert_eq!(
+                next.state_diff(&prev),
+                unshared(next).state_diff(&unshared(&prev)),
+                "after {:?}",
+                String::from_utf8_lossy(edit)
+            );
+            // And the diff really does reproduce the new screen.
+            let mut replay = crate::Parser::new(6, 12, 0);
+            replay.process(&prev.state_formatted());
+            replay.process(&next.state_diff(&prev));
+            assert_eq!(replay.screen().contents(), next.contents());
+        }
+    }
+
+    /// The one case where a shared row still draws something: the row above
+    /// it has started wrapping, so its first cell is redrawn to put the
+    /// cursor where the wrap leaves it. Printing cannot set that flag without
+    /// writing into the row below as well, which unshares it, so the flag is
+    /// set directly here.
+    #[test]
+    fn a_shared_row_below_a_newly_wrapped_one_is_still_diffed() {
+        let mut parser = parser_with(b"\x1b[1;1Hfirst line!!\x1b[2;1Hsecond");
+        let prev = parser.screen().clone();
+        parser
+            .screen_mut()
+            .grid_mut()
+            .drawing_row_mut(0)
+            .unwrap()
+            .wrap(true);
+        let next = parser.screen();
+        let expected = unshared(next).state_diff(&unshared(&prev));
+        assert!(!expected.is_empty());
+        assert_eq!(next.state_diff(&prev), expected);
+    }
+
+    #[test]
+    fn a_parser_carries_on_from_the_screen_it_is_given() {
+        let mut original = crate::Parser::new(4, 20, 0);
+        original.process(b"one\r\ntwo\r");
+        let mut resumed =
+            crate::Parser::from_screen(original.screen().clone());
+        // A whole sequence, not half of one: see `Parser::from_screen`.
+        for parser in [&mut original, &mut resumed] {
+            parser.process(b"\x1b[31mred\x1b[m and the rest");
+        }
+        let resumed = resumed.into_screen();
+        assert_eq!(resumed.contents(), original.screen().contents());
+        assert_eq!(
+            resumed.state_formatted(),
+            original.screen().state_formatted()
+        );
+        assert!(resumed.state_diff(original.screen()).is_empty());
+    }
+}

@@ -8,7 +8,7 @@
 //! so the loop never polls the socket.
 
 use crate::protocol::AgentHostRecord;
-use crate::wake::WakingSender;
+use crate::wake::{Waker, WakingSender};
 
 #[cfg(windows)]
 mod windows_pipe;
@@ -17,7 +17,7 @@ use std::{
     io::{self, Read, Write},
     path::{Path, PathBuf},
     sync::mpsc::{self, Receiver, SyncSender, TryRecvError},
-    thread::{self, Thread},
+    thread,
     time::Duration,
 };
 
@@ -212,11 +212,11 @@ pub struct AgentServer {
 }
 
 impl AgentServer {
-    /// Opens the private agent socket. `consumer` is the thread that calls
-    /// [`poll`](Self::poll); every connection event wakes it.
-    pub fn new(consumer: Thread) -> Self {
+    /// Opens the private agent socket. Every connection event wakes the
+    /// session loop, which calls [`poll`](Self::poll), through `waker`.
+    pub fn new(waker: Waker) -> Self {
         let (event_tx, events) = mpsc::sync_channel(EVENT_QUEUE_DEPTH);
-        let event_tx = WakingSender::new(event_tx, consumer);
+        let event_tx = WakingSender::new(event_tx, waker);
         #[cfg(unix)]
         let (listener, socket_path, error) = match create_listener(event_tx.clone()) {
             Ok(listener) => {
@@ -328,9 +328,20 @@ impl AgentServer {
         true
     }
 
-    pub fn records(&self) -> Vec<AgentHostRecord> {
+    /// The records a frame diffed from `base` has to carry: every pending one
+    /// for the acknowledged state (`None`), otherwise those after the last
+    /// one a state at or before `base` carried. Leaning on an earlier state
+    /// than `base` only resends records, which the client deduplicates.
+    pub fn records_after(&self, base: Option<u64>) -> Vec<AgentHostRecord> {
+        let carried = base.and_then(|base| {
+            self.states
+                .range(..=base)
+                .next_back()
+                .map(|(_, record)| *record)
+        });
         self.pending
             .iter()
+            .filter(|(id, _)| carried.is_none_or(|carried| *id > carried))
             .map(|(_, record)| record.clone())
             .collect()
     }

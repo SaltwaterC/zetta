@@ -16,10 +16,11 @@
 //! Where no watcher can be started the loop falls back to polling the child on
 //! a slow timer rather than on every pass.
 
+use crate::wake::Waker;
 use portable_pty::Child;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::thread::{self, Thread};
+use std::thread;
 use std::time::Duration;
 
 /// How often the loop polls a child it could not attach a watcher to.
@@ -31,9 +32,10 @@ pub struct ChildExitWatch {
 }
 
 impl ChildExitWatch {
-    /// Starts watching `child`, waking `consumer` when it exits. `None` when
+    /// Starts watching `child`, waking the loop through `waker` when it
+    /// exits. `None` when
     /// this platform or this child cannot be watched.
-    pub fn start(child: &dyn Child, consumer: Thread) -> Option<Self> {
+    pub fn start(child: &dyn Child, waker: Waker) -> Option<Self> {
         let wait = platform::exit_waiter(child)?;
         let exited = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&exited);
@@ -42,7 +44,7 @@ impl ChildExitWatch {
             .spawn(move || {
                 wait();
                 flag.store(true, Ordering::Release);
-                consumer.unpark();
+                waker.wake();
             })
             .ok()?;
         Some(Self { exited })

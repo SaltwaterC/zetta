@@ -1,5 +1,9 @@
 #!/bin/sh
 
+# Run from the repository root wherever the caller happens to be (a hook may
+# inherit a subdirectory as its cwd), without depending on Claude-only variables.
+cd "$(dirname "$0")/.." || exit 1
+
 notify() {
     sound=$1
     summary=$2

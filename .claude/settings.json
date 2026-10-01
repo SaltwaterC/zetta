@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh scripts/request-user-input-hook.sh \"Claude input required\"",
+            "command": "sh \"$CLAUDE_PROJECT_DIR/scripts/request-user-input-hook.sh\" \"Claude input required\"",
             "statusMessage": "Notifying Zetta about pending Claude input"
           }
         ]
@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "sh scripts/agent-stop-hook.sh",
+            "command": "sh \"$CLAUDE_PROJECT_DIR/scripts/agent-stop-hook.sh\"",
             "timeout": 600,
             "statusMessage": "Linting, testing, and building Zetta"
           }

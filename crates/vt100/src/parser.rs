@@ -19,6 +19,34 @@ impl Parser {
             ),
         }
     }
+
+    /// A parser that carries on from `screen`, as if it had produced it.
+    ///
+    /// Zetta addition. Rebuilding a parser by replaying
+    /// [`Screen::state_formatted`](crate::Screen::state_formatted) gives the
+    /// same screen, but costs a full serialization and parse and gives it
+    /// fresh rows, so it shares nothing with the screen it came from.
+    /// Starting from the screen itself does neither: the rows the bytes do
+    /// not touch stay shared with it. The escape parser starts afresh, so
+    /// `screen` should not be in the middle of an escape sequence, which a
+    /// screen between two complete diffs never is.
+    #[must_use]
+    pub fn from_screen(screen: crate::Screen) -> Self {
+        Self {
+            parser: vte::Parser::new(),
+            screen: crate::perform::WrappedScreen {
+                screen,
+                callbacks: (),
+            },
+        }
+    }
+
+    /// The screen, without the parser. Zetta addition; see
+    /// [`Self::from_screen`].
+    #[must_use]
+    pub fn into_screen(self) -> crate::Screen {
+        self.screen.screen
+    }
 }
 
 impl<CB: crate::callbacks::Callbacks> Parser<CB> {
