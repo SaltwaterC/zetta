@@ -8535,6 +8535,197 @@ fn relay_pane_copies_a_shared_pane_between_the_daemon_and_its_own_stdio() {
     let _ = relay.wait();
 }
 
+/// A relay's size outlives edits to the session that do not resize it.
+///
+/// Every edit moves the session's revision on, and the daemon forgets the sizes
+/// reported against the old one. A window reports again after each edit; a
+/// relay reports only when Mosh resizes its terminal, so a focus change left it
+/// unmeasured — and when the smaller window then left, the pane stayed at that
+/// window's size instead of growing to the relay's.
+#[test]
+fn a_relay_keeps_its_size_when_a_smaller_viewer_leaves_after_the_session_moves_on() {
+    let daemon = TestDaemon::start();
+    let client = daemon.client();
+    let pane = client
+        .spawn(spawn_request(None, "printf ready; sleep 60"))
+        .unwrap();
+    let descriptor = std::fs::File::from(pane.descriptor);
+    read_until(&descriptor, "ready");
+    client
+        .share(
+            pane.session_id,
+            summary(pane.session_id, pane.pane_id),
+            serde_json::Value::Null,
+            None,
+            true,
+        )
+        .unwrap();
+
+    // Every line typed into the pane prints the size its terminal is at.
+    let request = spawn_request(
+        Some(pane.session_id),
+        "printf relayed; while read -r _; do stty size; done",
+    );
+    let spawned = client
+        .spawn_shared(SharedSpawnRequest {
+            session_id: pane.session_id,
+            base_revision: SessionRevision::INITIAL,
+            operation_id: client.next_shared_operation_id(),
+            program: request.program,
+            args: request.args,
+            env: request.env,
+            working_directory: request.working_directory,
+            size: request.size,
+            console_palette: request.console_palette,
+        })
+        .unwrap();
+    let relayed_pane = spawned.pane.pane_id();
+    drop(spawned);
+
+    let small = match client
+        .attach_shared_as(pane.session_id, relayed_pane, std::process::id(), None)
+        .unwrap()
+    {
+        AttachOutcome::SharedAttached { pane, .. } => pane,
+        _other => panic!("the small viewer must attach as shared"),
+    };
+    let mut small_reader = small.reader();
+
+    // Started the way Zetta starts one: naming the window it relays for.
+    let terminal = TestPty::open(120, 40);
+    let mut relay = relay_command(&daemon, pane.session_id, relayed_pane, &terminal);
+    relay.arg("--viewer-stdin");
+    let mut relay = relay.spawn().expect("starting the relay");
+    let mut relay_input = terminal.master().expect("the terminal's master side");
+    let relayed = collect_output(terminal.master().expect("the terminal's master side"));
+    writeln!(relay_input, "relayed-window").expect("naming the relayed viewer");
+    wait_for_output(&relayed, "relayed", &relay);
+    wait_for_shared_size(&mut small_reader, &small, (120, 40));
+
+    let revision = client.shared_snapshot(pane.session_id).unwrap().revision;
+    small
+        .send_resize_for_revision(revision, 60, 20)
+        .expect("reporting the small viewer's size");
+    wait_for_shared_size(&mut small_reader, &small, (60, 20));
+
+    // A focus change moves the session on; the window reports again for the
+    // new revision, as Zetta does after every edit, and the relay does not.
+    client
+        .apply_shared(
+            pane.session_id,
+            revision,
+            SharedSessionOperation::SetFocus {
+                pane_id: relayed_pane,
+            },
+        )
+        .unwrap();
+    let revision = client.shared_snapshot(pane.session_id).unwrap().revision;
+    small
+        .send_resize_for_revision(revision, 60, 20)
+        .expect("reporting the small viewer's size again");
+
+    drop(small_reader);
+    drop(small);
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !relayed.lock().unwrap().contains("40 120") {
+        assert!(
+            Instant::now() < deadline,
+            "the pane never grew back to the relay's size; it printed {:?}\nDAEMONLOG\n{}",
+            relayed.lock().unwrap(),
+            std::fs::read_to_string(daemon.sessions_dir().join("daemon.log")).unwrap_or_default()
+        );
+        write!(relay_input, "\r").expect("asking the pane for its size");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    let _ = relay.kill();
+    let _ = relay.wait();
+}
+
+/// A relay's size report is taken whatever revision it names.
+///
+/// A relay stamps its report with the revision it reads just before sending,
+/// and an edit landing in between used to get the report dropped. A window
+/// reports again after every edit; a relay does not, so it stayed unmeasured.
+#[test]
+fn a_relays_size_report_survives_losing_a_race_with_an_edit() {
+    let daemon = TestDaemon::start();
+    let client = daemon.client();
+    let pane = client
+        .spawn(spawn_request(None, "printf ready; sleep 60"))
+        .unwrap();
+    let descriptor = std::fs::File::from(pane.descriptor);
+    read_until(&descriptor, "ready");
+    client
+        .share(
+            pane.session_id,
+            summary(pane.session_id, pane.pane_id),
+            serde_json::Value::Null,
+            None,
+            true,
+        )
+        .unwrap();
+    let request = spawn_request(Some(pane.session_id), "printf relayed; sleep 60");
+    let spawned = client
+        .spawn_shared(SharedSpawnRequest {
+            session_id: pane.session_id,
+            base_revision: SessionRevision::INITIAL,
+            operation_id: client.next_shared_operation_id(),
+            program: request.program,
+            args: request.args,
+            env: request.env,
+            working_directory: request.working_directory,
+            size: request.size,
+            console_palette: request.console_palette,
+        })
+        .unwrap();
+    let relayed_pane = spawned.pane.pane_id();
+    drop(spawned);
+
+    let observer = match client
+        .attach_shared_as(pane.session_id, relayed_pane, std::process::id(), None)
+        .unwrap()
+    {
+        AttachOutcome::SharedAttached { pane, .. } => pane,
+        _other => panic!("the observer must attach as shared"),
+    };
+    let mut observer_reader = observer.reader();
+    let relay = match daemon
+        .client()
+        .attach_shared_relaying_for(
+            pane.session_id,
+            relayed_pane,
+            None,
+            ClientId::new("relayed-window"),
+        )
+        .unwrap()
+    {
+        AttachOutcome::SharedAttached { pane, .. } => pane,
+        _other => panic!("the relay must attach as shared"),
+    };
+
+    let stale = client.shared_snapshot(pane.session_id).unwrap().revision;
+    client
+        .apply_shared(
+            pane.session_id,
+            stale,
+            SharedSessionOperation::SetFocus {
+                pane_id: relayed_pane,
+            },
+        )
+        .unwrap();
+    assert_ne!(
+        client.shared_snapshot(pane.session_id).unwrap().revision,
+        stale,
+        "the edit has to have moved the revision on for this test to mean anything"
+    );
+    relay
+        .send_resize_for_revision(stale, 120, 40)
+        .expect("reporting the relay's size at the revision it read");
+    wait_for_shared_size(&mut observer_reader, &observer, (120, 40));
+}
+
 /// A relay reports its size at the revision the session is on *now*.
 ///
 /// The daemon drops a size report naming any other revision, and says nothing

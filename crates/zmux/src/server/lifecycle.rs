@@ -527,10 +527,24 @@ fn replace_layout_target(
     }
 }
 
+/// Forgets the sizes viewers reported against the layout the session has just
+/// moved on from. A window measured its pane in that layout, and re-reports
+/// for the new one once it has laid it out.
+///
+/// A relay's report is kept. It is the size of a real terminal that Mosh resizes
+/// whenever the window's pane changes, and the relay reports again on every
+/// `SIGWINCH` — but on nothing else, because it is told nothing about revisions.
+/// Forgetting it left the relay unmeasured after any edit to the session, a
+/// focus change included, so the pane fell back to whatever size it was last
+/// applied at: once a smaller viewer left, the window that remained stayed at
+/// the departed viewer's size.
 fn clear_shared_size_reports(session: &mut Session) {
     for pane in &mut session.panes {
         if let Attachment::Shared(clients) = &mut pane.attachment {
-            for client in clients {
+            for client in clients
+                .iter_mut()
+                .filter(|client| client.relaying_for.is_none())
+            {
                 client.size = None;
             }
         }

@@ -925,7 +925,22 @@ pub(super) fn serve_shared(
                     .map_or(crate::messages::SessionRevision::INITIAL, |state| {
                         state.revision
                     });
-                if revision != Some(current_revision) {
+                // A relay is exempt: what it reports is the size of a real
+                // terminal, not a measurement of some layout, and it reports
+                // again only when Mosh resizes that terminal. Dropping a report
+                // that lost a race with an edit left it unmeasured for good.
+                let relay = session
+                    .panes
+                    .iter()
+                    .find(|pane| pane.id == pane_id)
+                    .and_then(|pane| match &pane.attachment {
+                        Attachment::Shared(clients) => clients
+                            .iter()
+                            .find(|client| client.attachment == attachment),
+                        _ => None,
+                    })
+                    .is_some_and(|client| client.relaying_for.is_some());
+                if revision != Some(current_revision) && !relay {
                     // Dropped rather than refused: the reporter has no reply
                     // channel here, and the size it measured belongs to a
                     // layout this session has moved on from. It is logged
