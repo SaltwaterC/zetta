@@ -98,24 +98,6 @@ impl Zetta {
             .into_any_element()
     }
 
-    fn pane_error_actions(
-        colors: &ThemeColors,
-        on_dismiss: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
-    ) -> AnyElement {
-        div()
-            .debug_selector(|| "dismiss-pane-output-error".to_owned())
-            .child(
-                IconButton::new("dismiss-pane-output-error", IconName::Close)
-                    .shape(IconButtonShape::Square)
-                    .icon_size(IconSize::Small)
-                    .icon_color(Color::Custom(colors.icon))
-                    .aria_label("Dismiss pane error")
-                    .tooltip(Tooltip::text("Dismiss pane error"))
-                    .on_click(on_dismiss),
-            )
-            .into_any_element()
-    }
-
     fn render_overlays(
         &mut self,
         colors: &ThemeColors,
@@ -125,6 +107,8 @@ impl Zetta {
         cx: &mut Context<Self>,
     ) -> ZettaOverlays {
         let entity = cx.entity();
+        let top_inset =
+            crate::ui_tokens::overlay_top_inset(self.launch_config.compact_mode, window);
         #[cfg(feature = "serial-console")]
         let serial_console = self.render_serial_console_overlay(cx);
         #[cfg(not(feature = "serial-console"))]
@@ -141,15 +125,18 @@ impl Zetta {
         let remote_session: Option<AnyElement> = None;
 
         ZettaOverlays {
-            notice: self.render_transient_notice_overlay(colors),
-            performance: self.render_performance_overlay(colors, window),
-            palette: modal_overlay(self.render_command_palette_overlay(colors, handle, cx)),
+            notice: self.render_transient_notice_overlay(colors, cx.theme().status(), handle),
+            performance: self.render_performance_overlay(colors, top_inset, window),
+            palette: modal_overlay(
+                self.render_command_palette_overlay(colors, top_inset, handle, cx),
+            ),
             multi_command: modal_overlay(self.render_multi_command_overlay(
                 colors,
                 error_color,
+                top_inset,
                 handle,
             )),
-            tab_search: self.render_tab_search_overlay(colors),
+            tab_search: self.render_tab_search_overlay(colors, top_inset),
             // Both are rendered inside their own cached view: scrolling or
             // hovering one notifies that view instead of `Zetta`, so the other
             // one — and the window column — is reused for the frame. Each fills
@@ -172,7 +159,9 @@ impl Zetta {
                 ))
                 .into_any_element()
             })),
-            theme_picker: modal_overlay(self.render_pane_theme_picker_overlay(colors, handle, cx)),
+            theme_picker: modal_overlay(
+                self.render_pane_theme_picker_overlay(colors, top_inset, handle, cx),
+            ),
             overlay_style_picker: modal_overlay(
                 self.render_overlay_style_picker_overlay(window, cx),
             ),
@@ -192,16 +181,25 @@ impl Zetta {
     /// grid, and the multiplexer arbitrates every viewer down to the smallest of
     /// them. Telling the user their tab can now be joined must not temporarily
     /// reduce the shared grid for a message that removes itself moments later.
-    fn render_transient_notice_overlay(&self, colors: &ThemeColors) -> Option<AnyElement> {
+    fn render_transient_notice_overlay(
+        &self,
+        colors: &ThemeColors,
+        status: &theme::StatusColors,
+        handle: &WeakEntity<Self>,
+    ) -> Option<AnyElement> {
         let passthrough_armed = self
             .key_passthrough
             .as_ref()
             .is_some_and(|state| state.held_key.is_none());
         let notice = if passthrough_armed {
-            "Send next key to terminal · Esc to cancel"
+            Some("Send next key to terminal · Esc to cancel")
         } else {
-            self.transient_notice.message()?
+            self.transient_notice.message()
         };
+        let error = self.transient_notice.error();
+        if notice.is_none() && error.is_none() {
+            return None;
+        }
         // Styled like the resize- and move-mode labels rather than as a `Banner`.
         // A `Banner` is built to sit on the feedback column's own background and
         // carries a translucent one of its own; floating it over a terminal left
@@ -209,25 +207,74 @@ impl Zetta {
         // mode labels solve exactly this problem — an opaque status-bar
         // background and the theme's plain text colour — so this borrows their
         // answer.
-        Some(
+        let card = || {
             div()
-                .absolute()
-                .when(passthrough_armed, |notice| {
-                    notice.debug_selector(|| "key-passthrough-indicator".to_owned())
-                })
-                .bottom(px(12.))
-                .right(px(12.))
                 .max_w(px(420.))
                 .px_2()
                 .py_1()
                 .rounded_sm()
                 .border_1()
-                .border_color(colors.border)
                 .bg(colors.status_bar_background)
                 .text_sm()
-                .text_color(colors.text)
                 .shadow_sm()
-                .child(notice.to_owned())
+        };
+        let dismiss_handle = handle.clone();
+        Some(
+            v_flex()
+                .absolute()
+                .bottom(px(12.))
+                .right(px(12.))
+                .items_end()
+                .gap_2()
+                .when_some(error, |column, error| {
+                    column.child(
+                        card()
+                            .debug_selector(|| "error-notice".to_owned())
+                            .border_color(status.error_border)
+                            .child(
+                                h_flex()
+                                    .items_start()
+                                    .gap_1()
+                                    .child(
+                                        div().min_w_0().flex_1().child(
+                                            crate::ui_messages::status_message(
+                                                crate::ui_messages::Tone::Error,
+                                                error.to_owned(),
+                                                colors,
+                                                status,
+                                            )
+                                            .text_sm(),
+                                        ),
+                                    )
+                                    .child(
+                                        IconButton::new("dismiss-error-notice", IconName::Close)
+                                            .shape(IconButtonShape::Square)
+                                            .icon_size(IconSize::XSmall)
+                                            .icon_color(Color::Custom(colors.icon))
+                                            .aria_label("Dismiss error")
+                                            .tooltip(Tooltip::text("Dismiss error"))
+                                            .on_click(move |_, _, cx| {
+                                                dismiss_handle
+                                                    .update(cx, |this, cx| {
+                                                        this.dismiss_error_notice(cx);
+                                                    })
+                                                    .ok();
+                                            }),
+                                    ),
+                            ),
+                    )
+                })
+                .when_some(notice, |column, notice| {
+                    column.child(
+                        card()
+                            .when(passthrough_armed, |notice| {
+                                notice.debug_selector(|| "key-passthrough-indicator".to_owned())
+                            })
+                            .border_color(colors.border)
+                            .text_color(colors.text)
+                            .child(notice.to_owned()),
+                    )
+                })
                 .into_any_element(),
         )
     }
@@ -346,50 +393,46 @@ impl Zetta {
         colors: &ThemeColors,
         handle: &WeakEntity<Zetta>,
     ) -> gpui::Div {
-        let feedback_row = |banner: Banner| {
-            div()
-                .px_2()
-                .py_1()
-                .when(cfg!(linux_like), |row| row.bg(colors.editor_background))
-                .child(banner)
-        };
         let dismiss_configuration_handle = handle.clone();
-        let dismiss_pane_error_handle = handle.clone();
         let content = content
             .when_some(self.projects.offer.clone(), |content, offer| {
                 let add_handle = handle.clone();
                 let dismiss_handle = handle.clone();
-                content.child(feedback_row(Self::project_offer_banner(
-                    &offer.root,
-                    h_flex()
-                        .flex_none()
-                        .gap_1()
-                        .child(
-                            Button::new("dismiss-project-offer", "Dismiss")
-                                .style(ButtonStyle::Outlined)
-                                .color(Color::Custom(colors.text))
-                                .on_click(move |_, _, cx| {
-                                    dismiss_handle
-                                        .update(cx, |this, cx| this.dismiss_project_offer(cx))
-                                        .ok();
-                                }),
-                        )
-                        .child(
-                            Button::new("accept-project-offer", "Add project")
-                                .style(ButtonStyle::Filled)
-                                .color(Color::Custom(colors.text))
-                                .on_click(move |_, window, cx| {
-                                    add_handle
-                                        .update(cx, |this, cx| {
-                                            this.accept_project_offer(window, cx);
-                                        })
-                                        .ok();
-                                }),
-                        ),
-                )))
+                content.child(feedback_row(
+                    colors,
+                    Self::project_offer_banner(
+                        &offer.root,
+                        h_flex()
+                            .flex_none()
+                            .gap_1()
+                            .child(
+                                Button::new("dismiss-project-offer", "Dismiss")
+                                    .style(ButtonStyle::Outlined)
+                                    .color(Color::Custom(colors.text))
+                                    .on_click(move |_, _, cx| {
+                                        dismiss_handle
+                                            .update(cx, |this, cx| this.dismiss_project_offer(cx))
+                                            .ok();
+                                    }),
+                            )
+                            .child(
+                                Button::new("accept-project-offer", "Add project")
+                                    .style(ButtonStyle::Filled)
+                                    .color(Color::Custom(colors.text))
+                                    .on_click(move |_, window, cx| {
+                                        add_handle
+                                            .update(cx, |this, cx| {
+                                                this.accept_project_offer(window, cx);
+                                            })
+                                            .ok();
+                                    }),
+                            ),
+                    ),
+                ))
             })
             .when(self.configuration_reload_feedback.is_visible(), |content| {
                 content.child(feedback_row(
+                    colors,
                     Banner::new().severity(Severity::Success).child(
                         Label::new(CONFIGURATION_RELOAD_SUCCESS_MESSAGE).size(LabelSize::Small),
                     ),
@@ -403,21 +446,11 @@ impl Zetta {
                     .ok();
             })
         });
-        let pane_error_actions = self.pane_output_error.as_ref().map(|_| {
-            let dismiss_handle = dismiss_pane_error_handle.clone();
-            Self::pane_error_actions(colors, move |_, _, cx| {
-                dismiss_handle
-                    .update(cx, |this, cx| this.dismiss_pane_output_error(cx))
-                    .ok();
-            })
-        });
         Self::render_persistent_error_banners(
             content,
             colors,
             self.configuration_error.clone(),
             configuration_actions,
-            self.pane_output_error.clone(),
-            pane_error_actions,
         )
     }
 
@@ -426,30 +459,14 @@ impl Zetta {
         colors: &ThemeColors,
         configuration_error: Option<String>,
         configuration_actions: Option<AnyElement>,
-        pane_output_error: Option<String>,
-        pane_error_actions: Option<AnyElement>,
     ) -> gpui::Div {
-        let banner = |error: String| {
-            Banner::new()
-                .severity(Severity::Error)
-                .child(Label::new(error).size(LabelSize::Small).line_clamp(3))
-        };
-        let feedback_row = |banner: Banner| {
-            div()
-                .px_2()
-                .py_1()
-                .when(cfg!(linux_like), |row| row.bg(colors.editor_background))
-                .child(banner)
-        };
         if let Some(error) = configuration_error {
-            content = content
-                .child(feedback_row(banner(error).action_slot(
-                    configuration_actions.expect("configuration error action"),
-                )));
-        }
-        if let Some(error) = pane_output_error {
             content = content.child(feedback_row(
-                banner(error).action_slot(pane_error_actions.expect("pane error action")),
+                colors,
+                Banner::new()
+                    .severity(Severity::Error)
+                    .child(Label::new(error).size(LabelSize::Small).line_clamp(3))
+                    .action_slot(configuration_actions.expect("configuration error action")),
             ));
         }
         content
@@ -684,6 +701,15 @@ impl Render for Zetta {
         let content = self.compose_window_content(column, overlays, colors, cx);
         client_window_frame(content, window, colors.border)
     }
+}
+
+/// One banner of the feedback column, between the tab bar and the tab body.
+fn feedback_row(colors: &ThemeColors, banner: Banner) -> gpui::Div {
+    div()
+        .px_2()
+        .py_1()
+        .when(cfg!(linux_like), |row| row.bg(colors.editor_background))
+        .child(banner)
 }
 
 #[cfg(test)]

@@ -2,6 +2,19 @@ use super::*;
 use crate::command_palette::action_available_in_launch_mode;
 use crate::rename::set_tab_title;
 
+/// The shortcut the effective keymap binds `action` to where the terminal has
+/// focus, resolved when the palette opens so a remapped action shows its new
+/// keys.
+fn palette_shortcut(
+    window: &Window,
+    focus: Option<&gpui::FocusHandle>,
+    action: &dyn Action,
+) -> Option<std::rc::Rc<[gpui::KeybindingKeystroke]>> {
+    focus
+        .and_then(|focus| window.highest_precedence_binding_for_action_in(action, focus))
+        .map(|binding| binding.keystrokes().to_vec().into())
+}
+
 impl Zetta {
     pub(crate) fn toggle_command_palette(
         &mut self,
@@ -24,151 +37,44 @@ impl Zetta {
         }
 
         let terminal_focus = self.active_terminal_focus(cx);
-        let mut commands = window
+        let shortcut = |window: &Window, action: &dyn Action| {
+            palette_shortcut(window, terminal_focus.as_ref(), action)
+        };
+        let actions = window
             .available_actions(cx)
             .into_iter()
             .filter(|action| action_is_enabled_in_build(action.name()))
             .filter(|action| action_available_in_launch_mode(action.name(), self.no_mux))
             .filter(|action| action.name() != ToggleCommandPalette.name())
             .filter(|action| action.name() != ApplyPaneSplitTemplate::name_for_type())
-            .map(|action| {
-                let shortcut = terminal_focus
-                    .as_ref()
-                    .and_then(|focus| {
-                        window.highest_precedence_binding_for_action_in(action.as_ref(), focus)
-                    })
-                    .map(|binding| {
-                        binding
-                            .keystrokes()
-                            .iter()
-                            .map(ToString::to_string)
-                            .collect::<Vec<_>>()
-                            .join(" ")
-                    });
-                PaletteCommand {
-                    name: humanize_action_name(action.name()),
-                    shortcut,
-                    action,
-                }
+            // Actions the palette offers even where the focused element does
+            // not register them, because they act on the tab or pane rather
+            // than on what has focus.
+            .chain([
+                Box::new(ChangeTabIcon) as Box<dyn Action>,
+                Box::new(ToggleTabPinning),
+                Box::new(ChangePaneTheme),
+                Box::new(ChangeTabTheme),
+                Box::new(SetPaneOverlay),
+            ])
+            .collect::<Vec<_>>();
+        let mut commands = actions
+            .into_iter()
+            .map(|action| PaletteCommand {
+                name: humanize_action_name(action.name()),
+                shortcut: shortcut(window, action.as_ref()),
+                action,
             })
             .collect::<Vec<_>>();
-        let change_tab_icon = ChangeTabIcon;
-        let change_tab_icon_shortcut = terminal_focus
-            .as_ref()
-            .and_then(|focus| {
-                window.highest_precedence_binding_for_action_in(&change_tab_icon, focus)
-            })
-            .map(|binding| {
-                binding
-                    .keystrokes()
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            });
-        commands.push(PaletteCommand {
-            name: humanize_action_name(change_tab_icon.name()),
-            shortcut: change_tab_icon_shortcut,
-            action: Box::new(change_tab_icon),
-        });
-        let toggle_tab_pinning = ToggleTabPinning;
-        let toggle_tab_pinning_shortcut = terminal_focus
-            .as_ref()
-            .and_then(|focus| {
-                window.highest_precedence_binding_for_action_in(&toggle_tab_pinning, focus)
-            })
-            .map(|binding| {
-                binding
-                    .keystrokes()
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            });
-        commands.push(PaletteCommand {
-            name: humanize_action_name(toggle_tab_pinning.name()),
-            shortcut: toggle_tab_pinning_shortcut,
-            action: Box::new(toggle_tab_pinning),
-        });
-        let change_pane_theme = ChangePaneTheme;
-        let change_pane_theme_shortcut = terminal_focus
-            .as_ref()
-            .and_then(|focus| {
-                window.highest_precedence_binding_for_action_in(&change_pane_theme, focus)
-            })
-            .map(|binding| {
-                binding
-                    .keystrokes()
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            });
-        commands.push(PaletteCommand {
-            name: humanize_action_name(change_pane_theme.name()),
-            shortcut: change_pane_theme_shortcut,
-            action: Box::new(change_pane_theme),
-        });
-        let change_tab_theme = ChangeTabTheme;
-        let change_tab_theme_shortcut = terminal_focus
-            .as_ref()
-            .and_then(|focus| {
-                window.highest_precedence_binding_for_action_in(&change_tab_theme, focus)
-            })
-            .map(|binding| {
-                binding
-                    .keystrokes()
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            });
-        commands.push(PaletteCommand {
-            name: humanize_action_name(change_tab_theme.name()),
-            shortcut: change_tab_theme_shortcut,
-            action: Box::new(change_tab_theme),
-        });
-        let set_pane_overlay = SetPaneOverlay;
-        let set_pane_overlay_shortcut = terminal_focus
-            .as_ref()
-            .and_then(|focus| {
-                window.highest_precedence_binding_for_action_in(&set_pane_overlay, focus)
-            })
-            .map(|binding| {
-                binding
-                    .keystrokes()
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            });
-        commands.push(PaletteCommand {
-            name: humanize_action_name(set_pane_overlay.name()),
-            shortcut: set_pane_overlay_shortcut,
-            action: Box::new(set_pane_overlay),
-        });
         commands.extend(
             self.effective_config()
                 .pane_split_templates
                 .keys()
                 .map(|name| {
                     let action = ApplyPaneSplitTemplate { name: name.clone() };
-                    let shortcut = terminal_focus
-                        .as_ref()
-                        .and_then(|focus| {
-                            window.highest_precedence_binding_for_action_in(&action, focus)
-                        })
-                        .map(|binding| {
-                            binding
-                                .keystrokes()
-                                .iter()
-                                .map(ToString::to_string)
-                                .collect::<Vec<_>>()
-                                .join(" ")
-                        });
                     PaletteCommand {
                         name: format!("zetta: apply pane split template: {name}"),
-                        shortcut,
+                        shortcut: shortcut(window, &action),
                         action: Box::new(action),
                     }
                 }),
@@ -321,9 +227,7 @@ impl Zetta {
                 return;
             }
             ClipboardOutcome::Edited => {
-                // The query is the filter, so a cut or a paste has to rebuild the
-                // match list rather than only redraw it.
-                palette.refresh_matches();
+                palette.query_edited();
                 cx.notify();
                 return;
             }
@@ -525,11 +429,12 @@ impl Zetta {
     pub(crate) fn render_command_palette_overlay(
         &self,
         colors: &ThemeColors,
+        top_inset: Pixels,
         handle: &WeakEntity<Self>,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let palette = self.command_palette.as_ref()?;
-        let query = field_query_run(&palette.query, Some("Type a command"), colors);
+        let query = field_query_run(&palette.query, Some("Search commands…"), colors);
         let result_count = palette.matches().len();
         let row_handle = handle.clone();
         let row_colors = colors.clone();
@@ -540,6 +445,7 @@ impl Zetta {
                 let Some(palette) = this.command_palette.as_ref() else {
                     return Vec::new();
                 };
+                let query_text = palette.query.text.clone();
                 range
                     .map(|position| {
                         let command_index = palette.matches()[position];
@@ -547,133 +453,65 @@ impl Zetta {
                         let command_name = command.name.clone();
                         let shortcut = command.shortcut.clone();
                         let row_handle = row_handle.clone();
-                        div()
-                            .id(("command-palette-row", command_index))
-                            .h_9()
-                            .w_full()
-                            .px_3()
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .gap_3()
-                            .cursor_pointer()
-                            .text_sm()
-                            .text_color(row_colors.text)
-                            .when(position == palette.selected, |row| {
-                                row.bg(row_colors.element_selected)
-                            })
-                            .hover(|style| style.bg(row_colors.element_hover))
-                            .on_click(move |_, window, cx| {
-                                row_handle
-                                    .update(cx, |this, cx| {
-                                        this.run_palette_command(command_index, window, cx);
-                                    })
-                                    .ok();
-                            })
-                            .child(
+                        let (row, name) = picker_row(
+                            ("command-palette-row", command_index),
+                            command_name.into(),
+                            &query_text,
+                            position == palette.selected,
+                            &row_colors,
+                        );
+                        row.on_click(move |_, window, cx| {
+                            row_handle
+                                .update(cx, |this, cx| {
+                                    this.run_palette_command(command_index, window, cx);
+                                })
+                                .ok();
+                        })
+                        .child(name)
+                        // Drawn as the menus draw theirs, from the binding
+                        // itself rather than as the raw `ctrl-shift-p` text.
+                        .when_some(shortcut, |row, keystrokes| {
+                            row.child(
                                 div()
-                                    .min_w_0()
-                                    .overflow_hidden()
-                                    .whitespace_nowrap()
-                                    .text_ellipsis()
-                                    .child(command_name),
+                                    .flex_none()
+                                    .child(ui::KeyBinding::from_keystrokes(keystrokes, false)),
                             )
-                            .when_some(shortcut, |row, shortcut| {
-                                row.child(
-                                    div()
-                                        .flex_none()
-                                        .text_xs()
-                                        .text_color(row_colors.text_muted)
-                                        .child(shortcut),
-                                )
-                            })
+                        })
                     })
                     .collect()
             }),
         )
         .with_sizing_behavior(ListSizingBehavior::Infer)
-        .max_h(px(360.))
+        .max_h(PALETTE_LIST_MAX_HEIGHT)
         .track_scroll(&palette.scroll)
         .on_scroll_wheel(|_, _, cx| cx.stop_propagation());
         let dismiss_handle = handle.clone();
-
-        Some(
-            div()
-                .id("command-palette-backdrop")
-                .absolute()
-                .inset_0()
-                .pt(px(72.))
-                .px_4()
-                .flex()
-                .items_start()
-                .justify_center()
-                .bg(transparent_black().opacity(0.24))
-                .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-                    dismiss_handle
-                        .update(cx, |this, cx| this.dismiss_command_palette(window, cx))
-                        .ok();
-                })
-                .child(
-                    div()
-                        .id("command-palette")
-                        .track_focus(&self.command_palette_focus)
-                        .w_full()
-                        .max_w(px(680.))
-                        .overflow_hidden()
-                        .rounded(px(8.))
-                        .border_1()
-                        .border_color(colors.border)
-                        .bg(colors.elevated_surface_background)
-                        .text_color(colors.text)
-                        .shadow_lg()
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .child(
-                            div()
-                                .h_12()
-                                .px_3()
-                                .flex()
-                                .items_center()
-                                .border_b_1()
-                                .border_color(colors.border)
-                                .text_color(colors.text)
-                                .child(div().text_color(colors.text_accent).mr_2().child(">"))
-                                .child(query),
-                        )
-                        .child(
-                            div()
-                                .py_1()
-                                .when(result_count == 0, |list| {
-                                    list.child(
-                                        div()
-                                            .h_12()
-                                            .px_3()
-                                            .flex()
-                                            .items_center()
-                                            .text_sm()
-                                            .text_color(colors.text_muted)
-                                            .child("No matching commands"),
-                                    )
-                                })
-                                .when(result_count > 0, |list| list.child(rows)),
-                        )
-                        .child(
-                            div()
-                                .h_7()
-                                .px_3()
-                                .flex()
-                                .items_center()
-                                .border_t_1()
-                                .border_color(colors.border)
-                                .text_xs()
-                                .text_color(colors.text_muted)
-                                .child(format!(
-                                    "{result_count} command{}",
-                                    if result_count == 1 { "" } else { "s" }
-                                )),
-                        ),
-                )
-                .into_any_element(),
-        )
+        let backdrop = modal_backdrop(
+            "command-palette-backdrop",
+            Placement::UnderChrome(top_inset),
+            BackdropClick::dismiss(move |window, cx| {
+                dismiss_handle
+                    .update(cx, |this, cx| this.dismiss_command_palette(window, cx))
+                    .ok();
+            }),
+        );
+        let panel = modal_panel("command-palette", colors)
+            .track_focus(&self.command_palette_focus)
+            .max_w(PALETTE_WIDTH)
+            .child(palette_header(">", query, colors))
+            .child(
+                palette_section(colors)
+                    .py_1()
+                    .when(result_count == 0, |list| {
+                        list.child(empty_list_row("No commands match", colors))
+                    })
+                    .when(result_count > 0, |list| list.child(rows)),
+            )
+            .child(palette_footer(colors).child(format!(
+                "{result_count} command{}",
+                if result_count == 1 { "" } else { "s" }
+            )));
+        Some(modal(backdrop, panel))
     }
 }
 

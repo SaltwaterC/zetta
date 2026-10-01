@@ -63,8 +63,7 @@ fn configuration_form_round_trip_uses_typed_values_and_profiles() {
         .iter_mut()
         .find(|profile| !profile.detected)
         .unwrap()
-        .arguments
-        .text = "-l, -i".to_owned();
+        .arguments = vec![TextField::new("-l"), TextField::new("-i")];
 
     let text = form.to_json().unwrap();
     let output: Value = serde_json::from_str(&text).unwrap();
@@ -353,11 +352,8 @@ fn configuration_defaults_round_trip_produces_minimal_output() {
     let output: Value = serde_json::from_str(&form.to_json().unwrap()).unwrap();
     let object = output.as_object().unwrap();
     for key in object.keys() {
-        // `terminal_font_size` has no fixed default (it falls back to a
-        // theme-dependent size at runtime), so it's intentionally always
-        // written rather than filtered — see the design notes in to_json.
         assert!(
-            matches!(key.as_str(), "profiles" | "terminal_font_size"),
+            key.as_str() == "profiles",
             "unexpected default-valued key {key:?}"
         );
     }
@@ -526,14 +522,128 @@ fn automatic_protection_round_trips_through_the_configuration_form() {
     let output: Value = serde_json::from_str(&form.to_json().unwrap()).unwrap();
     fs::remove_file(root).unwrap();
 
-    assert_eq!(
-        output["sessions"]["persistence"]["auto_protect"],
-        json!(false)
-    );
+    // Off is what leaving the key out means, so it is left out.
+    assert_eq!(output["sessions"]["persistence"].get("auto_protect"), None);
     // Written back beside what it depends on, so a reload cannot end up with the
     // flag set and nothing to seal to.
     assert_eq!(
         output["sessions"]["persistence"]["recipients"],
         json!(["age1example"])
     );
+}
+
+/// An unset font size follows the theme's buffer size. The form used to load
+/// it as `14` and always write that back, so saving any unrelated setting
+/// pinned the terminal to 14 points.
+#[test]
+fn an_unset_font_size_stays_unset_through_a_save() {
+    let path = settings_test_path("unset-font-size");
+    fs::write(&path, r#"{ "compact_mode": true }"#).unwrap();
+    let config = Config::load(Some(&path), None).unwrap();
+    let mut form = ConfigurationForm::load(&path, &config).unwrap();
+    fs::remove_file(&path).unwrap();
+
+    assert_eq!(form.terminal_font_size.text, "");
+    form.compact_mode = false;
+    let output: Value = serde_json::from_str(&form.to_json().unwrap()).unwrap();
+
+    assert!(
+        output.get("terminal_font_size").is_none(),
+        "saving another setting must not pin a font size: {output}"
+    );
+}
+
+#[test]
+fn clearing_the_font_size_removes_it_from_the_file() {
+    let path = settings_test_path("cleared-font-size");
+    fs::write(&path, r#"{ "terminal_font_size": 18 }"#).unwrap();
+    let config = Config::load(Some(&path), None).unwrap();
+    let mut form = ConfigurationForm::load(&path, &config).unwrap();
+    fs::remove_file(&path).unwrap();
+    assert_eq!(form.terminal_font_size.text, "18");
+
+    form.terminal_font_size.text.clear();
+    let output: Value = serde_json::from_str(&form.to_json().unwrap()).unwrap();
+
+    assert!(output.get("terminal_font_size").is_none());
+}
+
+#[test]
+fn an_out_of_range_font_size_is_reported_in_the_forms_words() {
+    let config = Config::defaults(None, None);
+    let path = settings_test_path("out-of-range-font-size");
+    let mut form = ConfigurationForm::load(&path, &config).unwrap();
+    form.terminal_font_size.text = "200".to_owned();
+
+    let error = form.to_json().unwrap_err();
+
+    assert!(error.to_string().starts_with("Font size"), "{error}");
+    // Named by field, so a failed save can take the keyboard to it.
+    assert_eq!(
+        error
+            .downcast_ref::<InvalidField>()
+            .map(|invalid| invalid.field),
+        Some(ConfigTextField::Setting(ConfigSetting::FontSize))
+    );
+}
+
+/// The file merges a later profile into an earlier one of the same name, so two
+/// rows sharing a name would save as one. The project form already refused
+/// this; the user configuration's form silently merged them.
+#[test]
+fn two_profiles_with_one_name_are_refused_rather_than_merged() {
+    let config = Config::parse(
+        r#"{"profiles":[{"name":"Work","program":"/bin/sh"},{"name":"Play","program":"/bin/sh"}]}"#,
+        None,
+        None,
+    )
+    .unwrap();
+    let path = settings_test_path("duplicate-profile-names");
+    let mut form = ConfigurationForm::load(&path, &config).unwrap();
+    let play = form
+        .profiles
+        .iter_mut()
+        .find(|profile| profile.name.text == "Play")
+        .unwrap();
+    play.name.text = "work".to_owned();
+
+    let error = form.to_json().unwrap_err().to_string();
+
+    assert!(error.contains("profile names must be unique"), "{error}");
+}
+
+/// Each argument is its own field and is written exactly as typed. The form
+/// used to hold them as one comma-separated field and split it on save, so an
+/// argument containing a comma became several, every time any setting was
+/// saved.
+#[test]
+fn an_argument_containing_a_comma_survives_a_save() {
+    let path = settings_test_path("comma-argument");
+    fs::write(
+        &path,
+        r#"{ "profiles": [{ "name": "Echo", "program": "/bin/sh", "args": ["-c", "echo a,b"] }] }"#,
+    )
+    .unwrap();
+    let config = Config::load(Some(&path), None).unwrap();
+    let mut form = ConfigurationForm::load(&path, &config).unwrap();
+    fs::remove_file(&path).unwrap();
+    let echo = form
+        .profiles
+        .iter_mut()
+        .find(|profile| profile.name.text == "Echo")
+        .unwrap();
+    assert_eq!(echo.arguments.len(), 2);
+    // An argument added and never filled in is not written.
+    echo.arguments.push(TextField::default());
+    form.compact_mode = true;
+
+    let output: Value = serde_json::from_str(&form.to_json().unwrap()).unwrap();
+
+    let echo = output["profiles"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|profile| profile["name"] == "Echo")
+        .unwrap();
+    assert_eq!(echo["args"], json!(["-c", "echo a,b"]));
 }

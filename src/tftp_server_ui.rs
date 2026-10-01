@@ -12,17 +12,15 @@ impl Zetta {
             .get(self.active_tab)
             .is_some_and(|tab| !can_add_panes(tab.panes.len(), 1))
         {
-            self.configuration_error = Some(format!(
+            self.show_error_notice(format!(
                 "Could not start TFTP server: this tab has reached the {MAX_PANES_PER_TAB}-pane limit"
-            ));
-            cx.notify();
+            ), cx);
             return;
         }
         let root = match self.active_server_root(cx) {
             Ok(root) => root,
             Err(error) => {
-                self.configuration_error = Some(format!("Could not start TFTP server: {error:#}"));
-                cx.notify();
+                self.show_error_notice(format!("Could not start TFTP server: {error:#}"), cx);
                 return;
             }
         };
@@ -41,9 +39,7 @@ impl Zetta {
             this.update_in(cx, |this, window, cx| match result {
                 Ok(server) => this.open_tftp_server_pane(server, window, cx),
                 Err(error) => {
-                    this.configuration_error =
-                        Some(format!("Could not start TFTP server: {error:#}"));
-                    cx.notify();
+                    this.show_error_notice(format!("Could not start TFTP server: {error:#}"), cx);
                 }
             })
             .ok();

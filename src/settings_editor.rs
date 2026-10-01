@@ -25,12 +25,16 @@ use crate::text_edit::TextField;
 mod configuration;
 mod keymap;
 mod pane_templates;
+mod profile;
+mod settings_table;
 
 // The three forms are named `crate::settings_editor::…` by the settings UI and
 // its view, exactly as they were before the split.
 pub(crate) use configuration::*;
 pub(crate) use keymap::*;
 pub(crate) use pane_templates::*;
+pub(crate) use profile::*;
+pub(crate) use settings_table::*;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SettingsPage {
@@ -39,13 +43,6 @@ pub enum SettingsPage {
     Keymap,
     PaneTemplates,
     Projects,
-}
-
-pub fn save(path: &Path, text: &str) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
-    }
-    fs::write(path, format!("{text}\n")).with_context(|| format!("writing {}", path.display()))
 }
 
 fn read_json_or(path: &Path, fallback: Value) -> Result<Value> {

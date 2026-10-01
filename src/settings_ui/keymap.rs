@@ -1,8 +1,6 @@
 use super::*;
-use crate::settings_view::KEYMAP_ROW_HEIGHT;
 use smallvec::SmallVec;
 use ui::StickyCandidate;
-use ui::{Button, ButtonStyle, div, h_flex, px};
 
 #[derive(Clone, Debug)]
 pub(crate) struct KeymapCapture {
@@ -291,6 +289,140 @@ fn build_keymap_row_data(editor: &SettingsEditor, rows: &[KeymapRow]) -> Vec<Key
         .collect()
 }
 
+/// The edits the Keymap page makes to its form.
+///
+/// Both the keyboard (`activate_settings_control`) and the row buttons call
+/// these, so the two cannot drift apart again: they used to be written twice,
+/// and the keyboard copy skipped the cache refresh, left focus dangling, and
+/// deleted a built-in binding where the button disabled it. Each returns
+/// whether it changed the form, and leaves the caches and the dirty flag right
+/// when it did; the caller only notifies.
+pub(crate) fn remove_binding(editor: &mut SettingsEditor, section: usize, binding: usize) -> bool {
+    let Some(form) = editor.keymap.sections.get_mut(section) else {
+        return false;
+    };
+    if binding >= form.bindings.len() {
+        return false;
+    }
+    form.bindings.remove(binding);
+    keymap_edited(editor);
+    editor.focused_control = Some(binding_removal_focus(editor, section, binding));
+    true
+}
+
+/// Disabling a built-in binding. It is recorded in the section's `unbind` map
+/// rather than deleted, and listed as an unbound default so it can be put back.
+pub(crate) fn unbind_binding(editor: &mut SettingsEditor, section: usize, binding: usize) -> bool {
+    let Some(form) = editor.keymap.sections.get_mut(section) else {
+        return false;
+    };
+    if binding >= form.bindings.len() {
+        return false;
+    }
+    let binding_form = form.bindings.remove(binding);
+    form.unbind.insert(
+        keymap_keystroke_storage(&binding_form.keystroke.text),
+        binding_form.action_name(),
+    );
+    form.unbound_defaults.push(binding_form);
+    keymap_edited(editor);
+    editor.focused_control = Some(binding_removal_focus(editor, section, binding));
+    true
+}
+
+/// Putting a disabled built-in binding back.
+pub(crate) fn restore_binding(editor: &mut SettingsEditor, section: usize, unbound: usize) -> bool {
+    let Some(form) = editor.keymap.sections.get_mut(section) else {
+        return false;
+    };
+    if unbound >= form.unbound_defaults.len() {
+        return false;
+    }
+    let binding = form.unbound_defaults.remove(unbound);
+    form.unbind
+        .shift_remove(&keymap_keystroke_storage(&binding.keystroke.text));
+    form.bindings.push(binding);
+    let remaining = form.unbound_defaults.len();
+    keymap_edited(editor);
+    editor.focused_control = Some(if unbound < remaining {
+        SettingsControl::RestoreBinding(section, unbound)
+    } else {
+        SettingsControl::AddBinding(section)
+    });
+    true
+}
+
+/// The keystroke and action a new binding starts with. A placeholder the user
+/// is expected to change, chosen so it parses and is unlikely to be bound.
+const NEW_BINDING_KEYSTROKE: &str = "ctrl-shift-x";
+const NEW_BINDING_ACTION: &str = "zetta::NewTab";
+/// The context a new keymap section starts with.
+const NEW_SECTION_CONTEXT: &str = "Zetta > Terminal";
+
+pub(crate) fn add_binding(editor: &mut SettingsEditor, section: usize) -> bool {
+    let Some(form) = editor.keymap.sections.get_mut(section) else {
+        return false;
+    };
+    form.bindings.push(BindingForm {
+        keystroke: TextField::new(NEW_BINDING_KEYSTROKE),
+        action: serde_json::Value::String(NEW_BINDING_ACTION.to_owned()),
+    });
+    keymap_edited(editor);
+    true
+}
+
+pub(crate) fn add_keymap_section(editor: &mut SettingsEditor) -> bool {
+    editor
+        .keymap
+        .sections
+        .push(KeymapSectionForm::new(NEW_SECTION_CONTEXT));
+    keymap_edited(editor);
+    true
+}
+
+/// What every keymap edit owes the page: the dirty flag, and the two caches
+/// rendering reads rows and the tab order from.
+pub(crate) fn keymap_edited(editor: &mut SettingsEditor) {
+    editor.keymap_dirty = true;
+    editor.message = None;
+    refresh_keymap_cache(editor);
+    invalidate_controls_cache(editor);
+}
+
+/// The control that removes or unbinds a binding, whichever that binding's
+/// button is: a built-in binding is unbound, a user one removed.
+pub(crate) fn binding_removal_control(
+    editor: &SettingsEditor,
+    section: usize,
+    binding: usize,
+) -> SettingsControl {
+    if editor.is_default_binding(section, binding) {
+        SettingsControl::UnbindBinding(section, binding)
+    } else {
+        SettingsControl::RemoveBinding(section, binding)
+    }
+}
+
+/// Where focus goes once a binding has left the list: the same button on the
+/// binding that moved up into its place, or the section's Add button when it
+/// was the last one.
+fn binding_removal_focus(
+    editor: &SettingsEditor,
+    section: usize,
+    binding: usize,
+) -> SettingsControl {
+    let remaining = editor
+        .keymap
+        .sections
+        .get(section)
+        .map_or(0, |form| form.bindings.len());
+    if binding < remaining {
+        binding_removal_control(editor, section, binding)
+    } else {
+        SettingsControl::AddBinding(section)
+    }
+}
+
 /// A candidate for sticky section headers in the keymap list.
 /// Section headers have depth 0, all other rows have depth 1.
 #[derive(Clone, Debug)]
@@ -330,97 +462,15 @@ pub(crate) fn compute_keymap_sticky_candidates(
     candidates
 }
 
-/// Render a sticky candidate as a section header.
-/// This is called with &mut Zetta, so we access the settings_editor and theme from there.
-pub(crate) fn render_keymap_sticky_candidate(
-    zetta: &mut Zetta,
-    candidate: KeymapStickyCandidate,
-    _window: &mut gpui::Window,
-    cx: &mut gpui::Context<Zetta>,
-) -> SmallVec<[gpui::AnyElement; 8]> {
-    let colors = zetta.window_theme(cx).colors().clone();
-    let Some(editor) = zetta.settings_editor.as_mut() else {
-        return SmallVec::new();
-    };
-    let handle = cx.entity().downgrade();
-    let mut elements = SmallVec::new();
-    match candidate.row {
-        KeymapRow::SectionHeader(section_index) => {
-            if let Some(section) = editor.keymap.sections.get(section_index) {
-                let context = section.context.clone();
-                let focused = editor.focused_control
-                    == Some(SettingsControl::Input(SettingsInput::Keymap(
-                        KeymapTextField::Context(section_index),
-                    )));
-                let element = h_flex()
-                    .w_full()
-                    .h(px(KEYMAP_ROW_HEIGHT))
-                    .gap_2()
-                    .px_2()
-                    .border_t_1()
-                    .border_b_1()
-                    .border_color(colors.border)
-                    .bg(if focused {
-                        colors.element_selected
-                    } else {
-                        colors.editor_background
-                    })
-                    .child(div().flex_none().text_sm().child("Context"))
-                    .child(
-                        div()
-                            .min_w_0()
-                            .flex_1()
-                            .child(crate::Zetta::text_input_widget(
-                                format!("settings-keymap-section-{section_index}-context"),
-                                context,
-                                SettingsInput::Keymap(KeymapTextField::Context(section_index)),
-                                editor.focused_input,
-                                &colors,
-                                handle.clone(),
-                            )),
-                    )
-                    .into_any_element();
-                elements.push(element);
-            }
-        }
-        KeymapRow::AddSection => {
-            let focused = editor.focused_control == Some(SettingsControl::AddKeymapSection);
-            let handle_for_click = handle.clone();
-            let element = h_flex()
-                .w_full()
-                .h(px(KEYMAP_ROW_HEIGHT))
-                .pl_6()
-                .pr_2()
-                .border_b_1()
-                .border_color(colors.border_variant)
-                .child(
-                    Button::new("add-keymap-section", "Add keymap context")
-                        .style(ButtonStyle::Outlined)
-                        .toggle_state(focused)
-                        .selected_style(ButtonStyle::OutlinedCustom(colors.border_focused))
-                        .on_click(move |_, _, cx| {
-                            handle_for_click
-                                .update(cx, |zetta, cx| {
-                                    if let Some(editor) = zetta.settings_editor.as_mut() {
-                                        editor
-                                            .keymap
-                                            .sections
-                                            .push(KeymapSectionForm::new("Zetta > Terminal"));
-                                        editor.keymap_dirty = true;
-                                        refresh_keymap_cache(editor);
-                                        invalidate_controls_cache(editor);
-                                        cx.notify();
-                                    }
-                                })
-                                .ok();
-                        }),
-                )
-                .into_any_element();
-            elements.push(element);
-        }
-        _ => {}
-    }
-    elements
+/// The render data for one row of the keymap list, for the sticky header that
+/// repeats a section's header (or the Add context row) above the rows under
+/// it. Drawn by the same builder as the row in the list, so the two cannot
+/// differ.
+pub(crate) fn keymap_row_data_for(
+    editor: &SettingsEditor,
+    row: KeymapRow,
+) -> Option<KeymapRowData> {
+    build_keymap_row_data(editor, &[row]).into_iter().next()
 }
 
 impl Zetta {
@@ -492,8 +542,7 @@ impl Zetta {
             field.text = text;
             field.cursor = field.text.len();
             field.select_all = false;
-            editor.keymap_dirty = true;
-            editor.message = None;
+            keymap_edited(editor);
         }
         self.focus_settings_input(SettingsInput::Keymap(target), window, cx);
     }

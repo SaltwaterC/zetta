@@ -108,11 +108,12 @@ fn a_profile_program_serializes_with_its_arguments_and_icon() {
     form.profiles.push(ProjectProfileForm {
         name: TextField::new(" Runner "),
         program: TextField::new("/usr/bin/env"),
-        arguments: TextField::new("bash, -l"),
+        arguments: vec![TextField::new("bash"), TextField::new("-l")],
         theme: None,
         dark_theme: None,
         icon: Some(ProfileIcon::Bash),
         hidden: false,
+        ..ProjectProfileForm::blank()
     });
 
     assert_eq!(
@@ -257,18 +258,19 @@ fn a_profile_needs_a_program_unless_it_overrides_an_inherited_one() {
     form.profiles.push(ProjectProfileForm {
         name: TextField::new("Runner"),
         program: TextField::default(),
-        arguments: TextField::new("-l"),
+        arguments: vec![TextField::new("-l")],
         theme: None,
         dark_theme: None,
         icon: None,
         hidden: false,
+        ..ProjectProfileForm::blank()
     });
     assert!(form.validate().is_err());
 
     // A row without a program is matched against the application profiles by
     // name, so a name none of them answers to would only fail when the file was
     // loaded back.
-    form.profiles[0].arguments = TextField::default();
+    form.profiles[0].arguments = Vec::new();
     assert!(form.validate().is_err());
 
     form.profiles[0].program = TextField::new("/usr/bin/env");
@@ -279,11 +281,12 @@ fn a_profile_needs_a_program_unless_it_overrides_an_inherited_one() {
     form.profiles[0] = ProjectProfileForm {
         name: TextField::new("Toolbox"),
         program: TextField::default(),
-        arguments: TextField::default(),
+        arguments: Vec::new(),
         theme: Some("One Dark".to_owned()),
         dark_theme: None,
         icon: None,
         hidden: false,
+        ..ProjectProfileForm::blank()
     };
     form.validate().unwrap();
 }

@@ -106,25 +106,8 @@ impl Zetta {
         let handle = cx.entity().downgrade();
         let cancel_handle = handle.clone();
         let confirm_handle = handle;
-        let panel = div()
-            .w(px(420.))
-            .max_w(gpui::relative(0.9))
-            .p_4()
-            .flex()
-            .flex_col()
-            .gap_3()
-            .rounded(px(8.))
-            .border_1()
-            .border_color(colors.border)
-            .bg(colors.elevated_surface_background)
-            .text_color(colors.text)
-            .shadow_lg()
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .child(
-                Label::new("Close pinned tab?")
-                    .size(LabelSize::Large)
-                    .color(Color::Custom(colors.text)),
-            )
+        let panel = dialog_panel("tab-close-confirmation", DIALOG_WIDTH_SMALL, &colors)
+            .child(dialog_title("Close pinned tab?", &colors))
             .child(div().text_sm().text_color(colors.text_muted).child(format!(
                 "Close {title}? This tab will leave the pinned tab bar.{}",
                 if backgrounded {
@@ -133,21 +116,16 @@ impl Zetta {
                     ""
                 }
             )))
+            .child(hint_line(
+                key_hints(&[("Enter", "close the tab"), ("Esc", "cancel")]),
+                &colors,
+            ))
             .child(
-                div()
-                    .text_xs()
-                    .text_color(colors.text_muted)
-                    .child("Press Enter to close this tab, or Esc to dismiss."),
-            )
-            .child(
-                h_flex()
-                    .justify_end()
-                    .gap_2()
+                dialog_buttons()
                     .child(
-                        Button::new("cancel-tab-close", "Cancel")
-                            .style(ButtonStyle::Outlined)
-                            .color(Color::Custom(colors.text))
-                            .on_click(move |_, window, cx| {
+                        DialogButton::new("cancel-tab-close", "Cancel", ButtonRole::Secondary)
+                            .key_tooltip("Keep the tab open", SurfaceKey::Escape)
+                            .render(&colors, move |_, window, cx| {
                                 cancel_handle
                                     .update(cx, |this, cx| {
                                         this.dismiss_tab_close_confirmation(window, cx);
@@ -156,31 +134,29 @@ impl Zetta {
                             }),
                     )
                     .child(
-                        Button::new("confirm-tab-close", "Close tab")
-                            .style(ButtonStyle::Filled)
-                            .color(Color::Custom(colors.text))
-                            .on_click(move |_, window, cx| {
-                                confirm_handle
-                                    .update(cx, |this, cx| this.confirm_tab_close(window, cx))
-                                    .ok();
-                            }),
+                        DialogButton::new(
+                            "confirm-tab-close",
+                            "Close tab",
+                            ButtonRole::Destructive,
+                        )
+                        .key_tooltip("Close the tab", SurfaceKey::Enter)
+                        .render(&colors, move |_, window, cx| {
+                            confirm_handle
+                                .update(cx, |this, cx| this.confirm_tab_close(window, cx))
+                                .ok();
+                        }),
                     ),
             );
 
-        Some(
-            div()
-                .id("tab-close-confirmation-overlay")
-                .absolute()
-                .inset_0()
-                .flex()
-                .items_center()
-                .justify_center()
-                .bg(transparent_black().opacity(0.24))
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .track_focus(&self.close_confirmation_focus)
-                .child(panel)
-                .into_any_element(),
-        )
+        Some(modal(
+            modal_backdrop(
+                "tab-close-confirmation-overlay",
+                Placement::Centered,
+                BackdropClick::Swallow,
+            )
+            .track_focus(&self.close_confirmation_focus),
+            panel,
+        ))
     }
 }
 

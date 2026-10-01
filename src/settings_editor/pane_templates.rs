@@ -84,7 +84,6 @@ pub enum PaneTemplateNodeField {
     EnvironmentName(usize),
     EnvironmentValue(usize),
     OverlayText,
-    OverlayOpacity,
     OverlayColor,
     StackProgram(usize),
     StackArgument(usize, usize),

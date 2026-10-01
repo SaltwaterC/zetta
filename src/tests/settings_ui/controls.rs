@@ -101,7 +101,7 @@ fn the_form_scroll_mapping_skips_the_controls_that_live_in_the_dialog_header() {
 #[test]
 fn detected_profile_controls_follow_the_visible_selection_order() {
     assert_eq!(
-        profile_controls(3, true),
+        profile_controls(3, true, 0),
         vec![
             SettingsControl::Toggle(SettingsToggle::ProfileVisibility(3)),
             SettingsControl::Dropdown(SettingsDropdown::ProfileIcon(3)),
@@ -114,7 +114,7 @@ fn detected_profile_controls_follow_the_visible_selection_order() {
 #[test]
 fn custom_profile_controls_follow_the_visible_selection_order() {
     assert_eq!(
-        profile_controls(3, false),
+        profile_controls(3, false, 1),
         vec![
             SettingsControl::Input(SettingsInput::Configuration(ConfigTextField::ProfileName(
                 3
@@ -124,8 +124,10 @@ fn custom_profile_controls_follow_the_visible_selection_order() {
                 ConfigTextField::ProfileProgram(3),
             )),
             SettingsControl::Input(SettingsInput::Configuration(
-                ConfigTextField::ProfileArguments(3),
+                ConfigTextField::ProfileArgument(3, 0),
             )),
+            SettingsControl::RemoveProfileArgument(ProfileTarget::Configuration(3), 0),
+            SettingsControl::AddProfileArgument(ProfileTarget::Configuration(3)),
             SettingsControl::Toggle(SettingsToggle::ProfileVisibility(3)),
             SettingsControl::Dropdown(SettingsDropdown::ProfileIcon(3)),
             SettingsControl::Dropdown(SettingsDropdown::ProfileTheme(3)),
@@ -137,16 +139,16 @@ fn custom_profile_controls_follow_the_visible_selection_order() {
 #[test]
 fn profile_draft_controls_include_visibility_and_modal_actions_in_order() {
     assert_eq!(
-        profile_draft_controls(),
+        profile_draft_controls(0),
         [
             SettingsControl::Input(SettingsInput::ProfileDraft(ProfileDraftField::Name)),
             SettingsControl::Input(SettingsInput::ProfileDraft(ProfileDraftField::Program)),
-            SettingsControl::Input(SettingsInput::ProfileDraft(ProfileDraftField::Arguments)),
+            SettingsControl::AddProfileArgument(ProfileTarget::Draft),
             SettingsControl::Toggle(SettingsToggle::ProfileDraftVisibility),
             SettingsControl::Dropdown(SettingsDropdown::ProfileDraftIcon),
             SettingsControl::Dropdown(SettingsDropdown::ProfileDraftTheme),
             SettingsControl::Dropdown(SettingsDropdown::ProfileDraftDarkTheme),
-            SettingsControl::Close,
+            SettingsControl::CloseModal,
             SettingsControl::CreateProfile,
         ]
     );
@@ -170,7 +172,7 @@ fn dismissing_the_profile_modal_clears_each_draft_dropdown() {
         editor.profile_draft = Some(crate::settings_editor::ProfileForm {
             name: TextField::default(),
             program: TextField::default(),
-            arguments: TextField::default(),
+            arguments: Vec::new(),
             theme: None,
             dark_theme: None,
             icon: None,
@@ -256,15 +258,19 @@ pub(crate) fn configuration_editor(config: &Config) -> SettingsEditor {
         font_scroll: UniformListScrollHandle::new(),
         keymap_scroll: UniformListScrollHandle::new(),
         numeric_repeat_generation: 0,
+        terminal_font_size_default: 15.,
         scroll_geometry_initialized: true,
         focused_input: None,
         focused_control: None,
+        armed_control: None,
+        close_request: None,
         focus_scroll_request: None,
         keymap_capture: None,
         open_dropdown: None,
         configuration_dirty: false,
         keymap_dirty: false,
         message: None,
+        invalid_setting: None,
         pane_template_validation_error: None,
         pane_template_validation_generation: 0,
         settings_save_in_progress: false,
@@ -290,11 +296,12 @@ fn position_of(controls: &[SettingsControl], control: &SettingsControl) -> usize
 /// `scroll_settings_control_into_view` maps a control's position in the tab
 /// order onto the scroll range, so the two orders have to agree or focusing a
 /// control scrolls somewhere else entirely. The background-session block was
-/// drawn between the scrollback setting and the appearance toggles while being
-/// tabbed after the pane-control dropdowns, and clicking **Identity file**
-/// scrolled it off the top of the dialog.
+/// once drawn between the scrollback setting and the appearance toggles while
+/// being tabbed after the pane-control dropdowns, and clicking **Identity
+/// file** scrolled it off the top of the dialog. Both orders now come from
+/// `configuration_layout` (see its own sidecar); this pins the sections.
 #[test]
-fn the_background_session_controls_are_tabbed_where_the_page_draws_them() {
+fn the_configuration_sections_are_tabbed_in_the_order_the_page_draws_them() {
     let config = Config::parse(
         r#"{"profiles":[{"name":"Toolbox","program":"/bin/sh"}]}"#,
         None,
@@ -303,62 +310,37 @@ fn the_background_session_controls_are_tabbed_where_the_page_draws_them() {
     .unwrap();
     let editor = configuration_editor(&config);
     let controls = Zetta::build_settings_controls(&editor);
+    let at = |control: SettingsControl| position_of(&controls, &control);
 
-    let scrollback = position_of(
-        &controls,
-        &SettingsControl::Numeric(NumericSetting::ScrollHistory),
-    );
-    let retention = position_of(
-        &controls,
-        &SettingsControl::Dropdown(SettingsDropdown::SessionRetention),
-    );
-    let opacity = position_of(&controls, &SettingsControl::Opacity);
-    let pane_controls = position_of(
-        &controls,
-        &SettingsControl::Dropdown(SettingsDropdown::PaneControlsPosition),
-    );
-
+    let order = [
+        at(SettingsControl::Dropdown(SettingsDropdown::DefaultProfile)),
+        at(SettingsControl::Input(SettingsInput::Configuration(
+            ConfigTextField::Setting(ConfigSetting::WorkingDirectory),
+        ))),
+        at(SettingsControl::Dropdown(SettingsDropdown::Theme)),
+        at(SettingsControl::Numeric(ConfigSetting::ScrollHistory)),
+        at(SettingsControl::Opacity(OpacityTarget::Configuration)),
+        at(SettingsControl::Dropdown(SettingsDropdown::Setting(
+            ConfigSetting::PaneControlsPosition,
+        ))),
+        at(SettingsControl::Dropdown(SettingsDropdown::Setting(
+            ConfigSetting::SessionRetention,
+        ))),
+        at(SettingsControl::Numeric(ConfigSetting::SessionRingBytes)),
+        #[cfg(feature = "session-persistence")]
+        at(SettingsControl::Input(SettingsInput::Configuration(
+            ConfigTextField::Setting(ConfigSetting::IdentityFile),
+        ))),
+        #[cfg(all(feature = "zmux", feature = "zosh-client"))]
+        at(SettingsControl::Dropdown(SettingsDropdown::Setting(
+            ConfigSetting::RemoteProtocol,
+        ))),
+        at(SettingsControl::AddProfile),
+    ];
     assert!(
-        scrollback < retention,
-        "the session block is drawn after the scrollback setting"
+        order.windows(2).all(|pair| pair[0] < pair[1]),
+        "new tabs, terminal, window, background sessions, remote sessions, profiles: {order:?}"
     );
-    assert!(
-        retention < opacity,
-        "the session block is drawn before the appearance toggles"
-    );
-    assert!(
-        opacity < pane_controls,
-        "the appearance toggles are drawn before the pane-control dropdowns"
-    );
-}
-
-/// The identity field is the one that broke: its estimated scroll position has
-/// to land near the row the page draws, not near the end of the form.
-#[cfg(feature = "session-persistence")]
-#[test]
-fn the_persistence_fields_follow_the_session_block_rather_than_the_form_tail() {
-    let config = Config::parse(
-        r#"{"profiles":[{"name":"Toolbox","program":"/bin/sh"}]}"#,
-        None,
-        None,
-    )
-    .unwrap();
-    let editor = configuration_editor(&config);
-    let controls = Zetta::build_settings_controls(&editor);
-
-    let ring_bytes = position_of(
-        &controls,
-        &SettingsControl::Numeric(NumericSetting::SessionRingBytes),
-    );
-    let identity = position_of(
-        &controls,
-        &SettingsControl::Input(SettingsInput::Configuration(
-            ConfigTextField::SessionPersistenceIdentity,
-        )),
-    );
-    let opacity = position_of(&controls, &SettingsControl::Opacity);
-
-    assert!(ring_bytes < identity && identity < opacity);
 }
 
 /// Without a recipient and an effective identity the toggle is not drawn, so it
@@ -373,7 +355,7 @@ fn the_automatic_protection_toggle_joins_the_tab_order_only_when_it_is_drawn() {
     )
     .unwrap();
     let mut editor = configuration_editor(&config);
-    let toggle = SettingsControl::Toggle(SettingsToggle::SessionAutoProtect);
+    let toggle = SettingsControl::Toggle(SettingsToggle::Setting(ConfigSetting::AutoProtect));
     assert!(!Zetta::build_settings_controls(&editor).contains(&toggle));
 
     editor.configuration.session_persistence_recipients = TextField::new("age1example".to_owned());
@@ -384,9 +366,9 @@ fn the_automatic_protection_toggle_joins_the_tab_order_only_when_it_is_drawn() {
     // And it stays with the block it belongs to.
     let identity = position_of(
         &controls,
-        &SettingsControl::Input(SettingsInput::Configuration(
-            ConfigTextField::SessionPersistenceIdentity,
-        )),
+        &SettingsControl::Input(SettingsInput::Configuration(ConfigTextField::Setting(
+            ConfigSetting::IdentityFile,
+        ))),
     );
     assert_eq!(position_of(&controls, &toggle), identity + 1);
 }

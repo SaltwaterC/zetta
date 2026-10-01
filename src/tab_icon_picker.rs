@@ -134,6 +134,9 @@ fn filter_icon_entries(entries: &[IconEntry], query: &str) -> Vec<Option<usize>>
         entries
             .iter()
             .enumerate()
+            // A substring rather than the fuzzy match the other lists use:
+            // icon names are short and the grid shows every match at once, so
+            // a scattered subsequence ("none" in "countdown timer") floods it.
             .filter(|(_, entry)| entry.search_label.contains(&query))
             .map(|(index, _)| Some(index)),
     );
@@ -438,6 +441,17 @@ impl Zetta {
                         (picker.selected + TAB_ICON_COLUMNS).min(options.len().saturating_sub(1));
                     selection_changed = true;
                 }
+                // The grid is two-dimensional, so the arrows move through it in
+                // both directions; they used to move the search field's caret
+                // sideways instead, which a one-word query rarely needs.
+                "left" if !command && !event.keystroke.modifiers.shift => {
+                    picker.selected = picker.selected.saturating_sub(1);
+                    selection_changed = true;
+                }
+                "right" if !command && !event.keystroke.modifiers.shift => {
+                    picker.selected = (picker.selected + 1).min(options.len().saturating_sub(1));
+                    selection_changed = true;
+                }
                 "tab" if !command => {
                     if event.keystroke.modifiers.shift {
                         picker.selected = picker.selected.saturating_sub(1);
@@ -547,42 +561,32 @@ impl Zetta {
         let search_handle = handle.clone();
         // The picker has one field and it always holds the focus while the
         // picker is open, so the frame is always the focused one.
-        let search = field_box("tab-icon-search", true, &colors)
-            .min_w_0()
-            .flex_1()
-            .when(query.select_all, |input| {
-                input.bg(colors.element_selection_background)
-            })
-            .text_color(colors.text)
-            .child(field_query_run(&query, Some("Search icons…"), &colors))
-            .on_click(move |_, window, cx| {
-                search_handle
-                    .update(cx, |this, cx| {
-                        this.tab_icon_picker_focus.focus(window, cx);
-                    })
-                    .ok();
-            });
+        let search = boxed_text_field(
+            "tab-icon-search",
+            &query,
+            true,
+            Some("Search icons…".into()),
+            FieldMask::Plain,
+            &colors,
+        )
+        .min_w_0()
+        .flex_1()
+        .on_click(move |_, window, cx| {
+            search_handle
+                .update(cx, |this, cx| {
+                    this.tab_icon_picker_focus.focus(window, cx);
+                })
+                .ok();
+        });
 
         let close_handle = handle.clone();
-        let close = div()
-            .id("close-tab-icon-picker")
-            .flex_none()
-            .px_3()
-            .py_1()
-            .rounded(px(4.))
-            .border_1()
-            .border_color(colors.element_selected)
-            .cursor_pointer()
-            .bg(colors.element_selected)
-            .text_color(colors.text)
-            .hover(|style| style.bg(colors.element_hover))
-            .tooltip(Tooltip::text("Close tab icon picker (Esc)"))
-            .on_click(move |_, window, cx| {
+        let close = DialogButton::new("close-tab-icon-picker", "Close", ButtonRole::Secondary)
+            .key_tooltip("Close tab icon picker", SurfaceKey::Escape)
+            .render(&colors, move |_, window, cx| {
                 close_handle
                     .update(cx, |this, cx| this.dismiss_tab_icon_picker(window, cx))
                     .ok();
-            })
-            .child("Close");
+            });
 
         // Virtualized icon grid using uniform_list
         let icon_rows = tab_icon_grid(TabIconGrid {
@@ -598,64 +602,41 @@ impl Zetta {
 
         let has_options = !options.is_empty();
 
-        Some(
-            div()
-                .id("tab-icon-picker-modal")
-                .absolute()
-                .inset_0()
-                .p_8()
-                .flex()
-                .items_center()
-                .justify_center()
-                .bg(transparent_black().opacity(0.55))
-                .occlude()
-                .child(
-                    div()
-                        .w_full()
-                        .max_w(px(720.))
-                        .h_full()
-                        .max_h(px(600.))
-                        .p_3()
-                        .flex()
-                        .flex_col()
-                        .rounded(px(8.))
-                        .border_1()
-                        .border_color(colors.border)
-                        .bg(colors.elevated_surface_background)
-                        .text_color(colors.text)
-                        .shadow_lg()
-                        .child(h_flex().mb_3().gap_2().child(search).child(close))
-                        .child(
-                            div()
-                                .relative()
-                                .min_h_0()
-                                .flex_1()
-                                .overflow_hidden()
-                                .when(has_options, |container| container.child(icon_rows))
-                                .when(!has_options, |container| {
-                                    container.child(
-                                        div()
-                                            .w_full()
-                                            .py_6()
-                                            .flex()
-                                            .justify_center()
-                                            .text_color(colors.text_muted)
-                                            .child("No icons match your search"),
-                                    )
-                                })
-                        )
-                        .child(
-                            h_flex()
-                                .mt_2()
-                                .w_full()
-                                .justify_center()
-                                .text_color(colors.text_muted)
-                                .text_xs()
-                                .child("Tab / Shift-Tab: navigate icons  •  ↑/↓: navigate rows  •  ←/→: move cursor in search  •  Enter: select  •  Esc: close"),
-                        ),
+        let panel = modal_panel("tab-icon-picker", &colors)
+            .max_w(px(720.))
+            .h_full()
+            .max_h(px(600.))
+            .p_3()
+            .child(h_flex().mb_3().gap_2().child(search).child(close))
+            .child(
+                div()
+                    .relative()
+                    .min_h_0()
+                    .flex_1()
+                    .overflow_hidden()
+                    .when(has_options, |container| container.child(icon_rows))
+                    .when(!has_options, |container| {
+                        container.child(empty_list_row("No icons match", &colors).justify_center())
+                    }),
+            )
+            .child(
+                hint_line(
+                    key_hints(&[("←→↑↓", "move"), ("Enter", "choose"), ("Esc", "close")]),
+                    &colors,
                 )
-                .into_any_element(),
-        )
+                .mt_2()
+                .w_full()
+                .flex()
+                .justify_center(),
+            );
+        Some(modal(
+            modal_backdrop(
+                "tab-icon-picker-modal",
+                Placement::Centered,
+                BackdropClick::Swallow,
+            ),
+            panel,
+        ))
     }
 }
 
@@ -741,7 +722,7 @@ fn tab_icon_grid(grid: TabIconGrid) -> gpui::UniformList {
                                 .items_center()
                                 .justify_center()
                                 .gap_1()
-                                .rounded(px(4.))
+                                .rounded(crate::ui_tokens::RADIUS_CONTROL)
                                 .cursor_pointer()
                                 .when(icon == row_selected_icon, |cell| {
                                     cell.bg(row_colors.element_selected)

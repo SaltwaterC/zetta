@@ -74,7 +74,7 @@ fn project_config_rejects_unsafe_or_global_only_fields() {
         ProjectConfig::parse(r#"{"compact_mode":true}"#, temporary.path(), &base_config(),)
             .unwrap_err()
             .to_string()
-            .contains("unrecognized")
+            .contains("unknown field `compact_mode`")
     );
     assert!(
         ProjectConfig::parse(

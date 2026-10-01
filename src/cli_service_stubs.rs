@@ -12,8 +12,7 @@ impl Zetta {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.configuration_error = Some("Serial console support is disabled in this build".into());
-        cx.notify();
+        self.show_error_notice("Serial console support is disabled in this build", cx);
     }
 }
 
@@ -25,8 +24,7 @@ impl Zetta {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.configuration_error = Some("HTTP server support is disabled in this build".into());
-        cx.notify();
+        self.show_error_notice("HTTP server support is disabled in this build", cx);
     }
 }
 
@@ -38,7 +36,6 @@ impl Zetta {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.configuration_error = Some("TFTP server support is disabled in this build".into());
-        cx.notify();
+        self.show_error_notice("TFTP server support is disabled in this build", cx);
     }
 }

@@ -103,7 +103,7 @@ impl crate::Zetta {
                 }
                 self.show_notice(message, cx);
             }
-            Err(error) => self.show_notice(
+            Err(error) => self.show_error_notice(
                 format!("Could not set Zetta as the default terminal: {error:#}"),
                 cx,
             ),
@@ -136,7 +136,7 @@ impl crate::Zetta {
             }
         }
         if rejected != 0 {
-            self.show_notice(
+            self.show_error_notice(
                 format!("Could not open {rejected} shell-script file(s) in Zetta"),
                 cx,
             );
@@ -310,7 +310,7 @@ fn set_xdg_terminal_preference(current_desktop: Option<&str>) -> Result<PathBuf>
     };
     let updated = update_xdg_terminal_list(&contents);
     if updated != contents {
-        crate::project::write_text_atomically(&path, &updated).with_context(|| {
+        crate::file_replace::replace_file(&path, &updated).with_context(|| {
             format!("writing xdg-terminal-exec configuration {}", path.display())
         })?;
     }
@@ -411,7 +411,7 @@ fn set_kde_terminal_preference(executable: &Path) -> Result<PathBuf> {
             ("TerminalService", "Zetta.desktop"),
         ],
     );
-    crate::project::write_text_atomically(&path, &updated)
+    crate::file_replace::replace_file(&path, &updated)
         .with_context(|| format!("writing KDE configuration {}", path.display()))?;
     Ok(path)
 }
@@ -421,7 +421,7 @@ fn set_xfce_terminal_preference(executable: &Path) -> Result<PathBuf> {
     let path = user_config_path("xfce4/helpers.rc")?;
     let contents = fs::read_to_string(&path).unwrap_or_default();
     let updated = update_xfce_helpers(&contents, &executable.to_string_lossy());
-    crate::project::write_text_atomically(&path, &updated)
+    crate::file_replace::replace_file(&path, &updated)
         .with_context(|| format!("writing Xfce configuration {}", path.display()))?;
     Ok(path)
 }

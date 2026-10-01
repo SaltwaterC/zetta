@@ -381,17 +381,11 @@ fn a_transient_notice_does_not_take_layout_space(cx: &mut TestAppContext) {
 
 struct PersistentErrorHarness {
     configuration_error: Option<String>,
-    pane_output_error: Option<String>,
 }
 
 impl PersistentErrorHarness {
     fn dismiss_configuration_error(&mut self, cx: &mut Context<Self>) {
         self.configuration_error = None;
-        cx.notify();
-    }
-
-    fn dismiss_pane_output_error(&mut self, cx: &mut Context<Self>) {
-        self.pane_output_error = None;
         cx.notify();
     }
 }
@@ -401,17 +395,9 @@ impl Render for PersistentErrorHarness {
         let colors = cx.theme().colors().clone();
         let handle = cx.entity().downgrade();
         let configuration_actions = self.configuration_error.as_ref().map(|_| {
-            let handle = handle.clone();
             Zetta::configuration_error_actions(&colors, move |_, _, cx| {
                 handle
                     .update(cx, |this, cx| this.dismiss_configuration_error(cx))
-                    .ok();
-            })
-        });
-        let pane_error_actions = self.pane_output_error.as_ref().map(|_| {
-            Zetta::pane_error_actions(&colors, move |_, _, cx| {
-                handle
-                    .update(cx, |this, cx| this.dismiss_pane_output_error(cx))
                     .ok();
             })
         });
@@ -420,8 +406,6 @@ impl Render for PersistentErrorHarness {
             &colors,
             self.configuration_error.clone(),
             configuration_actions,
-            self.pane_output_error.clone(),
-            pane_error_actions,
         )
         .child(
             div()
@@ -443,7 +427,7 @@ fn click_feedback_control(cx: &mut gpui::VisualTestContext, selector: &'static s
 }
 
 #[gpui::test]
-fn persistent_error_banners_expose_dismiss_controls_and_restore_body_height(
+fn the_configuration_error_banner_offers_reload_and_dismiss_and_restores_body_height(
     cx: &mut TestAppContext,
 ) {
     cx.update(|cx| {
@@ -453,47 +437,29 @@ fn persistent_error_banners_expose_dismiss_controls_and_restore_body_height(
     });
     let (root, cx) = cx.add_window_view(|_, _| PersistentErrorHarness {
         configuration_error: Some("Could not load configuration".to_owned()),
-        pane_output_error: Some("Could not attach session".to_owned()),
     });
     cx.simulate_resize(size(px(520.), px(320.)));
 
-    let with_banners = cx
+    let with_banner = cx
         .debug_bounds("tab-body")
         .expect("the tab body is always laid out")
         .size
         .height;
-    assert!(with_banners < px(320.));
+    assert!(with_banner < px(320.));
     assert!(cx.debug_bounds("reload-invalid-configuration").is_some());
     assert!(cx.debug_bounds("dismiss-invalid-configuration").is_some());
-    assert!(cx.debug_bounds("dismiss-pane-output-error").is_some());
 
     click_feedback_control(cx, "dismiss-invalid-configuration");
     cx.update_entity(&root, |view, _| {
         assert!(view.configuration_error.is_none());
-        assert!(view.pane_output_error.is_some());
     });
-    let with_one_banner = cx
+    let without_banner = cx
         .debug_bounds("tab-body")
         .expect("the tab body is always laid out")
         .size
         .height;
-    assert!(with_one_banner > with_banners);
+    assert!(without_banner > with_banner);
     assert!(cx.debug_bounds("reload-invalid-configuration").is_none());
-    assert!(cx.debug_bounds("dismiss-invalid-configuration").is_none());
-    assert!(cx.debug_bounds("dismiss-pane-output-error").is_some());
-
-    click_feedback_control(cx, "dismiss-pane-output-error");
-    cx.update_entity(&root, |view, _| {
-        assert!(view.configuration_error.is_none());
-        assert!(view.pane_output_error.is_none());
-    });
-    let without_banners = cx
-        .debug_bounds("tab-body")
-        .expect("the tab body is always laid out")
-        .size
-        .height;
-    assert!(without_banners > with_one_banner);
-    assert!(cx.debug_bounds("tab-body").is_some());
 }
 
 struct ProjectOfferBannerHarness;

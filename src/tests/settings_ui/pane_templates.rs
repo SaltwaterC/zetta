@@ -1,6 +1,54 @@
 use super::*;
 use crate::settings_editor::PaneTemplatesForm;
 
+/// A tree's tab order as the page builds it: every preview node, then the
+/// selected node's form.
+fn node_then_detail_controls(
+    node: &PaneTemplateNodeForm,
+    root: PaneTemplateNodePath,
+    editable: bool,
+    template_index: usize,
+    selected: Option<PaneTemplateNodePath>,
+) -> Vec<SettingsControl> {
+    let mut nodes = Vec::new();
+    let mut details = Vec::new();
+    add_node_controls_with_template(
+        &mut nodes,
+        &mut details,
+        node,
+        root,
+        editable,
+        template_index,
+        selected,
+    );
+    nodes.extend(details);
+    nodes
+}
+
+/// The page draws the whole preview and then the selected node's form beneath
+/// it, so Tab reaches every preview node before the first field of the form.
+#[test]
+fn the_preview_is_tabbed_through_before_the_selected_nodes_form() {
+    let node = PaneTemplateNodeForm::empty_two_pane();
+    let root = PaneTemplateNodePath::ROOT;
+    let left = root.child(false).unwrap();
+    let right = root.child(true).unwrap();
+
+    let controls = node_then_detail_controls(&node, root, true, 0, Some(left));
+
+    let last_node = controls
+        .iter()
+        .position(|control| *control == SettingsControl::SelectPaneTemplateNode(right))
+        .unwrap();
+    let first_detail = controls
+        .iter()
+        .position(|control| {
+            *control == SettingsControl::SplitPaneTemplate(left, PaneSplitAxis::Horizontal)
+        })
+        .unwrap();
+    assert!(last_node < first_detail);
+}
+
 #[test]
 fn only_the_selected_split_exposes_split_editor_controls() {
     let node = PaneTemplateNodeForm::Split {
@@ -10,9 +58,7 @@ fn only_the_selected_split_exposes_split_editor_controls() {
     };
     let root = PaneTemplateNodePath::ROOT;
     let selected_split = root.child(false).unwrap();
-    let mut controls = Vec::new();
-
-    add_node_controls_with_template(&mut controls, &node, root, true, 0, Some(selected_split));
+    let controls = node_then_detail_controls(&node, root, true, 0, Some(selected_split));
 
     assert!(controls.contains(&SettingsControl::Dropdown(
         SettingsDropdown::PaneTemplateAxis(selected_split)
@@ -47,8 +93,7 @@ fn returning_to_the_parent_split_restores_its_editor_controls() {
     assert!(templates.toggle_node_selection(left));
     assert_eq!(templates.selected_node, Some(root));
 
-    let mut controls = Vec::new();
-    add_node_controls_with_template(&mut controls, &node, root, true, 0, templates.selected_node);
+    let controls = node_then_detail_controls(&node, root, true, 0, templates.selected_node);
     assert!(controls.contains(&SettingsControl::Dropdown(
         SettingsDropdown::PaneTemplateAxis(root)
     )));
@@ -102,9 +147,7 @@ fn stacked_commands_are_only_offered_for_the_selected_leaf() {
     let root = PaneTemplateNodePath::ROOT;
     let left = root.child(false).unwrap();
     let right = root.child(true).unwrap();
-    let mut controls = Vec::new();
-
-    add_node_controls_with_template(&mut controls, &node, root, true, 0, Some(left));
+    let controls = node_then_detail_controls(&node, root, true, 0, Some(left));
 
     assert!(controls.contains(&SettingsControl::AddPaneTemplateStackEntry(left)));
     assert!(!controls.contains(&SettingsControl::AddPaneTemplateStackEntry(right)));
@@ -146,7 +189,7 @@ fn a_control_this_page_does_not_own_leaves_the_form_untouched() {
     let config = Config::parse("{}", None, None).unwrap();
     let mut editor = crate::settings_ui::controls::tests::configuration_editor(&config);
     editor.configuration_dirty = false;
-    editor.message = Some((false, "Saved".to_owned()));
+    editor.message = Some((Tone::Info, "Saved".to_owned()));
 
     let outcome = apply_pane_template_control(&mut editor, SettingsControl::Save);
 
@@ -160,7 +203,7 @@ fn a_control_this_page_does_not_own_leaves_the_form_untouched() {
     );
     assert_eq!(
         editor.message,
-        Some((false, "Saved".to_owned())),
+        Some((Tone::Info, "Saved".to_owned())),
         "an unowned control must not clear the last message"
     );
 }
@@ -186,4 +229,46 @@ fn a_template_control_for_a_missing_node_reports_no_change() {
 
     assert!(matches!(outcome, Ok(None)));
     assert!(!editor.configuration_dirty);
+}
+
+/// The overlay's opacity is a slider now, as the inactive-pane opacity is, and
+/// sliding it back to the default stores nothing rather than an explicit value
+/// the template never chose.
+#[test]
+fn the_overlay_opacity_slider_stores_the_default_as_unset() {
+    let source = r#"{"pane_split_templates":{"custom":{"layout":{"vertical":[{"label":"left","overlay":{"text":"Prod"}},{"label":"right"}]}}}}"#;
+    let config = Config::parse(source, None, None).unwrap();
+    let file = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(file.path(), source).unwrap();
+    let mut editor = crate::settings_ui::controls::tests::configuration_editor(&config);
+    editor.configuration =
+        crate::settings_editor::ConfigurationForm::load(file.path(), &config).unwrap();
+    editor.page = SettingsPage::PaneTemplates;
+    let index = templates(&editor)
+        .templates
+        .iter()
+        .position(|template| template.name.text == "custom")
+        .unwrap();
+    templates_mut(&mut editor).selected_template = index;
+    let root = PaneTemplateNodePath::ROOT.child(false).unwrap();
+
+    assert_eq!(
+        overlay_opacity(&editor, root),
+        Some(crate::pane::DEFAULT_OVERLAY_OPACITY)
+    );
+    assert!(set_overlay_opacity(&mut editor, root, 0.4));
+    assert_eq!(overlay_opacity(&editor, root), Some(0.4));
+    assert!(editor.configuration_dirty);
+
+    assert!(set_overlay_opacity(
+        &mut editor,
+        root,
+        crate::pane::DEFAULT_OVERLAY_OPACITY
+    ));
+    let Some(PaneTemplateNodeForm::Pane(pane)) =
+        templates(&editor).selected().unwrap().node.node_at(root)
+    else {
+        panic!("the left pane");
+    };
+    assert_eq!(pane.overlay.as_ref().unwrap().opacity.text, "");
 }

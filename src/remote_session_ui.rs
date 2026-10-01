@@ -8,6 +8,7 @@
 use super::*;
 use crate::background_session_ui::{RemoteAttachOutcome, load_remote_attach};
 use crate::config::REMOTE_KEEP_ALIVE_DEFAULT_MS;
+use crate::overlay_frame::{ALT_MODIFIER, PRIMARY_MODIFIER};
 use crate::remote_pane_transport::{RemotePaneTransport, parse_keep_alive_interval};
 use crate::session_auth_ui::SessionAuthenticationPromptMode;
 
@@ -859,13 +860,13 @@ impl Zetta {
                         self.remote_session_target = None;
                         self.focus_active(window, cx);
                     }
-                    Ok(_) => self.show_notice(
+                    Ok(_) => self.show_error_notice(
                         format!(
                             "Created remote session {session_id}, but it could not be shown here."
                         ),
                         cx,
                     ),
-                    Err(error) => self.show_notice(
+                    Err(error) => self.show_error_notice(
                         format!(
                             "Created remote session {session_id}, but could not show it: {}",
                             remote_error_message(&error)
@@ -876,7 +877,7 @@ impl Zetta {
             }
             Ok((session_id, RemoteAttachOutcome::AuthenticationRequired))
             | Ok((session_id, RemoteAttachOutcome::AuthenticationFailed)) => {
-                self.show_notice(
+                self.show_error_notice(
                     format!(
                         "Created remote session {session_id}, but authentication failed while attaching."
                     ),
@@ -885,7 +886,7 @@ impl Zetta {
                 self.remote_session_target = None;
             }
             Err(error) => {
-                self.show_notice(
+                self.show_error_notice(
                     format!(
                         "Could not create a remote session: {}",
                         remote_error_message(&error)
@@ -1411,9 +1412,9 @@ impl Zetta {
                 }
                 cx.notify();
             }
-            Some(SearchableDropdownAction::Commit(Some(value))) => {
+            Some(SearchableDropdownAction::Commit(Some(choice))) => {
                 if let Some(picker) = self.remote_session_picker.as_mut() {
-                    picker.commit_dropdown(value);
+                    picker.commit_dropdown(choice.value);
                 }
                 cx.notify();
             }
@@ -1579,107 +1580,88 @@ impl Zetta {
             )
         };
         Some(
-            div()
-                .id("remote-session-backdrop")
-                .absolute()
-                .inset_0()
-                .flex()
-                .items_center()
-                .justify_center()
-                .bg(transparent_black().opacity(0.24))
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .child(
-                    div()
-                        .id("remote-session-picker")
-                        .debug_selector(|| "remote-session-picker".to_owned())
-                        .track_focus(&self.remote_session_focus)
-                        .w_full()
-                        .max_w(px(680.))
-                        .max_h(gpui::relative(0.9))
-                        .p_4()
-                        .flex()
-                        .flex_col()
-                        .gap_3()
-                        .rounded(px(8.))
-                        .border_1()
-                        .border_color(colors.border)
-                        .bg(colors.elevated_surface_background)
-                        .text_color(colors.text)
-                        .shadow_lg()
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .child(Label::new("Open remote session").size(LabelSize::Large))
-                        .child(
-                            div()
-                                .min_h(px(45.))
-                                .text_sm()
-                                .text_color(colors.text_muted)
-                                .debug_selector(|| "remote-session-description".to_owned())
-                                .child(remote_session_description(transport)),
+            modal_backdrop(
+                "remote-session-backdrop",
+                Placement::Centered,
+                BackdropClick::Swallow,
+            )
+            .child(
+                dialog_panel("remote-session-picker", DIALOG_WIDTH_LARGE, colors)
+                    .debug_selector(|| "remote-session-picker".to_owned())
+                    .track_focus(&self.remote_session_focus)
+                    .child(dialog_title("Open remote session", colors))
+                    .child(
+                        div()
+                            .min_h(px(45.))
+                            .text_sm()
+                            .text_color(colors.text_muted)
+                            .debug_selector(|| "remote-session-description".to_owned())
+                            .child(remote_session_description(transport)),
+                    )
+                    .child(remote_session_fields(&field_widget, target, port, handle))
+                    .child(remote_session_transport_row(RemoteSessionTransportRow {
+                        transport,
+                        keep_alive,
+                        forward_agent: picker.forward_agent,
+                        field,
+                        colors,
+                        field_widget: &field_widget,
+                        handle,
+                    }))
+                    .child(remote_session_create_options(RemoteSessionCreateOptions {
+                        profile: profile_value,
+                        template: template_value,
+                        profiles_loading,
+                        profile_available,
+                        profile_error,
+                        field,
+                        colors,
+                        error_color,
+                        handle,
+                    }))
+                    .when(has_suggestions, |panel| {
+                        panel.child(
+                            suggestion_rows
+                                .when(field != RemoteSessionField::Target, |suggestions| {
+                                    suggestions.invisible()
+                                }),
                         )
-                        .child(remote_session_fields(&field_widget, target, port, handle))
-                        .child(remote_session_transport_row(RemoteSessionTransportRow {
-                            transport,
-                            keep_alive,
-                            forward_agent: picker.forward_agent,
-                            field,
-                            colors,
-                            field_widget: &field_widget,
-                            handle,
-                        }))
-                        .child(remote_session_create_options(RemoteSessionCreateOptions {
-                            profile: profile_value,
-                            template: template_value,
-                            profiles_loading,
-                            profile_available,
-                            profile_error,
-                            field,
-                            colors,
-                            error_color,
-                            handle,
-                        }))
-                        .when(has_suggestions, |panel| {
-                            panel.child(
-                                suggestion_rows
-                                    .when(field != RemoteSessionField::Target, |suggestions| {
-                                        suggestions.invisible()
-                                    }),
-                            )
-                        })
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .justify_between()
-                                .child(Label::new("Shared sessions").size(LabelSize::Small))
-                                .child(div().text_xs().text_color(colors.text_muted).child(
-                                    if loading {
-                                        "Loading…".to_owned()
-                                    } else {
-                                        format!(
-                                            "{session_count} session{}",
-                                            if session_count == 1 { "" } else { "s" }
-                                        )
-                                    },
-                                )),
-                        )
-                        .child(session_list)
-                        .child(remote_session_actions(RemoteSessionActions {
-                            loading,
-                            attaching,
-                            session_count,
-                            selected,
-                            field,
-                            colors,
-                            cancel_handle,
-                            load_handle,
-                            attach_handle,
-                            create_handle,
-                            create_available: can_create,
-                            creating,
-                        })),
-                )
-                .when_some(dropdown_popup, |backdrop, popup| backdrop.child(popup))
-                .into_any_element(),
+                    })
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(Label::new("Shared sessions").size(LabelSize::Small))
+                            .child(div().text_xs().text_color(colors.text_muted).child(
+                                if loading {
+                                    "Loading…".to_owned()
+                                } else {
+                                    format!(
+                                        "{session_count} session{}",
+                                        if session_count == 1 { "" } else { "s" }
+                                    )
+                                },
+                            )),
+                    )
+                    .child(session_list)
+                    .child(remote_session_actions(RemoteSessionActions {
+                        loading,
+                        attaching,
+                        session_count,
+                        selected,
+                        field,
+                        colors,
+                        cancel_handle,
+                        load_handle,
+                        attach_handle,
+                        create_handle,
+                        create_available: can_create,
+                        creating,
+                    })),
+            )
+            .when_some(dropdown_popup, |backdrop, popup| backdrop.child(popup))
+            .into_any_element(),
         )
     }
 }
@@ -1695,7 +1677,7 @@ fn remote_session_list_panel(
     div()
         .id("remote-session-list-panel")
         .w_full()
-        .rounded(px(4.))
+        .rounded(crate::ui_tokens::RADIUS_CONTROL)
         .border_1()
         .border_color(if field == RemoteSessionField::List {
             colors.border_focused
@@ -2050,57 +2032,32 @@ fn remote_session_field(
     click_handle: WeakEntity<Zetta>,
 ) -> AnyElement {
     let focused = field == selected_field;
-    let (before, after) = value.split_at_cursor();
-    field_box(id, focused, colors)
-        .debug_selector(move || id.to_owned())
-        .flex_1()
-        .min_w_0()
-        .cursor_text()
-        .when(value.select_all && focused, |input| {
-            input.bg(colors.element_selection_background)
-        })
-        .when(focused && !value.select_all, |input| {
-            input
-                .child(div().whitespace_nowrap().child(before.to_owned()))
-                .child(caret(colors))
-                .child(div().whitespace_nowrap().child(after.to_owned()))
-        })
-        .when(focused && value.select_all, |input| {
-            input.child(div().whitespace_nowrap().child(value.text.clone()))
-        })
-        .when(!focused, |input| {
-            input.child(
-                div()
-                    .min_w_0()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .text_color(if value.text.is_empty() {
-                        colors.text_placeholder
-                    } else {
-                        colors.text
-                    })
-                    .child(if value.text.is_empty() {
-                        placeholder.to_owned()
-                    } else {
-                        value.text.clone()
-                    }),
-            )
-        })
-        .on_click(move |_, _, cx| {
-            click_handle
-                .update(cx, |this, cx| {
-                    if let Some(picker) = this.remote_session_picker.as_mut() {
-                        if selected_field == RemoteSessionField::Target {
-                            picker.reset_suggestion_navigation();
-                        }
-                        picker.field = selected_field;
-                        cx.notify();
+    boxed_text_field(
+        id,
+        &value,
+        focused,
+        Some(placeholder.into()),
+        FieldMask::Plain,
+        colors,
+    )
+    .debug_selector(move || id.to_owned())
+    .flex_1()
+    .min_w_0()
+    .cursor_text()
+    .on_click(move |_, _, cx| {
+        click_handle
+            .update(cx, |this, cx| {
+                if let Some(picker) = this.remote_session_picker.as_mut() {
+                    if selected_field == RemoteSessionField::Target {
+                        picker.reset_suggestion_navigation();
                     }
-                })
-                .ok();
-        })
-        .into_any_element()
+                    picker.field = selected_field;
+                    cx.notify();
+                }
+            })
+            .ok();
+    })
+    .into_any_element()
 }
 
 /// What the picker says it is about to do, which depends on what carries the
@@ -2112,14 +2069,6 @@ fn remote_session_description(transport: RemotePaneTransport) -> &'static str {
          carried over Zosh. Remote sessions must be shared."
     } else {
         "Connect through your normal OpenSSH configuration. Remote sessions must be shared."
-    }
-}
-
-fn remote_session_primary_shortcut() -> &'static str {
-    if cfg!(target_os = "macos") {
-        "Cmd+Enter"
-    } else {
-        "Ctrl+Enter"
     }
 }
 
@@ -2224,7 +2173,7 @@ fn remote_session_agent_control(
         .px_2()
         .flex()
         .items_center()
-        .rounded(px(4.))
+        .rounded(crate::ui_tokens::RADIUS_CONTROL)
         .border_1()
         .border_color(if focused {
             colors.border_focused
@@ -2266,7 +2215,7 @@ fn remote_session_protocol_control(
         .flex_none()
         .h_9()
         .debug_selector(|| "remote-session-protocol".to_owned())
-        .rounded(px(4.))
+        .rounded(crate::ui_tokens::RADIUS_CONTROL)
         .border_1()
         .border_color(if focused {
             colors.border_focused
@@ -2520,11 +2469,11 @@ fn remote_session_dropdown_popup(
     handle: WeakEntity<Zetta>,
 ) -> AnyElement {
     let menu_handle = handle;
-    let on_select = move |value: String, cx: &mut App| {
+    let on_select = move |choice: DropdownChoice, cx: &mut App| {
         menu_handle
             .update(cx, |this, cx| {
                 if let Some(picker) = this.remote_session_picker.as_mut() {
-                    picker.commit_dropdown(value);
+                    picker.commit_dropdown(choice.value);
                 }
                 cx.notify();
             })
@@ -2553,18 +2502,6 @@ struct RemoteSessionActions<'a> {
     load_handle: WeakEntity<Zetta>,
     attach_handle: WeakEntity<Zetta>,
     create_handle: WeakEntity<Zetta>,
-}
-
-fn remote_session_action_style(
-    default: ButtonStyle,
-    focused: bool,
-    colors: &ThemeColors,
-) -> ButtonStyle {
-    if focused {
-        ButtonStyle::OutlinedCustom(colors.border_focused)
-    } else {
-        default
-    }
 }
 
 /// Cancel, Load, Create and Attach, with the session actions live only
@@ -2596,139 +2533,122 @@ fn remote_session_actions(actions: RemoteSessionActions<'_>) -> impl IntoElement
         "Enter or Attach attaches the selected session".to_owned()
     };
     let footer = format!(
-        "Tab next · ↑↓ choose · ←→ change · {instruction} · {} create · Alt+Enter attach · Esc cancel",
-        remote_session_primary_shortcut(),
+        "{instruction} · {}",
+        key_hints(&[
+            ("Tab", "next"),
+            ("↑↓", "choose"),
+            ("←→", "change"),
+            (&format!("{PRIMARY_MODIFIER}+Enter"), "create"),
+            (&format!("{ALT_MODIFIER}+Enter"), "attach"),
+            ("Esc", "cancel"),
+        ]),
     );
-    let cancel_focused = field == RemoteSessionField::Cancel;
-    let load_focused = field == RemoteSessionField::Load;
-    let create_focused = field == RemoteSessionField::Create;
-    let attach_focused = field == RemoteSessionField::Attach;
+    // One primary action: attaching once there is something to attach to,
+    // creating until then.
+    let attach_is_primary = session_count > 0;
+    let action = |selector: &'static str, button: AnyElement| {
+        div()
+            .debug_selector(move || selector.to_owned())
+            .child(button)
+    };
     div()
         .w_full()
         .flex()
         .flex_col()
         .gap_2()
         .child(
-            div()
+            hint_line(footer, colors)
                 .w_full()
                 .min_w_0()
-                .text_xs()
-                .text_color(colors.text_muted)
                 .whitespace_normal()
-                .debug_selector(|| "remote-session-action-help".to_owned())
-                .child(footer),
+                .debug_selector(|| "remote-session-action-help".to_owned()),
         )
         .child(
-            h_flex()
+            dialog_buttons()
                 .w_full()
                 .flex_none()
-                .justify_end()
-                .gap_2()
                 .debug_selector(|| "remote-session-actions".to_owned())
-                .child(
-                    div()
-                        .debug_selector(|| "remote-session-cancel-action".to_owned())
-                        .child(
-                            Button::new("cancel-remote-session", "Cancel")
-                                .style(remote_session_action_style(
-                                    ButtonStyle::Outlined,
-                                    cancel_focused,
-                                    colors,
-                                ))
-                                .color(Color::Custom(colors.text))
-                                .on_click(move |_, window, cx| {
-                                    cancel_handle
-                                        .update(cx, |this, cx| {
-                                            if let Some(picker) =
-                                                this.remote_session_picker.as_mut()
-                                            {
-                                                picker.field = RemoteSessionField::Cancel;
-                                            }
-                                            this.dismiss_remote_session_picker(window, cx);
-                                        })
-                                        .ok();
-                                }),
-                        ),
-                )
-                .child(
-                    div()
-                        .debug_selector(|| "remote-session-load-action".to_owned())
-                        .child(
-                            Button::new(
-                                "load-remote-sessions",
-                                if loading { "Loading…" } else { "Load" },
-                            )
-                            .style(remote_session_action_style(
-                                ButtonStyle::Outlined,
-                                load_focused,
-                                colors,
-                            ))
-                            .color(Color::Custom(colors.text))
-                            .disabled(loading)
-                            .on_click(move |_, window, cx| {
-                                load_handle
-                                    .update(cx, |this, cx| {
-                                        if let Some(picker) = this.remote_session_picker.as_mut() {
-                                            picker.field = RemoteSessionField::Load;
-                                        }
-                                        this.load_remote_sessions(window, cx);
-                                    })
-                                    .ok();
-                            }),
-                        ),
-                )
-                .child(
-                    div()
-                        .debug_selector(|| "remote-session-create-action".to_owned())
-                        .child(
-                            Button::new(
-                                "create-remote-session",
-                                if creating { "Creating…" } else { "Create" },
-                            )
-                            .style(remote_session_action_style(
-                                ButtonStyle::Filled,
-                                create_focused,
-                                colors,
-                            ))
-                            .color(Color::Custom(colors.text))
-                            .disabled(!create_available)
-                            .on_click(move |_, window, cx| {
-                                create_handle
-                                    .update(cx, |this, cx| {
-                                        if let Some(picker) = this.remote_session_picker.as_mut() {
-                                            picker.field = RemoteSessionField::Create;
-                                        }
-                                        this.create_remote_session(window, cx);
-                                    })
-                                    .ok();
-                            }),
-                        ),
-                )
-                .child(
-                    div()
-                        .debug_selector(|| "remote-session-attach-action".to_owned())
-                        .child(
-                            Button::new("attach-remote-session", "Attach")
-                                .style(remote_session_action_style(
-                                    ButtonStyle::Filled,
-                                    attach_focused,
-                                    colors,
-                                ))
-                                .color(Color::Custom(colors.text))
-                                .disabled(loading || session_count == 0)
-                                .on_click(move |_, window, cx| {
-                                    attach_handle
-                                        .update(cx, |this, cx| {
-                                            if let Some(picker) =
-                                                this.remote_session_picker.as_mut()
-                                            {
-                                                picker.field = RemoteSessionField::Attach;
-                                            }
-                                            this.select_remote_session(selected, window, cx);
-                                        })
-                                        .ok();
-                                }),
-                        ),
-                ),
+                .child(action(
+                    "remote-session-cancel-action",
+                    DialogButton::new("cancel-remote-session", "Cancel", ButtonRole::Secondary)
+                        .key_tooltip("Cancel", SurfaceKey::Escape)
+                        .focused(field == RemoteSessionField::Cancel)
+                        .render(colors, move |_, window, cx| {
+                            cancel_handle
+                                .update(cx, |this, cx| {
+                                    if let Some(picker) = this.remote_session_picker.as_mut() {
+                                        picker.field = RemoteSessionField::Cancel;
+                                    }
+                                    this.dismiss_remote_session_picker(window, cx);
+                                })
+                                .ok();
+                        }),
+                ))
+                .child(action(
+                    "remote-session-load-action",
+                    DialogButton::new("load-remote-sessions", "Load", ButtonRole::Secondary)
+                        .focused(field == RemoteSessionField::Load)
+                        .loading(loading)
+                        .render(colors, move |_, window, cx| {
+                            load_handle
+                                .update(cx, |this, cx| {
+                                    if let Some(picker) = this.remote_session_picker.as_mut() {
+                                        picker.field = RemoteSessionField::Load;
+                                    }
+                                    this.load_remote_sessions(window, cx);
+                                })
+                                .ok();
+                        }),
+                ))
+                .child(action(
+                    "remote-session-create-action",
+                    DialogButton::new(
+                        "create-remote-session",
+                        "Create",
+                        if attach_is_primary {
+                            ButtonRole::Secondary
+                        } else {
+                            ButtonRole::Primary
+                        },
+                    )
+                    .focused(field == RemoteSessionField::Create)
+                    .loading(creating)
+                    .enabled(create_available)
+                    .render(colors, move |_, window, cx| {
+                        create_handle
+                            .update(cx, |this, cx| {
+                                if let Some(picker) = this.remote_session_picker.as_mut() {
+                                    picker.field = RemoteSessionField::Create;
+                                }
+                                this.create_remote_session(window, cx);
+                            })
+                            .ok();
+                    }),
+                ))
+                .child(action(
+                    "remote-session-attach-action",
+                    DialogButton::new(
+                        "attach-remote-session",
+                        "Attach",
+                        if attach_is_primary {
+                            ButtonRole::Primary
+                        } else {
+                            ButtonRole::Secondary
+                        },
+                    )
+                    .focused(field == RemoteSessionField::Attach)
+                    .loading(attaching)
+                    .enabled(!loading && session_count > 0)
+                    .render(colors, move |_, window, cx| {
+                        attach_handle
+                            .update(cx, |this, cx| {
+                                if let Some(picker) = this.remote_session_picker.as_mut() {
+                                    picker.field = RemoteSessionField::Attach;
+                                }
+                                this.select_remote_session(selected, window, cx);
+                            })
+                            .ok();
+                    }),
+                )),
         )
 }

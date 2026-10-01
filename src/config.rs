@@ -23,6 +23,9 @@ use discovery::discovered_profiles;
 #[cfg(feature = "zmux")]
 pub(crate) use discovery::profile_command;
 
+/// The terminal font sizes a configuration may choose, inclusive.
+pub(crate) const MIN_TERMINAL_FONT_SIZE: f32 = 6.;
+pub(crate) const MAX_TERMINAL_FONT_SIZE: f32 = 100.;
 pub(crate) const DEFAULT_TERMINAL_FONT_FAMILY: &str = "MesloLGS NF";
 const DEFAULT_MAX_SCROLL_HISTORY_LINES: usize = MAX_SCROLL_HISTORY_LINES;
 pub(crate) const DEFAULT_INACTIVE_PANE_OPACITY: f32 = 0.8;
@@ -49,15 +52,7 @@ impl SessionRetention {
         }
     }
 
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::None => "None",
-            Self::Memory => "Memory",
-            Self::Disk => "Disk",
-        }
-    }
-
-    fn parse(value: &str) -> Result<Self> {
+    pub(crate) fn parse(value: &str) -> Result<Self> {
         match value {
             "none" => Ok(Self::None),
             "memory" => Ok(Self::Memory),
@@ -228,14 +223,7 @@ impl PaneControlsPosition {
         }
     }
 
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Left => "Left",
-            Self::Right => "Right",
-        }
-    }
-
-    fn parse(value: &str) -> Result<Self> {
+    pub(crate) fn parse(value: &str) -> Result<Self> {
         match value {
             "left" => Ok(Self::Left),
             "right" => Ok(Self::Right),
@@ -259,14 +247,7 @@ impl NewTabProfile {
         }
     }
 
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Default => "Default",
-            Self::Inherit => "Inherit",
-        }
-    }
-
-    fn parse(value: &str) -> Result<Self> {
+    pub(crate) fn parse(value: &str) -> Result<Self> {
         match value {
             "default" => Ok(Self::Default),
             "inherit" => Ok(Self::Inherit),
@@ -292,15 +273,7 @@ impl WorkingDirectoryScope {
         }
     }
 
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::None => "None",
-            Self::Pane => "Pane",
-            Self::Tab => "Tab",
-        }
-    }
-
-    fn parse(value: &str) -> Result<Self> {
+    pub(crate) fn parse(value: &str) -> Result<Self> {
         match value {
             "none" => Ok(Self::None),
             "pane" => Ok(Self::Pane),
@@ -812,8 +785,8 @@ impl Config {
         if let Some(font_size) = file.terminal_font_size.get() {
             let font_size = font_size as f32;
             anyhow::ensure!(
-                (6.0..=100.0).contains(&font_size),
-                "terminal_font_size must be between 6 and 100"
+                (MIN_TERMINAL_FONT_SIZE..=MAX_TERMINAL_FONT_SIZE).contains(&font_size),
+                "terminal_font_size must be between {MIN_TERMINAL_FONT_SIZE} and {MAX_TERMINAL_FONT_SIZE}"
             );
             self.terminal_font_size = Some(font_size);
         }
@@ -1551,6 +1524,16 @@ fn parse_max_scroll_history_lines(history_lines: u64) -> Result<usize> {
         "max_scroll_history_lines must not exceed {MAX_SCROLL_HISTORY_LINES}"
     );
     Ok(history_lines as usize)
+}
+
+/// Checks a profile entry's fields against the configuration's own file
+/// mirror, so a project's profile overrides accept exactly the fields a user
+/// profile does and name a misspelled one the same way. The project form used
+/// to keep its own list of these fields.
+pub(crate) fn check_profile_fields(value: &Value) -> anyhow::Result<()> {
+    ProfileFile::deserialize(value)
+        .map(|_| ())
+        .map_err(|error| anyhow!("{error}"))
 }
 
 impl ProfileFile {

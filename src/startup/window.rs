@@ -118,7 +118,7 @@ pub(crate) fn open_zetta_window(
                         zetta.toggle_settings(&ToggleSettings, window, cx);
                         zetta.focus_settings_input(
                             crate::settings_ui::SettingsInput::Configuration(
-                                ConfigTextField::FontSize,
+                                ConfigTextField::Setting(ConfigSetting::FontSize),
                             ),
                             window,
                             cx,

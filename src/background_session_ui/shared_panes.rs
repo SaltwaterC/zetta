@@ -610,7 +610,7 @@ impl Zetta {
                 // is concerned — but the multiplexer has already given the
                 // descriptor away, so say so rather than leaving a pane that reads
                 // nothing. The caller gives the pane back.
-                self.show_notice(
+                self.show_error_notice(
                     format!(
                         "Could not take this pane's terminal back from the multiplexer: {error:#}"
                     ),

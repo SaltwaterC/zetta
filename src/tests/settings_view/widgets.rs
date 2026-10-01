@@ -12,7 +12,7 @@ impl Render for DropdownMenuHarness {
             ThemeColors::light(),
             self.dropdown.render_state(),
             |_value, _colors| None,
-            |_value: String, _cx: &mut App| {},
+            |_choice: DropdownChoice, _cx: &mut App| {},
         );
         div()
             .size_full()

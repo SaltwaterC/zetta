@@ -343,19 +343,3 @@ fn only_the_keys_that_change_the_text_report_an_edit() {
         );
     }
 }
-
-/// The `|` marker is how a renamed tab, a pane label, a pane overlay and the
-/// baud field show a caret they cannot paint.
-#[test]
-fn the_caret_marker_shows_the_cursor_in_plain_text() {
-    let mut field = TextField::new("Database");
-    field.cursor = 4;
-    assert_eq!(field.caret_marker_display(), "Data|base");
-
-    field.select_all();
-    assert_eq!(field.caret_marker_display(), "Database");
-
-    // An overlay is opened selected on a pane that has no text yet, and has to
-    // look like it is being edited all the same.
-    assert_eq!(TextField::selected("").caret_marker_display(), "|");
-}

@@ -462,6 +462,7 @@ impl Zetta {
         &mut self,
         colors: &ThemeColors,
         error_color: Hsla,
+        top_inset: Pixels,
         handle: &WeakEntity<Self>,
     ) -> Option<AnyElement> {
         let multi_command_focus = self.multi_command_focus.clone();
@@ -485,6 +486,7 @@ impl Zetta {
             colors,
         );
         let error = prompt.error.clone();
+        let has_error = error.is_some();
         let completion_selected = prompt.completion_selected;
         let completion_count = prompt.completion_candidates.len();
         let completion_loading = prompt.completion_loading;
@@ -522,99 +524,57 @@ impl Zetta {
             })
             .collect::<Vec<_>>();
         let dismiss_handle = handle.clone();
-
-        Some(
-            div()
-                .id(if stacked_prompt {
-                    "stacked-command-backdrop"
-                } else {
-                    "multi-command-backdrop"
-                })
-                .absolute()
-                .inset_0()
-                .pt(px(72.))
-                .px_4()
-                .flex()
-                .items_start()
-                .justify_center()
-                .bg(transparent_black().opacity(0.24))
-                .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-                    dismiss_handle
-                        .update(cx, |this, cx| this.dismiss_multi_command(window, cx))
-                        .ok();
-                })
-                .child(
-                    div()
-                        .id(if stacked_prompt {
-                            "stacked-command-prompt"
-                        } else {
-                            "multi-command-prompt"
-                        })
-                        .track_focus(&multi_command_focus)
-                        .w_full()
-                        .max_w(px(680.))
-                        .overflow_hidden()
-                        .rounded(px(8.))
-                        .border_1()
-                        .border_color(colors.border)
-                        .bg(colors.elevated_surface_background)
-                        .text_color(colors.text)
-                        .shadow_lg()
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .child(
-                            div()
-                                .h_12()
-                                .px_3()
-                                .flex()
-                                .items_center()
-                                .text_color(colors.text)
-                                .child(div().text_color(colors.text_accent).mr_2().child("$"))
-                                .child(query),
-                        )
-                        .when(completion_count > 0, |prompt| {
-                            prompt.child(
-                                div()
-                                    .py_1()
-                                    .border_t_1()
-                                    .border_color(colors.border)
-                                    .children(completion_rows),
-                            )
-                        })
-                        .child(
-                            div()
-                                .min_h_9()
-                                .px_3()
-                                .py_2()
-                                .border_t_1()
-                                .border_color(colors.border)
-                                .text_xs()
-                                .text_color(if error.is_some() {
-                                    error_color
-                                } else {
-                                    colors.text_muted
-                                })
-                                .child(error.unwrap_or_else(|| {
-                                    if completion_loading {
-                                        "Loading completions…".to_owned()
-                                    } else if completion_count > 0 {
-                                        format!(
-                                            "{completion_count} completion{} · Tab next · Shift+Tab previous",
-                                            if completion_count == 1 { "" } else { "s" }
-                                        )
-                                    } else {
-                                        if stacked_prompt {
-                                            "Run one command in a stacked pane · Tab complete · Enter run · Esc cancel"
-                                                .to_owned()
-                                        } else {
-                                            "Double-brace values become tiled panes · Tab complete · Enter run · Esc cancel"
-                                                .to_owned()
-                                        }
-                                    }
-                                })),
-                        ),
+        let footer = error.unwrap_or_else(|| {
+            if completion_loading {
+                "Loading completions…".to_owned()
+            } else if completion_count > 0 {
+                format!(
+                    "{completion_count} completion{} · {}",
+                    if completion_count == 1 { "" } else { "s" },
+                    key_hints(&[("Tab", "next"), ("Shift+Tab", "previous")]),
                 )
-                .into_any_element(),
+            } else {
+                let hints = key_hints(&[("Tab", "complete"), ("Enter", "run"), ("Esc", "cancel")]);
+                if stacked_prompt {
+                    format!("Run one command in a stacked pane · {hints}")
+                } else {
+                    format!("Double-brace values become tiled panes · {hints}")
+                }
+            }
+        });
+        let backdrop = modal_backdrop(
+            if stacked_prompt {
+                "stacked-command-backdrop"
+            } else {
+                "multi-command-backdrop"
+            },
+            Placement::UnderChrome(top_inset),
+            BackdropClick::dismiss(move |window, cx| {
+                dismiss_handle
+                    .update(cx, |this, cx| this.dismiss_multi_command(window, cx))
+                    .ok();
+            }),
+        );
+        let panel = modal_panel(
+            if stacked_prompt {
+                "stacked-command-prompt"
+            } else {
+                "multi-command-prompt"
+            },
+            colors,
         )
+        .track_focus(&multi_command_focus)
+        .max_w(PALETTE_WIDTH)
+        .child(palette_header("$", query, colors))
+        .when(completion_count > 0, |prompt| {
+            prompt.child(palette_section(colors).py_1().children(completion_rows))
+        })
+        .child(
+            palette_footer(colors)
+                .when(has_error, |footer| footer.text_color(error_color))
+                .child(footer),
+        );
+        Some(modal(backdrop, panel))
     }
 }
 

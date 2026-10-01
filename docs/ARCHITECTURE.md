@@ -102,7 +102,22 @@ layering rule: every module named here is a sibling under `src/`.
   the keys that are its own; see the module docs for the two that deliberately
   do not
 - `text_edit_ui.rs`: the rendering half of a field — the caret, the inline
-  query run the overlays share, and the bordered frame the boxed fields share
+  query run the overlays share, the bordered frame, `boxed_text_field` (the one
+  boxed field every form and prompt draws, masked or not) and `read_only_field`
+- `ui_tokens.rs`: the shared design values — the modal scrim, corner radii,
+  the disabled fade, settings column and row sizes, palette and dialog widths,
+  and the overlay inset under the chrome. Colours stay with the theme
+- `overlay_frame.rs`: the frames every modal is drawn in — the occluding
+  backdrop and its click policy, the panel, the palette header/section/footer,
+  the dialog panel/title/buttons, list rows with match highlighting, and the
+  `key_hints` line
+- `ui_buttons.rs`: `DialogButton` in its three roles (primary, secondary,
+  destructive), the focus ring drawn around a button, and the labelled
+  icon-only remove button
+- `ui_messages.rs`: `Tone` and `status_message`, the one line of feedback
+  every form and prompt shows an error, warning, note or success with
+- `fuzzy_match.rs`: the fuzzy scorer the palette, the theme picker and the
+  dropdowns filter with, and the ranges it matched for highlighting
 - `searchable_dropdown.rs`: the shared state, keyboard handling, and rendering
   for searchable dropdowns. The settings editor and the remote-session picker
   own different option lists and commit different values, but their dropdown
@@ -141,7 +156,12 @@ layering rule: every module named here is a sibling under `src/`.
   the default template and stripped back to what was rebound), and
   `settings_editor/pane_templates.rs` (`PaneTemplatesForm`, which overlays
   either the built-in presets (the user configuration) or the resolved user
-  configuration (a project)). The root re-exports all three
+  configuration (a project)), `settings_editor/profile.rs` (`ProfileForm` and
+  the profile rules, shared with the project builder) and
+  `settings_editor/settings_table.rs` (`ConfigSetting`: every scalar setting's
+  key path, kind and default, which loading, saving, default stripping,
+  validation and the page's controls are all driven from). The root re-exports
+  them
 - `keymap_file.rs`: Zetta's keymap file model, replacing Zed's
   `settings::KeymapFile`. That type is 2,800 lines built around Zed's keymap
   *editor* and reached the `fs` crate, which dragged Zed's git and SSH-askpass
@@ -150,8 +170,13 @@ layering rule: every module named here is a sibling under `src/`.
 - `project_form.rs`: the typed form for a project's `.zetta/config.json` and its
   serialization; every field is optional because the file is an overlay
 - `settings_ui.rs`: settings state and event handling; a module directory —
-  `settings_ui/keymap.rs` (capture, search cache), `settings_ui/controls.rs`
-  (the control list and focus/scroll navigation),
+  `settings_ui/keymap.rs` (capture, search cache, and the keymap edits the
+  keyboard and the row buttons share), `settings_ui/configuration_page.rs` (the
+  Configuration page's sections and rows, which both its rendering and its
+  tab order are built from), `settings_ui/close_guard.rs` (every way out of the
+  dialog or the project builder, and the unsaved-changes confirmation),
+  `settings_ui/controls.rs` (the control list and focus/scroll navigation, and
+  the armed state destructive controls confirm through),
   `settings_ui/dropdowns.rs` (what a dropdown offers and what choosing an
   option does), `settings_ui/editing.rs` (activating a control, text input,
   toggles, sliders, and the numeric fields that repeat while held),
@@ -184,6 +209,14 @@ estimates the offset from a control's position in the tab order;
 new focusable elements should be wrapped in it (a plain `overflow_y_scroll` div
 honours neither `Window::request_autoscroll` nor `ScrollHandle::scroll_to_item`).
 
+Every button, field and switch on a settings page is built from `widgets`
+(`SettingsButton`, `settings_remove_button`, `add_row`, `section_heading`,
+`card_frame`, `argument_list`, `environment_pair_rows`, `editable_field`,
+`toggle_switch`, `picker_trigger`) and clicks through `activate_on_click`, which
+focuses the control and then runs `activate_settings_control` — the same path
+Enter takes. A button that mutates the form in its own closure is how the
+keyboard and the mouse came to do different things; do not add one.
+
 ## Configuration, profiles, and projects
 
 - `config.rs`: the typed `Config`/`Profile` model, its parsing, and the
@@ -201,6 +234,9 @@ honours neither `Window::request_autoscroll` nor `ScrollHandle::scroll_to_item`)
   `crates/zetta_profiles`, because the daemon resolves the same names
 - `project.rs`: `ProjectConfig`, `ProjectRegistry`, and project field
   validation
+- `file_replace.rs`: replacing a user's file atomically — staged beside the
+  target, symlinks followed, permissions kept — for the configuration, the
+  keymap, project files, the registry and the desktop-entry edits
 - `project_context.rs`: the active project for a window, project detection for
   a directory, and the theme/profile resolution that follows from it
 - `project_cli.rs`: `zetta project` argument parsing and its non-open commands

@@ -749,13 +749,7 @@ fn read_config_source(path: &Path) -> Result<String> {
 }
 
 fn save_config(path: &Path, source: &str) -> Result<()> {
-    if let Some(parent) = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-    {
-        fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
-    }
-    fs::write(path, format!("{source}\n")).with_context(|| format!("writing {}", path.display()))
+    crate::file_replace::replace_file(path, source)
 }
 
 fn profile_config_options() -> String {

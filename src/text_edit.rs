@@ -142,24 +142,6 @@ impl TextField {
         self.text.split_at(self.cursor.min(self.text.len()))
     }
 
-    /// The value with a `|` standing in for the caret, for the three surfaces
-    /// that show a field as text rather than as an element: a tab or pane being
-    /// renamed, a pane overlay being typed, and the serial console's baud field.
-    ///
-    /// A selected value is shown whole, since the selection is what is
-    /// highlighted; an empty selected value still shows the marker, so an
-    /// overlay opened on a pane with no text is visibly being edited.
-    pub(crate) fn caret_marker_display(&self) -> String {
-        if self.select_all {
-            if self.text.is_empty() {
-                return "|".to_owned();
-            }
-            return self.text.clone();
-        }
-        let (before, after) = self.split_at_cursor();
-        format!("{before}|{after}")
-    }
-
     fn delete_selection(&mut self) -> bool {
         if !self.select_all {
             return false;

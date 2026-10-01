@@ -3,6 +3,30 @@ use super::pane_templates;
 use super::projects;
 use super::*;
 
+/// Disarms a destructive control that was pressed once, unless focus is staying
+/// on it: the confirming press is a second press of the same button.
+pub(crate) fn disarm_unless(editor: &mut SettingsEditor, control: &SettingsControl) {
+    if editor.armed_control.as_ref() != Some(control) {
+        editor.armed_control = None;
+    }
+}
+
+/// Whether a destructive control should act now. The first press arms it and
+/// says what the second one will do; the second press, with nothing else
+/// focused in between, confirms it.
+pub(crate) fn confirm_destructive(editor: &mut SettingsEditor, control: &SettingsControl) -> bool {
+    if editor.armed_control.as_ref() == Some(control) {
+        editor.armed_control = None;
+        return true;
+    }
+    editor.armed_control = Some(control.clone());
+    editor.message = Some((
+        Tone::Warning,
+        "Press again to confirm; this cannot be undone.".to_owned(),
+    ));
+    false
+}
+
 pub(crate) fn adjacent_settings_control_index(
     len: usize,
     current: Option<usize>,
@@ -58,9 +82,12 @@ impl Zetta {
         controls
     }
 
-    fn build_settings_controls(editor: &SettingsEditor) -> Vec<SettingsControl> {
+    pub(crate) fn build_settings_controls(editor: &SettingsEditor) -> Vec<SettingsControl> {
         if let Some(query) = editor.font_query.as_ref() {
-            let mut controls = vec![SettingsControl::Input(SettingsInput::FontSearch)];
+            let mut controls = vec![
+                SettingsControl::Input(SettingsInput::FontSearch),
+                SettingsControl::CloseModal,
+            ];
             controls.extend(
                 matching_font_indices(&editor.normalized_fonts, &query.text)
                     .iter()
@@ -70,11 +97,19 @@ impl Zetta {
             return controls;
         }
         if editor.profile_draft.is_some() {
-            return profile_draft_controls().to_vec();
+            return profile_draft_controls(
+                editor
+                    .profile_draft
+                    .as_ref()
+                    .map_or(0, |draft| draft.arguments.len()),
+            );
         }
 
         if editor.keymap_capture.is_some() {
             return Vec::new();
+        }
+        if editor.close_request.is_some() {
+            return super::close_guard::close_request_controls(editor);
         }
 
         let mut controls = vec![
@@ -88,71 +123,11 @@ impl Zetta {
         ];
         match editor.page {
             SettingsPage::Configuration => {
-                controls.extend([
-                    SettingsControl::Dropdown(SettingsDropdown::DefaultProfile),
-                    SettingsControl::Dropdown(SettingsDropdown::NewTabProfile),
-                    SettingsControl::Dropdown(SettingsDropdown::Theme),
-                    SettingsControl::Dropdown(SettingsDropdown::DarkTheme),
-                    SettingsControl::DefaultTabIconPicker,
-                    SettingsControl::Numeric(NumericSetting::FontSize),
-                    SettingsControl::FontPicker,
-                    SettingsControl::Input(SettingsInput::Configuration(
-                        ConfigTextField::WorkingDirectory,
-                    )),
-                    SettingsControl::Dropdown(SettingsDropdown::WorkingDirectoryScope),
-                    SettingsControl::Numeric(NumericSetting::ScrollHistory),
-                    // The background-session block, in the order the page draws
-                    // it: between the scrollback setting and the appearance
-                    // toggles. It used to be listed after the pane-control
-                    // dropdowns, which put it late in the tab order and early on
-                    // the page — and since `scroll_settings_control_into_view`
-                    // maps tab position onto the scroll range, focusing one of
-                    // these fields scrolled it out of view.
-                    SettingsControl::Dropdown(SettingsDropdown::SessionRetention),
-                    SettingsControl::Numeric(NumericSetting::SessionRingBytes),
-                    SettingsControl::Dropdown(SettingsDropdown::RemoteSessionProtocol),
-                    SettingsControl::Numeric(NumericSetting::RemoteSessionKeepAlive),
-                    SettingsControl::Toggle(SettingsToggle::RemoteSessionForwardAgent),
-                    #[cfg(feature = "session-persistence")]
-                    SettingsControl::Input(SettingsInput::Configuration(
-                        ConfigTextField::SessionPersistenceRecipients,
-                    )),
-                    #[cfg(feature = "session-persistence")]
-                    SettingsControl::Input(SettingsInput::Configuration(
-                        ConfigTextField::SessionPersistenceIdentity,
-                    )),
-                ]);
-                // Only in the tab order while the page is actually drawing it —
-                // a control that cannot be seen but can still be tabbed to is a
-                // stop where the focus ring lands on nothing.
-                #[cfg(feature = "session-persistence")]
-                if editor.configuration.session_auto_protect_is_offered() {
-                    controls.push(SettingsControl::Toggle(SettingsToggle::SessionAutoProtect));
-                }
-                controls.extend([
-                    SettingsControl::Opacity,
-                    SettingsControl::Toggle(SettingsToggle::CompactMode),
-                    SettingsControl::Toggle(SettingsToggle::PaneSize),
-                    SettingsControl::Toggle(SettingsToggle::TitleBarLabels),
-                    SettingsControl::Toggle(SettingsToggle::TitleBarButtons),
-                    #[cfg(target_os = "macos")]
-                    SettingsControl::Toggle(SettingsToggle::TitleBarMenus),
-                    #[cfg(target_os = "macos")]
-                    SettingsControl::RequestFocusStatusAccess,
-                    SettingsControl::Dropdown(SettingsDropdown::PaneControlsPosition),
-                    SettingsControl::Dropdown(SettingsDropdown::PaneControlsDefaultVisibility),
-                ]);
-                #[cfg(feature = "http-server")]
-                controls.push(SettingsControl::Numeric(NumericSetting::HttpServerPort));
-                #[cfg(feature = "tftp-server")]
-                controls.push(SettingsControl::Numeric(NumericSetting::TftpServerPort));
-                for (index, profile) in editor.configuration.profiles.iter().enumerate() {
-                    controls.extend(profile_controls(index, profile.detected));
-                }
-                controls.push(SettingsControl::AddProfile);
+                controls.extend(super::configuration_page::configuration_controls(editor));
             }
             SettingsPage::Themes => {
                 controls.extend([
+                    SettingsControl::OpenThemeStore,
                     SettingsControl::Input(SettingsInput::ThemeSearch),
                     SettingsControl::SearchThemes,
                 ]);
@@ -215,10 +190,19 @@ impl Zetta {
                                     SettingsDropdown::BindingProfile(section_index, binding_index),
                                 ));
                             }
-                            controls
-                                .push(SettingsControl::RemoveBinding(section_index, binding_index));
+                            controls.push(keymap::binding_removal_control(
+                                editor,
+                                section_index,
+                                binding_index,
+                            ));
                         }
                     }
+                    // Drawn after the bindings and before the Add button, so
+                    // tabbed there too (see `keymap_rows_from_matches`).
+                    controls
+                        .extend((0..section.unbound_defaults.len()).map(|unbound| {
+                            SettingsControl::RestoreBinding(section_index, unbound)
+                        }));
                     controls.push(SettingsControl::AddBinding(section_index));
                 }
                 controls.push(SettingsControl::AddKeymapSection);
@@ -262,6 +246,9 @@ impl Zetta {
                 | SettingsControl::RemoveBinding(section, binding)
                 | SettingsControl::UnbindBinding(section, binding) => {
                     Some(KeymapRow::Binding(*section, *binding))
+                }
+                SettingsControl::RestoreBinding(section, unbound) => {
+                    Some(KeymapRow::UnboundDefault(*section, *unbound))
                 }
                 SettingsControl::AddBinding(section) => Some(KeymapRow::AddBinding(*section)),
                 SettingsControl::AddKeymapSection => Some(KeymapRow::AddSection),
@@ -341,6 +328,8 @@ impl Zetta {
             return;
         }
         if let Some(editor) = self.settings_editor.as_mut() {
+            disarm_unless(editor, &control);
+            check_setting_being_left(editor, &control);
             editor.focused_input = None;
             editor.focused_control = Some(control.clone());
             if !scroll {
@@ -378,8 +367,16 @@ impl Zetta {
     }
 }
 
-pub(crate) fn profile_controls(index: usize, detected: bool) -> Vec<SettingsControl> {
-    let mut controls = Vec::with_capacity(if detected { 4 } else { 8 });
+/// The controls of a configured profile's card, in the order it draws them.
+/// A detected profile's program and arguments come from what is installed, so
+/// only its four overrides are controls.
+pub(crate) fn profile_controls(
+    index: usize,
+    detected: bool,
+    arguments: usize,
+) -> Vec<SettingsControl> {
+    let target = ProfileTarget::Configuration(index);
+    let mut controls = Vec::new();
     if !detected {
         controls.extend([
             SettingsControl::Input(SettingsInput::Configuration(ConfigTextField::ProfileName(
@@ -389,10 +386,8 @@ pub(crate) fn profile_controls(index: usize, detected: bool) -> Vec<SettingsCont
             SettingsControl::Input(SettingsInput::Configuration(
                 ConfigTextField::ProfileProgram(index),
             )),
-            SettingsControl::Input(SettingsInput::Configuration(
-                ConfigTextField::ProfileArguments(index),
-            )),
         ]);
+        controls.extend(argument_controls(target, arguments));
     }
     controls.extend([
         SettingsControl::Toggle(SettingsToggle::ProfileVisibility(index)),
@@ -403,35 +398,51 @@ pub(crate) fn profile_controls(index: usize, detected: bool) -> Vec<SettingsCont
     controls
 }
 
-pub(crate) fn project_profile_controls(index: usize) -> [SettingsControl; 8] {
-    [
+/// A profile's argument list: each field and the button that removes it, then
+/// the button that adds one.
+pub(crate) fn argument_controls(target: ProfileTarget, arguments: usize) -> Vec<SettingsControl> {
+    let mut controls = Vec::with_capacity(arguments * 2 + 1);
+    for argument in 0..arguments {
+        controls.push(SettingsControl::Input(target.argument_input(argument)));
+        controls.push(SettingsControl::RemoveProfileArgument(target, argument));
+    }
+    controls.push(SettingsControl::AddProfileArgument(target));
+    controls
+}
+
+pub(crate) fn project_profile_controls(index: usize, arguments: usize) -> Vec<SettingsControl> {
+    let mut controls = vec![
         SettingsControl::Input(SettingsInput::Project(ProjectTextField::ProfileName(index))),
         SettingsControl::RemoveProjectProfile(index),
         SettingsControl::Input(SettingsInput::Project(ProjectTextField::ProfileProgram(
             index,
         ))),
-        SettingsControl::Input(SettingsInput::Project(ProjectTextField::ProfileArguments(
-            index,
-        ))),
+    ];
+    controls.extend(argument_controls(ProfileTarget::Project(index), arguments));
+    controls.extend([
         SettingsControl::Toggle(SettingsToggle::ProjectProfileVisibility(index)),
         SettingsControl::Dropdown(SettingsDropdown::ProjectProfileIcon(index)),
         SettingsControl::Dropdown(SettingsDropdown::ProjectProfileTheme(index)),
         SettingsControl::Dropdown(SettingsDropdown::ProjectProfileDarkTheme(index)),
-    ]
+    ]);
+    controls
 }
 
-pub(crate) fn profile_draft_controls() -> [SettingsControl; 9] {
-    [
+pub(crate) fn profile_draft_controls(arguments: usize) -> Vec<SettingsControl> {
+    let mut controls = vec![
         SettingsControl::Input(SettingsInput::ProfileDraft(ProfileDraftField::Name)),
         SettingsControl::Input(SettingsInput::ProfileDraft(ProfileDraftField::Program)),
-        SettingsControl::Input(SettingsInput::ProfileDraft(ProfileDraftField::Arguments)),
+    ];
+    controls.extend(argument_controls(ProfileTarget::Draft, arguments));
+    controls.extend([
         SettingsControl::Toggle(SettingsToggle::ProfileDraftVisibility),
         SettingsControl::Dropdown(SettingsDropdown::ProfileDraftIcon),
         SettingsControl::Dropdown(SettingsDropdown::ProfileDraftTheme),
         SettingsControl::Dropdown(SettingsDropdown::ProfileDraftDarkTheme),
-        SettingsControl::Close,
+        SettingsControl::CloseModal,
         SettingsControl::CreateProfile,
-    ]
+    ]);
+    controls
 }
 
 #[cfg(test)]

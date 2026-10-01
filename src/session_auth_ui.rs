@@ -235,7 +235,7 @@ impl Zetta {
                 );
             }
             Err(error) => {
-                self.show_notice(
+                self.show_error_notice(
                     format!("Could not inspect your age identity: {error:#}"),
                     cx,
                 );
@@ -335,7 +335,7 @@ impl Zetta {
         } else {
             self.remote_session_target = None;
             self.remote_session_key_envelope = None;
-            self.show_notice(message, cx);
+            self.show_error_notice(message, cx);
         }
     }
 
@@ -358,7 +358,7 @@ impl Zetta {
         let identity_index = match required_identity {
             Some(Ok(index)) => Some(index),
             Some(Err((path, error))) => {
-                self.show_notice(
+                self.show_error_notice(
                     format!(
                         "Could not inspect encrypted identity {}: {error:#}",
                         path.display()
@@ -542,7 +542,7 @@ impl Zetta {
     }
 
     /// Keeps an operation failure in the authentication prompt when one is
-    /// active; an attach or resume attempted from elsewhere is only a transient
+    /// active; an attach or resume attempted from elsewhere is a floating error
     /// notice. This prevents an internal prompt error from briefly appearing in
     /// the window's persistent feedback column before the prompt consumes it.
     pub(crate) fn show_session_operation_error(
@@ -555,7 +555,7 @@ impl Zetta {
             prompt.error = Some(message);
             cx.notify();
         } else {
-            self.show_notice(message, cx);
+            self.show_error_notice(message, cx);
         }
     }
 
@@ -1253,40 +1253,22 @@ impl Zetta {
             disk_protected,
             disk_has_secondary_field,
         };
-        Some(
-            div()
-                .id("session-authentication-overlay")
-                .absolute()
-                .inset_0()
-                .flex()
-                .items_center()
-                .justify_center()
-                .bg(transparent_black().opacity(0.24))
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .track_focus(&self.session_authentication_focus)
-                .child(
-                    div()
-                        .w(px(480.))
-                        .max_w(gpui::relative(0.9))
-                        .p_4()
-                        .flex()
-                        .flex_col()
-                        .gap_3()
-                        .rounded(px(8.))
-                        .border_1()
-                        .border_color(colors.border)
-                        .bg(colors.elevated_surface_background)
-                        .text_color(colors.text)
-                        .shadow_lg()
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .child(session_prompt_heading(view))
-                        .child(session_prompt_description(view))
-                        .child(session_prompt_secret_field(view))
-                        .child(session_prompt_secondary_fields(view))
-                        .child(session_prompt_buttons(view)),
-                )
-                .into_any_element(),
-        )
+        let panel = dialog_panel("session-authentication", DIALOG_WIDTH_SMALL, &colors)
+            .child(session_prompt_heading(view))
+            .child(session_prompt_description(view))
+            .child(session_prompt_secret_field(view))
+            .child(session_prompt_secondary_fields(view))
+            .child(session_prompt_buttons(view));
+        // A typed secret must survive a stray click outside the prompt.
+        Some(modal(
+            modal_backdrop(
+                "session-authentication-overlay",
+                Placement::Centered,
+                BackdropClick::Swallow,
+            )
+            .track_focus(&self.session_authentication_focus),
+            panel,
+        ))
     }
 }
 
@@ -1316,8 +1298,7 @@ struct SessionPromptView<'a> {
 }
 
 impl SessionPromptView<'_> {
-    /// One masked field. The run is bullets rather than the text, so
-    /// `text_edit_ui`'s shared run does not apply — only its frame does.
+    /// One masked field.
     fn field(
         &self,
         id: &'static str,
@@ -1328,29 +1309,10 @@ impl SessionPromptView<'_> {
         let colors = self.colors;
         let handle = self.handle;
         let focused = prompt.field == selected;
-        let (before, after) = value.split_at_cursor();
         let click_handle = handle.clone();
-        // A masked field, so the run is bullets rather than the text and
-        // `text_edit_ui`'s shared run does not apply — only its frame does.
-        field_box(id, focused, colors)
+        boxed_text_field(id, value, focused, None, FieldMask::Secret, colors)
             .w_full()
             .cursor_text()
-            .when(value.select_all && focused, |input| {
-                input.bg(colors.element_selection_background)
-            })
-            .child(
-                div()
-                    .whitespace_nowrap()
-                    .child("•".repeat(before.chars().count())),
-            )
-            .when(focused && !value.select_all, |input| {
-                input.child(caret(colors))
-            })
-            .child(
-                div()
-                    .whitespace_nowrap()
-                    .child("•".repeat(after.chars().count())),
-            )
             .on_click(move |_, _, cx| {
                 click_handle
                     .update(cx, |this, cx| {
@@ -1376,21 +1338,22 @@ fn session_prompt_heading(view: SessionPromptView<'_>) -> impl IntoElement {
         unlocking_sealed_session,
         ..
     } = view;
-    Label::new(match action {
-        Some(action) => action.title(no_mux),
-        None if unlocking_sealed_session => "Unlock your age identity",
-        None if matches!(
-            prompt.mode,
-            SessionAuthenticationPromptMode::ResumeDisk { .. }
-        ) =>
-        {
-            "Restore encrypted disk session"
-        }
-        None if remote_create => "Create remote session",
-        None => "Authenticate protected session",
-    })
-    .size(LabelSize::Large)
-    .color(Color::Custom(colors.text))
+    dialog_title(
+        match action {
+            Some(action) => action.title(no_mux),
+            None if unlocking_sealed_session => "Unlock your age identity",
+            None if matches!(
+                prompt.mode,
+                SessionAuthenticationPromptMode::ResumeDisk { .. }
+            ) =>
+            {
+                "Restore encrypted disk session"
+            }
+            None if remote_create => "Create remote session",
+            None => "Authenticate protected session",
+        },
+        colors,
+    )
 }
 
 /// The line under the title explaining what submitting will do.
@@ -1516,7 +1479,10 @@ fn session_prompt_secondary_fields(view: SessionPromptView<'_>) -> impl IntoElem
             },
         )
         .when_some(prompt.error.as_ref(), |panel, error| {
-            panel.child(div().text_sm().text_color(error_color).child(error.clone()))
+            panel.child(crate::ui_messages::error_message(
+                error.clone(),
+                error_color,
+            ))
         })
 }
 
@@ -1536,32 +1502,31 @@ fn session_prompt_buttons(view: SessionPromptView<'_>) -> impl IntoElement {
     let submit_handle = handle.clone();
     let without_authentication_handle = handle.clone();
     let cancel_handle = handle.clone();
-    div()
-        .flex()
-        .justify_end()
-        .gap_2()
+    dialog_buttons()
         .child(
-            Button::new("cancel-session-authentication", "Cancel")
-                .style(ButtonStyle::Outlined)
-                .color(Color::Custom(colors.text))
-                .on_click(move |_, window, cx| {
-                    cancel_handle
-                        .update(cx, |this, cx| {
-                            this.dismiss_session_authentication(window, cx);
-                        })
-                        .ok();
-                }),
+            DialogButton::new(
+                "cancel-session-authentication",
+                "Cancel",
+                ButtonRole::Secondary,
+            )
+            .key_tooltip("Cancel", SurfaceKey::Escape)
+            .render(colors, move |_, window, cx| {
+                cancel_handle
+                    .update(cx, |this, cx| {
+                        this.dismiss_session_authentication(window, cx);
+                    })
+                    .ok();
+            }),
         )
         .when(action.is_some() || remote_create, |buttons| {
             buttons.child(
-                Button::new(
+                DialogButton::new(
                     "continue-without-session-authentication",
                     "No authentication",
+                    ButtonRole::Secondary,
                 )
-                .style(ButtonStyle::Outlined)
-                .color(Color::Custom(colors.text))
-                .disabled(prompt.working)
-                .on_click(move |_, window, cx| {
+                .enabled(!prompt.working)
+                .render(colors, move |_, window, cx| {
                     without_authentication_handle
                         .update(cx, |this, cx| {
                             this.continue_without_session_authentication(window, cx);
@@ -1570,28 +1535,28 @@ fn session_prompt_buttons(view: SessionPromptView<'_>) -> impl IntoElement {
                 }),
             )
         })
-        .child(
-            Button::new(
+        .child({
+            let submit_label = match action {
+                Some(action) => action.submit_label(no_mux),
+                None if remote_create => "Create",
+                None if unlocking_sealed_session => "Unlock",
+                None => "Authenticate",
+            };
+            DialogButton::new(
                 "submit-session-authentication",
-                match action {
-                    Some(action) => action.submit_label(no_mux),
-                    None if remote_create => "Create",
-                    None if unlocking_sealed_session => "Unlock",
-                    None => "Authenticate",
-                },
+                submit_label,
+                ButtonRole::Primary,
             )
-            .style(ButtonStyle::Filled)
-            .color(Color::Custom(colors.text))
+            .key_tooltip(submit_label, SurfaceKey::Enter)
             .loading(prompt.working)
-            .disabled(prompt.working)
-            .on_click(move |_, window, cx| {
+            .render(colors, move |_, window, cx| {
                 submit_handle
                     .update(cx, |this, cx| {
                         this.submit_session_authentication(window, cx);
                     })
                     .ok();
-            }),
-        )
+            })
+        })
 }
 
 /// Creates or checks the session secret. Runs on a background thread, because

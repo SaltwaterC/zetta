@@ -335,9 +335,13 @@ impl Zetta {
     }
 
     /// The scrollback search field anchored below the title bar.
-    pub(crate) fn render_tab_search_overlay(&self, colors: &ThemeColors) -> Option<AnyElement> {
+    pub(crate) fn render_tab_search_overlay(
+        &self,
+        colors: &ThemeColors,
+        top_inset: Pixels,
+    ) -> Option<AnyElement> {
         let search = self.tab_search.as_ref()?;
-        let query = field_query_run(&search.query, None, colors);
+        let query = field_query_run(&search.query, Some("Search all panes…"), colors);
         let retained_match_count = search.matches.len();
         let status = if search.limit_reached {
             let position = search
@@ -357,7 +361,7 @@ impl Zetta {
         Some(
             div()
                 .absolute()
-                .top(px(74.0))
+                .top(top_inset)
                 .left_2()
                 .right_2()
                 .flex()
@@ -373,7 +377,7 @@ impl Zetta {
                         .flex()
                         .flex_col()
                         .gap_1()
-                        .rounded(px(5.0))
+                        .rounded(crate::ui_tokens::RADIUS_SURFACE)
                         .border_1()
                         .border_color(colors.border)
                         .bg(colors.elevated_surface_background.alpha(1.0))
@@ -397,7 +401,11 @@ impl Zetta {
                             div()
                                 .text_xs()
                                 .text_color(colors.text_muted)
-                                .child("All panes  Enter next  Shift+Enter previous  Esc close"),
+                                .child(key_hints(&[
+                                    ("Enter", "next"),
+                                    ("Shift+Enter", "previous"),
+                                    ("Esc", "close"),
+                                ])),
                         ),
                 )
                 .into_any_element(),

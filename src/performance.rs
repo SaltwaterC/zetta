@@ -530,9 +530,14 @@ pub(crate) fn disable_frame_tracing() {
 
 impl Zetta {
     /// The floating frame-timing readout toggled by `TogglePerformanceOverlay`.
+    ///
+    /// Anchored top-left, under the chrome: the scrollback search takes the
+    /// top-right corner, and the two used to sit at the same offset on the same
+    /// edge and cover each other.
     pub(crate) fn render_performance_overlay(
         &self,
         colors: &ThemeColors,
+        top_inset: Pixels,
         window: &Window,
     ) -> Option<AnyElement> {
         let overlay = self.performance_overlay.as_ref()?;
@@ -565,16 +570,19 @@ impl Zetta {
             div()
                 .id("performance-overlay")
                 .absolute()
-                .top(px(74.))
-                .right(px(10.))
+                .top(top_inset)
+                .left_2()
                 .w(px(232.))
                 .p_2()
                 .flex()
                 .flex_col()
                 .gap_1()
-                .rounded(px(4.))
+                .rounded(crate::ui_tokens::RADIUS_CONTROL)
                 .border_1()
                 .border_color(colors.border)
+                // Slightly see-through on purpose: it sits over the terminal
+                // it is measuring, and hiding what is drawn there would hide
+                // the thing being measured.
                 .bg(colors.elevated_surface_background.opacity(0.96))
                 .shadow_sm()
                 .text_sm()

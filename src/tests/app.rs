@@ -185,6 +185,25 @@ fn a_new_tab_in_the_current_session_follows_the_configured_scope() {
     assert!(NewTabOrigin::CurrentSession.inherits_working_directory(WorkingDirectoryScope::Tab));
 }
 
+/// An error has no timer: one that removes itself can go unread, and then
+/// nothing says why the thing the user asked for did not happen. An ordinary
+/// notice arriving meanwhile shows beside it rather than replacing it.
+#[test]
+fn an_error_notice_stays_until_dismissed_and_survives_later_notices() {
+    let mut notice = TransientNotice::default();
+    notice.show_error("Could not start HTTP server".to_owned());
+    let later = notice.show("this tab can now be joined".to_owned());
+
+    assert!(notice.dismiss_if_current(later));
+    assert_eq!(notice.error(), Some("Could not start HTTP server"));
+    assert!(notice.dismiss_error());
+    assert_eq!(notice.error(), None);
+    assert!(
+        !notice.dismiss_error(),
+        "dismissing twice reports no change"
+    );
+}
+
 #[test]
 fn a_transient_notice_is_taken_away_by_its_own_timer_only() {
     // The banner it replaces stayed on screen until something else overwrote

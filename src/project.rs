@@ -8,7 +8,6 @@ use std::{
 use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use tempfile::NamedTempFile;
 
 use crate::config::{Config, platform_config_dir};
 use crate::project_commands::{
@@ -127,27 +126,44 @@ impl ProjectConfig {
     }
 }
 
+/// Which fields a project file may set, as a deserialization mirror:
+/// `deny_unknown_fields` is what rejects a misspelled or user-only field, the
+/// way `ConfigFile` does for the user configuration, and names the fields that
+/// are allowed when it does. Every value is `IgnoredAny` because checking the
+/// values is the parsers' job — the ones above, and `Config::parse_overlay` for
+/// the fields a project overlays on the user configuration. This used to be a
+/// hand-kept list of names.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProjectFileFields {
+    #[serde(default, rename = "theme")]
+    _theme: serde::de::IgnoredAny,
+    #[serde(default, rename = "dark_theme")]
+    _dark_theme: serde::de::IgnoredAny,
+    #[serde(default, rename = "working_directory")]
+    _working_directory: serde::de::IgnoredAny,
+    #[serde(default, rename = "default_profile")]
+    _default_profile: serde::de::IgnoredAny,
+    #[serde(default, rename = "profiles")]
+    _profiles: serde::de::IgnoredAny,
+    #[serde(default, rename = "default_tab_icon")]
+    _default_tab_icon: serde::de::IgnoredAny,
+    #[serde(default, rename = "env")]
+    _env: serde::de::IgnoredAny,
+    #[serde(default, rename = "commands")]
+    _commands: serde::de::IgnoredAny,
+    #[serde(default, rename = "inactive_pane_opacity")]
+    _inactive_pane_opacity: serde::de::IgnoredAny,
+    #[serde(default, rename = "initial_split")]
+    _initial_split: serde::de::IgnoredAny,
+    #[serde(default, rename = "pane_split_templates")]
+    _pane_split_templates: serde::de::IgnoredAny,
+}
+
 pub(crate) fn validate_project_fields(object: &Map<String, Value>) -> Result<()> {
-    const FIELDS: &[&str] = &[
-        "theme",
-        "dark_theme",
-        "working_directory",
-        "default_profile",
-        "profiles",
-        "default_tab_icon",
-        "env",
-        "commands",
-        "inactive_pane_opacity",
-        "initial_split",
-        "pane_split_templates",
-    ];
-    if let Some(field) = object
-        .keys()
-        .find(|field| !FIELDS.contains(&field.as_str()))
-    {
-        anyhow::bail!("unrecognized project configuration field {field:?}");
-    }
-    Ok(())
+    ProjectFileFields::deserialize(Value::Object(object.clone()))
+        .map(|_| ())
+        .map_err(|error| anyhow::anyhow!("project configuration: {error}"))
 }
 
 fn parse_project_environment(value: &Value) -> Result<HashMap<String, String>> {
@@ -545,29 +561,10 @@ fn path_identity(path: &Path) -> String {
     }
 }
 
-pub(crate) fn write_text_atomically(path: &Path, text: &str) -> Result<()> {
-    let parent = path.parent().context("file path has no parent")?;
-    fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
-    let mut temporary = NamedTempFile::new_in(parent)
-        .with_context(|| format!("creating temporary file in {}", parent.display()))?;
-    temporary
-        .write_all(text.as_bytes())
-        .with_context(|| format!("writing temporary file for {}", path.display()))?;
-    if !text.ends_with('\n') {
-        temporary.write_all(b"\n")?;
-    }
-    temporary.as_file().sync_all()?;
-    temporary
-        .persist(path)
-        .map_err(|error| error.error)
-        .with_context(|| format!("replacing {}", path.display()))?;
-    Ok(())
-}
-
 fn write_json_atomically(path: &Path, value: &impl Serialize) -> Result<()> {
     let mut source = serde_json::to_string_pretty(value)?;
     source.push('\n');
-    write_text_atomically(path, &source)
+    crate::file_replace::replace_file(path, &source)
 }
 
 #[cfg(test)]

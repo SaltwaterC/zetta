@@ -128,17 +128,28 @@ the CLI through process control remain silent.
 ## Settings editor
 
 Press `Ctrl-,` or use the tab-bar settings button to open typed controls for
-the active configuration and keymap files. Profiles and themes use checked
-dropdowns, the font picker searches installed families, and every profile
-exposes theme, icon, and individual visibility controls for the Profiles menu.
-The Configuration page's **Background sessions (zmux)** section controls
-detached/shared-session screen retention and its memory budget.
+the active configuration and keymap files.
 
-Font size and scrollback accept typed values and press-and-hold steppers;
-scrollback also supports a `Max` sentinel. Inactive-pane opacity uses a
-percentage slider. Settings and font lists have independent scrollbars, and new
-profiles are created in a labeled modal. Key bindings are grouped by context
-with action dropdowns.
+The Configuration page is grouped into **New tabs**, **Terminal**, **Window
+and title bar**, **Background sessions**, **Remote sessions**, **Network
+services** and **Profiles**. Rows appear only where the build and platform can
+use them: the network ports need the `http-server` or `tftp-server` feature,
+the remote-session rows need `zmux` (and the protocol and keep-alive rows
+`zosh-client`), the disk-retention rows need `session-persistence`, and the
+title-bar menus and Focus status rows are macOS-only. A setting that is not
+offered still parses, and is kept when the file is saved.
+
+Every switch reads as what it turns on: **Show pane size**, **Show title bar
+labels** and the like are on when the thing is shown, even though the file's
+keys are the `hide_…` ones.
+
+Font size and scrollback accept typed values and press-and-hold steppers.
+Scrollback also takes `Max`, and an empty font size follows the theme's buffer
+size rather than pinning one. Inactive-pane opacity uses a percentage slider,
+where 100% does not dim at all. Each profile argument is its own field, so an
+argument can contain a comma or a space; **Add argument** adds one. New
+profiles are created in their own modal, and key bindings are grouped by
+context with action dropdowns.
 
 All configuration dropdowns support fuzzy type-to-search. Open a dropdown and
 type letters to filter its entries; matching is case-insensitive and supports
@@ -146,12 +157,27 @@ subsequences, so `ond` can find `One Dark`. The query stays visible above the
 scrollable results, while the selected match is scrolled into view. Use
 Backspace to revise the query, the arrow keys to move among matches, and
 Enter or Space to select an entry. Escape or Tab closes the dropdown, and a
-query with no matches leaves the current value unchanged.
+query with no matches leaves the current value unchanged. An entry named like
+the dropdown's **Inherit**, **None** or **Automatic** option is still that
+entry: the option is told apart by its place at the top of the list.
 
-Saving validates the active page, persists and applies it without restarting,
-closes the dialog, and returns focus to the terminal. Invalid settings or
-bindings are reported without replacing the existing file. Custom `--config`
-and `--keymap` paths remain CLI-only settings.
+**Save** writes whatever has unsaved changes. On the Projects page with a
+project's builder open it writes that project's `.zetta/config.json`;
+otherwise it writes the configuration and the keymap, then applies them
+without restarting, closes the dialog, and returns focus to the terminal. Both
+files are checked before either is written, and each is replaced atomically,
+so a failure leaves the old files in place; a symlinked file is written where
+the link points. An invalid value is reported in the dialog, and when it is a
+field on the Configuration page the dialog moves focus to that field. A
+Configuration field is also checked as focus leaves it, and the reason shows
+under the field until it is edited. Save is unavailable while there is nothing
+to save.
+
+Closing the dialog, pressing Escape, or leaving the project builder with
+unsaved changes asks whether to keep editing or discard them, and offers to
+save first where Save can do so. Removing a theme extension or a registered
+project takes effect immediately, so it takes a second press of the button to
+confirm. Custom `--config` and `--keymap` paths remain CLI-only settings.
 
 The HTTP and TFTP server ports are typed settings backed by
 `http_server_port` and `tftp_server_port` in `config.json`. They default to
@@ -559,8 +585,8 @@ with MesloLGS NF as the font. Common appearance settings include:
 }
 ```
 
-`terminal_font_size` accepts values from 6 through 100.
-`terminal_font_family` accepts bundled and system-installed fonts.
+`terminal_font_size` accepts values from 6 through 100; leave it out to follow
+the theme's buffer size. `terminal_font_family` accepts bundled and system-installed fonts.
 `default_tab_icon` accepts any built-in icon name, or `null` to hide icons on
 new tabs. It can also be changed through Settings > Configuration.
 `inactive_pane_opacity` accepts values from 0 through 1 and defaults to 0.8.
@@ -572,8 +598,8 @@ indicator always appears at the end of the title bar in compact mode.
 the title bar. `hide_title_bar_labels` and `hide_title_bar_buttons` default to
 `false`; they hide title-bar text and controls respectively. The Keep running
 control is shown only in `--no-mux` mode; normal daemon mode exposes Share Tab
-in tab menus and the command palette instead. On macOS,
-`hide_title_bar_menus` defaults to `true` and hides the Menu and Profile menus
+in tab menus and the command palette instead. `hide_title_bar_menus` is read on
+macOS only, where it defaults to `true` and hides the Menu and Profile menus
 from the title bar. It is ignored on other platforms and is not shown in their
 settings editor.
 `pane_controls_position` accepts `"left"` or `"right"` and defaults to
@@ -595,7 +621,7 @@ scrollback. Changes apply to newly opened tabs.
 The standard font-size shortcuts apply to all terminals. `Ctrl-Alt` variants
 apply only to the active pane, allowing split panes to use independent sizes.
 Pane reset removes that pane's override; global reset returns to
-`terminal_font_size` when configured, otherwise to Zed's default buffer size.
+`terminal_font_size` when configured, otherwise to the theme's buffer size.
 
 Zetta bundles the Regular, Bold, Italic, and Bold Italic faces of MesloLGS NF,
 so Nerd Font prompt glyphs work without a system installation. The files come

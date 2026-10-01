@@ -1,5 +1,4 @@
 use super::*;
-use crate::settings_ui::{invalidate_controls_cache, refresh_keymap_cache};
 
 use crate::startup::keymap_keystroke_display;
 
@@ -11,10 +10,9 @@ mod projects;
 mod widgets;
 
 pub(crate) use form_widgets::SettingsFormWidgets;
-pub(crate) use widgets::{
-    DropdownRenderState, KEYMAP_ROW_HEIGHT, SETTINGS_SCROLLBAR_WIDTH, action_button, control_row,
-    dropdown_field, text_field, track_focus_scroll, track_focus_scroll_from,
-};
+// Every shared building block of the settings form, for the pages and the
+// modals alike.
+pub(crate) use widgets::*;
 
 #[cfg(test)]
 #[path = "tests/settings_view.rs"]
@@ -59,7 +57,7 @@ fn settings_page_tab(
         .id(id)
         .px_3()
         .py_1()
-        .rounded(px(4.))
+        .rounded(crate::ui_tokens::RADIUS_CONTROL)
         .cursor_pointer()
         .when(
             editor.page == page || editor.focused_control == Some(SettingsControl::Tab(page)),
@@ -101,14 +99,11 @@ impl Zetta {
                            control: gpui::AnyElement| {
             widgets.setting_row(label, description, control_id, control)
         };
-        let setting_toggle = |id: &'static str, value: bool, toggle: SettingsToggle| {
-            widgets.setting_toggle(id, value, toggle)
-        };
-        let numeric =
-            |id: &'static str,
-             field: TextField,
-             setting: NumericSetting,
-             input: ConfigTextField| widgets.numeric(id, field, setting, input);
+        let setting_toggle =
+            |id: SharedString, label: &'static str, value: bool, toggle: SettingsToggle| {
+                widgets.setting_toggle(id, label, value, toggle)
+            };
+        let numeric = |setting: ConfigSetting, field: TextField| widgets.numeric(setting, field);
         let opacity_slider =
             |opacity: f32, target: OpacityTarget| widgets.opacity_slider(opacity, target);
         let focus_status_access = if cx.has_global::<ZettaProcessState>() {
@@ -126,6 +121,7 @@ impl Zetta {
             setting_toggle: &setting_toggle,
             numeric: &numeric,
             opacity_slider: &opacity_slider,
+            error_color: self.window_theme(cx).status().error,
         };
         let content = pages::render_settings_pages(
             editor,
@@ -193,71 +189,37 @@ impl Zetta {
         save_in_progress: bool,
         unsaved_changes: bool,
     ) -> gpui::Div {
-        let close_handle = handle.clone();
-        let save_handle = handle.clone();
         h_flex()
             .gap_2()
             .child(
-                div()
-                    .id("close-settings")
-                    .px_3()
-                    .py_1()
-                    .rounded(px(4.))
-                    .border_1()
-                    .border_color(if editor.focused_control == Some(SettingsControl::Close) {
-                        colors.border_focused
-                    } else {
-                        colors.element_selected
-                    })
-                    .cursor_pointer()
-                    .bg(colors.element_selected)
-                    .text_color(colors.text)
-                    .hover(|style| style.bg(colors.element_hover))
-                    .tooltip(Tooltip::text("Close settings (Esc)"))
-                    .on_click(move |_, window, cx| {
-                        close_handle
-                            .update(cx, |this, cx| this.dismiss_settings(window, cx))
-                            .ok();
-                    })
-                    .child("Close"),
+                // Esc closes the dialog unless the project builder is open,
+                // where it goes back to the project list instead.
+                close_settings_tooltip(
+                    DialogButton::new("close-settings", "Close", ButtonRole::Secondary),
+                    project_editor(editor).is_none(),
+                )
+                .focused(editor.focused_control == Some(SettingsControl::Close))
+                .render(
+                    colors,
+                    widgets::activate_on_click(handle, SettingsControl::Close),
+                ),
             )
             .child(
-                div()
-                    .id("save-settings")
-                    .px_3()
-                    .py_1()
-                    .rounded(px(4.))
-                    .border_1()
-                    .border_color(if editor.focused_control == Some(SettingsControl::Save) {
-                        colors.border_focused
-                    } else {
-                        colors.element_selected
-                    })
-                    .bg(colors.element_selected)
-                    .text_color(colors.text)
-                    .when(!save_in_progress, |button| {
-                        button
-                            .cursor_pointer()
-                            .hover(|style| style.bg(colors.element_hover))
-                            .tooltip(Tooltip::for_action_title_in(
-                                "Save settings",
-                                &SaveSettings,
-                                &self.settings_focus,
-                            ))
-                            .on_click(move |_, window, cx| {
-                                save_handle
-                                    .update(cx, |this, cx| this.save_settings(window, cx))
-                                    .ok();
-                            })
-                    })
-                    .when(save_in_progress, |button| button.opacity(0.65))
-                    .child(if save_in_progress {
-                        "Saving…"
-                    } else if unsaved_changes {
-                        "Save *"
-                    } else {
-                        "Save"
-                    }),
+                DialogButton::new(
+                    "save-settings",
+                    if unsaved_changes { "Save *" } else { "Save" },
+                    ButtonRole::Primary,
+                )
+                .action_tooltip("Save settings", &SaveSettings, Some(&self.settings_focus))
+                .focused(editor.focused_control == Some(SettingsControl::Save))
+                // Nothing to write is not something to press: Save used to
+                // close the dialog when clicked on a clean form.
+                .enabled(unsaved_changes)
+                .loading(save_in_progress)
+                .render(
+                    colors,
+                    widgets::activate_on_click(handle, SettingsControl::Save),
+                ),
             )
     }
 
@@ -268,6 +230,7 @@ impl Zetta {
     ) -> Option<gpui::AnyElement> {
         let editor = self.settings_editor.as_ref()?;
         let colors = self.window_theme(cx).colors().clone();
+        let status = self.window_theme(cx).status().clone();
         let handle = cx.entity().downgrade();
         if !editor.scroll_geometry_initialized {
             let geometry_handle = handle.clone();
@@ -319,6 +282,7 @@ impl Zetta {
         let profile_modal = modals::render_profile_modal(
             editor,
             &colors,
+            &status,
             &handle,
             &scroll_indicator,
             &text_input,
@@ -326,6 +290,7 @@ impl Zetta {
         );
 
         let keymap_capture_modal = modals::render_keymap_capture_modal(editor, &colors, &handle);
+        let close_request_modal = modals::render_close_request_modal(editor, &colors, &handle);
 
         // Rendered once, as a sibling of the dialog content, regardless of which page or
         // row opened it (see `DropdownRenderState` for why it can't render inline).
@@ -339,10 +304,11 @@ impl Zetta {
         let project = crate::settings_ui::project_editor(editor);
         let settings_save_in_progress = editor.settings_save_in_progress
             || project.is_some_and(|project| project.save_in_progress);
-        let unsaved_changes = match project {
-            Some(project) => project.dirty,
-            None => editor.configuration_dirty || editor.keymap_dirty,
-        };
+        // Save writes the open project's file first and then whatever else is
+        // unsaved, so it has something to do while any of them is dirty.
+        let unsaved_changes = project.is_some_and(|project| project.dirty)
+            || editor.configuration_dirty
+            || editor.keymap_dirty;
         let path = match editor.page {
             SettingsPage::Configuration => self.launch_config.config_path.display().to_string(),
             SettingsPage::Themes => format!(
@@ -361,92 +327,83 @@ impl Zetta {
             },
         };
         Some(
-            div()
-                .id("settings-backdrop")
-                .absolute()
-                .inset_0()
-                .p_4()
-                .flex()
-                .items_center()
-                .justify_center()
-                .bg(transparent_black().opacity(0.3))
-                .occlude()
-                .child(
-                    div()
-                        .id("settings-editor")
-                        .track_focus(&self.settings_focus)
-                        .key_context("Settings")
-                        .relative()
-                        .size_full()
-                        .max_w(px(980.))
-                        .max_h(px(680.))
-                        .flex()
-                        .flex_col()
-                        .overflow_hidden()
-                        .rounded(px(8.))
-                        .border_1()
-                        .border_color(colors.border)
-                        .bg(colors.elevated_surface_background)
-                        .text_color(colors.text)
-                        .shadow_lg()
-                        .child(
-                            h_flex()
-                                .h_12()
+            modal_backdrop(
+                "settings-backdrop",
+                Placement::Centered,
+                BackdropClick::Swallow,
+            )
+            .child(
+                modal_panel("settings-editor", &colors)
+                    .track_focus(&self.settings_focus)
+                    .key_context("Settings")
+                    .relative()
+                    .size_full()
+                    .max_w(px(980.))
+                    .max_h(px(680.))
+                    .child(
+                        h_flex()
+                            .h_12()
+                            .px_3()
+                            .flex_none()
+                            .justify_between()
+                            .border_b_1()
+                            .border_color(colors.border)
+                            .child(SETTINGS_PAGE_TABS.iter().fold(
+                                h_flex().gap_1(),
+                                |row, (page, id, label)| {
+                                    row.child(settings_page_tab(
+                                        *page, id, label, editor, &colors, &handle,
+                                    ))
+                                },
+                            ))
+                            .child(self.render_settings_header_actions(
+                                editor,
+                                &colors,
+                                &handle,
+                                settings_save_in_progress,
+                                unsaved_changes,
+                            )),
+                    )
+                    .child(
+                        h_flex()
+                            .h_9()
+                            .px_3()
+                            .flex_none()
+                            .border_b_1()
+                            .border_color(colors.border)
+                            .text_xs()
+                            .text_color(colors.text_muted)
+                            .child(path),
+                    )
+                    .child(page_region)
+                    .when_some(editor.message.clone(), |dialog, (tone, message)| {
+                        dialog.child(
+                            div()
                                 .px_3()
-                                .flex_none()
-                                .justify_between()
-                                .border_b_1()
+                                .py_2()
+                                .border_t_1()
                                 .border_color(colors.border)
-                                .child(SETTINGS_PAGE_TABS.iter().fold(
-                                    h_flex().gap_1(),
-                                    |row, (page, id, label)| {
-                                        row.child(settings_page_tab(
-                                            *page, id, label, editor, &colors, &handle,
-                                        ))
-                                    },
-                                ))
-                                .child(self.render_settings_header_actions(
-                                    editor,
-                                    &colors,
-                                    &handle,
-                                    settings_save_in_progress,
-                                    unsaved_changes,
+                                .child(crate::ui_messages::status_message(
+                                    tone, message, &colors, &status,
                                 )),
                         )
-                        .child(
-                            h_flex()
-                                .h_9()
-                                .px_3()
-                                .flex_none()
-                                .border_b_1()
-                                .border_color(colors.border)
-                                .text_xs()
-                                .text_color(colors.text_muted)
-                                .child(path),
-                        )
-                        .child(page_region)
-                        .when_some(editor.message.clone(), |dialog, (error, message)| {
-                            dialog.child(
-                                div()
-                                    .px_3()
-                                    .py_2()
-                                    .border_t_1()
-                                    .border_color(colors.border)
-                                    .text_xs()
-                                    .text_color(if error {
-                                        colors.text
-                                    } else {
-                                        colors.text_muted
-                                    })
-                                    .child(message),
-                            )
-                        })
-                        .when_some(font_modal, |dialog, modal| dialog.child(modal))
-                        .when_some(profile_modal, |dialog, modal| dialog.child(modal))
-                        .when_some(keymap_capture_modal, |dialog, modal| dialog.child(modal))
-                        .when_some(dropdown_popup, |dialog, popup| dialog.child(popup)),
-                )
-                .into_any_element(),
+                    })
+                    .when_some(font_modal, |dialog, modal| dialog.child(modal))
+                    .when_some(profile_modal, |dialog, modal| dialog.child(modal))
+                    .when_some(keymap_capture_modal, |dialog, modal| dialog.child(modal))
+                    .when_some(close_request_modal, |dialog, modal| dialog.child(modal))
+                    .when_some(dropdown_popup, |dialog, popup| dialog.child(popup)),
+            )
+            .into_any_element(),
         )
+    }
+}
+
+/// The header Close's tooltip, naming Esc while Esc does the same thing.
+fn close_settings_tooltip(button: DialogButton, esc_closes: bool) -> DialogButton {
+    if esc_closes {
+        button.key_tooltip("Close settings", SurfaceKey::Escape)
+    } else {
+        button.tooltip("Close settings")
     }
 }

@@ -940,11 +940,10 @@ impl Zetta {
         cx: &mut Context<Self>,
     ) {
         if !self.projects.registry.contains(&root) {
-            self.configuration_error = Some(format!(
-                "{} is not a registered Zetta project",
-                root.display()
-            ));
-            cx.notify();
+            self.show_error_notice(
+                format!("{} is not a registered Zetta project", root.display()),
+                cx,
+            );
             return;
         }
         let config_root = working_directory
@@ -1169,11 +1168,10 @@ impl Zetta {
                         reload_projects_in_other_windows(window.window_handle().window_id(), cx);
                     }
                     Err(error) => {
-                        this.configuration_error = Some(format!(
-                            "Could not add project {}: {error:#}",
-                            offer.root.display()
-                        ));
-                        cx.notify();
+                        this.show_error_notice(
+                            format!("Could not add project {}: {error:#}", offer.root.display()),
+                            cx,
+                        );
                     }
                 })
                 .ok();

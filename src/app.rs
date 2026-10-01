@@ -230,10 +230,11 @@ pub(crate) const TRANSIENT_NOTICE_DURATION: Duration = Duration::from_secs(8);
 
 /// A short-lived informational banner, shown and then taken away again.
 ///
-/// Separate from `configuration_error` and `pane_output_error`, which stay until
-/// dismissed: those report a state the user may have to act on, whereas this
-/// reports something that has just happened, or advice about what to do instead.
-/// Leaving that kind of message on screen makes it read as an unresolved error.
+/// Separate from `configuration_error`, which stays until dismissed: that
+/// reports a state the user may have to act on, whereas this reports something
+/// that has just happened, or advice about what to do instead. Leaving that
+/// kind of message on screen makes it read as an unresolved error — which is
+/// why an actual error is held apart from it, in `error`.
 ///
 /// The generation is what stops an earlier notice's timer from taking a later
 /// notice away with it.
@@ -241,6 +242,13 @@ pub(crate) const TRANSIENT_NOTICE_DURATION: Duration = Duration::from_secs(8);
 pub(crate) struct TransientNotice {
     message: Option<String>,
     generation: u64,
+    /// Something the user asked for that failed. Floats with the notice rather
+    /// than joining the feedback column, for the same reason the notice does,
+    /// but is not on a timer: an error that removes itself can be missed, and
+    /// then nothing says why the thing did not happen. It stays until
+    /// dismissed, and a later informational notice shows beside it rather
+    /// than replacing it.
+    error: Option<String>,
 }
 
 impl TransientNotice {
@@ -260,6 +268,18 @@ impl TransientNotice {
 
     pub(crate) fn message(&self) -> Option<&str> {
         self.message.as_deref()
+    }
+
+    fn show_error(&mut self, message: String) {
+        self.error = Some(message);
+    }
+
+    pub(crate) fn error(&self) -> Option<&str> {
+        self.error.as_deref()
+    }
+
+    fn dismiss_error(&mut self) -> bool {
+        self.error.take().is_some()
     }
 }
 
@@ -303,7 +323,7 @@ impl Zetta {
                 }
                 match resolved {
                     Ok(auto_protect) => this.auto_protect = auto_protect.map(std::sync::Arc::new),
-                    Err(error) => this.show_notice(
+                    Err(error) => this.show_error_notice(
                         format!("Could not set up automatic session protection: {error:#}"),
                         cx,
                     ),
@@ -330,14 +350,25 @@ impl Zetta {
         cx.notify();
     }
 
-    pub(crate) fn dismiss_configuration_error(&mut self, cx: &mut Context<Self>) {
-        if self.configuration_error.take().is_some() {
+    /// Reports that something the user asked for failed: a server that would
+    /// not start, a session that could not be attached, a paste that could not
+    /// be read. Stays until dismissed; see [`TransientNotice::error`].
+    ///
+    /// Not for configuration problems, which go to `configuration_error` and
+    /// its Reload action.
+    pub(crate) fn show_error_notice(&mut self, message: impl Into<String>, cx: &mut Context<Self>) {
+        self.transient_notice.show_error(message.into());
+        cx.notify();
+    }
+
+    pub(crate) fn dismiss_error_notice(&mut self, cx: &mut Context<Self>) {
+        if self.transient_notice.dismiss_error() {
             cx.notify();
         }
     }
 
-    pub(crate) fn dismiss_pane_output_error(&mut self, cx: &mut Context<Self>) {
-        if self.pane_output_error.take().is_some() {
+    pub(crate) fn dismiss_configuration_error(&mut self, cx: &mut Context<Self>) {
+        if self.configuration_error.take().is_some() {
             cx.notify();
         }
     }
@@ -461,7 +492,6 @@ pub(crate) struct Zetta {
     pub(crate) configuration_generation: u64,
     pub(crate) configuration_error: Option<String>,
     pub(crate) configuration_reload_feedback: ConfigurationReloadFeedback,
-    pub(crate) pane_output_error: Option<String>,
     pub(crate) pane_output_save_in_progress: bool,
     pub(crate) transient_notice: TransientNotice,
     pub(crate) key_passthrough: Option<crate::key_passthrough::KeyPassthrough>,
@@ -924,7 +954,6 @@ impl Zetta {
             configuration_generation: 0,
             configuration_error,
             configuration_reload_feedback: ConfigurationReloadFeedback::default(),
-            pane_output_error: None,
             pane_output_save_in_progress: false,
             transient_notice: TransientNotice::default(),
             key_passthrough: None,

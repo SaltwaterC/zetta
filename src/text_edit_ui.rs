@@ -23,12 +23,18 @@ use crate::text_edit::TextField;
 
 /// The caret. One pixel wide and the accent colour, so it reads as a cursor
 /// rather than as a character.
+///
+/// Its height is the line height of the text around it, which it gets by
+/// holding a zero-width space: a fixed height was right for the settings
+/// fields' text and too short for a pane overlay typed at a larger size, which
+/// is why those surfaces used to draw a `|` into their text instead.
 pub(crate) fn caret(colors: &ThemeColors) -> Div {
     div()
         .flex_none()
         .w(px(1.))
-        .h(px(16.))
+        .overflow_hidden()
         .bg(colors.text_accent)
+        .child("\u{200B}")
 }
 
 /// A field's text with its caret in it, laid out to be clipped rather than to
@@ -51,6 +57,12 @@ pub(crate) fn field_text_run(
         .whitespace_nowrap()
         .when(selected, |input| {
             input.bg(colors.element_selection_background)
+        })
+        .when(selected && before.is_empty() && after.is_empty(), |input| {
+            // Nothing is selected to show where the field is, so it keeps its
+            // caret: an overlay opens selected on a pane with no text yet, and
+            // has to look like it is being edited all the same.
+            input.child(caret(colors))
         })
         .child(div().whitespace_nowrap().child(before))
         .when(!selected, |input| input.child(caret(colors)))
@@ -97,7 +109,7 @@ pub(crate) fn field_box(
         .flex()
         .items_center()
         .overflow_hidden()
-        .rounded(px(4.))
+        .rounded(crate::ui_tokens::RADIUS_CONTROL)
         .border_1()
         .border_color(if focused {
             colors.border_focused
@@ -105,6 +117,93 @@ pub(crate) fn field_box(
             colors.border
         })
         .bg(colors.editor_background)
+}
+
+/// How a boxed field shows its value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FieldMask {
+    Plain,
+    /// One bullet per character, for passphrases and session secrets.
+    Secret,
+}
+
+/// A boxed field with its value in it: [`field_box`]'s frame, holding the
+/// [`field_text_run`] and its caret while focused, and otherwise the value
+/// clipped with an ellipsis — or `placeholder`, in the placeholder colour,
+/// while the value is empty.
+///
+/// This is the one boxed field: the settings forms, the remote-session picker
+/// and the session prompt each used to spell out this same focused/unfocused
+/// split, and had drifted in where the selection highlight went and whether an
+/// empty field said anything. The caller still adds its width, its click
+/// target and `cursor_text`.
+pub(crate) fn boxed_text_field(
+    id: impl Into<ElementId>,
+    field: &TextField,
+    focused: bool,
+    placeholder: Option<SharedString>,
+    mask: FieldMask,
+    colors: &ThemeColors,
+) -> Stateful<Div> {
+    let masked = |text: &str| -> SharedString {
+        match mask {
+            FieldMask::Plain => text.to_owned().into(),
+            FieldMask::Secret => "•".repeat(text.chars().count()).into(),
+        }
+    };
+    let frame = field_box(id, focused, colors);
+    if focused {
+        let (before, after) = field.split_at_cursor();
+        return frame.child(field_text_run(
+            masked(before),
+            masked(after),
+            field.select_all,
+            placeholder.filter(|_| field.text.is_empty()),
+            colors,
+        ));
+    }
+    let (text, color) = match placeholder {
+        Some(placeholder) if field.text.is_empty() => (placeholder, colors.text_placeholder),
+        _ => (masked(&field.text), colors.text),
+    };
+    frame.child(
+        div()
+            .min_w_0()
+            .overflow_hidden()
+            .whitespace_nowrap()
+            .text_ellipsis()
+            .text_color(color)
+            .child(text),
+    )
+}
+
+/// A value shown where a field would be, for a form that cannot be edited — a
+/// built-in template, say. Same height and padding as [`field_box`], so a form
+/// does not reflow between its editable and read-only states, but no border to
+/// suggest it can be typed into.
+pub(crate) fn read_only_field(
+    id: impl Into<ElementId>,
+    text: impl Into<SharedString>,
+    colors: &ThemeColors,
+) -> Stateful<Div> {
+    div()
+        .id(id)
+        .h_9()
+        .px_2()
+        .flex()
+        .items_center()
+        .overflow_hidden()
+        .rounded(crate::ui_tokens::RADIUS_CONTROL)
+        .bg(colors.element_background)
+        .text_color(colors.text_muted)
+        .child(
+            div()
+                .min_w_0()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .child(text.into()),
+        )
 }
 
 #[cfg(test)]

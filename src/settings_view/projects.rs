@@ -16,10 +16,10 @@ pub(crate) fn render_projects_page(
     editor: &SettingsEditor,
     colors: &ThemeColors,
     handle: &WeakEntity<Zetta>,
-    opacity_slider: &dyn Fn(f32, OpacityTarget) -> AnyElement,
+    widgets: &super::pages::PageWidgets<'_>,
 ) -> AnyElement {
     match project_editor(editor) {
-        Some(project) => render_project_config(editor, project, colors, handle, opacity_slider),
+        Some(project) => render_project_config(editor, project, colors, handle, widgets),
         None => render_project_list(editor, colors, handle),
     }
 }
@@ -31,105 +31,91 @@ fn render_project_list(
 ) -> AnyElement {
     let mut rows = Vec::with_capacity(editor.project_roots.len());
     for (index, root) in editor.project_roots.iter().enumerate() {
-        let title = project_display_name(root).to_owned();
+        let controls = [
+            SettingsControl::OpenProject(index),
+            SettingsControl::EditProject(index),
+            SettingsControl::RemoveProject(index),
+        ];
+        let focused = controls
+            .iter()
+            .any(|control| editor.focused_control.as_ref() == Some(control));
         rows.push(
-            div()
-                .id(format!("settings-project-{index}"))
-                .p_3()
-                .rounded(px(6.))
-                .border_1()
-                .border_color(colors.border)
-                .bg(colors.editor_background)
-                .child(div().text_sm().child(title))
-                .child(
-                    div()
-                        .mt_1()
-                        .text_xs()
-                        .text_color(colors.text_muted)
-                        .child(root.display().to_string()),
-                )
-                .child(
-                    div()
-                        .mt_1()
-                        .text_xs()
-                        .text_color(colors.text_muted)
-                        .child(ProjectConfig::path_for(root).display().to_string()),
-                )
+            track_focus_scroll(card_frame(focused, colors), editor, &controls)
+                .child(card_text(
+                    project_display_name(root).to_owned(),
+                    [
+                        root.display().to_string().into(),
+                        ProjectConfig::path_for(root).display().to_string().into(),
+                    ],
+                    colors,
+                ))
                 .child(
                     h_flex()
                         .mt_3()
                         .gap_2()
-                        .child(action_button(
-                            editor,
-                            format!("settings-open-project-{index}"),
-                            "Open".to_owned(),
-                            SettingsControl::OpenProject(index),
-                            true,
-                            colors,
-                            handle,
-                        ))
-                        .child(action_button(
-                            editor,
-                            format!("settings-edit-project-{index}"),
-                            "Edit config".to_owned(),
-                            SettingsControl::EditProject(index),
-                            !editor.project_loading,
-                            colors,
-                            handle,
-                        ))
-                        .child(action_button(
-                            editor,
-                            format!("settings-remove-project-{index}"),
-                            "Remove".to_owned(),
-                            SettingsControl::RemoveProject(index),
-                            true,
-                            colors,
-                            handle,
-                        )),
-                ),
+                        .child(
+                            SettingsButton::new(
+                                format!("settings-open-project-{index}"),
+                                "Open",
+                                SettingsControl::OpenProject(index),
+                            )
+                            .render(editor, colors, handle),
+                        )
+                        .child(
+                            SettingsButton::new(
+                                format!("settings-edit-project-{index}"),
+                                "Edit config",
+                                SettingsControl::EditProject(index),
+                            )
+                            .loading(editor.project_loading)
+                            .render(editor, colors, handle),
+                        )
+                        .child(
+                            SettingsButton::new(
+                                format!("settings-remove-project-{index}"),
+                                "Remove",
+                                SettingsControl::RemoveProject(index),
+                            )
+                            .destructive()
+                            .confirm_with("Confirm remove")
+                            .render(editor, colors, handle),
+                        ),
+                )
+                .into_any_element(),
         );
     }
 
     v_flex()
-        .gap_3()
-        .child(
-            div()
-                .text_sm()
-                .child("Projects apply .zetta/config.json while an active pane is inside their registered root."),
-        )
-        .child(
-            div()
-                .text_xs()
-                .text_color(colors.text_muted)
-                .child("Edit config opens a builder for the project's theme, working directory, profiles, tab icon, environment, commands, inactive-pane opacity, pane templates, and initial split. Register only trusted projects: templates and registered commands may execute arbitrary shell code."),
-        )
-        .child(
-            h_flex().child(action_button(editor, "settings-add-project".to_owned(), "Add project".to_owned(), SettingsControl::AddProject, true, colors, handle)),
-        )
-        .when(editor.project_roots.is_empty(), |page| {
-            page.child(
-                div()
-                    .py_4()
-                    .text_sm()
-                    .text_color(colors.text_muted)
-                    .child("No projects are registered."),
-            )
-        })
+        .child(section_heading(
+            "Projects",
+            Some(
+                "A project's .zetta/config.json applies while the active pane is inside its root"
+                    .into(),
+            ),
+            colors,
+        ))
+        .child(div().mb_2().text_xs().text_color(colors.text_muted).child(
+            "Edit config opens a builder for everything a project can override. Register \
+                 only projects you trust: their templates and commands can run any shell code.",
+        ))
         .children(rows)
+        .when(editor.project_roots.is_empty(), |page| {
+            page.child(empty_state("No projects are registered yet", colors))
+        })
+        .child(add_row(
+            action_button(
+                editor,
+                "settings-add-project".to_owned(),
+                "Add project".to_owned(),
+                SettingsControl::AddProject,
+                true,
+                colors,
+                handle,
+            ),
+            editor,
+            &[SettingsControl::AddProject],
+        ))
         .into_any_element()
-}
-
-fn section_heading(label: &'static str, description: &'static str, colors: &ThemeColors) -> Div {
-    v_flex()
-        .mt_4()
-        .mb_1()
-        .child(div().text_sm().child(label))
-        .child(
-            div()
-                .text_xs()
-                .text_color(colors.text_muted)
-                .child(description),
-        )
 }
 
 fn render_project_config(
@@ -137,8 +123,9 @@ fn render_project_config(
     project: &ProjectEditor,
     colors: &ThemeColors,
     handle: &WeakEntity<Zetta>,
-    opacity_slider: &dyn Fn(f32, OpacityTarget) -> AnyElement,
+    widgets: &super::pages::PageWidgets<'_>,
 ) -> AnyElement {
+    let opacity_slider = widgets.opacity_slider;
     let form = &project.form;
     let current_icon = form.default_tab_icon;
     let actions = project_config_actions(editor, project, colors, handle);
@@ -159,7 +146,7 @@ fn render_project_config(
                 "project-theme".to_owned(),
                 form.theme
                     .clone()
-                    .unwrap_or_else(|| crate::project_form::PROJECT_INHERIT_LABEL.to_owned()),
+                    .unwrap_or_else(|| crate::settings_ui::INHERIT_LABEL.to_owned()),
                 SettingsDropdown::ProjectTheme,
                 editor,
                 colors,
@@ -177,7 +164,7 @@ fn render_project_config(
                 "project-dark-theme".to_owned(),
                 form.dark_theme
                     .clone()
-                    .unwrap_or_else(|| crate::project_form::PROJECT_INHERIT_LABEL.to_owned()),
+                    .unwrap_or_else(|| crate::settings_ui::INHERIT_LABEL.to_owned()),
                 SettingsDropdown::ProjectDarkTheme,
                 editor,
                 colors,
@@ -211,7 +198,7 @@ fn render_project_config(
                 "project-default-profile".to_owned(),
                 form.default_profile
                     .clone()
-                    .unwrap_or_else(|| crate::project_form::PROJECT_INHERIT_LABEL.to_owned()),
+                    .unwrap_or_else(|| crate::settings_ui::INHERIT_LABEL.to_owned()),
                 SettingsDropdown::ProjectDefaultProfile,
                 editor,
                 colors,
@@ -232,7 +219,7 @@ fn render_project_config(
                 .child(action_button(
                     editor,
                     "project-tab-icon-clear".to_owned(),
-                    "Inherit".to_owned(),
+                    "Reset to inherited".to_owned(),
                     SettingsControl::ClearProjectTabIcon,
                     !matches!(current_icon, ProjectTabIcon::Inherit),
                     colors,
@@ -247,33 +234,13 @@ fn render_project_config(
             &[SettingsControl::Toggle(
                 SettingsToggle::ProjectOpacityOverride,
             )],
-            switch(
+            toggle_switch(
                 "project-inactive-pane-opacity-override",
-                form.inactive_pane_opacity.is_some().into(),
-            )
-            .label(if form.inactive_pane_opacity.is_some() {
-                "On"
-            } else {
-                "Off"
-            })
-            .full_width(true)
-            .aria_label("project-inactive-pane-opacity-override")
-            .on_click({
-                let toggle_handle = handle.clone();
-                move |state, window, cx| {
-                    toggle_handle
-                        .update(cx, |this, cx| {
-                            this.set_settings_toggle(
-                                SettingsToggle::ProjectOpacityOverride,
-                                state.selected(),
-                                window,
-                                cx,
-                            );
-                        })
-                        .ok();
-                }
-            })
-            .into_any_element(),
+                "Override the inactive pane opacity",
+                form.inactive_pane_opacity.is_some(),
+                SettingsToggle::ProjectOpacityOverride,
+                handle,
+            ),
             colors,
         ),
     ];
@@ -281,7 +248,7 @@ fn render_project_config(
         content.push(control_row(
             editor,
             "Inactive pane opacity",
-            &[SettingsControl::ProjectOpacity],
+            &[SettingsControl::Opacity(OpacityTarget::Project)],
             opacity_slider(opacity, OpacityTarget::Project),
             colors,
         ));
@@ -289,12 +256,14 @@ fn render_project_config(
 
     push_project_environment_rows(&mut content, editor, form, colors, handle);
     push_project_command_rows(&mut content, editor, form, colors, handle);
-    push_project_profile_rows(&mut content, editor, form, colors, handle);
-    push_project_template_rows(&mut content, editor, form, colors, handle);
+    push_project_profile_rows(&mut content, editor, form, colors, widgets, handle);
+    push_project_template_rows(&mut content, editor, form, colors, widgets, handle);
     v_flex().children(content).into_any_element()
 }
 
-/// The builder's Close, Save and Open-file buttons.
+/// The builder's Back and Open-file buttons. Saving is the dialog header's
+/// Save, which writes the open project's file while the builder is up; the
+/// builder used to carry a second Save of its own that did the same thing.
 fn project_config_actions(
     editor: &SettingsEditor,
     project: &ProjectEditor,
@@ -309,21 +278,6 @@ fn project_config_actions(
             "project-config-close".to_owned(),
             "Back to projects".to_owned(),
             SettingsControl::CloseProjectConfig,
-            !saving,
-            colors,
-            handle,
-        ))
-        .child(action_button(
-            editor,
-            "project-config-save".to_owned(),
-            if saving {
-                "Saving…".to_owned()
-            } else if project.dirty {
-                "Save project *".to_owned()
-            } else {
-                "Save project".to_owned()
-            },
-            SettingsControl::SaveProjectConfig,
             !saving,
             colors,
             handle,
@@ -347,48 +301,18 @@ fn project_tab_icon_trigger(
     colors: &ThemeColors,
     handle: &WeakEntity<Zetta>,
 ) -> AnyElement {
-    let form = &project.form;
-    let icon_handle = handle.clone();
-    let current_icon = form.default_tab_icon;
-    h_flex()
-        .id("project-tab-icon-picker-trigger")
-        .h_9()
-        .min_w_0()
-        .flex_1()
-        .px_3()
-        .justify_between()
-        .rounded(px(4.))
-        .border_1()
-        .border_color(
-            if editor.focused_control == Some(SettingsControl::ProjectTabIconPicker) {
-                colors.border_focused
-            } else {
-                colors.border
-            },
-        )
-        .bg(colors.editor_background)
-        .cursor_pointer()
-        .hover(|style| style.bg(colors.element_hover))
-        .child(
-            h_flex()
-                .gap_2()
-                .child(Icon::new(current_icon.icon().unwrap_or(IconName::Dash)))
-                .child(current_icon.label()),
-        )
-        .child(
-            svg()
-                .path(IconName::ChevronDown.path())
-                .size(px(14.))
-                .text_color(colors.icon_muted),
-        )
-        .on_click(move |_, window, cx| {
-            icon_handle
-                .update(cx, |this, cx| {
-                    this.open_project_tab_icon_picker(window, cx);
-                })
-                .ok();
-        })
-        .into_any_element()
+    let current_icon = project.form.default_tab_icon;
+    picker_trigger(
+        "project-tab-icon-picker-trigger",
+        SettingsControl::ProjectTabIconPicker,
+        h_flex()
+            .gap_2()
+            .child(Icon::new(current_icon.icon().unwrap_or(IconName::Dash)))
+            .child(current_icon.label()),
+        editor,
+        colors,
+        handle,
+    )
 }
 
 /// The environment rows: the variables every terminal started inside the
@@ -401,76 +325,38 @@ fn push_project_environment_rows(
     handle: &WeakEntity<Zetta>,
 ) {
     content.push(
-        section_heading(
-            "Environment",
-            "Applied to every terminal started inside the project. Template and pane values override matching keys, and reserved ZETTA_* names cannot be replaced.",
-            colors,
-        )
-        .into_any_element(),
+        section_heading("Environment", Some("Applied to every terminal started inside the project. Template and pane values override matching keys, and reserved ZETTA_* names cannot be replaced.".into()), colors),
     );
     for (index, entry) in form.environment.iter().enumerate() {
-        content.push(control_row(
+        content.extend(environment_pair_rows(
+            EnvironmentPair {
+                label: format!("Variable {}", index + 1),
+                id: format!("project-env-{index}"),
+                name: &entry.name,
+                name_input: SettingsInput::Project(ProjectTextField::EnvironmentName(index)),
+                value: &entry.value,
+                value_input: SettingsInput::Project(ProjectTextField::EnvironmentValue(index)),
+                remove: SettingsControl::RemoveProjectEnvironment(index),
+                editable: true,
+            },
             editor,
-            format!("Variable {} · name", index + 1),
-            &[
-                SettingsControl::Input(SettingsInput::Project(ProjectTextField::EnvironmentName(
-                    index,
-                ))),
-                SettingsControl::RemoveProjectEnvironment(index),
-            ],
-            h_flex()
-                .gap_1()
-                .child(text_field(
-                    format!("project-env-name-{index}"),
-                    entry.name.clone(),
-                    SettingsInput::Project(ProjectTextField::EnvironmentName(index)),
-                    editor,
-                    colors,
-                    handle,
-                ))
-                .child(action_button(
-                    editor,
-                    format!("project-env-remove-{index}"),
-                    "×".to_owned(),
-                    SettingsControl::RemoveProjectEnvironment(index),
-                    true,
-                    colors,
-                    handle,
-                ))
-                .into_any_element(),
             colors,
-        ));
-        content.push(control_row(
-            editor,
-            format!("Variable {} · value", index + 1),
-            &[SettingsControl::Input(SettingsInput::Project(
-                ProjectTextField::EnvironmentValue(index),
-            ))],
-            text_field(
-                format!("project-env-value-{index}"),
-                entry.value.clone(),
-                SettingsInput::Project(ProjectTextField::EnvironmentValue(index)),
-                editor,
-                colors,
-                handle,
-            ),
-            colors,
+            handle,
         ));
     }
-    content.push(
-        h_flex()
-            .justify_end()
-            .child(action_button(
-                editor,
-                "project-env-add".to_owned(),
-                "Add environment variable".to_owned(),
-                SettingsControl::AddProjectEnvironment,
-                true,
-                colors,
-                handle,
-            ))
-            .into_any_element(),
-    );
+    content.push(add_row(
+        action_button(
+            editor,
+            "project-env-add".to_owned(),
+            "Add environment variable".to_owned(),
+            SettingsControl::AddProjectEnvironment,
+            true,
+            colors,
+            handle,
+        ),
+        editor,
+        &[SettingsControl::AddProjectEnvironment],
+    ));
 }
 
 /// The registered-command rows. A command's own environment overrides the
@@ -483,12 +369,7 @@ fn push_project_command_rows(
     handle: &WeakEntity<Zetta>,
 ) {
     content.push(
-        section_heading(
-            "Commands",
-            "Registered commands run raw shell code in the active pane. Command environments override project environment values for that invocation and do not persist in the pane.",
-            colors,
-        )
-        .into_any_element(),
+        section_heading("Commands", Some("Registered commands run raw shell code in the active pane. Command environments override project environment values for that invocation and do not persist in the pane.".into()), colors),
     );
     for (command_index, command) in form.commands.iter().enumerate() {
         content.push(control_row(
@@ -510,11 +391,11 @@ fn push_project_command_rows(
                     colors,
                     handle,
                 ))
-                .child(action_button(
+                .child(settings_remove_button(
                     editor,
                     format!("project-command-remove-{command_index}"),
-                    "×".to_owned(),
                     SettingsControl::RemoveProjectCommand(command_index),
+                    "command",
                     true,
                     colors,
                     handle,
@@ -539,282 +420,127 @@ fn push_project_command_rows(
             colors,
         ));
         for (environment_index, entry) in command.environment.iter().enumerate() {
-            content.push(control_row(
-                editor,
-                format!(
-                    "Command {} environment {} · name",
-                    command_index + 1,
-                    environment_index + 1
-                ),
-                &[
-                    SettingsControl::Input(SettingsInput::Project(
-                        ProjectTextField::CommandEnvironmentName(command_index, environment_index),
+            content.extend(environment_pair_rows(
+                EnvironmentPair {
+                    label: format!(
+                        "Command {} variable {}",
+                        command_index + 1,
+                        environment_index + 1
+                    ),
+                    id: format!("project-command-env-{command_index}-{environment_index}"),
+                    name: &entry.name,
+                    name_input: SettingsInput::Project(ProjectTextField::CommandEnvironmentName(
+                        command_index,
+                        environment_index,
                     )),
-                    SettingsControl::RemoveProjectCommandEnvironment(
+                    value: &entry.value,
+                    value_input: SettingsInput::Project(ProjectTextField::CommandEnvironmentValue(
+                        command_index,
+                        environment_index,
+                    )),
+                    remove: SettingsControl::RemoveProjectCommandEnvironment(
                         command_index,
                         environment_index,
                     ),
-                ],
-                h_flex()
-                    .gap_1()
-                    .child(text_field(
-                        format!("project-command-env-name-{command_index}-{environment_index}"),
-                        entry.name.clone(),
-                        SettingsInput::Project(ProjectTextField::CommandEnvironmentName(
-                            command_index,
-                            environment_index,
-                        )),
-                        editor,
-                        colors,
-                        handle,
-                    ))
-                    .child(action_button(
-                        editor,
-                        format!("project-command-env-remove-{command_index}-{environment_index}"),
-                        "×".to_owned(),
-                        SettingsControl::RemoveProjectCommandEnvironment(
-                            command_index,
-                            environment_index,
-                        ),
-                        true,
-                        colors,
-                        handle,
-                    ))
-                    .into_any_element(),
-                colors,
-            ));
-            content.push(control_row(
+                    editable: true,
+                },
                 editor,
-                format!(
-                    "Command {} environment {} · value",
-                    command_index + 1,
-                    environment_index + 1
-                ),
-                &[SettingsControl::Input(SettingsInput::Project(
-                    ProjectTextField::CommandEnvironmentValue(command_index, environment_index),
-                ))],
-                text_field(
-                    format!("project-command-env-value-{command_index}-{environment_index}"),
-                    entry.value.clone(),
-                    SettingsInput::Project(ProjectTextField::CommandEnvironmentValue(
-                        command_index,
-                        environment_index,
-                    )),
-                    editor,
-                    colors,
-                    handle,
-                ),
                 colors,
+                handle,
             ));
         }
-        content.push(
-            h_flex()
-                .justify_end()
-                .child(action_button(
-                    editor,
-                    format!("project-command-env-add-{command_index}"),
-                    "Add command environment variable".to_owned(),
-                    SettingsControl::AddProjectCommandEnvironment(command_index),
-                    true,
-                    colors,
-                    handle,
-                ))
-                .into_any_element(),
-        );
-    }
-    content.push(
-        h_flex()
-            .justify_end()
-            .child(action_button(
+        content.push(add_row(
+            action_button(
                 editor,
-                "project-command-add".to_owned(),
-                "Add command".to_owned(),
-                SettingsControl::AddProjectCommand,
+                format!("project-command-env-add-{command_index}"),
+                "Add command environment variable".to_owned(),
+                SettingsControl::AddProjectCommandEnvironment(command_index),
                 true,
                 colors,
                 handle,
-            ))
-            .into_any_element(),
-    );
+            ),
+            editor,
+            &[SettingsControl::AddProjectCommandEnvironment(command_index)],
+        ));
+    }
+    content.push(add_row(
+        action_button(
+            editor,
+            "project-command-add".to_owned(),
+            "Add command".to_owned(),
+            SettingsControl::AddProjectCommand,
+            true,
+            colors,
+            handle,
+        ),
+        editor,
+        &[SettingsControl::AddProjectCommand],
+    ));
 }
 
-/// The profile-override rows, merged over the application profiles by name.
+/// The profile overrides, merged over the application profiles by name: one
+/// card each, the same card the Configuration page draws a profile with.
 fn push_project_profile_rows(
     content: &mut Vec<AnyElement>,
     editor: &SettingsEditor,
     form: &crate::project_form::ProjectForm,
     colors: &ThemeColors,
+    widgets: &super::pages::PageWidgets<'_>,
     handle: &WeakEntity<Zetta>,
 ) {
-    content.push(
-        section_heading(
-            "Profiles",
-            "Overrides merged over the application profiles by name. Leave the program empty to keep the inherited command and only change the theme, icon, or visibility.",
-            colors,
-        )
-        .into_any_element(),
-    );
+    content.push(section_heading(
+        "Profiles",
+        Some(
+            "Overrides merged over the application profiles by name. Leave the program empty \
+             to keep the inherited command and change only the theme, icon or visibility."
+                .into(),
+        ),
+        colors,
+    ));
     for (index, profile) in form.profiles.iter().enumerate() {
-        let [
-            profile_name_control,
-            profile_remove_control,
-            profile_program_control,
-            profile_arguments_control,
-            profile_visibility_control,
-            profile_icon_control,
-            profile_theme_control,
-            profile_dark_theme_control,
-        ] = project_profile_controls(index);
-        let profile_name_row_controls =
-            [profile_name_control.clone(), profile_remove_control.clone()];
-        content.push(control_row(
+        let controls = project_profile_controls(index, profile.arguments.len());
+        content.push(super::pages::render_profile_card(
+            super::pages::ProfileCard {
+                profile,
+                identity: Some(super::pages::ProfileIdentity {
+                    id_prefix: format!("project-profile-{index}"),
+                    name: SettingsInput::Project(ProjectTextField::ProfileName(index)),
+                    program: SettingsInput::Project(ProjectTextField::ProfileProgram(index)),
+                    program_hint: Some("Leave empty to keep the inherited command"),
+                    remove: SettingsControl::RemoveProjectProfile(index),
+                    remove_label: "profile override",
+                    arguments: ProfileTarget::Project(index),
+                }),
+                overrides: super::pages::ProfileOverrides {
+                    id_prefix: format!("project-profile-{index}"),
+                    visibility: SettingsToggle::ProjectProfileVisibility(index),
+                    icon: SettingsDropdown::ProjectProfileIcon(index),
+                    theme: SettingsDropdown::ProjectProfileTheme(index),
+                    dark_theme: SettingsDropdown::ProjectProfileDarkTheme(index),
+                    profile,
+                    automatic_icon: &profile.automatic_icon,
+                },
+                controls: &controls,
+            },
             editor,
-            format!("Profile {} · name", index + 1),
-            &profile_name_row_controls,
-            h_flex()
-                .gap_1()
-                .child(text_field(
-                    format!("project-profile-name-{index}"),
-                    profile.name.clone(),
-                    SettingsInput::Project(ProjectTextField::ProfileName(index)),
-                    editor,
-                    colors,
-                    handle,
-                ))
-                .child(action_button(
-                    editor,
-                    format!("project-profile-remove-{index}"),
-                    "×".to_owned(),
-                    profile_remove_control.clone(),
-                    true,
-                    colors,
-                    handle,
-                ))
-                .into_any_element(),
             colors,
-        ));
-        content.push(control_row(
-            editor,
-            format!("Profile {} · program", index + 1),
-            std::slice::from_ref(&profile_program_control),
-            text_field(
-                format!("project-profile-program-{index}"),
-                profile.program.clone(),
-                SettingsInput::Project(ProjectTextField::ProfileProgram(index)),
-                editor,
-                colors,
-                handle,
-            ),
-            colors,
-        ));
-        content.push(control_row(
-            editor,
-            format!("Profile {} · arguments (comma separated)", index + 1),
-            std::slice::from_ref(&profile_arguments_control),
-            text_field(
-                format!("project-profile-arguments-{index}"),
-                profile.arguments.clone(),
-                SettingsInput::Project(ProjectTextField::ProfileArguments(index)),
-                editor,
-                colors,
-                handle,
-            ),
-            colors,
-        ));
-        let visibility_handle = handle.clone();
-        content.push(control_row(
-            editor,
-            format!("Profile {} · shown in menus", index + 1),
-            std::slice::from_ref(&profile_visibility_control),
-            switch(
-                ("project-profile-visibility", index),
-                (!profile.hidden).into(),
-            )
-            .label(if profile.hidden { "Hidden" } else { "Visible" })
-            .full_width(true)
-            .aria_label("project-profile-visibility")
-            .on_click(move |state, window, cx| {
-                visibility_handle
-                    .update(cx, |this, cx| {
-                        this.set_settings_toggle(
-                            SettingsToggle::ProjectProfileVisibility(index),
-                            state.selected(),
-                            window,
-                            cx,
-                        );
-                    })
-                    .ok();
-            })
-            .into_any_element(),
-            colors,
-        ));
-        content.push(control_row(
-            editor,
-            format!("Profile {} · icon", index + 1),
-            std::slice::from_ref(&profile_icon_control),
-            dropdown_field(
-                format!("project-profile-icon-{index}"),
-                profile
-                    .icon
-                    .as_ref()
-                    .map_or("Automatic", ProfileIcon::label)
-                    .to_owned(),
-                SettingsDropdown::ProjectProfileIcon(index),
-                editor,
-                colors,
-                handle,
-            ),
-            colors,
-        ));
-        content.push(control_row(
-            editor,
-            format!("Profile {} · light theme", index + 1),
-            std::slice::from_ref(&profile_theme_control),
-            dropdown_field(
-                format!("project-profile-theme-{index}"),
-                profile
-                    .theme
-                    .clone()
-                    .unwrap_or_else(|| crate::project_form::PROJECT_INHERIT_LABEL.to_owned()),
-                SettingsDropdown::ProjectProfileTheme(index),
-                editor,
-                colors,
-                handle,
-            ),
-            colors,
-        ));
-        content.push(control_row(
-            editor,
-            format!("Profile {} · dark theme", index + 1),
-            std::slice::from_ref(&profile_dark_theme_control),
-            dropdown_field(
-                format!("project-profile-dark-theme-{index}"),
-                profile
-                    .dark_theme
-                    .clone()
-                    .unwrap_or_else(|| crate::project_form::PROJECT_INHERIT_LABEL.to_owned()),
-                SettingsDropdown::ProjectProfileDarkTheme(index),
-                editor,
-                colors,
-                handle,
-            ),
-            colors,
+            handle,
+            widgets,
         ));
     }
-    content.push(
-        h_flex()
-            .justify_end()
-            .child(action_button(
-                editor,
-                "project-profile-add".to_owned(),
-                "Add profile override".to_owned(),
-                SettingsControl::AddProjectProfile,
-                true,
-                colors,
-                handle,
-            ))
-            .into_any_element(),
-    );
+    content.push(add_row(
+        action_button(
+            editor,
+            "project-profile-add".to_owned(),
+            "Add profile override".to_owned(),
+            SettingsControl::AddProjectProfile,
+            true,
+            colors,
+            handle,
+        ),
+        editor,
+        &[SettingsControl::AddProjectProfile],
+    ));
 }
 
 /// The pane-template rows: the project's initial split, and the template
@@ -824,15 +550,11 @@ fn push_project_template_rows(
     editor: &SettingsEditor,
     form: &crate::project_form::ProjectForm,
     colors: &ThemeColors,
+    widgets: &super::pages::PageWidgets<'_>,
     handle: &WeakEntity<Zetta>,
 ) {
     content.push(
-        section_heading(
-            "Pane templates",
-            "The application's templates are read-only here; overriding one or adding a new one applies only inside this project. The initial split replaces the active pane subtree the first time a tab enters the project.",
-            colors,
-        )
-        .into_any_element(),
+        section_heading("Pane templates", Some("The application's templates are read-only here; overriding one or adding a new one applies only inside this project. The initial split replaces the active pane subtree the first time a tab enters the project.".into()), colors),
     );
     content.push(control_row(
         editor,
@@ -855,7 +577,7 @@ fn push_project_template_rows(
     content.push(
         div()
             .mt_3()
-            .child(render_pane_templates_page(editor, colors, handle))
+            .child(render_pane_templates_page(editor, colors, widgets, handle))
             .into_any_element(),
     );
 }

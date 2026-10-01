@@ -5,12 +5,15 @@ mod cli_services;
 mod command_palette;
 mod config;
 mod default_terminal;
+mod file_replace;
+mod fuzzy_match;
 #[cfg(feature = "http-server")]
 mod http_server;
 mod image_paste;
 #[cfg(not(feature = "zmux"))]
 mod local_sessions;
 mod logging;
+mod overlay_frame;
 #[cfg(not(feature = "zmux"))]
 mod zmux {
     pub(crate) mod remote {
@@ -62,6 +65,10 @@ mod text_edit_ui;
 #[cfg(tftp_enabled)]
 mod tftp;
 mod theme_extensions;
+mod ui_buttons;
+mod ui_messages;
+use ui_messages::Tone;
+mod ui_tokens;
 #[cfg(feature = "syntax-highlighting")]
 mod vi_syntax;
 mod zetta_assets;
@@ -117,6 +124,11 @@ use keymap_file::{DEFAULT_KEYMAP_PATH, KeymapFile, KeymapFileLoadResult};
 use mux::MuxPanes;
 #[cfg(feature = "zmux")]
 use mux::MuxRuntime;
+use overlay_frame::{
+    BackdropClick, Placement, dialog_buttons, dialog_panel, dialog_title, empty_list_row,
+    hint_line, key_hints, modal, modal_backdrop, modal_panel, palette_footer, palette_header,
+    palette_section, picker_row,
+};
 use process_control::{
     ProcessControlCommand, ProcessControlServer, ReconnectSessionResult, TabAttentionRequest,
     request_existing_process_window,
@@ -130,9 +142,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use session_auth_ui::SessionAuthenticationPrompt;
 use settings_editor::{
-    BindingForm, ConfigTextField, ConfigurationForm, KeymapForm, KeymapSectionForm,
+    BindingForm, ConfigSetting, ConfigTextField, ConfigurationForm, KeymapForm, KeymapSectionForm,
     KeymapTextField, PaneTemplateNodePath, PaneTemplateTextField, SettingsPage,
-    save as save_settings_file,
 };
 use silent_mode::{FocusStatusAccess, SilentModeState};
 use task::{Shell, ShellBuilder, SpawnInTerminal, TaskId};
@@ -149,19 +160,24 @@ use text_edit::{
     ClipboardOutcome, TextField, TextFieldEdit, apply_clipboard_shortcut, apply_text_field_key,
     is_copy_chord, previous_char_boundary,
 };
-use text_edit_ui::{caret, field_box, field_query_run, field_text_run};
+use text_edit_ui::{FieldMask, boxed_text_field, field_query_run, field_text_run, read_only_field};
 use theme::{
     ActiveTheme, ClientDecorationsExt as _, GlobalTheme, SystemAppearance, Theme, ThemeColors,
     ThemeRegistry,
 };
 use theme_extensions::{InstalledThemeExtension, ThemeExtension};
 use ui::{
-    Banner, Button, ButtonCommon as _, ButtonLike, ButtonLink, ButtonSize, ButtonStyle,
-    Clickable as _, Color, Icon, IconButton, IconButtonShape, IconName, IconSize, Label, LabelSize,
-    PopoverMenu, PopoverMenuHandle, Severity, Tooltip, prelude::*, switch,
+    Banner, Button, ButtonCommon as _, ButtonLike, ButtonSize, ButtonStyle, Clickable as _, Color,
+    Icon, IconButton, IconButtonShape, IconName, IconSize, Label, LabelSize, PopoverMenu,
+    PopoverMenuHandle, Severity, Tooltip, prelude::*, switch,
 };
 #[cfg(feature = "zmux")]
 use ui::{ScrollAxes, Scrollbars, WithScrollbar as _};
+use ui_buttons::{ButtonRole, DialogButton, SurfaceKey, remove_button};
+use ui_tokens::{
+    DIALOG_WIDTH_LARGE, DIALOG_WIDTH_MEDIUM, DIALOG_WIDTH_SMALL, PALETTE_LIST_MAX_HEIGHT,
+    PALETTE_WIDTH,
+};
 use util::{ResultExt as _, paths::PathStyle};
 use zetta_assets::ZettaAssets;
 

@@ -35,9 +35,15 @@ pub enum PaletteKey {
 
 pub struct PaletteCommand {
     pub name: String,
-    pub shortcut: Option<String>,
+    /// The keys the effective keymap binds the action to, drawn as a key
+    /// binding beside the command.
+    pub shortcut: Option<std::rc::Rc<[gpui::KeybindingKeystroke]>>,
     pub action: Box<dyn Action>,
 }
+
+/// How far PageUp and PageDown move the selection: about a list's height of
+/// rows at the palette's maximum height.
+const PAGE_ROWS: usize = 8;
 
 pub struct CommandPalette {
     pub query: TextField,
@@ -84,6 +90,17 @@ impl CommandPalette {
         }
     }
 
+    /// What changing the query owes the list, whichever way it changed —
+    /// typing, or a cut or paste: the matches are rebuilt from it and the
+    /// selection returns to the first match rather than pointing into the old
+    /// list. The palette's clipboard path used to rebuild the matches but keep
+    /// the old selection.
+    pub fn query_edited(&mut self) {
+        self.refresh_matches();
+        self.selected = 0;
+        self.scroll_to_selected();
+    }
+
     pub fn matches(&self) -> &[usize] {
         &self.matches
     }
@@ -109,6 +126,17 @@ impl CommandPalette {
                 self.scroll_to_selected();
                 PaletteKey::Redraw
             }
+            "pageup" => {
+                self.selected = self.selected.saturating_sub(PAGE_ROWS);
+                self.scroll_to_selected();
+                PaletteKey::Redraw
+            }
+            "pagedown" => {
+                self.selected =
+                    (self.selected + PAGE_ROWS).min(self.matches.len().saturating_sub(1));
+                self.scroll_to_selected();
+                PaletteKey::Redraw
+            }
             "enter" => match self.matches.get(self.selected).copied() {
                 Some(command) => PaletteKey::Accept(command),
                 // An empty list has nothing to run, and the overlay stays open
@@ -119,12 +147,7 @@ impl CommandPalette {
                 crate::text_edit::TextFieldEdit::Ignored => PaletteKey::Ignored,
                 crate::text_edit::TextFieldEdit::CursorMoved => PaletteKey::Redraw,
                 crate::text_edit::TextFieldEdit::Edited => {
-                    // The query is the filter, so the match list is rebuilt and
-                    // the selection returns to the first match rather than
-                    // pointing into the old one.
-                    self.refresh_matches();
-                    self.selected = 0;
-                    self.scroll_to_selected();
+                    self.query_edited();
                     PaletteKey::Redraw
                 }
             },
@@ -144,7 +167,9 @@ impl CommandPalette {
             .normalized_names
             .iter()
             .enumerate()
-            .filter_map(|(index, name)| fuzzy_score(name, &query).map(|score| (index, score)))
+            .filter_map(|(index, name)| {
+                crate::fuzzy_match::score(name, &query).map(|score| (index, score))
+            })
             .collect::<Vec<_>>();
         matches.sort_by(|(left_index, left_score), (right_index, right_score)| {
             right_score.cmp(left_score).then_with(|| {
@@ -228,39 +253,6 @@ pub fn humanize_action_name(name: &str) -> String {
         }
     }
     result
-}
-
-fn fuzzy_score(candidate: &str, query: &str) -> Option<i32> {
-    if query.is_empty() {
-        return Some(0);
-    }
-    let mut characters = query.chars();
-    let mut wanted = characters.next()?;
-    let mut score = 0;
-    let mut previous_match = None;
-    for (index, character) in candidate.char_indices() {
-        if character != wanted {
-            continue;
-        }
-        score += 10;
-        if previous_match.is_some_and(|previous| previous + character.len_utf8() == index) {
-            score += 8;
-        }
-        if index == 0
-            || candidate[..index]
-                .chars()
-                .next_back()
-                .is_some_and(|previous| matches!(previous, ' ' | ':' | '_' | '-'))
-        {
-            score += 5;
-        }
-        previous_match = Some(index);
-        match characters.next() {
-            Some(next) => wanted = next,
-            None => return Some(score - candidate.len() as i32 / 8),
-        }
-    }
-    None
 }
 
 #[cfg(test)]

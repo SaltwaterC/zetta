@@ -91,7 +91,7 @@ impl Zetta {
                     cx,
                 ),
                 Err(error) => {
-                    this.show_notice(
+                    this.show_error_notice(
                         format!(
                             "Could not protect this session with your age key: {error:#}. \
                              Choose a secret instead."
@@ -234,7 +234,7 @@ impl Zetta {
                 Ok(true) => return SealedKeyAuthorization::NeedsIdentityPassphrase,
                 Ok(false) => {}
                 Err(error) => {
-                    self.show_notice(
+                    self.show_error_notice(
                         format!("Could not inspect your age identity: {error:#}"),
                         cx,
                     );
@@ -248,7 +248,7 @@ impl Zetta {
                 None => SealedKeyAuthorization::NotSealed,
             },
             Err(error) => {
-                self.show_notice(
+                self.show_error_notice(
                     format!("Could not open that session with your age identity: {error:#}"),
                     cx,
                 );
@@ -394,7 +394,7 @@ impl Zetta {
                 let setup_succeeded = match setup {
                     Ok(()) => true,
                     Err(error) => {
-                        self.show_notice(
+                        self.show_error_notice(
                             format!("Could not initialize shared tab collaboration: {error:#}"),
                             cx,
                         );
@@ -428,11 +428,11 @@ impl Zetta {
             // says which. The tab stays shared, which is what the menu then shows.
             Err(error) if !offered => {
                 self.tabs[index].shared = previous_shared;
-                self.show_notice(format!("{error:#}"), cx);
+                self.show_error_notice(format!("{error:#}"), cx);
             }
             Err(error) => {
                 self.tabs[index].shared = previous_shared;
-                self.show_notice(format!("Could not share this tab: {error:#}"), cx);
+                self.show_error_notice(format!("Could not share this tab: {error:#}"), cx);
             }
         }
         cx.notify();
@@ -655,7 +655,7 @@ impl Zetta {
                 if let Some(runtime) = runtime
                     && let Err(error) = self.bind_shared_session(tab_id, runtime, window, cx)
                 {
-                    self.show_notice(
+                    self.show_error_notice(
                         format!(
                             "Could not restore shared tab collaboration after the failed handoff: \
                              {error:#}"
@@ -739,7 +739,7 @@ impl Zetta {
             Ok(false) => {}
             Err(error) => {
                 if !self.no_mux {
-                    self.show_notice(
+                    self.show_error_notice(
                         format!(
                             "Could not hand the session to the multiplexer; it remains in this window: {error:#}"
                         ),
@@ -747,7 +747,7 @@ impl Zetta {
                     );
                     return Some(tab);
                 }
-                self.show_notice(
+                self.show_error_notice(
                     format!(
                         "Could not hand the session to the multiplexer, so it is being kept in this \
                          window instead: {error:#}"

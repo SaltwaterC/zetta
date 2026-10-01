@@ -649,7 +649,7 @@ impl Zetta {
                 ) {
                     Ok(transport) => transport,
                     Err(error) => {
-                        self.show_notice(format!("{error:#}"), cx);
+                        self.show_error_notice(format!("{error:#}"), cx);
                         let _ = completion.send(ReconnectSessionResult::Rejected);
                         return;
                     }
@@ -688,7 +688,7 @@ impl Zetta {
                                     ReconnectSessionResult::AuthenticationFailed
                                 }
                                 Err(error) => {
-                                    this.show_notice(
+                                    this.show_error_notice(
                                         format!(
                                             "Could not attach the remote session {session_id}: {error:#}"
                                         ),
@@ -703,7 +703,7 @@ impl Zetta {
                             ReconnectSessionResult::AuthenticationFailed
                         }
                         Err(error) => {
-                            this.show_notice(
+                            this.show_error_notice(
                                 format!(
                                     "Could not attach the remote session {session_id}: {error:#}"
                                 ),

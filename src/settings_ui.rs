@@ -5,6 +5,8 @@ use crate::startup::keymap_keystroke_display;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+pub(crate) mod close_guard;
+pub(crate) mod configuration_page;
 mod controls;
 mod dropdowns;
 mod editing;
@@ -13,15 +15,14 @@ pub(crate) mod pane_templates;
 pub(crate) mod projects;
 mod theme_extensions_ui;
 
-pub(crate) use controls::{
-    invalidate_controls_cache, profile_controls, profile_draft_controls, project_profile_controls,
-};
+pub(crate) use close_guard::CloseRequest;
+#[cfg(test)]
+pub(crate) use controls::profile_draft_controls;
+pub(crate) use controls::{invalidate_controls_cache, profile_controls, project_profile_controls};
 use keymap::{
     KeymapCapture, is_modifier_key, is_unmodified_capture_control, keybinding_for_capture,
 };
-pub(crate) use keymap::{
-    KeymapRow, KeymapRowData, refresh_keymap_cache, render_keymap_sticky_candidate,
-};
+pub(crate) use keymap::{KeymapRow, KeymapRowData, refresh_keymap_cache};
 pub(crate) use projects::{ProjectEditor, project_editor};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -40,20 +41,49 @@ pub(crate) enum SettingsInput {
 pub(crate) enum ProfileDraftField {
     Name,
     Program,
-    Arguments,
+    Argument(usize),
+}
+
+/// What a dropdown offers for "nothing of its own": the value falls back to the
+/// layer below — the application's theme for a profile, the profile's for a
+/// pane, the user configuration's for a project. One word for all of them,
+/// where there used to be three phrasings of it.
+pub(crate) const INHERIT_LABEL: &str = crate::project_form::PROJECT_INHERIT_LABEL;
+pub(crate) const PROFILE_THEME_INHERIT_LABEL: &str = INHERIT_LABEL;
+
+/// A form that holds a profile's argument list: a configured profile, the Add
+/// profile modal's draft, or a project's profile override. One control pair
+/// adds and removes arguments for all three.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum ProfileTarget {
+    Configuration(usize),
+    Draft,
+    Project(usize),
+}
+
+impl ProfileTarget {
+    /// The input for one of this profile's arguments.
+    pub(crate) fn argument_input(self, argument: usize) -> SettingsInput {
+        match self {
+            Self::Configuration(index) => {
+                SettingsInput::Configuration(ConfigTextField::ProfileArgument(index, argument))
+            }
+            Self::Draft => SettingsInput::ProfileDraft(ProfileDraftField::Argument(argument)),
+            Self::Project(index) => {
+                SettingsInput::Project(ProjectTextField::ProfileArgument(index, argument))
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum SettingsDropdown {
     DefaultProfile,
-    NewTabProfile,
     Theme,
     DarkTheme,
-    WorkingDirectoryScope,
-    PaneControlsPosition,
-    PaneControlsDefaultVisibility,
-    SessionRetention,
-    RemoteSessionProtocol,
+    /// A Configuration setting chosen from fixed options; see
+    /// `settings_table`.
+    Setting(ConfigSetting),
     ProfileTheme(usize),
     ProfileDarkTheme(usize),
     ProfileIcon(usize),
@@ -79,43 +109,23 @@ pub(crate) enum SettingsDropdown {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SettingsToggle {
-    CompactMode,
-    PaneSize,
-    TitleBarLabels,
-    TitleBarButtons,
+    /// A Configuration switch; see `settings_table`. A switch reads as what it
+    /// turns on even where the file's key is a `hide_…`.
+    Setting(ConfigSetting),
     ProfileVisibility(usize),
     ProfileDraftVisibility,
-    /// Protect background sessions with the configured age key instead of a
-    /// typed secret. Offered only when a recipient and an effective identity are
-    /// available, because without them it would mint sessions nobody can
-    /// reattach.
-    #[cfg(feature = "session-persistence")]
-    SessionAutoProtect,
-    #[cfg(target_os = "macos")]
-    TitleBarMenus,
-    RemoteSessionForwardAgent,
     ProjectOpacityOverride,
     ProjectProfileVisibility(usize),
 }
 
-/// Which form's inactive-pane opacity a slider edits. The projects builder
-/// shows the same control for a project's override.
+/// Which opacity a slider edits: the user configuration's inactive-pane
+/// opacity, a project's override of it, or the overlay of a pane in the
+/// selected pane template.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum OpacityTarget {
     Configuration,
     Project,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum NumericSetting {
-    FontSize,
-    ScrollHistory,
-    SessionRingBytes,
-    RemoteSessionKeepAlive,
-    #[cfg(feature = "http-server")]
-    HttpServerPort,
-    #[cfg(feature = "tftp-server")]
-    TftpServerPort,
+    PaneTemplateOverlay(PaneTemplateNodePath),
 }
 
 /// A keyboard-reachable control in the settings dialog. Keeping this separate
@@ -130,22 +140,41 @@ pub(crate) enum SettingsControl {
     CaptureKeymap(KeymapTextField),
     Dropdown(SettingsDropdown),
     Toggle(SettingsToggle),
-    Numeric(NumericSetting),
+    /// A Configuration number's steppers and field; see `settings_table`.
+    Numeric(ConfigSetting),
     FontPicker,
     DefaultTabIconPicker,
-    Opacity,
+    /// An opacity slider; see [`OpacityTarget`].
+    Opacity(OpacityTarget),
     AddProfile,
     #[cfg(target_os = "macos")]
     RequestFocusStatusAccess,
     RemoveProfile(usize),
+    AddProfileArgument(ProfileTarget),
+    RemoveProfileArgument(ProfileTarget, usize),
+    /// Opens the Zed themes store in the browser. It used to be a link only
+    /// the pointer could reach.
+    OpenThemeStore,
     SearchThemes,
     InstallTheme(Arc<str>),
     RemoveTheme(String),
     RemoveBinding(usize, usize),
     UnbindBinding(usize, usize),
+    /// Put back a built-in binding the user disabled, by its index among the
+    /// section's unbound defaults.
+    RestoreBinding(usize, usize),
     AddBinding(usize),
     AddKeymapSection,
     Font(usize),
+    /// The Close or Cancel of whichever modal is open over the page: the font
+    /// picker or the Add profile modal. Its own control rather than the
+    /// header's `Close`, which it used to share, so focusing it no longer lit
+    /// up the header's Close behind the backdrop as well.
+    CloseModal,
+    /// The unsaved-changes confirmation's answers.
+    KeepEditing,
+    DiscardChanges,
+    SaveBeforeClosing,
     CreateProfile,
     SelectPaneTemplate(usize),
     SelectPaneTemplateNode(PaneTemplateNodePath),
@@ -171,11 +200,9 @@ pub(crate) enum SettingsControl {
     EditProject(usize),
     RemoveProject(usize),
     CloseProjectConfig,
-    SaveProjectConfig,
     OpenProjectConfigFile,
     ProjectTabIconPicker,
     ClearProjectTabIcon,
-    ProjectOpacity,
     AddProjectEnvironment,
     RemoveProjectEnvironment(usize),
     AddProjectCommand,
@@ -219,9 +246,22 @@ pub(crate) struct SettingsEditor {
     pub(crate) font_scroll: UniformListScrollHandle,
     pub(crate) keymap_scroll: UniformListScrollHandle,
     pub(crate) numeric_repeat_generation: u64,
+    /// The terminal font size that applies while the Configuration page leaves
+    /// `terminal_font_size` unset: the buffer size from the theme settings. It
+    /// is what the empty field shows, and what its stepper starts from.
+    pub(crate) terminal_font_size_default: f32,
     pub(crate) scroll_geometry_initialized: bool,
     pub(crate) focused_input: Option<SettingsInput>,
     pub(crate) focused_control: Option<SettingsControl>,
+    /// A destructive control that has been pressed once and is waiting for the
+    /// second press that confirms it. Removing a theme extension deletes its
+    /// files and removing a project rewrites the registry, both at once rather
+    /// than on Save, so a single stray press used to be enough. Moving focus
+    /// anywhere else disarms it.
+    pub(crate) armed_control: Option<SettingsControl>,
+    /// A way out that is waiting on the unsaved-changes confirmation; see
+    /// `close_guard`.
+    pub(crate) close_request: Option<close_guard::CloseRequest>,
     /// The control the keyboard just moved to, paired with the scroll offset the
     /// request was made at. Rows that can measure themselves finish the scroll
     /// precisely during prepaint; the recorded offset is how a later wheel scroll
@@ -231,7 +271,12 @@ pub(crate) struct SettingsEditor {
     pub(crate) open_dropdown: Option<SettingsDropdown>,
     pub(crate) configuration_dirty: bool,
     pub(crate) keymap_dirty: bool,
-    pub(crate) message: Option<(bool, String)>,
+    /// What the dialog's status line says, and how seriously.
+    pub(crate) message: Option<(Tone, String)>,
+    /// The Configuration setting whose field cannot be saved as it stands, and
+    /// why: found as the keyboard left the field or when Save refused it, and
+    /// shown under the field until the field is edited.
+    pub(crate) invalid_setting: Option<(ConfigSetting, String)>,
     pub(crate) pane_template_validation_error: Option<String>,
     pub(crate) pane_template_validation_generation: u64,
     pub(crate) settings_save_in_progress: bool,
@@ -360,6 +405,41 @@ pub(crate) fn settings_save_in_flight(editor: &SettingsEditor) -> bool {
             .is_some_and(|project| project.save_in_progress)
 }
 
+/// Checks the Configuration setting whose field the keyboard is leaving for
+/// `next`, so a value that cannot be saved is reported under the field it was
+/// typed into rather than only once Save refuses it. Moving within the field —
+/// clicking into it again, or onto its own steppers — is not leaving it.
+pub(crate) fn check_setting_being_left(editor: &mut SettingsEditor, next: &SettingsControl) {
+    let Some(SettingsInput::Configuration(ConfigTextField::Setting(setting))) =
+        editor.focused_input
+    else {
+        return;
+    };
+    if *next
+        == SettingsControl::Input(SettingsInput::Configuration(ConfigTextField::Setting(
+            setting,
+        )))
+        || *next == SettingsControl::Numeric(setting)
+    {
+        return;
+    }
+    match editor.configuration.check(setting) {
+        Some(message) => editor.invalid_setting = Some((setting, message)),
+        None => clear_invalid_setting(editor, setting),
+    }
+}
+
+/// Forgets that `setting` could not be saved, once it has been changed.
+pub(crate) fn clear_invalid_setting(editor: &mut SettingsEditor, setting: ConfigSetting) {
+    if editor
+        .invalid_setting
+        .as_ref()
+        .is_some_and(|(invalid, _)| *invalid == setting)
+    {
+        editor.invalid_setting = None;
+    }
+}
+
 pub(crate) fn matching_font_indices(normalized_fonts: &[String], query: &str) -> Arc<[usize]> {
     let search = query.to_lowercase();
     normalized_fonts
@@ -378,26 +458,6 @@ fn matching_font_position(
     matching_font_indices(normalized_fonts, query)
         .iter()
         .position(|index| *index == font_index)
-}
-
-pub(crate) fn adjusted_scroll_history(current: u64, direction: i32, maximum: u64) -> u64 {
-    let step_basis = if direction < 0 {
-        current.saturating_sub(1)
-    } else {
-        current
-    };
-    let step = match step_basis {
-        0..100_000 => 1_000,
-        100_000..1_000_000 => 100_000,
-        1_000_000..10_000_000 => 1_000_000,
-        10_000_000..100_000_000 => 10_000_000,
-        _ => 100_000_000,
-    };
-    if direction < 0 {
-        current.saturating_sub(step)
-    } else {
-        current.saturating_add(step).min(maximum)
-    }
 }
 
 impl Zetta {
@@ -424,7 +484,7 @@ impl Zetta {
         cx: &mut Context<Self>,
     ) {
         if self.settings_editor.is_some() {
-            self.dismiss_settings(window, cx);
+            self.request_settings_close(close_guard::CloseRequest::Dialog, window, cx);
             return;
         }
         if self.settings_loading {
@@ -562,15 +622,21 @@ impl Zetta {
             font_scroll: UniformListScrollHandle::new(),
             keymap_scroll: UniformListScrollHandle::new(),
             numeric_repeat_generation: 0,
+            terminal_font_size_default: theme_settings::ThemeSettings::get_global(cx)
+                .buffer_font_size_settings()
+                .as_f32(),
             scroll_geometry_initialized: false,
             focused_input: None,
             focused_control: Some(SettingsControl::Tab(initial_page)),
+            armed_control: None,
+            close_request: None,
             focus_scroll_request: None,
             keymap_capture: None,
             open_dropdown: None,
             configuration_dirty: false,
             keymap_dirty: false,
             message: None,
+            invalid_setting: None,
             pane_template_validation_error: None,
             pane_template_validation_generation: 0,
             settings_save_in_progress: false,
@@ -703,6 +769,8 @@ impl Zetta {
         let Some(editor) = self.settings_editor.as_mut() else {
             return;
         };
+        check_setting_being_left(editor, &SettingsControl::Input(input));
+        editor.armed_control = None;
         editor.focused_input = Some(input);
         editor.focused_control = Some(SettingsControl::Input(input));
         editor.clear_dropdown();
@@ -720,10 +788,10 @@ impl Zetta {
             SettingsInput::FontSearch => editor.font_query.as_mut(),
             SettingsInput::KeymapSearch => Some(&mut editor.keymap_search),
             SettingsInput::ProfileDraft(field) => {
-                editor.profile_draft.as_mut().map(|draft| match field {
-                    ProfileDraftField::Name => &mut draft.name,
-                    ProfileDraftField::Program => &mut draft.program,
-                    ProfileDraftField::Arguments => &mut draft.arguments,
+                editor.profile_draft.as_mut().and_then(|draft| match field {
+                    ProfileDraftField::Name => Some(&mut draft.name),
+                    ProfileDraftField::Program => Some(&mut draft.program),
+                    ProfileDraftField::Argument(argument) => draft.arguments.get_mut(argument),
                 })
             }
         };
@@ -757,8 +825,9 @@ impl Zetta {
         if editor.settings_save_in_progress {
             return;
         }
+        // Nothing to write: Save is disabled, and the shortcut does nothing
+        // rather than closing the dialog, which is what Close is for.
         if !editor.configuration_dirty && !editor.keymap_dirty {
-            self.dismiss_settings(window, cx);
             return;
         }
 
@@ -770,7 +839,7 @@ impl Zetta {
             .then(|| editor.configuration.clone());
         let keymap = editor.keymap_dirty.then(|| editor.keymap.clone());
         editor.settings_save_in_progress = true;
-        editor.message = Some((false, "Saving settings…".to_owned()));
+        editor.message = Some((Tone::Info, "Saving settings…".to_owned()));
 
         let config_path = self.launch_config.config_path.clone();
         let keymap_path = self.launch_config.keymap_path.clone();
@@ -797,12 +866,8 @@ impl Zetta {
                 } = match prepared {
                     Ok(prepared) => prepared,
                     Err(error) => {
-                        this.update_in(cx, |this, _, cx| {
-                            if let Some(editor) = this.settings_editor.as_mut() {
-                                editor.settings_save_in_progress = false;
-                                editor.message = Some((true, format!("Not saved: {error:#}")));
-                                cx.notify();
-                            }
+                        this.update_in(cx, |this, window, cx| {
+                            this.report_settings_save_failure(&error, window, cx);
                         })
                         .ok();
                         return;
@@ -820,7 +885,8 @@ impl Zetta {
                         this.update_in(cx, |this, _, cx| {
                             if let Some(editor) = this.settings_editor.as_mut() {
                                 editor.settings_save_in_progress = false;
-                                editor.message = Some((true, format!("Not saved: {error:#}")));
+                                editor.message =
+                                    Some((Tone::Error, format!("Not saved: {error:#}")));
                                 cx.notify();
                             }
                         })
@@ -832,13 +898,19 @@ impl Zetta {
 
                 let write_result = executor
                     .spawn(async move {
-                        if let Some(keymap) = keymap_text {
-                            save_settings_file(&keymap_path, &keymap)?;
-                        }
-                        if let Some(configuration) = configuration_text {
-                            save_settings_file(&config_path, &configuration)?;
-                        }
-                        Result::<()>::Ok(())
+                        // Both staged before either is renamed into place,
+                        // so a failure leaves neither file half-saved.
+                        let files = [
+                            keymap_text
+                                .as_deref()
+                                .map(|text| (keymap_path.as_path(), text)),
+                            configuration_text
+                                .as_deref()
+                                .map(|text| (config_path.as_path(), text)),
+                        ];
+                        crate::file_replace::replace_files(
+                            &files.into_iter().flatten().collect::<Vec<_>>(),
+                        )
                     })
                     .await;
                 this.update_in(cx, |this, window, cx| match write_result {
@@ -855,7 +927,7 @@ impl Zetta {
                     Err(error) => {
                         if let Some(editor) = this.settings_editor.as_mut() {
                             editor.settings_save_in_progress = false;
-                            editor.message = Some((true, format!("Not saved: {error:#}")));
+                            editor.message = Some((Tone::Error, format!("Not saved: {error:#}")));
                             cx.notify();
                         }
                     }
@@ -863,6 +935,40 @@ impl Zetta {
                 .ok();
             })
             .detach();
+        cx.notify();
+    }
+
+    /// A save that did not happen: says why, and when the reason is one field
+    /// of the Configuration page, takes the keyboard to that field so it can be
+    /// corrected where it is rather than found.
+    fn report_settings_save_failure(
+        &mut self,
+        error: &anyhow::Error,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let invalid_field = error
+            .downcast_ref::<crate::settings_editor::InvalidField>()
+            .map(|invalid| invalid.field);
+        if let Some(editor) = self.settings_editor.as_mut() {
+            editor.settings_save_in_progress = false;
+        }
+        if let Some(field) = invalid_field {
+            if self
+                .settings_editor
+                .as_ref()
+                .is_some_and(|editor| editor.page != SettingsPage::Configuration)
+            {
+                self.select_settings_page(SettingsPage::Configuration, window, cx);
+            }
+            self.focus_settings_input(SettingsInput::Configuration(field), window, cx);
+        }
+        if let Some(editor) = self.settings_editor.as_mut() {
+            if let Some(ConfigTextField::Setting(setting)) = invalid_field {
+                editor.invalid_setting = Some((setting, error.to_string()));
+            }
+            editor.message = Some((Tone::Error, format!("Not saved: {error:#}")));
+        }
         cx.notify();
     }
 
@@ -967,8 +1073,8 @@ impl Zetta {
                     }
                     cx.notify();
                 }
-                Some(SearchableDropdownAction::Commit(Some(value))) => {
-                    self.commit_open_settings_dropdown_value(value, cx);
+                Some(SearchableDropdownAction::Commit(Some(choice))) => {
+                    self.commit_open_settings_dropdown_value(choice, cx);
                 }
                 Some(SearchableDropdownAction::Tab { reverse }) => {
                     if let Some(editor) = self.settings_editor.as_mut() {
@@ -999,27 +1105,28 @@ impl Zetta {
         let command = event.keystroke.modifiers.control || event.keystroke.modifiers.platform;
         match event.keystroke.key.as_str() {
             "escape" => {
-                if self.settings_editor.as_ref().is_some_and(|editor| {
+                if self
+                    .settings_editor
+                    .as_ref()
+                    .is_some_and(|editor| editor.close_request.is_some())
+                {
+                    self.answer_settings_close(SettingsControl::KeepEditing, window, cx);
+                } else if self.settings_editor.as_ref().is_some_and(|editor| {
                     editor.font_query.is_some() || editor.profile_draft.is_some()
                 }) {
-                    if let Some(editor) = self.settings_editor.as_mut() {
-                        editor.font_query = None;
-                        editor.dismiss_profile_draft();
-                        editor.focused_input = None;
-                        editor.focused_control = None;
-                        editor.focus_scroll_request = None;
-                        editor.message = None;
-                        invalidate_controls_cache(editor);
-                    }
-                    cx.notify();
+                    self.close_settings_modal(cx);
                 } else if self
                     .settings_editor
                     .as_ref()
                     .is_some_and(|editor| project_editor(editor).is_some())
                 {
-                    self.close_project_config(window, cx);
+                    self.request_settings_close(
+                        close_guard::CloseRequest::ProjectBuilder,
+                        window,
+                        cx,
+                    );
                 } else {
-                    self.dismiss_settings(window, cx);
+                    self.request_settings_close(close_guard::CloseRequest::Dialog, window, cx);
                 }
             }
             "1" if command => self.select_settings_page(SettingsPage::Configuration, window, cx),
@@ -1044,11 +1151,8 @@ impl Zetta {
                     Some(SettingsControl::Numeric(setting)) => {
                         self.adjust_numeric_setting(setting, direction, cx);
                     }
-                    Some(SettingsControl::Opacity) => {
-                        self.adjust_settings_opacity(OpacityTarget::Configuration, direction, cx);
-                    }
-                    Some(SettingsControl::ProjectOpacity) => {
-                        self.adjust_settings_opacity(OpacityTarget::Project, direction, cx);
+                    Some(SettingsControl::Opacity(target)) => {
+                        self.adjust_settings_opacity(target, direction, cx);
                     }
                     Some(SettingsControl::Input(_)) => self.edit_settings_input(event, cx),
                     _ => self.focus_adjacent_settings_control(direction < 0, window, cx),
@@ -1080,6 +1184,10 @@ impl Zetta {
                         };
                         self.select_settings_page(pages[next], window, cx);
                         self.focus_settings_control(SettingsControl::Tab(pages[next]), window, cx);
+                    }
+                    // A slider moves sideways as well as up and down.
+                    Some(SettingsControl::Opacity(target)) => {
+                        self.adjust_settings_opacity(target, direction, cx);
                     }
                     Some(SettingsControl::Dropdown(dropdown)) => {
                         self.open_settings_dropdown(dropdown, window.mouse_position(), cx);

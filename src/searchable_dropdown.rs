@@ -13,6 +13,18 @@ pub(crate) const DROPDOWN_OPTION_ROW_HEIGHT: Pixels = px(36.);
 pub(crate) const DROPDOWN_OPTIONS_MAX_HEIGHT: Pixels = px(260.);
 pub(crate) const DROPDOWN_LIST_VIEWPORT_HEIGHT: Pixels = px(252.);
 
+/// The option a dropdown committed: its position in the options the dropdown
+/// was opened with, as well as its text.
+///
+/// The position is what tells an option that means "unset" — Inherit, None,
+/// Automatic — from a theme, profile or template that happens to be named the
+/// same, which a comparison of the text cannot.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct DropdownChoice {
+    pub(crate) index: usize,
+    pub(crate) value: String,
+}
+
 /// The result of a key pressed while a searchable dropdown is open.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum SearchableDropdownAction {
@@ -23,7 +35,7 @@ pub(crate) enum SearchableDropdownAction {
     Close,
     /// The highlighted value should be committed. `None` means that the query
     /// has no matches and the popup must stay open.
-    Commit(Option<String>),
+    Commit(Option<DropdownChoice>),
     /// The popup should close and the owning surface should advance focus.
     Tab { reverse: bool },
 }
@@ -139,6 +151,15 @@ impl SearchableDropdown {
         self.scroll_to_selection();
     }
 
+    /// The highlighted option, by position as well as by text.
+    pub(crate) fn selected_choice(&self) -> Option<DropdownChoice> {
+        let value = self.selected_value()?;
+        Some(DropdownChoice {
+            index: self.selected_index,
+            value,
+        })
+    }
+
     pub(crate) fn selected_value(&self) -> Option<String> {
         if !self.query.is_empty() && !self.rows.contains(&self.selected_index) {
             return None;
@@ -166,7 +187,7 @@ impl SearchableDropdown {
                 self.move_selection(1);
                 SearchableDropdownAction::Handled
             }
-            "enter" | "space" => SearchableDropdownAction::Commit(self.selected_value()),
+            "enter" | "space" => SearchableDropdownAction::Commit(self.selected_choice()),
             "backspace" => {
                 self.query.pop();
                 self.after_query_edit();
@@ -255,7 +276,7 @@ pub(crate) fn searchable_dropdown_popup<Leading, Select>(
 ) -> AnyElement
 where
     Leading: Fn(&str, &ThemeColors) -> Option<AnyElement> + Clone + 'static,
-    Select: Fn(String, &mut App) + Clone + 'static,
+    Select: Fn(DropdownChoice, &mut App) + Clone + 'static,
 {
     let options = state.options.clone();
     let active_index = state.selected_index.min(options.len().saturating_sub(1));
@@ -299,7 +320,7 @@ where
                         .h(DROPDOWN_OPTION_ROW_HEIGHT)
                         .px_2()
                         .py_1()
-                        .rounded(px(3.))
+                        .rounded(crate::ui_tokens::RADIUS_ROW)
                         .cursor_pointer()
                         .overflow_hidden()
                         .whitespace_nowrap()
@@ -314,7 +335,15 @@ where
                                 })
                                 .child(value.clone()),
                         )
-                        .on_click(move |_, _, cx| on_select(value.clone(), cx))
+                        .on_click(move |_, _, cx| {
+                            on_select(
+                                DropdownChoice {
+                                    index,
+                                    value: value.clone(),
+                                },
+                                cx,
+                            );
+                        })
                 })
                 .collect::<Vec<_>>()
         },
@@ -340,7 +369,7 @@ where
                     .debug_selector(move || popup_selector.clone())
                     .min_w(px(180.))
                     .max_w(px(560.))
-                    .rounded(px(4.))
+                    .rounded(crate::ui_tokens::RADIUS_CONTROL)
                     .border_1()
                     .border_color(colors.border_focused)
                     .bg(colors.elevated_surface_background)
@@ -359,7 +388,21 @@ where
                                 .py_1()
                                 .text_xs()
                                 .text_color(colors.text_muted)
-                                .child(format!("Search: {query}")),
+                                .flex()
+                                .items_center()
+                                .child("Search: ")
+                                // The query is typed at its end, so that is
+                                // where its caret is.
+                                .child(
+                                    crate::text_edit_ui::field_text_run(
+                                        query.clone().into(),
+                                        SharedString::default(),
+                                        false,
+                                        None,
+                                        &colors,
+                                    )
+                                    .text_color(colors.text),
+                                ),
                         )
                     })
                     .child(if no_matches {
@@ -384,42 +427,6 @@ where
     .into_any_element()
 }
 
-fn fuzzy_score(candidate: &str, query: &str) -> Option<i32> {
-    let candidate = candidate.to_lowercase();
-    let query = query.to_lowercase();
-    if query.is_empty() {
-        return Some(0);
-    }
-
-    let mut characters = query.chars();
-    let mut wanted = characters.next()?;
-    let mut score = 0;
-    let mut previous_match = None;
-    for (index, character) in candidate.char_indices() {
-        if character != wanted {
-            continue;
-        }
-        score += 10;
-        if previous_match.is_some_and(|previous| previous + character.len_utf8() == index) {
-            score += 8;
-        }
-        if index == 0
-            || candidate[..index]
-                .chars()
-                .next_back()
-                .is_some_and(|previous| matches!(previous, ' ' | ':' | '_' | '-'))
-        {
-            score += 5;
-        }
-        previous_match = Some(index);
-        match characters.next() {
-            Some(next) => wanted = next,
-            None => return Some(score - candidate.len() as i32 / 8),
-        }
-    }
-    None
-}
-
 pub(crate) fn fuzzy_match_index(options: &[String], query: &str) -> Option<usize> {
     if query.is_empty() {
         return (!options.is_empty()).then_some(0);
@@ -427,7 +434,9 @@ pub(crate) fn fuzzy_match_index(options: &[String], query: &str) -> Option<usize
     options
         .iter()
         .enumerate()
-        .filter_map(|(index, option)| fuzzy_score(option, query).map(|score| (index, score)))
+        .filter_map(|(index, option)| {
+            crate::fuzzy_match::score_ignoring_case(option, query).map(|score| (index, score))
+        })
         .max_by(|(left_index, left_score), (right_index, right_score)| {
             left_score
                 .cmp(right_score)
@@ -443,7 +452,9 @@ pub(crate) fn fuzzy_match_indices(options: &[String], query: &str) -> Vec<usize>
     options
         .iter()
         .enumerate()
-        .filter_map(|(index, option)| fuzzy_score(option, query).map(|_| index))
+        .filter_map(|(index, option)| {
+            crate::fuzzy_match::score_ignoring_case(option, query).map(|_| index)
+        })
         .collect()
 }
 

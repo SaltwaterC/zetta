@@ -16,6 +16,9 @@ use std::time::Duration;
 
 const VALIDATION_DEBOUNCE: Duration = Duration::from_millis(75);
 
+/// The source option that runs a command of the pane's own.
+const DIRECT_COMMAND_LABEL: &str = "Direct command";
+
 /// The pane-template form the editor is currently editing.
 ///
 /// The same editor serves the Templates page, which edits the user
@@ -38,7 +41,7 @@ pub(crate) fn templates_mut(editor: &mut SettingsEditor) -> &mut PaneTemplatesFo
     &mut editor.configuration.pane_templates
 }
 
-fn mark_templates_dirty(editor: &mut SettingsEditor) {
+pub(crate) fn mark_templates_dirty(editor: &mut SettingsEditor) {
     if editing_project(editor) {
         mark_project_dirty(editor);
     } else {
@@ -145,9 +148,6 @@ pub(crate) fn pane_template_text_mut(
                 PaneTemplateNodeField::OverlayText => {
                     pane.overlay.as_mut().map(|overlay| &mut overlay.text)
                 }
-                PaneTemplateNodeField::OverlayOpacity => {
-                    pane.overlay.as_mut().map(|overlay| &mut overlay.opacity)
-                }
                 PaneTemplateNodeField::OverlayColor => {
                     pane.overlay.as_mut().map(|overlay| &mut overlay.color)
                 }
@@ -179,6 +179,48 @@ fn selected_pane(
         PaneTemplateNodeForm::Pane(pane) => Some(pane),
         PaneTemplateNodeForm::Split { .. } => None,
     }
+}
+
+/// The opacity of the selected pane's overlay, from 0 to 1, as the overlay
+/// slider shows it: the default while the template leaves it unset.
+pub(crate) fn overlay_opacity(editor: &SettingsEditor, path: PaneTemplateNodePath) -> Option<f32> {
+    let overlay = selected_pane(editor, path)?.overlay.as_ref()?;
+    Some(
+        overlay
+            .opacity
+            .text
+            .trim()
+            .parse::<u8>()
+            .map_or(crate::pane::DEFAULT_OVERLAY_OPACITY, |percent| {
+                f32::from(percent.min(100)) / 100.
+            }),
+    )
+}
+
+/// Sets the selected pane's overlay opacity from the slider. The default is
+/// stored as unset, so a template that has only ever been slid back to the
+/// default does not write an `opacity` it never chose.
+pub(crate) fn set_overlay_opacity(
+    editor: &mut SettingsEditor,
+    path: PaneTemplateNodePath,
+    opacity: f32,
+) -> bool {
+    if !templates(editor).selected_is_editable() {
+        return false;
+    }
+    let percent = (opacity.clamp(0., 1.) * 100.).round() as u8;
+    let default = (crate::pane::DEFAULT_OVERLAY_OPACITY * 100.).round() as u8;
+    let Some(overlay) = selected_pane_mut(editor, path).and_then(|pane| pane.overlay.as_mut())
+    else {
+        return false;
+    };
+    overlay.opacity = TextField::new(if percent == default {
+        String::new()
+    } else {
+        percent.to_string()
+    });
+    mark_templates_dirty(editor);
+    true
 }
 
 fn selected_pane_mut(
@@ -252,22 +294,27 @@ pub(crate) fn pane_template_dropdown_options(
         }
         SettingsDropdown::PaneTemplateSource(_) => {
             let selected = match selected_pane(editor, path).map(|pane| &pane.source) {
-                Some(PaneTemplateSourceForm::Inherit) | None => "Inherited".to_owned(),
+                Some(PaneTemplateSourceForm::Inherit) | None => INHERIT_LABEL.to_owned(),
                 Some(PaneTemplateSourceForm::Profile(profile)) => profile.clone(),
-                Some(PaneTemplateSourceForm::Command(_)) => "Direct command".to_owned(),
+                Some(PaneTemplateSourceForm::Command(_)) => DIRECT_COMMAND_LABEL.to_owned(),
             };
-            let mut options = vec!["Inherited".to_owned()];
-            options.extend(templates(editor).available_profiles.iter().cloned());
-            options.push("Direct command".to_owned());
-            options.sort_by_key(|option| option.to_ascii_lowercase());
-            options.dedup();
+            // Inherit first and Direct command last, around the profiles in
+            // order: the two are recognised by position when chosen, so a
+            // profile named like either is still a profile.
+            let mut profiles = templates(editor).available_profiles.to_vec();
+            profiles.sort_by_key(|option| option.to_ascii_lowercase());
+            profiles.dedup();
+            let options = std::iter::once(INHERIT_LABEL.to_owned())
+                .chain(profiles)
+                .chain(std::iter::once(DIRECT_COMMAND_LABEL.to_owned()))
+                .collect::<Vec<_>>();
             (selected, options.into())
         }
         SettingsDropdown::PaneTemplateTheme(_) => {
             let selected = selected_pane(editor, path)
                 .and_then(|pane| pane.theme.clone())
-                .unwrap_or_else(|| "Use profile/application theme".to_owned());
-            let options = std::iter::once("Use profile/application theme".to_owned())
+                .unwrap_or_else(|| INHERIT_LABEL.to_owned());
+            let options = std::iter::once(INHERIT_LABEL.to_owned())
                 .chain(editor.themes.iter().cloned())
                 .collect::<Vec<_>>();
             (selected, options.into())
@@ -275,8 +322,8 @@ pub(crate) fn pane_template_dropdown_options(
         SettingsDropdown::PaneTemplateDarkTheme(_) => {
             let selected = selected_pane(editor, path)
                 .and_then(|pane| pane.dark_theme.clone())
-                .unwrap_or_else(|| "Use profile/application theme".to_owned());
-            let options = std::iter::once("Use profile/application theme".to_owned())
+                .unwrap_or_else(|| INHERIT_LABEL.to_owned());
+            let options = std::iter::once(INHERIT_LABEL.to_owned())
                 .chain(editor.themes.iter().cloned())
                 .collect::<Vec<_>>();
             (selected, options.into())
@@ -295,8 +342,10 @@ pub(crate) fn pane_template_dropdown_options(
 pub(crate) fn set_pane_template_dropdown(
     editor: &mut SettingsEditor,
     dropdown: SettingsDropdown,
-    value: &str,
+    choice: &DropdownChoice,
 ) -> bool {
+    let value = choice.value.as_str();
+    let unset = choice.index == 0;
     let (SettingsDropdown::PaneTemplateAxis(path)
     | SettingsDropdown::PaneTemplateSource(path)
     | SettingsDropdown::PaneTemplateTheme(path)
@@ -317,12 +366,13 @@ pub(crate) fn set_pane_template_dropdown(
             })
             .is_ok(),
         SettingsDropdown::PaneTemplateSource(_) => {
+            let last = pane_template_dropdown_options(editor, dropdown).1.len() - 1;
             let Some(pane) = selected_pane_mut(editor, path) else {
                 return false;
             };
-            pane.source = if value == "Inherited" {
+            pane.source = if unset {
                 PaneTemplateSourceForm::Inherit
-            } else if value == "Direct command" {
+            } else if choice.index == last {
                 PaneTemplateSourceForm::Command(PaneTemplateCommandForm {
                     program: TextField::default(),
                     args: Vec::new(),
@@ -336,14 +386,14 @@ pub(crate) fn set_pane_template_dropdown(
             let Some(pane) = selected_pane_mut(editor, path) else {
                 return false;
             };
-            pane.theme = (value != "Use profile/application theme").then(|| value.to_owned());
+            pane.theme = (!unset).then(|| value.to_owned());
             true
         }
         SettingsDropdown::PaneTemplateDarkTheme(_) => {
             let Some(pane) = selected_pane_mut(editor, path) else {
                 return false;
             };
-            pane.dark_theme = (value != "Use profile/application theme").then(|| value.to_owned());
+            pane.dark_theme = (!unset).then(|| value.to_owned());
             true
         }
         SettingsDropdown::PaneTemplateOverlaySize(_) => {
@@ -353,9 +403,7 @@ pub(crate) fn set_pane_template_dropdown(
             let Some(overlay) = pane.overlay.as_mut() else {
                 return false;
             };
-            overlay.size = (value != "Default")
-                .then(|| overlay_size_from_label(value))
-                .flatten();
+            overlay.size = (!unset).then(|| overlay_size_from_label(value)).flatten();
             true
         }
         _ => unreachable!(),
@@ -501,8 +549,10 @@ pub(crate) fn pane_template_controls(editor: &SettingsEditor) -> Vec<SettingsCon
     let template_index = pane_templates.selected_template;
     let selected_path = pane_templates.selected_node;
     let mut tree_controls = Vec::new();
+    let mut detail_controls = Vec::new();
     add_node_controls_with_template(
         &mut tree_controls,
+        &mut detail_controls,
         &template.node,
         PaneTemplateNodePath::ROOT,
         editable,
@@ -510,6 +560,7 @@ pub(crate) fn pane_template_controls(editor: &SettingsEditor) -> Vec<SettingsCon
         selected_path,
     );
     controls.extend(tree_controls);
+    controls.extend(detail_controls);
     controls
 }
 
@@ -532,28 +583,36 @@ fn add_global_environment_controls(
     controls.push(SettingsControl::AddPaneTemplateGlobalEnvironment);
 }
 
+/// The layout preview's nodes, in tree order, into `nodes`; and the selected
+/// node's detail form into `details`.
+///
+/// Kept apart because the page draws them apart: the whole preview, then the
+/// form of the node selected in it underneath. Interleaving the form into the
+/// tree walk sent Tab from the last detail field back up into the preview.
 fn add_node_controls_with_template(
-    controls: &mut Vec<SettingsControl>,
+    nodes: &mut Vec<SettingsControl>,
+    details: &mut Vec<SettingsControl>,
     node: &PaneTemplateNodeForm,
     path: PaneTemplateNodePath,
     editable: bool,
     template_index: usize,
     selected_path: Option<PaneTemplateNodePath>,
 ) {
-    controls.push(SettingsControl::SelectPaneTemplateNode(path));
+    nodes.push(SettingsControl::SelectPaneTemplateNode(path));
     match node {
         PaneTemplateNodeForm::Split { first, second, .. } => {
             if editable && selected_path == Some(path) {
-                controls.extend([
+                details.extend([
                     SettingsControl::Dropdown(SettingsDropdown::PaneTemplateAxis(path)),
                     SettingsControl::SwapPaneTemplateChildren(path),
                 ]);
                 if !path.is_root() {
-                    controls.push(SettingsControl::RemovePaneTemplateNode(path));
+                    details.push(SettingsControl::RemovePaneTemplateNode(path));
                 }
             }
             add_node_controls_with_template(
-                controls,
+                nodes,
+                details,
                 first,
                 path.child(false).unwrap_or(path),
                 editable,
@@ -561,7 +620,8 @@ fn add_node_controls_with_template(
                 selected_path,
             );
             add_node_controls_with_template(
-                controls,
+                nodes,
+                details,
                 second,
                 path.child(true).unwrap_or(path),
                 editable,
@@ -573,14 +633,14 @@ fn add_node_controls_with_template(
             if !editable || selected_path != Some(path) {
                 return;
             }
-            controls.extend([
+            details.extend([
                 SettingsControl::SplitPaneTemplate(path, PaneSplitAxis::Horizontal),
                 SettingsControl::SplitPaneTemplate(path, PaneSplitAxis::Vertical),
             ]);
             if !path.is_root() {
-                controls.push(SettingsControl::RemovePaneTemplateNode(path));
+                details.push(SettingsControl::RemovePaneTemplateNode(path));
             }
-            controls.extend([
+            details.extend([
                 SettingsControl::Input(SettingsInput::PaneTemplate(PaneTemplateTextField::Node(
                     template_index,
                     path,
@@ -591,7 +651,7 @@ fn add_node_controls_with_template(
                 SettingsControl::Dropdown(SettingsDropdown::PaneTemplateDarkTheme(path)),
             ]);
             if let PaneTemplateSourceForm::Command(command) = &pane.source {
-                controls.push(SettingsControl::Input(SettingsInput::PaneTemplate(
+                details.push(SettingsControl::Input(SettingsInput::PaneTemplate(
                     PaneTemplateTextField::Node(
                         template_index,
                         path,
@@ -599,7 +659,7 @@ fn add_node_controls_with_template(
                     ),
                 )));
                 for argument in 0..command.args.len() {
-                    controls.extend([
+                    details.extend([
                         SettingsControl::Input(SettingsInput::PaneTemplate(
                             PaneTemplateTextField::Node(
                                 template_index,
@@ -610,10 +670,10 @@ fn add_node_controls_with_template(
                         SettingsControl::RemovePaneTemplateArgument(path, argument),
                     ]);
                 }
-                controls.push(SettingsControl::AddPaneTemplateArgument(path));
+                details.push(SettingsControl::AddPaneTemplateArgument(path));
             }
             for environment in 0..pane.environment.len() {
-                controls.extend([
+                details.extend([
                     SettingsControl::Input(SettingsInput::PaneTemplate(
                         PaneTemplateTextField::Node(
                             template_index,
@@ -631,10 +691,10 @@ fn add_node_controls_with_template(
                     SettingsControl::RemovePaneTemplateEnvironment(path, environment),
                 ]);
             }
-            controls.push(SettingsControl::AddPaneTemplateEnvironment(path));
-            controls.push(SettingsControl::TogglePaneTemplateOverlay(path));
+            details.push(SettingsControl::AddPaneTemplateEnvironment(path));
+            details.push(SettingsControl::TogglePaneTemplateOverlay(path));
             if pane.overlay.is_some() {
-                controls.extend([
+                details.extend([
                     SettingsControl::Input(SettingsInput::PaneTemplate(
                         PaneTemplateTextField::Node(
                             template_index,
@@ -643,13 +703,7 @@ fn add_node_controls_with_template(
                         ),
                     )),
                     SettingsControl::Dropdown(SettingsDropdown::PaneTemplateOverlaySize(path)),
-                    SettingsControl::Input(SettingsInput::PaneTemplate(
-                        PaneTemplateTextField::Node(
-                            template_index,
-                            path,
-                            PaneTemplateNodeField::OverlayOpacity,
-                        ),
-                    )),
+                    SettingsControl::Opacity(OpacityTarget::PaneTemplateOverlay(path)),
                     SettingsControl::Input(SettingsInput::PaneTemplate(
                         PaneTemplateTextField::Node(
                             template_index,
@@ -659,7 +713,7 @@ fn add_node_controls_with_template(
                     )),
                 ]);
             }
-            add_stack_controls(controls, pane, path, template_index);
+            add_stack_controls(details, pane, path, template_index);
         }
     }
 }
@@ -724,7 +778,7 @@ pub(crate) fn activate_pane_template_control(
             invalidate_controls_cache(editor);
         }
         Err(error) => {
-            editor.message = Some((true, format!("Not changed: {error:#}")));
+            editor.message = Some((Tone::Error, format!("Not changed: {error:#}")));
         }
     }
     if schedule_validation {

@@ -9,36 +9,37 @@ use super::*;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ConfigTextField {
-    WorkingDirectory,
-    FontSize,
-    ScrollHistory,
-    SessionRingBytes,
-    RemoteSessionKeepAlive,
-    #[cfg(feature = "session-persistence")]
-    SessionPersistenceRecipients,
-    #[cfg(feature = "session-persistence")]
-    SessionPersistenceIdentity,
-    #[cfg(feature = "http-server")]
-    HttpServerPort,
-    #[cfg(feature = "tftp-server")]
-    TftpServerPort,
+    /// The field of a number or text setting; see `settings_table`.
+    Setting(ConfigSetting),
     ProfileName(usize),
     ProfileProgram(usize),
-    ProfileArguments(usize),
+    /// One argument of a profile: the profile, then the argument.
+    ProfileArgument(usize, usize),
 }
 
-#[derive(Clone, Debug)]
-pub struct ProfileForm {
-    pub name: TextField,
-    pub program: TextField,
-    pub arguments: TextField,
-    pub theme: Option<String>,
-    pub dark_theme: Option<String>,
-    /// An explicit configuration override. None means automatic inference.
-    pub icon: Option<ProfileIcon>,
-    pub automatic_icon: ProfileIcon,
-    pub hidden: bool,
-    pub detected: bool,
+/// A value the Configuration page cannot save, naming the field it is in so
+/// the dialog can take the keyboard there. Reported in the page's own words
+/// ("Font size must be…"), not the file's key names.
+#[derive(Debug)]
+pub(crate) struct InvalidField {
+    pub(crate) field: ConfigTextField,
+    message: String,
+}
+
+impl std::fmt::Display for InvalidField {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for InvalidField {}
+
+fn invalid(field: ConfigTextField, message: impl Into<String>) -> anyhow::Error {
+    InvalidField {
+        field,
+        message: message.into(),
+    }
+    .into()
 }
 
 #[derive(Clone, Debug)]
@@ -73,11 +74,14 @@ pub struct ConfigurationForm {
     pub remote_session_keep_alive: TextField,
     /// Whether a Zosh pane may forward the local SSH agent.
     pub remote_session_forward_agent: bool,
+    #[cfg(feature = "session-persistence")]
     pub session_persistence_recipients: TextField,
+    #[cfg(feature = "session-persistence")]
     pub session_persistence_identity: TextField,
     /// Whether background sessions are protected with the configured age key
     /// instead of a secret typed into a dialog. Only meaningful, and only
     /// offered, alongside a recipient and an effective identity.
+    #[cfg(feature = "session-persistence")]
     pub session_persistence_auto_protect: bool,
     #[cfg(feature = "http-server")]
     pub http_server_port: TextField,
@@ -107,7 +111,6 @@ impl ConfigurationForm {
             .as_object()
             .context("configuration root must be an object")?
             .clone();
-        let string = |name: &str| root.get(name).and_then(Value::as_str).map(str::to_owned);
         let configured_profiles = root
             .get("profiles")
             .and_then(Value::as_array)
@@ -139,17 +142,8 @@ impl ConfigurationForm {
                             .and_then(Value::as_str)
                             .unwrap_or_default(),
                     ),
-                    arguments: TextField::new(
-                        configured
-                            .and_then(|profile| profile.get("args"))
-                            .and_then(Value::as_array)
-                            .map(|args| {
-                                args.iter()
-                                    .filter_map(Value::as_str)
-                                    .collect::<Vec<_>>()
-                                    .join(", ")
-                            })
-                            .unwrap_or_default(),
+                    arguments: profile_arguments_from_json(
+                        configured.and_then(|profile| profile.get("args")),
                     ),
                     theme: configured
                         .and_then(|profile| profile.get("theme"))
@@ -175,293 +169,91 @@ impl ConfigurationForm {
             })
             .collect::<Result<Vec<_>>>()?;
         let pane_templates = PaneTemplatesForm::load(root.get("pane_split_templates"), config)?;
-        let session_ring_bytes = root
-            .get("sessions")
-            .and_then(Value::as_object)
-            .and_then(|sessions| sessions.get("ring_bytes"))
-            .and_then(Value::as_u64)
-            .and_then(|bytes| usize::try_from(bytes).ok())
-            .unwrap_or(config.sessions.ring_bytes);
-        let session_persistence_recipients = root
-            .get("sessions")
-            .and_then(Value::as_object)
-            .and_then(|sessions| sessions.get("persistence"))
-            .and_then(Value::as_object)
-            .and_then(|persistence| persistence.get("recipients"))
-            .and_then(Value::as_array)
-            .map_or_else(
-                || config.sessions.persistence.recipients.join(", "),
-                |recipients| {
-                    recipients
-                        .iter()
-                        .filter_map(Value::as_str)
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                },
-            );
-        let session_persistence_identity = root
-            .get("sessions")
-            .and_then(Value::as_object)
-            .and_then(|sessions| sessions.get("persistence"))
-            .and_then(Value::as_object)
-            .and_then(|persistence| persistence.get("identity"))
-            .and_then(Value::as_str)
-            .unwrap_or_else(|| {
-                config
-                    .sessions
-                    .persistence
-                    .identity
-                    .as_deref()
-                    .and_then(Path::to_str)
-                    .unwrap_or_default()
-            });
-        Ok(Self {
-            default_profile: config.profiles[config.default_profile].name.clone(),
-            new_tab_profile: config.new_tab_profile,
-            working_directory: TextField::new(
-                string("working_directory").unwrap_or_else(|| "~".to_owned()),
-            ),
-            working_directory_scope: config.working_directory_scope,
-            theme: config
-                .theme
-                .clone()
-                .unwrap_or_else(|| crate::ZETTA_DEFAULT_THEME.to_owned()),
-            dark_theme: config
-                .dark_theme
-                .clone()
-                .unwrap_or_else(|| crate::ZETTA_DEFAULT_DARK_THEME.to_owned()),
-            default_tab_icon: config.default_tab_icon,
-            terminal_font_size: TextField::new(
-                config.terminal_font_size.unwrap_or(14.).to_string(),
-            ),
-            terminal_font_family: config.terminal_font_family.clone(),
-            max_scroll_history_lines: TextField::new(
-                if config.max_scroll_history_lines == terminal::MAX_SCROLL_HISTORY_LINES {
-                    "Max".to_owned()
-                } else {
-                    config.max_scroll_history_lines.to_string()
-                },
-            ),
-            inactive_pane_opacity: config.inactive_pane_opacity,
-            compact_mode: config.compact_mode,
-            hide_pane_size: config.hide_pane_size,
-            hide_title_bar_labels: config.hide_title_bar_labels,
-            hide_title_bar_buttons: config.hide_title_bar_buttons,
-            #[cfg(target_os = "macos")]
-            hide_title_bar_menus: config.hide_title_bar_menus,
-            pane_controls_position: config.pane_controls_position,
-            pane_controls_hidden_by_default: config.pane_controls_hidden_by_default,
-            session_retention: config.sessions.retention,
-            session_ring_bytes: TextField::new(session_ring_bytes.to_string()),
-            remote_session_protocol: config.sessions.remote.protocol,
-            remote_session_keep_alive: TextField::new(
-                config
-                    .sessions
-                    .remote
-                    .keep_alive_ms
-                    .map(|interval| interval.to_string())
-                    .unwrap_or_default(),
-            ),
-            remote_session_forward_agent: config.sessions.remote.forward_agent,
-            session_persistence_recipients: TextField::new(session_persistence_recipients),
-            session_persistence_identity: TextField::new(session_persistence_identity),
-            session_persistence_auto_protect: config.sessions.persistence.auto_protect,
-            #[cfg(feature = "http-server")]
-            http_server_port: TextField::new(config.http_server_port.to_string()),
-            #[cfg(feature = "tftp-server")]
-            tftp_server_port: TextField::new(config.tftp_server_port.to_string()),
+        // Every scalar starts blank and is then filled from the file by the
+        // settings table, so how a setting is read lives in one place.
+        let mut form = Self {
             root,
+            default_profile: String::new(),
+            new_tab_profile: NewTabProfile::default(),
+            working_directory: TextField::default(),
+            working_directory_scope: WorkingDirectoryScope::default(),
+            theme: String::new(),
+            dark_theme: String::new(),
+            default_tab_icon: None,
+            terminal_font_size: TextField::default(),
+            terminal_font_family: String::new(),
+            max_scroll_history_lines: TextField::default(),
+            inactive_pane_opacity: crate::config::DEFAULT_INACTIVE_PANE_OPACITY,
+            compact_mode: false,
+            hide_pane_size: false,
+            hide_title_bar_labels: false,
+            hide_title_bar_buttons: false,
+            #[cfg(target_os = "macos")]
+            hide_title_bar_menus: false,
+            pane_controls_position: PaneControlsPosition::default(),
+            pane_controls_hidden_by_default: false,
+            session_retention: SessionRetention::default(),
+            session_ring_bytes: TextField::default(),
+            remote_session_protocol: crate::config::RemoteSessionProtocol::default(),
+            remote_session_keep_alive: TextField::default(),
+            remote_session_forward_agent: false,
+            #[cfg(feature = "session-persistence")]
+            session_persistence_recipients: TextField::default(),
+            #[cfg(feature = "session-persistence")]
+            session_persistence_identity: TextField::default(),
+            #[cfg(feature = "session-persistence")]
+            session_persistence_auto_protect: false,
+            #[cfg(feature = "http-server")]
+            http_server_port: TextField::default(),
+            #[cfg(feature = "tftp-server")]
+            tftp_server_port: TextField::default(),
             profiles,
             pane_templates,
-        })
+        };
+        for &setting in ALL_SETTINGS {
+            let value = get_path(&form.root, setting.spec().key).cloned();
+            setting.decode(&mut form, value.as_ref(), config);
+        }
+        Ok(form)
     }
 
     pub fn text_mut(&mut self, field: ConfigTextField) -> Option<&mut TextField> {
         match field {
-            ConfigTextField::WorkingDirectory => Some(&mut self.working_directory),
-            ConfigTextField::FontSize => Some(&mut self.terminal_font_size),
-            ConfigTextField::ScrollHistory => Some(&mut self.max_scroll_history_lines),
-            ConfigTextField::SessionRingBytes => Some(&mut self.session_ring_bytes),
-            ConfigTextField::RemoteSessionKeepAlive => Some(&mut self.remote_session_keep_alive),
-            #[cfg(feature = "session-persistence")]
-            ConfigTextField::SessionPersistenceRecipients => {
-                Some(&mut self.session_persistence_recipients)
-            }
-            #[cfg(feature = "session-persistence")]
-            ConfigTextField::SessionPersistenceIdentity => {
-                Some(&mut self.session_persistence_identity)
-            }
-            #[cfg(feature = "http-server")]
-            ConfigTextField::HttpServerPort => Some(&mut self.http_server_port),
-            #[cfg(feature = "tftp-server")]
-            ConfigTextField::TftpServerPort => Some(&mut self.tftp_server_port),
+            ConfigTextField::Setting(setting) => setting.text_mut(self),
             ConfigTextField::ProfileName(index) => {
                 self.profiles.get_mut(index).map(|p| &mut p.name)
             }
             ConfigTextField::ProfileProgram(index) => {
                 self.profiles.get_mut(index).map(|p| &mut p.program)
             }
-            ConfigTextField::ProfileArguments(index) => {
-                self.profiles.get_mut(index).map(|p| &mut p.arguments)
-            }
+            ConfigTextField::ProfileArgument(index, argument) => self
+                .profiles
+                .get_mut(index)
+                .and_then(|p| p.arguments.get_mut(argument)),
         }
+    }
+
+    /// Why `setting`'s field cannot be saved as it stands, if it cannot: what
+    /// the page checks as the keyboard leaves a field, as well as on Save.
+    pub(crate) fn check(&self, setting: ConfigSetting) -> Option<String> {
+        setting.encode(self).err()
     }
 
     pub fn to_json(&self) -> Result<String> {
         let mut root = self.root.clone();
-        root.insert("default_profile".into(), json!(self.default_profile));
-        root.insert(
-            "new_tab_profile".into(),
-            json!(self.new_tab_profile.as_str()),
-        );
-        root.insert(
-            "working_directory".into(),
-            json!(self.working_directory.text),
-        );
-        root.insert(
-            "working_directory_scope".into(),
-            json!(self.working_directory_scope.as_str()),
-        );
-        root.insert("theme".into(), json!(self.theme));
-        root.insert("dark_theme".into(), json!(self.dark_theme));
-        let default_tab_icon = self.default_tab_icon.map(|icon| {
-            let name: &'static str = icon.into();
-            Value::String(name.to_owned())
-        });
-        root.insert(
-            "default_tab_icon".into(),
-            default_tab_icon.unwrap_or(Value::Null),
-        );
-        let terminal_font_size = self
-            .terminal_font_size
-            .text
-            .trim()
-            .parse::<f32>()
-            .context("terminal font size must be a number")?;
-        root.insert("terminal_font_size".into(), json!(terminal_font_size));
-        root.insert(
-            "terminal_font_family".into(),
-            json!(self.terminal_font_family),
-        );
-        let scroll_history = if self
-            .max_scroll_history_lines
-            .text
-            .trim()
-            .eq_ignore_ascii_case("max")
-        {
-            terminal::MAX_SCROLL_HISTORY_LINES as u64
-        } else {
-            self.max_scroll_history_lines
-                .text
-                .trim()
-                .parse::<u64>()
-                .context("scrollback history must be a non-negative integer or Max")?
-        };
-        root.insert("max_scroll_history_lines".into(), json!(scroll_history));
-        let inactive_pane_opacity = format!("{:.2}", self.inactive_pane_opacity)
-            .parse::<f64>()
-            .context("formatting inactive pane opacity")?;
-        root.insert("inactive_pane_opacity".into(), json!(inactive_pane_opacity));
-        root.insert("compact_mode".into(), json!(self.compact_mode));
-        root.insert("hide_pane_size".into(), json!(self.hide_pane_size));
-        root.insert(
-            "hide_title_bar_labels".into(),
-            json!(self.hide_title_bar_labels),
-        );
-        root.insert(
-            "hide_title_bar_buttons".into(),
-            json!(self.hide_title_bar_buttons),
-        );
-        #[cfg(target_os = "macos")]
-        root.insert(
-            "hide_title_bar_menus".into(),
-            json!(self.hide_title_bar_menus),
-        );
-        root.insert(
-            "pane_controls_position".into(),
-            json!(self.pane_controls_position.as_str()),
-        );
-        root.insert(
-            "pane_controls_hidden_by_default".into(),
-            json!(self.pane_controls_hidden_by_default),
-        );
-        let session_ring_bytes = self
-            .session_ring_bytes
-            .text
-            .trim()
-            .parse::<usize>()
-            .context("session ring bytes must be a positive integer")?;
-        anyhow::ensure!(
-            (4 * 1024..=crate::config::MAX_SESSION_RING_BYTES).contains(&session_ring_bytes),
-            "session ring bytes must be between 4096 and {}",
-            crate::config::MAX_SESSION_RING_BYTES
-        );
-        let recipients = self
-            .session_persistence_recipients
-            .text
-            .split(',')
-            .map(str::trim)
-            .filter(|recipient| !recipient.is_empty())
-            .map(str::to_owned)
-            .collect::<Vec<_>>();
-        let identity = self.session_persistence_identity.text.trim();
-        let remote_keep_alive = self.remote_session_keep_alive.text.trim();
-        let remote_keep_alive = (!remote_keep_alive.is_empty())
-            .then(|| {
-                let interval = remote_keep_alive.parse::<u64>().context(
-                    "the remote keep-alive interval must be a whole number of milliseconds",
-                )?;
-                anyhow::ensure!(
-                    (crate::config::REMOTE_KEEP_ALIVE_MIN_MS
-                        ..=crate::config::REMOTE_KEEP_ALIVE_MAX_MS)
-                        .contains(&interval),
-                    "the remote keep-alive interval must be between {} and {} milliseconds",
-                    crate::config::REMOTE_KEEP_ALIVE_MIN_MS,
-                    crate::config::REMOTE_KEEP_ALIVE_MAX_MS
-                );
-                Ok(interval)
-            })
-            .transpose()?;
-        root.insert(
-            "sessions".into(),
-            json!({
-                "retention": self.session_retention.as_str(),
-                "ring_bytes": session_ring_bytes,
-                "remote": {
-                    "protocol": self.remote_session_protocol.name(),
-                    "keep_alive_ms": remote_keep_alive,
-                    "forward_agent": self.remote_session_forward_agent,
-                },
-                "persistence": {
-                    "recipients": recipients,
-                    "identity": (!identity.is_empty()).then_some(identity),
-                    "auto_protect": self.session_persistence_auto_protect,
-                },
-            }),
-        );
-        #[cfg(feature = "http-server")]
-        {
-            let http_server_port = self
-                .http_server_port
-                .text
-                .trim()
-                .parse::<u16>()
-                .ok()
-                .filter(|port| *port != 0)
-                .context("HTTP server port must be an integer from 1 to 65535")?;
-            root.insert("http_server_port".into(), json!(http_server_port));
+        for &setting in ALL_SETTINGS {
+            setting
+                .write(self, &mut root)
+                .map_err(|message| invalid(ConfigTextField::Setting(setting), message))?;
         }
-        #[cfg(feature = "tftp-server")]
-        {
-            let tftp_server_port = self
-                .tftp_server_port
-                .text
-                .trim()
-                .parse::<u16>()
-                .ok()
-                .filter(|port| *port != 0)
-                .context("TFTP server port must be an integer from 1 to 65535")?;
-            root.insert("tftp_server_port".into(), json!(tftp_server_port));
+        if let Err(problem) = check_profiles(&self.profiles) {
+            let index = problem.profile();
+            let field = if problem.is_in_program() {
+                ConfigTextField::ProfileProgram(index)
+            } else {
+                ConfigTextField::ProfileName(index)
+            };
+            return Err(invalid(field, problem.to_string()));
         }
         if !self.profiles.is_empty() || root.contains_key("profiles") {
             root.insert(
@@ -476,41 +268,7 @@ impl ConfigurationForm {
                                 || profile.icon.is_some()
                                 || profile.hidden
                         })
-                        .map(|profile| {
-                            let mut value = Map::new();
-                            value.insert("name".into(), json!(profile.name.text));
-                            if !profile.program.text.trim().is_empty() {
-                                value.insert("program".into(), json!(profile.program.text));
-                                value.insert(
-                                    "args".into(),
-                                    Value::Array(
-                                        profile
-                                            .arguments
-                                            .text
-                                            .split(',')
-                                            .map(str::trim)
-                                            .filter(|arg| !arg.is_empty())
-                                            .map(|arg| json!(arg))
-                                            .collect(),
-                                    ),
-                                );
-                            }
-                            if let Some(theme) = &profile.theme {
-                                value.insert("theme".into(), json!(theme));
-                            }
-                            if let Some(dark_theme) = &profile.dark_theme {
-                                value.insert("dark_theme".into(), json!(dark_theme));
-                            }
-                            if let Some(icon) = &profile.icon
-                                && let Some(name) = icon.name()
-                            {
-                                value.insert("icon".into(), json!(name));
-                            }
-                            if profile.hidden {
-                                value.insert("hidden".into(), json!(true));
-                            }
-                            Value::Object(value)
-                        })
+                        .map(ProfileForm::to_entry)
                         .collect(),
                 ),
             );
@@ -524,101 +282,7 @@ impl ConfigurationForm {
         } else {
             root.remove("pane_split_templates");
         }
-        strip_default_configuration_values(&mut root, &self.profiles, &self.working_directory);
         serde_json::to_string_pretty(&Value::Object(root)).context("serializing configuration")
-    }
-}
-
-fn strip_matching_defaults(root: &mut Map<String, Value>, defaults: &[(&str, Value)]) {
-    for (key, default) in defaults {
-        if root.get(*key) == Some(default) {
-            root.remove(*key);
-        }
-    }
-}
-
-fn strip_default_configuration_values(
-    root: &mut Map<String, Value>,
-    profiles: &[ProfileForm],
-    working_directory: &TextField,
-) {
-    #[allow(
-        unused_mut,
-        reason = "the platform- and feature-gated pushes below are the only mutations"
-    )]
-    let mut defaults: Vec<(&str, Value)> = vec![
-        ("new_tab_profile", json!(NewTabProfile::default().as_str())),
-        (
-            "working_directory_scope",
-            json!(WorkingDirectoryScope::default().as_str()),
-        ),
-        ("theme", json!(crate::ZETTA_DEFAULT_THEME)),
-        ("dark_theme", json!(crate::ZETTA_DEFAULT_DARK_THEME)),
-        ("default_tab_icon", json!("terminal")),
-        (
-            "terminal_font_family",
-            json!(crate::config::DEFAULT_TERMINAL_FONT_FAMILY),
-        ),
-        (
-            "max_scroll_history_lines",
-            json!(terminal::MAX_SCROLL_HISTORY_LINES as u64),
-        ),
-        (
-            "inactive_pane_opacity",
-            json!(
-                format!("{:.2}", crate::config::DEFAULT_INACTIVE_PANE_OPACITY)
-                    .parse::<f64>()
-                    .unwrap()
-            ),
-        ),
-        ("compact_mode", json!(false)),
-        ("hide_pane_size", json!(true)),
-        ("hide_title_bar_labels", json!(false)),
-        ("hide_title_bar_buttons", json!(false)),
-        (
-            "pane_controls_position",
-            json!(PaneControlsPosition::default().as_str()),
-        ),
-        ("pane_controls_hidden_by_default", json!(false)),
-        (
-            "sessions",
-            json!({
-                "retention": SessionRetention::default().as_str(),
-                "ring_bytes": crate::config::DEFAULT_SESSION_RING_BYTES,
-                "remote": {
-                    "protocol": crate::config::RemoteSessionProtocol::default().name(),
-                    "keep_alive_ms": null,
-                    "forward_agent": false,
-                },
-                "persistence": {
-                    "recipients": [],
-                    "identity": null,
-                    "auto_protect": false,
-                },
-            }),
-        ),
-    ];
-    #[cfg(target_os = "macos")]
-    defaults.push(("hide_title_bar_menus", json!(true)));
-    #[cfg(feature = "http-server")]
-    defaults.push(("http_server_port", json!(crate::config::DEFAULT_HTTP_PORT)));
-    #[cfg(feature = "tftp-server")]
-    defaults.push((
-        "tftp_server_port",
-        json!(crate::config::DEFAULT_TFTP_SERVER_PORT),
-    ));
-    strip_matching_defaults(root, &defaults);
-
-    if root
-        .get("default_profile")
-        .and_then(Value::as_str)
-        .zip(profiles.first())
-        .is_some_and(|(name, first)| name.eq_ignore_ascii_case(&first.name.text))
-    {
-        root.remove("default_profile");
-    }
-    if matches!(working_directory.text.trim(), "~" | "~/") {
-        root.remove("working_directory");
     }
 }
 

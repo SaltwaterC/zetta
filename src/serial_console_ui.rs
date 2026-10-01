@@ -1,4 +1,6 @@
 use super::*;
+use crate::overlay_frame::PRIMARY_MODIFIER;
+use crate::text_edit_ui::field_box;
 
 /// The connection the prompt describes, or the message to show in its place.
 ///
@@ -43,58 +45,45 @@ impl Zetta {
         let colors = self.window_theme(cx).colors().clone();
         let handle = cx.entity().downgrade();
 
-        let field_row =
-            |label: &'static str, value: String, field: SerialField| -> gpui::AnyElement {
-                let selected = prompt.field == field;
-                let click_handle = handle.clone();
-                div()
-                    .id(("serial-field", field as usize))
-                    .w_full()
-                    .h_9()
-                    .px_3()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .rounded(px(4.))
-                    .border_1()
-                    .border_color(if selected {
-                        colors.border_focused
-                    } else {
-                        colors.border
-                    })
-                    .bg(colors.editor_background)
-                    .when(
-                        selected && field == SerialField::BaudRate && prompt.baud_rate.select_all,
-                        |row| row.bg(colors.element_selection_background),
-                    )
-                    .cursor_pointer()
-                    .child(
-                        Label::new(label)
-                            .size(LabelSize::Small)
-                            .color(Color::Custom(colors.text_muted)),
-                    )
-                    .child(
-                        Label::new(value)
-                            .size(LabelSize::Small)
-                            .color(Color::Custom(colors.text)),
-                    )
-                    .on_click(move |_, _, cx| {
-                        click_handle
-                            .update(cx, |this, cx| {
-                                if let Some(prompt) = this.serial_console.as_mut() {
-                                    let cycle =
-                                        prompt.field == field && field != SerialField::BaudRate;
-                                    prompt.field = field;
-                                    if cycle {
-                                        prompt.cycle_current_value(false);
-                                    }
-                                    cx.notify();
+        let field_row = |label: &'static str,
+                         value: gpui::AnyElement,
+                         field: SerialField|
+         -> gpui::AnyElement {
+            let selected = prompt.field == field;
+            let click_handle = handle.clone();
+            field_box(("serial-field", field as usize), selected, &colors)
+                .w_full()
+                .px_3()
+                .justify_between()
+                .cursor_pointer()
+                .child(
+                    Label::new(label)
+                        .size(LabelSize::Small)
+                        .color(Color::Custom(colors.text_muted)),
+                )
+                .child(value)
+                .on_click(move |_, _, cx| {
+                    click_handle
+                        .update(cx, |this, cx| {
+                            if let Some(prompt) = this.serial_console.as_mut() {
+                                let cycle = prompt.field == field && field != SerialField::BaudRate;
+                                prompt.field = field;
+                                if cycle {
+                                    prompt.cycle_current_value(false);
                                 }
-                            })
-                            .ok();
-                    })
-                    .into_any_element()
-            };
+                                cx.notify();
+                            }
+                        })
+                        .ok();
+                })
+                .into_any_element()
+        };
+        let text_value = |value: String| {
+            Label::new(value)
+                .size(LabelSize::Small)
+                .color(Color::Custom(colors.text))
+                .into_any_element()
+        };
 
         let device_value = if prompt.loading {
             "Scanning…".to_owned()
@@ -107,104 +96,152 @@ impl Zetta {
                 },
             )
         };
+        // The one field typed into, so it carries the caret every other field
+        // in Zetta draws rather than a `|` in its text.
         let baud_value = if prompt.field == SerialField::BaudRate {
-            prompt.baud_rate.caret_marker_display()
+            field_query_run(&prompt.baud_rate, None, &colors)
+                .text_sm()
+                .into_any_element()
         } else {
-            prompt.baud_rate.text.clone()
+            text_value(prompt.baud_rate.text.clone())
         };
-        let status = if prompt.connecting {
-            "Connecting…".to_owned()
+        let hints = if prompt.connecting {
+            "Connecting…".into()
         } else {
-            "Tab: next field · arrows: change · Enter: connect · Ctrl/Cmd-R: refresh · Esc: cancel"
-                .to_owned()
+            key_hints(&[
+                ("Tab", "next field"),
+                ("←→", "change"),
+                ("Enter", "connect"),
+                (&format!("{PRIMARY_MODIFIER}+R"), "refresh"),
+                ("Esc", "cancel"),
+            ])
         };
+        let can_connect = !prompt.loading && !prompt.devices.is_empty();
+        let refresh_handle = handle.clone();
+        let cancel_handle = handle.clone();
+        let connect_handle = handle.clone();
+        let error_color = self.window_theme(cx).status().error;
 
-        Some(
-            div()
-                .id("serial-console-overlay")
-                .absolute()
-                .inset_0()
-                .flex()
-                .items_center()
-                .justify_center()
-                .bg(transparent_black().opacity(0.24))
-                .track_focus(&self.serial_console_focus)
-                .child(
-                    div()
-                        .w(px(560.))
-                        .max_w(gpui::relative(0.9))
-                        .p_4()
-                        .flex()
-                        .flex_col()
-                        .gap_2()
-                        .rounded(px(8.))
-                        .border_1()
-                        .border_color(colors.border)
-                        .bg(colors.elevated_surface_background)
-                        .text_color(colors.text)
-                        .shadow_lg()
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .justify_between()
-                                .child(
-                                    Label::new("Open serial console")
-                                        .size(LabelSize::Large)
-                                        .color(Color::Custom(colors.text)),
-                                )
-                                .child(
-                                    Label::new(format!(
-                                        "{} · {} baud",
-                                        prompt.framing_label(),
-                                        prompt.baud_rate.text
-                                    ))
-                                    .size(LabelSize::Small)
-                                    .color(Color::Custom(colors.text_muted)),
-                                ),
+        let panel = dialog_panel("serial-console", DIALOG_WIDTH_MEDIUM, &colors)
+            .child(
+                h_flex()
+                    .justify_between()
+                    .child(dialog_title("Open serial console", &colors))
+                    .child(
+                        Label::new(format!(
+                            "{} · {} baud",
+                            prompt.framing_label(),
+                            prompt.baud_rate.text
+                        ))
+                        .size(LabelSize::Small)
+                        .color(Color::Custom(colors.text_muted)),
+                    ),
+            )
+            .child(
+                v_flex()
+                    .gap_2()
+                    .child(field_row(
+                        "Device",
+                        text_value(device_value),
+                        SerialField::Device,
+                    ))
+                    .child(field_row("Baud rate", baud_value, SerialField::BaudRate))
+                    .child(field_row(
+                        "Data bits",
+                        text_value(data_bits_label(prompt.data_bits).to_owned()),
+                        SerialField::DataBits,
+                    ))
+                    .child(field_row(
+                        "Parity",
+                        text_value(parity_label(prompt.parity).to_owned()),
+                        SerialField::Parity,
+                    ))
+                    .child(field_row(
+                        "Stop bits",
+                        text_value(stop_bits_label(prompt.stop_bits).to_owned()),
+                        SerialField::StopBits,
+                    ))
+                    .child(field_row(
+                        "Flow control",
+                        text_value(flow_control_label(prompt.flow_control).to_owned()),
+                        SerialField::FlowControl,
+                    )),
+            )
+            .when_some(prompt.error.as_ref(), |panel, error| {
+                panel.child(crate::ui_messages::error_message(
+                    error.clone(),
+                    error_color,
+                ))
+            })
+            .child(hint_line(hints, &colors))
+            // The prompt used to have no buttons at all, which left a mouse
+            // user no way to connect or to leave.
+            .child(
+                h_flex()
+                    .justify_between()
+                    .child(
+                        DialogButton::new(
+                            "refresh-serial-devices",
+                            "Refresh",
+                            ButtonRole::Secondary,
                         )
-                        .child(field_row("Device", device_value, SerialField::Device))
-                        .child(field_row("Baud rate", baud_value, SerialField::BaudRate))
-                        .child(field_row(
-                            "Data bits",
-                            data_bits_label(prompt.data_bits).to_owned(),
-                            SerialField::DataBits,
-                        ))
-                        .child(field_row(
-                            "Parity",
-                            parity_label(prompt.parity).to_owned(),
-                            SerialField::Parity,
-                        ))
-                        .child(field_row(
-                            "Stop bits",
-                            stop_bits_label(prompt.stop_bits).to_owned(),
-                            SerialField::StopBits,
-                        ))
-                        .child(field_row(
-                            "Flow control",
-                            flow_control_label(prompt.flow_control).to_owned(),
-                            SerialField::FlowControl,
-                        ))
-                        .when_some(prompt.error.as_ref(), |panel, error| {
-                            panel.child(
-                                div()
-                                    .px_2()
-                                    .text_sm()
-                                    .text_color(self.window_theme(cx).status().error)
-                                    .child(error.clone()),
+                        .loading(prompt.loading)
+                        .render(&colors, move |_, _, cx| {
+                            refresh_handle
+                                .update(cx, |this, cx| this.refresh_serial_devices(cx))
+                                .ok();
+                        }),
+                    )
+                    .child(
+                        dialog_buttons()
+                            .child(
+                                DialogButton::new(
+                                    "cancel-serial-console",
+                                    "Cancel",
+                                    ButtonRole::Secondary,
+                                )
+                                .key_tooltip("Cancel", SurfaceKey::Escape)
+                                .render(
+                                    &colors,
+                                    move |_, window, cx| {
+                                        cancel_handle
+                                            .update(cx, |this, cx| {
+                                                this.dismiss_serial_console(window, cx);
+                                            })
+                                            .ok();
+                                    },
+                                ),
                             )
-                        })
-                        .child(
-                            div()
-                                .pt_1()
-                                .text_xs()
-                                .text_color(colors.text_muted)
-                                .child(status),
-                        ),
-                )
-                .into_any_element(),
-        )
+                            .child(
+                                DialogButton::new(
+                                    "connect-serial-console",
+                                    "Connect",
+                                    ButtonRole::Primary,
+                                )
+                                .enabled(can_connect)
+                                .loading(prompt.connecting)
+                                .key_tooltip("Connect to the device", SurfaceKey::Enter)
+                                .render(
+                                    &colors,
+                                    move |_, _, cx| {
+                                        connect_handle
+                                            .update(cx, |this, cx| this.submit_serial_console(cx))
+                                            .ok();
+                                    },
+                                ),
+                            ),
+                    ),
+            );
+
+        Some(modal(
+            modal_backdrop(
+                "serial-console-overlay",
+                Placement::Centered,
+                BackdropClick::Swallow,
+            )
+            .track_focus(&self.serial_console_focus),
+            panel,
+        ))
     }
 
     pub(crate) fn toggle_serial_console(

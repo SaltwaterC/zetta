@@ -443,7 +443,11 @@ fn custom_pane_labels_replace_the_fallback_and_render_while_editing() {
     tab.renaming_pane = Some(2);
     tab.rename_buffer = Some(TextField::new("Database"));
     tab.rename_buffer.as_mut().unwrap().cursor = 4;
-    assert_eq!(tab.displayed_pane_label(2).as_deref(), Some("Data|base"));
+    // The label shows what is typed; the caret is drawn by the field the
+    // renderer takes from `pane_rename_field`, not spliced into the text.
+    assert_eq!(tab.displayed_pane_label(2).as_deref(), Some("Database"));
+    assert_eq!(tab.pane_rename_field(2).map(|field| field.cursor), Some(4));
+    assert!(tab.pane_rename_field(3).is_none());
 
     tab.pane_mut(2).unwrap().custom_label = None;
     tab.renaming_pane = None;
@@ -487,13 +491,15 @@ fn pane_overlay_is_hidden_by_default_and_renders_while_editing() {
     tab.editing_overlay_pane = Some(2);
     tab.overlay_buffer = Some(TextField::new("Staging"));
     tab.overlay_buffer.as_mut().unwrap().cursor = 4;
-    assert_eq!(tab.displayed_pane_overlay(2).as_deref(), Some("Stag|ing"));
-
-    tab.overlay_buffer.as_mut().unwrap().select_all = true;
+    // The overlay shows what is typed; its caret is drawn from the field.
     assert_eq!(tab.displayed_pane_overlay(2).as_deref(), Some("Staging"));
+    assert_eq!(tab.pane_overlay_field(2).map(|field| field.cursor), Some(4));
 
+    // An overlay opened on a pane with no text is still shown, so the field
+    // (and its caret) has somewhere to be drawn.
     tab.overlay_buffer = Some(TextField::selected(""));
-    assert_eq!(tab.displayed_pane_overlay(2).as_deref(), Some("|"));
+    assert_eq!(tab.displayed_pane_overlay(2).as_deref(), Some(""));
+    assert!(tab.pane_overlay_field(2).is_some());
 
     tab.editing_overlay_pane = None;
     tab.overlay_buffer = None;

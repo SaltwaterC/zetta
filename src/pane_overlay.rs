@@ -511,7 +511,7 @@ impl Zetta {
     /// them all and Escape restores the pane's previous values.
     pub(crate) fn render_overlay_style_picker_overlay(
         &self,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
         let picker = self
@@ -525,68 +525,45 @@ impl Zetta {
             colors: &colors,
             handle: &handle,
         };
-        let cancel_handle = handle.clone();
-
-        Some(
-            div()
-                .id("overlay-style-backdrop")
-                .absolute()
-                .inset_0()
-                .pt(px(72.))
-                .px_4()
-                .flex()
-                .items_start()
-                .justify_center()
-                .bg(transparent_black().opacity(0.24))
-                .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-                    cancel_handle
-                        .update(cx, |this, cx| {
-                            this.cancel_overlay_style_picker(window, cx);
-                        })
-                        .ok();
-                })
-                .child(
-                    div()
-                        .id("overlay-style-picker")
-                        .track_focus(&self.overlay_style_focus)
-                        .w_full()
-                        .max_w(px(440.))
-                        .overflow_hidden()
-                        .rounded(px(8.))
-                        .border_1()
-                        .border_color(colors.border)
-                        .bg(colors.elevated_surface_background)
-                        .text_color(colors.text)
-                        .shadow_lg()
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .child(overlay_picker_header(ctx))
-                        .child(
-                            div()
-                                .px_4()
-                                .py_4()
-                                .flex()
-                                .flex_col()
-                                .gap_3()
-                                .child(
-                                    h_flex()
-                                        .w_full()
-                                        .gap_3()
-                                        .child(overlay_font_size_section(ctx))
-                                        .child(overlay_opacity_section(ctx)),
-                                )
-                                .child(
-                                    h_flex()
-                                        .w_full()
-                                        .gap_3()
-                                        .child(overlay_colour_section(ctx))
-                                        .child(overlay_colour_preset_section(ctx)),
-                                ),
-                        )
-                        .child(overlay_picker_hint_bar(ctx))
-                        .child(overlay_picker_buttons(ctx)),
-                )
-                .into_any_element(),
-        )
+        // A stray click must not throw away a style the pane is previewing, so
+        // the backdrop absorbs clicks; Cancel and Esc are how to leave.
+        let backdrop = modal_backdrop(
+            "overlay-style-backdrop",
+            Placement::UnderChrome(crate::ui_tokens::overlay_top_inset(
+                self.launch_config.compact_mode,
+                window,
+            )),
+            BackdropClick::Swallow,
+        );
+        let panel = modal_panel("overlay-style-picker", &colors)
+            .track_focus(&self.overlay_style_focus)
+            .max_w(DIALOG_WIDTH_SMALL)
+            .child(overlay_picker_header(ctx))
+            .child(
+                div()
+                    .px_4()
+                    .py_4()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .gap_3()
+                            .child(overlay_font_size_section(ctx))
+                            .child(overlay_opacity_section(ctx)),
+                    )
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .gap_3()
+                            .child(overlay_colour_section(ctx))
+                            .child(overlay_colour_preset_section(ctx)),
+                    ),
+            )
+            .child(overlay_picker_hint_bar(ctx))
+            .child(overlay_picker_buttons(ctx));
+        Some(modal(backdrop, panel))
     }
 }
 
@@ -612,7 +589,7 @@ impl OverlayPickerContext<'_> {
         div()
             .px_3()
             .py_3()
-            .rounded(px(6.))
+            .rounded(crate::ui_tokens::RADIUS_CONTROL)
             .border_1()
             .cursor_pointer()
             .border_color(if active {
@@ -773,7 +750,7 @@ fn overlay_hex_field(ctx: OverlayPickerContext<'_>) -> gpui::Div {
                 .border_color(colors.border)
                 .bg(picker.color()),
         )
-        .child(div().text_color(colors.text).text_sm().child("Colour"))
+        .child(div().text_color(colors.text).text_sm().child("Color"))
         .child(
             div()
                 .id("overlay-hex-field")
@@ -896,7 +873,7 @@ fn overlay_colour_preset_section(ctx: OverlayPickerContext<'_>) -> gpui::Div {
         focused_preset_index,
     );
     ctx.section_box(OverlayPickerSection::ColorPresets)
-        .child(ctx.section_title("Colour presets"))
+        .child(ctx.section_title("Color presets"))
         .child(v_flex().gap_1().children(preset_rows))
 }
 
@@ -972,7 +949,7 @@ fn overlay_size_options(
                 .id(("overlay-size-option", index))
                 .flex_1()
                 .py_1()
-                .rounded(px(4.))
+                .rounded(crate::ui_tokens::RADIUS_CONTROL)
                 .cursor_pointer()
                 .when(selected, |option| option.bg(colors.element_selected))
                 .hover(|option| option.bg(colors.element_hover))
@@ -1075,7 +1052,7 @@ fn overlay_color_presets(
                                 .flex()
                                 .items_center()
                                 .gap_1()
-                                .rounded(px(4.))
+                                .rounded(crate::ui_tokens::RADIUS_CONTROL)
                                 .border_1()
                                 .border_color(if keyboard_focused {
                                     colors.border_focused

@@ -69,15 +69,3 @@ fn settings_options_are_shared_without_copying_the_collection() {
     assert!(Arc::ptr_eq(&options, &menu_options));
     assert_eq!(&*menu_options, &["One", "Two"]);
 }
-
-#[test]
-fn scroll_history_steps_cover_the_full_range_without_jumping_to_max() {
-    let maximum = i32::MAX as u64;
-    assert_eq!(adjusted_scroll_history(100_000, 1, maximum), 200_000);
-    assert_eq!(adjusted_scroll_history(100_000, -1, maximum), 99_000);
-    assert_eq!(
-        adjusted_scroll_history(maximum, -1, maximum),
-        maximum - 100_000_000
-    );
-    assert_eq!(adjusted_scroll_history(maximum - 1, 1, maximum), maximum);
-}

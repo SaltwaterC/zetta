@@ -1130,6 +1130,7 @@ impl Zetta {
 
         let entries = sessions.to_vec();
         let menu_handle = handle.clone();
+        let dismiss_handle = handle.clone();
         PopoverMenu::new("reconnect-session-menu")
             .with_handle(self.reconnect_menu_handle.clone())
             .trigger_with_tooltip(
@@ -1147,7 +1148,7 @@ impl Zetta {
             .menu(move |window, cx| {
                 let entries = entries.clone();
                 let menu_handle = menu_handle.clone();
-                Some(ui::ContextMenu::build(window, cx, move |mut menu, _, _| {
+                let menu = ui::ContextMenu::build(window, cx, move |mut menu, _, _| {
                     for (runner_id, session_id, title, details) in &entries {
                         let runner_id = *runner_id;
                         let session_id = *session_id;
@@ -1178,7 +1179,11 @@ impl Zetta {
                         );
                     }
                     menu
-                }))
+                });
+                // As the Profile and application menus do: dismissing the menu
+                // with Esc used to leave focus nowhere.
+                restore_focus_on_dismiss(&menu, dismiss_handle.clone(), window, cx);
+                Some(menu)
             })
             .into_any_element()
     }

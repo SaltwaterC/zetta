@@ -201,7 +201,22 @@ impl Tab {
         if self.renaming_pane != Some(id) {
             return Some(pane.label());
         }
-        Some(self.rename_buffer.as_ref()?.caret_marker_display())
+        Some(self.rename_buffer.as_ref()?.text.clone())
+    }
+
+    /// The field a pane's label is being typed into, while it is: rendered
+    /// with a caret where the label is shown, rather than as the label.
+    pub(crate) fn pane_rename_field(&self, id: u64) -> Option<&TextField> {
+        self.rename_buffer
+            .as_ref()
+            .filter(|_| self.renaming_pane == Some(id))
+    }
+
+    /// The field the tab's title is being typed into, while it is.
+    pub(crate) fn tab_rename_field(&self) -> Option<&TextField> {
+        self.rename_buffer
+            .as_ref()
+            .filter(|_| self.renaming_pane.is_none())
     }
 
     /// Whether `id` is the pane being renamed with its whole label selected.
@@ -211,12 +226,6 @@ impl Tab {
         self.renaming_pane == Some(id) && self.rename_selected()
     }
 
-    /// The same for the tab title, which is renamed through the same buffer:
-    /// `renaming_pane` is what distinguishes the two.
-    pub(crate) fn tab_rename_selected(&self) -> bool {
-        self.renaming_pane.is_none() && self.rename_selected()
-    }
-
     fn rename_selected(&self) -> bool {
         self.rename_buffer
             .as_ref()
@@ -224,14 +233,22 @@ impl Tab {
     }
 
     /// The pane's overlay text: the committed `overlay_text` normally, or the
-    /// in-progress edit buffer (with a `|` cursor marker) while it is being
-    /// edited. `None` means no overlay should be shown for this pane.
+    /// in-progress edit buffer while it is being edited (see
+    /// [`Self::pane_overlay_field`], which is what carries its caret). `None`
+    /// means no overlay should be shown for this pane.
     pub(crate) fn displayed_pane_overlay(&self, id: u64) -> Option<String> {
         let pane = self.pane(id)?;
         if self.editing_overlay_pane != Some(id) {
             return pane.overlay_text.clone();
         }
-        Some(self.overlay_buffer.as_ref()?.caret_marker_display())
+        Some(self.overlay_buffer.as_ref()?.text.clone())
+    }
+
+    /// The field a pane's overlay is being typed into, while it is.
+    pub(crate) fn pane_overlay_field(&self, id: u64) -> Option<&TextField> {
+        self.overlay_buffer
+            .as_ref()
+            .filter(|_| self.editing_overlay_pane == Some(id))
     }
 
     pub(crate) fn pane(&self, id: u64) -> Option<&TerminalPane> {

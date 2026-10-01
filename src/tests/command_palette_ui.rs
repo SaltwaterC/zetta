@@ -68,6 +68,23 @@ fn the_arrow_keys_move_the_selection_and_stop_at_the_ends() {
 }
 
 #[test]
+fn page_keys_move_the_selection_a_page_and_stop_at_the_ends() {
+    let names = (0..20)
+        .map(|index| format!("command {index:02}"))
+        .collect::<Vec<_>>();
+    let names = names.iter().map(String::as_str).collect::<Vec<_>>();
+    let mut palette = palette(&names);
+
+    palette.apply_key(&key("pagedown"));
+    assert_eq!(selected_name(&palette), "command 08");
+    palette.apply_key(&key("pagedown"));
+    palette.apply_key(&key("pagedown"));
+    assert_eq!(selected_name(&palette), "command 19");
+    palette.apply_key(&key("pageup"));
+    assert_eq!(selected_name(&palette), "command 11");
+}
+
+#[test]
 fn enter_accepts_the_selected_match_rather_than_running_it() {
     let mut palette = palette(&["alpha", "beta"]);
     palette.apply_key(&key("down"));

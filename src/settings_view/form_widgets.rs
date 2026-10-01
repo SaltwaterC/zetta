@@ -10,6 +10,7 @@
 //! these methods in closures, keeping the page and modal signatures unchanged.
 
 use super::*;
+use crate::settings_editor::{Placeholder, SettingKind};
 
 pub(crate) struct SettingsFormWidgets {
     colors: ThemeColors,
@@ -22,6 +23,8 @@ pub(crate) struct SettingsFormWidgets {
     /// own view and cannot hold the editor.
     focus_scroll_request: Option<(SettingsControl, Pixels)>,
     settings_scroll: ScrollHandle,
+    /// What the font-size field shows while it is empty.
+    terminal_font_size_default: f32,
 }
 
 impl SettingsFormWidgets {
@@ -37,24 +40,22 @@ impl SettingsFormWidgets {
             focused_control: editor.focused_control.clone(),
             focus_scroll_request: editor.focus_scroll_request.clone(),
             settings_scroll: editor.settings_scroll.clone(),
+            terminal_font_size_default: editor.terminal_font_size_default,
         }
     }
 
+    /// The scrollbar beside one of the dialog's scroll regions.
+    ///
+    /// Drawn at paint time from the region's live geometry rather than from
+    /// what it measured the frame before, and not drawn at all while there is
+    /// nothing to scroll: a full-height thumb beside content that fits — the
+    /// Add profile modal's, say — read as a broken control. Painting late is
+    /// also what keeps it right on the frame content starts or stops
+    /// overflowing, such as when an argument is added.
     pub(crate) fn scroll_indicator(&self, id: String, scroll: &ScrollHandle) -> gpui::AnyElement {
-        let viewport = scroll.bounds().size.height;
-        let maximum = scroll.max_offset().y;
-        let content_height = viewport + maximum;
-        let thumb_fraction = if content_height > px(0.) {
-            (viewport / content_height).clamp(0.08, 1.)
-        } else {
-            1.
-        };
-        let progress = if maximum > px(0.) {
-            (-scroll.offset().y / maximum).clamp(0., 1.)
-        } else {
-            0.
-        };
-        let top_fraction = progress * (1. - thumb_fraction);
+        let paint_scroll = scroll.clone();
+        let track_color = self.colors.scrollbar_track_background;
+        let thumb_color = self.colors.scrollbar_thumb_background;
         let click_scroll = scroll.clone();
         let click_handle = self.handle.clone();
         let wheel_scroll = scroll.clone();
@@ -66,17 +67,18 @@ impl SettingsFormWidgets {
             .right_0()
             .bottom_0()
             .w(px(SETTINGS_SCROLLBAR_WIDTH))
-            .bg(self.colors.scrollbar_track_background)
-            .cursor_pointer()
             .child(
-                div()
-                    .absolute()
-                    .right(px(2.))
-                    .top(gpui::relative(top_fraction))
-                    .h(gpui::relative(thumb_fraction))
-                    .w(px(6.))
-                    .rounded_full()
-                    .bg(self.colors.scrollbar_thumb_background),
+                canvas(
+                    |_, _, _| {},
+                    move |bounds, (), window, _| {
+                        let Some(thumb) = scroll_thumb_bounds(&paint_scroll, bounds) else {
+                            return;
+                        };
+                        window.paint_quad(gpui::fill(bounds, track_color));
+                        window.paint_quad(gpui::fill(thumb, thumb_color).corner_radii(px(3.)));
+                    },
+                )
+                .size_full(),
             )
             .on_scroll_wheel(move |event, window, cx| {
                 let delta = event.delta.pixel_delta(window.line_height());
@@ -160,7 +162,7 @@ impl SettingsFormWidgets {
             std::slice::from_ref(&control_id),
         )
         .w_full()
-        .min_h(px(54.))
+        .min_h(crate::ui_tokens::ROW_MIN_HEIGHT)
         .px_2()
         .py_2()
         .gap_4()
@@ -184,38 +186,27 @@ impl SettingsFormWidgets {
                         .child(description),
                 ),
         )
-        .child(div().w(px(330.)).flex_none().child(control))
+        .child(
+            div()
+                .w(crate::ui_tokens::CONTROL_COLUMN_WIDTH)
+                .flex_none()
+                .child(control),
+        )
         .into_any_element()
     }
 
     pub(crate) fn setting_toggle(
         &self,
-        id: &'static str,
+        id: SharedString,
+        label: &'static str,
         value: bool,
         toggle: SettingsToggle,
     ) -> gpui::AnyElement {
-        let toggle_handle = self.handle.clone();
-        switch(id, value.into())
-            .label(if value { "On" } else { "Off" })
-            .full_width(true)
-            .aria_label(id)
-            .on_click(move |state, window, cx| {
-                toggle_handle
-                    .update(cx, |this, cx| {
-                        this.set_settings_toggle(toggle, state.selected(), window, cx);
-                    })
-                    .ok();
-            })
-            .into_any_element()
+        toggle_switch(id, label, value, toggle, &self.handle)
     }
 
-    pub(crate) fn numeric(
-        &self,
-        id: &'static str,
-        field: TextField,
-        setting: NumericSetting,
-        input: ConfigTextField,
-    ) -> gpui::AnyElement {
+    pub(crate) fn numeric(&self, setting: ConfigSetting, field: TextField) -> gpui::AnyElement {
+        let id = setting.element_id();
         let focused = self.focused_control == Some(SettingsControl::Numeric(setting));
         let decrease_down = self.handle.clone();
         let decrease_up = self.handle.clone();
@@ -225,10 +216,10 @@ impl SettingsFormWidgets {
         let increase_out = self.handle.clone();
         let colors = &self.colors;
         h_flex()
-            .id(id)
+            .id(id.clone())
             .h_9()
             .w_full()
-            .rounded(px(4.))
+            .rounded(crate::ui_tokens::RADIUS_CONTROL)
             .border_1()
             .border_color(if focused {
                 colors.border_focused
@@ -263,11 +254,20 @@ impl SettingsFormWidgets {
                             .ok();
                     }),
             )
-            .child(div().min_w_0().flex_1().child(self.text_input(
-                format!("{id}-value"),
-                field,
-                SettingsInput::Configuration(input),
-            )))
+            .child(
+                div()
+                    .min_w_0()
+                    .flex_1()
+                    .child(Zetta::text_input_widget_with_placeholder(
+                        format!("{id}-value"),
+                        field,
+                        SettingsInput::Configuration(ConfigTextField::Setting(setting)),
+                        self.focused_input,
+                        self.numeric_placeholder(setting),
+                        &self.colors,
+                        self.handle.clone(),
+                    )),
+            )
             .child(
                 div()
                     .id(format!("{id}-increase"))
@@ -298,36 +298,58 @@ impl SettingsFormWidgets {
             .into_any_element()
     }
 
-    pub(crate) fn opacity_slider(&self, opacity: f32, target: OpacityTarget) -> gpui::AnyElement {
-        let selected = (opacity.clamp(0., 1.) * 20.).round() as usize;
-        let control = match target {
-            OpacityTarget::Configuration => SettingsControl::Opacity,
-            OpacityTarget::Project => SettingsControl::ProjectOpacity,
+    /// What an empty stepped field means, for the settings where empty is a
+    /// value of its own rather than a mistake.
+    fn numeric_placeholder(&self, setting: ConfigSetting) -> Option<SharedString> {
+        let SettingKind::Number(spec) = setting.spec().kind else {
+            return None;
         };
-        let focused = self.focused_control == Some(control);
+        Some(match spec.placeholder()? {
+            Placeholder::ThemeFontSize => {
+                format!("Default ({})", self.terminal_font_size_default).into()
+            }
+            Placeholder::Text(text) => text.into(),
+        })
+    }
+
+    pub(crate) fn opacity_slider(&self, opacity: f32, target: OpacityTarget) -> gpui::AnyElement {
+        let opacity = opacity.clamp(0., 1.);
+        let control = SettingsControl::Opacity(target);
+        let focused = self.focused_control.as_ref() == Some(&control);
+        let stop_prefix: SharedString = format!("{target:?}-opacity-stop").into();
         let colors = &self.colors;
         let stops = (0usize..=20)
             .map(|step| {
                 let slider_handle = self.handle.clone();
+                let click_control = control.clone();
                 div()
-                    .id(("inactive-opacity-stop", step))
+                    .id((stop_prefix.clone(), step))
                     .h_full()
                     .flex_1()
                     .cursor_pointer()
-                    .on_click(move |_, _, cx| {
+                    .on_click(move |_, window, cx| {
                         slider_handle
                             .update(cx, |this, cx| {
+                                // Clicking a slider puts the keyboard on it, as
+                                // clicking any other control does.
+                                this.focus_settings_control_without_scroll(
+                                    click_control.clone(),
+                                    window,
+                                    cx,
+                                );
                                 this.set_settings_opacity(target, step as f32 / 20., cx);
                             })
                             .ok();
                     })
             })
             .collect::<Vec<_>>();
-        let fraction = selected as f32 / 20.;
+        // Drawn at the value itself rather than the nearest stop, so a file's
+        // 0.83 shows as 83% where it used to read as 85%.
+        let fraction = opacity;
         h_flex()
             .w_full()
             .gap_3()
-            .rounded(px(4.))
+            .rounded(crate::ui_tokens::RADIUS_CONTROL)
             .border_1()
             .border_color(if focused {
                 colors.border_focused
@@ -378,8 +400,33 @@ impl SettingsFormWidgets {
                     .w(px(44.))
                     .text_right()
                     .text_sm()
-                    .child(format!("{}%", selected * 5)),
+                    .child(format!("{}%", (opacity * 100.).round() as u32)),
             )
             .into_any_element()
     }
 }
+
+/// Where the thumb of a scrollbar `track` sits for `scroll`'s current
+/// geometry, or `None` when its content fits and there is nothing to show.
+pub(crate) fn scroll_thumb_bounds(
+    scroll: &ScrollHandle,
+    track: gpui::Bounds<Pixels>,
+) -> Option<gpui::Bounds<Pixels>> {
+    let viewport = scroll.bounds().size.height;
+    let maximum = scroll.max_offset().y;
+    if maximum <= px(0.) || viewport <= px(0.) {
+        return None;
+    }
+    let thumb_fraction = (viewport / (viewport + maximum)).clamp(0.08, 1.);
+    let progress = (-scroll.offset().y / maximum).clamp(0., 1.);
+    let height = track.size.height * thumb_fraction;
+    let top = track.top() + (track.size.height - height) * progress;
+    Some(gpui::Bounds::new(
+        point(track.right() - px(8.), top),
+        gpui::size(px(6.), height),
+    ))
+}
+
+#[cfg(test)]
+#[path = "../tests/settings_view/form_widgets.rs"]
+mod tests;

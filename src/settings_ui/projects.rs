@@ -67,7 +67,8 @@ pub(crate) fn mark_project_dirty(editor: &mut SettingsEditor) {
 
 pub(crate) fn project_controls(editor: &SettingsEditor) -> Vec<SettingsControl> {
     let Some(project) = project_editor(editor) else {
-        let mut controls = vec![SettingsControl::AddProject];
+        // The list, then Add project under it, as the page draws them.
+        let mut controls = Vec::new();
         for index in 0..editor.project_roots.len() {
             controls.extend([
                 SettingsControl::OpenProject(index),
@@ -75,12 +76,12 @@ pub(crate) fn project_controls(editor: &SettingsEditor) -> Vec<SettingsControl> 
                 SettingsControl::RemoveProject(index),
             ]);
         }
+        controls.push(SettingsControl::AddProject);
         return controls;
     };
     let form = &project.form;
     let mut controls = vec![
         SettingsControl::CloseProjectConfig,
-        SettingsControl::SaveProjectConfig,
         SettingsControl::OpenProjectConfigFile,
         SettingsControl::Dropdown(SettingsDropdown::ProjectTheme),
         SettingsControl::Dropdown(SettingsDropdown::ProjectDarkTheme),
@@ -91,7 +92,7 @@ pub(crate) fn project_controls(editor: &SettingsEditor) -> Vec<SettingsControl> 
         SettingsControl::Toggle(SettingsToggle::ProjectOpacityOverride),
     ];
     if form.inactive_pane_opacity.is_some() {
-        controls.push(SettingsControl::ProjectOpacity);
+        controls.push(SettingsControl::Opacity(OpacityTarget::Project));
     }
     for index in 0..form.environment.len() {
         controls.extend([
@@ -129,8 +130,8 @@ pub(crate) fn project_controls(editor: &SettingsEditor) -> Vec<SettingsControl> 
         controls.push(SettingsControl::AddProjectCommandEnvironment(command_index));
     }
     controls.push(SettingsControl::AddProjectCommand);
-    for index in 0..form.profiles.len() {
-        controls.extend(project_profile_controls(index));
+    for (index, profile) in form.profiles.iter().enumerate() {
+        controls.extend(project_profile_controls(index, profile.arguments.len()));
     }
     controls.push(SettingsControl::AddProjectProfile);
     controls.push(SettingsControl::Dropdown(
@@ -209,19 +210,23 @@ pub(crate) fn project_dropdown_options(
 pub(crate) fn set_project_dropdown(
     editor: &mut SettingsEditor,
     dropdown: SettingsDropdown,
-    value: &str,
+    choice: &DropdownChoice,
 ) -> bool {
+    // Every project dropdown opens with its "unset" option first, recognised by
+    // that position rather than by its text.
+    let value = choice.value.as_str();
+    let unset = choice.index == 0;
     let Some(project) = editor.project.as_mut() else {
         return false;
     };
     let form = &mut project.form;
-    let optional = |value: &str| (value != PROJECT_INHERIT_LABEL).then(|| value.to_owned());
+    let optional = |value: &str| (!unset).then(|| value.to_owned());
     match dropdown {
         SettingsDropdown::ProjectTheme => form.theme = optional(value),
         SettingsDropdown::ProjectDarkTheme => form.dark_theme = optional(value),
         SettingsDropdown::ProjectDefaultProfile => form.default_profile = optional(value),
         SettingsDropdown::ProjectInitialSplit => {
-            form.initial_split = (value != "None").then(|| value.to_owned());
+            form.initial_split = optional(value);
         }
         SettingsDropdown::ProjectProfileTheme(index) => {
             let Some(profile) = form.profiles.get_mut(index) else {
@@ -239,7 +244,7 @@ pub(crate) fn set_project_dropdown(
             let Some(profile) = form.profiles.get_mut(index) else {
                 return false;
             };
-            profile.icon = (value != "Automatic")
+            profile.icon = (!unset)
                 .then(|| {
                     ProfileIcon::parse_name(&value.to_ascii_lowercase())
                         .ok()
@@ -363,7 +368,7 @@ impl Zetta {
                     Err(error) => {
                         if let Some(editor) = this.settings_editor.as_mut() {
                             editor.message =
-                                Some((true, format!("Could not add project: {error:#}")));
+                                Some((Tone::Error, format!("Could not add project: {error:#}")));
                         }
                         cx.notify();
                     }
@@ -416,7 +421,7 @@ impl Zetta {
         );
         if let Some(editor) = self.settings_editor.as_mut() {
             editor.project_loading = true;
-            editor.message = Some((false, "Loading the project configuration…".to_owned()));
+            editor.message = Some((Tone::Info, "Loading the project configuration…".to_owned()));
             invalidate_controls_cache(editor);
         }
         let base = self.launch_config.clone();
@@ -457,7 +462,7 @@ impl Zetta {
                         }
                         Err(error) => {
                             editor.message = Some((
-                                true,
+                                Tone::Error,
                                 format!("Could not open the project configuration: {error:#}"),
                             ));
                         }
@@ -497,10 +502,12 @@ impl Zetta {
             editor.settings_scroll.set_offset(Point::default());
             editor.focused_input = None;
             editor.focused_control = Some(project_row_control(editor, closed.as_ref()));
+            // Only reachable after the unsaved-changes confirmation said to
+            // discard; still said, since the list gives no other sign of it.
             editor.message = discarded.then(|| {
                 (
-                    false,
-                    "Closed the project configuration without saving.".to_owned(),
+                    Tone::Info,
+                    "Discarded the project configuration's unsaved changes.".to_owned(),
                 )
             });
             invalidate_controls_cache(editor);
@@ -518,8 +525,8 @@ impl Zetta {
         else {
             return;
         };
+        // Nothing to write; Save is disabled rather than doubling as Close.
         if !project.dirty {
-            self.close_project_config(window, cx);
             return;
         }
         let form = project.form.clone();
@@ -528,7 +535,7 @@ impl Zetta {
             if let Some(project) = editor.project.as_mut() {
                 project.save_in_progress = true;
             }
-            editor.message = Some((false, "Saving the project configuration…".to_owned()));
+            editor.message = Some((Tone::Info, "Saving the project configuration…".to_owned()));
         }
         let base = self.launch_config.clone();
         let executor = cx.background_executor().clone();
@@ -556,7 +563,8 @@ impl Zetta {
                                 editor.focused_input = None;
                                 editor.focused_control =
                                     Some(project_row_control(editor, saved.as_ref()));
-                                editor.message = Some((false, format!("Saved {}", path.display())));
+                                editor.message =
+                                    Some((Tone::Success, format!("Saved {}", path.display())));
                                 invalidate_controls_cache(editor);
                             }
                             this.activate_current_project(window, cx);
@@ -572,7 +580,8 @@ impl Zetta {
                                 if let Some(project) = editor.project.as_mut() {
                                     project.save_in_progress = false;
                                 }
-                                editor.message = Some((true, format!("Not saved: {error:#}")));
+                                editor.message =
+                                    Some((Tone::Error, format!("Not saved: {error:#}")));
                             }
                         }
                     }
@@ -637,7 +646,7 @@ impl Zetta {
                     Err(error) => {
                         if let Some(editor) = this.settings_editor.as_mut() {
                             editor.message = Some((
-                                true,
+                                Tone::Error,
                                 format!("Could not remove project {}: {error:#}", root.display()),
                             ));
                         }
@@ -657,15 +666,19 @@ impl Zetta {
     ) {
         match control {
             SettingsControl::CloseProjectConfig => {
-                self.close_project_config(window, cx);
-                return;
-            }
-            SettingsControl::SaveProjectConfig => {
-                self.save_project_config(window, cx);
+                self.request_settings_close(
+                    super::close_guard::CloseRequest::ProjectBuilder,
+                    window,
+                    cx,
+                );
                 return;
             }
             SettingsControl::OpenProjectConfigFile => {
-                self.open_project_config_file(window, cx);
+                self.request_settings_close(
+                    super::close_guard::CloseRequest::OpenProjectFile,
+                    window,
+                    cx,
+                );
                 return;
             }
             SettingsControl::ProjectTabIconPicker => {
@@ -736,15 +749,7 @@ impl Zetta {
                 focus = SettingsControl::AddProjectCommandEnvironment(command_index);
             }
             SettingsControl::AddProjectProfile => {
-                form.profiles.push(ProjectProfileForm {
-                    name: TextField::default(),
-                    program: TextField::default(),
-                    arguments: TextField::default(),
-                    theme: None,
-                    dark_theme: None,
-                    icon: None,
-                    hidden: false,
-                });
+                form.profiles.push(ProjectProfileForm::blank());
             }
             SettingsControl::RemoveProjectProfile(index) => {
                 if index >= form.profiles.len() {

@@ -511,7 +511,7 @@ fn render_tab(
         .as_ref()
         .filter(|_| tab.renaming_pane.is_none())
     {
-        buffer.caret_marker_display().into()
+        buffer.text.clone().into()
     } else {
         resolve_tab_title(tab, || {
             if let Some(view) = tab.active_view() {
@@ -550,6 +550,7 @@ fn render_tab(
         tab_icon,
         TabContent {
             title: title.clone(),
+            rename_field: tab.tab_rename_field().cloned(),
             lifecycle_icon,
             silent_mode_icon,
             custom_icon,
@@ -881,6 +882,9 @@ mod tests;
 /// the tab, its theme, and how far the bar is shrinking.
 struct TabContent {
     title: SharedString,
+    /// The title's field while the tab is being renamed, drawn with its caret
+    /// in place of the title.
+    rename_field: Option<TextField>,
     lifecycle_icon: Option<IconName>,
     silent_mode_icon: Option<IconName>,
     custom_icon: Option<IconName>,
@@ -898,6 +902,7 @@ fn render_tab_content(
 ) -> AnyElement {
     let TabContent {
         title,
+        rename_field,
         lifecycle_icon,
         silent_mode_icon,
         custom_icon,
@@ -961,11 +966,11 @@ fn render_tab_content(
                     .whitespace_nowrap()
                     .text_ellipsis()
                     .text_sm()
-                    .when(tab.tab_rename_selected(), |title| {
-                        title.bg(tab_colors.element_selection_background)
-                    })
                     .text_color(tab_text)
-                    .child(title),
+                    .map(|element| match rename_field.as_ref() {
+                        Some(field) => element.child(field_query_run(field, None, tab_colors)),
+                        None => element.child(title),
+                    }),
             )
         })
         .into_any_element()
@@ -1049,7 +1054,7 @@ fn with_tab_context_menu(
                         action_available_in_launch_mode(ToggleAutoBackgroundTab.name(), no_mux),
                         |menu| {
                             menu.action_checked(
-                                "Keep running",
+                                "Keep Running",
                                 Box::new(ToggleAutoBackgroundTab),
                                 tab_auto_background,
                             )
@@ -1061,7 +1066,7 @@ fn with_tab_context_menu(
                             menu.action_checked("Share Tab", Box::new(ToggleTabSharing), tab_shared)
                         },
                     )
-                    .action("Detach", Box::new(DetachTab))
+                    .action("Detach Tab", Box::new(DetachTab))
                     .when(tab_move_menu_entry_available(tab_count), |menu| {
                         menu.separator().action_checked(
                             "Tab Move Mode",

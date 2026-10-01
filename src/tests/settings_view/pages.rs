@@ -57,7 +57,7 @@ struct ProfileCardScrollHarness {
 impl Render for ProfileCardScrollHarness {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         let control = SettingsControl::Dropdown(SettingsDropdown::ProfileDarkTheme(0));
-        let controls = profile_controls(0, true);
+        let controls = profile_controls(0, true, 0);
         let card = div()
             .h(px(60.))
             .w_full()

@@ -143,10 +143,7 @@ impl Zetta {
                 return;
             }
             ClipboardOutcome::Edited => {
-                // The query filters the theme list, so a cut or a paste rebuilds
-                // it rather than only redrawing.
-                picker.refresh_matches();
-                picker.selected = 0;
+                picker.query_edited();
                 cx.notify();
                 return;
             }
@@ -320,14 +317,15 @@ impl Zetta {
     pub(crate) fn render_pane_theme_picker_overlay(
         &self,
         colors: &ThemeColors,
+        top_inset: Pixels,
         handle: &WeakEntity<Self>,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let picker = self.theme_picker.as_ref()?;
         let theme_scope = self.theme_picker_scope;
         let search_placeholder = match theme_scope {
-            ThemeScope::Pane => "Search pane themes",
-            ThemeScope::Tab => "Search tab themes",
+            ThemeScope::Pane => "Search pane themes…",
+            ThemeScope::Tab => "Search tab themes…",
         };
         let query = field_query_run(&picker.query, Some(search_placeholder), colors);
         let result_count = picker.matches().len();
@@ -341,6 +339,7 @@ impl Zetta {
                     return Vec::new();
                 };
                 let current_name = this.theme_picker_current.clone();
+                let query_text = picker.query.text.clone();
                 range
                     .map(|position| {
                         let command_index = picker.matches()[position];
@@ -348,138 +347,69 @@ impl Zetta {
                         let command_name = command.name.clone();
                         let is_current = current_name.as_deref() == Some(command.name.as_str());
                         let row_handle = row_handle.clone();
-                        div()
-                            .id(("theme-picker-row", command_index))
-                            .h_9()
-                            .w_full()
-                            .px_3()
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .gap_3()
-                            .cursor_pointer()
-                            .text_sm()
-                            .text_color(row_colors.text)
-                            .when(position == picker.selected, |row| {
-                                row.bg(row_colors.element_selected)
-                            })
-                            .hover(|style| style.bg(row_colors.element_hover))
-                            .on_click(move |_, window, cx| {
-                                row_handle
-                                    .update(cx, |this, cx| {
-                                        this.run_pane_theme_picker_command(
-                                            command_index,
-                                            window,
-                                            cx,
-                                        );
-                                    })
-                                    .ok();
-                            })
-                            .child(
-                                h_flex()
-                                    .min_w_0()
-                                    .gap_2()
-                                    .when(is_current, |row| {
-                                        row.child(
-                                            Icon::new(IconName::Check)
-                                                .size(IconSize::Small)
-                                                .color(Color::Custom(row_colors.text_accent)),
-                                        )
-                                    })
-                                    .when(!is_current, |row| row.child(div().w_4()))
-                                    .child(
-                                        div()
-                                            .min_w_0()
-                                            .overflow_hidden()
-                                            .whitespace_nowrap()
-                                            .text_ellipsis()
-                                            .child(command_name),
-                                    ),
-                            )
+                        let (row, name) = picker_row(
+                            ("theme-picker-row", command_index),
+                            command_name.into(),
+                            &query_text,
+                            position == picker.selected,
+                            &row_colors,
+                        );
+                        row.on_click(move |_, window, cx| {
+                            row_handle
+                                .update(cx, |this, cx| {
+                                    this.run_pane_theme_picker_command(command_index, window, cx);
+                                })
+                                .ok();
+                        })
+                        .child(
+                            h_flex()
+                                .min_w_0()
+                                .gap_2()
+                                .when(is_current, |row| {
+                                    row.child(
+                                        Icon::new(IconName::Check)
+                                            .size(IconSize::Small)
+                                            .color(Color::Custom(row_colors.text_accent)),
+                                    )
+                                })
+                                .when(!is_current, |row| row.child(div().w_4()))
+                                .child(name),
+                        )
                     })
                     .collect()
             }),
         )
         .with_sizing_behavior(ListSizingBehavior::Infer)
-        .max_h(px(360.))
+        .max_h(PALETTE_LIST_MAX_HEIGHT)
         .track_scroll(&picker.scroll)
         .on_scroll_wheel(|_, _, cx| cx.stop_propagation());
         let dismiss_handle = handle.clone();
-
-        Some(
-            div()
-                .id("theme-picker-backdrop")
-                .absolute()
-                .inset_0()
-                .pt(px(72.))
-                .px_4()
-                .flex()
-                .items_start()
-                .justify_center()
-                .bg(transparent_black().opacity(0.24))
-                .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-                    dismiss_handle
-                        .update(cx, |this, cx| this.dismiss_pane_theme_picker(window, cx))
-                        .ok();
-                })
-                .child(
-                    div()
-                        .id("theme-picker")
-                        .track_focus(&self.theme_picker_focus)
-                        .w_full()
-                        .max_w(px(680.))
-                        .overflow_hidden()
-                        .rounded(px(8.))
-                        .border_1()
-                        .border_color(colors.border)
-                        .bg(colors.elevated_surface_background)
-                        .text_color(colors.text)
-                        .shadow_lg()
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .child(
-                            div()
-                                .h_12()
-                                .px_3()
-                                .flex()
-                                .items_center()
-                                .border_b_1()
-                                .border_color(colors.border)
-                                .text_color(colors.text)
-                                .child(div().text_color(colors.text_accent).mr_2().child("◑"))
-                                .child(query),
-                        )
-                        .child(
-                            div()
-                                .py_1()
-                                .when(result_count == 0, |list| {
-                                    list.child(
-                                        div()
-                                            .h_12()
-                                            .px_3()
-                                            .flex()
-                                            .items_center()
-                                            .text_sm()
-                                            .text_color(colors.text_muted)
-                                            .child("No matching themes"),
-                                    )
-                                })
-                                .when(result_count > 0, |list| list.child(rows)),
-                        )
-                        .child(
-                            div()
-                                .h_7()
-                                .px_3()
-                                .flex()
-                                .items_center()
-                                .border_t_1()
-                                .border_color(colors.border)
-                                .text_xs()
-                                .text_color(colors.text_muted)
-                                .child("Change is not saved to the profile or configuration"),
-                        ),
-                )
-                .into_any_element(),
-        )
+        let backdrop = modal_backdrop(
+            "theme-picker-backdrop",
+            Placement::UnderChrome(top_inset),
+            BackdropClick::dismiss(move |window, cx| {
+                dismiss_handle
+                    .update(cx, |this, cx| this.dismiss_pane_theme_picker(window, cx))
+                    .ok();
+            }),
+        );
+        let panel = modal_panel("theme-picker", colors)
+            .track_focus(&self.theme_picker_focus)
+            .max_w(PALETTE_WIDTH)
+            .child(palette_header("◑", query, colors))
+            .child(
+                palette_section(colors)
+                    .py_1()
+                    .when(result_count == 0, |list| {
+                        list.child(empty_list_row("No themes match", colors))
+                    })
+                    .when(result_count > 0, |list| list.child(rows)),
+            )
+            .child(
+                palette_footer(colors)
+                    .child("The change is not saved to the profile or configuration"),
+            );
+        Some(modal(backdrop, panel))
     }
 }
 

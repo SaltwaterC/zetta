@@ -12,7 +12,7 @@ impl Zetta {
         if query.is_empty() {
             editor.theme_extensions.clear();
             editor.theme_extensions_searched = false;
-            editor.message = Some((false, "Enter a theme name to search.".to_owned()));
+            editor.message = Some((Tone::Info, "Enter a theme name to search.".to_owned()));
             cx.notify();
             return;
         }
@@ -33,7 +33,7 @@ impl Zetta {
                         Ok(extensions) => editor.theme_extensions = extensions,
                         Err(error) => {
                             editor.message =
-                                Some((true, format!("Could not load themes: {error:#}")));
+                                Some((Tone::Error, format!("Could not load themes: {error:#}")));
                         }
                     }
                     cx.notify();
@@ -64,7 +64,7 @@ impl Zetta {
             return;
         };
         editor.theme_extension_downloading = Some(extension_id);
-        editor.message = Some((false, format!("Downloading {}…", extension.name)));
+        editor.message = Some((Tone::Info, format!("Downloading {}…", extension.name)));
         let name = extension.name.clone();
         let http = cx.http_client();
         let themes_dir = config::themes_dir();
@@ -106,7 +106,7 @@ impl Zetta {
                                 editor.themes = themes.into();
                                 Self::refresh_open_dropdown_options(editor);
                                 editor.message = Some((
-                                    false,
+                                    Tone::Info,
                                     format!(
                                         "Installed {name} ({count} theme file{}). Theme selectors have been reloaded.",
                                         if count == 1 { "" } else { "s" }
@@ -118,7 +118,7 @@ impl Zetta {
                         Err(error) => {
                             if let Some(editor) = this.settings_editor.as_mut() {
                                 editor.message =
-                                    Some((true, format!("Could not install {name}: {error:#}")));
+                                    Some((Tone::Error, format!("Could not install {name}: {error:#}")));
                             }
                         }
                     }
@@ -163,7 +163,7 @@ impl Zetta {
         if in_use {
             if let Some(editor) = self.settings_editor.as_mut() {
                 editor.message = Some((
-                    true,
+                    Tone::Error,
                     "Choose and save replacement application/profile themes before removing this extension."
                         .to_owned(),
                 ));
@@ -173,7 +173,7 @@ impl Zetta {
         }
         if let Some(editor) = self.settings_editor.as_mut() {
             editor.theme_extension_downloading = Some(Arc::from(extension_id.clone()));
-            editor.message = Some((false, format!("Removing {extension_id}…")));
+            editor.message = Some((Tone::Info, format!("Removing {extension_id}…")));
         }
 
         let themes_dir = config::themes_dir();
@@ -221,7 +221,7 @@ impl Zetta {
                                 editor.installed_theme_extensions = installed_theme_extensions;
                                 Self::refresh_open_dropdown_options(editor);
                                 editor.message = Some((
-                                    false,
+                                    Tone::Info,
                                     format!(
                                         "Removed {extension_id} ({count} theme file{}). Theme selectors have been reloaded.",
                                         if count == 1 { "" } else { "s" }
@@ -233,7 +233,7 @@ impl Zetta {
                         Err(error) => {
                             if let Some(editor) = this.settings_editor.as_mut() {
                                 editor.message = Some((
-                                    true,
+                                    Tone::Error,
                                     format!("Could not remove {extension_id}: {error:#}"),
                                 ));
                             }

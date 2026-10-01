@@ -8,8 +8,8 @@ struct DraftModalScrollHarness {
 
 impl Render for DraftModalScrollHarness {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        let controls = profile_draft_controls();
-        let body_controls = &controls[..7];
+        let controls = profile_draft_controls(0);
+        let body_controls = &controls[..controls.len() - 2];
         let body = div()
             .id("draft-body")
             .h(px(80.))

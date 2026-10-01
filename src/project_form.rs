@@ -29,7 +29,7 @@ use crate::project_commands::{
     parse_command_environment, validate_command_environment_entry, validate_command_name,
     validate_command_string, validate_environment_entry,
 };
-use crate::settings_editor::PaneTemplatesForm;
+use crate::settings_editor::{PaneTemplatesForm, ProfileForm};
 use crate::text_edit::TextField;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -43,7 +43,7 @@ pub(crate) enum ProjectTextField {
     CommandEnvironmentValue(usize, usize),
     ProfileName(usize),
     ProfileProgram(usize),
-    ProfileArguments(usize),
+    ProfileArgument(usize, usize),
 }
 
 #[derive(Clone, Debug)]
@@ -61,18 +61,9 @@ pub(crate) struct ProjectCommandForm {
     pub(crate) object: bool,
 }
 
-#[derive(Clone, Debug)]
-pub(crate) struct ProjectProfileForm {
-    pub(crate) name: TextField,
-    pub(crate) program: TextField,
-    pub(crate) arguments: TextField,
-    pub(crate) theme: Option<String>,
-    pub(crate) dark_theme: Option<String>,
-    /// An explicit icon override. `None` means the profile keeps whichever icon
-    /// the user configuration infers for it.
-    pub(crate) icon: Option<ProfileIcon>,
-    pub(crate) hidden: bool,
-}
+/// A project's profile override: the same form the user configuration's
+/// profiles use, since it is the same entry in the file.
+pub(crate) type ProjectProfileForm = crate::settings_editor::ProfileForm;
 
 /// A project's `default_tab_icon`, which is three-valued: absent inherits the
 /// user configuration, `null` means new tabs get no icon, and a name selects
@@ -235,7 +226,9 @@ impl ProjectForm {
                     .as_array()
                     .context("profiles must be an array")?
                     .iter()
-                    .map(parse_profile_form)
+                    .map(|value| {
+                        ProfileForm::from_entry(value, inherited_profile_icon(base, value))
+                    })
                     .collect::<Result<Vec<_>>>()
             })
             .transpose()?
@@ -301,10 +294,10 @@ impl ProjectForm {
                 .profiles
                 .get_mut(index)
                 .map(|profile| &mut profile.program),
-            ProjectTextField::ProfileArguments(index) => self
+            ProjectTextField::ProfileArgument(index, argument) => self
                 .profiles
                 .get_mut(index)
-                .map(|profile| &mut profile.arguments),
+                .and_then(|profile| profile.arguments.get_mut(argument)),
         }
     }
 
@@ -389,19 +382,10 @@ impl ProjectForm {
             }
         }
 
-        let mut profile_names = HashSet::new();
+        crate::settings_editor::check_profiles(&self.profiles)
+            .map_err(|problem| anyhow::anyhow!("{problem}"))?;
         for profile in &self.profiles {
             let name = profile.name.text.trim();
-            anyhow::ensure!(!name.is_empty(), "profile names must not be empty");
-            anyhow::ensure!(
-                profile_names.insert(name.to_ascii_lowercase()),
-                "duplicate profile {name:?}"
-            );
-            anyhow::ensure!(
-                !profile.program.text.trim().is_empty()
-                    || arguments(&profile.arguments.text).is_empty(),
-                "profile {name:?} needs a program before it can take arguments"
-            );
             // A row without a program is an override of an application profile,
             // matched by name; naming one that does not exist would otherwise
             // only fail when the file is loaded back.
@@ -491,21 +475,12 @@ impl ProjectForm {
         if !self.profiles.is_empty() {
             root.insert(
                 "profiles".into(),
-                Value::Array(self.profiles.iter().map(profile_value).collect()),
+                Value::Array(self.profiles.iter().map(ProfileForm::to_entry).collect()),
             );
         }
         serde_json::to_string_pretty(&Value::Object(root))
             .context("serializing the project configuration")
     }
-}
-
-/// Splits a comma-separated argument field the way the configuration page does,
-/// so both forms accept the same input.
-pub(crate) fn arguments(text: &str) -> Vec<&str> {
-    text.split(',')
-        .map(str::trim)
-        .filter(|argument| !argument.is_empty())
-        .collect()
 }
 
 fn non_empty(text: &str) -> Option<&str> {
@@ -582,98 +557,26 @@ fn command_value(command: &ProjectCommandForm) -> Value {
     Value::Object(object)
 }
 
-fn parse_profile_form(value: &Value) -> Result<ProjectProfileForm> {
-    let object = value
-        .as_object()
-        .context("each profile must be an object")?;
-    const FIELDS: &[&str] = &[
-        "name",
-        "program",
-        "args",
-        "theme",
-        "dark_theme",
-        "icon",
-        "hidden",
-    ];
-    if let Some(field) = object
-        .keys()
-        .find(|field| !FIELDS.contains(&field.as_str()))
-    {
-        anyhow::bail!("unrecognized profile field {field:?}");
+/// The icon an override shows while it sets none of its own: the inherited
+/// profile's of that name, or the one its program suggests.
+fn inherited_profile_icon(base: &Config, value: &Value) -> ProfileIcon {
+    let name = value
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let program = value
+        .get("program")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if !program.trim().is_empty() {
+        return ProfileIcon::automatic_for_program(program);
     }
-    Ok(ProjectProfileForm {
-        name: TextField::new(
-            object
-                .get("name")
-                .and_then(Value::as_str)
-                .context("profile.name must be a string")?,
-        ),
-        program: TextField::new(
-            object
-                .get("program")
-                .and_then(Value::as_str)
-                .unwrap_or_default(),
-        ),
-        arguments: TextField::new(
-            object
-                .get("args")
-                .and_then(Value::as_array)
-                .map(|args| {
-                    args.iter()
-                        .filter_map(Value::as_str)
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                })
-                .unwrap_or_default(),
-        ),
-        theme: object
-            .get("theme")
-            .and_then(Value::as_str)
-            .map(str::to_owned),
-        dark_theme: object
-            .get("dark_theme")
-            .and_then(Value::as_str)
-            .map(str::to_owned),
-        icon: object
-            .get("icon")
-            .map(ProfileIcon::parse)
-            .transpose()?
-            .flatten(),
-        hidden: object
-            .get("hidden")
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
-    })
-}
-
-fn profile_value(profile: &ProjectProfileForm) -> Value {
-    let mut value = Map::new();
-    value.insert("name".into(), json!(profile.name.text.trim()));
-    if let Some(program) = non_empty(&profile.program.text) {
-        value.insert("program".into(), json!(program));
-        value.insert(
-            "args".into(),
-            Value::Array(
-                arguments(&profile.arguments.text)
-                    .into_iter()
-                    .map(|argument| json!(argument))
-                    .collect(),
-            ),
-        );
-    }
-    if let Some(theme) = profile.theme.as_deref() {
-        value.insert("theme".into(), json!(theme));
-    }
-    if let Some(dark_theme) = profile.dark_theme.as_deref() {
-        value.insert("dark_theme".into(), json!(dark_theme));
-    }
-    if let Some(name) = profile.icon.as_ref().and_then(ProfileIcon::name) {
-        value.insert("icon".into(), json!(name));
-    }
-    if profile.hidden {
-        value.insert("hidden".into(), json!(true));
-    }
-    Value::Object(value)
+    base.profiles
+        .iter()
+        .find(|profile| profile.name.eq_ignore_ascii_case(name))
+        .map_or(ProfileIcon::Zetta, |profile| {
+            ProfileIcon::automatic_for_profile(&profile.name, &profile.command)
+        })
 }
 
 /// Writes `text` to the project's configuration file after checking that it
@@ -682,7 +585,7 @@ fn profile_value(profile: &ProjectProfileForm) -> Value {
 pub(crate) fn save(root: &Path, base: &Config, text: &str) -> Result<PathBuf> {
     ProjectConfig::parse(text, root, base)?;
     let path = ProjectConfig::path_for(root);
-    crate::project::write_text_atomically(&path, text)?;
+    crate::file_replace::replace_file(&path, text)?;
     Ok(path)
 }
 

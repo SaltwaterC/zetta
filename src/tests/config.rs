@@ -1283,3 +1283,19 @@ fn a_setting_written_twice_is_reported_rather_than_silently_resolved() {
     );
     assert!(error.contains("duplicate field `theme`"), "{error}");
 }
+
+/// The example is what the docs point people at, so it has to be a file Zetta
+/// accepts. It is also what went stale: `sessions.remote.forward_agent` was
+/// missing from it until this test existed.
+#[test]
+fn the_example_configuration_parses_and_names_every_remote_setting() {
+    let source = include_str!("../../config.example.json");
+    Config::parse(source, None, None).unwrap();
+    let example: serde_json::Value = serde_json::from_str(source).unwrap();
+    for key in ["protocol", "keep_alive_ms", "forward_agent"] {
+        assert!(
+            example["sessions"]["remote"].get(key).is_some(),
+            "config.example.json should show sessions.remote.{key}"
+        );
+    }
+}

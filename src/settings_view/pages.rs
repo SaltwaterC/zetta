@@ -1,11 +1,16 @@
 use super::pane_templates::render_pane_templates_page;
 use super::projects::render_projects_page;
-use super::widgets::{KEYMAP_ROW_HEIGHT, KeymapRowRenderContext, SETTINGS_SCROLLBAR_WIDTH};
+use super::widgets::{KeymapRowRenderContext, SETTINGS_SCROLLBAR_WIDTH};
 use super::*;
-use crate::settings_ui::keymap::{compute_keymap_sticky_candidates, keymap_row_data};
+use crate::settings_editor::SettingKind;
+use crate::settings_ui::configuration_page::{ConfigurationItem, configuration_layout};
+use crate::settings_ui::keymap::{
+    KeymapRow, KeymapStickyCandidate, compute_keymap_sticky_candidates, keymap_row_data,
+    keymap_row_data_for,
+};
 use ui::sticky_items;
 
-fn profile_field(
+pub(super) fn profile_field(
     label: &'static str,
     control: impl IntoElement,
     colors: &ThemeColors,
@@ -23,7 +28,7 @@ fn profile_field(
         .into_any_element()
 }
 
-fn profile_fields_grid(fields: impl IntoIterator<Item = AnyElement>) -> Div {
+pub(super) fn profile_fields_grid(fields: impl IntoIterator<Item = AnyElement>) -> Div {
     div().mt_3().grid().grid_cols(2).gap_3().children(fields)
 }
 
@@ -40,10 +45,12 @@ pub(crate) struct PageWidgets<'a> {
     pub(crate) dropdown: &'a dyn Fn(String, String, SettingsDropdown) -> AnyElement,
     pub(crate) setting_row:
         &'a dyn Fn(&'static str, &'static str, SettingsControl, AnyElement) -> AnyElement,
-    pub(crate) setting_toggle: &'a dyn Fn(&'static str, bool, SettingsToggle) -> AnyElement,
-    pub(crate) numeric:
-        &'a dyn Fn(&'static str, TextField, NumericSetting, ConfigTextField) -> AnyElement,
+    pub(crate) setting_toggle:
+        &'a dyn Fn(SharedString, &'static str, bool, SettingsToggle) -> AnyElement,
+    pub(crate) numeric: &'a dyn Fn(ConfigSetting, TextField) -> AnyElement,
     pub(crate) opacity_slider: &'a dyn Fn(f32, OpacityTarget) -> AnyElement,
+    /// The theme's error colour, for the validation messages pages show.
+    pub(crate) error_color: Hsla,
 }
 
 pub(crate) fn render_settings_pages(
@@ -60,53 +67,9 @@ pub(crate) fn render_settings_pages(
         }
         SettingsPage::Themes => render_themes_page(editor, colors, handle, widgets),
         SettingsPage::Keymap => render_keymap_page(editor, colors, handle, zetta_entity, widgets),
-        SettingsPage::PaneTemplates => render_pane_templates_page(editor, colors, handle),
-        SettingsPage::Projects => {
-            render_projects_page(editor, colors, handle, widgets.opacity_slider)
-        }
+        SettingsPage::PaneTemplates => render_pane_templates_page(editor, colors, widgets, handle),
+        SettingsPage::Projects => render_projects_page(editor, colors, handle, widgets),
     }
-}
-
-/// A settings row that opens a picker rather than editing in place: the value it
-/// currently holds, a chevron, and the focus ring the form's other controls
-/// have.
-///
-/// The default-tab-icon and font-family rows are the two of these; they differ
-/// only in what they show and what clicking them opens, so the frame is built
-/// once here.
-fn picker_trigger_row(
-    id: &'static str,
-    focused: bool,
-    colors: &ThemeColors,
-    value: impl IntoElement,
-    open: impl Fn(&mut Window, &mut App) + 'static,
-) -> AnyElement {
-    h_flex()
-        .id(id)
-        .h_9()
-        .w_full()
-        .min_w(px(180.))
-        .px_3()
-        .justify_between()
-        .rounded(px(4.))
-        .border_1()
-        .border_color(if focused {
-            colors.border_focused
-        } else {
-            colors.border
-        })
-        .bg(colors.editor_background)
-        .cursor_pointer()
-        .hover(|style| style.bg(colors.element_hover))
-        .child(value)
-        .child(
-            svg()
-                .path(IconName::ChevronDown.path())
-                .size(px(14.))
-                .text_color(colors.icon_muted),
-        )
-        .on_click(move |_, window, cx| open(window, cx))
-        .into_any_element()
 }
 
 /// The row that opens the tab-icon picker, showing the icon new tabs get.
@@ -116,22 +79,16 @@ fn default_tab_icon_field(
     handle: &WeakEntity<Zetta>,
 ) -> AnyElement {
     let current = editor.configuration.default_tab_icon;
-    let picker_handle = handle.clone();
-    picker_trigger_row(
+    picker_trigger(
         "default-tab-icon-picker-trigger",
-        editor.focused_control == Some(SettingsControl::DefaultTabIconPicker),
-        colors,
+        SettingsControl::DefaultTabIconPicker,
         h_flex()
             .gap_2()
             .child(Icon::new(current.unwrap_or(IconName::Dash)))
             .child(current.map_or_else(|| "None".to_owned(), tab_icon_label)),
-        move |window, cx| {
-            picker_handle
-                .update(cx, |this, cx| {
-                    this.open_default_tab_icon_picker(window, cx);
-                })
-                .ok();
-        },
+        editor,
+        colors,
+        handle,
     )
 }
 
@@ -142,37 +99,23 @@ fn font_family_field(
     handle: &WeakEntity<Zetta>,
 ) -> AnyElement {
     let current_font = editor.configuration.terminal_font_family.clone();
-    let picker_handle = handle.clone();
-    picker_trigger_row(
+    picker_trigger(
         "terminal-font-family-picker-trigger",
-        editor.focused_control == Some(SettingsControl::FontPicker),
-        colors,
+        SettingsControl::FontPicker,
         div()
-            .min_w_0()
             .overflow_hidden()
             .whitespace_nowrap()
             .text_ellipsis()
             .font_family(current_font.clone())
             .child(current_font),
-        move |window, cx| {
-            picker_handle
-                .update(cx, |this, cx| {
-                    if let Some(editor) = this.settings_editor.as_mut() {
-                        editor.font_query = Some(TextField::default());
-                        editor.scroll_geometry_initialized = false;
-                    }
-                    this.focus_settings_input(SettingsInput::FontSearch, window, cx);
-                })
-                .ok();
-        },
+        editor,
+        colors,
+        handle,
     )
 }
 
-/// The Configuration page: a flat list of setting rows, in sections.
-///
-/// Each section is its own builder below, because the rows are a data table
-/// rather than logic and reading one section should not mean scrolling past the
-/// others.
+/// The Configuration page, drawn from [`configuration_layout`] — the same list
+/// its tab order is built from.
 fn render_configuration_page(
     editor: &SettingsEditor,
     colors: &ThemeColors,
@@ -180,568 +123,186 @@ fn render_configuration_page(
     focus_status_access: FocusStatusAccess,
     widgets: &PageWidgets<'_>,
 ) -> AnyElement {
-    let mut rows = configuration_appearance_rows(editor, colors, handle, widgets);
-    rows.extend(configuration_session_rows(editor, colors, widgets));
-    rows.extend(configuration_window_rows(
-        editor,
-        colors,
-        focus_status_access,
-        widgets,
-    ));
-    #[cfg(servers_enabled)]
-    rows.extend(configuration_network_rows(
-        &editor.configuration,
-        colors,
-        widgets.setting_row,
-        widgets.numeric,
-    ));
-    rows.extend(configuration_profile_rows(editor, colors, handle, widgets));
+    // Read only by the macOS Focus status row.
+    #[cfg(not(target_os = "macos"))]
+    let _ = focus_status_access;
+    let rows = configuration_layout(editor)
+        .into_iter()
+        .map(|item| match item {
+            ConfigurationItem::Heading(section) => {
+                section_heading(section.title(), Some(section.description().into()), colors)
+            }
+            ConfigurationItem::Row(setting) => (widgets.setting_row)(
+                setting.label(),
+                setting.description(),
+                setting.control(),
+                with_setting_error(
+                    configuration_control(setting, editor, colors, handle, widgets),
+                    setting,
+                    editor,
+                    widgets,
+                ),
+            ),
+            #[cfg(target_os = "macos")]
+            ConfigurationItem::FocusStatus => (widgets.setting_row)(
+                "macOS Focus status",
+                "Allow Zetta to follow Focus status; manual Silent Mode remains available",
+                SettingsControl::RequestFocusStatusAccess,
+                focus_status_control(editor, colors, handle, focus_status_access),
+            ),
+            ConfigurationItem::Profile(index) => profile_card(
+                index,
+                &editor.configuration.profiles[index],
+                editor,
+                colors,
+                handle,
+                widgets,
+            ),
+            ConfigurationItem::AddProfile => add_row(
+                DialogButton::new("add-settings-profile", "Add profile", ButtonRole::Secondary)
+                    .focused(editor.focused_control == Some(SettingsControl::AddProfile))
+                    .render(
+                        colors,
+                        activate_on_click(handle, SettingsControl::AddProfile),
+                    ),
+                editor,
+                &[SettingsControl::AddProfile],
+            ),
+        });
     div().children(rows).into_any_element()
 }
 
-/// Profile, theme, tab icon, font, working directory and scrollback: what a
-/// new tab looks like and starts in.
-fn configuration_appearance_rows(
+/// The control a setting's row hosts, drawn by the setting's kind. Its label,
+/// description and place in the tab order come from the layout.
+fn configuration_control(
+    setting: ConfigSetting,
     editor: &SettingsEditor,
     colors: &ThemeColors,
     handle: &WeakEntity<Zetta>,
     widgets: &PageWidgets<'_>,
-) -> Vec<AnyElement> {
-    let &PageWidgets {
-        text_input,
-        dropdown,
-        setting_row,
-        numeric,
-        ..
-    } = widgets;
+) -> AnyElement {
     let configuration = &editor.configuration;
-    let default_profile = dropdown(
-        "settings-default-profile".to_owned(),
-        configuration.default_profile.clone(),
-        SettingsDropdown::DefaultProfile,
-    );
-    let new_tab_profile = dropdown(
-        "settings-new-tab-profile".to_owned(),
-        configuration.new_tab_profile.label().to_owned(),
-        SettingsDropdown::NewTabProfile,
-    );
-    let theme = dropdown(
-        "settings-theme".to_owned(),
-        configuration.theme.clone(),
-        SettingsDropdown::Theme,
-    );
-    let dark_theme = dropdown(
-        "settings-dark-theme".to_owned(),
-        configuration.dark_theme.clone(),
-        SettingsDropdown::DarkTheme,
-    );
-    let default_tab_icon = default_tab_icon_field(editor, colors, handle);
-    let font_family = font_family_field(editor, colors, handle);
-    let working_directory_scope = dropdown(
-        "settings-working-directory-scope".to_owned(),
-        configuration.working_directory_scope.label().to_owned(),
-        SettingsDropdown::WorkingDirectoryScope,
-    );
-    vec![
-        setting_row(
-            "Default profile",
-            "Profile selected when Zetta starts",
-            SettingsControl::Dropdown(SettingsDropdown::DefaultProfile),
-            default_profile,
+    let id = setting.element_id();
+    match setting.spec().kind {
+        SettingKind::Switch(_) => (widgets.setting_toggle)(
+            id,
+            setting.label(),
+            setting.switch_shown(configuration).unwrap_or(false),
+            SettingsToggle::Setting(setting),
         ),
-        setting_row(
-            "New Tab profile",
-            "Default uses the Default profile above; Inherit reuses the active tab's profile",
-            SettingsControl::Dropdown(SettingsDropdown::NewTabProfile),
-            new_tab_profile,
+        SettingKind::Choice(_) => (widgets.dropdown)(
+            id.to_string(),
+            setting
+                .choice_label(configuration)
+                .unwrap_or_default()
+                .to_owned(),
+            SettingsDropdown::Setting(setting),
         ),
-        setting_row(
-            "Light theme",
-            "Application color theme used in light appearance",
-            SettingsControl::Dropdown(SettingsDropdown::Theme),
-            theme,
+        SettingKind::Number(spec) => {
+            (widgets.numeric)(setting, spec.text.field(configuration).clone())
+        }
+        SettingKind::Text(spec) => (widgets.text_input)(
+            id.to_string(),
+            spec.text.field(configuration).clone(),
+            SettingsInput::Configuration(ConfigTextField::Setting(setting)),
         ),
-        setting_row(
-            "Dark theme",
-            "Application color theme used in dark appearance",
-            SettingsControl::Dropdown(SettingsDropdown::DarkTheme),
-            dark_theme,
-        ),
-        setting_row(
-            "Default tab icon",
-            "Icon shown on new tabs; choose None to hide it",
-            SettingsControl::DefaultTabIconPicker,
-            default_tab_icon,
-        ),
-        setting_row(
-            "Terminal font size",
-            "Point size from 6 through 100",
-            SettingsControl::Numeric(NumericSetting::FontSize),
-            numeric(
-                "settings-font-size",
-                configuration.terminal_font_size.clone(),
-                NumericSetting::FontSize,
-                ConfigTextField::FontSize,
-            ),
-        ),
-        setting_row(
-            "Terminal font family",
-            "Search bundled and system-installed font families",
-            SettingsControl::FontPicker,
-            font_family,
-        ),
-        setting_row(
-            "Working directory",
-            "Initial directory; ~ expands to your home directory",
-            SettingsControl::Input(SettingsInput::Configuration(
-                ConfigTextField::WorkingDirectory,
-            )),
-            text_input(
-                "settings-working-directory".to_owned(),
-                configuration.working_directory.clone(),
-                SettingsInput::Configuration(ConfigTextField::WorkingDirectory),
-            ),
-        ),
-        setting_row(
-            "Inherit working directory scope",
-            "Choose which new shells inherit the active pane's current directory",
-            SettingsControl::Dropdown(SettingsDropdown::WorkingDirectoryScope),
-            working_directory_scope,
-        ),
-        setting_row(
-            "Scrollback history",
-            "Enter 0 through Max; steppers accelerate across the range",
-            SettingsControl::Numeric(NumericSetting::ScrollHistory),
-            numeric(
-                "settings-scroll-history",
-                configuration.max_scroll_history_lines.clone(),
-                NumericSetting::ScrollHistory,
-                ConfigTextField::ScrollHistory,
-            ),
-        ),
-    ]
-}
-
-/// The background-session section: what a detached or shared session keeps, and
-/// how it is encrypted at rest.
-fn configuration_session_rows(
-    editor: &SettingsEditor,
-    colors: &ThemeColors,
-    widgets: &PageWidgets<'_>,
-) -> Vec<AnyElement> {
-    let &PageWidgets {
-        text_input,
-        dropdown,
-        setting_row,
-        setting_toggle,
-        numeric,
-        ..
-    } = widgets;
-    // Both are read only by the encrypted-retention rows below.
-    #[cfg(not(feature = "session-persistence"))]
-    let (_, _) = (text_input, setting_toggle);
-    let configuration = &editor.configuration;
-    let session_retention = dropdown(
-        "settings-session-retention".to_owned(),
-        configuration.session_retention.label().to_owned(),
-        SettingsDropdown::SessionRetention,
-    );
-    let remote_session_protocol = dropdown(
-        "settings-remote-session-protocol".to_owned(),
-        match configuration.remote_session_protocol {
-            crate::config::RemoteSessionProtocol::Ssh => "SSH".to_owned(),
-            crate::config::RemoteSessionProtocol::Zosh => "Zosh".to_owned(),
-        },
-        SettingsDropdown::RemoteSessionProtocol,
-    );
-    // `mut` only where the auto-protect row below can be pushed.
-    #[cfg_attr(not(feature = "session-persistence"), allow(unused_mut))]
-    let mut rows = vec![
-        div()
-            .pt_4()
-            .pb_2()
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(colors.text_muted)
-                    .child(if cfg!(feature = "zmux") {
-                        "Background sessions (zmux)"
-                    } else {
-                        "Background sessions"
-                    }),
-            )
-            .child(div().text_xs().text_color(colors.text_muted).child(
-                if cfg!(feature = "session-persistence") {
-                    "Screen retention for detached and shared sessions"
-                } else {
-                    "Screen retention for detached sessions"
-                },
-            ))
-            .into_any_element(),
-        setting_row(
-            "Detached session retention",
-            if cfg!(feature = "session-persistence") {
-                "Keep no screen, a bounded in-memory screen, or encrypted disk state; a temporary GitHub outage uses memory until persistence returns"
-            } else {
-                "Keep no screen or a bounded in-memory screen"
-            },
-            SettingsControl::Dropdown(SettingsDropdown::SessionRetention),
-            session_retention,
-        ),
-        setting_row(
-            "Detached session ring bytes",
-            "Memory budget for the bounded screen retained by background sessions",
-            SettingsControl::Numeric(NumericSetting::SessionRingBytes),
-            numeric(
-                "settings-session-ring-bytes",
-                configuration.session_ring_bytes.clone(),
-                NumericSetting::SessionRingBytes,
-                ConfigTextField::SessionRingBytes,
-            ),
-        ),
-        setting_row(
-            "Remote session protocol",
-            "What carries a remote session's panes. Finding and attaching one is \
-             OpenSSH either way; Zosh gives each pane a Mosh link of its own, which \
-             survives roaming and suspend",
-            SettingsControl::Dropdown(SettingsDropdown::RemoteSessionProtocol),
-            remote_session_protocol,
-        ),
-        setting_row(
-            "Remote keep-alive",
-            "Milliseconds a Zosh link may go without sending before it holds itself \
-             open. Leave empty for Mosh's own three-second heartbeat",
-            SettingsControl::Numeric(NumericSetting::RemoteSessionKeepAlive),
-            numeric(
-                "settings-remote-session-keep-alive",
-                configuration.remote_session_keep_alive.clone(),
-                NumericSetting::RemoteSessionKeepAlive,
-                ConfigTextField::RemoteSessionKeepAlive,
-            ),
-        ),
-        setting_row(
-            "Forward SSH agent",
-            "Opt in to forwarding the local SSH agent through OpenSSH or Zosh; remote processes can use the forwarded socket",
-            SettingsControl::Toggle(SettingsToggle::RemoteSessionForwardAgent),
-            setting_toggle(
-                "settings-remote-session-forward-agent",
-                configuration.remote_session_forward_agent,
-                SettingsToggle::RemoteSessionForwardAgent,
-            ),
-        ),
-        #[cfg(feature = "session-persistence")]
-        setting_row(
-            "Disk recipients",
-            "Comma-separated age recipients or github:USER entries used for encrypted session retention",
-            SettingsControl::Input(SettingsInput::Configuration(
-                ConfigTextField::SessionPersistenceRecipients,
-            )),
-            text_input(
-                "settings-session-persistence-recipients".to_owned(),
-                configuration.session_persistence_recipients.clone(),
-                SettingsInput::Configuration(ConfigTextField::SessionPersistenceRecipients),
-            ),
-        ),
-        #[cfg(feature = "session-persistence")]
-        setting_row(
-            "Identity file",
-            "Optional age identity path; ~/.ssh/id_ed25519 is used when this is blank and present",
-            SettingsControl::Input(SettingsInput::Configuration(
-                ConfigTextField::SessionPersistenceIdentity,
-            )),
-            text_input(
-                "settings-session-persistence-identity".to_owned(),
-                configuration.session_persistence_identity.clone(),
-                SettingsInput::Configuration(ConfigTextField::SessionPersistenceIdentity),
-            ),
-        ),
-    ];
-    // Drawn only with a recipient and an effective identity to hand,
-    // under the same predicate that decides whether it is a tab stop,
-    // so what is on screen and what the keyboard reaches cannot disagree.
-    #[cfg(feature = "session-persistence")]
-    if configuration.session_auto_protect_is_offered() {
-        rows.push(setting_row(
-            "Protect sessions with your key",
-            "Detach, keep and share without a secret prompt: the session key is sealed to \
-             the recipients above and reopened with the identity file",
-            SettingsControl::Toggle(SettingsToggle::SessionAutoProtect),
-            setting_toggle(
-                "settings-session-persistence-auto-protect",
-                configuration.session_persistence_auto_protect,
-                SettingsToggle::SessionAutoProtect,
-            ),
-        ));
+        SettingKind::Custom(_) => {
+            custom_configuration_control(setting, editor, colors, handle, widgets)
+        }
     }
-    rows
 }
 
-/// The window-chrome section: pane dimming, compact mode, and what the title
-/// bar shows.
-fn configuration_window_rows(
+/// A setting's control, with why its value cannot be saved beneath it while
+/// it cannot be.
+fn with_setting_error(
+    control: AnyElement,
+    setting: ConfigSetting,
     editor: &SettingsEditor,
-    colors: &ThemeColors,
-    focus_status_access: FocusStatusAccess,
     widgets: &PageWidgets<'_>,
-) -> Vec<AnyElement> {
-    // Both are read only by the macOS Focus status row below.
-    #[cfg(not(target_os = "macos"))]
-    let (_, _) = (focus_status_access, colors);
-    let &PageWidgets {
-        dropdown,
-        setting_row,
-        setting_toggle,
-        opacity_slider,
-        ..
-    } = widgets;
-    let configuration = &editor.configuration;
-    let pane_controls_position = dropdown(
-        "settings-pane-controls-position".to_owned(),
-        configuration.pane_controls_position.label().to_owned(),
-        SettingsDropdown::PaneControlsPosition,
-    );
-    let pane_controls_default_visibility = dropdown(
-        "settings-pane-controls-default-visibility".to_owned(),
-        if configuration.pane_controls_hidden_by_default {
-            "Hidden".to_owned()
-        } else {
-            "Visible".to_owned()
-        },
-        SettingsDropdown::PaneControlsDefaultVisibility,
-    );
-    vec![
-        setting_row(
-            "Inactive pane opacity",
-            "Dimming level as a percentage",
-            SettingsControl::Opacity,
-            opacity_slider(
-                configuration.inactive_pane_opacity,
-                OpacityTarget::Configuration,
-            ),
-        ),
-        setting_row(
-            "Compact mode",
-            "Move tabs into the title bar and reduce its controls",
-            SettingsControl::Toggle(SettingsToggle::CompactMode),
-            setting_toggle(
-                "settings-compact-mode",
-                configuration.compact_mode,
-                SettingsToggle::CompactMode,
-            ),
-        ),
-        setting_row(
-            "Hide pane size",
-            "Hide the active pane dimensions from the title bar",
-            SettingsControl::Toggle(SettingsToggle::PaneSize),
-            setting_toggle(
-                "settings-hide-pane-size",
-                configuration.hide_pane_size,
-                SettingsToggle::PaneSize,
-            ),
-        ),
-        setting_row(
-            "Hide title bar labels",
-            "Hide text such as Menu, Profile, and Keep running when available",
-            SettingsControl::Toggle(SettingsToggle::TitleBarLabels),
-            setting_toggle(
-                "settings-hide-title-bar-labels",
-                configuration.hide_title_bar_labels,
-                SettingsToggle::TitleBarLabels,
-            ),
-        ),
-        setting_row(
-            "Hide title bar buttons",
-            "Hide title bar buttons such as Keep running in --no-mux mode and Detach",
-            SettingsControl::Toggle(SettingsToggle::TitleBarButtons),
-            setting_toggle(
-                "settings-hide-title-bar-buttons",
-                configuration.hide_title_bar_buttons,
-                SettingsToggle::TitleBarButtons,
-            ),
-        ),
-        #[cfg(target_os = "macos")]
-        setting_row(
-            "Hide title bar menus",
-            "Hide the Menu and Profile menus from the title bar",
-            SettingsControl::Toggle(SettingsToggle::TitleBarMenus),
-            setting_toggle(
-                "settings-hide-title-bar-menus",
-                configuration.hide_title_bar_menus,
-                SettingsToggle::TitleBarMenus,
-            ),
-        ),
-        #[cfg(target_os = "macos")]
-        setting_row(
-            "macOS Focus status",
-            "Allow Zetta to follow Focus status; manual Silent Mode remains available",
-            SettingsControl::RequestFocusStatusAccess,
-            h_flex()
-                .justify_between()
-                .gap_2()
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(colors.text_muted)
-                        .child(focus_status_access.label()),
-                )
-                .child(
-                    Button::new("settings-request-focus-status-access", "Request access")
-                        .style(ButtonStyle::Outlined)
-                        .size(ButtonSize::Compact)
-                        .color(Color::Custom(colors.text))
-                        .aria_label("Request macOS Focus status access")
-                        .tooltip(Tooltip::for_action_title(
-                            "Request Focus Status Access",
-                            &RequestFocusStatusAccess,
-                        ))
-                        .on_click(|_, window, cx| {
-                            window.dispatch_action(Box::new(RequestFocusStatusAccess), cx);
-                        }),
-                )
-                .into_any_element(),
-        ),
-        setting_row(
-            "Pane controls position",
-            "Keep pane overlay controls on the right or move them to the left",
-            SettingsControl::Dropdown(SettingsDropdown::PaneControlsPosition),
-            pane_controls_position,
-        ),
-        setting_row(
-            "Pane controls by default",
-            "Start new panes with overlay controls visible or hidden",
-            SettingsControl::Dropdown(SettingsDropdown::PaneControlsDefaultVisibility),
-            pane_controls_default_visibility,
-        ),
-    ]
-}
-
-/// The optional local servers' ports.
-///
-/// Each row is behind its own feature, so the whole section disappears from
-/// the page when neither server is built.
-#[cfg(servers_enabled)]
-fn configuration_network_rows(
-    configuration: &ConfigurationForm,
-    colors: &ThemeColors,
-    setting_row: &dyn Fn(&'static str, &'static str, SettingsControl, AnyElement) -> AnyElement,
-    numeric: &dyn Fn(&'static str, TextField, NumericSetting, ConfigTextField) -> AnyElement,
-) -> Vec<AnyElement> {
-    let mut rows = vec![
-        div()
-            .pt_4()
-            .pb_2()
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(colors.text_muted)
-                    .child("Network services"),
-            )
+) -> AnyElement {
+    match &editor.invalid_setting {
+        Some((invalid, message)) if *invalid == setting => v_flex()
+            .gap_1()
+            .child(control)
             .child(
                 div()
                     .text_xs()
-                    .text_color(colors.text_muted)
-                    .child("Ports used by the optional local servers"),
+                    .text_color(widgets.error_color)
+                    .child(message.clone()),
             )
             .into_any_element(),
-    ];
-    #[cfg(feature = "http-server")]
-    rows.push(setting_row(
-        "HTTP server port",
-        "TCP port used when starting the static HTTP server",
-        SettingsControl::Numeric(NumericSetting::HttpServerPort),
-        numeric(
-            "settings-http-server-port",
-            configuration.http_server_port.clone(),
-            NumericSetting::HttpServerPort,
-            ConfigTextField::HttpServerPort,
-        ),
-    ));
-    #[cfg(feature = "tftp-server")]
-    rows.push(setting_row(
-        "TFTP server port",
-        "UDP port used when starting the TFTP server",
-        SettingsControl::Numeric(NumericSetting::TftpServerPort),
-        numeric(
-            "settings-tftp-server-port",
-            configuration.tftp_server_port.clone(),
-            NumericSetting::TftpServerPort,
-            ConfigTextField::TftpServerPort,
-        ),
-    ));
-    rows
+        _ => control,
+    }
 }
 
-/// The Profiles section: its heading, one block of controls per configured
-/// profile, and the Add profile button.
-fn configuration_profile_rows(
+/// The settings with an editor of their own.
+fn custom_configuration_control(
+    setting: ConfigSetting,
     editor: &SettingsEditor,
     colors: &ThemeColors,
     handle: &WeakEntity<Zetta>,
     widgets: &PageWidgets<'_>,
-) -> Vec<AnyElement> {
+) -> AnyElement {
     let configuration = &editor.configuration;
-    let mut rows = Vec::new();
-    rows.push(
-        div()
-            .pt_4()
-            .pb_2()
-            .text_sm()
-            .text_color(colors.text_muted)
-            .child("Profiles")
-            .into_any_element(),
-    );
-    for (index, profile) in configuration.profiles.iter().enumerate() {
-        rows.push(profile_card(
-            index, profile, editor, colors, handle, widgets,
-        ));
+    let dropdown = |label: &str, dropdown: SettingsDropdown| {
+        (widgets.dropdown)(setting.element_id().to_string(), label.to_owned(), dropdown)
+    };
+    match setting {
+        ConfigSetting::DefaultProfile => dropdown(
+            &configuration.default_profile,
+            SettingsDropdown::DefaultProfile,
+        ),
+        ConfigSetting::LightTheme => dropdown(&configuration.theme, SettingsDropdown::Theme),
+        ConfigSetting::DarkTheme => {
+            dropdown(&configuration.dark_theme, SettingsDropdown::DarkTheme)
+        }
+        ConfigSetting::DefaultTabIcon => default_tab_icon_field(editor, colors, handle),
+        ConfigSetting::FontFamily => font_family_field(editor, colors, handle),
+        ConfigSetting::InactivePaneOpacity => (widgets.opacity_slider)(
+            configuration.inactive_pane_opacity,
+            OpacityTarget::Configuration,
+        ),
+        _ => unreachable!("{setting:?} is not a custom setting"),
     }
+}
 
-    let add_handle = handle.clone();
-    let add_focused = editor.focused_control == Some(SettingsControl::AddProfile);
-    rows.push(
-        h_flex()
-            .w_full()
-            .h(px(KEYMAP_ROW_HEIGHT))
-            .border_t_1()
-            .border_color(colors.border_variant)
-            .child(
-                Button::new("add-settings-profile", "Add profile")
-                    .style(ButtonStyle::Outlined)
-                    .color(Color::Custom(colors.text))
-                    .selected_label_color(Color::Custom(colors.text))
-                    .toggle_state(add_focused)
-                    .selected_style(ButtonStyle::OutlinedCustom(colors.border_focused))
-                    .on_click(move |_, window, cx| {
-                        add_handle
-                            .update(cx, |this, cx| {
-                                if let Some(editor) = this.settings_editor.as_mut() {
-                                    editor.profile_draft_scroll = ScrollHandle::new();
-                                    editor.profile_draft = Some(settings_editor::ProfileForm {
-                                        name: TextField::default(),
-                                        program: TextField::default(),
-                                        arguments: TextField::default(),
-                                        theme: None,
-                                        dark_theme: None,
-                                        icon: None,
-                                        automatic_icon: ProfileIcon::Zetta,
-                                        hidden: false,
-                                        detected: false,
-                                    });
-                                    editor.message = None;
-                                    invalidate_controls_cache(editor);
-                                }
-                                this.focus_settings_input(
-                                    SettingsInput::ProfileDraft(ProfileDraftField::Name),
-                                    window,
-                                    cx,
-                                );
-                            })
-                            .ok();
-                    }),
+/// The macOS Focus status row: what access Zetta has, and the button that asks
+/// for it.
+#[cfg(target_os = "macos")]
+fn focus_status_control(
+    editor: &SettingsEditor,
+    colors: &ThemeColors,
+    handle: &WeakEntity<Zetta>,
+    focus_status_access: FocusStatusAccess,
+) -> AnyElement {
+    h_flex()
+        .justify_between()
+        .gap_2()
+        .child(
+            div()
+                .text_sm()
+                .text_color(colors.text_muted)
+                .child(focus_status_access.label()),
+        )
+        .child(
+            DialogButton::new(
+                "settings-request-focus-status-access",
+                "Request access",
+                ButtonRole::Secondary,
             )
-            .into_any_element(),
-    );
-    rows
+            .compact(true)
+            .action_tooltip(
+                "Request Focus status access",
+                &RequestFocusStatusAccess,
+                None,
+            )
+            .focused(editor.focused_control == Some(SettingsControl::RequestFocusStatusAccess))
+            .render(
+                colors,
+                activate_on_click(handle, SettingsControl::RequestFocusStatusAccess),
+            ),
+        )
+        .into_any_element()
 }
 
 /// The Themes page: the extension search, what is installed, and what the last
@@ -766,86 +327,44 @@ fn theme_search_rows(
     handle: &WeakEntity<Zetta>,
     widgets: &PageWidgets<'_>,
 ) -> Vec<AnyElement> {
-    let text_input = widgets.text_input;
-    let search = text_input(
+    let search = (widgets.text_input)(
         "settings-theme-extension-search".to_owned(),
         editor.theme_extension_query.clone(),
         SettingsInput::ThemeSearch,
     );
-    let search_handle = handle.clone();
     vec![
-
-            div()
-                .mb_3()
-                .child(
-                    div()
-                        .mb_1()
-                        .text_sm()
-                        .child("Download themes from Zed extensions"),
+        section_heading(
+            "Download themes from Zed extensions",
+            Some("Only declared theme JSON files are installed; other extension features are ignored".into()),
+            colors,
+        ),
+        h_flex()
+            .mb_3()
+            .child(
+                SettingsButton::new(
+                    "browse-theme-store".to_owned(),
+                    "Browse the Zed themes store",
+                    SettingsControl::OpenThemeStore,
                 )
-                .child(
-                    div()
-                        .mb_3()
-                        .text_xs()
-                        .text_color(colors.text_muted)
-                        .child(
-                            "Only declared theme JSON files are installed. Other extension features are ignored.",
-                        )
-                        .child(
-                            div().mt_1().child(
-                                ButtonLink::new(
-                                    "Browse the Zed themes store",
-                                    "https://zed.dev/extensions?filter=themes",
-                                )
-                                .label_size(LabelSize::Small),
-                            ),
-                        ),
-                )
-                .child(
-                    h_flex()
-                        .gap_2()
-                        .child(div().flex_1().child(search))
-                        .child(
-                            div()
-                                .id("search-theme-extensions")
-                                .h_9()
-                                .px_3()
-                                .flex()
-                                .items_center()
-                                .rounded(px(4.))
-                                .border_1()
-                                .border_color(
-                                    if editor.focused_control
-                                        == Some(SettingsControl::SearchThemes)
-                                    {
-                                        colors.border_focused
-                                    } else {
-                                        colors.border
-                                    },
-                                )
-                                .when(
-                                    editor.focused_control
-                                        == Some(SettingsControl::SearchThemes),
-                                    |button| button.bg(colors.element_selected),
-                                )
-                                .cursor_pointer()
-                                .text_color(colors.text)
-                                .hover(|style| style.bg(colors.element_hover))
-                                .on_click(move |_, window, cx| {
-                                    search_handle
-                                        .update(cx, |this, cx| {
-                                            this.fetch_theme_extensions(window, cx);
-                                        })
-                                        .ok();
-                                })
-                                .child(if editor.theme_extensions_loading {
-                                    "Loading…"
-                                } else {
-                                    "Search"
-                                }),
-                        ),
-                )
-                .into_any_element(),
+                .render(editor, colors, handle),
+            )
+            .into_any_element(),
+        track_focus_scroll(
+            h_flex().mb_3().gap_2(),
+            editor,
+            &[SettingsControl::SearchThemes],
+        )
+        .child(div().flex_1().child(search))
+        .child(
+            SettingsButton::new(
+                "search-theme-extensions".to_owned(),
+                "Search",
+                SettingsControl::SearchThemes,
+            )
+            .loading(editor.theme_extensions_loading)
+            .render(editor, colors, handle),
+        )
+        .into_any_element(),
     ]
 }
 
@@ -856,111 +375,58 @@ fn installed_theme_extension_rows(
     colors: &ThemeColors,
     handle: &WeakEntity<Zetta>,
 ) -> Vec<AnyElement> {
-    let mut rows = Vec::new();
-
-    if !editor.installed_theme_extensions.is_empty() {
-        rows.push(
-            div()
-                .mt_2()
-                .mb_2()
-                .text_sm()
-                .child("Installed from Zed extensions")
-                .into_any_element(),
+    if editor.installed_theme_extensions.is_empty() {
+        return Vec::new();
+    }
+    let busy = editor.theme_extension_downloading.is_some();
+    let mut rows = vec![section_heading(
+        "Installed from Zed extensions",
+        None,
+        colors,
+    )];
+    for installed in &editor.installed_theme_extensions {
+        let control = SettingsControl::RemoveTheme(installed.id.clone());
+        let removing = editor
+            .theme_extension_downloading
+            .as_ref()
+            .is_some_and(|active| active.as_ref() == installed.id);
+        let theme_names = installed.theme_names.join(", ");
+        let files = format!(
+            "{} theme file{}{}",
+            installed.file_count,
+            if installed.file_count == 1 { "" } else { "s" },
+            if theme_names.is_empty() {
+                String::new()
+            } else {
+                format!(" · {theme_names}")
+            }
         );
-        for installed in &editor.installed_theme_extensions {
-            let id = installed.id.clone();
-            let removing = editor
-                .theme_extension_downloading
-                .as_ref()
-                .is_some_and(|active| active.as_ref() == installed.id);
-            let disabled = editor.theme_extension_downloading.is_some();
-            let remove_handle = handle.clone();
-            let theme_names = installed.theme_names.join(", ");
-            let focused =
-                editor.focused_control == Some(SettingsControl::RemoveTheme(installed.id.clone()));
-            rows.push(
-                div()
-                    .mb_2()
-                    .p_3()
-                    .rounded(px(4.))
-                    .border_1()
-                    .border_color(if focused {
-                        colors.border_focused
-                    } else {
-                        colors.border
-                    })
-                    .bg(if focused {
-                        colors.element_selected
-                    } else {
-                        colors.editor_background
-                    })
+        rows.push(
+            track_focus_scroll(
+                card_frame(editor.focused_control.as_ref() == Some(&control), colors),
+                editor,
+                std::slice::from_ref(&control),
+            )
+            .child(
+                h_flex()
+                    .justify_between()
+                    .gap_3()
+                    .child(card_text(installed.id.clone(), [files.into()], colors))
                     .child(
-                        h_flex()
-                            .justify_between()
-                            .gap_3()
-                            .child(
-                                div()
-                                    .min_w_0()
-                                    .flex_1()
-                                    .child(div().text_sm().child(installed.id.clone()))
-                                    .child(
-                                        div().mt_1().text_xs().text_color(colors.text_muted).child(
-                                            format!(
-                                                "{} theme file{}{}",
-                                                installed.file_count,
-                                                if installed.file_count == 1 { "" } else { "s" },
-                                                if theme_names.is_empty() {
-                                                    String::new()
-                                                } else {
-                                                    format!(" · {theme_names}")
-                                                }
-                                            ),
-                                        ),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .id(format!("remove-theme-extension-{}", installed.id))
-                                    .h_8()
-                                    .px_3()
-                                    .flex()
-                                    .items_center()
-                                    .flex_none()
-                                    .rounded(px(4.))
-                                    .border_1()
-                                    .border_color(
-                                        if editor.focused_control
-                                            == Some(SettingsControl::RemoveTheme(
-                                                installed.id.clone(),
-                                            ))
-                                        {
-                                            colors.border_focused
-                                        } else {
-                                            colors.border
-                                        },
-                                    )
-                                    .when(!disabled, |button| {
-                                        button
-                                            .cursor_pointer()
-                                            .hover(|style| style.bg(colors.element_hover))
-                                            .on_click(move |_, window, cx| {
-                                                remove_handle
-                                                    .update(cx, |this, cx| {
-                                                        this.remove_theme_extension(
-                                                            id.clone(),
-                                                            window,
-                                                            cx,
-                                                        );
-                                                    })
-                                                    .ok();
-                                            })
-                                    })
-                                    .child(if removing { "Removing…" } else { "Remove" }),
-                            ),
-                    )
-                    .into_any_element(),
-            );
-        }
+                        SettingsButton::new(
+                            format!("remove-theme-extension-{}", installed.id),
+                            "Remove",
+                            control.clone(),
+                        )
+                        .destructive()
+                        .confirm_with("Confirm remove")
+                        .enabled(!busy)
+                        .loading(removing)
+                        .render(editor, colors, handle),
+                    ),
+            )
+            .into_any_element(),
+        );
     }
     rows
 }
@@ -972,132 +438,71 @@ fn available_theme_extension_rows(
     handle: &WeakEntity<Zetta>,
 ) -> Vec<AnyElement> {
     let mut rows = Vec::new();
-
     if editor.theme_extensions.is_empty() && !editor.theme_extensions_loading {
-        rows.push(
-            div()
-                .py_6()
-                .text_center()
-                .text_color(colors.text_muted)
-                .child(if editor.theme_extensions_searched {
-                    "No matching theme extensions found."
-                } else {
-                    "Enter a theme name and select Search."
-                })
-                .into_any_element(),
-        );
+        rows.push(empty_state(
+            if editor.theme_extensions_searched {
+                "No theme extensions match"
+            } else {
+                "Type a theme name and choose Search"
+            },
+            colors,
+        ));
     }
     for extension in &editor.theme_extensions {
-        let id = extension.id.clone();
+        let control = SettingsControl::InstallTheme(extension.id.clone());
         let downloading = editor
             .theme_extension_downloading
             .as_ref()
-            .is_some_and(|active| active == &id);
+            .is_some_and(|active| active == &extension.id);
         let already_installed = editor
             .installed_theme_extensions
             .iter()
             .any(|installed| installed.id == extension.id.as_ref());
-        let disabled = editor.theme_extension_downloading.is_some() || already_installed;
-        let install_handle = handle.clone();
-        let focused =
-            editor.focused_control == Some(SettingsControl::InstallTheme(extension.id.clone()));
-        let description = extension
-            .description
-            .clone()
-            .unwrap_or_else(|| "Theme extension for Zed".to_owned());
         let author = if extension.authors.is_empty() {
             String::new()
         } else {
             format!(" by {}", extension.authors.join(", "))
         };
+        let description = extension
+            .description
+            .clone()
+            .unwrap_or_else(|| "Theme extension for Zed".to_owned());
+        let details = format!(
+            "{} downloads · version {}",
+            extension.download_count, extension.version
+        );
         rows.push(
-            div()
-                .mb_2()
-                .p_3()
-                .rounded(px(4.))
-                .border_1()
-                .border_color(if focused {
-                    colors.border_focused
-                } else {
-                    colors.border
-                })
-                .bg(if focused {
-                    colors.element_selected
-                } else {
-                    colors.editor_background
-                })
-                .child(
-                    h_flex()
-                        .justify_between()
-                        .gap_3()
-                        .child(
-                            div()
-                                .min_w_0()
-                                .flex_1()
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .child(format!("{}{}", extension.name, author)),
-                                )
-                                .child(
-                                    div()
-                                        .mt_1()
-                                        .text_xs()
-                                        .text_color(colors.text_muted)
-                                        .child(description),
-                                )
-                                .child(div().mt_1().text_xs().text_color(colors.text_muted).child(
-                                    format!(
-                                        "{} downloads · version {}",
-                                        extension.download_count, extension.version
-                                    ),
-                                )),
+            track_focus_scroll(
+                card_frame(editor.focused_control.as_ref() == Some(&control), colors),
+                editor,
+                std::slice::from_ref(&control),
+            )
+            .child(
+                h_flex()
+                    .justify_between()
+                    .gap_3()
+                    .child(card_text(
+                        format!("{}{author}", extension.name),
+                        [description.into(), details.into()],
+                        colors,
+                    ))
+                    .child(
+                        SettingsButton::new(
+                            format!("install-theme-extension-{}", extension.id),
+                            if already_installed {
+                                "Installed"
+                            } else {
+                                "Install"
+                            },
+                            control.clone(),
                         )
-                        .child(
-                            div()
-                                .id(format!("install-theme-extension-{}", extension.id))
-                                .h_8()
-                                .px_3()
-                                .flex()
-                                .items_center()
-                                .flex_none()
-                                .rounded(px(4.))
-                                .border_1()
-                                .border_color(
-                                    if editor.focused_control
-                                        == Some(SettingsControl::InstallTheme(extension.id.clone()))
-                                    {
-                                        colors.border_focused
-                                    } else {
-                                        colors.border
-                                    },
-                                )
-                                .when(!disabled, |button| {
-                                    button
-                                        .cursor_pointer()
-                                        .hover(|style| style.bg(colors.element_hover))
-                                        .on_click(move |_, window, cx| {
-                                            install_handle
-                                                .update(cx, |this, cx| {
-                                                    this.download_theme_extension(
-                                                        id.clone(),
-                                                        window,
-                                                        cx,
-                                                    );
-                                                })
-                                                .ok();
-                                        })
-                                })
-                                .child(if downloading {
-                                    "Installing…"
-                                } else if already_installed {
-                                    "Installed"
-                                } else {
-                                    "Install"
-                                }),
-                        ),
-                )
-                .into_any_element(),
+                        .primary()
+                        .enabled(editor.theme_extension_downloading.is_none() && !already_installed)
+                        .loading(downloading)
+                        .render(editor, colors, handle),
+                    ),
+            )
+            .into_any_element(),
         );
     }
     rows
@@ -1136,63 +541,84 @@ fn render_keymap_page(
     .with_decoration(sticky_items(
         zetta_entity_for_sticky,
         compute_keymap_sticky_candidates,
-        move |zetta, candidate, window, cx| {
-            render_keymap_sticky_candidate(zetta, candidate, window, cx)
-        },
+        render_keymap_sticky_row,
     ));
     let keymap_scroll = editor.keymap_scroll.0.borrow().base_handle.clone();
 
     div()
-            .flex()
-            .flex_col()
-            .size_full()
-            .child(
+        .flex()
+        .flex_col()
+        .size_full()
+        .child(
+            div().flex_none().child(section_heading(
+                "Keyboard shortcuts",
+                Some(
+                    "Type a shortcut into a field, or choose Record to capture one from the \
+                     keyboard"
+                        .into(),
+                ),
+                colors,
+            )),
+        )
+        .child(div().flex_none().mb_3().child(text_input(
+            "settings-keymap-search".to_owned(),
+            editor.keymap_search.clone(),
+            SettingsInput::KeymapSearch,
+        )))
+        .when(no_results, |content| {
+            content.child(
                 div()
                     .flex_none()
-                    .mb_3()
-                    .text_sm()
-                    .child("Type an accelerator in the field, or click Record to capture one from your keyboard.")
-                    .child(
-                        div()
-                            .mt_1()
-                            .text_xs()
-                            .text_color(colors.text_muted)
-                            .child("Recording opens a confirmation dialog: press Return to use the captured shortcut or Esc to cancel."),
-                    ),
+                    .child(empty_state("No bindings match", colors)),
             )
-            .child(
-                div().flex_none().mb_3().child(text_input(
-                    "settings-keymap-search".to_owned(),
-                    editor.keymap_search.clone(),
-                    SettingsInput::KeymapSearch,
+        })
+        .child(
+            // The scroll indicator is absolutely positioned against this
+            // container's padding edge, so the padding is what keeps it off the
+            // rows rather than painted over their trailing controls.
+            div()
+                .relative()
+                .flex_1()
+                .min_h_0()
+                .pr(px(SETTINGS_SCROLLBAR_WIDTH + 2.))
+                .child(rows_list)
+                .child(scroll_indicator(
+                    "settings-keymap-scrollbar".to_owned(),
+                    &keymap_scroll,
                 )),
-            )
-            .when(no_results, |content| {
-                content.child(
-                    div()
-                        .flex_none()
-                        .mb_3()
-                        .text_sm()
-                        .text_color(colors.text_muted)
-                        .child("No bindings match your search."),
-                )
-            })
-            .child(
-                // The scroll indicator is absolutely positioned against this
-                // container's padding edge, so the padding is what keeps it off the
-                // rows rather than painted over their trailing controls.
-                div()
-                    .relative()
-                    .flex_1()
-                    .min_h_0()
-                    .pr(px(SETTINGS_SCROLLBAR_WIDTH + 2.))
-                    .child(rows_list)
-                    .child(scroll_indicator(
-                        "settings-keymap-scrollbar".to_owned(),
-                        &keymap_scroll,
-                    )),
-            )
-            .into_any_element()
+        )
+        .into_any_element()
+}
+
+/// A sticky header above the keymap list: the section header or Add context
+/// row the list has scrolled past, drawn by the list's own row builder.
+fn render_keymap_sticky_row(
+    zetta: &mut Zetta,
+    candidate: KeymapStickyCandidate,
+    _window: &mut Window,
+    cx: &mut Context<Zetta>,
+) -> smallvec::SmallVec<[AnyElement; 8]> {
+    if !matches!(
+        candidate.row,
+        KeymapRow::SectionHeader(_) | KeymapRow::AddSection
+    ) {
+        return smallvec::SmallVec::new();
+    }
+    let colors = zetta.window_theme(cx).colors().clone();
+    let handle = cx.entity().downgrade();
+    let Some(editor) = zetta.settings_editor.as_ref() else {
+        return smallvec::SmallVec::new();
+    };
+    let ctx = KeymapRowRenderContext {
+        colors,
+        handle,
+        focused_control: editor.focused_control.clone(),
+        focused_input: editor.focused_input,
+    };
+    keymap_row_data_for(editor, candidate.row)
+        .map(|row| Zetta::render_keymap_row(&row, &ctx))
+        .into_iter()
+        .collect()
 }
 
 #[cfg(test)]
@@ -1214,295 +640,278 @@ fn profile_card(
     handle: &WeakEntity<Zetta>,
     widgets: &PageWidgets<'_>,
 ) -> AnyElement {
-    let &PageWidgets {
-        text_input,
-        dropdown,
-        ..
-    } = widgets;
-
-    let profile_controls = profile_controls(index, profile.detected);
-    let profile_focused = profile_controls
-        .iter()
-        .any(|control| editor.focused_control.as_ref() == Some(control));
-    let profile_theme = profile
-        .theme
-        .clone()
-        .unwrap_or_else(|| "Use application theme".to_owned());
-    let profile_theme = dropdown(
-        format!("settings-profile-{index}-theme"),
-        profile_theme,
-        SettingsDropdown::ProfileTheme(index),
-    );
-    let profile_dark_theme = profile
-        .dark_theme
-        .clone()
-        .unwrap_or_else(|| "Use application theme".to_owned());
-    let profile_dark_theme = dropdown(
-        format!("settings-profile-{index}-dark-theme"),
-        profile_dark_theme,
-        SettingsDropdown::ProfileDarkTheme(index),
-    );
-    let profile_icon_value = profile.icon.as_ref().unwrap_or(&profile.automatic_icon);
-    let profile_icon = h_flex()
-        .w_full()
-        .gap_2()
-        .child(profile_icon_value.render(IconSize::Small))
-        .child(div().min_w_0().flex_1().child(dropdown(
-            format!("settings-profile-{index}-icon"),
-            ProfileIcon::selector_label(profile.icon.as_ref()).to_owned(),
-            SettingsDropdown::ProfileIcon(index),
-        )));
-    let visibility_handle = handle.clone();
-    let profile_visibility = switch(
-        format!("settings-profile-{index}-visibility"),
-        (!profile.hidden).into(),
-    )
-    .label(if profile.hidden { "Hidden" } else { "Visible" })
-    .full_width(true)
-    .aria_label("Show profile in Profiles menu")
-    .on_click(move |state, window, cx| {
-        visibility_handle
-            .update(cx, |this, cx| {
-                this.set_settings_toggle(
-                    SettingsToggle::ProfileVisibility(index),
-                    state.selected(),
-                    window,
-                    cx,
-                );
-            })
-            .ok();
-    });
-    let card = if profile.detected {
-        detected_profile_card(
-            ProfileCardParts {
-                index,
-                profile,
-                profile_focused,
-                profile_icon_value,
-                profile_visibility,
-                profile_icon,
-                profile_theme,
-                profile_dark_theme,
-            },
-            colors,
-        )
-    } else {
-        user_profile_card(
-            ProfileCardParts {
-                index,
-                profile,
-                profile_focused,
-                profile_icon_value,
-                profile_visibility,
-                profile_icon,
-                profile_theme,
-                profile_dark_theme,
-            },
-            editor,
-            colors,
-            handle,
-            text_input,
-        )
-    };
-    track_focus_scroll(div().w_full().child(card), editor, &profile_controls).into_any_element()
-}
-
-/// The parts both kinds of profile card are built from: which profile it is,
-/// whether anything inside it holds the keyboard, its icon, and the four
-/// override controls the two cards lay out identically.
-struct ProfileCardParts<'a> {
-    index: usize,
-    profile: &'a crate::settings_editor::ProfileForm,
-    profile_focused: bool,
-    profile_icon_value: &'a ProfileIcon,
-    profile_visibility: ui::Switch,
-    profile_icon: Div,
-    profile_theme: AnyElement,
-    profile_dark_theme: AnyElement,
-}
-
-/// The card frame both kinds share: padding, rounding, and the border and fill
-/// that report focus.
-fn profile_card_frame(focused: bool, colors: &ThemeColors) -> Div {
-    div()
-        .p_3()
-        .mb_2()
-        .rounded(px(6.))
-        .border_1()
-        .border_color(if focused {
-            colors.border_focused
-        } else {
-            colors.border
-        })
-        .bg(if focused {
-            colors.element_selected
-        } else {
-            colors.editor_background
-        })
-}
-
-/// A profile discovered on this machine. Its program and arguments come from
-/// what is installed, so they are shown rather than edited, and only the four
-/// overrides are controls.
-fn detected_profile_card(parts: ProfileCardParts<'_>, colors: &ThemeColors) -> AnyElement {
-    let ProfileCardParts {
-        index,
+    let overrides = ProfileOverrides {
+        id_prefix: format!("settings-profile-{index}"),
+        visibility: SettingsToggle::ProfileVisibility(index),
+        icon: SettingsDropdown::ProfileIcon(index),
+        theme: SettingsDropdown::ProfileTheme(index),
+        dark_theme: SettingsDropdown::ProfileDarkTheme(index),
         profile,
-        profile_focused,
-        profile_icon_value,
-        profile_visibility,
-        profile_icon,
-        profile_theme,
-        profile_dark_theme,
-    } = parts;
-    let _ = index;
-    profile_card_frame(profile_focused, colors)
-        .child(
-            h_flex()
-                .min_w_0()
-                .flex_1()
-                .gap_2()
-                .child(profile_icon_value.render(IconSize::Medium))
-                .child(
-                    div()
-                        .min_w_0()
-                        .flex_1()
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(colors.text)
-                                .child(profile.name.text.clone()),
-                        )
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(colors.text_muted)
-                                .child("Detected profile"),
-                        ),
-                ),
-        )
-        .child(profile_fields_grid([
-            profile_field("Shown in Profiles menu", profile_visibility, colors),
-            profile_field("Icon", profile_icon, colors),
-            profile_field("Light theme", profile_theme, colors),
-            profile_field("Dark theme", profile_dark_theme, colors),
-        ]))
-        .into_any_element()
+        automatic_icon: &profile.automatic_icon,
+    };
+    let controls = profile_controls(index, profile.detected, profile.arguments.len());
+    let identity = (!profile.detected).then(|| ProfileIdentity {
+        id_prefix: format!("settings-profile-{index}"),
+        name: SettingsInput::Configuration(ConfigTextField::ProfileName(index)),
+        program: SettingsInput::Configuration(ConfigTextField::ProfileProgram(index)),
+        program_hint: None,
+        remove: SettingsControl::RemoveProfile(index),
+        remove_label: "profile",
+        arguments: ProfileTarget::Configuration(index),
+    });
+    render_profile_card(
+        ProfileCard {
+            profile,
+            identity,
+            overrides,
+            controls: &controls,
+        },
+        editor,
+        colors,
+        handle,
+        widgets,
+    )
 }
 
-/// A user-defined profile: its name, program and arguments are editable, and it
-/// can be removed.
-fn user_profile_card(
-    parts: ProfileCardParts<'_>,
+/// What a profile card shows: the profile, its name/program/arguments fields
+/// (absent for a detected profile, which names itself instead), its four
+/// overrides, and every control it hosts in tab order, which is what the card
+/// highlights for and scrolls into view as one.
+///
+/// The Configuration page's profiles and a project's profile overrides are
+/// both drawn with this; the builder used to draw its overrides as a column of
+/// rows labelled "Profile N · …".
+pub(super) struct ProfileCard<'a> {
+    pub(super) profile: &'a crate::settings_editor::ProfileForm,
+    pub(super) identity: Option<ProfileIdentity>,
+    pub(super) overrides: ProfileOverrides<'a>,
+    pub(super) controls: &'a [SettingsControl],
+}
+
+/// The controls of a profile's editable identity: its name, program and
+/// arguments, and the button that removes it.
+pub(super) struct ProfileIdentity {
+    pub(super) id_prefix: String,
+    pub(super) name: SettingsInput,
+    pub(super) program: SettingsInput,
+    /// What leaving the program empty means, where it means something.
+    pub(super) program_hint: Option<&'static str>,
+    pub(super) remove: SettingsControl,
+    pub(super) remove_label: &'static str,
+    pub(super) arguments: ProfileTarget,
+}
+
+pub(super) fn render_profile_card(
+    card: ProfileCard<'_>,
     editor: &SettingsEditor,
     colors: &ThemeColors,
     handle: &WeakEntity<Zetta>,
-    text_input: &dyn Fn(String, TextField, SettingsInput) -> AnyElement,
+    widgets: &PageWidgets<'_>,
 ) -> AnyElement {
-    let ProfileCardParts {
-        index,
+    let ProfileCard {
         profile,
-        profile_focused,
-        profile_icon_value,
-        profile_visibility,
-        profile_icon,
-        profile_theme,
-        profile_dark_theme,
-    } = parts;
-    let _ = profile_icon_value;
-    let remove_handle = handle.clone();
-    profile_card_frame(profile_focused, colors)
+        identity,
+        overrides,
+        controls,
+    } = card;
+    let focused = controls
+        .iter()
+        .any(|control| editor.focused_control.as_ref() == Some(control));
+    let overrides = profile_override_fields(overrides, colors, handle, widgets.dropdown);
+    let card = card_frame(focused, colors);
+    let card = match identity {
+        Some(identity) => card.child(profile_identity_fields(
+            profile, identity, editor, colors, handle, widgets,
+        )),
+        None => card.child(detected_profile_header(profile, colors)),
+    };
+    track_focus_scroll(
+        div()
+            .w_full()
+            .child(card.child(profile_fields_grid(overrides))),
+        editor,
+        controls,
+    )
+    .into_any_element()
+}
+
+/// Which override controls a profile's card hosts, and the profile they show.
+pub(super) struct ProfileOverrides<'a> {
+    pub(super) id_prefix: String,
+    pub(super) visibility: SettingsToggle,
+    pub(super) icon: SettingsDropdown,
+    pub(super) theme: SettingsDropdown,
+    pub(super) dark_theme: SettingsDropdown,
+    pub(super) profile: &'a crate::settings_editor::ProfileForm,
+    /// The icon shown while the profile has none of its own. A draft's is
+    /// worked out from the program as it is typed.
+    pub(super) automatic_icon: &'a ProfileIcon,
+}
+
+/// The four overrides every profile has, detected or not: whether it is shown
+/// in the Profiles menu, its icon, and its two themes. Also what the Add
+/// profile modal shows for its draft.
+pub(super) fn profile_override_fields(
+    overrides: ProfileOverrides<'_>,
+    colors: &ThemeColors,
+    handle: &WeakEntity<Zetta>,
+    dropdown: &dyn Fn(String, String, SettingsDropdown) -> AnyElement,
+) -> [AnyElement; 4] {
+    let ProfileOverrides {
+        id_prefix,
+        visibility,
+        icon,
+        theme,
+        dark_theme,
+        profile,
+        automatic_icon,
+    } = overrides;
+    let icon_value = profile.icon.as_ref().unwrap_or(automatic_icon);
+    [
+        profile_field(
+            "Shown in Profiles menu",
+            toggle_switch(
+                SharedString::from(format!("{id_prefix}-visibility")),
+                "Show this profile in the Profiles menu",
+                !profile.hidden,
+                visibility,
+                handle,
+            ),
+            colors,
+        ),
+        profile_field(
+            "Icon",
+            h_flex()
+                .w_full()
+                .gap_2()
+                .child(icon_value.render(IconSize::Small))
+                .child(div().min_w_0().flex_1().child(dropdown(
+                    format!("{id_prefix}-icon"),
+                    ProfileIcon::selector_label(profile.icon.as_ref()).to_owned(),
+                    icon,
+                ))),
+            colors,
+        ),
+        profile_field(
+            "Light theme",
+            dropdown(
+                format!("{id_prefix}-theme"),
+                profile_theme_label(profile.theme.as_deref()).to_owned(),
+                theme,
+            ),
+            colors,
+        ),
+        profile_field(
+            "Dark theme",
+            dropdown(
+                format!("{id_prefix}-dark-theme"),
+                profile_theme_label(profile.dark_theme.as_deref()).to_owned(),
+                dark_theme,
+            ),
+            colors,
+        ),
+    ]
+}
+
+/// What a profile's theme dropdown shows: the theme, or the word for "none of
+/// its own" while it follows the application's.
+fn profile_theme_label(theme: Option<&str>) -> &str {
+    theme.unwrap_or(crate::settings_ui::PROFILE_THEME_INHERIT_LABEL)
+}
+
+/// A profile discovered on this machine: its program and arguments come from
+/// what is installed, so the card names it rather than editing it.
+fn detected_profile_header(
+    profile: &crate::settings_editor::ProfileForm,
+    colors: &ThemeColors,
+) -> AnyElement {
+    let icon = profile.icon.as_ref().unwrap_or(&profile.automatic_icon);
+    h_flex()
+        .min_w_0()
+        .flex_1()
+        .gap_2()
+        .child(icon.render(IconSize::Medium))
+        .child(card_text(
+            profile.name.text.clone(),
+            [SharedString::from("Detected profile")],
+            colors,
+        ))
+        .into_any_element()
+}
+
+/// A profile's name, program and arguments, and the button that removes it.
+fn profile_identity_fields(
+    profile: &crate::settings_editor::ProfileForm,
+    identity: ProfileIdentity,
+    editor: &SettingsEditor,
+    colors: &ThemeColors,
+    handle: &WeakEntity<Zetta>,
+    widgets: &PageWidgets<'_>,
+) -> AnyElement {
+    let ProfileIdentity {
+        id_prefix,
+        name,
+        program,
+        program_hint,
+        remove,
+        remove_label,
+        arguments,
+    } = identity;
+    let text_input = widgets.text_input;
+    v_flex()
+        .gap_3()
         .child(
             h_flex()
                 .items_end()
                 .gap_2()
-                .child(
-                    div()
-                        .min_w_0()
-                        .flex_1()
-                        .child(
-                            div()
-                                .mb_1()
-                                .text_xs()
-                                .text_color(colors.text_muted)
-                                .child("Profile name"),
-                        )
-                        .child(text_input(
-                            format!("settings-profile-{index}-name"),
-                            profile.name.clone(),
-                            SettingsInput::Configuration(ConfigTextField::ProfileName(index)),
-                        )),
-                )
-                .child(
-                    IconButton::new(("remove-settings-profile", index), IconName::Trash)
-                        .icon_size(IconSize::Small)
-                        .icon_color(Color::Custom(colors.icon))
-                        .selected_icon_color(Color::Custom(colors.icon))
-                        .toggle_state(
-                            editor.focused_control == Some(SettingsControl::RemoveProfile(index)),
-                        )
-                        .selected_style(ButtonStyle::OutlinedCustom(colors.border_focused))
-                        .tooltip(Tooltip::text("Remove profile"))
-                        .on_click(move |_, _, cx| {
-                            remove_handle
-                                .update(cx, |this, cx| {
-                                    if let Some(editor) = this.settings_editor.as_mut() {
-                                        editor.configuration.profiles.remove(index);
-                                        editor.configuration_dirty = true;
-                                        invalidate_controls_cache(editor);
-                                        cx.notify();
-                                    }
-                                })
-                                .ok();
-                        }),
-                ),
+                .child(div().min_w_0().flex_1().child(profile_field(
+                    "Profile name",
+                    text_input(format!("{id_prefix}-name"), profile.name.clone(), name),
+                    colors,
+                )))
+                .child(settings_remove_button(
+                    editor,
+                    format!("{id_prefix}-remove"),
+                    remove,
+                    remove_label,
+                    true,
+                    colors,
+                    handle,
+                )),
         )
         .child(
             div()
-                .mt_2()
-                .grid()
-                .grid_cols(2)
-                .gap_2()
-                .child(
-                    div()
-                        .min_w_0()
-                        .flex_1()
-                        .child(
-                            div()
-                                .mb_1()
-                                .text_xs()
-                                .text_color(colors.text_muted)
-                                .child("Program"),
-                        )
-                        .child(text_input(
-                            format!("settings-profile-{index}-program"),
-                            profile.program.clone(),
-                            SettingsInput::Configuration(ConfigTextField::ProfileProgram(index)),
-                        )),
-                )
-                .child(
-                    div()
-                        .min_w_0()
-                        .flex_1()
-                        .child(
-                            div()
-                                .mb_1()
-                                .text_xs()
-                                .text_color(colors.text_muted)
-                                .child("Arguments (comma separated)"),
-                        )
-                        .child(text_input(
-                            format!("settings-profile-{index}-arguments"),
-                            profile.arguments.clone(),
-                            SettingsInput::Configuration(ConfigTextField::ProfileArguments(index)),
-                        )),
-                ),
+                .child(profile_field(
+                    "Program",
+                    text_input(
+                        format!("{id_prefix}-program"),
+                        profile.program.clone(),
+                        program,
+                    ),
+                    colors,
+                ))
+                .when_some(program_hint, |field, hint| {
+                    field.child(
+                        div()
+                            .mt_1()
+                            .text_xs()
+                            .text_color(colors.text_muted)
+                            .child(hint),
+                    )
+                }),
         )
-        .child(profile_fields_grid([
-            profile_field("Shown in Profiles menu", profile_visibility, colors),
-            profile_field("Icon", profile_icon, colors),
-            profile_field("Light theme", profile_theme, colors),
-            profile_field("Dark theme", profile_dark_theme, colors),
-        ]))
+        .child(profile_field(
+            "Arguments",
+            argument_list(
+                editor,
+                arguments,
+                &profile.arguments,
+                &id_prefix,
+                &editor.settings_scroll,
+                colors,
+                handle,
+            ),
+            colors,
+        ))
         .into_any_element()
 }

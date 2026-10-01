@@ -56,7 +56,7 @@ fn init_test_theme(cx: &mut gpui::TestAppContext) {
 }
 
 #[gpui::test]
-fn a_session_operation_failure_becomes_a_transient_notice_without_a_prompt(
+fn a_session_operation_failure_becomes_an_error_notice_without_a_prompt(
     cx: &mut gpui::TestAppContext,
 ) {
     init_test_theme(cx);
@@ -67,10 +67,10 @@ fn a_session_operation_failure_becomes_a_transient_notice_without_a_prompt(
 
     cx.read_entity(&zetta, |zetta, _| {
         assert_eq!(
-            zetta.transient_notice.message(),
+            zetta.transient_notice.error(),
             Some("Could not attach that session")
         );
-        assert!(zetta.pane_output_error.is_none());
+        assert!(zetta.configuration_error.is_none());
     });
 }
 
@@ -101,7 +101,7 @@ fn a_session_operation_failure_stays_in_the_authentication_prompt(cx: &mut gpui:
                 .and_then(|prompt| prompt.error.as_deref()),
             Some("Could not open the session")
         );
-        assert!(zetta.transient_notice.message().is_none());
-        assert!(zetta.pane_output_error.is_none());
+        assert!(zetta.transient_notice.error().is_none());
+        assert!(zetta.configuration_error.is_none());
     });
 }

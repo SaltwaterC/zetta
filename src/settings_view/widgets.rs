@@ -1,8 +1,12 @@
 use super::*;
 pub(crate) use crate::searchable_dropdown::{
-    SearchableDropdownRenderState, searchable_dropdown_popup,
+    DropdownChoice, SearchableDropdownRenderState, searchable_dropdown_popup,
 };
+use crate::settings_editor::SettingKind;
 use crate::settings_ui::keymap::GLOBAL_CONTEXT_LABEL;
+use crate::ui_tokens::{
+    CONTROL_COLUMN_WIDTH, DENSE_ROW_MIN_HEIGHT, DISABLED_OPACITY, RADIUS_CONTROL,
+};
 
 /// Owned snapshot of the state needed to render the currently open dropdown's option
 /// popover. The popover is always rendered once, as a sibling of the settings dialog
@@ -52,6 +56,29 @@ struct KeymapBindingRow<'a> {
 /// How much of the form stays visible past a control the keyboard just moved to,
 /// so it never sits flush against the edge of the scroll region.
 const FOCUS_SCROLL_MARGIN: Pixels = px(10.);
+
+/// The click handler of a settings control: focus it without scrolling (the
+/// pointer is already on it), then run it exactly as the keyboard would.
+///
+/// Every button in the dialog goes through this rather than mutating the form
+/// in its own closure. The two used to be written separately and drifted: the
+/// keyboard's copy of the keymap edits skipped the cache refresh, and its
+/// removal of a built-in binding deleted it where the button disabled it.
+pub(crate) fn activate_on_click(
+    handle: &WeakEntity<Zetta>,
+    control: SettingsControl,
+) -> impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static {
+    let handle = handle.clone();
+    move |_, window, cx| {
+        cx.stop_propagation();
+        handle
+            .update(cx, |this, cx| {
+                this.focus_settings_control_without_scroll(control.clone(), window, cx);
+                this.activate_settings_control(control.clone(), window, cx);
+            })
+            .ok();
+    }
+}
 
 /// Finishes the scroll to the control the keyboard just moved to, from the
 /// bounds that control actually laid out at.
@@ -123,9 +150,95 @@ pub(crate) fn track_focus_scroll_from(
     })
 }
 
-/// A compact, keyboard-reachable button for a [`SettingsControl`]. Clicking it
-/// focuses the control first so the dialog's focus ring and its keyboard path
-/// stay in agreement.
+/// A compact, keyboard-reachable button for a [`SettingsControl`]: a
+/// [`DialogButton`] that clicks through [`activate_on_click`], so the focus
+/// ring and the keyboard path stay in agreement, and that reports its bounds
+/// for the scroll that brought focus to it.
+pub(crate) struct SettingsButton {
+    id: String,
+    label: String,
+    control: SettingsControl,
+    role: ButtonRole,
+    enabled: bool,
+    loading: bool,
+    /// What the button says once a first press has armed it; see
+    /// `SettingsEditor::armed_control`.
+    confirm_label: Option<String>,
+}
+
+impl SettingsButton {
+    pub(crate) fn new(id: String, label: impl Into<String>, control: SettingsControl) -> Self {
+        Self {
+            id,
+            label: label.into(),
+            control,
+            role: ButtonRole::Secondary,
+            enabled: true,
+            loading: false,
+            confirm_label: None,
+        }
+    }
+
+    /// Work this button started is in flight.
+    pub(crate) fn loading(mut self, loading: bool) -> Self {
+        self.loading = loading;
+        self
+    }
+
+    /// For the one action a section exists for, such as installing a theme.
+    pub(crate) fn primary(mut self) -> Self {
+        self.role = ButtonRole::Primary;
+        self
+    }
+
+    /// For an action that cannot be undone from the dialog: the first press
+    /// arms the button, which then says `label`, and only a second press on it
+    /// acts. The control's activation is what enforces this; the label is how
+    /// the button shows it.
+    pub(crate) fn confirm_with(mut self, label: impl Into<String>) -> Self {
+        self.confirm_label = Some(label.into());
+        self
+    }
+
+    /// For a button that throws something away: a split, a pane, a project.
+    pub(crate) fn destructive(mut self) -> Self {
+        self.role = ButtonRole::Destructive;
+        self
+    }
+
+    pub(crate) fn enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
+    }
+
+    pub(crate) fn render(
+        self,
+        editor: &SettingsEditor,
+        colors: &ThemeColors,
+        handle: &WeakEntity<Zetta>,
+    ) -> AnyElement {
+        let focused = editor.focused_control.as_ref() == Some(&self.control);
+        let armed = editor.armed_control.as_ref() == Some(&self.control);
+        let label = match self.confirm_label {
+            Some(confirm) if armed => confirm,
+            _ => self.label,
+        };
+        track_focus_scroll(div(), editor, std::slice::from_ref(&self.control))
+            .flex_none()
+            .child(
+                DialogButton::new(SharedString::from(self.id), label, self.role)
+                    .compact(true)
+                    .enabled(self.enabled)
+                    .loading(self.loading)
+                    .focused(focused)
+                    .render(colors, activate_on_click(handle, self.control)),
+            )
+            .into_any_element()
+    }
+}
+
+/// [`SettingsButton`] in the secondary role, the one most of the forms' buttons
+/// have.
 pub(crate) fn action_button(
     editor: &SettingsEditor,
     id: String,
@@ -135,52 +248,51 @@ pub(crate) fn action_button(
     colors: &ThemeColors,
     handle: &WeakEntity<Zetta>,
 ) -> AnyElement {
+    SettingsButton::new(id, label, control)
+        .enabled(enabled)
+        .render(editor, colors, handle)
+}
+
+/// The button that removes one entry of a list — an argument, an environment
+/// variable, a stacked command — named for what it removes in its tooltip and
+/// its accessible label. These used to be a bare `×` that said neither.
+pub(crate) fn settings_remove_button(
+    editor: &SettingsEditor,
+    id: String,
+    control: SettingsControl,
+    what: &str,
+    enabled: bool,
+    colors: &ThemeColors,
+    handle: &WeakEntity<Zetta>,
+) -> AnyElement {
     let focused = editor.focused_control.as_ref() == Some(&control);
-    let click_handle = handle.clone();
-    let click_control = control.clone();
+    let button = if enabled {
+        remove_button(
+            SharedString::from(id),
+            what,
+            focused,
+            colors,
+            activate_on_click(handle, control.clone()),
+        )
+    } else {
+        // Read-only forms keep the button's place so the row does not reflow
+        // between an editable template and a built-in one.
+        div()
+            .size_6()
+            .flex_none()
+            .opacity(DISABLED_OPACITY)
+            .into_any_element()
+    };
     track_focus_scroll(div(), editor, std::slice::from_ref(&control))
-        .id(id)
-        .h_8()
-        .px_2()
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(px(4.))
-        .border_1()
-        .border_color(if focused {
-            colors.border_focused
-        } else {
-            colors.border
-        })
-        .text_xs()
-        .when(enabled, |button| {
-            button
-                .cursor_pointer()
-                .hover(|style| style.bg(colors.element_hover))
-                .on_click(move |_, window, cx| {
-                    cx.stop_propagation();
-                    click_handle
-                        .update(cx, |this, cx| {
-                            this.focus_settings_control_without_scroll(
-                                click_control.clone(),
-                                window,
-                                cx,
-                            );
-                            this.activate_settings_control(click_control.clone(), window, cx);
-                        })
-                        .ok();
-                })
-        })
-        .when(!enabled, |button| button.opacity(0.5))
-        .when(focused, |button| button.bg(colors.element_selected))
-        .text_color(colors.text)
-        .child(label)
+        .flex_none()
+        .child(button)
         .into_any_element()
 }
 
 /// A label-and-control row for the denser forms (pane templates, the project
-/// builder), where `SettingsFormWidgets::setting_row`'s two-line description
-/// layout would be too tall.
+/// builder), where `SettingsFormWidgets::setting_row`'s two-line layout would
+/// be too tall — unless the row has something to explain, which goes in
+/// `description` under the label rather than into the label itself.
 ///
 /// The row highlights while any of the controls it hosts holds keyboard focus.
 /// That is what `setting_row` does for the Configuration page, and it is why
@@ -196,12 +308,26 @@ pub(crate) fn control_row(
     control: AnyElement,
     colors: &ThemeColors,
 ) -> AnyElement {
+    described_control_row(editor, label, None, controls, control, colors)
+}
+
+/// [`control_row`] with a line under the label saying what the value means:
+/// its unit, its range, or what leaving it empty does.
+pub(crate) fn described_control_row(
+    editor: &SettingsEditor,
+    label: impl Into<String>,
+    description: Option<&str>,
+    controls: &[SettingsControl],
+    control: AnyElement,
+    colors: &ThemeColors,
+) -> AnyElement {
     let focused = controls
         .iter()
         .any(|candidate| editor.focused_control.as_ref() == Some(candidate));
     track_focus_scroll(h_flex(), editor, controls)
         .w_full()
-        .min_h(px(42.))
+        .min_h(DENSE_ROW_MIN_HEIGHT)
+        .py_1()
         .gap_3()
         .justify_between()
         .border_b_1()
@@ -211,9 +337,385 @@ pub(crate) fn control_row(
             colors.border_variant
         })
         .when(focused, |row| row.bg(colors.element_selected))
-        .child(div().min_w_0().flex_1().text_xs().child(label.into()))
-        .child(div().w(px(300.)).flex_none().child(control))
+        .child(
+            div()
+                .min_w_0()
+                .flex_1()
+                .child(div().text_xs().child(label.into()))
+                .when_some(description, |label, description| {
+                    label.child(
+                        div()
+                            .text_xs()
+                            .text_color(colors.text_muted)
+                            .child(description.to_owned()),
+                    )
+                }),
+        )
+        .child(div().w(CONTROL_COLUMN_WIDTH).flex_none().child(control))
         .into_any_element()
+}
+
+/// A section's heading on a settings page: its title, and a line saying what
+/// the section is for.
+///
+/// Every page's headings used to be spelled out where they were drawn, with
+/// three different spacings and two colours for the same role, and two of the
+/// Configuration page's five groups had none at all.
+pub(crate) fn section_heading(
+    title: impl Into<SharedString>,
+    description: Option<SharedString>,
+    colors: &ThemeColors,
+) -> AnyElement {
+    v_flex()
+        .pt_4()
+        .pb_2()
+        .child(
+            div()
+                .text_sm()
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(colors.text)
+                .child(title.into()),
+        )
+        .when_some(description, |heading, description| {
+            heading.child(
+                div()
+                    .text_xs()
+                    .text_color(colors.text_muted)
+                    .child(description),
+            )
+        })
+        .into_any_element()
+}
+
+/// The row an Add button sits in at the foot of a list: left-aligned, under
+/// the rows it adds to, and scrolled to like any other control.
+///
+/// Half the pages right-aligned these and half left-aligned them.
+pub(crate) fn add_row(
+    button: AnyElement,
+    editor: &SettingsEditor,
+    controls: &[SettingsControl],
+) -> AnyElement {
+    track_focus_scroll(h_flex(), editor, controls)
+        .w_full()
+        .py_2()
+        .child(button)
+        .into_any_element()
+}
+
+/// The frame of a card in a settings list — a theme extension, a profile, a
+/// project, a template — with the border and fill that report keyboard focus
+/// inside it.
+///
+/// Four builders used to draw this with two radii, and two of them never showed
+/// focus at all.
+pub(crate) fn card_frame(focused: bool, colors: &ThemeColors) -> Div {
+    div()
+        .mb_2()
+        .p_3()
+        .rounded(RADIUS_CONTROL)
+        .border_1()
+        .border_color(if focused {
+            colors.border_focused
+        } else {
+            colors.border
+        })
+        .bg(if focused {
+            colors.element_selected
+        } else {
+            colors.editor_background
+        })
+}
+
+/// A card's title and the muted lines under it.
+pub(crate) fn card_text(
+    title: impl Into<SharedString>,
+    lines: impl IntoIterator<Item = SharedString>,
+    colors: &ThemeColors,
+) -> Div {
+    div()
+        .min_w_0()
+        .flex_1()
+        .child(div().text_sm().text_color(colors.text).child(title.into()))
+        .children(lines.into_iter().map(|line| {
+            div()
+                .mt_1()
+                .text_xs()
+                .text_color(colors.text_muted)
+                .child(line)
+        }))
+}
+
+/// A settings switch. On means the thing its label names is on — every switch
+/// in the dialog reads that way now, including the ones whose file key is a
+/// `hide_…` — and `label` is what a screen reader announces, where the switches
+/// used to announce their element ids.
+pub(crate) fn toggle_switch(
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+    value: bool,
+    toggle: SettingsToggle,
+    handle: &WeakEntity<Zetta>,
+) -> AnyElement {
+    let toggle_handle = handle.clone();
+    switch(id, value.into())
+        .label(if value { "On" } else { "Off" })
+        .full_width(true)
+        .aria_label(label)
+        .on_click(move |state, window, cx| {
+            toggle_handle
+                .update(cx, |this, cx| {
+                    this.set_settings_toggle(toggle, state.selected(), window, cx);
+                })
+                .ok();
+        })
+        .into_any_element()
+}
+
+/// A row control that opens a picker rather than editing in place — the font
+/// family, a tab icon. Drawn as the dropdown triggers are, since to a reader it
+/// is one: the value it holds and a chevron. The Configuration page and the
+/// project builder each had a copy of this, drawn differently from the
+/// dropdowns beside them.
+pub(crate) fn picker_trigger(
+    id: impl Into<ElementId>,
+    control: SettingsControl,
+    value: impl IntoElement,
+    editor: &SettingsEditor,
+    colors: &ThemeColors,
+    handle: &WeakEntity<Zetta>,
+) -> AnyElement {
+    ButtonLike::new(id)
+        .style(ButtonStyle::Outlined)
+        .toggle_state(editor.focused_control.as_ref() == Some(&control))
+        .selected_style(ButtonStyle::OutlinedCustom(colors.border_focused))
+        .full_width()
+        .child(
+            h_flex()
+                .w_full()
+                .min_w_0()
+                .justify_between()
+                .gap_2()
+                .child(
+                    div()
+                        .min_w_0()
+                        .flex_1()
+                        .overflow_hidden()
+                        .text_sm()
+                        .text_color(colors.text)
+                        .child(value),
+                )
+                .child(
+                    Icon::new(IconName::ChevronDown)
+                        .size(IconSize::XSmall)
+                        .color(Color::Custom(colors.text_muted)),
+                ),
+        )
+        .on_click(activate_on_click(handle, control))
+        .into_any_element()
+}
+
+/// One environment variable of a list, as two rows: its name, then its value
+/// with the button that removes the pair. That is the order the keyboard
+/// reaches them in; the remove button used to be drawn beside the name while
+/// being tabbed after the value.
+///
+/// Four lists share this — a project's environment, a project command's, a
+/// template's and a template pane's.
+pub(crate) struct EnvironmentPair<'a> {
+    /// What the rows are labelled, such as `Variable 3`.
+    pub(crate) label: String,
+    /// The prefix the rows' element ids are built from.
+    pub(crate) id: String,
+    pub(crate) name: &'a TextField,
+    pub(crate) name_input: SettingsInput,
+    pub(crate) value: &'a TextField,
+    pub(crate) value_input: SettingsInput,
+    pub(crate) remove: SettingsControl,
+    /// A built-in template's pairs are shown, not edited.
+    pub(crate) editable: bool,
+}
+
+pub(crate) fn environment_pair_rows(
+    pair: EnvironmentPair<'_>,
+    editor: &SettingsEditor,
+    colors: &ThemeColors,
+    handle: &WeakEntity<Zetta>,
+) -> [AnyElement; 2] {
+    let EnvironmentPair {
+        label,
+        id,
+        name,
+        name_input,
+        value,
+        value_input,
+        remove,
+        editable,
+    } = pair;
+    let field = |suffix: &str, text: &TextField, input: SettingsInput| {
+        editable_field(
+            format!("{id}-{suffix}"),
+            text,
+            input,
+            editable,
+            editor,
+            colors,
+            handle,
+        )
+    };
+    [
+        control_row(
+            editor,
+            format!("{label} · name"),
+            &[SettingsControl::Input(name_input)],
+            field("name", name, name_input),
+            colors,
+        ),
+        control_row(
+            editor,
+            format!("{label} · value"),
+            &[SettingsControl::Input(value_input), remove.clone()],
+            h_flex()
+                .gap_1()
+                .child(
+                    div()
+                        .min_w_0()
+                        .flex_1()
+                        .child(field("value", value, value_input)),
+                )
+                .child(settings_remove_button(
+                    editor,
+                    format!("{id}-remove"),
+                    remove,
+                    "environment variable",
+                    editable,
+                    colors,
+                    handle,
+                ))
+                .into_any_element(),
+            colors,
+        ),
+    ]
+}
+
+/// [`text_field`], or the same value shown read-only when the form cannot be
+/// edited. A built-in template's fields used to be live: clicking one focused
+/// it and typing into it was silently dropped.
+pub(crate) fn editable_field(
+    id: String,
+    field: &TextField,
+    input: SettingsInput,
+    editable: bool,
+    editor: &SettingsEditor,
+    colors: &ThemeColors,
+    handle: &WeakEntity<Zetta>,
+) -> AnyElement {
+    if editable {
+        text_field(id, field.clone(), input, editor, colors, handle)
+    } else {
+        read_only_field(SharedString::from(id), field.text.clone(), colors)
+            .w_full()
+            .into_any_element()
+    }
+}
+
+/// [`dropdown_field`], or its value shown read-only when the form cannot be
+/// edited: a built-in template's dropdowns used to open and then ignore the
+/// choice.
+pub(crate) fn editable_dropdown(
+    id: String,
+    label: String,
+    selection: SettingsDropdown,
+    editable: bool,
+    editor: &SettingsEditor,
+    colors: &ThemeColors,
+    handle: &WeakEntity<Zetta>,
+) -> AnyElement {
+    if editable {
+        dropdown_field(id, label, selection, editor, colors, handle)
+    } else {
+        read_only_field(SharedString::from(id), label, colors)
+            .w_full()
+            .into_any_element()
+    }
+}
+
+/// A profile's arguments: one field per argument, each with the button that
+/// removes it, then the button that adds one. The same list for a configured
+/// profile, the Add profile draft and a project's override.
+///
+/// `scroll` is the region the list scrolls in — the page's, or the Add profile
+/// modal's own — so a focused argument is scrolled into view in the right one.
+pub(crate) fn argument_list(
+    editor: &SettingsEditor,
+    target: ProfileTarget,
+    arguments: &[TextField],
+    id_prefix: &str,
+    scroll: &ScrollHandle,
+    colors: &ThemeColors,
+    handle: &WeakEntity<Zetta>,
+) -> AnyElement {
+    v_flex()
+        .w_full()
+        .gap_1()
+        .children(arguments.iter().enumerate().map(|(argument, value)| {
+            let input = target.argument_input(argument);
+            let remove = SettingsControl::RemoveProfileArgument(target, argument);
+            track_focus_scroll_from(
+                h_flex().w_full().gap_1(),
+                editor.focus_scroll_request.as_ref(),
+                scroll,
+                &[SettingsControl::Input(input), remove.clone()],
+            )
+            .child(div().min_w_0().flex_1().child(text_field(
+                format!("{id_prefix}-argument-{argument}"),
+                value.clone(),
+                input,
+                editor,
+                colors,
+                handle,
+            )))
+            .child(settings_remove_button(
+                editor,
+                format!("{id_prefix}-remove-argument-{argument}"),
+                remove,
+                "argument",
+                true,
+                colors,
+                handle,
+            ))
+        }))
+        .child(
+            h_flex().child(
+                SettingsButton::new(
+                    format!("{id_prefix}-add-argument"),
+                    "Add argument",
+                    SettingsControl::AddProfileArgument(target),
+                )
+                .render(editor, colors, handle),
+            ),
+        )
+        .into_any_element()
+}
+
+/// What a list shows when it has nothing in it yet.
+pub(crate) fn empty_state(text: impl Into<SharedString>, colors: &ThemeColors) -> AnyElement {
+    div()
+        .py_4()
+        .text_sm()
+        .text_color(colors.text_muted)
+        .child(text.into())
+        .into_any_element()
+}
+
+/// Whether a field holds one of the stepped numbers, which are centred between
+/// their `−` and `+` buttons.
+fn settings_input_is_numeric(input: SettingsInput) -> bool {
+    matches!(
+        input,
+        SettingsInput::Configuration(ConfigTextField::Setting(setting))
+            if matches!(setting.spec().kind, SettingKind::Number(_))
+    )
 }
 
 pub(crate) fn text_field(
@@ -312,10 +814,10 @@ impl Zetta {
                 .map(|icon| icon.render(IconSize::Small).into_any_element())
         };
         let menu_handle = handle.clone();
-        let on_select = move |value: String, cx: &mut App| {
+        let on_select = move |choice: DropdownChoice, cx: &mut App| {
             menu_handle
                 .update(cx, |this, cx| {
-                    this.set_settings_dropdown(selection, value, cx);
+                    this.set_settings_dropdown(selection, choice, cx);
                     if let Some(editor) = this.settings_editor.as_mut() {
                         editor.clear_dropdown();
                     }
@@ -355,55 +857,48 @@ impl Zetta {
         colors: &ThemeColors,
         handle: WeakEntity<Self>,
     ) -> gpui::AnyElement {
+        let placeholder = match input {
+            SettingsInput::Keymap(KeymapTextField::Context(_)) => Some(GLOBAL_CONTEXT_LABEL),
+            SettingsInput::KeymapSearch => Some("Search bindings…"),
+            SettingsInput::ThemeSearch => Some("Search Zed themes…"),
+            SettingsInput::FontSearch => Some("Search fonts…"),
+            _ => None,
+        }
+        .map(SharedString::new_static);
+        Self::text_input_widget_with_placeholder(
+            id,
+            field,
+            input,
+            focused_input,
+            placeholder,
+            colors,
+            handle,
+        )
+    }
+
+    /// [`Self::text_input_widget`] with what an empty field shows instead of
+    /// nothing — the value that applies while the setting is unset.
+    pub(crate) fn text_input_widget_with_placeholder(
+        id: String,
+        field: TextField,
+        input: SettingsInput,
+        focused_input: Option<SettingsInput>,
+        placeholder: Option<SharedString>,
+        colors: &ThemeColors,
+        handle: WeakEntity<Self>,
+    ) -> gpui::AnyElement {
         let focused = focused_input == Some(input);
-        let centered = match input {
-            SettingsInput::Configuration(
-                ConfigTextField::FontSize | ConfigTextField::ScrollHistory,
-            ) => true,
-            #[cfg(feature = "http-server")]
-            SettingsInput::Configuration(ConfigTextField::HttpServerPort) => true,
-            #[cfg(feature = "tftp-server")]
-            SettingsInput::Configuration(ConfigTextField::TftpServerPort) => true,
-            _ => false,
-        };
-        let keymap_global_placeholder = (field.text.is_empty()
-            && matches!(input, SettingsInput::Keymap(KeymapTextField::Context(_))))
-        .then_some(GLOBAL_CONTEXT_LABEL);
-        let (before, after) = field.split_at_cursor();
         let input_handle = handle.clone();
-        field_box(id, focused, colors)
+        boxed_text_field(id, &field, focused, placeholder, FieldMask::Plain, colors)
             .w_full()
             .min_w(px(180.))
-            .when(centered, |input| input.justify_center().text_center())
+            // The size the dropdowns and pickers beside it draw their values
+            // at, whatever the row around it inherits.
+            .text_sm()
+            .when(settings_input_is_numeric(input), |input| {
+                input.justify_center()
+            })
             .cursor_text()
-            .when(field.select_all && focused, |input| {
-                input.bg(colors.element_selection_background)
-            })
-            .when(!focused, |input| {
-                input.child(
-                    div()
-                        .w_full()
-                        .min_w_0()
-                        .flex_1()
-                        .overflow_hidden()
-                        .whitespace_nowrap()
-                        .text_ellipsis()
-                        .when(keymap_global_placeholder.is_some(), |text| {
-                            text.text_color(colors.text_placeholder)
-                        })
-                        .child(
-                            keymap_global_placeholder
-                                .unwrap_or(field.text.as_str())
-                                .to_owned(),
-                        ),
-                )
-            })
-            .when(focused, |input| {
-                input
-                    .child(div().whitespace_nowrap().child(before.to_owned()))
-                    .when(!field.select_all, |input| input.child(caret(colors)))
-                    .child(div().whitespace_nowrap().child(after.to_owned()))
-            })
             .on_click(move |_, window, cx| {
                 input_handle
                     .update(cx, |this, cx| this.focus_settings_input(input, window, cx))
@@ -515,17 +1010,23 @@ impl Zetta {
             is_default,
         } = row;
         let colors = &ctx.colors;
-        let binding_focused = ctx.focused_control
-            == Some(SettingsControl::Input(SettingsInput::Keymap(
-                KeymapTextField::Keystroke(section_index, binding_index),
-            )))
-            || ctx.focused_control
-                == Some(SettingsControl::RemoveBinding(section_index, binding_index))
-            || ctx.focused_control
-                == Some(SettingsControl::CaptureKeymap(KeymapTextField::Keystroke(
-                    section_index,
-                    binding_index,
-                )));
+        // The row shows focus for every control it hosts, as `control_row`
+        // does; the dropdowns' and the button's own rings are a pixel wide.
+        let binding_focused = ctx.focused_control.as_ref().is_some_and(|control| {
+            matches!(
+                control,
+                SettingsControl::Input(SettingsInput::Keymap(KeymapTextField::Keystroke(s, b)))
+                | SettingsControl::CaptureKeymap(KeymapTextField::Keystroke(s, b))
+                | SettingsControl::Dropdown(
+                    SettingsDropdown::BindingAction(s, b)
+                        | SettingsDropdown::BindingTemplate(s, b)
+                        | SettingsDropdown::BindingProfile(s, b)
+                )
+                | SettingsControl::RemoveBinding(s, b)
+                | SettingsControl::UnbindBinding(s, b)
+                    if *s == section_index && *b == binding_index
+            )
+        });
         let action_focused = ctx.focused_control
             == Some(SettingsControl::Dropdown(SettingsDropdown::BindingAction(
                 section_index,
@@ -568,7 +1069,10 @@ impl Zetta {
                 ctx.handle.clone(),
             )
         });
-        let capture_handle = ctx.handle.clone();
+        let capture_control = SettingsControl::CaptureKeymap(KeymapTextField::Keystroke(
+            section_index,
+            binding_index,
+        ));
         h_flex()
             .w_full()
             .h(px(KEYMAP_ROW_HEIGHT))
@@ -580,7 +1084,7 @@ impl Zetta {
             .when(binding_focused, |row| row.bg(colors.element_selected))
             .child(
                 h_flex()
-                    .w(px(330.))
+                    .w(CONTROL_COLUMN_WIDTH)
                     .gap_1()
                     .flex_none()
                     .child(Self::text_input_widget(
@@ -602,17 +1106,9 @@ impl Zetta {
                         .style(ButtonStyle::Outlined)
                         .size(ButtonSize::Compact)
                         .color(Color::Custom(colors.text))
-                        .on_click(move |_, window, cx| {
-                            capture_handle
-                                .update(cx, |this, cx| {
-                                    this.start_keymap_capture(
-                                        KeymapTextField::Keystroke(section_index, binding_index),
-                                        window,
-                                        cx,
-                                    );
-                                })
-                                .ok();
-                        }),
+                        .toggle_state(ctx.focused_control == Some(capture_control.clone()))
+                        .selected_style(ButtonStyle::OutlinedCustom(colors.border_focused))
+                        .on_click(activate_on_click(&ctx.handle, capture_control.clone())),
                     ),
             )
             .child(div().min_w_0().flex_1().child(action))
@@ -636,7 +1132,6 @@ impl Zetta {
                         SettingsControl::RemoveBinding(section_index, binding_index),
                     )
                 };
-                let remove_handle = ctx.handle.clone();
                 IconButton::new(
                     format!("unbind-settings-binding-{section_index}-{binding_index}"),
                     icon,
@@ -644,36 +1139,10 @@ impl Zetta {
                 .icon_size(IconSize::Small)
                 .icon_color(Color::Custom(colors.icon))
                 .selected_icon_color(Color::Custom(colors.icon))
-                .toggle_state(ctx.focused_control == Some(control_variant))
+                .toggle_state(ctx.focused_control.as_ref() == Some(&control_variant))
                 .selected_style(ButtonStyle::OutlinedCustom(colors.border_focused))
                 .tooltip(Tooltip::text(tooltip_text))
-                .on_click(move |_, _, cx| {
-                    remove_handle
-                        .update(cx, |this, cx| {
-                            if let Some(editor) = this.settings_editor.as_mut()
-                                && let Some(section) = editor.keymap.sections.get_mut(section_index)
-                                && binding_index < section.bindings.len()
-                            {
-                                let binding = section.bindings.remove(binding_index);
-                                if is_default {
-                                    // Add to unbind map
-                                    let storage_key =
-                                        keymap_keystroke_storage(&binding.keystroke.text);
-                                    section.unbind.insert(storage_key, binding.action_name());
-                                    // Add to unbound_defaults for immediate UI feedback
-                                    section.unbound_defaults.push(BindingForm {
-                                        keystroke: binding.keystroke,
-                                        action: binding.action,
-                                    });
-                                }
-                                editor.keymap_dirty = true;
-                                refresh_keymap_cache(editor);
-                                invalidate_controls_cache(editor);
-                                cx.notify();
-                            }
-                        })
-                        .ok();
-                })
+                .on_click(activate_on_click(&ctx.handle, control_variant))
             })
             .into_any_element()
     }
@@ -682,13 +1151,17 @@ impl Zetta {
     /// button that puts it back.
     fn render_keymap_unbound_row(
         section_index: usize,
-        binding_index: usize,
+        unbound_index: usize,
         keystroke: &TextField,
         action_name: &str,
         ctx: &KeymapRowRenderContext,
     ) -> gpui::AnyElement {
         let colors = &ctx.colors;
-        let restore_handle = ctx.handle.clone();
+        let restore = SettingsControl::RestoreBinding(section_index, unbound_index);
+        let focused = ctx.focused_control.as_ref() == Some(&restore);
+        // Shown, not edited: a disabled binding has no field of its own, and
+        // reusing a live binding's `Keystroke` input here (as this row once
+        // did) focused whichever live binding shared its index.
         h_flex()
             .w_full()
             .h(px(KEYMAP_ROW_HEIGHT))
@@ -697,74 +1170,38 @@ impl Zetta {
             .gap_2()
             .border_b_1()
             .border_color(colors.border_variant)
+            .when(focused, |row| row.bg(colors.element_selected))
             .child(
-                h_flex()
-                    .w(px(330.))
-                    .gap_1()
+                div()
+                    .w(CONTROL_COLUMN_WIDTH)
                     .flex_none()
-                    .child(Self::text_input_widget(
-                        format!("settings-unbound-{section_index}-{binding_index}-key"),
-                        keystroke.clone(),
-                        SettingsInput::Keymap(KeymapTextField::Keystroke(
-                            section_index,
-                            binding_index,
-                        )),
-                        ctx.focused_input,
-                        colors,
-                        ctx.handle.clone(),
-                    ))
-                    .child(
-                        Button::new(
-                            format!("record-unbound-{section_index}-{binding_index}"),
-                            "Record",
-                        )
-                        .style(ButtonStyle::Outlined)
-                        .size(ButtonSize::Compact)
-                        .color(Color::Custom(colors.text))
-                        .disabled(true)
-                        .on_click(move |_, _, _| {}),
-                    ),
+                    .px_2()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .text_color(colors.text_muted)
+                    .line_through()
+                    .child(keystroke.text.clone()),
             )
             .child(
                 div()
                     .min_w_0()
                     .flex_1()
-                    .opacity(0.5)
+                    .text_color(colors.text_muted)
                     .child(action_name.to_owned()),
             )
             .child(
                 IconButton::new(
-                    format!("restore-unbound-{section_index}-{binding_index}"),
+                    format!("restore-unbound-{section_index}-{unbound_index}"),
                     IconName::RotateCw,
                 )
                 .icon_size(IconSize::Small)
                 .icon_color(Color::Custom(colors.icon))
-                .tooltip(Tooltip::text("Restore binding"))
-                .on_click(move |_, _, cx| {
-                    restore_handle
-                        .update(cx, |this, cx| {
-                            if let Some(editor) = this.settings_editor.as_mut()
-                                && let Some(section) = editor.keymap.sections.get_mut(section_index)
-                                && binding_index < section.unbound_defaults.len()
-                            {
-                                let binding = section.unbound_defaults.remove(binding_index);
-                                // Remove from unbind map
-                                section.unbind.shift_remove(&keymap_keystroke_storage(
-                                    &binding.keystroke.text,
-                                ));
-                                // Add back to bindings
-                                section.bindings.push(BindingForm {
-                                    keystroke: binding.keystroke,
-                                    action: binding.action,
-                                });
-                                editor.keymap_dirty = true;
-                                refresh_keymap_cache(editor);
-                                invalidate_controls_cache(editor);
-                                cx.notify();
-                            }
-                        })
-                        .ok();
-                }),
+                .selected_icon_color(Color::Custom(colors.icon))
+                .toggle_state(focused)
+                .selected_style(ButtonStyle::OutlinedCustom(colors.border_focused))
+                .tooltip(Tooltip::text("Restore built-in binding"))
+                .on_click(activate_on_click(&ctx.handle, restore)),
             )
             .into_any_element()
     }
@@ -776,7 +1213,6 @@ impl Zetta {
         ctx: &KeymapRowRenderContext,
     ) -> gpui::AnyElement {
         let colors = &ctx.colors;
-        let add_handle = ctx.handle.clone();
         let focused = ctx.focused_control == Some(SettingsControl::AddBinding(section_index));
         h_flex()
             .w_full()
@@ -795,24 +1231,10 @@ impl Zetta {
                 .selected_label_color(Color::Custom(colors.text))
                 .toggle_state(focused)
                 .selected_style(ButtonStyle::OutlinedCustom(colors.border_focused))
-                .on_click(move |_, _, cx| {
-                    add_handle
-                        .update(cx, |this, cx| {
-                            if let Some(editor) = this.settings_editor.as_mut()
-                                && let Some(section) = editor.keymap.sections.get_mut(section_index)
-                            {
-                                section.bindings.push(BindingForm {
-                                    keystroke: TextField::new("ctrl-shift-x"),
-                                    action: serde_json::Value::String("zetta::NewTab".to_owned()),
-                                });
-                                editor.keymap_dirty = true;
-                                refresh_keymap_cache(editor);
-                                invalidate_controls_cache(editor);
-                                cx.notify();
-                            }
-                        })
-                        .ok();
-                }),
+                .on_click(activate_on_click(
+                    &ctx.handle,
+                    SettingsControl::AddBinding(section_index),
+                )),
             )
             .into_any_element()
     }
@@ -820,7 +1242,6 @@ impl Zetta {
     /// The button that appends a whole keymap context.
     fn render_keymap_add_section_row(ctx: &KeymapRowRenderContext) -> gpui::AnyElement {
         let colors = &ctx.colors;
-        let add_handle = ctx.handle.clone();
         let focused = ctx.focused_control == Some(SettingsControl::AddKeymapSection);
         h_flex()
             .w_full()
@@ -836,22 +1257,10 @@ impl Zetta {
                     .selected_label_color(Color::Custom(colors.text))
                     .toggle_state(focused)
                     .selected_style(ButtonStyle::OutlinedCustom(colors.border_focused))
-                    .on_click(move |_, _, cx| {
-                        add_handle
-                            .update(cx, |this, cx| {
-                                if let Some(editor) = this.settings_editor.as_mut() {
-                                    editor
-                                        .keymap
-                                        .sections
-                                        .push(KeymapSectionForm::new("Zetta > Terminal"));
-                                    editor.keymap_dirty = true;
-                                    refresh_keymap_cache(editor);
-                                    invalidate_controls_cache(editor);
-                                    cx.notify();
-                                }
-                            })
-                            .ok();
-                    }),
+                    .on_click(activate_on_click(
+                        &ctx.handle,
+                        SettingsControl::AddKeymapSection,
+                    )),
             )
             .into_any_element()
     }

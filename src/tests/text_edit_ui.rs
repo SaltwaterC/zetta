@@ -78,6 +78,16 @@ fn a_selected_field_renders_without_the_caret(cx: &mut TestAppContext) {
     );
 }
 
+/// An empty field opened selected has no selection to show where it is, so it
+/// keeps its caret: a pane overlay opens that way on a pane with no text yet.
+#[gpui::test]
+fn an_empty_selected_field_still_shows_a_caret(cx: &mut TestAppContext) {
+    let (selected_empty, plain_empty) =
+        run_widths(TextField::selected(""), TextField::default(), None, cx);
+    assert_eq!(selected_empty, plain_empty);
+    assert!(selected_empty > px(0.), "the caret is drawn");
+}
+
 /// The placeholder is rendered only while the field is empty, so a field with
 /// text does not show a suggestion behind what was typed.
 #[gpui::test]

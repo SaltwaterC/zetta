@@ -966,8 +966,7 @@ impl crate::Zetta {
                 return;
             };
             this.update(cx, |this, cx| {
-                this.configuration_error = Some(superseded_multiplexer_message(protocol_version));
-                cx.notify();
+                this.show_error_notice(superseded_multiplexer_message(protocol_version), cx);
             })
             .ok();
         })
@@ -1071,10 +1070,10 @@ impl crate::Zetta {
                                 return;
                             }
                             this.mux_recovery_task.take();
-                            this.configuration_error = Some(format!(
-                                "Could not restore disk session persistence: {error:#}"
-                            ));
-                            cx.notify();
+                            this.show_error_notice(
+                                format!("Could not restore disk session persistence: {error:#}"),
+                                cx,
+                            );
                         })
                         .ok();
                         break;
@@ -1150,8 +1149,7 @@ impl crate::Zetta {
                          backgrounded: {error:#}"
                     );
                     self.mux_connect_failure = Some((Instant::now(), message.clone()));
-                    self.configuration_error = Some(message);
-                    cx.notify();
+                    self.show_error_notice(message, cx);
                     return Err(error).context("connecting to the session multiplexer");
                 }
             }
@@ -1186,7 +1184,7 @@ impl crate::Zetta {
             // The terminal opened locally instead, so it works but cannot be
             // backgrounded. Say so once rather than letting the difference
             // surface later as a session that mysteriously will not detach.
-            self.show_notice(
+            self.show_error_notice(
                 format!(
                     "This terminal is running outside the session multiplexer, so it cannot be \
                  backgrounded: {error}"

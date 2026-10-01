@@ -50,8 +50,8 @@ fn lifecycle_actions_are_exposed_only_in_their_launch_mode() {
 
 #[test]
 fn fuzzy_matching_finds_subsequences() {
-    assert!(fuzzy_score("terminal: paste trimmed", "paste trim").is_some());
-    assert!(fuzzy_score("terminal: paste", "missing").is_none());
+    assert!(crate::fuzzy_match::score("terminal: paste trimmed", "paste trim").is_some());
+    assert!(crate::fuzzy_match::score("terminal: paste", "missing").is_none());
 }
 
 #[test]

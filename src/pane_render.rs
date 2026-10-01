@@ -53,7 +53,7 @@ fn pane_overlay_element(
     pane_id: u64,
     overlay: String,
     pane: &TerminalPane,
-    editing: bool,
+    editing: Option<&TextField>,
     colors: &ThemeColors,
 ) -> gpui::Stateful<gpui::Div> {
     let font_size = pane.overlay_font_size.unwrap_or(OverlayFontSize::DEFAULT);
@@ -82,9 +82,12 @@ fn pane_overlay_element(
             OverlayFontSize::ExtraExtraExtraLarge => element.text_3xl(),
         })
         .text_color(color)
-        .opacity(if editing { 1. } else { base_opacity })
+        .opacity(if editing.is_some() { 1. } else { base_opacity })
         .overflow_hidden()
-        .child(overlay)
+        .map(|element| match editing {
+            Some(field) => element.child(field_query_run(field, None, colors)),
+            None => element.child(overlay),
+        })
 }
 
 fn stacked_entry_status(entry: &StackedPane) -> String {
@@ -445,7 +448,7 @@ impl Zetta {
                     pane_id,
                     overlay,
                     pane,
-                    tab.editing_overlay_pane == Some(pane_id),
+                    tab.pane_overlay_field(pane_id),
                     colors,
                 ))
             })
@@ -671,7 +674,6 @@ impl Zetta {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let PaneLayoutContext { tab, colors, .. } = context;
-        let pane_label_selected = tab.pane_rename_selected(pane_id);
         let maximize_handle = cx.entity().downgrade();
         let minimize_handle = cx.entity().downgrade();
         let close_handle = cx.entity().downgrade();
@@ -712,9 +714,6 @@ impl Zetta {
                     .border_1()
                     .border_color(colors.border)
                     .bg(colors.status_bar_background)
-                    .when(pane_label_selected, |label| {
-                        label.bg(colors.element_selected)
-                    })
                     .cursor_text()
                     .overflow_hidden()
                     .tooltip(Tooltip::for_action_title(pane_label_tooltip, &RenamePane))
@@ -728,11 +727,19 @@ impl Zetta {
                                 .ok();
                         }
                     })
-                    .child(
-                        Label::new(pane_label)
-                            .size(LabelSize::Small)
-                            .color(Color::Custom(colors.text_muted)),
-                    ),
+                    .map(|label| match tab.pane_rename_field(pane_id) {
+                        Some(field) => label.child(
+                            div()
+                                .text_xs()
+                                .text_color(colors.text)
+                                .child(field_query_run(field, None, colors)),
+                        ),
+                        None => label.child(
+                            Label::new(pane_label)
+                                .size(LabelSize::Small)
+                                .color(Color::Custom(colors.text_muted)),
+                        ),
+                    }),
             )
             .when(tab.panes.len() > 1, |controls| {
                 controls

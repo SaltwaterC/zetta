@@ -24,7 +24,8 @@
     "ring_bytes": 262144,
     "remote": {
       "protocol": "ssh",
-      "keep_alive_ms": null
+      "keep_alive_ms": null,
+      "forward_agent": false
     },
     "persistence": {
       "recipients": [],

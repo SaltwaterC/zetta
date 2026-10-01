@@ -52,12 +52,3 @@ fn default_binding_lookup_keeps_plus_and_minus_shortcuts_distinct() {
         Some(&json!("zetta::DecreasePaneFontSize"))
     );
 }
-
-#[test]
-fn save_creates_parent_directories() {
-    let root = std::env::temp_dir().join(format!("zetta-settings-save-{}", std::process::id()));
-    let path = root.join("nested/config.json");
-    save(&path, "{}").unwrap();
-    assert_eq!(fs::read_to_string(&path).unwrap(), "{}\n");
-    fs::remove_dir_all(root).unwrap();
-}

@@ -63,15 +63,19 @@ fn test_editor(config: &Config, project: Option<ProjectEditor>) -> SettingsEdito
         font_scroll: UniformListScrollHandle::new(),
         keymap_scroll: UniformListScrollHandle::new(),
         numeric_repeat_generation: 0,
+        terminal_font_size_default: 15.,
         scroll_geometry_initialized: true,
         focused_input: None,
         focused_control: None,
+        armed_control: None,
+        close_request: None,
         focus_scroll_request: None,
         keymap_capture: None,
         open_dropdown: None,
         configuration_dirty: false,
         keymap_dirty: false,
         message: None,
+        invalid_setting: None,
         pane_template_validation_error: None,
         pane_template_validation_generation: 0,
         settings_save_in_progress: false,
@@ -170,10 +174,11 @@ fn the_project_list_exposes_one_control_group_per_registered_project() {
     assert_eq!(
         project_controls(&editor),
         vec![
-            SettingsControl::AddProject,
             SettingsControl::OpenProject(0),
             SettingsControl::EditProject(0),
             SettingsControl::RemoveProject(0),
+            // Drawn under the list, like every page's Add button.
+            SettingsControl::AddProject,
         ]
     );
 }
@@ -193,7 +198,6 @@ fn the_builder_replaces_the_list_controls_and_reaches_every_row() {
 
     assert!(!controls.contains(&SettingsControl::AddProject));
     assert!(controls.contains(&SettingsControl::CloseProjectConfig));
-    assert!(controls.contains(&SettingsControl::SaveProjectConfig));
     assert!(controls.contains(&SettingsControl::OpenProjectConfigFile));
     for control in [
         SettingsControl::Input(SettingsInput::Project(ProjectTextField::EnvironmentName(0))),
@@ -274,16 +278,14 @@ fn project_profile_controls_follow_the_visible_selection_order() {
     );
     let editor = test_editor(&config, Some(project));
     let controls = project_controls(&editor);
-    let profile = project_profile_controls(0);
+    let profile = project_profile_controls(0, 0);
     assert_eq!(
         profile,
         [
             SettingsControl::Input(SettingsInput::Project(ProjectTextField::ProfileName(0))),
             SettingsControl::RemoveProjectProfile(0),
             SettingsControl::Input(SettingsInput::Project(ProjectTextField::ProfileProgram(0))),
-            SettingsControl::Input(SettingsInput::Project(ProjectTextField::ProfileArguments(
-                0
-            ),)),
+            SettingsControl::AddProfileArgument(ProfileTarget::Project(0)),
             SettingsControl::Toggle(SettingsToggle::ProjectProfileVisibility(0)),
             SettingsControl::Dropdown(SettingsDropdown::ProjectProfileIcon(0)),
             SettingsControl::Dropdown(SettingsDropdown::ProjectProfileTheme(0)),
@@ -302,13 +304,13 @@ fn project_profile_controls_follow_the_visible_selection_order() {
 fn the_opacity_slider_is_only_reachable_while_the_project_overrides_it() {
     let config = base_config();
     let editor = test_editor(&config, Some(test_project(&config, "{}")));
-    assert!(!project_controls(&editor).contains(&SettingsControl::ProjectOpacity));
+    assert!(!project_controls(&editor).contains(&SettingsControl::Opacity(OpacityTarget::Project)));
 
     let editor = test_editor(
         &config,
         Some(test_project(&config, r#"{"inactive_pane_opacity": 0.5}"#)),
     );
-    assert!(project_controls(&editor).contains(&SettingsControl::ProjectOpacity));
+    assert!(project_controls(&editor).contains(&SettingsControl::Opacity(OpacityTarget::Project)));
 }
 
 #[test]
@@ -355,7 +357,10 @@ fn a_dropdown_selection_of_inherit_clears_the_field_and_marks_the_form_dirty() {
     assert!(set_project_dropdown(
         &mut editor,
         SettingsDropdown::ProjectTheme,
-        PROJECT_INHERIT_LABEL,
+        &DropdownChoice {
+            index: 0,
+            value: PROJECT_INHERIT_LABEL.to_owned(),
+        },
     ));
 
     let project = editor.project.as_ref().unwrap();
@@ -381,4 +386,25 @@ fn closing_the_builder_returns_focus_to_the_row_it_was_opened_from() {
         project_row_control(&editor, Some(&project)),
         SettingsControl::Tab(SettingsPage::Projects)
     );
+}
+
+/// The "unset" option is recognised by being first, not by its text, so a theme
+/// that happens to be named like it can still be chosen. Choosing one used to
+/// clear the field instead.
+#[test]
+fn a_theme_named_like_the_inherit_option_can_still_be_chosen() {
+    let config = base_config();
+    let mut editor = test_editor(&config, Some(test_project(&config, "{}")));
+
+    assert!(set_project_dropdown(
+        &mut editor,
+        SettingsDropdown::ProjectTheme,
+        &DropdownChoice {
+            index: 3,
+            value: PROJECT_INHERIT_LABEL.to_owned(),
+        },
+    ));
+
+    let project = editor.project.as_ref().unwrap();
+    assert_eq!(project.form.theme.as_deref(), Some(PROJECT_INHERIT_LABEL));
 }

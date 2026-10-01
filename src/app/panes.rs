@@ -526,7 +526,7 @@ impl Zetta {
             this.update(cx, |this, cx| {
                 finish_pane_output_save(&mut this.pane_output_save_in_progress);
                 if let Err(error) = result {
-                    this.show_notice(format!("Could not save pane output: {error:#}"), cx);
+                    this.show_error_notice(format!("Could not save pane output: {error:#}"), cx);
                 }
             })
             .ok();
