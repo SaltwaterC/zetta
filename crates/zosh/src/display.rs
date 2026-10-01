@@ -38,6 +38,11 @@ impl DisplayScreen {
 
 impl Screen for DisplayScreen {
     fn feed(&mut self, bytes: &[u8]) {
+        // Feeding nothing must change nothing (see `Screen::feed`): a state
+        // whose diff is empty shares its base's screen instead of feeding it.
+        if bytes.is_empty() {
+            return;
+        }
         self.scrollback.feed(bytes);
         self.inner.feed(bytes);
         self.received_output = true;

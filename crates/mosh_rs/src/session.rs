@@ -131,6 +131,11 @@ pub struct MoshSession<S: Screen> {
     /// When the newest socket was opened, which is what paces the next
     /// rotation and what ages the old ones out.
     last_port_choice: u64,
+    /// How the newest socket was last set to read, or `None` when that is
+    /// not known. A front end doing its own waiting calls
+    /// [`Self::pump_ready`] on every pass, and every pass used to make a
+    /// system call to put the socket in the mode it was already in.
+    newest_read_mode: Option<ReadMode>,
     server: SocketAddr,
     crypto: CryptoSession,
     packets: PacketState,
@@ -176,6 +181,7 @@ impl<S: Screen> MoshSession<S> {
         Ok(Self {
             sockets: vec![bind_socket(server)?],
             last_port_choice: 0,
+            newest_read_mode: None,
             mtu: DEFAULT_LINK_MTU
                 - if server.is_ipv6() {
                     IPV6_HEADER_LEN
@@ -309,6 +315,19 @@ impl<S: Screen> MoshSession<S> {
     /// prediction that STALLS is itself a signal.
     pub fn prediction_wait_ms(&self) -> Option<u64> {
         self.prediction.wait_time_ms()
+    }
+
+    /// How long a front end that does its own waiting may wait before
+    /// this session needs another pass, if nothing arrives first: the
+    /// sooner of [`Self::wait_time_ms`] and [`Self::prediction_wait_ms`].
+    ///
+    /// This is the whole of what the session's own clocks ask for, so a
+    /// wait bounded by it needs no ceiling of its own to keep them
+    /// honest.
+    pub fn next_wake_ms(&mut self) -> u64 {
+        let send = self.wait_time_ms();
+        self.prediction_wait_ms()
+            .map_or(send, |prediction| send.min(prediction))
     }
 
     /// Queue a terminal resize.
@@ -491,6 +510,7 @@ impl<S: Screen> MoshSession<S> {
         }
         self.last_port_choice = now;
         self.sockets.push(socket);
+        self.newest_read_mode = None;
         self.prune_sockets(now);
     }
 
@@ -550,14 +570,23 @@ impl<S: Screen> MoshSession<S> {
     /// event loop never needs to look at a socket.
     #[cfg(any(unix, windows))]
     pub fn socket_handles(&self) -> Vec<SocketHandle> {
+        self.socket_handle_iter().collect()
+    }
+
+    /// [`Self::socket_handles`] without the allocation, for a caller that
+    /// rebuilds its wait set on every pass.
+    #[cfg(any(unix, windows))]
+    pub fn socket_handle_iter(&self) -> impl Iterator<Item = SocketHandle> + '_ {
         #[cfg(unix)]
         use std::os::fd::AsRawFd as _;
         #[cfg(windows)]
         use std::os::windows::io::AsRawSocket as _;
-        #[cfg(unix)]
-        return self.sockets.iter().map(|s| s.as_raw_fd()).collect();
-        #[cfg(windows)]
-        return self.sockets.iter().map(|s| s.as_raw_socket()).collect();
+        self.sockets.iter().map(|socket| {
+            #[cfg(unix)]
+            return socket.as_raw_fd();
+            #[cfg(windows)]
+            return socket.as_raw_socket();
+        })
     }
 
     /// How long there is before this session needs to send something.
@@ -577,7 +606,10 @@ impl<S: Screen> MoshSession<S> {
 
         // Only the newest socket ever waits; the older ones are already
         // non-blocking, so what they hold is taken instantly.
-        if let Some(newest) = self.sockets.last() {
+        let mode = wait.map_or(ReadMode::Ready, ReadMode::Wait);
+        if self.newest_read_mode != Some(mode)
+            && let Some(newest) = self.sockets.last()
+        {
             match wait {
                 Some(d) => {
                     let _ = newest.set_nonblocking(false);
@@ -587,6 +619,7 @@ impl<S: Screen> MoshSession<S> {
                     let _ = newest.set_nonblocking(true);
                 }
             }
+            self.newest_read_mode = Some(mode);
         }
 
         // Drain every socket, oldest first: several datagrams can land
@@ -854,6 +887,15 @@ impl MoshSession<crate::screen::Vt100Screen> {
     ) -> Result<Self> {
         Self::connect_with_screen(host, port, key, crate::screen::Vt100Screen::new(rows, cols))
     }
+}
+
+/// How the newest socket reads: waiting up to a timeout, as
+/// [`MoshSession::pump`] has it, or taking only what has already arrived,
+/// as [`MoshSession::pump_ready`] does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReadMode {
+    Wait(Duration),
+    Ready,
 }
 
 /// A fresh local socket for talking to `server`.

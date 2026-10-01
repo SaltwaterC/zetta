@@ -39,6 +39,8 @@ fn terminal_guard_restore_is_idempotent() {
         restored: false,
         #[cfg(unix)]
         saved_mode: None,
+        #[cfg(windows)]
+        added_window_input: false,
     };
     guard.restore();
     assert!(guard.restored);

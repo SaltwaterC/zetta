@@ -24,25 +24,6 @@ fn udp_port_candidates_start_randomly_and_wrap_the_complete_range() {
 }
 
 #[test]
-fn publishing_pty_event_preserves_wakeup_before_park() {
-    // Use a fresh thread so another test cannot leave a park token behind.
-    thread::spawn(|| {
-        let (sender, receiver) = mpsc::sync_channel(1);
-        let events = PtyEventSender {
-            sender,
-            consumer: thread::current(),
-        };
-        events.send(PtyEvent::InputWritten(1)).unwrap();
-        let started = Instant::now();
-        thread::park_timeout(Duration::from_secs(2));
-        assert!(started.elapsed() < Duration::from_secs(1));
-        assert!(matches!(receiver.try_recv(), Ok(PtyEvent::InputWritten(1))));
-    })
-    .join()
-    .unwrap();
-}
-
-#[test]
 fn the_server_keeps_its_half_alive_without_hearing_anything() {
     let interval = Duration::from_millis(500);
     let armed = Some(interval);
@@ -74,6 +55,30 @@ fn the_server_keeps_its_half_alive_without_hearing_anything() {
         KEEP_ALIVE_LINGER - Duration::from_millis(1)
     ));
     assert!(!keep_alive_due(armed, interval, KEEP_ALIVE_LINGER));
+}
+
+#[test]
+fn the_keep_alive_deadline_is_when_the_keep_alive_falls_due() {
+    let interval = Duration::from_millis(500);
+    let armed = Some(interval);
+    let start = Instant::now();
+
+    assert_eq!(keep_alive_deadline(None, start, start), None);
+    let due = keep_alive_deadline(armed, start, start).expect("armed");
+    assert_eq!(due, start + interval);
+    // The deadline and the predicate agree on either side of it.
+    assert!(!keep_alive_due(
+        armed,
+        due - start - Duration::from_millis(1),
+        due - start
+    ));
+    assert!(keep_alive_due(armed, due - start, due - start));
+
+    // Nothing is scheduled once the linger would have lapsed by then.
+    let heard = start - KEEP_ALIVE_LINGER;
+    assert_eq!(keep_alive_deadline(armed, start, heard), None);
+    let heard = start + interval - KEEP_ALIVE_LINGER + Duration::from_millis(1);
+    assert_eq!(keep_alive_deadline(armed, start, heard), Some(due));
 }
 
 #[test]
@@ -194,10 +199,7 @@ fn input_completion_follows_actual_write_not_enqueue_or_unrelated_output() {
             release: release_rx,
         }),
         write_rx,
-        PtyEventSender {
-            sender: event_tx.clone(),
-            consumer: thread::current(),
-        },
+        WakingSender::to_current(event_tx.clone()),
     );
     queue_pty_write(&write_tx, b"x".to_vec()).unwrap();
     queue_pty_request(&write_tx, PtyWrite::InputFrame(9)).unwrap();
@@ -361,4 +363,269 @@ fn openssh_handle_state_is_recognised_by_its_suffix() {
     assert!(is_openssh_handle_state(OsStr::new("other_posix_fd_state")));
     assert!(!is_openssh_handle_state(OsStr::new("SSH_AUTH_SOCK")));
     assert!(!is_openssh_handle_state(OsStr::new("POSIX_FD_STATE_EXTRA")));
+}
+
+fn test_transport() -> ServerTransport {
+    ServerTransport::new(Ocb::new(&[0x5a; 16]).unwrap())
+}
+
+fn wake_sources<'a>(
+    transport: &'a ServerTransport,
+    terminal: &'a TerminalState,
+    echo: &'a EchoAcknowledgements,
+) -> WakeSources<'a> {
+    let now = Instant::now();
+    WakeSources {
+        now,
+        associated: true,
+        association_deadline: now + ASSOCIATION_TIMEOUT,
+        network_timeout: None,
+        transport,
+        keep_alive: None,
+        last_send: now,
+        send_failed_at: None,
+        terminal,
+        echo,
+        child_poll: None,
+    }
+}
+
+#[test]
+fn an_unattached_session_sleeps_until_its_association_deadline() {
+    let (transport, terminal, echo) = (
+        test_transport(),
+        TerminalState::new(24, 80),
+        EchoAcknowledgements::default(),
+    );
+    let sources = WakeSources {
+        associated: false,
+        ..wake_sources(&transport, &terminal, &echo)
+    };
+    assert_eq!(
+        next_wake(sources).earliest(),
+        Some(sources.association_deadline)
+    );
+}
+
+#[test]
+fn an_idle_attached_session_sleeps_until_its_transport_is_due() {
+    let (transport, terminal, echo) = (
+        test_transport(),
+        TerminalState::new(24, 80),
+        EchoAcknowledgements::default(),
+    );
+    let sources = wake_sources(&transport, &terminal, &echo);
+    let due = transport
+        .next_deadline()
+        .expect("an idle transport has a heartbeat");
+    assert!(
+        due > sources.now + Duration::from_secs(1),
+        "the heartbeat is seconds away"
+    );
+    assert_eq!(next_wake(sources).earliest(), Some(due));
+}
+
+#[test]
+fn the_loop_wakes_for_echo_acknowledgements_and_keep_alives() {
+    let (transport, terminal) = (test_transport(), TerminalState::new(24, 80));
+    let mut echo = EchoAcknowledgements::default();
+    let written = Instant::now();
+    echo.written(1, written);
+    let sources = wake_sources(&transport, &terminal, &echo);
+    assert_eq!(next_wake(sources).earliest(), Some(written + ECHO_DELAY));
+
+    let echo = EchoAcknowledgements::default();
+    let sources = WakeSources {
+        keep_alive: Some(Duration::from_millis(500)),
+        ..wake_sources(&transport, &terminal, &echo)
+    };
+    assert_eq!(
+        next_wake(sources).earliest(),
+        Some(sources.last_send + Duration::from_millis(500))
+    );
+}
+
+#[test]
+fn a_keep_alive_that_cannot_be_sent_is_retried_on_an_interval_not_continuously() {
+    let (transport, terminal, echo) = (
+        test_transport(),
+        TerminalState::new(24, 80),
+        EchoAcknowledgements::default(),
+    );
+    let base = wake_sources(&transport, &terminal, &echo);
+    let overdue = WakeSources {
+        keep_alive: Some(KEEP_ALIVE_MIN),
+        last_send: base.now - Duration::from_secs(1),
+        ..base
+    };
+    assert!(
+        next_wake(overdue).earliest().unwrap() <= base.now,
+        "an overdue keep-alive is due at once"
+    );
+
+    let failing = WakeSources {
+        send_failed_at: Some(base.now),
+        ..overdue
+    };
+    assert_eq!(
+        next_wake(failing).earliest(),
+        Some(base.now + KEEP_ALIVE_MIN)
+    );
+}
+
+#[test]
+fn timers_that_have_already_fired_do_not_wake_the_loop_again() {
+    // Past the presence linger and the scrollback stall, both of which a pass
+    // acts on once and then has nothing more to do for. A deadline left in
+    // the past would make every park return at once.
+    let mut transport = test_transport();
+    transport.start_shutdown();
+    for _ in 0..64 {
+        transport.force_next_send();
+        transport.tick();
+    }
+    assert!(transport.shutdown_timed_out());
+    assert_eq!(transport.next_deadline(), None);
+
+    let mut terminal = TerminalState::new(24, 80);
+    terminal.set_scrollback_budget(0);
+    for _ in 0..20_000 {
+        terminal.process(b"a line of output that scrolls off the top\r\n");
+    }
+    assert!(terminal.scrollback_over_budget());
+    let echo = EchoAcknowledgements::default();
+    let later = Instant::now() + sleep_guard::PRESENCE_LINGER * 2;
+
+    let attached = WakeSources {
+        now: later,
+        ..wake_sources(&transport, &terminal, &echo)
+    };
+    assert_eq!(next_wake(attached).earliest(), None);
+
+    let unattached = WakeSources {
+        associated: false,
+        association_deadline: later + ASSOCIATION_TIMEOUT,
+        ..attached
+    };
+    assert_eq!(
+        next_wake(unattached).earliest(),
+        Some(unattached.association_deadline)
+    );
+}
+
+#[test]
+fn a_pty_without_an_exit_watch_is_polled_on_its_fallback_timer() {
+    let (transport, terminal, echo) = (
+        test_transport(),
+        TerminalState::new(24, 80),
+        EchoAcknowledgements::default(),
+    );
+    let poll = Instant::now() + child_exit::FALLBACK_POLL;
+    let sources = WakeSources {
+        child_poll: Some(poll),
+        ..wake_sources(&transport, &terminal, &echo)
+    };
+    assert_eq!(next_wake(sources).earliest(), Some(poll));
+}
+
+/// Exchanges datagrams between a test client and the session for `period`,
+/// returning when the first datagram from the session arrived, if one did.
+#[cfg(unix)]
+fn pump(
+    client: &mut Transport,
+    socket: &UdpSocket,
+    server: SocketAddr,
+    period: Duration,
+) -> Option<Instant> {
+    let until = Instant::now() + period;
+    let mut first = None;
+    let mut buf = vec![0u8; UDP_BUFFER];
+    while Instant::now() < until {
+        if let Ok((n, _)) = socket.recv_from(&mut buf) {
+            first.get_or_insert_with(Instant::now);
+            client.recv(&buf[..n]);
+        }
+        for datagram in client.tick() {
+            socket.send_to(&datagram, server).unwrap();
+        }
+    }
+    first
+}
+
+// Unix only because it echoes through `cat`; the loop it measures is the same
+// code on every platform.
+#[cfg(unix)]
+#[test]
+fn an_idle_session_sleeps_instead_of_polling_and_still_answers_at_once() {
+    use moshcatty::pb::UserInstruction;
+
+    let key = [0x24u8; 16];
+    let server_socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+    server_socket
+        .set_write_timeout(Some(UDP_SEND_TIMEOUT))
+        .unwrap();
+    let server_addr = server_socket.local_addr().unwrap();
+    let cfg = Config {
+        command: vec!["cat".into()],
+        ..Config::default()
+    };
+    let session = thread::spawn(move || {
+        serve_session(
+            cfg,
+            server_socket,
+            ServerTransport::new(Ocb::new(&key).unwrap()),
+        )
+    });
+
+    let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+    socket
+        .set_read_timeout(Some(Duration::from_millis(5)))
+        .unwrap();
+    let mut client = Transport::new_client(Ocb::new(&key).unwrap());
+    client.set_pending(UserInstruction::encode_message(&[UserInstruction::resize(
+        80, 24,
+    )]));
+    assert!(
+        pump(
+            &mut client,
+            &socket,
+            server_addr,
+            Duration::from_millis(1500)
+        )
+        .is_some(),
+        "the session never answered its client"
+    );
+
+    // Attached, acknowledged and quiet: the old loop made about two hundred
+    // passes a second here.
+    let before = LOOP_PASSES.load(Ordering::Relaxed);
+    pump(&mut client, &socket, server_addr, Duration::from_secs(1));
+    let passes = LOOP_PASSES.load(Ordering::Relaxed) - before;
+    assert!(
+        passes < 25,
+        "an idle session made {passes} passes in a second"
+    );
+
+    // Sleeping must not cost responsiveness: a keystroke is read, echoed by
+    // `cat` and the screen sent back without waiting for any timer.
+    client.set_pending(UserInstruction::encode_message(&[
+        UserInstruction::keystroke(b"x".to_vec()),
+    ]));
+    client.force_next_send();
+    let sent = Instant::now();
+    let answered = pump(&mut client, &socket, server_addr, Duration::from_secs(1))
+        .expect("the keystroke was answered");
+    assert!(
+        answered - sent < Duration::from_millis(250),
+        "the session took {:?} to answer a keystroke",
+        answered - sent
+    );
+
+    client.start_shutdown();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !session.is_finished() {
+        assert!(Instant::now() < deadline, "the session did not shut down");
+        pump(&mut client, &socket, server_addr, Duration::from_millis(50));
+    }
+    session.join().unwrap().unwrap();
 }

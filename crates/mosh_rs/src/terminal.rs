@@ -17,8 +17,16 @@
 //!
 //! What a screen IS lives behind [`Screen`], so an application can
 //! bring the emulator it already has instead of carrying a second one.
+//!
+//! Screens are held behind [`Arc`], and that is a cost decision rather
+//! than a sharing one. Most states on an idle link change nothing: a
+//! keep-alive's answer and a heartbeat are new state numbers with empty
+//! diffs, and each used to cost a whole screen copy. Shared, they cost a
+//! reference count. The same sharing is what lets [`ClientTerminal::render`]
+//! recognise a pass with nothing new to paint without diffing anything.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::screen::{DiffScreen, OverlayCell, OverlayCursor, Screen};
 
@@ -27,10 +35,17 @@ use crate::screen::{DiffScreen, OverlayCell, OverlayCursor, Screen};
 pub struct ClientTerminal<S: Screen> {
     /// Screens by state number. A diff names the state it starts from,
     /// so the client must be able to reproduce that screen exactly, not
-    /// just the newest one.
-    states: HashMap<u64, S>,
+    /// just the newest one. States whose diff changed nothing share
+    /// their base's screen.
+    states: HashMap<u64, Arc<S>>,
     /// What the display is currently showing, predictions included.
-    displayed: S,
+    displayed: Arc<S>,
+    /// What `displayed` was last brought up to: the confirmed screen it
+    /// was built from and what was painted over it. While neither has
+    /// changed the display is already right, which is how a pass with
+    /// nothing new costs a comparison instead of a copy and a diff.
+    /// `None` whenever `displayed` may differ from what this describes.
+    shown: Option<Shown<S>>,
     /// Highest state applied, which is what `displayed` is caught up to
     /// after a render.
     latest: u64,
@@ -43,15 +58,30 @@ pub struct ClientTerminal<S: Screen> {
     title_prefix: String,
 }
 
+/// The inputs `displayed` was last built from.
+struct Shown<S> {
+    confirmed: Arc<S>,
+    overlay: Vec<OverlayCell>,
+    cursor: OverlayCursor,
+}
+
+impl<S> Shown<S> {
+    fn matches(&self, confirmed: &Arc<S>, overlay: &[OverlayCell], cursor: OverlayCursor) -> bool {
+        Arc::ptr_eq(&self.confirmed, confirmed) && self.cursor == cursor && self.overlay == overlay
+    }
+}
+
 impl<S: Screen> ClientTerminal<S> {
     /// Start from a blank screen both sides agree on.
     pub fn new(blank: S) -> Self {
+        let blank = Arc::new(blank);
         let mut states = HashMap::new();
         // State 0 is the blank screen before anything is sent.
-        states.insert(0, blank.clone());
+        states.insert(0, Arc::clone(&blank));
         Self {
             states,
             displayed: blank,
+            shown: None,
             latest: 0,
             title_prefix: String::new(),
         }
@@ -66,8 +96,15 @@ impl<S: Screen> ClientTerminal<S> {
         let Some(base) = self.states.get(&old_num) else {
             return false;
         };
-        let mut screen = base.clone();
-        screen.feed(bytes);
+        // Feeding nothing changes nothing (see `Screen::feed`), so the
+        // new state IS its base and shares it.
+        let screen = if bytes.is_empty() {
+            Arc::clone(base)
+        } else {
+            let mut screen = S::clone(base);
+            screen.feed(bytes);
+            Arc::new(screen)
+        };
         self.states.insert(new_num, screen);
         if new_num > self.latest || self.latest == u64::MAX {
             self.latest = new_num;
@@ -78,10 +115,14 @@ impl<S: Screen> ClientTerminal<S> {
     /// Record a resize the server reported, so later diffs land on a
     /// screen of the right shape.
     pub fn resize(&mut self, rows: u16, cols: u16) {
+        // Every held state is resized on its own, so states that shared
+        // a screen stop sharing it here; a resize is rare enough that
+        // the copies do not matter.
         for screen in self.states.values_mut() {
-            screen.resize(rows, cols);
+            Arc::make_mut(screen).resize(rows, cols);
         }
-        self.displayed.resize(rows, cols);
+        Arc::make_mut(&mut self.displayed).resize(rows, cols);
+        self.shown = None;
     }
 
     /// Forget states the server promised never to diff from again.
@@ -94,7 +135,7 @@ impl<S: Screen> ClientTerminal<S> {
     /// The newest state the server has sent: the screen every
     /// prediction must be judged against, and nothing else.
     pub fn confirmed(&self) -> Option<&S> {
-        self.states.get(&self.latest)
+        self.states.get(&self.latest).map(Arc::as_ref)
     }
 
     /// What the display is showing right now, predictions included.
@@ -107,7 +148,7 @@ impl<S: Screen> ClientTerminal<S> {
     pub fn screen_text(&self) -> String {
         self.states
             .get(&self.latest)
-            .map(Screen::text)
+            .map(|screen| screen.text())
             .unwrap_or_default()
     }
 
@@ -123,7 +164,9 @@ impl<S: Screen> ClientTerminal<S> {
 
     /// The window title the host has asked for, unprefixed.
     pub fn title(&self) -> Option<String> {
-        self.states.get(&self.latest).and_then(Screen::title)
+        self.states
+            .get(&self.latest)
+            .and_then(|screen| screen.title())
     }
 
     /// Highest state applied.
@@ -148,14 +191,45 @@ impl<S: Screen> ClientTerminal<S> {
     /// is taken against reality rather than against a screen the user
     /// never saw.
     pub fn advance(&mut self, overlay: &[OverlayCell], cursor: OverlayCursor) {
-        let Some(latest) = self.states.get(&self.latest) else {
-            return;
-        };
-        let mut next = latest.clone();
-        if !overlay.is_empty() || cursor != OverlayCursor::Unchanged {
-            next.draw_overlay(overlay, cursor);
+        if let Some((next, shown)) = self.next_display(overlay, cursor) {
+            self.displayed = next;
+            self.shown = Some(shown);
         }
-        self.displayed = next;
+    }
+
+    /// The screen the display should show next, and what it is built
+    /// from, or `None` when that is exactly what it already shows (or
+    /// there is no state to show).
+    ///
+    /// With nothing painted over it, the display is the confirmed screen
+    /// itself, shared rather than copied; only an overlay needs a copy of
+    /// its own to paint on.
+    fn next_display(
+        &self,
+        overlay: &[OverlayCell],
+        cursor: OverlayCursor,
+    ) -> Option<(Arc<S>, Shown<S>)> {
+        let confirmed = self.states.get(&self.latest)?;
+        if self
+            .shown
+            .as_ref()
+            .is_some_and(|shown| shown.matches(confirmed, overlay, cursor))
+        {
+            return None;
+        }
+        let next = if overlay.is_empty() && cursor == OverlayCursor::Unchanged {
+            Arc::clone(confirmed)
+        } else {
+            let mut painted = S::clone(confirmed);
+            painted.draw_overlay(overlay, cursor);
+            Arc::new(painted)
+        };
+        let shown = Shown {
+            confirmed: Arc::clone(confirmed),
+            overlay: overlay.to_vec(),
+            cursor,
+        };
+        Some((next, shown))
     }
 }
 
@@ -169,13 +243,12 @@ impl<S: DiffScreen> ClientTerminal<S> {
     /// owns the grid it draws from calls [`Self::advance`] and then
     /// draws [`Self::displayed`].
     pub fn render(&mut self, overlay: &[OverlayCell], cursor: OverlayCursor) -> Vec<u8> {
-        let Some(latest) = self.states.get(&self.latest) else {
+        // Nothing has changed since the last render: what the display
+        // shows is already this, so the diff would be empty and the
+        // title already sent.
+        let Some((next, shown)) = self.next_display(overlay, cursor) else {
             return Vec::new();
         };
-        let mut next = latest.clone();
-        if !overlay.is_empty() || cursor != OverlayCursor::Unchanged {
-            next.draw_overlay(overlay, cursor);
-        }
         let mut out = next.diff_from(&self.displayed);
         // The title travels inside the host diff, and a diff of CELLS
         // cannot carry it: without this it reaches the client and stops
@@ -183,6 +256,7 @@ impl<S: DiffScreen> ClientTerminal<S> {
         // before the session began.
         out.extend_from_slice(&self.title_escape(next.title(), self.displayed.title()));
         self.displayed = next;
+        self.shown = Some(shown);
         out
     }
 
@@ -210,9 +284,14 @@ impl<S: DiffScreen> ClientTerminal<S> {
         // A repaint is for a terminal whose state cannot be known, so
         // the title is restated rather than diffed.
         let title = latest.title();
-        let copy = latest.clone();
+        let shown = Shown {
+            confirmed: Arc::clone(latest),
+            overlay: Vec::new(),
+            cursor: OverlayCursor::Unchanged,
+        };
+        self.displayed = Arc::clone(latest);
         out.extend_from_slice(&self.title_escape(title, None));
-        self.displayed = copy;
+        self.shown = Some(shown);
         out
     }
 }
@@ -374,6 +453,163 @@ mod tests {
         let _ = t.render(&[], OverlayCursor::Unchanged);
         let again = String::from_utf8_lossy(&t.repaint()).into_owned();
         assert!(again.contains("]0;after suspend"), "{again:?}");
+    }
+
+    /// A screen that counts the diffs taken of it, so a test can tell a
+    /// render that was skipped from one that compared and found nothing.
+    #[derive(Clone)]
+    struct Counted {
+        inner: Vt100Screen,
+        diffs: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl Screen for Counted {
+        fn feed(&mut self, bytes: &[u8]) {
+            self.inner.feed(bytes);
+        }
+        fn resize(&mut self, rows: u16, cols: u16) {
+            self.inner.resize(rows, cols);
+        }
+        fn rows(&self) -> u16 {
+            self.inner.rows()
+        }
+        fn cols(&self) -> u16 {
+            self.inner.cols()
+        }
+        fn cursor(&self) -> (u16, u16) {
+            self.inner.cursor()
+        }
+        fn cell(&self, row: u16, col: u16) -> crate::screen::Cell {
+            self.inner.cell(row, col)
+        }
+        fn text(&self) -> String {
+            self.inner.text()
+        }
+    }
+
+    impl DiffScreen for Counted {
+        fn diff_from(&self, previous: &Self) -> Vec<u8> {
+            self.diffs
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.inner.diff_from(&previous.inner)
+        }
+        fn repaint(&self) -> Vec<u8> {
+            self.inner.repaint()
+        }
+    }
+
+    fn counted() -> (
+        ClientTerminal<Counted>,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        let diffs = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let blank = Counted {
+            inner: Vt100Screen::new(3, 20),
+            diffs: std::sync::Arc::clone(&diffs),
+        };
+        (ClientTerminal::new(blank), diffs)
+    }
+
+    fn diffs_taken(diffs: &std::sync::atomic::AtomicUsize) -> usize {
+        diffs.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn predicted(col: u16, contents: &str) -> OverlayCell {
+        OverlayCell {
+            row: 0,
+            col,
+            cell: crate::screen::Cell {
+                contents: contents.into(),
+                rendition: Default::default(),
+            },
+            underline: false,
+        }
+    }
+
+    #[test]
+    fn a_state_whose_diff_is_empty_shares_its_base_screen() {
+        // A keep-alive's answer: a new state number that changes nothing.
+        let mut t = terminal(3, 20);
+        t.apply_diff(0, 1, b"abc");
+        t.apply_diff(1, 2, b"");
+        assert!(Arc::ptr_eq(&t.states[&1], &t.states[&2]));
+        assert_eq!(t.latest(), 2);
+        assert_eq!(text_of(&t).trim(), "abc");
+    }
+
+    #[test]
+    fn a_pass_with_nothing_new_is_not_diffed_at_all() {
+        let (mut t, diffs) = counted();
+        t.apply_diff(0, 1, b"hello");
+        assert!(!t.render(&[], OverlayCursor::Unchanged).is_empty());
+        assert_eq!(diffs_taken(&diffs), 1);
+
+        // Neither the state nor the overlay moved, and an empty diff
+        // keeps the same screen, so there is nothing to compare.
+        assert!(t.render(&[], OverlayCursor::Unchanged).is_empty());
+        t.apply_diff(1, 2, b"");
+        assert!(t.render(&[], OverlayCursor::Unchanged).is_empty());
+        assert_eq!(diffs_taken(&diffs), 1, "an unchanged pass took a diff");
+
+        // A real change still paints.
+        t.apply_diff(2, 3, b" world");
+        assert!(!t.render(&[], OverlayCursor::Unchanged).is_empty());
+        assert_eq!(t.displayed_text().trim(), "hello world");
+    }
+
+    #[test]
+    fn a_changed_overlay_paints_even_on_an_unchanged_state() {
+        let (mut t, diffs) = counted();
+        t.apply_diff(0, 1, b"ab");
+        let _ = t.render(&[], OverlayCursor::Unchanged);
+
+        let guess = [predicted(2, "c")];
+        assert!(!t.render(&guess, OverlayCursor::At(0, 3)).is_empty());
+        assert_eq!(t.displayed_text().trim(), "abc");
+        // The same guess again is already on screen.
+        let before = diffs_taken(&diffs);
+        assert!(t.render(&guess, OverlayCursor::At(0, 3)).is_empty());
+        assert_eq!(diffs_taken(&diffs), before);
+        // And taking it away is a change too.
+        assert!(!t.render(&[], OverlayCursor::Unchanged).is_empty());
+        assert_eq!(t.displayed_text().trim(), "ab");
+    }
+
+    #[test]
+    fn a_resize_makes_the_next_render_look_again() {
+        let (mut t, diffs) = counted();
+        t.apply_diff(0, 1, b"ab");
+        let _ = t.render(&[], OverlayCursor::Unchanged);
+        t.resize(4, 20);
+        let before = diffs_taken(&diffs);
+        let _ = t.render(&[], OverlayCursor::Unchanged);
+        assert_eq!(diffs_taken(&diffs), before + 1);
+    }
+
+    #[test]
+    fn a_resize_does_not_reach_a_state_another_shared() {
+        // Shared screens are copied apart by a resize, not resized twice
+        // or left behind.
+        let mut t = terminal(3, 20);
+        t.apply_diff(0, 1, b"ab");
+        t.apply_diff(1, 2, b"");
+        t.resize(5, 30);
+        for screen in t.states.values() {
+            assert_eq!((screen.rows(), screen.cols()), (5, 30));
+        }
+        assert_eq!((t.displayed().rows(), t.displayed().cols()), (5, 30));
+    }
+
+    #[test]
+    fn a_render_after_advance_or_repaint_has_nothing_left_to_do() {
+        let (mut t, diffs) = counted();
+        t.apply_diff(0, 1, b"xy");
+        t.advance(&[], OverlayCursor::Unchanged);
+        assert!(t.render(&[], OverlayCursor::Unchanged).is_empty());
+        t.apply_diff(1, 2, b"z");
+        let _ = t.repaint();
+        assert!(t.render(&[], OverlayCursor::Unchanged).is_empty());
+        assert_eq!(diffs_taken(&diffs), 0);
     }
 
     #[test]

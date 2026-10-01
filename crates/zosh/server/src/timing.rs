@@ -123,29 +123,52 @@ pub fn begin() -> Option<Instant> {
 
 pub fn slow(name: &'static str, since: Option<Instant>) {
     if let Some(since) = since {
-        let elapsed = since.elapsed();
-        if elapsed >= Duration::from_millis(100) {
-            record(name, elapsed.as_micros() as u64, 0);
-        }
+        record_if_slow(name, since.elapsed());
     }
 }
 
+/// Per-pass diagnostics for the session loop.
+///
+/// The loop sleeps until its next deadline, which can be seconds, so the time
+/// between passes says nothing by itself. What does is the time a pass spent
+/// working (`loop_gap`) and how late a sleep with a deadline woke past it
+/// (`wake_late`), which is what a host stalling the process — power
+/// management, an overloaded machine — looks like from inside it.
 pub struct LoopTiming {
     last: Option<Instant>,
+    parked: Option<Parked>,
     heartbeat: Option<Instant>,
+}
+
+struct Parked {
+    at: Instant,
+    until: Option<Instant>,
 }
 
 impl LoopTiming {
     pub fn new() -> Self {
         Self {
             last: begin(),
+            parked: None,
             heartbeat: begin(),
         }
     }
 
+    /// Called at the top of every pass.
     pub fn tick(&mut self) {
-        slow("loop_gap", self.last);
-        self.last = begin();
+        let now = begin();
+        match self.parked.take() {
+            Some(parked) => {
+                if let Some(last) = self.last {
+                    record_if_slow("loop_gap", parked.at.saturating_duration_since(last));
+                }
+                if let (Some(now), Some(until)) = (now, parked.until) {
+                    record_if_slow("wake_late", now.saturating_duration_since(until));
+                }
+            }
+            None => slow("loop_gap", self.last),
+        }
+        self.last = now;
         if self
             .heartbeat
             .is_some_and(|at| at.elapsed() >= Duration::from_secs(1))
@@ -153,6 +176,19 @@ impl LoopTiming {
             record("heartbeat", 0, 0);
             self.heartbeat = self.last;
         }
+    }
+
+    /// Called just before the loop parks until `until`, or indefinitely.
+    pub fn parking(&mut self, until: Option<Instant>) {
+        if let Some(at) = begin() {
+            self.parked = Some(Parked { at, until });
+        }
+    }
+}
+
+fn record_if_slow(name: &'static str, elapsed: Duration) {
+    if elapsed >= Duration::from_millis(100) {
+        record(name, elapsed.as_micros() as u64, 0);
     }
 }
 

@@ -142,6 +142,11 @@ pub trait Screen: Clone {
     /// Feed host output. These are ECMA-48 escape bytes rendered by the
     /// SERVER's own emulator, so this is exactly what feeding a PTY
     /// would be.
+    ///
+    /// Feeding no bytes must leave the screen exactly as it was: a state
+    /// whose diff is empty shares its base's screen rather than feeding
+    /// a copy of it, and an implementation that changed anything on an
+    /// empty feed would see that change skipped.
     fn feed(&mut self, bytes: &[u8]);
 
     /// Change the screen's shape.
@@ -236,7 +241,7 @@ pub enum OverlayCursor {
 }
 
 /// One cell an overlay wants painted.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OverlayCell {
     /// Row to paint on.
     pub row: u16,

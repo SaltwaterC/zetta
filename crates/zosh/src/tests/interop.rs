@@ -1,6 +1,7 @@
 use super::*;
 use mosh_rs::Screen;
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 // Build the bundled server in ../../server, or a patched upstream server, and
@@ -135,6 +136,11 @@ fn bundled_server_forwards_osc_color_queries() {
 }
 
 fn connect_test_session(arguments: &[&str]) -> mosh_rs::MoshSession<display::DisplayScreen> {
+    session_from_bootstrap(&start_test_server(arguments))
+}
+
+/// Starts the test server with `arguments` and returns what it printed.
+fn start_test_server(arguments: &[&str]) -> String {
     let server = std::env::var_os("ZOSH_TEST_SERVER").expect("set ZOSH_TEST_SERVER");
     let output = Command::new(server)
         .args(arguments)
@@ -148,11 +154,11 @@ fn connect_test_session(arguments: &[&str]) -> mosh_rs::MoshSession<display::Dis
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let bootstrap = String::from_utf8(output.stdout).unwrap();
-    session_from_bootstrap(&bootstrap)
+    String::from_utf8(output.stdout).unwrap()
 }
 
-fn session_from_bootstrap(bootstrap: &str) -> mosh_rs::MoshSession<display::DisplayScreen> {
+/// The port and key a server's `MOSH CONNECT` line announces.
+fn endpoint_of(bootstrap: &str) -> (u16, mosh_rs::Base64Key) {
     let mut endpoint = bootstrap
         .lines()
         .find_map(|line| line.strip_prefix("MOSH CONNECT "))
@@ -160,6 +166,11 @@ fn session_from_bootstrap(bootstrap: &str) -> mosh_rs::MoshSession<display::Disp
         .split_whitespace();
     let port = endpoint.next().unwrap().parse().unwrap();
     let key = mosh_rs::Base64Key::from_printable(endpoint.next().unwrap()).unwrap();
+    (port, key)
+}
+
+fn session_from_bootstrap(bootstrap: &str) -> mosh_rs::MoshSession<display::DisplayScreen> {
+    let (port, key) = endpoint_of(bootstrap);
     let mut session = mosh_rs::MoshSession::connect_with_screen(
         "127.0.0.1",
         port,
@@ -406,4 +417,81 @@ fn colours_and_remote_locales_survive_a_complete_round_trip() {
     session.send_input(b"q");
     session.shutdown();
     pump_until(session, |session, _| session.finished());
+}
+
+/// A pane carried by a `PaneSession` against a fresh server running `cat`,
+/// with its display bytes collected by a reader thread.
+fn connect_test_pane(keep_alive: Option<u64>) -> (PaneSession, Arc<Mutex<Vec<u8>>>) {
+    let bootstrap = start_test_server(&["new", "-i", "127.0.0.1", "--", "/bin/cat"]);
+    let (port, key) = endpoint_of(&bootstrap);
+    let settings = PaneSessionSettings {
+        keep_alive,
+        prediction: mosh_rs::DisplayPreference::Never,
+        ..PaneSessionSettings::default()
+    };
+    let mut pane = PaneSession::connect("127.0.0.1", port, &key, 80, 24, settings).unwrap();
+    let mut reader = pane.take_reader().unwrap();
+    let shown = Arc::new(Mutex::new(Vec::new()));
+    std::thread::spawn({
+        let shown = Arc::clone(&shown);
+        move || {
+            let mut buffer = [0_u8; 4096];
+            while let Ok(count) = std::io::Read::read(&mut reader, &mut buffer) {
+                if count == 0 {
+                    return;
+                }
+                shown.lock().unwrap().extend_from_slice(&buffer[..count]);
+            }
+        }
+    });
+    (pane, shown)
+}
+
+/// An idle pane sleeps until something is due: the old loop capped every
+/// wait at 100 ms and so made ten passes a second whatever the link was
+/// doing, on every pane at once.
+#[test]
+#[ignore = "requires ZOSH_TEST_SERVER pointing at the bundled Mosh server"]
+fn an_idle_pane_wakes_only_when_it_has_something_to_do() {
+    // Mosh's own heartbeats are three seconds apart, and with a keep-alive
+    // each side sends every half second: a handful of passes either way,
+    // against the thirty or more the capped loop made in this window.
+    for (keep_alive, ceiling) in [(None, 9), (Some(500), 24)] {
+        let (pane, _shown) = connect_test_pane(keep_alive);
+        std::thread::sleep(Duration::from_millis(1_500));
+        let before = pane.passes();
+        std::thread::sleep(Duration::from_secs(3));
+        let passes = pane.passes() - before;
+        assert!(
+            passes <= ceiling,
+            "an idle pane with keep-alive {keep_alive:?} made {passes} passes in 3 s"
+        );
+        drop(pane);
+    }
+}
+
+/// Sleeping must not cost latency: a keystroke wakes the loop at once, and
+/// the echo is painted the moment its datagram arrives, rather than when a
+/// wait runs out. On Windows the old loop could not see that datagram at all
+/// until its wait ended.
+#[test]
+#[ignore = "requires ZOSH_TEST_SERVER pointing at the bundled Mosh server"]
+fn a_keystroke_on_an_idle_pane_is_echoed_without_waiting_for_a_timer() {
+    let (pane, shown) = connect_test_pane(None);
+    std::thread::sleep(Duration::from_millis(1_500));
+    let mut writer = pane.writer();
+    let typed = Instant::now();
+    std::io::Write::write_all(&mut writer, b"x").unwrap();
+    while !shown.lock().unwrap().contains(&b'x') {
+        assert!(
+            typed.elapsed() < Duration::from_secs(2),
+            "the echo never arrived"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let echoed = typed.elapsed();
+    assert!(
+        echoed < Duration::from_millis(250),
+        "the echo took {echoed:?} to reach the pane"
+    );
 }

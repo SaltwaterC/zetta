@@ -13,9 +13,9 @@
 //! their meaning is what a reader of this crate needs anyway. The
 //! numbers are proto2's, verbatim from mosh.
 
-use flate2::Compression;
 use flate2::read::ZlibDecoder;
 use flate2::write::ZlibEncoder;
+use flate2::{Compress, Compression, FlushCompress, Status};
 use prost::Message as _;
 use std::io::{Read as _, Write as _};
 
@@ -101,6 +101,12 @@ impl Instruction {
         enc.finish().map_err(|_| MoshError::BadInstruction)
     }
 
+    /// The same bytes as [`Self::to_compressed`], from a stream that is
+    /// kept rather than rebuilt; see [`ZlibCompressor`].
+    pub fn to_compressed_with(&self, compressor: &mut ZlibCompressor) -> Result<Vec<u8>> {
+        compressor.compress(&self.encode_to_vec())
+    }
+
     /// Inverse of [`Self::to_compressed`].
     ///
     /// Capped, because the input is untrusted and zlib expands: a few
@@ -173,6 +179,52 @@ impl Fragment {
     }
 }
 
+/// A zlib stream kept for the life of a session.
+///
+/// Every datagram carries a freshly compressed instruction, and on an
+/// idle session most of them are keep-alives and acknowledgements a few
+/// dozen bytes long. Building an encoder for each one costs more than
+/// compressing it: the deflate state is a few hundred kilobytes that a
+/// new encoder allocates and clears. Resetting this one keeps the
+/// allocation, and produces byte for byte what a fresh encoder at the
+/// same level would, so nothing on the wire changes.
+pub struct ZlibCompressor(Compress);
+
+impl Default for ZlibCompressor {
+    fn default() -> Self {
+        Self(Compress::new(Compression::default(), true))
+    }
+}
+
+impl std::fmt::Debug for ZlibCompressor {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("ZlibCompressor")
+    }
+}
+
+impl ZlibCompressor {
+    /// One complete zlib stream holding `raw`.
+    pub fn compress(&mut self, raw: &[u8]) -> Result<Vec<u8>> {
+        self.0.reset();
+        // Deflate can grow incompressible input slightly; the header,
+        // the block framing and the checksum fit in this margin for the
+        // sizes an instruction has, and `reserve` covers anything else.
+        let mut out = Vec::with_capacity(raw.len() + raw.len() / 64 + 64);
+        loop {
+            let consumed = usize::try_from(self.0.total_in()).unwrap_or(raw.len());
+            let input = raw.get(consumed..).unwrap_or_default();
+            match self
+                .0
+                .compress_vec(input, &mut out, FlushCompress::Finish)
+                .map_err(|_| MoshError::BadInstruction)?
+            {
+                Status::StreamEnd => return Ok(out),
+                Status::Ok | Status::BufError => out.reserve(out.capacity().max(64)),
+            }
+        }
+    }
+}
+
 /// Cuts instructions into fragments and hands out instruction ids.
 ///
 /// The id only advances when the instruction actually differs from the
@@ -184,6 +236,7 @@ pub struct Fragmenter {
     next_id: u64,
     last_instruction: Option<Instruction>,
     last_mtu: Option<usize>,
+    compressor: ZlibCompressor,
 }
 
 impl Fragmenter {
@@ -210,7 +263,7 @@ impl Fragmenter {
         self.last_mtu = Some(mtu);
         let id = self.next_id;
 
-        let payload = inst.to_compressed()?;
+        let payload = inst.to_compressed_with(&mut self.compressor)?;
         let total = payload.len().div_ceil(body_mtu);
         let mut out = Vec::with_capacity(total);
         for (i, chunk) in payload.chunks(body_mtu).enumerate() {
@@ -362,6 +415,26 @@ mod tests {
             Instruction::from_compressed(&bomb),
             Err(MoshError::BadInstruction)
         ));
+    }
+
+    #[test]
+    fn a_kept_compressor_writes_what_a_fresh_encoder_would() {
+        // What makes reusing the stream safe: the bytes on the wire are
+        // the ones a new encoder produces, every time, whatever the
+        // stream compressed before.
+        let mut kept = ZlibCompressor::default();
+        for (num, diff) in [
+            (1, b"".to_vec()),
+            (2, b"a diff".to_vec()),
+            (3, incompressible(4000)),
+            (4, vec![b'x'; 20_000]),
+            (5, b"after a large one".to_vec()),
+        ] {
+            let i = inst(num, &diff);
+            let reused = i.to_compressed_with(&mut kept).unwrap();
+            assert_eq!(reused, i.to_compressed().unwrap(), "state {num}");
+            assert_eq!(Instruction::from_compressed(&reused).unwrap(), i);
+        }
     }
 
     #[test]

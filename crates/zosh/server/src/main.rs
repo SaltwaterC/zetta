@@ -1,5 +1,6 @@
 mod agent;
 mod args;
+mod child_exit;
 mod lifecycle;
 mod protocol;
 mod server;
@@ -7,6 +8,7 @@ mod sleep_guard;
 mod terminal_state;
 mod timing;
 mod user_stream;
+mod wake;
 
 use anyhow::Result;
 

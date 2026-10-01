@@ -1,11 +1,14 @@
 //! The server half of Zosh's opt-in SSH-agent forwarding extension.
 //!
 //! A private Unix-domain socket is created only after the authenticated client
-//! has sent the agent hello. Every local connection is handled by one small
-//! reader/writer thread; the session loop only moves complete, bounded frames
-//! between that thread and cumulative Mosh host records.
+//! has sent the agent hello. A listener thread accepts on it and every local
+//! connection is handled by one small reader/writer thread; the session loop
+//! only moves complete, bounded frames between those threads and cumulative
+//! Mosh host records. Each thread wakes the loop when it has something for it,
+//! so the loop never polls the socket.
 
 use crate::protocol::AgentHostRecord;
+use crate::wake::WakingSender;
 
 #[cfg(windows)]
 mod windows_pipe;
@@ -14,7 +17,7 @@ use std::{
     io::{self, Read, Write},
     path::{Path, PathBuf},
     sync::mpsc::{self, Receiver, SyncSender, TryRecvError},
-    thread,
+    thread::{self, Thread},
     time::Duration,
 };
 
@@ -22,7 +25,7 @@ use std::{
 use std::fs;
 #[cfg(windows)]
 use std::fs::OpenOptions;
-#[cfg(windows)]
+#[cfg(any(unix, windows))]
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -34,9 +37,16 @@ const MAX_OUTSTANDING: usize = 64;
 const EVENT_QUEUE_DEPTH: usize = 64;
 const REQUEST_IDENTITIES: u8 = 11;
 const PRIME_TIMEOUT: Duration = Duration::from_secs(1);
+/// How long the listener backs off after a failed accept, such as running out
+/// of descriptors, so a persistent failure cannot spin its thread.
+#[cfg(unix)]
+const ACCEPT_RETRY: Duration = Duration::from_millis(100);
 
 #[cfg(unix)]
-use std::os::unix::{fs::PermissionsExt, net::UnixListener};
+use std::os::unix::{
+    fs::PermissionsExt,
+    net::{UnixListener, UnixStream},
+};
 
 /// Give a native SSH agent-forwarding channel one bounded request before the
 /// bootstrap announces its Mosh endpoint. OpenSSH sends its forwarding
@@ -125,7 +135,7 @@ enum LocalEvent {
         connection_id: u64,
         error: Option<String>,
     },
-    #[cfg(windows)]
+    #[cfg(any(unix, windows))]
     Connected {
         stream: AgentStream,
     },
@@ -141,6 +151,27 @@ struct Reply {
 }
 
 type AgentStream = Box<dyn ReadWrite + Send>;
+
+/// The accept thread on the private Unix socket. Dropping it stops the thread
+/// by setting `stop` and then connecting once, which is what an `accept`
+/// blocked on the socket is waiting for.
+#[cfg(unix)]
+struct UnixAgentListener {
+    path: PathBuf,
+    stop: Arc<AtomicBool>,
+    thread: Option<thread::JoinHandle<()>>,
+}
+
+#[cfg(unix)]
+impl Drop for UnixAgentListener {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        let _ = UnixStream::connect(&self.path);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
 
 #[cfg(windows)]
 struct WindowsPipeListener {
@@ -166,12 +197,12 @@ impl<T: Read + Write> ReadWrite for T {}
 /// State owned by one negotiated remote agent socket.
 pub struct AgentServer {
     #[cfg(unix)]
-    listener: Option<UnixListener>,
+    listener: Option<UnixAgentListener>,
     #[cfg(windows)]
     listener: Option<WindowsPipeListener>,
     socket_path: Option<PathBuf>,
     events: Receiver<LocalEvent>,
-    event_tx: SyncSender<LocalEvent>,
+    event_tx: WakingSender<LocalEvent>,
     connections: HashMap<u64, Connection>,
     outstanding: HashMap<(u64, u64), SyncSender<Reply>>,
     pending: Vec<(u64, AgentHostRecord)>,
@@ -181,11 +212,17 @@ pub struct AgentServer {
 }
 
 impl AgentServer {
-    pub fn new() -> Self {
+    /// Opens the private agent socket. `consumer` is the thread that calls
+    /// [`poll`](Self::poll); every connection event wakes it.
+    pub fn new(consumer: Thread) -> Self {
         let (event_tx, events) = mpsc::sync_channel(EVENT_QUEUE_DEPTH);
+        let event_tx = WakingSender::new(event_tx, consumer);
         #[cfg(unix)]
-        let (listener, socket_path, error) = match create_listener() {
-            Ok((listener, path)) => (Some(listener), Some(path), None),
+        let (listener, socket_path, error) = match create_listener(event_tx.clone()) {
+            Ok(listener) => {
+                let path = listener.path.clone();
+                (Some(listener), Some(path), None)
+            }
             Err(error) => (None, None, Some(error.to_string())),
         };
         #[cfg(windows)]
@@ -226,11 +263,10 @@ impl AgentServer {
     }
 
     pub fn poll(&mut self) -> bool {
-        self.accept_connections();
         let mut dirty = false;
         loop {
             match self.events.try_recv() {
-                #[cfg(windows)]
+                #[cfg(any(unix, windows))]
                 Ok(LocalEvent::Connected { stream }) => {
                     if self.connections.len() >= MAX_CONNECTIONS {
                         continue;
@@ -318,44 +354,6 @@ impl AgentServer {
         self.states.retain(|number, _| *number > state);
     }
 
-    fn accept_connections(&mut self) {
-        #[cfg(unix)]
-        let Some(listener) = self.listener.as_ref() else {
-            return;
-        };
-        #[cfg(unix)]
-        for _ in 0..MAX_CONNECTIONS {
-            match listener.accept() {
-                Ok((stream, _)) => {
-                    // BSD-derived kernels (macOS included) hand back an
-                    // accepted socket that inherits the listener's
-                    // O_NONBLOCK, which Linux never does. The connection
-                    // thread reads with blocking `read_exact`, so on macOS it
-                    // would see `WouldBlock` at once and drop the client.
-                    if self.connections.len() >= MAX_CONNECTIONS
-                        || stream.set_nonblocking(false).is_err()
-                    {
-                        continue;
-                    }
-                    let connection_id = self.next_connection_id;
-                    self.next_connection_id = self.next_connection_id.saturating_add(1);
-                    let (replies, reply_rx) = mpsc::sync_channel(1);
-                    self.connections
-                        .insert(connection_id, Connection { replies });
-                    spawn_connection(
-                        connection_id,
-                        Box::new(stream),
-                        reply_rx,
-                        self.event_tx.clone(),
-                    );
-                }
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
-                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-                Err(_) => break,
-            }
-        }
-    }
-
     fn queue_request(&mut self, connection_id: u64, frame: Vec<u8>) -> bool {
         let Some(connection) = self.connections.get(&connection_id) else {
             return false;
@@ -422,7 +420,9 @@ impl AgentServer {
 
 impl Drop for AgentServer {
     fn drop(&mut self) {
-        #[cfg(windows)]
+        // The listener goes first: on Unix it stops by connecting to the
+        // socket, which therefore has to still exist.
+        #[cfg(any(unix, windows))]
         self.listener.take();
         #[cfg(unix)]
         if let Some(path) = self.socket_path.take() {
@@ -435,7 +435,7 @@ impl Drop for AgentServer {
 }
 
 #[cfg(unix)]
-fn create_listener() -> io::Result<(UnixListener, PathBuf)> {
+fn create_listener(events: WakingSender<LocalEvent>) -> io::Result<UnixAgentListener> {
     let mut random = [0_u8; 8];
     getrandom::fill(&mut random).map_err(|error| io::Error::other(error.to_string()))?;
     let name = random
@@ -448,8 +448,49 @@ fn create_listener() -> io::Result<(UnixListener, PathBuf)> {
     let listener = UnixListener::bind(&path)?;
     fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))?;
     fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
-    listener.set_nonblocking(true)?;
-    Ok((listener, path))
+    let stop = Arc::new(AtomicBool::new(false));
+    let thread = thread::Builder::new()
+        .name("zosh-agent-listener".to_owned())
+        .spawn({
+            let stop = Arc::clone(&stop);
+            move || accept_connections(&listener, &stop, &events)
+        })
+        .map_err(io::Error::other)?;
+    Ok(UnixAgentListener {
+        path,
+        stop,
+        thread: Some(thread),
+    })
+}
+
+/// The listener thread: hand every accepted connection to the session loop
+/// until the listener is dropped. The listener blocks, so an accepted socket
+/// does too — BSD-derived kernels, macOS among them, give it the listener's
+/// `O_NONBLOCK`, and the connection thread reads with blocking `read_exact`.
+#[cfg(unix)]
+fn accept_connections(
+    listener: &UnixListener,
+    stop: &AtomicBool,
+    events: &WakingSender<LocalEvent>,
+) {
+    loop {
+        let accepted = listener.accept();
+        if stop.load(Ordering::Acquire) {
+            return;
+        }
+        match accepted {
+            Ok((stream, _)) => match events.try_send(LocalEvent::Connected {
+                stream: Box::new(stream),
+            }) {
+                // A full queue drops the connection, as the session loop
+                // would refuse one past MAX_CONNECTIONS anyway.
+                Ok(()) | Err(mpsc::TrySendError::Full(_)) => {}
+                Err(mpsc::TrySendError::Disconnected(_)) => return,
+            },
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(_) => thread::sleep(ACCEPT_RETRY),
+        }
+    }
 }
 
 #[cfg(any(unix, windows))]
@@ -457,7 +498,7 @@ fn spawn_connection(
     connection_id: u64,
     mut stream: AgentStream,
     replies: Receiver<Reply>,
-    events: SyncSender<LocalEvent>,
+    events: WakingSender<LocalEvent>,
 ) {
     thread::spawn(move || {
         loop {
@@ -527,7 +568,7 @@ fn valid_frame(frame: &[u8]) -> bool {
 }
 
 #[cfg(windows)]
-fn create_named_pipe_listener(events: SyncSender<LocalEvent>) -> io::Result<WindowsPipeListener> {
+fn create_named_pipe_listener(events: WakingSender<LocalEvent>) -> io::Result<WindowsPipeListener> {
     use std::os::windows::io::FromRawHandle;
     use windows::Win32::Foundation::{CloseHandle, ERROR_PIPE_CONNECTED};
     use windows::Win32::System::Pipes::ConnectNamedPipe;

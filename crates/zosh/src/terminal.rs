@@ -44,6 +44,10 @@ pub struct TerminalGuard {
     restored: bool,
     #[cfg(unix)]
     saved_mode: Option<Arc<libc::termios>>,
+    /// Whether this guard turned on the console's window input, and so has
+    /// to turn it off again.
+    #[cfg(windows)]
+    added_window_input: bool,
 }
 
 #[derive(Clone)]
@@ -52,6 +56,8 @@ pub(crate) struct TerminalState {
     alternate_screen: bool,
     #[cfg(unix)]
     saved_mode: Option<Arc<libc::termios>>,
+    #[cfg(windows)]
+    added_window_input: bool,
 }
 
 impl TerminalGuard {
@@ -66,6 +72,8 @@ impl TerminalGuard {
                 restored: false,
                 #[cfg(unix)]
                 saved_mode: None,
+                #[cfg(windows)]
+                added_window_input: false,
             });
         }
 
@@ -73,6 +81,8 @@ impl TerminalGuard {
         let saved_mode = enter_raw_mode().context("enabling terminal raw mode")?;
         #[cfg(not(unix))]
         terminal::enable_raw_mode().context("enabling terminal raw mode")?;
+        #[cfg(windows)]
+        let added_window_input = window_input::enable();
         if initialize {
             let mut stdout = io::stdout();
             let initialization = execute!(
@@ -91,6 +101,8 @@ impl TerminalGuard {
                 let _ = restore_raw_mode(&saved_mode);
                 #[cfg(not(unix))]
                 let _ = terminal::disable_raw_mode();
+                #[cfg(windows)]
+                window_input::restore(added_window_input);
                 return Err(error);
             }
         }
@@ -100,6 +112,8 @@ impl TerminalGuard {
             restored: false,
             #[cfg(unix)]
             saved_mode: Some(saved_mode),
+            #[cfg(windows)]
+            added_window_input,
         })
     }
 
@@ -122,6 +136,8 @@ impl TerminalGuard {
             alternate_screen: self.alternate_screen,
             #[cfg(unix)]
             saved_mode: self.saved_mode.clone(),
+            #[cfg(windows)]
+            added_window_input: self.added_window_input,
         }
     }
 
@@ -144,6 +160,57 @@ pub(crate) fn restore_state(state: TerminalState) {
     }
     #[cfg(not(unix))]
     let _ = terminal::disable_raw_mode();
+    #[cfg(windows)]
+    window_input::restore(state.added_window_input);
+}
+
+/// The console's `ENABLE_WINDOW_INPUT`, which is what makes it report a
+/// resize as an input event at all. crossterm turns that event into
+/// `Event::Resize` but does not set the mode, so without this the client
+/// could only learn of a resize by asking for the size on a timer.
+///
+/// The event describes the screen *buffer*, which in a classic console with
+/// scrollback is taller than the window, so the client treats it as a cue to
+/// read the window size rather than as the size itself.
+#[cfg(windows)]
+mod window_input {
+    use windows::Win32::System::Console::{
+        CONSOLE_MODE, ENABLE_WINDOW_INPUT, GetConsoleMode, GetStdHandle, STD_INPUT_HANDLE,
+        SetConsoleMode,
+    };
+
+    /// Turns window input on, reporting whether it was this call that did.
+    pub(super) fn enable() -> bool {
+        // SAFETY: plain console calls on this process's own input handle,
+        // with `mode` written only on success.
+        unsafe {
+            let Ok(input) = GetStdHandle(STD_INPUT_HANDLE) else {
+                return false;
+            };
+            let mut mode = CONSOLE_MODE::default();
+            if GetConsoleMode(input, &mut mode).is_err() || mode.contains(ENABLE_WINDOW_INPUT) {
+                return false;
+            }
+            SetConsoleMode(input, mode | ENABLE_WINDOW_INPUT).is_ok()
+        }
+    }
+
+    /// Turns window input back off if [`enable`] turned it on.
+    pub(super) fn restore(added: bool) {
+        if !added {
+            return;
+        }
+        // SAFETY: as in `enable`.
+        unsafe {
+            let Ok(input) = GetStdHandle(STD_INPUT_HANDLE) else {
+                return;
+            };
+            let mut mode = CONSOLE_MODE::default();
+            if GetConsoleMode(input, &mut mode).is_ok() {
+                let _ = SetConsoleMode(input, CONSOLE_MODE(mode.0 & !ENABLE_WINDOW_INPUT.0));
+            }
+        }
+    }
 }
 
 /// Put Unix terminal handling under this guard's ownership instead of relying

@@ -114,7 +114,7 @@ image = { version = "0.25", default-features = false, features = [
     "webp",
 ] }
 menu = { path = "crates/menu" }
-moshcatty = { git = "https://github.com/binaricat/MoshCatty.git", rev = "554b9d305e7ac4b11de740d764bbc3e05f816d7b", optional = true }
+moshcatty = { path = "crates/moshcatty", optional = true }
 release_channel = { path = "crates/release_channel" }
 reqwest_client = { path = "zed/crates/reqwest_client" }
 rust-embed = "8"

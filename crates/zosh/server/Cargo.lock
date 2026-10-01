@@ -241,7 +241,6 @@ dependencies = [
 [[package]]
 name = "moshcatty"
 version = "0.1.8"
-source = "git+https://github.com/binaricat/MoshCatty.git?rev=554b9d305e7ac4b11de740d764bbc3e05f816d7b#554b9d305e7ac4b11de740d764bbc3e05f816d7b"
 dependencies = [
  "aes",
  "base64",

@@ -1,5 +1,6 @@
 use crate::agent::AgentServer;
 use crate::args::Config;
+use crate::child_exit::{self, ChildExitWatch};
 #[cfg(any(unix, windows))]
 use crate::lifecycle;
 use crate::protocol::{AgentHostRecord, ServerTransport, encode_host_message_with_agent};
@@ -7,6 +8,7 @@ use crate::sleep_guard::{self, IdleSleepGuard};
 use crate::terminal_state::{QueryResponder, TerminalState};
 use crate::timing;
 use crate::user_stream::{UserEvent, UserStreamTracker};
+use crate::wake::{WakeDeadline, WakingSender};
 use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD_NO_PAD;
@@ -17,6 +19,8 @@ use std::collections::VecDeque;
 use std::io::{Read, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 use std::path::Path;
+#[cfg(test)]
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -24,7 +28,6 @@ use std::time::{Duration, Instant};
 const INITIAL_ROWS: u16 = 24;
 const INITIAL_COLS: u16 = 80;
 const ASSOCIATION_TIMEOUT: Duration = Duration::from_secs(60);
-const LOOP_SLEEP: Duration = Duration::from_millis(5);
 const IO_BUDGET: Duration = Duration::from_millis(2);
 // Match stock Mosh's late acknowledgement grace period. PTY output is not
 // proof that the shell has processed a particular input frame.
@@ -33,6 +36,12 @@ const MAX_ROWS: u16 = 1024;
 const MAX_COLS: u16 = 1024;
 const MAX_CELLS: u32 = 262_144;
 const UDP_BUFFER: usize = 65_535;
+const UDP_QUEUE_DEPTH: usize = 256;
+// The UDP reader thread blocks on the socket, and a socket's blocking mode is
+// shared by every handle to it, so the loop's sends block too. This bounds
+// them instead: a send that cannot go out at once fails the way a nonblocking
+// one would, and SSP retransmits it.
+const UDP_SEND_TIMEOUT: Duration = IO_BUDGET;
 const PTY_CHUNK: usize = 8192;
 const PTY_QUEUE_DEPTH: usize = 256;
 // Bounds on a client-announced keep-alive interval. The client validates its
@@ -62,6 +71,30 @@ struct PtySession {
     event_rx: Receiver<PtyEvent>,
     write_tx: SyncSender<PtyWrite>,
     exited: bool,
+    /// Wakes the loop when the child exits. Without one the child is polled
+    /// every `child_exit::FALLBACK_POLL`, from `next_child_poll`.
+    exit_watch: Option<ChildExitWatch>,
+    next_child_poll: Instant,
+}
+
+impl PtySession {
+    /// Whether this pass should ask the child whether it has exited.
+    fn child_may_have_exited(&mut self) -> bool {
+        if let Some(watch) = &self.exit_watch {
+            return watch.exited();
+        }
+        let now = Instant::now();
+        if now < self.next_child_poll {
+            return false;
+        }
+        self.next_child_poll = now + child_exit::FALLBACK_POLL;
+        true
+    }
+
+    /// When the loop has to wake to poll the child, if it has to at all.
+    fn child_poll_deadline(&self) -> Option<Instant> {
+        (!self.exited && self.exit_watch.is_none()).then_some(self.next_child_poll)
+    }
 }
 
 #[cfg_attr(
@@ -75,8 +108,8 @@ pub fn run(mut cfg: Config) -> Result<()> {
     let timing_file = timing::open()?;
     let (socket, port) = bind_udp(cfg.bind_ip, cfg.port_low, cfg.port_high)?;
     socket
-        .set_nonblocking(true)
-        .context("setting UDP socket nonblocking")?;
+        .set_write_timeout(Some(UDP_SEND_TIMEOUT))
+        .context("bounding UDP sends")?;
 
     let mut key = [0u8; 16];
     getrandom::fill(&mut key).map_err(|error| anyhow!("generating Mosh session key: {error}"))?;
@@ -122,7 +155,14 @@ pub fn run(mut cfg: Config) -> Result<()> {
     result
 }
 
+/// The session loop. Every input reaches it through a thread that wakes it
+/// (see `wake`), and between inputs it sleeps until the next timer it owes
+/// anything to (`next_wake`), so an idle session costs a wakeup per heartbeat
+/// or keep-alive rather than one every few milliseconds.
 fn serve_session(cfg: Config, socket: UdpSocket, mut transport: ServerTransport) -> Result<()> {
+    // Threads that feed the loop wake the thread that creates them, so this
+    // has to happen here, after the Unix bootstrap has forked.
+    let udp_events = spawn_udp_reader(&socket)?;
     // The first authenticated user state decides whether this is a Zosh peer
     // that negotiated forwarding. Until then no child, PTY, or agent socket
     // exists, so an inherited bootstrap SSH_AUTH_SOCK cannot leak into a
@@ -139,7 +179,6 @@ fn serve_session(cfg: Config, socket: UdpSocket, mut transport: ServerTransport)
     let mut clipboard_supported = false;
     let mut responder = QueryResponder::new();
     let mut user_stream = UserStreamTracker::new();
-    let mut udp_buf = vec![0u8; UDP_BUFFER];
     let mut peer: Option<SocketAddr> = None;
     let association_deadline = Instant::now() + ASSOCIATION_TIMEOUT;
     let network_timeout = configured_network_timeout();
@@ -154,9 +193,14 @@ fn serve_session(cfg: Config, socket: UdpSocket, mut transport: ServerTransport)
     // announced one, and when this side last put a datagram on the wire.
     let mut keep_alive: Option<Duration> = None;
     let mut last_send = Instant::now();
+    // The last time a send was attempted and nothing left, which keeps a
+    // keep-alive that cannot go out from waking the loop continuously.
+    let mut send_failed_at: Option<Instant> = None;
     let mut sleep_guard = IdleSleepGuard::new();
 
     loop {
+        #[cfg(test)]
+        LOOP_PASSES.fetch_add(1, Ordering::Relaxed);
         loop_timing.tick();
         let phase = timing::begin();
         // Reading the program is what produces scrolled-off rows, so a client
@@ -210,11 +254,11 @@ fn serve_session(cfg: Config, socket: UdpSocket, mut transport: ServerTransport)
             if udp_started.elapsed() >= IO_BUDGET {
                 break;
             }
-            match socket.recv_from(&mut udp_buf) {
-                Ok((n, addr)) => {
-                    let outcome = transport.receive(&udp_buf[..n])?;
+            match udp_events.try_recv() {
+                Ok(UdpEvent::Datagram { bytes, from: addr }) => {
+                    let outcome = transport.receive(&bytes)?;
                     if outcome.authenticated {
-                        timing::record("udp_authenticated", n as u64, 0);
+                        timing::record("udp_authenticated", bytes.len() as u64, 0);
                         peer = Some(addr);
                     }
 
@@ -276,7 +320,7 @@ fn serve_session(cfg: Config, socket: UdpSocket, mut transport: ServerTransport)
                                     .any(|event| matches!(event, UserEvent::AgentHello { .. }));
                                 agent_decided = true;
                                 if cfg.forward_agent && requested {
-                                    agent_server = Some(AgentServer::new());
+                                    agent_server = Some(AgentServer::new(thread::current()));
                                 }
                                 pty = Some(spawn_pty_session(
                                     &cfg,
@@ -324,12 +368,14 @@ fn serve_session(cfg: Config, socket: UdpSocket, mut transport: ServerTransport)
                         }
                     }
                 }
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                Ok(UdpEvent::Failed(error)) => {
+                    return Err(error).context("receiving UDP datagram");
+                }
+                Err(TryRecvError::Empty) => {
                     udp_budget_exhausted = false;
                     break;
                 }
-                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(error) => return Err(error).context("receiving UDP datagram"),
+                Err(TryRecvError::Disconnected) => bail!("the UDP reader stopped"),
             }
         }
 
@@ -399,8 +445,13 @@ fn serve_session(cfg: Config, socket: UdpSocket, mut transport: ServerTransport)
                 transport.force_next_send();
             }
 
-            if send_updates(&mut transport, &socket, peer, cfg.verbose > 1) {
-                last_send = Instant::now();
+            match send_updates(&mut transport, &socket, peer, cfg.verbose > 1) {
+                SendOutcome::Sent => {
+                    last_send = Instant::now();
+                    send_failed_at = None;
+                }
+                SendOutcome::Failed => send_failed_at = Some(Instant::now()),
+                SendOutcome::Nothing => {}
             }
 
             if transport.crypto_exhausted() {
@@ -423,6 +474,7 @@ fn serve_session(cfg: Config, socket: UdpSocket, mut transport: ServerTransport)
         let phase = timing::begin();
         if let Some(session) = pty.as_mut()
             && !session.exited
+            && session.child_may_have_exited()
             && session
                 .child
                 .try_wait()
@@ -451,9 +503,28 @@ fn serve_session(cfg: Config, socket: UdpSocket, mut transport: ServerTransport)
 
         // A producer unparks after publishing an event. The park token also
         // covers events published between draining the queue and this wait.
-        // Never wait when a bounded drain may have left work queued.
-        if !pty_progress.budget_exhausted && !udp_budget_exhausted {
-            thread::park_timeout(LOOP_SLEEP);
+        // Never wait while this pass has left work behind: a bounded drain
+        // that stopped early, PTY output that was held back for a scrollback
+        // budget this pass's acknowledgements have since freed, or a host
+        // update that became owed after the update was built.
+        let pty_backlog = hold_for_scrollback && !terminal.scrollback_over_budget();
+        let update_owed = associated && !local_shutdown && !remote_shutdown && dirty;
+        if !pty_progress.budget_exhausted && !udp_budget_exhausted && !pty_backlog && !update_owed {
+            let wake = next_wake(WakeSources {
+                now: Instant::now(),
+                associated,
+                association_deadline,
+                network_timeout,
+                transport: &transport,
+                keep_alive,
+                last_send,
+                send_failed_at,
+                terminal: &terminal,
+                echo: &echo,
+                child_poll: pty.as_ref().and_then(PtySession::child_poll_deadline),
+            });
+            loop_timing.parking(wake.earliest());
+            wake.park();
         }
     }
 
@@ -468,18 +539,64 @@ struct PtyProgress {
     budget_exhausted: bool,
 }
 
-#[derive(Clone)]
-struct PtyEventSender {
-    sender: SyncSender<PtyEvent>,
-    consumer: thread::Thread,
+/// Counts passes of the session loop, so a test can tell an idle session that
+/// sleeps from one that polls.
+#[cfg(test)]
+static LOOP_PASSES: AtomicU64 = AtomicU64::new(0);
+
+/// Everything the loop's clocks are read from, for `next_wake`.
+#[derive(Clone, Copy)]
+struct WakeSources<'a> {
+    now: Instant,
+    associated: bool,
+    association_deadline: Instant,
+    network_timeout: Option<Duration>,
+    transport: &'a ServerTransport,
+    keep_alive: Option<Duration>,
+    last_send: Instant,
+    send_failed_at: Option<Instant>,
+    terminal: &'a TerminalState,
+    echo: &'a EchoAcknowledgements,
+    child_poll: Option<Instant>,
 }
 
-impl PtyEventSender {
-    fn send(&self, event: PtyEvent) -> Result<(), mpsc::SendError<PtyEvent>> {
-        self.sender.send(event)?;
-        self.consumer.unpark();
-        Ok(())
+/// The instant the loop next has to wake for if nothing arrives first: the
+/// earliest of every timer a pass acts on.
+///
+/// A deadline that has already passed means "wake at once", so every one
+/// here is either consumed by the pass it wakes — the transport sends, the
+/// echo acknowledgement advances, the session ends — or left out once it has
+/// passed, because a pass has already acted on it and acting again changes
+/// nothing. A past deadline that is neither would wake the loop continuously.
+fn next_wake(sources: WakeSources<'_>) -> WakeDeadline {
+    let WakeSources { now, .. } = sources;
+    let last_recv = sources.transport.last_recv();
+    let mut wake = WakeDeadline::default();
+    wake.at(sources.echo.next_due());
+    wake.at(sources.child_poll);
+    if sources.terminal.scrollback_over_budget() {
+        // Once passed, the pass stops holding the program back for the
+        // client, which is all this deadline is for.
+        wake.at(Some(last_recv + SCROLLBACK_STALL).filter(|at| *at > now));
     }
+    if !sources.associated {
+        wake.at(Some(sources.association_deadline));
+        return wake;
+    }
+    wake.at(sources.transport.next_deadline());
+    wake.at(
+        keep_alive_deadline(sources.keep_alive, sources.last_send, last_recv).map(|due| {
+            // A keep-alive that could not be sent stays due; retry it at
+            // the fastest interval a client may ask for, not continuously.
+            sources
+                .send_failed_at
+                .map_or(due, |failed| due.max(failed + KEEP_ALIVE_MIN))
+        }),
+    );
+    wake.at(sources.network_timeout.map(|timeout| last_recv + timeout));
+    // Once passed, the sleep guard has already been released.
+    wake.at(Some(last_recv + sleep_guard::PRESENCE_LINGER).filter(|at| *at > now));
+    wake
 }
 
 /// Whether this side owes a keep-alive of its own right now.
@@ -501,6 +618,29 @@ fn keep_alive_due(
     keep_alive.is_some_and(|interval| since_send >= interval && since_recv < KEEP_ALIVE_LINGER)
 }
 
+/// The instant `keep_alive_due` next turns true if nothing is sent or heard
+/// before then, or `None` when it cannot: no interval is armed, or the linger
+/// runs out first.
+fn keep_alive_deadline(
+    keep_alive: Option<Duration>,
+    last_send: Instant,
+    last_recv: Instant,
+) -> Option<Instant> {
+    let due = last_send + keep_alive?;
+    (due < last_recv + KEEP_ALIVE_LINGER).then_some(due)
+}
+
+/// What a call to `send_updates` did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SendOutcome {
+    /// The transport had nothing due.
+    Nothing,
+    /// At least one datagram left this host.
+    Sent,
+    /// Datagrams were built and none could be sent.
+    Failed,
+}
+
 /// Send whatever the transport has due, reporting whether anything actually
 /// left this host. The keep-alive timer is measured from that, so a datagram
 /// the transport built but could not send must not restart it.
@@ -509,10 +649,13 @@ fn send_updates(
     socket: &UdpSocket,
     peer: Option<SocketAddr>,
     verbose: bool,
-) -> bool {
+) -> SendOutcome {
     let phase = timing::begin();
     let datagrams = transport.tick();
     timing::slow("transport_tick_slow", phase);
+    if datagrams.is_empty() {
+        return SendOutcome::Nothing;
+    }
     let mut sent = false;
     if let Some(addr) = peer {
         for datagram in datagrams {
@@ -541,7 +684,11 @@ fn send_updates(
         }
     }
     timing::slow("transport_send_slow", phase);
-    sent
+    if sent {
+        SendOutcome::Sent
+    } else {
+        SendOutcome::Failed
+    }
 }
 
 fn drain_pty_events(
@@ -754,7 +901,48 @@ fn queue_pty_request(tx: &SyncSender<PtyWrite>, request: PtyWrite) -> Result<()>
     }
 }
 
-fn spawn_pty_reader(mut reader: Box<dyn Read + Send>, tx: PtyEventSender) {
+/// What the UDP reader thread hands the session loop.
+enum UdpEvent {
+    Datagram {
+        bytes: Vec<u8>,
+        from: SocketAddr,
+    },
+    /// The socket failed; the reader has stopped.
+    Failed(std::io::Error),
+}
+
+/// Starts the thread that blocks on the session's UDP socket, waking the
+/// calling thread — the session loop — with each datagram.
+fn spawn_udp_reader(socket: &UdpSocket) -> Result<Receiver<UdpEvent>> {
+    let socket = socket
+        .try_clone()
+        .context("cloning the UDP socket for its reader")?;
+    let (sender, events) = mpsc::sync_channel(UDP_QUEUE_DEPTH);
+    let sender = WakingSender::to_current(sender);
+    thread::Builder::new()
+        .name("zosh-udp-reader".to_owned())
+        .spawn(move || {
+            let mut buf = vec![0u8; UDP_BUFFER];
+            loop {
+                let event = match socket.recv_from(&mut buf) {
+                    Ok((n, from)) => UdpEvent::Datagram {
+                        bytes: buf[..n].to_vec(),
+                        from,
+                    },
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(error) => UdpEvent::Failed(error),
+                };
+                let failed = matches!(event, UdpEvent::Failed(_));
+                if sender.send(event).is_err() || failed {
+                    return;
+                }
+            }
+        })
+        .context("starting the UDP reader")?;
+    Ok(events)
+}
+
+fn spawn_pty_reader(mut reader: Box<dyn Read + Send>, tx: WakingSender<PtyEvent>) {
     thread::spawn(move || {
         let mut buf = [0u8; PTY_CHUNK];
         loop {
@@ -783,7 +971,7 @@ fn spawn_pty_reader(mut reader: Box<dyn Read + Send>, tx: PtyEventSender) {
 fn spawn_pty_writer(
     mut writer: Box<dyn Write + Send>,
     rx: Receiver<PtyWrite>,
-    event_tx: PtyEventSender,
+    event_tx: WakingSender<PtyEvent>,
 ) {
     thread::spawn(move || {
         while let Ok(request) = rx.recv() {
@@ -832,10 +1020,8 @@ fn spawn_pty_session(cfg: &Config, agent_socket: Option<&Path>) -> Result<PtySes
     let writer = pair.master.take_writer().context("taking PTY writer")?;
     let master = pair.master;
     let (event_tx, event_rx) = mpsc::sync_channel::<PtyEvent>(PTY_QUEUE_DEPTH);
-    let event_sender = PtyEventSender {
-        sender: event_tx,
-        consumer: thread::current(),
-    };
+    let event_sender = WakingSender::to_current(event_tx);
+    let exit_watch = ChildExitWatch::start(child.as_ref(), thread::current());
     let (write_tx, write_rx) = mpsc::sync_channel::<PtyWrite>(PTY_QUEUE_DEPTH);
     spawn_pty_reader(reader, event_sender.clone());
     spawn_pty_writer(writer, write_rx, event_sender);
@@ -845,6 +1031,8 @@ fn spawn_pty_session(cfg: &Config, agent_socket: Option<&Path>) -> Result<PtySes
         event_rx,
         write_tx,
         exited: false,
+        exit_watch,
+        next_child_poll: Instant::now() + child_exit::FALLBACK_POLL,
     })
 }
 
@@ -1029,6 +1217,13 @@ struct EchoAcknowledgements {
 impl EchoAcknowledgements {
     fn written(&mut self, frame: u64, now: Instant) {
         self.pending.push_back((frame, now));
+    }
+
+    /// When the oldest written frame becomes eligible for acknowledgement.
+    fn next_due(&self) -> Option<Instant> {
+        self.pending
+            .front()
+            .map(|(_, written_at)| *written_at + ECHO_DELAY)
     }
 
     fn advance(&mut self, now: Instant) -> u64 {

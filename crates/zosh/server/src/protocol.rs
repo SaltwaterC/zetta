@@ -218,6 +218,11 @@ impl ServerTransport {
         self.inner.tick()
     }
 
+    /// When `tick` next has anything to do; see `Transport::next_deadline`.
+    pub fn next_deadline(&self) -> Option<Instant> {
+        self.inner.next_deadline()
+    }
+
     /// Send on the next `tick` rather than at the next scheduled
     /// deadline.  SSP would already answer a non-empty diff within its
     /// 100 ms delayed-ack window; this is what turns a keep-alive's

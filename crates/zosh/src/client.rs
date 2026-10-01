@@ -17,11 +17,13 @@ use mosh_rs::{
     Base64Key, DisplayPreference, HostEvent, MoshSession, sender::KEEP_ALIVE_DEFAULT_MS,
 };
 
-#[cfg(not(unix))]
+#[cfg(windows)]
 use std::{io::IsTerminal as _, sync::mpsc, thread, time::Duration};
 
+#[cfg(windows)]
+use crossterm::event::{self, Event, KeyEventKind};
 #[cfg(not(unix))]
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::{
     agent::{AGENT_PROTOCOL_VERSION, AgentBridge, AgentClientCommand},
@@ -30,9 +32,16 @@ use crate::{
     frame::{self, ClientSession, Frame},
     notification::Notifier,
     terminal,
+    wait::{self, Waiter},
 };
 
-const IDLE_WAIT_MS: u64 = 100;
+#[cfg(windows)]
+use crate::wait::Wake;
+
+/// How often an interactive Windows console's size is read when no resize
+/// event has said it changed; see `session_loop`.
+#[cfg(windows)]
+const RESIZE_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 const EXIT_MESSAGE: &[u8] = b"\r\n[zosh is exiting.]\r\n";
 
 const MAX_TERMINAL_QUERY_SEQUENCE: usize = 46 * 1024;
@@ -666,12 +675,14 @@ fn session_loop(
     #[cfg(unix)]
     let mut input_closed = false;
 
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    let wake = Arc::new(Wake::new().context("creating the input wake-up")?);
+    #[cfg(windows)]
     let interactive = io::stdin().is_terminal();
-    #[cfg(not(unix))]
-    let pipe_input = (!interactive).then(spawn_pipe_reader);
-    #[cfg(not(unix))]
-    let mut input_closed = false;
+    #[cfg(windows)]
+    let input_events = spawn_input_reader(interactive, Arc::clone(&wake));
+    #[cfg(windows)]
+    let mut next_size_check = Instant::now() + RESIZE_CHECK_INTERVAL;
 
     let signals = signal_state(terminal_guard.is_initialized());
     let started = Instant::now();
@@ -679,6 +690,7 @@ fn session_loop(
     let mut stdout = io::stdout();
     let mut query_proxy = TerminalQueryProxy::default();
     let mut pending_resize = None;
+    let mut waiter = Waiter::default();
     loop {
         if signals
             .interrupt
@@ -703,19 +715,38 @@ fn session_loop(
             return Ok(());
         }
 
-        let current = terminal::size();
-        let current = (current.0.max(1), current.1.max(1));
-        if current != size {
-            size = current;
-            session.send_resize(i32::from(size.0), i32::from(size.1));
-            pending_resize = Some(size);
+        // The terminal's size is read when it may have changed, not on
+        // every pass: on Unix that is a SIGWINCH, and reading it opens the
+        // controlling terminal. A Windows console reports a resize as an
+        // input event, handled where the events are; the timer behind it is
+        // for the classic console, which reports none for a window that only
+        // changed height.
+        #[cfg(unix)]
+        if signals.take_resized() {
+            follow_terminal_size(session, &mut size, &mut pending_resize);
         }
+        #[cfg(windows)]
+        if interactive && Instant::now() >= next_size_check {
+            follow_terminal_size(session, &mut size, &mut pending_resize);
+            next_size_check = Instant::now() + RESIZE_CHECK_INTERVAL;
+        }
+        #[cfg(unix)]
+        let size_check_ms = None;
+        #[cfg(windows)]
+        let size_check_ms = interactive.then(|| millis_until(next_size_check));
 
-        let wait = session.wait_time_ms().min(IDLE_WAIT_MS);
+        let wait = wait::earliest_ms([
+            Some(session.next_wake_ms()),
+            agent.wait_ms(),
+            notifier.wait_ms(session.link_health(), elapsed(started)),
+            signals.fallback_wait_ms(),
+            size_check_ms,
+        ]);
 
         #[cfg(unix)]
         {
-            let input_ready = wait_for_input_or_network(session, wait, !input_closed)?;
+            let input_ready =
+                wait_for_input_or_network(&mut waiter, session, &signals, !input_closed, wait)?;
             if input_ready {
                 let read = io::stdin()
                     .read(&mut input)
@@ -723,35 +754,9 @@ fn session_loop(
                 if read == 0 {
                     input_closed = true;
                     let _ = apply_proxied_input(session, &mut escape_state, query_proxy.finish());
-                } else {
-                    if let Some(action) =
-                        apply_input(session, &mut escape_state, &mut query_proxy, &input[..read])
-                    {
-                        let columns = size.0;
-                        let mut context = ActionContext {
-                            session,
-                            terminal_guard,
-                            size: &mut size,
-                            initialize_terminal,
-                            notifier: &mut notifier,
-                            started,
-                            columns,
-                            stdout: &mut stdout,
-                        };
-                        if handle_escape_action(action, &mut context)? {
-                            return Ok(());
-                        }
-                    }
-                }
-            }
-        }
-
-        #[cfg(not(unix))]
-        if interactive && event::poll(Duration::from_millis(wait))? {
-            while event::poll(Duration::ZERO)? {
-                let action =
-                    read_event(session, &mut escape_state, &mut size, &mut pending_resize)?;
-                if let Some(action) = action {
+                } else if let Some(action) =
+                    apply_input(session, &mut escape_state, &mut query_proxy, &input[..read])
+                {
                     let columns = size.0;
                     let mut context = ActionContext {
                         session,
@@ -768,38 +773,51 @@ fn session_loop(
                     }
                 }
             }
-        } else if let Some(receiver) = pipe_input.as_ref() {
-            if !input_closed {
-                match receiver.recv_timeout(Duration::from_millis(wait.max(1))) {
-                    Ok(bytes) if !bytes.is_empty() => {
-                        if let Some(action) =
-                            apply_input(session, &mut escape_state, &mut query_proxy, &bytes)
-                        {
-                            let columns = size.0;
-                            let mut context = ActionContext {
-                                session,
-                                terminal_guard,
-                                size: &mut size,
-                                initialize_terminal,
-                                notifier: &mut notifier,
-                                started,
-                                columns,
-                                stdout: &mut stdout,
-                            };
-                            if handle_escape_action(action, &mut context)? {
-                                return Ok(());
-                            }
-                        }
+        }
+
+        #[cfg(windows)]
+        {
+            waiter
+                .wait(&[wake.handle()], session.socket_handle_iter(), wait)
+                .context("waiting for terminal input or the network")?;
+            wake.drain();
+            while let Ok(event) = input_events.try_recv() {
+                let action = match event {
+                    InputEvent::Console(event) => apply_console_event(
+                        session,
+                        &mut escape_state,
+                        event,
+                        &mut size,
+                        &mut pending_resize,
+                    ),
+                    InputEvent::Bytes(bytes) => {
+                        apply_input(session, &mut escape_state, &mut query_proxy, &bytes)
                     }
-                    Ok(_) | Err(mpsc::RecvTimeoutError::Disconnected) => {
-                        input_closed = true;
+                    InputEvent::Closed => {
                         let _ =
                             apply_proxied_input(session, &mut escape_state, query_proxy.finish());
+                        None
                     }
-                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                    InputEvent::Failed(error) => {
+                        return Err(error).context("reading terminal input");
+                    }
+                };
+                if let Some(action) = action {
+                    let columns = size.0;
+                    let mut context = ActionContext {
+                        session,
+                        terminal_guard,
+                        size: &mut size,
+                        initialize_terminal,
+                        notifier: &mut notifier,
+                        started,
+                        columns,
+                        stdout: &mut stdout,
+                    };
+                    if handle_escape_action(action, &mut context)? {
+                        return Ok(());
+                    }
                 }
-            } else {
-                thread::sleep(Duration::from_millis(wait.max(1)));
             }
         }
 
@@ -835,18 +853,79 @@ fn session_loop(
     }
 }
 
-#[cfg(not(unix))]
-fn spawn_pipe_reader() -> mpsc::Receiver<Vec<u8>> {
+/// Reads the local terminal's size and, if it changed, tells the server.
+/// The frame that answers is painted as a whole-screen repaint.
+fn follow_terminal_size(
+    session: &mut ClientSession,
+    size: &mut (u16, u16),
+    pending_resize: &mut Option<(u16, u16)>,
+) {
+    let current = terminal::size();
+    let current = (current.0.max(1), current.1.max(1));
+    if current != *size {
+        *size = current;
+        session.send_resize(i32::from(size.0), i32::from(size.1));
+        *pending_resize = Some(current);
+    }
+}
+
+#[cfg(windows)]
+fn millis_until(deadline: Instant) -> u64 {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    u64::try_from(remaining.as_micros().div_ceil(1_000)).unwrap_or(u64::MAX)
+}
+
+/// What the Windows input thread hands the session loop.
+#[cfg(windows)]
+enum InputEvent {
+    /// A console event, from an interactive console.
+    Console(Event),
+    /// Bytes from a redirected stdin.
+    Bytes(Vec<u8>),
+    /// Redirected stdin reached its end.
+    Closed,
+    /// Reading the console failed.
+    Failed(io::Error),
+}
+
+/// Reads stdin on a thread of its own and raises `wake` with everything it
+/// reads, which is how input on Windows ends the loop's wait: `WSAPoll`
+/// watches only sockets, and a console is not one.
+#[cfg(windows)]
+fn spawn_input_reader(interactive: bool, wake: Arc<Wake>) -> mpsc::Receiver<InputEvent> {
     let (sender, receiver) = mpsc::channel();
     thread::spawn(move || {
+        let send = |event| {
+            let sent = sender.send(event).is_ok();
+            wake.notify();
+            sent
+        };
+        if interactive {
+            loop {
+                match event::read() {
+                    Ok(event) => {
+                        if !send(InputEvent::Console(event)) {
+                            return;
+                        }
+                    }
+                    Err(error) => {
+                        send(InputEvent::Failed(error));
+                        return;
+                    }
+                }
+            }
+        }
         let mut stdin = io::stdin();
         let mut bytes = [0_u8; 4096];
         loop {
             match stdin.read(&mut bytes) {
-                Ok(0) | Err(_) => break,
+                Ok(0) | Err(_) => {
+                    send(InputEvent::Closed);
+                    return;
+                }
                 Ok(count) => {
-                    if sender.send(bytes[..count].to_vec()).is_err() {
-                        break;
+                    if !send(InputEvent::Bytes(bytes[..count].to_vec())) {
+                        return;
                     }
                 }
             }
@@ -855,52 +934,32 @@ fn spawn_pipe_reader() -> mpsc::Receiver<Vec<u8>> {
     receiver
 }
 
+/// Waits for stdin, a signal or the network, until `timeout_ms`; `true` when
+/// stdin is readable. A signal only has to end the wait, because the loop
+/// reads the flags its handlers set at the top of every pass.
 #[cfg(unix)]
 fn wait_for_input_or_network(
+    waiter: &mut Waiter,
     session: &ClientSession,
-    timeout_ms: u64,
+    signals: &SignalState,
     watch_input: bool,
+    timeout_ms: u64,
 ) -> io::Result<bool> {
     use std::os::fd::AsRawFd as _;
 
-    let stdin = io::stdin();
-    let mut descriptors = Vec::with_capacity(session.socket_handles().len() + 1);
-    let input_index = if watch_input {
-        descriptors.push(libc::pollfd {
-            fd: stdin.as_raw_fd(),
-            events: libc::POLLIN,
-            revents: 0,
-        });
-        Some(0)
-    } else {
-        None
-    };
-    descriptors.extend(session.socket_handles().into_iter().map(|fd| libc::pollfd {
-        fd,
-        events: libc::POLLIN,
-        revents: 0,
-    }));
-    let timeout = timeout_ms.min(i32::MAX as u64) as i32;
-    // SAFETY: every descriptor is borrowed from a live stdin or Mosh socket,
-    // and `descriptors` remains allocated until poll has returned.
-    let result = unsafe {
-        libc::poll(
-            descriptors.as_mut_ptr(),
-            descriptors.len() as libc::nfds_t,
-            timeout,
-        )
-    };
-    if result < 0 {
-        let error = io::Error::last_os_error();
-        if error.kind() == io::ErrorKind::Interrupted {
-            return Ok(false);
-        }
-        return Err(error);
+    let mut watched = Vec::with_capacity(2);
+    if let Some(pipe) = signals.pipe.as_ref() {
+        watched.push(pipe.as_raw_fd());
     }
-    Ok(input_index.is_some_and(|index| {
-        let events = descriptors[index].revents;
-        events & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) != 0
-    }))
+    let input_index = watch_input.then(|| {
+        watched.push(io::stdin().as_raw_fd());
+        watched.len() - 1
+    });
+    let ready = waiter.wait(&watched, session.socket_handle_iter(), timeout_ms)?;
+    if signals.pipe.is_some() && ready.is_ready(0) {
+        signals.drain();
+    }
+    Ok(input_index.is_some_and(|index| ready.is_ready(index)))
 }
 
 fn apply_input(
@@ -1016,33 +1075,92 @@ fn handle_escape_action<W: Write>(
 struct SignalState {
     terminate: Option<Arc<AtomicBool>>,
     interrupt: Option<Arc<AtomicBool>>,
+    /// Set by SIGWINCH: the terminal may have changed size.
+    #[cfg(unix)]
+    resized: Arc<AtomicBool>,
+    /// Readable whenever any of the signals above arrives, so a signal ends
+    /// the loop's wait however far off its deadline is, and whichever of the
+    /// process's threads the signal was delivered to.
+    #[cfg(unix)]
+    pipe: Option<std::os::unix::net::UnixStream>,
+    #[cfg(unix)]
+    pipe_registrations: Vec<signal_hook::SigId>,
+}
+
+/// How long a wait may last when no signal can end it, which is only when
+/// the signal pipe could not be made.
+#[cfg(unix)]
+const SIGNAL_FALLBACK_MS: u64 = 100;
+
+impl SignalState {
+    #[cfg(unix)]
+    fn take_resized(&self) -> bool {
+        self.resized.swap(false, Ordering::SeqCst)
+    }
+
+    /// A ceiling on the wait for when signals cannot end it by themselves.
+    fn fallback_wait_ms(&self) -> Option<u64> {
+        #[cfg(unix)]
+        return self.pipe.is_none().then_some(SIGNAL_FALLBACK_MS);
+        #[cfg(not(unix))]
+        return None;
+    }
+
+    #[cfg(unix)]
+    fn drain(&self) {
+        let Some(mut pipe) = self.pipe.as_ref() else {
+            return;
+        };
+        let mut bytes = [0_u8; 64];
+        while matches!(pipe.read(&mut bytes), Ok(count) if count > 0) {}
+    }
+}
+
+#[cfg(unix)]
+impl Drop for SignalState {
+    fn drop(&mut self) {
+        for registration in self.pipe_registrations.drain(..) {
+            signal_hook::low_level::unregister(registration);
+        }
+    }
 }
 
 fn signal_state(forward_interrupt: bool) -> SignalState {
     #[cfg(unix)]
     {
+        use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM, SIGWINCH};
+
         let terminate = Arc::new(AtomicBool::new(false));
-        for signal in [signal_hook::consts::SIGTERM, signal_hook::consts::SIGHUP] {
+        for signal in [SIGTERM, SIGHUP] {
             let _ = signal_hook::flag::register(signal, Arc::clone(&terminate));
         }
-        if forward_interrupt {
+        let resized = Arc::new(AtomicBool::new(false));
+        let _ = signal_hook::flag::register(SIGWINCH, Arc::clone(&resized));
+        let interrupt = if forward_interrupt {
             let interrupt = Arc::new(AtomicBool::new(false));
-            let _ =
-                signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&interrupt));
-            SignalState {
-                terminate: Some(terminate),
-                interrupt: Some(interrupt),
-            }
+            let _ = signal_hook::flag::register(SIGINT, Arc::clone(&interrupt));
+            Some(interrupt)
         } else {
             // A non-interactive invocation has no terminal byte stream to
             // which Ctrl-C can be translated, so preserve normal process
             // termination for that case.
-            let _ =
-                signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&terminate));
-            SignalState {
-                terminate: Some(terminate),
-                interrupt: None,
-            }
+            let _ = signal_hook::flag::register(SIGINT, Arc::clone(&terminate));
+            None
+        };
+        // After the flags: signal-hook runs a signal's actions in the order
+        // they were registered, so the flag is set before the loop wakes.
+        let mut pipe_registrations = Vec::new();
+        let pipe = signal_pipe(
+            &[SIGWINCH, SIGTERM, SIGHUP, SIGINT],
+            &mut pipe_registrations,
+        )
+        .ok();
+        SignalState {
+            terminate: Some(terminate),
+            interrupt,
+            resized,
+            pipe,
+            pipe_registrations,
         }
     }
     #[cfg(not(unix))]
@@ -1053,6 +1171,30 @@ fn signal_state(forward_interrupt: bool) -> SignalState {
             interrupt: None,
         }
     }
+}
+
+/// A socket pair whose reading end becomes readable when any of `signals`
+/// arrives.
+#[cfg(unix)]
+fn signal_pipe(
+    signals: &[libc::c_int],
+    registrations: &mut Vec<signal_hook::SigId>,
+) -> io::Result<std::os::unix::net::UnixStream> {
+    let (reader, writer) = std::os::unix::net::UnixStream::pair()?;
+    reader.set_nonblocking(true)?;
+    for &signal in signals {
+        let registration = signal_hook::low_level::pipe::register(signal, writer.try_clone()?);
+        match registration {
+            Ok(registration) => registrations.push(registration),
+            Err(error) => {
+                for registration in registrations.drain(..) {
+                    signal_hook::low_level::unregister(registration);
+                }
+                return Err(error);
+            }
+        }
+    }
+    Ok(reader)
 }
 
 fn suspend_and_resume(
@@ -1094,14 +1236,18 @@ fn suspend_and_resume(
     Ok(())
 }
 
-#[cfg(not(unix))]
-fn read_event(
+/// Applies one console event. A resize is taken as a cue to read the window's
+/// size rather than as the size itself: the console reports its screen
+/// buffer, which in a classic console with scrollback is taller than the
+/// window.
+#[cfg(windows)]
+fn apply_console_event(
     session: &mut ClientSession,
     escape: &mut EscapeState,
+    event: Event,
     size: &mut (u16, u16),
     pending_resize: &mut Option<(u16, u16)>,
-) -> Result<Option<EscapeAction>> {
-    let event = event::read().context("reading terminal input")?;
+) -> Option<EscapeAction> {
     match event {
         Event::Key(key) if key.kind == KeyEventKind::Press || key.kind == KeyEventKind::Repeat => {
             let bytes = key_bytes(key, session.displayed().application_cursor());
@@ -1109,19 +1255,17 @@ fn read_event(
             if !send.is_empty() {
                 session.send_input(&send);
             }
-            Ok(action)
+            action
         }
         Event::Paste(text) => {
             session.send_input(text.as_bytes());
-            Ok(None)
+            None
         }
-        Event::Resize(columns, rows) => {
-            *size = (columns.max(1), rows.max(1));
-            session.send_resize(i32::from(size.0), i32::from(size.1));
-            *pending_resize = Some(*size);
-            Ok(None)
+        Event::Resize(..) => {
+            follow_terminal_size(session, size, pending_resize);
+            None
         }
-        _ => Ok(None),
+        _ => None,
     }
 }
 

@@ -139,51 +139,6 @@ fn a_colour_query_response_is_taken_out_of_the_input_it_arrives_in() {
     );
 }
 
-/// A wake-up has to be visible to the loop's wait, or a keystroke waits out
-/// the idle timeout instead of going out now.
-#[test]
-fn a_wake_up_is_seen_by_the_wait_and_cleared_by_draining_it() {
-    let wake = Wake::new().expect("a wake-up pipe");
-    wake.notify();
-
-    let started = Instant::now();
-    wait_for_wake(&wake, 5_000);
-    assert!(
-        started.elapsed() < Duration::from_secs(1),
-        "a pending wake-up must not wait out the timeout"
-    );
-
-    wake.drain();
-    let started = Instant::now();
-    wait_for_wake(&wake, 50);
-    assert!(
-        started.elapsed() >= Duration::from_millis(40),
-        "a drained wake-up must let the loop wait again"
-    );
-}
-
-/// The session-shaped wait, without a session: on Unix the wake-up is a
-/// descriptor in the poll set, and elsewhere it is the condition the wait is
-/// on, so both are exercised through the same call the loop makes.
-#[cfg(unix)]
-fn wait_for_wake(wake: &Wake, timeout_ms: u64) {
-    let mut descriptors = [libc::pollfd {
-        fd: wake.read_descriptor(),
-        events: libc::POLLIN,
-        revents: 0,
-    }];
-    // SAFETY: the descriptor is borrowed from a live wake-up pipe and the
-    // array outlives the call.
-    unsafe {
-        libc::poll(descriptors.as_mut_ptr(), 1, timeout_ms as libc::c_int);
-    }
-}
-
-#[cfg(not(unix))]
-fn wait_for_wake(wake: &Wake, timeout_ms: u64) {
-    wake.wait(timeout_ms);
-}
-
 /// A pane that is closed drops every handle to its session, and the loop has
 /// to finish the shutdown rather than chase the closed channel for ever.
 #[test]

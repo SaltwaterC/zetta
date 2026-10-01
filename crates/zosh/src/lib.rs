@@ -23,6 +23,7 @@ mod notification;
 mod scrollback;
 mod stream;
 mod terminal;
+mod wait;
 
 pub use client::ClientArgs;
 pub use escape::{EscapeAction, EscapeKey, EscapeState};

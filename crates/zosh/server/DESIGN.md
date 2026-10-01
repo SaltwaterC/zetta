@@ -73,6 +73,47 @@ keep-alive exists to survive; that is why the timer does not consult
 `last_recv` except to stop lingering after ten seconds.  The interval is
 clamped before it is believed, because it arrives over the network.
 
+## Session loop
+
+The loop waits on nothing itself. Each input has a thread that blocks on it and
+wakes the loop through `wake::WakingSender`, which unparks after publishing so
+an event sent while the loop is still draining leaves a park token behind:
+
+| Input | Thread |
+| --- | --- |
+| UDP datagrams | `zosh-udp-reader`, blocking on a clone of the socket |
+| PTY output, input-write completions | the PTY reader and writer |
+| agent connections and frames | the agent listener and one thread per connection |
+| the child's exit | `zosh-child-exit` (`child_exit.rs`) |
+
+Everything else is a clock, and `next_wake` parks the loop until the earliest
+one: the transport's own timers (`Transport::next_deadline`, the reason
+`crates/moshcatty` is forked), the echo-acknowledgement grace period, the
+keep-alive, the association and network timeouts, the scrollback stall and the
+sleep-guard linger. An idle session therefore wakes for a heartbeat or a
+keep-alive rather than every few milliseconds; the loop it replaced polled every
+5 ms, about 200 wakeups a second, which was most of its CPU on a small host.
+
+Two rules keep that safe, and both are pinned by tests in `tests/server.rs`:
+
+- **Never park with work owed.** A pass that stopped a drain early, freed a
+  scrollback budget that was holding PTY output back, or became owed a host
+  update after building one goes round again instead.
+- **Never leave a passed deadline in the set.** A deadline in the past means
+  "wake at once", so each one is either consumed by the pass it wakes or left
+  out once it has fired. A keep-alive that cannot be sent stays due, so its
+  retry is floored at `KEEP_ALIVE_MIN` rather than allowed to spin.
+
+The child is watched without being reaped (`waitid(WNOWAIT)` on Unix, a
+duplicated process handle on Windows), so the loop still owns it and kills it
+the way `portable_pty` does. PTY end of file cannot stand in for this: a
+background job can hold the terminal open after the shell exits, and a ConPTY's
+output stays open until the pseudoconsole is closed.
+
+UDP sends share the reader's blocking socket, so they are bounded by a 2 ms send
+timeout instead; one that cannot go out fails the way a nonblocking send did,
+and SSP retransmits it.
+
 ## Terminal state
 
 PTY output is parsed into an authoritative VT state.  Outbound Mosh SSP states

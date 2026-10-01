@@ -13,7 +13,10 @@
 //!
 //! The loop runs on its own thread. That thread is the only one that touches
 //! the session, which is what lets the embedder call [`PaneSession::resize`]
-//! and write input from wherever it happens to be.
+//! and write input from wherever it happens to be. It sleeps until the
+//! network, the embedder or one of the session's own deadlines needs it (see
+//! [`crate::wait`]), so an idle pane costs a wakeup per heartbeat or
+//! keep-alive rather than ten a second.
 
 use std::{
     collections::VecDeque,
@@ -35,12 +38,8 @@ use crate::{
     client::{ProxiedInput, TerminalQueryProxy, forward_terminal_queries},
     display::DisplayScreen,
     frame::{self, ClientSession, Frame},
+    wait::{self, PassCounter, Waiter, Wake},
 };
-
-/// The longest the loop sleeps with nothing to do. The session's own deadline
-/// is usually shorter; this is the ceiling that keeps a quiet link's timers
-/// honest, and matches the standalone client's.
-const IDLE_WAIT_MS: u64 = 100;
 
 /// How much rendered output may sit unread before the loop waits for the
 /// consumer.
@@ -94,6 +93,14 @@ pub struct PaneSession {
     finished: Arc<AtomicBool>,
     error: Arc<Mutex<Option<String>>>,
     thread: Option<JoinHandle<()>>,
+    #[cfg_attr(
+        not(all(test, unix)),
+        allow(
+            dead_code,
+            reason = "only the Unix interop tests count the loop's passes"
+        )
+    )]
+    passes: PassCounter,
 }
 
 enum Command {
@@ -152,6 +159,7 @@ impl PaneSession {
         let finished = Arc::new(AtomicBool::new(false));
         let error = Arc::new(Mutex::new(None));
         let (commands, command_receiver) = mpsc::channel();
+        let passes = PassCounter::default();
 
         let thread = thread::Builder::new()
             .name("zosh-pane-session".to_owned())
@@ -160,15 +168,15 @@ impl PaneSession {
                 let output = output.clone();
                 let finished = finished.clone();
                 let error = error.clone();
+                let passes = passes.clone();
                 move || {
-                    let result = drive(
-                        session,
-                        (columns, rows),
-                        agent_settings,
-                        &command_receiver,
-                        &wake,
-                        &output,
-                    );
+                    let ends = LoopEnds {
+                        commands: &command_receiver,
+                        wake: &wake,
+                        output: &output,
+                        passes: &passes,
+                    };
+                    let result = drive(session, (columns, rows), agent_settings, ends);
                     if let Err(failure) = result {
                         *error
                             .lock()
@@ -188,7 +196,14 @@ impl PaneSession {
             finished,
             error,
             thread: Some(thread),
+            passes,
         })
+    }
+
+    /// How many passes the session loop has made.
+    #[cfg(all(test, unix))]
+    pub(crate) fn passes(&self) -> u64 {
+        self.passes.count()
     }
 
     /// The rendered display bytes, once. The stream ends when the session
@@ -292,19 +307,35 @@ impl Write for PaneWriter {
     }
 }
 
+/// What the session loop talks to besides the session itself.
+#[derive(Clone, Copy)]
+struct LoopEnds<'a> {
+    commands: &'a Receiver<Command>,
+    wake: &'a Wake,
+    output: &'a Arc<OutputPipe>,
+    passes: &'a PassCounter,
+}
+
 /// Drives one session to its end.
 ///
 /// The pass order matters and matches the standalone client's: wait for
 /// something to do, apply everything the embedder asked for, pump the network,
 /// forward any terminal query, then paint at most one frame.
+///
+/// The wait ends on a datagram, on the embedder's wake-up, or at the earliest
+/// deadline the session or the agent negotiation has, and at no other time.
 fn drive(
     mut session: ClientSession,
     size: (u16, u16),
     agent_settings: AgentSettings,
-    commands: &Receiver<Command>,
-    wake: &Wake,
-    output: &Arc<OutputPipe>,
+    ends: LoopEnds<'_>,
 ) -> Result<()> {
+    let LoopEnds {
+        commands,
+        wake,
+        output,
+        passes,
+    } = ends;
     let mut sink = OutputSink {
         pipe: Arc::clone(output),
     };
@@ -320,10 +351,14 @@ fn drive(
     }
     session.send_resize(i32::from(size.0), i32::from(size.1));
     let mut embedder = Embedder::Present;
+    let mut waiter = Waiter::default();
     loop {
-        let wait = session.wait_time_ms().min(IDLE_WAIT_MS);
-        wait_for_command_or_network(&session, wake, wait)?;
+        let wait = wait::earliest_ms([Some(session.next_wake_ms()), agent.wait_ms()]);
+        waiter
+            .wait(&[wake.handle()], session.socket_handle_iter(), wait)
+            .context("waiting for Mosh network or session input")?;
         wake.drain();
+        passes.tick();
         if embedder == Embedder::Present {
             embedder = apply_commands(
                 &mut session,
@@ -436,57 +471,6 @@ fn apply_input(session: &mut ClientSession, query_proxy: &mut TerminalQueryProxy
     }
 }
 
-#[cfg(unix)]
-fn wait_for_command_or_network(
-    session: &ClientSession,
-    wake: &Wake,
-    timeout_ms: u64,
-) -> Result<()> {
-    let mut descriptors = Vec::with_capacity(session.socket_handles().len() + 1);
-    descriptors.push(libc::pollfd {
-        fd: wake.read_descriptor(),
-        events: libc::POLLIN,
-        revents: 0,
-    });
-    descriptors.extend(session.socket_handles().into_iter().map(|fd| libc::pollfd {
-        fd,
-        events: libc::POLLIN,
-        revents: 0,
-    }));
-    let timeout = timeout_ms.min(i32::MAX as u64) as i32;
-    // SAFETY: every descriptor is borrowed from a live Mosh socket or from the
-    // wake pipe this session owns, and `descriptors` stays allocated until
-    // poll has returned.
-    let result = unsafe {
-        libc::poll(
-            descriptors.as_mut_ptr(),
-            descriptors.len() as libc::nfds_t,
-            timeout,
-        )
-    };
-    if result < 0 {
-        let error = io::Error::last_os_error();
-        if error.kind() != io::ErrorKind::Interrupted {
-            return Err(error).context("waiting for Mosh network or session input");
-        }
-    }
-    Ok(())
-}
-
-/// Without `poll` there is no way to wait on the Mosh sockets and the
-/// embedder at once, so the wait is on the embedder alone and the network is
-/// pumped when it expires. The standalone client does the same on these
-/// platforms: input is immediate, and output waits at most [`IDLE_WAIT_MS`].
-#[cfg(not(unix))]
-fn wait_for_command_or_network(
-    _session: &ClientSession,
-    wake: &Wake,
-    timeout_ms: u64,
-) -> Result<()> {
-    wake.wait(timeout_ms);
-    Ok(())
-}
-
 /// A pipe the loop paints into and the embedder reads.
 #[derive(Default)]
 struct OutputPipe {
@@ -587,143 +571,6 @@ impl Write for OutputSink {
 
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
-    }
-}
-
-/// How a caller on another thread gets the session loop out of its wait.
-///
-/// On Unix the loop is inside `poll`, so there has to be a descriptor in the
-/// set it can be woken through; elsewhere the wait is the command channel
-/// itself and sending is already the wake-up.
-struct Wake {
-    #[cfg(unix)]
-    read: std::os::fd::OwnedFd,
-    #[cfg(unix)]
-    write: std::os::fd::OwnedFd,
-    #[cfg(not(unix))]
-    notified: Mutex<bool>,
-    #[cfg(not(unix))]
-    signal: Condvar,
-}
-
-#[cfg(unix)]
-impl Wake {
-    fn new() -> io::Result<Self> {
-        use std::os::fd::{FromRawFd as _, OwnedFd};
-
-        let mut descriptors = [0 as libc::c_int; 2];
-        // SAFETY: `pipe` fills the two-element array it is given.
-        if unsafe { libc::pipe(descriptors.as_mut_ptr()) } < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        // SAFETY: `pipe` returned these descriptors and nothing else owns
-        // them, so the pipe is closed exactly once, when this value is
-        // dropped.
-        let pipe = unsafe {
-            Self {
-                read: OwnedFd::from_raw_fd(descriptors[0]),
-                write: OwnedFd::from_raw_fd(descriptors[1]),
-            }
-        };
-        // A wake-up must never block the caller, and the loop must be able to
-        // empty the pipe without blocking either.
-        for descriptor in [pipe.read_descriptor(), pipe.write_descriptor()] {
-            set_descriptor_flags(descriptor)?;
-        }
-        Ok(pipe)
-    }
-
-    fn read_descriptor(&self) -> libc::c_int {
-        use std::os::fd::AsRawFd as _;
-        self.read.as_raw_fd()
-    }
-
-    fn write_descriptor(&self) -> libc::c_int {
-        use std::os::fd::AsRawFd as _;
-        self.write.as_raw_fd()
-    }
-
-    fn notify(&self) {
-        let byte = [1_u8];
-        // SAFETY: the descriptor is owned by this value and the buffer is one
-        // byte long. A full pipe already means a pending wake-up, so a short
-        // or failed write needs no handling.
-        unsafe {
-            libc::write(self.write_descriptor(), byte.as_ptr().cast(), 1);
-        }
-    }
-
-    fn drain(&self) {
-        let mut bytes = [0_u8; 64];
-        loop {
-            // SAFETY: the descriptor is owned by this value and the buffer is
-            // as long as the count passed with it.
-            let read = unsafe {
-                libc::read(
-                    self.read_descriptor(),
-                    bytes.as_mut_ptr().cast(),
-                    bytes.len(),
-                )
-            };
-            if read <= 0 {
-                return;
-            }
-        }
-    }
-}
-
-#[cfg(unix)]
-fn set_descriptor_flags(descriptor: libc::c_int) -> io::Result<()> {
-    // SAFETY: `descriptor` is owned by the caller and both calls only read or
-    // replace its flags.
-    unsafe {
-        if libc::fcntl(descriptor, libc::F_SETFD, libc::FD_CLOEXEC) < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        let flags = libc::fcntl(descriptor, libc::F_GETFL);
-        if flags < 0 || libc::fcntl(descriptor, libc::F_SETFL, flags | libc::O_NONBLOCK) < 0 {
-            return Err(io::Error::last_os_error());
-        }
-    }
-    Ok(())
-}
-
-#[cfg(not(unix))]
-impl Wake {
-    fn new() -> io::Result<Self> {
-        Ok(Self {
-            notified: Mutex::new(false),
-            signal: Condvar::new(),
-        })
-    }
-
-    fn notify(&self) {
-        *self
-            .notified
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = true;
-        self.signal.notify_all();
-    }
-
-    fn wait(&self, timeout_ms: u64) {
-        let notified = self
-            .notified
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if *notified {
-            return;
-        }
-        let _ = self.signal.wait_timeout(
-            notified,
-            std::time::Duration::from_millis(timeout_ms.max(1)),
-        );
-    }
-
-    fn drain(&self) {
-        *self
-            .notified
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = false;
     }
 }
 

@@ -163,6 +163,17 @@ impl AgentBridge {
         self.path.is_some()
     }
 
+    /// How long until [`Self::negotiation_timed_out`] has something to say,
+    /// or `None` once it never will. Rounded up, so a loop that waits this
+    /// long finds the timeout already passed rather than a moment short.
+    pub(crate) fn wait_ms(&self) -> Option<u64> {
+        if self.negotiated {
+            return None;
+        }
+        let remaining = NEGOTIATION_TIMEOUT.saturating_sub(self.waiting_since?.elapsed());
+        Some(u64::try_from(remaining.as_micros().div_ceil(1_000)).unwrap_or(u64::MAX))
+    }
+
     pub(crate) fn negotiation_timed_out(&mut self) {
         if self.negotiated || self.waiting_since.is_none() {
             return;

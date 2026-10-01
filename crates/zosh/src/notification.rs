@@ -75,6 +75,27 @@ impl Notifier {
             .collect()
     }
 
+    /// How long until [`Self::bar`] would draw something different if
+    /// nothing is heard or said before then: a message running out, the link
+    /// crossing a lateness threshold, or the time a lateness bar shows
+    /// ticking over to its next second. `None` when nothing will change.
+    pub(crate) fn wait_ms(&self, health: LinkHealth, now: u64) -> Option<u64> {
+        let no_contact = health.since_heard_ms > SERVER_LATE_MS;
+        let no_reply = health.since_ack_ms > REPLY_LATE_MS;
+        let message = self
+            .expires_at
+            .map(|expires_at| expires_at.saturating_sub(now));
+        let tick = (no_contact || no_reply).then(|| {
+            let (elapsed, _) = late_kind(health, no_contact);
+            1_000 - elapsed % 1_000
+        });
+        // The thresholds are exceeded, not reached, hence the extra
+        // millisecond.
+        let contact = (!no_contact).then(|| SERVER_LATE_MS + 1 - health.since_heard_ms);
+        let reply = (!no_reply).then(|| REPLY_LATE_MS + 1 - health.since_ack_ms);
+        [message, tick, contact, reply].into_iter().flatten().min()
+    }
+
     fn expire(&mut self, now: u64) {
         if self.expires_at.is_some_and(|expires_at| now >= expires_at) {
             self.message = None;

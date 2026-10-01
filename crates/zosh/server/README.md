@@ -119,11 +119,13 @@ intermittent colour report.
 
 ### Opt-in timing diagnostics
 
-PTY output and input-write completions wake the server loop immediately.
-UDP and PTY draining each yield after a 2 ms work budget (checked between
-items), retaining their packet/event count limits. A budget-limited pass
-does not take the idle wait. Idle UDP polling still uses a 5 ms timeout;
-individual terminal-processing or transport operations can exceed the budget.
+The server loop is event driven: UDP datagrams, PTY output, input-write
+completions, agent connections and the child's exit each wake it from a thread
+of their own, and between them it sleeps until the next timer it owes anything
+to (see `DESIGN.md`). UDP and PTY draining each yield after a 2 ms work budget
+(checked between items), retaining their packet/event count limits. A
+budget-limited pass does not sleep; individual terminal-processing or transport
+operations can exceed the budget.
 
 Set `MOSH_SERVER_TIMING_LOG` **on the server** to a new file in an existing
 directory. The file must not already exist; on Unix it is created with mode
@@ -153,14 +155,17 @@ No typed text, terminal output, session keys, or peer addresses are logged.
 | `udp_authenticated`, `udp_sent` | datagram byte count | 0 |
 | `host_update` | queued server state | echo acknowledgement |
 | `udp_send_error` | OS error code, or 0 | 0 |
-| `loop_gap`, `*_slow` | elapsed microseconds (at least 100 ms) | 0 |
+| `loop_gap`, `wake_late`, `*_slow` | elapsed microseconds (at least 100 ms) | 0 |
 | `heartbeat`, `session_start`, `child_exited`, `pty_eof`, `pty_write_error` | 0 | 0 |
 | `session_end` | 1 on error, otherwise 0 | 0 |
 
 Compare write begin/end to locate a blocked PTY write, read/apply to locate
 reader-queue delays, and host-update/send to locate transport pacing. Frame
 records connect accepted input to writer completion. A heartbeat is emitted
-each second that the main loop runs; `loop_gap` includes work and sleeping.
+each second that the main loop runs, which an idle session may not do every
+second. `loop_gap` is the time one pass spent working, excluding the sleep that
+ended it; `wake_late` is how far a sleep overran the deadline it was set for,
+which is how a host stalling the process shows up.
 Slow-phase records identify PTY draining, input processing, screen diffing,
 transport processing/sending, or child polling that takes at least 100 ms.
 A successful UDP send only means the local OS accepted it, not that the client

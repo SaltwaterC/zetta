@@ -70,6 +70,31 @@ specification; this is where the client half of it lives.
   `ACTIVE_RETRY_TIMEOUT_MS`.
 - `src/session.rs`: `MoshSession::set_keep_alive`, a pass-through.
 
+**Idle cost.** Zosh's two session loops pass through this crate several
+times a second on an idle link, and a profile of an idle client found most
+of each pass here. None of these changes what reaches the wire or the
+terminal.
+
+- `src/terminal.rs`: `ClientTerminal` holds its screens behind `Arc`. A
+  state whose diff is empty (every keep-alive answer and heartbeat) shares
+  its base's screen instead of copying it and re-parsing it through
+  `Screen::feed`, and `render`/`advance` remember what the display was last
+  built from (`Shown`), so a pass where neither the state nor the overlay
+  changed returns at once instead of copying and diffing the whole screen.
+  The display shares the confirmed screen when nothing is painted over it.
+- `src/screen.rs`: `Screen::feed` documents that feeding no bytes changes
+  nothing, which the sharing relies on, and `OverlayCell` derives
+  `PartialEq`/`Eq` so an overlay can be compared with the last one.
+- `src/transport.rs`: `ZlibCompressor`, one zlib stream per `Fragmenter`
+  reset for each instruction rather than an encoder built per datagram;
+  its output is byte-identical to a fresh encoder's, which a test pins.
+- `src/session.rs`: `cycle` sets the newest socket's read mode only when
+  it changes (`ReadMode`), rather than making the system call on every
+  `pump_ready`; `socket_handle_iter` lists the sockets without allocating;
+  and `next_wake_ms` folds `prediction_wait_ms` into `wait_time_ms`, so a
+  front end that waits by itself needs no ceiling of its own to keep the
+  prediction timers honest.
+
 Nothing else changed, and with the keep-alive off every upstream test
 still passes unmodified.
 
