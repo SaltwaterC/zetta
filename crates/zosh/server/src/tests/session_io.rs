@@ -73,14 +73,42 @@ mod direct {
 
     struct Program {
         child: Box<dyn portable_pty::Child + Send + Sync>,
-        /// Held only to keep the descriptor the `PtyIo` borrows open.
-        _master: Box<dyn MasterPty + Send>,
+        /// Keeps the descriptor borrowed by `PtyIo` open through cleanup.
+        master: Box<dyn MasterPty + Send>,
+    }
+
+    impl Program {
+        fn stop(&mut self) -> io::Result<()> {
+            let _ = self.child.kill();
+            // macOS can keep a killed PTY child in exit until its queued
+            // terminal output has been read. The master is nonblocking, so
+            // keep draining while polling for exit rather than blocking in
+            // wait with unread output (or racing the child's final write).
+            let mut reader = self.master.try_clone_reader().map_err(io::Error::other)?;
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                match io::copy(&mut reader, &mut io::sink()) {
+                    Ok(_) => {}
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+                    Err(error) => return Err(error),
+                }
+                if self.child.try_wait()?.is_some() {
+                    return Ok(());
+                }
+                if Instant::now() >= deadline {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "PTY child did not exit during cleanup",
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        }
     }
 
     impl Drop for Program {
         fn drop(&mut self) {
-            let _ = self.child.kill();
-            let _ = self.child.wait();
+            let _ = self.stop();
         }
     }
 
@@ -105,7 +133,7 @@ mod direct {
         (
             Program {
                 child,
-                _master: pair.master,
+                master: pair.master,
             },
             io,
         )
@@ -210,7 +238,7 @@ mod direct {
 
     #[test]
     fn output_ends_the_loops_wait_and_a_held_program_does_not() {
-        let (_program, pty) = spawn("sleep 0.3; printf late; sleep 30");
+        let (mut program, pty) = spawn("sleep 0.3; printf late; sleep 30");
         let mut wait = LoopWait::new().unwrap();
         let udp = UdpIo::new(UdpSocket::bind("127.0.0.1:0").unwrap(), &wait.waker()).unwrap();
         let far = {
@@ -231,6 +259,10 @@ mod direct {
         let started = Instant::now();
         wait.wait(far, &udp, Some(&pty), true).unwrap();
         assert!(started.elapsed() < Duration::from_secs(5));
+        // The waits leave "late" unread. Cleanup must drain it so macOS
+        // can finish the child's exit, and must report failure within a
+        // bounded time rather than hanging the entire suite in wait.
+        program.stop().expect("cleanup with unread PTY output");
     }
 }
 
