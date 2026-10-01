@@ -3,6 +3,7 @@ mod args;
 mod lifecycle;
 mod protocol;
 mod server;
+mod sleep_guard;
 mod terminal_state;
 mod timing;
 mod user_stream;

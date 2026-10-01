@@ -3,6 +3,7 @@ use crate::args::Config;
 #[cfg(any(unix, windows))]
 use crate::lifecycle;
 use crate::protocol::{AgentHostRecord, ServerTransport, encode_host_message_with_agent};
+use crate::sleep_guard::{self, IdleSleepGuard};
 use crate::terminal_state::{QueryResponder, TerminalState};
 use crate::timing;
 use crate::user_stream::{UserEvent, UserStreamTracker};
@@ -45,7 +46,7 @@ const KEEP_ALIVE_MAX: Duration = Duration::from_millis(3000);
 // whose client has vanished from transmitting into the void forever, while
 // still covering a power-management stall an order of magnitude longer than
 // any that has been observed.
-const KEEP_ALIVE_LINGER: Duration = Duration::from_secs(10);
+pub(crate) const KEEP_ALIVE_LINGER: Duration = Duration::from_secs(10);
 // How long the peer may go unheard before its scrollback budget stops
 // holding the program back. Up to here the program is slowed to what the
 // client can take, which is what makes the history complete; past here the
@@ -153,6 +154,7 @@ fn serve_session(cfg: Config, socket: UdpSocket, mut transport: ServerTransport)
     // announced one, and when this side last put a datagram on the wire.
     let mut keep_alive: Option<Duration> = None;
     let mut last_send = Instant::now();
+    let mut sleep_guard = IdleSleepGuard::new();
 
     loop {
         loop_timing.tick();
@@ -333,6 +335,10 @@ fn serve_session(cfg: Config, socket: UdpSocket, mut transport: ServerTransport)
 
         timing::slow("input_drain_slow", phase);
         let associated = peer.is_some() && transport.has_received_authenticated();
+        sleep_guard.update(
+            sleep_guard::peer_present(associated, transport.last_recv().elapsed()),
+            cfg.verbose > 0,
+        );
         if !associated && Instant::now() >= association_deadline {
             kill_pty(&mut pty, false);
             bail!("no Mosh client associated within 60 seconds");
