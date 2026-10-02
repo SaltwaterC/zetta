@@ -2157,6 +2157,8 @@ impl TerminalBuilder {
             events_tx: events_tx.clone(),
             completion_tx: None,
             term,
+            #[cfg(test)]
+            content_snapshot_gate: None,
             wakeup_gate,
             term_config: config,
             output_processor: Processor::<StdSyncHandler>::new(),
@@ -2999,6 +3001,8 @@ impl TerminalBuilder {
                 events_tx: events_tx.clone(),
                 completion_tx,
                 term,
+                #[cfg(test)]
+                content_snapshot_gate: None,
                 wakeup_gate,
                 term_config: config,
                 output_processor,
@@ -3297,6 +3301,8 @@ pub struct Terminal {
     events_tx: futures::channel::mpsc::UnboundedSender<PtyEvent>,
     completion_tx: Option<Sender<Option<ExitStatus>>>,
     term: Arc<AlacrittyTermLock>,
+    #[cfg(test)]
+    content_snapshot_gate: Option<tests::ContentSnapshotGate>,
     wakeup_gate: WakeupGate,
     term_config: AlacrittyTermConfig,
     output_processor: Processor<StdSyncHandler>,
@@ -5161,13 +5167,22 @@ impl Terminal {
     }
 
     /// Takes a plain-text snapshot of the complete retained terminal buffer on
-    /// the background executor so grid traversal and text construction do not
-    /// run on the UI thread.
+    /// the background executor. The capture point is when the worker clones the
+    /// terminal under its lock; traversal and text allocation happen after unlocking.
     pub fn get_content_async(&self) -> Task<String> {
         let term = self.term.clone();
+        #[cfg(test)]
+        let gate = self.content_snapshot_gate.clone();
         self.background_executor.spawn(async move {
-            let term = term.lock_unfair();
-            content_text(&term)
+            // Only the mutable prefix is copied; sealed history chunks stay shared.
+            // End the guard's lifetime here so PTY parsing and rendering can proceed
+            // throughout the history-sized traversal and allocation below.
+            let snapshot = term.lock_unfair().clone();
+            #[cfg(test)]
+            if let Some(gate) = gate {
+                gate.after_capture(&term, &snapshot).await;
+            }
+            content_text(&snapshot)
         })
     }
 
@@ -11062,6 +11077,100 @@ mod tests {
         let observed = std::fs::read_to_string(&output_path).unwrap();
         let _ = std::fs::remove_file(output_path);
         assert_eq!(observed.lines().collect::<Vec<_>>(), ["10|J|Control"; 2]);
+    }
+
+    #[derive(Clone)]
+    pub(super) struct ContentSnapshotGate {
+        captured: async_channel::Sender<()>,
+        resume: async_channel::Receiver<()>,
+    }
+
+    impl ContentSnapshotGate {
+        pub(super) async fn after_capture(
+            &self,
+            live: &AlacrittyTermLock,
+            snapshot: &AlacrittyTerm,
+        ) {
+            use alacritty_terminal::{grid::Dimensions, index::Line};
+
+            {
+                let live = live
+                    .try_lock_unfair()
+                    .expect("export still holds the live lock");
+                let copied_rows = (snapshot.topmost_line().0..=snapshot.bottommost_line().0)
+                    .filter(|&line| {
+                        live.grid().row_storage_id(Line(line))
+                            != snapshot.grid().row_storage_id(Line(line))
+                    })
+                    .count();
+                // Visible rows, 1,024 live history rows, and at most one unsealed chunk.
+                assert!(copied_rows <= snapshot.screen_lines() + 1_024 + 255);
+                assert!(
+                    copied_rows < snapshot.total_lines(),
+                    "archive must stay shared"
+                );
+            }
+            self.captured.send(()).await.unwrap();
+            self.resume.recv().await.unwrap();
+        }
+    }
+
+    #[gpui::test]
+    async fn test_async_content_snapshot_releases_live_grid(cx: &mut TestAppContext) {
+        let window = cx.add_empty_window();
+        let terminal = window.new(|cx| {
+            TerminalBuilder::new_display_only_with_bounds(
+                SettingsCursorShape::default(),
+                AlternateScroll::On,
+                Some(4_000),
+                0,
+                cx.background_executor(),
+                PathStyle::local(),
+                TerminalBounds {
+                    cell_width: px(10.),
+                    line_height: px(10.),
+                    bounds: bounds(GpuiPoint::default(), size(px(400.), px(30.))),
+                },
+            )
+            .subscribe(cx)
+        });
+        let mut expected = (0..3_000)
+            .map(|line| format!("retained line {line}\n"))
+            .collect::<String>();
+        // Exercise wrapping, wide and combining characters, and an unfinished last line.
+        expected.push_str(&"w".repeat(55));
+        expected.push_str("\n界 e\u{301}\nprompt");
+        let (captured_tx, captured_rx) = async_channel::bounded(1);
+        let (resume_tx, resume_rx) = async_channel::bounded(1);
+        let export = terminal.update(window, |terminal, cx| {
+            terminal.write_output(expected.as_bytes(), cx);
+            terminal.content_snapshot_gate = Some(ContentSnapshotGate {
+                captured: captured_tx,
+                resume: resume_rx,
+            });
+            terminal.get_content_async()
+        });
+        captured_rx.recv().await.unwrap();
+
+        // Keep extraction pending while output, scroll, input and render access
+        // the live terminal. The gate avoids sleeps and scheduler-dependent races.
+        window.update_window_entity(&terminal, |terminal, window, cx| {
+            terminal.write_output(b" AFTER CAPTURE\nnew output", cx);
+            terminal.scroll_to_top();
+            terminal.sync(window, cx);
+            assert!(terminal.scrolled_to_top());
+            terminal.input(b"typed while exporting".to_vec());
+            terminal.sync(window, cx);
+            assert!(terminal.scrolled_to_bottom());
+            assert_eq!(
+                terminal.take_input_log(),
+                [b"typed while exporting".to_vec()]
+            );
+            terminal.with_renderable_cells(|cells| assert!(cells.count() > 0));
+            assert!(terminal.get_content().contains("AFTER CAPTURE"));
+        });
+        resume_tx.send(()).await.unwrap();
+        assert_eq!(export.await, expected);
     }
 
     #[gpui::test]

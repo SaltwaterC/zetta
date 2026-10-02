@@ -33,6 +33,9 @@ Retain these Zetta-specific behaviors when synchronizing:
   tracking;
 - diagnose terminal grid-lock and renderable-snapshot stalls without logging
   from the UI thread.
+- export scrollback from a terminal cloned on the background worker under a
+  short live-grid lock. Keep sealed history shared and traverse the snapshot
+  only after releasing the lock used by rendering and PTY parsing;
 - render snapshots retain selection coordinates only. Selection clipboard
   requests clone the grid at their event-stream position and serialize on a
   background worker. Application-wide clipboard versions reject stale results;
