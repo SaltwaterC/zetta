@@ -2,6 +2,227 @@ use super::*;
 use crate::protocol::BackgroundPaneLayout;
 
 #[test]
+fn scrollback_rotation_keeps_sequences_and_existing_segments() {
+    let directory = tempfile::tempdir().unwrap();
+    let identity = age::x25519::Identity::generate();
+    let mut store = PersistenceStore::open(directory.path(), &[identity.to_public().to_string()])
+        .unwrap()
+        .unwrap();
+    let full = vec![b'x'; SEGMENT_BYTES];
+    store.append_scrollback(7, 1, &full).unwrap();
+    assert!(store.segments.is_empty(), "size threshold must rotate");
+
+    store.append_scrollback(7, 1, b"timed").unwrap();
+    store.segments.get_mut(&(7, 1)).unwrap().started_at = unix_now() - SEGMENT_INTERVAL.as_secs();
+    store.append_scrollback(7, 1, b" segment").unwrap();
+    assert!(store.segments.is_empty(), "time threshold must rotate");
+
+    store.append_scrollback(7, 1, b"explicit flush").unwrap();
+    store.flush_segments().unwrap();
+    store.append_scrollback(7, 1, b"buffered").unwrap();
+    store.append_scrollback(7, 1, b" tail").unwrap();
+    assert_eq!(store.segments[&(7, 1)].sequence, 4);
+    assert_eq!(store.segments[&(7, 1)].bytes, b"buffered tail");
+    let paths = scrollback_paths(&store.directory, 7).unwrap();
+    assert_eq!(paths.len(), 3, "small fresh appends must stay buffered");
+    for (index, expected) in [full.as_slice(), b"timed segment", b"explicit flush"]
+        .iter()
+        .enumerate()
+    {
+        assert_eq!(
+            scrollback_path_parts(&paths[index], 7),
+            Some((1, index as u64 + 1))
+        );
+        assert_eq!(
+            age::decrypt(&identity, &fs::read(&paths[index]).unwrap()).unwrap(),
+            *expected
+        );
+    }
+}
+
+#[test]
+fn scrollback_recovery_reconciles_orphans_and_each_panes_highest_sequence() {
+    for handoff in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let identity = age::x25519::Identity::generate();
+        let mut store =
+            PersistenceStore::open(directory.path(), &[identity.to_public().to_string()])
+                .unwrap()
+                .unwrap();
+        store.append_scrollback(7, 1, b"first").unwrap();
+        store.flush_segments().unwrap();
+        // No manifest record: these also model publication followed by a crash
+        // before the manifest could be written. Recovery must still reserve them.
+        for (session, pane, sequence) in [(7, 1, 10), (7, 1, 3), (7, 2, 20), (8, 1, 30)] {
+            let path = store.directory.join(format!(
+                "session-{session}-pane-{pane}-segment-{sequence}.age"
+            ));
+            fs::write(path, store.recipients.encrypt(b"orphan").unwrap()).unwrap();
+        }
+        for name in [
+            "session-7-pane-1-segment-999.tmp-123",
+            "session-7-pane-1-segment-invalid.age",
+            "session-7-bytes-segment-999.age",
+            "unrelated.age",
+        ] {
+            fs::write(store.directory.join(name), []).unwrap();
+        }
+        drop(store);
+        let mut store = PersistenceStore::open_with_recovery_state(directory.path(), None, handoff)
+            .unwrap()
+            .unwrap();
+        for (session, pane, expected) in [(7, 1, 11), (7, 2, 21), (8, 1, 31), (8, 2, 1)] {
+            store.append_scrollback(session, pane, b"next").unwrap();
+            assert_eq!(store.segments[&(session, pane)].sequence, expected);
+        }
+        store.flush_segments().unwrap();
+        let paths = scrollback_paths(&store.directory, 7).unwrap();
+        assert_eq!(paths.len(), 6);
+        assert_eq!(
+            age::decrypt(&identity, &fs::read(&paths[0]).unwrap()).unwrap(),
+            b"first"
+        );
+    }
+}
+
+#[test]
+fn scrollback_publication_skips_collisions_without_overwriting() {
+    let directory = tempfile::tempdir().unwrap();
+    let identity = age::x25519::Identity::generate();
+    let mut store = PersistenceStore::open(directory.path(), &[identity.to_public().to_string()])
+        .unwrap()
+        .unwrap();
+    store.append_scrollback(7, 1, b"new").unwrap();
+    // Arrive after the sequence is reserved, including a second collision.
+    for sequence in [1, 2] {
+        fs::write(
+            store
+                .directory
+                .join(format!("session-7-pane-1-segment-{sequence}.age")),
+            store.recipients.encrypt(b"existing").unwrap(),
+        )
+        .unwrap();
+    }
+    store.flush_segments().unwrap();
+    store.append_scrollback(7, 1, b"next").unwrap();
+    store.flush_segments().unwrap();
+    let paths = scrollback_paths(&store.directory, 7).unwrap();
+    assert_eq!(paths.len(), 4);
+    for (path, expected) in paths
+        .iter()
+        .zip([b"existing".as_slice(), b"existing", b"new", b"next"])
+    {
+        assert_eq!(
+            age::decrypt(&identity, &fs::read(path).unwrap()).unwrap(),
+            expected
+        );
+    }
+    assert!(
+        fs::read_dir(&store.directory).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".tmp")
+        }),
+        "publication must clean up temporary files"
+    );
+}
+
+#[test]
+fn scrollback_publication_reserves_its_sequence_even_if_the_manifest_write_fails() {
+    let directory = tempfile::tempdir().unwrap();
+    let identity = age::x25519::Identity::generate();
+    let mut store = PersistenceStore::open(directory.path(), &[identity.to_public().to_string()])
+        .unwrap()
+        .unwrap();
+    store
+        .append_scrollback(7, 1, b"published before error")
+        .unwrap();
+    fs::remove_file(&store.manifest_path).unwrap();
+    fs::create_dir(&store.manifest_path).unwrap();
+    assert!(store.flush_segments().is_err());
+    fs::remove_dir(&store.manifest_path).unwrap();
+
+    store
+        .append_scrollback(7, 1, b"published after error")
+        .unwrap();
+    store.flush_segments().unwrap();
+    let paths = scrollback_paths(&store.directory, 7).unwrap();
+    assert_eq!(paths.len(), 2);
+    for (path, expected) in paths.iter().zip([
+        b"published before error".as_slice(),
+        b"published after error",
+    ]) {
+        assert_eq!(
+            age::decrypt(&identity, &fs::read(path).unwrap()).unwrap(),
+            expected
+        );
+    }
+}
+
+#[test]
+fn scrollback_sequence_exhaustion_never_reuses_the_last_file() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut store = store_with_one_live_record(directory.path());
+    store.next_sequences.insert((3, 1), Some(u64::MAX));
+    store.append_scrollback(3, 1, b"last").unwrap();
+    store.append_scrollback(3, 1, b" segment").unwrap();
+    store.flush_segments().unwrap();
+    let path = store
+        .directory
+        .join(format!("session-3-pane-1-segment-{}.age", u64::MAX));
+    let original = fs::read(&path).unwrap();
+    assert!(store.append_scrollback(3, 1, b"overflow").is_err());
+    drop(store);
+    let mut recovered = PersistenceStore::open_with_recovery(directory.path(), None)
+        .unwrap()
+        .unwrap();
+    assert!(
+        recovered
+            .append_scrollback(3, 1, b"overflow after restart")
+            .is_err()
+    );
+    assert_eq!(fs::read(path).unwrap(), original);
+}
+
+#[test]
+fn scrollback_pruning_and_forgetting_release_only_the_removed_sessions() {
+    for forget in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = store_with_one_live_record(directory.path());
+        store.append_scrollback(3, 1, b"removed").unwrap();
+        store.append_scrollback(4, 1, b"retained").unwrap();
+        store.flush_segments().unwrap();
+        store.append_scrollback(3, 1, b"pending removal").unwrap();
+        store.append_scrollback(4, 1, b"pending retention").unwrap();
+        if forget {
+            store.forget(3).unwrap();
+        } else {
+            store.manifest.records[0].restorable = true;
+            store.manifest.records[0].updated_at = 0;
+            store.prune(&HashSet::from([3])).unwrap();
+            assert!(
+                store.segments.contains_key(&(3, 1)),
+                "live sessions must survive pruning"
+            );
+            store.prune(&HashSet::new()).unwrap();
+        }
+        assert!(!store.segments.contains_key(&(3, 1)));
+        assert!(!store.next_sequences.contains_key(&(3, 1)));
+        assert!(scrollback_paths(&store.directory, 3).unwrap().is_empty());
+        assert_eq!(store.segments[&(4, 1)].sequence, 2);
+        store.flush_segments().unwrap();
+        store.append_scrollback(4, 1, b"still increasing").unwrap();
+        assert_eq!(store.segments[&(4, 1)].sequence, 3);
+        store.append_scrollback(3, 1, b"new session").unwrap();
+        store.flush_segments().unwrap();
+        assert_eq!(scrollback_paths(&store.directory, 3).unwrap().len(), 1);
+        assert_eq!(scrollback_paths(&store.directory, 4).unwrap().len(), 3);
+    }
+}
+
+#[test]
 fn disk_segments_are_encrypted_and_manifest_sizes_are_updated() {
     let directory = tempfile::tempdir().unwrap();
     let identity = age::x25519::Identity::generate();

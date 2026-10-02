@@ -5,6 +5,9 @@
 //! private keys that can read them back. The age files produced here are
 //! ordinary age v1 files, so the store does not introduce a second encrypted
 //! file format for metadata, snapshots, or scrollback.
+//! Scrollback sequence numbers are recovered once at open and reserved in
+//! memory thereafter. Only publication touches the filesystem on rotation;
+//! appending to a buffered segment never scans the persistence directory.
 
 use std::{
     collections::{HashMap, HashSet, hash_map::Entry},
@@ -453,6 +456,12 @@ struct SegmentBuffer {
     sequence: u64,
 }
 
+fn take_sequence(next: &mut Option<u64>) -> Result<u64> {
+    let sequence = next.context("scrollback segment sequence exhausted")?;
+    *next = sequence.checked_add(1);
+    Ok(sequence)
+}
+
 /// The encrypted store below the private session directory.
 pub struct PersistenceStore {
     directory: PathBuf,
@@ -460,6 +469,9 @@ pub struct PersistenceStore {
     recipients: RecipientSet,
     manifest: Manifest,
     segments: HashMap<(u64, u64), SegmentBuffer>,
+    // None means exhausted, so u64::MAX can never wrap or be reused. Entries
+    // outlive flushed buffers and are removed only with their session.
+    next_sequences: HashMap<(u64, u64), Option<u64>>,
 }
 
 impl fmt::Debug for PersistenceStore {
@@ -542,7 +554,9 @@ impl PersistenceStore {
             recipients,
             manifest,
             segments: HashMap::new(),
+            next_sequences: HashMap::new(),
         };
+        store.recover_sequences()?;
         if recovered {
             store.prune(&HashSet::new())?;
         }
@@ -680,15 +694,18 @@ impl PersistenceStore {
             return Ok(());
         }
         let now = unix_now();
-        let sequence = self.next_sequence(session_id, pane_id);
-        let segment = self
-            .segments
-            .entry((session_id, pane_id))
-            .or_insert_with(|| SegmentBuffer {
-                bytes: Vec::new(),
-                started_at: now,
-                sequence,
-            });
+        let key = (session_id, pane_id);
+        let segment = match self.segments.entry(key) {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => {
+                let sequence = take_sequence(self.next_sequences.entry(key).or_insert(Some(1)))?;
+                entry.insert(SegmentBuffer {
+                    bytes: Vec::new(),
+                    started_at: now,
+                    sequence,
+                })
+            }
+        };
         segment.bytes.extend_from_slice(bytes);
         if let Some(record) = self
             .manifest
@@ -824,6 +841,8 @@ impl PersistenceStore {
             }
         }
         self.manifest.records.retain(|record| record.id != id);
+        self.next_sequences
+            .retain(|(session_id, _), _| *session_id != id);
         self.write_manifest()
     }
 
@@ -860,6 +879,8 @@ impl PersistenceStore {
         for id in &remove {
             self.remove_files(*id)?;
         }
+        self.next_sequences
+            .retain(|(session_id, _), _| !remove.contains(session_id));
         self.manifest
             .records
             .retain(|record| !remove.contains(&record.id));
@@ -888,23 +909,36 @@ impl PersistenceStore {
             .saturating_add(1)
     }
 
-    fn next_sequence(&self, session_id: u64, pane_id: u64) -> u64 {
-        let prefix = format!("session-{session_id}-pane-{pane_id}-segment-");
-        fs::read_dir(&self.directory)
-            .ok()
-            .into_iter()
-            .flatten()
-            .filter_map(|entry| entry.ok())
-            .filter_map(|entry| entry.file_name().into_string().ok())
-            .filter_map(|name| {
-                name.strip_prefix(&prefix)?
-                    .strip_suffix(".age")?
-                    .parse()
-                    .ok()
-            })
-            .max()
-            .unwrap_or(0u64)
-            .saturating_add(1)
+    fn recover_sequences(&mut self) -> Result<()> {
+        // Include orphaned segments: publication may have succeeded before a
+        // crash prevented the corresponding manifest update.
+        for entry in fs::read_dir(&self.directory).context("recovering scrollback sequences")? {
+            let name = entry?.file_name();
+            let Some(name) = name.to_str() else { continue };
+            let Some((session_id, remainder)) = name
+                .strip_prefix("session-")
+                .and_then(|name| name.strip_suffix(".age"))
+                .and_then(|name| name.split_once("-pane-"))
+            else {
+                continue;
+            };
+            let Some((pane_id, sequence)) = remainder.split_once("-segment-") else {
+                continue;
+            };
+            let (Ok(session_id), Ok(pane_id), Ok(sequence)) =
+                (session_id.parse(), pane_id.parse(), sequence.parse::<u64>())
+            else {
+                continue;
+            };
+            let next = self
+                .next_sequences
+                .entry((session_id, pane_id))
+                .or_insert(Some(1));
+            if let Some(previous) = *next {
+                *next = sequence.checked_add(1).map(|value| value.max(previous));
+            }
+        }
+        Ok(())
     }
 
     fn flush_segment(
@@ -914,11 +948,31 @@ impl PersistenceStore {
         segment: &mut SegmentBuffer,
     ) -> Result<()> {
         let ciphertext = self.recipients.encrypt(&segment.bytes)?;
-        let path = self.directory.join(format!(
-            "session-{session_id}-pane-{pane_id}-segment-{}.age",
-            segment.sequence
-        ));
-        atomic_write(&path, &ciphertext)?;
+        let mut temporary = tempfile::NamedTempFile::new_in(&self.directory)
+            .context("creating private scrollback segment")?;
+        temporary
+            .write_all(&ciphertext)
+            .context("writing scrollback segment")?;
+        loop {
+            let path = self.directory.join(format!(
+                "session-{session_id}-pane-{pane_id}-segment-{}.age",
+                segment.sequence
+            ));
+            // Publish a complete age stream without replacing a file created
+            // since recovery. Retry collisions only at flush, never on append.
+            match temporary.persist_noclobber(&path) {
+                Ok(_) => break,
+                Err(error) if error.error.kind() == io::ErrorKind::AlreadyExists => {
+                    temporary = error.file;
+                    segment.sequence = take_sequence(
+                        self.next_sequences
+                            .entry((session_id, pane_id))
+                            .or_insert(Some(1)),
+                    )?;
+                }
+                Err(error) => return Err(error.error).context("committing scrollback segment"),
+            }
+        }
         segment.bytes.clear();
         self.write_manifest()
     }
