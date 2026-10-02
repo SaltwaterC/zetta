@@ -4699,6 +4699,240 @@ fn ending_one_shared_stream_leaves_the_same_clients_other_attachment() {
     client.kill(created.session_id).unwrap();
 }
 
+/// A shared pane whose program holds its input back until `gate` is written.
+///
+/// Returns once the terminal is raw, which the program reports by creating a
+/// file beside the gate rather than by printing: output written before the
+/// attach completes is not replayed to it. The terminal is raw so that a full input buffer throttles the multiplexer's
+/// writes rather than having the line discipline discard what does not fit, as
+/// canonical mode does. Once released, the program reads exactly `length` bytes
+/// and prints their checksum, so the one line it prints says whether every byte
+/// arrived, in order.
+#[cfg(target_os = "linux")]
+fn gated_reader_pane(
+    client: &Client,
+    gate: &Path,
+    length: usize,
+) -> (u64, zmux::client::SharedPane) {
+    let status = Command::new("mkfifo").arg(gate).status().unwrap();
+    assert!(status.success(), "creating the gate fifo");
+    let ready = gate.with_extension("ready");
+    let command = format!(
+        "stty raw -echo; : > '{}'; read _ < '{}'; head -c {length} | cksum",
+        ready.display(),
+        gate.display()
+    );
+    let created = client
+        .create_shared(one_pane_shared_request(client, &command))
+        .unwrap();
+    let pane_id = created.state.operation_receipts[0].draft_mappings[0].pane_id;
+    let pane = match client
+        .attach_shared_with_secret(created.session_id, pane_id, None)
+        .unwrap()
+    {
+        AttachOutcome::SharedAttached { pane, .. } => pane,
+        _other => panic!("a shared session's pane must attach shared"),
+    };
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !ready.exists() {
+        assert!(Instant::now() < deadline, "the gated program never started");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    (created.session_id, pane)
+}
+
+/// Printable, so nothing in it is a control character to the line discipline,
+/// and not periodic in the chunk size, so a chunk delivered twice or out of
+/// order changes the checksum.
+#[cfg(target_os = "linux")]
+fn paste_payload(length: usize) -> Vec<u8> {
+    (0..length)
+        .map(|index| b'!' + ((index * 7 + index / 4093) % 94) as u8)
+        .collect()
+}
+
+#[cfg(target_os = "linux")]
+fn expected_cksum(payload: &[u8]) -> String {
+    let mut cksum = Command::new("cksum")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    cksum.stdin.take().unwrap().write_all(payload).unwrap();
+    let output = cksum.wait_with_output().unwrap();
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
+}
+
+/// Sends a paste the way a window does, in frames the transport accepts.
+#[cfg(target_os = "linux")]
+fn send_paste(pane: &zmux::client::SharedPane, payload: &[u8]) {
+    for chunk in payload.chunks(16 * 1024) {
+        pane.send_input(chunk).expect("queueing shared input");
+    }
+}
+
+/// CPU time a process has used, user and system, in clock ticks.
+#[cfg(target_os = "linux")]
+fn process_cpu_ticks(pid: u32) -> u64 {
+    let status = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+    // Counted from after the parenthesised command name, which may itself
+    // contain spaces: utime and stime are the 14th and 15th fields of the line.
+    let (_, after_name) = status.rsplit_once(") ").unwrap();
+    let fields: Vec<&str> = after_name.split_whitespace().collect();
+    fields[11].parse::<u64>().unwrap() + fields[12].parse::<u64>().unwrap()
+}
+
+/// The share of one CPU the daemon uses over `window`.
+#[cfg(target_os = "linux")]
+fn daemon_cpu_share(daemon: &TestDaemon, window: Duration) -> f64 {
+    // SAFETY: `sysconf` has no preconditions.
+    let ticks_per_second = unsafe { libc::sysconf(libc::_SC_CLK_TCK) } as f64;
+    let pid = daemon.process.id();
+    let before = process_cpu_ticks(pid);
+    std::thread::sleep(window);
+    let used = process_cpu_ticks(pid) - before;
+    used as f64 / ticks_per_second / window.as_secs_f64()
+}
+
+/// The most of one CPU a daemon holding input nobody reads may use. A drain
+/// retrying the unwritable terminal without waiting uses all of one.
+#[cfg(target_os = "linux")]
+const BLOCKED_INPUT_CPU_CEILING: f64 = 0.1;
+
+/// Another shared pane answers promptly, so the daemon is still serving.
+#[cfg(target_os = "linux")]
+fn assert_echoes_promptly(client: &Client, marker: &str) {
+    let created = client
+        .create_shared(one_pane_shared_request(client, "exec cat"))
+        .unwrap();
+    let pane_id = created.state.operation_receipts[0].draft_mappings[0].pane_id;
+    let AttachOutcome::SharedAttached { pane, .. } = client
+        .attach_shared_with_secret(created.session_id, pane_id, None)
+        .unwrap()
+    else {
+        panic!("a shared session's pane must attach shared")
+    };
+    let mut reader = pane.reader();
+    let started = Instant::now();
+    pane.send_input(format!("{marker}\n").as_bytes()).unwrap();
+    read_until_reader(&mut reader, marker);
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "an unrelated pane took {:?} to echo",
+        started.elapsed()
+    );
+    drop(reader);
+    drop(pane);
+    client.kill(created.session_id).unwrap();
+}
+
+/// A paste into a program that has stopped reading leaves the drain waiting for
+/// the terminal to take more, not retrying it as fast as it can — and the rest
+/// arrives as soon as the program reads again, rather than on a timer.
+#[cfg(target_os = "linux")]
+#[test]
+fn shared_input_the_child_does_not_read_leaves_the_drain_idle() {
+    let daemon = TestDaemon::start();
+    let client = daemon.client();
+    let gate = daemon._directory.path().join("gate");
+    let payload = paste_payload(1024 * 1024);
+    let (session_id, pane) = gated_reader_pane(&client, &gate, payload.len());
+    let mut reader = pane.reader();
+
+    send_paste(&pane, &payload);
+    // Long enough for the terminal to fill and the drain to settle.
+    std::thread::sleep(Duration::from_millis(200));
+    let share = daemon_cpu_share(&daemon, Duration::from_secs(1));
+    assert!(
+        share < BLOCKED_INPUT_CPU_CEILING,
+        "the daemon used {:.0}% of a CPU holding input the pane would not take",
+        share * 100.0
+    );
+    assert_echoes_promptly(&client, "unrelated-pane-still-live");
+
+    // Each chunk the terminal takes from here has to wake the drain at once. A
+    // drain that only noticed room on its liveness timer would need seconds per
+    // chunk, which this deadline does not allow.
+    let released = Instant::now();
+    std::fs::write(&gate, "\n").unwrap();
+    read_until_reader(&mut reader, &expected_cksum(&payload));
+    assert!(
+        released.elapsed() < Duration::from_secs(2),
+        "the held paste took {:?} to arrive once the program read again",
+        released.elapsed()
+    );
+    drop(reader);
+    drop(pane);
+    // The program exits once it has printed, which may already have ended
+    // the session.
+    let _ = client.kill(session_id);
+}
+
+/// Closing a pane with input still queued for it takes the input with it, and
+/// leaves the drain nothing to retry.
+#[cfg(target_os = "linux")]
+#[test]
+fn closing_a_pane_with_pending_input_frees_the_drain() {
+    let daemon = TestDaemon::start();
+    let client = daemon.client();
+    let gate = daemon._directory.path().join("gate");
+    let payload = paste_payload(512 * 1024);
+    let (session_id, pane) = gated_reader_pane(&client, &gate, payload.len());
+    send_paste(&pane, &payload);
+    std::thread::sleep(Duration::from_millis(200));
+
+    client.kill(session_id).unwrap();
+    drop(pane);
+    std::thread::sleep(Duration::from_millis(200));
+    let share = daemon_cpu_share(&daemon, Duration::from_secs(1));
+    assert!(
+        share < BLOCKED_INPUT_CPU_CEILING,
+        "the daemon used {:.0}% of a CPU after the pane holding input closed",
+        share * 100.0
+    );
+    assert_echoes_promptly(&client, "after-close-still-live");
+}
+
+/// Input queued for a pane belongs to the pane, not to the client that sent it:
+/// the sender leaving neither drops it nor turns the wait for room into a spin,
+/// and it still arrives whole once the program reads.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_departing_sender_leaves_pending_input_queued_without_spinning() {
+    let daemon = TestDaemon::start();
+    let client = daemon.client();
+    let gate = daemon._directory.path().join("gate");
+    let payload = paste_payload(512 * 1024);
+    let (session_id, sender) = gated_reader_pane(&client, &gate, payload.len());
+    let AttachOutcome::SharedAttached { pane: viewer, .. } = client
+        .attach_shared_with_secret(session_id, sender.pane_id(), None)
+        .unwrap()
+    else {
+        panic!("a second attachment must be shared")
+    };
+    let mut reader = viewer.reader();
+    send_paste(&sender, &payload);
+    std::thread::sleep(Duration::from_millis(200));
+
+    drop(sender);
+    std::thread::sleep(Duration::from_millis(200));
+    let share = daemon_cpu_share(&daemon, Duration::from_secs(1));
+    assert!(
+        share < BLOCKED_INPUT_CPU_CEILING,
+        "the daemon used {:.0}% of a CPU after the sender left",
+        share * 100.0
+    );
+    assert_echoes_promptly(&client, "after-sender-left-still-live");
+
+    std::fs::write(&gate, "\n").unwrap();
+    read_until_reader(&mut reader, &expected_cksum(&payload));
+    drop(reader);
+    drop(viewer);
+    // The program exits once it has printed, which may already have ended
+    // the session.
+    let _ = client.kill(session_id);
+}
+
 #[test]
 fn headless_create_commits_a_recursive_layout_and_is_idempotent() {
     let daemon = TestDaemon::start();

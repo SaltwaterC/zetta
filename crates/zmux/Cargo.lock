@@ -3320,6 +3320,7 @@ dependencies = [
  "hpke",
  "libc",
  "log",
+ "polling",
  "reqwest",
  "serde",
  "serde_json",

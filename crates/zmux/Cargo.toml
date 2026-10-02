@@ -62,6 +62,7 @@ zetta_profiles = { path = "../zetta_profiles" }
 zclip = { path = "../zclip", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
+polling = "3"
 uds_windows = "1.2"
 windows = { version = "0.61", features = [
     "Win32_Foundation",

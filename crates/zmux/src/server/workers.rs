@@ -167,13 +167,14 @@ pub(super) fn start_drain(daemon: Arc<Daemon>) -> Result<()> {
             .set_nonblocking(true)
             .expect("making the drain wake channel non-blocking");
         *daemon.drain_wake.lock().unwrap() = Some(wake);
+        let wait = DrainWait::new(waker);
         let daemon = daemon.clone();
-        Box::new(move || drain_loop(daemon, waker))
+        Box::new(move || drain_loop(daemon, wait))
     });
     Ok(())
 }
 
-pub(super) fn drain_loop(daemon: Arc<Daemon>, mut waker: Stream) {
+pub(super) fn drain_loop(daemon: Arc<Daemon>, mut wait: DrainWait) {
     let mut buffer = vec![0; 16 * 1024];
     let mut evicted = false;
     let mut last_liveness_check = std::time::Instant::now();
@@ -215,9 +216,12 @@ pub(super) fn drain_loop(daemon: Arc<Daemon>, mut waker: Stream) {
                     if !drain_reads(&pane.attachment) {
                         continue;
                     }
-                    // Whatever the terminal could not take when it arrived.
-                    if !pane.pending_input.is_empty() {
-                        flush_pending_input(pane);
+                    // Whatever the terminal could not take when it arrived. A
+                    // terminal that takes none of it leaves the pass idle, so
+                    // the wait below sleeps until it has room.
+                    if !pane.pending_input.is_empty()
+                        && flush_pending_input(pane) == InputFlush::Progressed
+                    {
                         idle = false;
                     }
                     if pane.exited {
@@ -324,7 +328,7 @@ pub(super) fn drain_loop(daemon: Arc<Daemon>, mut waker: Stream) {
                 thread::sleep(HANGUP_BACKOFF);
             }
             let started = Instant::now();
-            wait_for_drainable(&daemon, &mut waker, idle_wait(last_liveness_check));
+            wait.wait(&daemon, idle_wait(last_liveness_check));
             if started.elapsed() < HANGUP_BACKOFF {
                 instant_idle_waits = instant_idle_waits.saturating_add(1);
             } else {
@@ -463,60 +467,137 @@ pub(super) const HANGUP_BACKOFF: Duration = Duration::from_millis(1);
 /// instant return is the ordinary case of output arriving.
 pub(super) const INSTANT_IDLE_WAITS_BEFORE_BACKING_OFF: u32 = 2;
 
-/// Blocks until a pane the drain is responsible for has output, a client
-/// attaches or detaches, or the wait runs out.
+/// What the drain thread sleeps on between passes.
 ///
-/// This is what makes shared mode responsive. Sleeping a fixed twenty
-/// milliseconds instead put half of that on every shared keystroke's round
-/// trip — measured at a ten millisecond median, against ten *microseconds* for
-/// a client reading the pty itself — and the waker could not shorten it,
-/// because it was drained *before* the sleep rather than waited on, so
-/// `wake_drain` had no effect at all.
-#[cfg(unix)]
-pub(super) fn wait_for_drainable(daemon: &Arc<Daemon>, waker: &mut Stream, timeout: Duration) {
-    use std::os::fd::AsRawFd as _;
-    let mut fds = vec![libc::pollfd {
-        fd: waker.as_raw_fd(),
-        events: libc::POLLIN,
-        revents: 0,
-    }];
-    {
-        let sessions = daemon.sessions.lock().unwrap();
-        for session in sessions.iter() {
-            for pane in session.panes.iter() {
-                // An exited pane is drained to the end by the pass above and
-                // then reports hangup for ever; waiting on it would never block.
-                if pane.exited || !drain_reads(&pane.attachment) {
-                    continue;
-                }
-                fds.push(libc::pollfd {
-                    fd: pane.pty.file().as_raw_fd(),
-                    events: libc::POLLIN,
-                    revents: 0,
-                });
-            }
-        }
-    }
-    let millis = timeout.as_millis().min(i32::MAX as u128) as libc::c_int;
-    // SAFETY: `fds` is a valid, initialised slice of exactly the length given,
-    // and the descriptors outlive the call — the sessions lock is released only
-    // after they are collected, and a pane closing while this waits shows up as
-    // `POLLNVAL`, which ends the wait rather than corrupting it.
-    unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, millis) };
-    drain_waker(waker);
+/// Owns the wake channel on every platform, and on Windows the poller that a
+/// pseudoconsole's input pipe reports room through.
+pub(super) struct DrainWait {
+    waker: Stream,
+    #[cfg(windows)]
+    poller: Arc<polling::Poller>,
+    #[cfg(windows)]
+    events: polling::Events,
 }
 
-#[cfg(windows)]
-pub(super) fn wait_for_drainable(_daemon: &Arc<Daemon>, waker: &mut Stream, timeout: Duration) {
-    // A pseudoconsole's pipes cannot be waited on alongside the wake channel in
-    // one call the way a pty's descriptors can, so this keeps the fixed tick and
-    // the latency that comes with it.
-    drain_waker(waker);
-    thread::sleep(timeout.min(WINDOWS_DRAIN_TICK));
+impl DrainWait {
+    #[cfg(unix)]
+    pub(super) fn new(waker: Stream) -> Self {
+        Self { waker }
+    }
+
+    #[cfg(windows)]
+    pub(super) fn new(waker: Stream) -> Self {
+        Self {
+            waker,
+            poller: Arc::new(polling::Poller::new().expect("creating the drain poller")),
+            events: polling::Events::new(),
+        }
+    }
+
+    /// Blocks until a pane the drain is responsible for has output, has room
+    /// for input queued for it, a client attaches or detaches, or the wait
+    /// runs out.
+    ///
+    /// This is what makes shared mode responsive. Sleeping a fixed twenty
+    /// milliseconds instead put half of that on every shared keystroke's round
+    /// trip — measured at a ten millisecond median, against ten *microseconds*
+    /// for a client reading the pty itself — and the waker could not shorten
+    /// it, because it was drained *before* the sleep rather than waited on, so
+    /// `wake_drain` had no effect at all.
+    ///
+    /// Waiting for room is what lets a pass that wrote nothing count as idle.
+    /// Without it the drain could only retry a terminal whose program had
+    /// stopped reading, and did, as fast as it could, for as long as the paste
+    /// stayed queued.
+    #[cfg(unix)]
+    pub(super) fn wait(&mut self, daemon: &Arc<Daemon>, timeout: Duration) {
+        use std::os::fd::AsRawFd as _;
+        let mut fds = vec![libc::pollfd {
+            fd: self.waker.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        }];
+        {
+            let sessions = daemon.sessions.lock().unwrap();
+            for session in sessions.iter() {
+                for pane in session.panes.iter() {
+                    // An exited pane is drained to the end by the pass above and
+                    // then reports hangup for ever; waiting on it would never
+                    // block.
+                    if pane.exited || !drain_reads(&pane.attachment) {
+                        continue;
+                    }
+                    let mut events = libc::POLLIN;
+                    if !pane.pending_input.is_empty() {
+                        events |= libc::POLLOUT;
+                    }
+                    fds.push(libc::pollfd {
+                        fd: pane.pty.file().as_raw_fd(),
+                        events,
+                        revents: 0,
+                    });
+                }
+            }
+        }
+        let millis = timeout.as_millis().min(i32::MAX as u128) as libc::c_int;
+        // SAFETY: `fds` is a valid, initialised slice of exactly the length
+        // given, and the descriptors outlive the call — the sessions lock is
+        // released only after they are collected, and a pane closing while this
+        // waits shows up as `POLLNVAL`, which ends the wait rather than
+        // corrupting it.
+        unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, millis) };
+        drain_waker(&mut self.waker);
+    }
+
+    /// The Windows half of [`DrainWait::wait`].
+    ///
+    /// A pseudoconsole's output pipe cannot be waited on alongside the wake
+    /// channel in one call the way a pty's descriptor can, so reads keep the
+    /// fixed tick and the latency that comes with it. Its input pipe can: the
+    /// writer thread behind it posts to a poller once it has made room, so a
+    /// pane holding queued input ends the wait as soon as it can take more.
+    #[cfg(windows)]
+    pub(super) fn wait(&mut self, daemon: &Arc<Daemon>, timeout: Duration) {
+        use alacritty_terminal::tty::EventedReadWrite as _;
+        drain_waker(&mut self.waker);
+        {
+            let mut sessions = daemon.sessions.lock().unwrap();
+            for session in sessions.iter_mut() {
+                for pane in session.panes.iter_mut() {
+                    if pane.exited
+                        || pane.pending_input.is_empty()
+                        || !drain_reads(&pane.attachment)
+                    {
+                        continue;
+                    }
+                    // Posts at once if the pipe has room already, so room made
+                    // between the flush and here is not missed.
+                    pane.pty.writer().register(
+                        &self.poller,
+                        polling::Event::writable(DRAIN_WRITABLE_KEY),
+                        polling::PollMode::Oneshot,
+                    );
+                }
+            }
+        }
+        self.events.clear();
+        if let Err(error) = self
+            .poller
+            .wait(&mut self.events, Some(timeout.min(WINDOWS_DRAIN_TICK)))
+        {
+            log::debug!("waiting on the drain poller failed: {error:#}");
+            thread::sleep(timeout.min(WINDOWS_DRAIN_TICK));
+        }
+    }
 }
 
 #[cfg(windows)]
 pub(super) const WINDOWS_DRAIN_TICK: Duration = Duration::from_millis(20);
+
+/// The key a pseudoconsole input pipe with room posts under. The drain only
+/// needs to wake, not to know which pane it was, so every pane shares it.
+#[cfg(windows)]
+const DRAIN_WRITABLE_KEY: usize = 0;
 
 /// Empties the wake channel.
 ///
@@ -535,14 +616,19 @@ pub(super) fn drain_waker(waker: &mut Stream) {
 /// A partial write is normal on a non-blocking master and is not an error: what
 /// is left stays queued and the drain thread tries again, so a paste larger than
 /// the terminal's free buffer arrives in full rather than in part.
-pub(super) fn flush_pending_input(pane: &mut Pane) {
+///
+/// Reports whether that got anywhere, because the drain must not retry a
+/// terminal that took nothing: a program that has stopped reading would keep it
+/// spinning on the sessions lock for as long as the paste stayed queued.
+pub(super) fn flush_pending_input(pane: &mut Pane) -> InputFlush {
     use alacritty_terminal::tty::EventedReadWrite as _;
     if pane.pending_input.is_empty() {
-        return;
+        return InputFlush::Progressed;
     }
     let mut written = 0;
     while written < pane.pending_input.len() {
         match pane.pty.writer().write(&pane.pending_input[written..]) {
+            // A full pseudoconsole pipe reports this rather than `WouldBlock`.
             Ok(0) => break,
             Ok(count) => written += count,
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
@@ -553,11 +639,27 @@ pub(super) fn flush_pending_input(pane: &mut Pane) {
                 // drain thread retry a write that cannot succeed.
                 log::debug!("writing shared input to pane {} failed: {error:#}", pane.id);
                 pane.pending_input.clear();
-                return;
+                return InputFlush::Progressed;
             }
         }
     }
     pane.pending_input.drain(..written);
+    if written == 0 {
+        InputFlush::Blocked
+    } else {
+        InputFlush::Progressed
+    }
+}
+
+/// What [`flush_pending_input`] managed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum InputFlush {
+    /// Something changed: bytes were written, the queue was dropped with its
+    /// terminal, or there was nothing queued.
+    Progressed,
+    /// Input is queued and the terminal took none of it. Only the terminal
+    /// becoming writable changes that, which [`DrainWait`] waits for.
+    Blocked,
 }
 
 /// Sends a pane's output to every shared client, dropping clients whose
