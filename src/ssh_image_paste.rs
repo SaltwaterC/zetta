@@ -15,6 +15,9 @@
 //! Windows WSL profiles also lack access to the desktop image clipboard. When
 //! no SSH or Mosh target is reported, `wsl` stages the image in that profile's
 //! distribution instead of asking its Linux application to read the clipboard.
+//!
+//! Recognising a Mosh foreground process is also what project detection needs
+//! (see [`foreground_is_mosh_session`]), so that predicate lives here too.
 
 #[cfg(any(windows, test))]
 mod wsl;
@@ -431,15 +434,30 @@ fn is_open_ssh(program: &str) -> bool {
     program_is_named(program, &["ssh", "ssh.exe"])
 }
 
+/// Whether a pane's foreground process is a Mosh session: the bundled `zosh`,
+/// an upstream `mosh` launcher, or the `mosh-client` either one runs.
+///
+/// Project detection asks this, not image paste. An OpenSSH session needs no
+/// such check, because the remote shell's own `zetta-cwd:` reports pass
+/// through it and move the pane out of any local project. A Mosh client
+/// redraws the remote screen and sends the remote title with a `[mosh] `
+/// prefix, so those reports never arrive and the pane would keep the local
+/// directory it had before the session started. This is not gated on
+/// `zosh-client`: an upstream mosh run in a pane has the same problem.
+pub(crate) fn foreground_is_mosh_session(argv: &[String]) -> bool {
+    foreground_argv(argv, |program| {
+        is_mosh_launcher(program) || is_mosh_client(program)
+    })
+    .is_some()
+}
+
 /// The bundled `zosh` launcher, and a `mosh` that has not yet replaced itself
 /// with its client.
-#[cfg(feature = "zosh-client")]
 fn is_mosh_launcher(program: &str) -> bool {
     program_is_named(program, &["zosh", "zosh.exe", "mosh", "mosh.exe"])
 }
 
 /// What upstream Mosh's launcher becomes, and what `zosh --client` runs.
-#[cfg(feature = "zosh-client")]
 fn is_mosh_client(program: &str) -> bool {
     program_is_named(program, &["mosh-client", "mosh-client.exe"])
 }

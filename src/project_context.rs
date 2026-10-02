@@ -171,6 +171,23 @@ impl ProjectState {
         self.active_context = None;
     }
 
+    /// Takes a pane out of its project while a remote client owns its
+    /// foreground, returning whether it was in one.
+    ///
+    /// The detection entry is dropped as well as the root. When the client
+    /// exits, the shell's reported directory is usually the one it reported
+    /// before the session started, and a surviving entry for that directory
+    /// would make `begin_detection` skip the detection that brings the project
+    /// back.
+    fn leave_for_remote_foreground(&mut self, pane_id: u64) -> bool {
+        let was_in_project = self.root_for_pane(pane_id).is_some();
+        self.forget_pane(pane_id);
+        if was_in_project {
+            self.invalidate_active_context();
+        }
+        was_in_project
+    }
+
     pub(crate) fn forget_tab(&mut self, tab_id: u64, pane_ids: impl IntoIterator<Item = u64>) {
         for pane_id in pane_ids {
             self.forget_pane(pane_id);
@@ -475,6 +492,28 @@ impl Zetta {
         let Some(pane) = tab.pane(pane_id) else {
             return;
         };
+        // A Mosh client's remote shell cannot report its directory through
+        // the session, so the pane would otherwise keep the local project it
+        // was in when the client started. A change of foreground process
+        // emits `TitleChanged`, which is what re-runs this on both sides of
+        // the session.
+        let remote_foreground = pane.terminal.as_ref().is_some_and(|terminal| {
+            terminal
+                .read(cx)
+                .foreground_process_command_line()
+                .is_some_and(|argv| crate::ssh_image_paste::foreground_is_mosh_session(&argv))
+        });
+        if remote_foreground {
+            if self.projects.leave_for_remote_foreground(pane_id) {
+                if self.is_active_pane(tab_id, pane_id) {
+                    self.activate_current_project(window, cx);
+                } else {
+                    self.apply_effective_themes_to_tab(tab_id, cx);
+                    cx.notify();
+                }
+            }
+            return;
+        }
         let is_wsl = is_wsl_shell(&pane.profile.command);
         let directory = if is_wsl {
             pane.wsl_working_directory(cx)
@@ -508,11 +547,7 @@ impl Zetta {
             {
                 self.projects.offer = None;
             }
-            let is_active = self
-                .tabs
-                .get(self.active_tab)
-                .is_some_and(|tab| tab.id == tab_id && tab.active_pane == pane_id);
-            if is_active {
+            if self.is_active_pane(tab_id, pane_id) {
                 self.activate_current_project(window, cx);
             }
         }
@@ -542,6 +577,12 @@ impl Zetta {
                 .ok();
             })
             .detach();
+    }
+
+    fn is_active_pane(&self, tab_id: u64, pane_id: u64) -> bool {
+        self.tabs
+            .get(self.active_tab)
+            .is_some_and(|tab| tab.id == tab_id && tab.active_pane == pane_id)
     }
 
     #[expect(
@@ -620,11 +661,7 @@ impl Zetta {
             self.projects.offer = Some(ProjectOffer { root, pane_id });
         }
 
-        let is_active = self
-            .tabs
-            .get(self.active_tab)
-            .is_some_and(|tab| tab.id == tab_id && tab.active_pane == pane_id);
-        if is_active {
+        if self.is_active_pane(tab_id, pane_id) {
             self.activate_current_project(window, cx);
         } else {
             cx.notify();

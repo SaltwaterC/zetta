@@ -171,6 +171,38 @@ fn non_ssh_foreground_processes_use_the_native_path() {
     assert!(foreground_ssh_argv(&["ssh-helper".to_owned(), "host".to_owned()]).is_none());
 }
 
+#[test]
+fn a_mosh_session_is_recognized_in_every_form_a_pane_reports_it() {
+    let argv = |words: &[&str]| {
+        words
+            .iter()
+            .map(|word| (*word).to_owned())
+            .collect::<Vec<_>>()
+    };
+    for session in [
+        argv(&["zosh", "host"]),
+        argv(&["/usr/bin/zosh", "host"]),
+        argv(&[r"C:\Program Files\Zetta\zosh.exe", "host"]),
+        argv(&["mosh", "--ssh=ssh -p 2222", "host"]),
+        argv(&["mosh-client", "-# host |", "192.0.2.1", "60001"]),
+        // The single-string form MSYS2 and Cygwin report a command line as.
+        argv(&["zosh user@host"]),
+    ] {
+        assert!(foreground_is_mosh_session(&session), "{session:?}");
+    }
+    for local in [
+        argv(&["ssh", "host"]),
+        argv(&["zsh"]),
+        argv(&["bash", "-l"]),
+        argv(&["vim", "zosh.txt"]),
+        argv(&["zosh-server", "new"]),
+        argv(&["vim zosh"]),
+        argv(&[]),
+    ] {
+        assert!(!foreground_is_mosh_session(&local), "{local:?}");
+    }
+}
+
 #[cfg(feature = "zosh-client")]
 fn mosh(program: &str, arguments: &[&str]) -> Vec<String> {
     std::iter::once(program)

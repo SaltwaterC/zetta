@@ -247,6 +247,22 @@ fn registered_wsl_roots_match_lexically_while_the_share_is_unreachable() {
 }
 
 #[test]
+fn a_remote_foreground_leaves_the_project_and_lets_the_return_detect_it_again() {
+    let registry = ProjectRegistry::load_from(PathBuf::from("registry.json")).unwrap();
+    let mut projects = ProjectState::new(registry);
+    let directory = PathBuf::from("project");
+    projects.begin_detection(7, directory.clone()).unwrap();
+    projects.pane_roots.insert(7, directory.clone());
+
+    assert!(projects.leave_for_remote_foreground(7));
+    assert!(projects.root_for_pane(7).is_none());
+    assert!(!projects.leave_for_remote_foreground(7));
+    // The shell reports the same directory once the client exits; that has
+    // to be detected afresh rather than treated as already seen.
+    assert!(projects.begin_detection(7, directory).is_some());
+}
+
+#[test]
 fn invalidating_detection_never_reuses_an_in_flight_generation() {
     let registry = ProjectRegistry::load_from(PathBuf::from("registry.json")).unwrap();
     let mut projects = ProjectState::new(registry);
