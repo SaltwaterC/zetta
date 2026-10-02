@@ -107,6 +107,61 @@ pub struct RetentionConfiguration {
     pub degraded_reason: Option<String>,
 }
 
+/// A retention policy whose recipients have been resolved, ready to be sent to
+/// any number of daemons with [`Client::configure_resolved`].
+///
+/// Separate from sending it because resolving can be a GitHub fetch: a caller
+/// with several connections to configure from one configuration should make
+/// that fetch once, not once per connection.
+#[cfg(feature = "session-persistence")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolvedRetention {
+    pub requested_retention: Retention,
+    pub effective_retention: Retention,
+    pub degraded_reason: Option<String>,
+    pub recipients: Vec<String>,
+}
+
+#[cfg(feature = "session-persistence")]
+impl ResolvedRetention {
+    /// Resolves `persistence`'s recipients for `retention`, degrading disk to
+    /// `fallback_retention` on a temporary lookup failure exactly as
+    /// [`Client::configure_with_retention_and_persistence_resilient`] does.
+    pub fn resolve(
+        retention: Retention,
+        persistence: &PersistenceOptions,
+        fallback_retention: Retention,
+    ) -> Result<Self> {
+        retention.validate()?;
+        fallback_retention.validate()?;
+        anyhow::ensure!(
+            matches!(fallback_retention, Retention::Memory { .. }),
+            "retention fallback must be an in-memory policy"
+        );
+        let (effective_retention, degraded_reason, recipients) = resolve_effective_retention(
+            retention,
+            &persistence.recipients,
+            fallback_retention,
+            crate::persistence::resolve_recipient_strings_for_startup,
+        )?;
+        Ok(Self {
+            requested_retention: retention,
+            effective_retention,
+            degraded_reason,
+            recipients,
+        })
+    }
+
+    /// What a daemon that accepted this policy is running with.
+    pub fn configuration(&self) -> RetentionConfiguration {
+        RetentionConfiguration {
+            requested_retention: self.requested_retention,
+            effective_retention: self.effective_retention,
+            degraded_reason: self.degraded_reason.clone(),
+        }
+    }
+}
+
 /// A connected client together with the retention policy the daemon actually
 /// accepted during startup.
 pub struct ConfiguredClient {
@@ -2547,24 +2602,19 @@ impl Client {
         persistence: PersistenceOptions,
         fallback_retention: Retention,
     ) -> Result<RetentionConfiguration> {
-        retention.validate()?;
-        fallback_retention.validate()?;
-        anyhow::ensure!(
-            matches!(fallback_retention, Retention::Memory { .. }),
-            "retention fallback must be an in-memory policy"
-        );
-        let (effective_retention, degraded_reason, recipients) = resolve_effective_retention(
-            retention,
-            &persistence.recipients,
-            fallback_retention,
-            crate::persistence::resolve_recipient_strings_for_startup,
-        )?;
-        self.configure(effective_retention, recipients)?;
-        Ok(RetentionConfiguration {
-            requested_retention: retention,
-            effective_retention,
-            degraded_reason,
-        })
+        let resolved = ResolvedRetention::resolve(retention, &persistence, fallback_retention)?;
+        self.configure_resolved(&resolved)
+    }
+
+    /// Sends an already resolved policy, so a caller configuring several
+    /// daemons from one configuration resolves its recipients once.
+    #[cfg(feature = "session-persistence")]
+    pub fn configure_resolved(
+        &self,
+        resolved: &ResolvedRetention,
+    ) -> Result<RetentionConfiguration> {
+        self.configure(resolved.effective_retention, resolved.recipients.clone())?;
+        Ok(resolved.configuration())
     }
 
     /// Asks the daemon to replace itself, keeping its sessions.

@@ -118,6 +118,96 @@ pub(crate) struct MuxRuntime {
     superseded: Arc<zmux::client::SupersededMultiplexer>,
 }
 
+/// The daemon request a configuration reload makes, resolved once for every
+/// runtime it is sent to.
+///
+/// Resolving can fetch `github:` recipients, so a reload resolves it once on
+/// its worker rather than once per window on the GUI thread.
+#[derive(Clone, Debug)]
+pub(crate) struct MuxReconfiguration {
+    #[cfg(feature = "session-persistence")]
+    resolved: zmux::client::ResolvedRetention,
+    #[cfg(not(feature = "session-persistence"))]
+    retention: Retention,
+}
+
+impl MuxReconfiguration {
+    /// Blocking: may make a network request. Run it off the GUI thread.
+    pub(crate) fn resolve(sessions: &crate::config::SessionsConfig) -> Result<Self> {
+        let retention = sessions.to_zmux_retention()?;
+        #[cfg(feature = "session-persistence")]
+        {
+            let resolved = zmux::client::ResolvedRetention::resolve(
+                retention,
+                &sessions.to_zmux_persistence(),
+                Retention::Memory {
+                    bytes: sessions.ring_bytes,
+                },
+            )?;
+            Ok(Self { resolved })
+        }
+        #[cfg(not(feature = "session-persistence"))]
+        Ok(Self { retention })
+    }
+
+    #[cfg(all(test, feature = "session-persistence"))]
+    pub(crate) fn for_test(resolved: zmux::client::ResolvedRetention) -> Self {
+        Self { resolved }
+    }
+
+    #[cfg(all(test, not(feature = "session-persistence")))]
+    pub(crate) fn for_test(retention: Retention) -> Self {
+        Self { retention }
+    }
+}
+
+/// The half of a [`MuxRuntime`] that a configuration reload reconfigures.
+///
+/// Both fields are shared with the runtime, so the daemon request can be made
+/// on a worker without borrowing the window that owns it, and the runtime's view
+/// of retention still only follows a confirmed daemon response.
+#[derive(Clone)]
+pub(crate) struct MuxReconfigureHandle {
+    client: Arc<Client>,
+    retention_state: Arc<Mutex<MuxRetentionState>>,
+}
+
+impl MuxReconfigureHandle {
+    /// Identifies the client, so a reload sends one request per connection
+    /// however many windows share it.
+    pub(crate) fn identity(&self) -> usize {
+        Arc::as_ptr(&self.client) as usize
+    }
+
+    /// Blocking: a daemon round trip, and an in-place upgrade when the daemon
+    /// predates the request.
+    pub(crate) fn reconfigure(&self, plan: &MuxReconfiguration) -> Result<()> {
+        // `Client::configure` may replace an older daemon in place. Keep this
+        // client (and the subscription registries beside it) alive across that
+        // handover rather than replacing the `Arc<Client>`, which would strand
+        // pane reporters and revoke/grant watchers on the old subscription.
+        #[cfg(feature = "session-persistence")]
+        let state = {
+            let configuration = self.client.configure_resolved(&plan.resolved)?;
+            MuxRetentionState {
+                requested: configuration.requested_retention,
+                effective: configuration.effective_retention,
+                degraded_reason: configuration.degraded_reason,
+            }
+        };
+        #[cfg(not(feature = "session-persistence"))]
+        let state = {
+            self.client.configure(plan.retention, Vec::new())?;
+            MuxRetentionState::exact(plan.retention)
+        };
+        *self
+            .retention_state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = state;
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct MuxRetentionState {
     /// The policy selected in configuration, which stays disk while a
@@ -330,46 +420,13 @@ impl MuxRuntime {
             .is_some()
     }
 
-    #[cfg(not(feature = "session-persistence"))]
-    pub(crate) fn reconfigure_with_retention(&mut self, retention: Retention) -> Result<()> {
-        // `Client::configure` may replace an older daemon in place. Keep this
-        // client (and the subscription registries beside it) alive across that
-        // handover, and only let the local view of retention follow a confirmed
-        // daemon response.
-        self.client.configure(retention, Vec::new())?;
-        *self
-            .retention_state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = MuxRetentionState::exact(retention);
-        Ok(())
-    }
-
-    #[cfg(feature = "session-persistence")]
-    pub(crate) fn reconfigure_with_retention_and_persistence(
-        &mut self,
-        retention: Retention,
-        persistence: PersistenceOptions,
-        fallback_retention: Retention,
-    ) -> Result<()> {
-        // Recipient resolution and the upgrade-aware retry both happen inside
-        // the existing client. Replacing the `Arc<Client>` here would strand
-        // pane reporters and revoke/grant watchers on the old subscription.
-        let configuration = self
-            .client
-            .configure_with_retention_and_persistence_resilient(
-                retention,
-                persistence,
-                fallback_retention,
-            )?;
-        *self
-            .retention_state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = MuxRetentionState {
-            requested: configuration.requested_retention,
-            effective: configuration.effective_retention,
-            degraded_reason: configuration.degraded_reason,
-        };
-        Ok(())
+    /// What a configuration reload needs of this runtime to reconfigure its
+    /// daemon off the GUI thread.
+    pub(crate) fn reconfigure_handle(&self) -> MuxReconfigureHandle {
+        MuxReconfigureHandle {
+            client: self.client.clone(),
+            retention_state: self.retention_state.clone(),
+        }
     }
 
     pub(crate) fn client(&self) -> &Arc<Client> {

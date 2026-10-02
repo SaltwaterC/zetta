@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// does not add work to rendering or input handling.
 const CONFIGURATION_FILE_POLL: Duration = Duration::from_secs(1);
 
-pub(super) fn config_file_stamp(path: &Path) -> ConfigFileStamp {
+pub(crate) fn config_file_stamp(path: &Path) -> ConfigFileStamp {
     let Ok(metadata) = fs::metadata(path) else {
         return ConfigFileStamp {
             modified: None,
@@ -29,66 +29,47 @@ pub(super) fn config_file_stamp(path: &Path) -> ConfigFileStamp {
     }
 }
 
-pub(super) fn reload_process_configuration(cx: &mut App) -> Result<()> {
-    let (config_path, keymap_override) = {
-        let process = cx.global::<ZettaProcessState>();
-        (
-            process.config.config_path.clone(),
-            process.config.keymap_override.clone(),
-        )
-    };
-    let config_stamp = config_file_stamp(&config_path);
-    let config = Config::load(Some(&config_path), keymap_override)?;
-    let entities = process_zetta_entities(cx);
-    let has_entities = !entities.is_empty();
-    for entity in entities {
-        entity
-            .update(cx, |zetta, cx| {
-                zetta.reload_configuration_from_process(config.clone(), cx)
-            })
-            .with_context(|| {
-                format!("applying reloaded configuration {}", config_path.display())
-            })?;
-    }
-    // A process can receive a request before its first window has been
-    // attached. Keep launcher integrations correct in that small window too;
-    // normal entities update them as part of their reload path.
-    if !has_entities {
-        #[cfg(windows)]
-        windows_integration::update_profile_jump_list(
-            config.profiles.clone(),
-            config.hidden_profiles.clone(),
-        );
-        #[cfg(target_os = "linux")]
-        if linux_desktop::update_profile_actions(&config.profiles, &config.hidden_profiles)
-            .log_err()
-            .unwrap_or(false)
-        {
-            schedule_linux_desktop_window_reassociation(cx);
-        }
-        #[cfg(target_os = "macos")]
-        update_native_macos_dock_menu(cx, &config.profiles, &config.hidden_profiles);
-    }
-    let process = cx.global_mut::<ZettaProcessState>();
-    process.config = config;
-    process.config_file_stamp = config_stamp;
-    process.configuration_error = None;
-    Ok(())
+/// Reloads the process's configuration into every window, and calls
+/// `completion` once that has been committed.
+///
+/// The reading happens on a worker; see `configuration_reload::coordinator`.
+/// Every window keeps its current configuration until then.
+pub(crate) fn reload_process_configuration(
+    cx: &mut App,
+    completion: impl FnOnce(Result<()>, &mut App) + 'static,
+) {
+    crate::configuration_reload::request_configuration_reload(
+        crate::configuration_reload::ReloadScope::Process,
+        Box::new(move |outcome, cx| completion(outcome.process_result(), cx)),
+        cx,
+    );
 }
 
-pub(super) fn reload_process_configuration_if_changed(cx: &mut App) -> Result<bool> {
-    let (config_path, last_stamp) = {
-        let process = cx.global::<ZettaProcessState>();
-        (
-            process.config.config_path.clone(),
-            process.config_file_stamp,
-        )
-    };
-    if config_file_stamp(&config_path) == last_stamp {
-        return Ok(false);
-    }
-    reload_process_configuration(cx)?;
-    Ok(true)
+/// [`reload_process_configuration`] if the file changed since it was last
+/// loaded; `completion` learns whether it had. The check itself is a `stat`,
+/// so it is made off the GUI thread too.
+pub(super) fn reload_process_configuration_if_changed(
+    cx: &mut App,
+    completion: impl FnOnce(Result<bool>, &mut App) + 'static,
+) {
+    let config_path = cx.global::<ZettaProcessState>().config.config_path.clone();
+    cx.spawn(async move |cx| {
+        let stamp = cx
+            .background_spawn(async move { config_file_stamp(&config_path) })
+            .await;
+        cx.update(|cx| {
+            // Compared now rather than before the `stat`: a reload that
+            // committed meanwhile has already recorded this stamp.
+            if stamp == cx.global::<ZettaProcessState>().config_file_stamp {
+                completion(Ok(false), cx);
+                return;
+            }
+            reload_process_configuration(cx, move |result, cx| {
+                completion(result.map(|()| true), cx);
+            });
+        });
+    })
+    .detach();
 }
 
 /// Keeps every open window, native launcher, and the process-wide launch
@@ -119,7 +100,13 @@ pub(super) fn start_configuration_watcher(cx: &mut App) {
             };
             if changed != last_seen {
                 last_seen = changed;
-                if let Err(error) = cx.update(reload_process_configuration) {
+                let (sender, reloaded) = futures::channel::oneshot::channel();
+                cx.update(|cx| {
+                    reload_process_configuration(cx, move |result, _| {
+                        let _ = sender.send(result);
+                    });
+                });
+                if let Ok(Err(error)) = reloaded.await {
                     eprintln!(
                         "Could not reload {} after it changed: {error:#}",
                         config_path.display()
@@ -130,7 +117,9 @@ pub(super) fn start_configuration_watcher(cx: &mut App) {
                     // A configuration reload can update the desktop entry
                     // itself. Absorb that write so the desktop poll below
                     // does not schedule a second repair for the same change.
-                    desktop_entry_stamp = linux_desktop::desktop_entry_stamp();
+                    desktop_entry_stamp = cx
+                        .background_spawn(async { linux_desktop::desktop_entry_stamp() })
+                        .await;
                 }
             }
 

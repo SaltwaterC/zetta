@@ -46,19 +46,15 @@ fn dispatch(command: ProcessControlCommand, cx: &mut AsyncApp) {
         ProcessControlCommand::ReloadConfiguration {
             config_path,
             completion,
-        } => {
-            let _ = completion.send(cx.update(|cx| reload_configuration(&config_path, cx)));
-        }
+        } => cx.update(|cx| reload_configuration(&config_path, completion, cx)),
         ProcessControlCommand::OpenWindow { completion } => {
-            let _ = completion.send(cx.update(open_window));
+            cx.update(|cx| open_window(completion, cx));
         }
         ProcessControlCommand::OpenNewWindow {
             profile,
             activation_token,
             completion,
-        } => {
-            let _ = completion.send(cx.update(|cx| open_new_window(profile, activation_token, cx)));
-        }
+        } => cx.update(|cx| open_new_window(profile, activation_token, completion, cx)),
         ProcessControlCommand::OpenProject {
             root,
             working_directory,
@@ -380,9 +376,12 @@ fn open_urls(urls: &[String], cx: &mut App) {
     });
 }
 
-fn reload_configuration(config_path: &str, cx: &mut App) -> bool {
+/// Answers once the reload has been committed to every window, so a client
+/// that is told yes can rely on the new configuration being in effect.
+fn reload_configuration(config_path: &str, completion: Sender<bool>, cx: &mut App) {
     if !accepting_control_requests(cx) {
-        return false;
+        let _ = completion.send(false);
+        return;
     }
     // Only the process that owns this configuration file applies the reload;
     // another process watching a different file answers no and lets the client
@@ -391,25 +390,39 @@ fn reload_configuration(config_path: &str, cx: &mut App) -> bool {
         &cx.global::<ZettaProcessState>().config.config_path,
     ) != config_path
     {
-        return false;
+        let _ = completion.send(false);
+        return;
     }
-    match reload_process_configuration(cx) {
-        Ok(()) => true,
-        Err(error) => {
-            eprintln!("Could not reload {config_path}: {error:#}");
-            false
-        }
-    }
+    let config_path = config_path.to_owned();
+    reload_process_configuration(cx, move |result, _| {
+        let reloaded = match result {
+            Ok(()) => true,
+            Err(error) => {
+                eprintln!("Could not reload {config_path}: {error:#}");
+                false
+            }
+        };
+        let _ = completion.send(reloaded);
+    });
 }
 
-fn open_window(cx: &mut App) -> bool {
+/// Opens the window once any pending configuration change has been loaded, so
+/// it opens with the configuration on disk. Shutdown is checked again after
+/// the reload, which can take long enough for one to begin.
+fn open_window(completion: Sender<bool>, cx: &mut App) {
     if !accepting_control_requests(cx) {
-        return false;
+        let _ = completion.send(false);
+        return;
     }
-    if let Err(error) = reload_process_configuration_if_changed(cx) {
-        eprintln!("Could not refresh configuration before opening a window: {error:#}");
-    }
+    reload_process_configuration_if_changed(cx, move |refreshed, cx| {
+        if let Err(error) = refreshed {
+            eprintln!("Could not refresh configuration before opening a window: {error:#}");
+        }
+        let _ = completion.send(accepting_control_requests(cx) && open_window_now(cx));
+    });
+}
 
+fn open_window_now(cx: &mut App) -> bool {
     match open_dormant_or_new_window(cx) {
         Ok(()) => true,
         Err(error) => {
@@ -422,13 +435,27 @@ fn open_window(cx: &mut App) -> bool {
 fn open_new_window(
     profile: Option<String>,
     activation_token: Option<String>,
+    completion: Sender<bool>,
+    cx: &mut App,
+) {
+    if !accepting_control_requests(cx) {
+        let _ = completion.send(false);
+        return;
+    }
+    reload_process_configuration_if_changed(cx, move |refreshed, cx| {
+        let opened = accepting_control_requests(cx)
+            && open_new_window_now(profile, activation_token, refreshed.err(), cx);
+        let _ = completion.send(opened);
+    });
+}
+
+fn open_new_window_now(
+    profile: Option<String>,
+    activation_token: Option<String>,
+    refresh_error: Option<anyhow::Error>,
     cx: &mut App,
 ) -> bool {
-    if !accepting_control_requests(cx) {
-        return false;
-    }
     let profile_requested = profile.is_some();
-    let refresh_error = reload_process_configuration_if_changed(cx).err();
     if let Some(error) = refresh_error.as_ref() {
         eprintln!("Could not refresh configuration before opening a fresh window: {error:#}");
     }

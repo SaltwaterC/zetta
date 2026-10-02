@@ -42,11 +42,23 @@ pub(crate) fn changed_theme_files(
 }
 
 pub(crate) fn load_user_themes(cx: &mut App) -> Result<()> {
+    let families = prepare_user_themes()?;
+    register_user_themes(families, cx);
+    Ok(())
+}
+
+/// Reads and parses every user theme file that changed since the last call.
+///
+/// Touches no GPUI state, so a configuration reload runs it on its worker and
+/// hands the result to [`register_user_themes`] on the GUI thread. A file that
+/// fails to read or parse is logged and skipped rather than stopping the scan:
+/// the stamp cache has already recorded it, so stopping would also leave every
+/// later changed file unloaded until it changed again.
+pub(crate) fn prepare_user_themes() -> Result<Vec<theme::ThemeFamily>> {
     static THEME_FILE_CACHE: OnceLock<Mutex<HashMap<PathBuf, ThemeFileStamp>>> = OnceLock::new();
     let themes_dir = config::themes_dir();
     fs::create_dir_all(&themes_dir)
         .with_context(|| format!("creating theme directory {}", themes_dir.display()))?;
-    let registry = ThemeRegistry::global(cx);
     let paths = changed_theme_files(
         &themes_dir,
         &mut THEME_FILE_CACHE
@@ -54,12 +66,26 @@ pub(crate) fn load_user_themes(cx: &mut App) -> Result<()> {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()),
     )?;
-    for path in paths {
-        let bytes = fs::read(&path).with_context(|| format!("reading theme {}", path.display()))?;
-        theme_settings::load_user_theme(&registry, &bytes)
-            .with_context(|| format!("loading theme {}", path.display()))?;
+    Ok(paths
+        .into_iter()
+        .filter_map(|path| {
+            fs::read(&path)
+                .with_context(|| format!("reading theme {}", path.display()))
+                .and_then(|bytes| {
+                    theme_settings::deserialize_user_theme(&bytes)
+                        .with_context(|| format!("loading theme {}", path.display()))
+                })
+                .map(theme_settings::refine_theme_family)
+                .log_err()
+        })
+        .collect())
+}
+
+pub(crate) fn register_user_themes(families: Vec<theme::ThemeFamily>, cx: &App) {
+    if families.is_empty() {
+        return;
     }
-    Ok(())
+    ThemeRegistry::global(cx).insert_theme_families(families);
 }
 
 /// Zetta's scrollbar colors, which every theme it ships or installs gets.

@@ -700,7 +700,29 @@ fn index_default_bindings(bindings: &[KeyBinding]) -> HashMap<DefaultBindingKey,
     indexed
 }
 
-pub(crate) fn load_keybindings(path: &PathBuf, profile_count: usize, no_mux: bool, cx: &mut App) {
+pub(crate) fn load_keybindings(path: &Path, profile_count: usize, no_mux: bool, cx: &mut App) {
+    bind_keybindings(path, &read_keymap_source(path), profile_count, no_mux, cx);
+}
+
+/// The user keymap's text, read separately from binding it so a configuration
+/// reload can do the read on its worker. `None` when the file cannot be read,
+/// which binds only the defaults, as a missing keymap always has.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct KeymapSource(Option<String>);
+
+pub(crate) fn read_keymap_source(path: &Path) -> KeymapSource {
+    KeymapSource(fs::read_to_string(path).ok())
+}
+
+/// Rebuilds the whole keymap from the defaults and `source`, the contents of
+/// the keymap at `path`.
+pub(crate) fn bind_keybindings(
+    path: &Path,
+    source: &KeymapSource,
+    profile_count: usize,
+    no_mux: bool,
+    cx: &mut App,
+) {
     cx.clear_key_bindings();
     match KeymapFile::load_asset_allow_partial_failure(DEFAULT_KEYMAP_PATH, cx) {
         Ok(bindings) => cx.bind_keys(bindings),
@@ -715,10 +737,10 @@ pub(crate) fn load_keybindings(path: &PathBuf, profile_count: usize, no_mux: boo
 
     cx.bind_keys(bindings);
 
-    let Ok(content) = fs::read_to_string(path) else {
+    let Some(content) = source.0.as_deref() else {
         return;
     };
-    let content = normalize_keymap_key_names(&content);
+    let content = normalize_keymap_key_names(content);
 
     // Parse user keymap to detect rebindings and create unbind key bindings
     let user_keymap = match KeymapFile::parse(&content) {

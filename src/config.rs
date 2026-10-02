@@ -710,17 +710,30 @@ impl Config {
     }
 
     pub fn load(config_path: Option<&Path>, keymap_path: Option<PathBuf>) -> Result<Self> {
-        let config = Self::defaults(config_path, keymap_path.clone());
+        Self::load_with_source(config_path, keymap_path).map(|(config, _)| config)
+    }
+
+    /// [`Self::load`], also returning the text it parsed (`None` for a missing
+    /// file), so a caller that needs the raw file as well reads the same
+    /// revision of it rather than reading it a second time.
+    pub(crate) fn load_with_source(
+        config_path: Option<&Path>,
+        keymap_path: Option<PathBuf>,
+    ) -> Result<(Self, Option<String>)> {
+        let config = Self::defaults(config_path, keymap_path);
 
         let content = match fs::read_to_string(&config.config_path) {
             Ok(content) => content,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(config),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok((config, None));
+            }
             Err(error) => {
                 return Err(error)
                     .with_context(|| format!("reading {}", config.config_path.display()));
             }
         };
-        Self::parse_into(&content, config)
+        let config = Self::parse_into(&content, config)?;
+        Ok((config, Some(content)))
     }
 
     /// Parses configuration text using the same defaults and path resolution as [`Self::load`].

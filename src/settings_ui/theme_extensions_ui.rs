@@ -43,6 +43,18 @@ impl Zetta {
             .detach();
     }
 
+    /// Every registered theme's name, sorted, for the theme selectors.
+    fn registered_theme_names(cx: &App) -> Vec<String> {
+        let mut themes = ThemeRegistry::global(cx)
+            .list()
+            .into_iter()
+            .map(|theme| theme.name.to_string())
+            .collect::<Vec<_>>();
+        themes.sort();
+        themes.dedup();
+        themes
+    }
+
     pub(crate) fn download_theme_extension(
         &mut self,
         extension_id: Arc<str>,
@@ -93,27 +105,25 @@ impl Zetta {
                     }
                     match result {
                         Ok(count) => {
-                            this.reload_configuration(&ReloadConfiguration, window, cx);
-                            let mut themes = ThemeRegistry::global(cx)
-                                .list()
-                                .into_iter()
-                                .map(|theme| theme.name.to_string())
-                                .collect::<Vec<_>>();
-                            themes.sort();
-                            themes.dedup();
-                            if let Some(editor) = this.settings_editor.as_mut() {
-                                editor.installed_theme_extensions = installed_theme_extensions;
-                                editor.themes = themes.into();
-                                Self::refresh_open_dropdown_options(editor);
-                                editor.message = Some((
-                                    Tone::Info,
-                                    format!(
-                                        "Installed {name} ({count} theme file{}). Theme selectors have been reloaded.",
-                                        if count == 1 { "" } else { "s" }
-                                    ),
-                                ));
-                            }
-                            this.settings_focus.focus(window, cx);
+                            // The new files are registered by the reload, so the
+                            // selectors are rebuilt once it has committed.
+                            this.reload_configuration_then(window, cx, move |this, window, cx| {
+                                let themes = Self::registered_theme_names(cx);
+                                if let Some(editor) = this.settings_editor.as_mut() {
+                                    editor.installed_theme_extensions = installed_theme_extensions;
+                                    editor.themes = themes.into();
+                                    Self::refresh_open_dropdown_options(editor);
+                                    editor.message = Some((
+                                        Tone::Info,
+                                        format!(
+                                            "Installed {name} ({count} theme file{}). Theme selectors have been reloaded.",
+                                            if count == 1 { "" } else { "s" }
+                                        ),
+                                    ));
+                                }
+                                this.settings_focus.focus(window, cx);
+                                cx.notify();
+                            });
                         }
                         Err(error) => {
                             if let Some(editor) = this.settings_editor.as_mut() {
@@ -207,28 +217,23 @@ impl Zetta {
                             // Installing or removing an extension changes what
                             // a theme name resolves to.
                             crate::process_control::bump_pane_theme_revision();
-                            this.reload_configuration(&ReloadConfiguration, window, cx);
-
-                            let mut themes = ThemeRegistry::global(cx)
-                                .list()
-                                .into_iter()
-                                .map(|theme| theme.name.to_string())
-                                .collect::<Vec<_>>();
-                            themes.sort();
-                            themes.dedup();
-                            if let Some(editor) = this.settings_editor.as_mut() {
-                                editor.themes = themes.into();
-                                editor.installed_theme_extensions = installed_theme_extensions;
-                                Self::refresh_open_dropdown_options(editor);
-                                editor.message = Some((
-                                    Tone::Info,
-                                    format!(
-                                        "Removed {extension_id} ({count} theme file{}). Theme selectors have been reloaded.",
-                                        if count == 1 { "" } else { "s" }
-                                    ),
-                                ));
-                            }
-                            this.settings_focus.focus(window, cx);
+                            this.reload_configuration_then(window, cx, move |this, window, cx| {
+                                let themes = Self::registered_theme_names(cx);
+                                if let Some(editor) = this.settings_editor.as_mut() {
+                                    editor.themes = themes.into();
+                                    editor.installed_theme_extensions = installed_theme_extensions;
+                                    Self::refresh_open_dropdown_options(editor);
+                                    editor.message = Some((
+                                        Tone::Info,
+                                        format!(
+                                            "Removed {extension_id} ({count} theme file{}). Theme selectors have been reloaded.",
+                                            if count == 1 { "" } else { "s" }
+                                        ),
+                                    ));
+                                }
+                                this.settings_focus.focus(window, cx);
+                                cx.notify();
+                            });
                         }
                         Err(error) => {
                             if let Some(editor) = this.settings_editor.as_mut() {

@@ -211,7 +211,8 @@ fn reloading_a_clean_configuration_editor_shows_new_configured_profiles() {
     .unwrap();
     let new_config = Config::load(Some(&path), None).unwrap();
 
-    editor.refresh_configuration(&new_config).unwrap();
+    let form = ConfigurationForm::load(&path, &new_config).unwrap();
+    editor.refresh_configuration(&new_config, &form);
 
     let profile = editor
         .configuration

@@ -69,8 +69,12 @@ layering rule: every module named here is a sibling under `src/`.
 - `terminal_spawn.rs`: terminal process spawning and its event wiring
 - `default_terminal.rs`: registering and detecting Zetta as the system's
   default terminal, and the desktop-environment detection that needs
-- `configuration_reload.rs`: settings/keymap file editing and configuration
-  reload
+- `configuration_reload.rs`: settings/keymap file editing, the Reload action,
+  and what each window does with a reloaded configuration;
+  `configuration_reload/coordinator.rs` (runs reloads one at a time, for the
+  process or for given windows, and commits each in a fixed order) and
+  `configuration_reload/preparation.rs` (the off-thread half: every file
+  read, recipient resolution and daemon request a reload makes)
 - `view_boundary.rs`: `ZettaSubview`, the entity wrapper that lets part of the
   render tree be cached and be the target of its own scroll/hover
   notifications; see "Render boundaries" in `AGENTS.md`

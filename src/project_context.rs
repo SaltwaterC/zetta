@@ -65,8 +65,14 @@ impl ProjectState {
 
     pub(crate) fn insert_config(&mut self, config: ProjectConfig) -> Arc<ProjectConfig> {
         let config = Arc::new(config);
-        self.configs.insert(config.root.clone(), config.clone());
+        self.insert_shared_config(config.clone());
         config
+    }
+
+    /// [`Self::insert_config`] for a configuration a reload loaded once and
+    /// hands to every window that has the project open.
+    pub(crate) fn insert_shared_config(&mut self, config: Arc<ProjectConfig>) {
+        self.configs.insert(config.root.clone(), config);
     }
 
     pub(crate) fn mark_entered(&mut self, tab_id: u64, root: &Path) -> bool {
@@ -345,6 +351,17 @@ impl Zetta {
     /// the user's keymap file, so it is gated on the slot count actually
     /// changing rather than run on every project activation.
     pub(crate) fn refresh_profile_shortcuts(&mut self, cx: &mut App) {
+        self.refresh_profile_shortcuts_from(None, cx);
+    }
+
+    /// [`Self::refresh_profile_shortcuts`], binding from a keymap already read
+    /// when there is one, so a configuration reload does not read the file on
+    /// the GUI thread.
+    pub(crate) fn refresh_profile_shortcuts_from(
+        &mut self,
+        keymap: Option<&KeymapSource>,
+        cx: &mut App,
+    ) {
         let slots = {
             let effective = self.effective_config();
             visible_profile_count(&self.profiles, &effective.hidden_profiles)
@@ -366,7 +383,16 @@ impl Zetta {
             return;
         }
         self.profile_shortcut_slots = slots;
-        load_keybindings(&self.launch_config.keymap_path, slots, self.no_mux, cx);
+        match keymap {
+            Some(keymap) => bind_keybindings(
+                &self.launch_config.keymap_path,
+                keymap,
+                slots,
+                self.no_mux,
+                cx,
+            ),
+            None => load_keybindings(&self.launch_config.keymap_path, slots, self.no_mux, cx),
+        }
     }
 
     /// Applies the window's current system appearance and refreshes every
@@ -554,6 +580,7 @@ impl Zetta {
         let registry = self.projects.registry.clone();
         let loaded_roots = self.projects.configs.keys().cloned().collect::<Vec<_>>();
         let base = self.project_detection_base.clone();
+        let detection_base = base.clone();
         let executor = cx.background_executor().clone();
         let this = cx.entity().downgrade();
         window
@@ -570,6 +597,7 @@ impl Zetta {
                     })
                     .await;
                 this.update_in(cx, |this, window, cx| {
+                    let result = this.discard_stale_detected_config(&detection_base, result, cx);
                     this.apply_project_detection(
                         tab_id, pane_id, directory, generation, result, window, cx,
                     );
@@ -577,6 +605,25 @@ impl Zetta {
                 .ok();
             })
             .detach();
+    }
+
+    /// Drops a project configuration a detection loaded against a base that a
+    /// configuration reload has since replaced, and loads it again against the
+    /// current one. The detected root itself is still good.
+    fn discard_stale_detected_config(
+        &mut self,
+        detection_base: &Arc<Config>,
+        mut result: ProjectDetectionResult,
+        cx: &mut Context<Self>,
+    ) -> ProjectDetectionResult {
+        if Arc::ptr_eq(detection_base, &self.project_detection_base) || result.config.is_none() {
+            return result;
+        }
+        result.config = None;
+        if let Some(root) = result.config_root.clone() {
+            self.reload_stale_project_configs(vec![root], cx);
+        }
+        result
     }
 
     fn is_active_pane(&self, tab_id: u64, pane_id: u64) -> bool {

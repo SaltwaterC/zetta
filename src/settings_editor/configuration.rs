@@ -107,7 +107,23 @@ impl ConfigurationForm {
     }
 
     pub fn load(path: &Path, config: &Config) -> Result<Self> {
-        let root = read_json_or(path, json!({}))?
+        Self::from_value(read_json_or(path, json!({}))?, config)
+    }
+
+    /// [`Self::load`] from text already read, `None` meaning the file does not
+    /// exist. A configuration reload reads the file once, on its worker, and
+    /// builds both the configuration and this form from that one read.
+    pub fn parse(source: Option<&str>, path: &Path, config: &Config) -> Result<Self> {
+        let value = match source {
+            Some(source) => serde_json::from_str(source)
+                .with_context(|| format!("parsing {}", path.display()))?,
+            None => json!({}),
+        };
+        Self::from_value(value, config)
+    }
+
+    fn from_value(value: Value, config: &Config) -> Result<Self> {
+        let root = value
             .as_object()
             .context("configuration root must be an object")?
             .clone();

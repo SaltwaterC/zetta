@@ -300,7 +300,6 @@ pub(crate) struct SettingsEditor {
 
 struct PreparedSettingsSave {
     configuration_text: Option<String>,
-    parsed_config: Option<Config>,
     keymap_text: Option<String>,
 }
 
@@ -310,17 +309,17 @@ fn prepare_settings_save(
     config_path: &Path,
     keymap_override: Option<PathBuf>,
 ) -> Result<PreparedSettingsSave> {
-    let (configuration_text, parsed_config) = if let Some(configuration) = configuration {
-        let text = configuration.to_json()?;
-        let parsed = Config::parse(&text, Some(config_path), keymap_override)?;
-        (Some(text), Some(parsed))
-    } else {
-        (None, None)
-    };
+    let configuration_text = configuration
+        .map(|configuration| {
+            let text = configuration.to_json()?;
+            // Rejects an edit that would not load before it replaces the file.
+            Config::parse(&text, Some(config_path), keymap_override)?;
+            anyhow::Ok(text)
+        })
+        .transpose()?;
     let keymap_text = keymap.map(|keymap| keymap.to_json()).transpose()?;
     Ok(PreparedSettingsSave {
         configuration_text,
-        parsed_config,
         keymap_text,
     })
 }
@@ -340,12 +339,19 @@ impl SettingsEditor {
     /// has not saved yet. A clean form has no local state to preserve, so it
     /// can be rebuilt from the newly resolved configuration and the file on
     /// disk.
-    pub(crate) fn refresh_configuration(&mut self, config: &Config) -> Result<()> {
+    ///
+    /// `configuration` is the form for `config`, built off the GUI thread from
+    /// the same read of the file that produced `config`.
+    pub(crate) fn refresh_configuration(
+        &mut self,
+        config: &Config,
+        configuration: &ConfigurationForm,
+    ) {
         if self.configuration_dirty {
-            return Ok(());
+            return;
         }
 
-        let configuration = ConfigurationForm::load(&config.config_path, config)?;
+        let configuration = configuration.clone();
         let mut pane_template_names = configuration.pane_templates.names();
         pane_template_names.sort();
 
@@ -360,7 +366,6 @@ impl SettingsEditor {
         self.clear_dropdown();
         self.focus_scroll_request = None;
         invalidate_controls_cache(self);
-        Ok(())
     }
 
     pub(crate) fn dismiss_profile_draft(&mut self) {
@@ -861,7 +866,6 @@ impl Zetta {
                     .await;
                 let PreparedSettingsSave {
                     configuration_text,
-                    parsed_config,
                     keymap_text,
                 } = match prepared {
                     Ok(prepared) => prepared,
@@ -915,12 +919,8 @@ impl Zetta {
                     .await;
                 this.update_in(cx, |this, window, cx| match write_result {
                     Ok(()) => {
-                        let config = parsed_config.unwrap_or_else(|| this.launch_config.clone());
                         this.settings_editor = None;
-                        if let Err(error) = this.reload_configuration_from_process(config, cx) {
-                            this.configuration_error =
-                                Some(format!("Could not apply saved settings: {error:#}"));
-                        }
+                        this.apply_saved_settings(cx);
                         this.focus_active(window, cx);
                         cx.notify();
                     }
@@ -936,6 +936,33 @@ impl Zetta {
             })
             .detach();
         cx.notify();
+    }
+
+    /// Reloads this window from the files a save just wrote.
+    ///
+    /// Read back rather than applied from the save's own parse, because the
+    /// reload's other inputs — themes, projects, the daemon — are read on its
+    /// worker either way, and one read of the file keeps them consistent.
+    fn apply_saved_settings(&mut self, cx: &mut Context<Self>) {
+        let zetta = cx.entity().downgrade();
+        crate::configuration_reload::request_configuration_reload(
+            crate::configuration_reload::ReloadScope::Windows(vec![zetta.clone()]),
+            Box::new(move |outcome, cx| {
+                let Some(zetta) = zetta.upgrade() else {
+                    return;
+                };
+                if let Err(failure) = outcome.window_result(zetta.entity_id()) {
+                    let (crate::configuration_reload::ReloadFailure::Load(error)
+                    | crate::configuration_reload::ReloadFailure::Apply(error)) = failure;
+                    zetta.update(cx, |this, cx| {
+                        this.configuration_error =
+                            Some(format!("Could not apply saved settings: {error}"));
+                        cx.notify();
+                    });
+                }
+            }),
+            cx,
+        );
     }
 
     /// A save that did not happen: says why, and when the reason is one field
