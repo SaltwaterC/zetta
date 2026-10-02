@@ -1,8 +1,9 @@
 use super::*;
 use crate::project::{
-    ProjectConfig, ProjectRegistry, canonical_project_root, discover_project_config,
-    is_registered_project_config_root, paths_equal, resolve_registered_project,
-    resolve_registered_project_config_root, resolve_registered_project_root,
+    ProjectConfig, ProjectRegistry, ProjectRootResolution, canonical_project_root,
+    discover_project_config_canonical, is_registered_project_config_root, path_is_within_lexically,
+    paths_equal, resolve_registered_project_canonical, resolve_registered_project_config_root,
+    resolve_registered_project_root,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -22,6 +23,10 @@ pub(crate) struct ProjectState {
     pub(crate) registry: ProjectRegistry,
     pub(crate) configs: HashMap<PathBuf, Arc<ProjectConfig>>,
     pub(crate) pane_roots: HashMap<u64, PathBuf>,
+    /// How each detected pane root maps onto the directories its shell
+    /// reports; see [`PaneRootAnchor`]. A root inserted any other way has no
+    /// entry and is compared against its own spelling.
+    pane_anchors: HashMap<u64, PaneRootAnchor>,
     detections: HashMap<u64, ProjectDetectionState>,
     next_detection_generation: u64,
     entered: HashSet<(u64, String)>,
@@ -41,6 +46,7 @@ impl ProjectState {
             registry,
             configs: HashMap::new(),
             pane_roots: HashMap::new(),
+            pane_anchors: HashMap::new(),
             detections: HashMap::new(),
             next_detection_generation: 0,
             entered: HashSet::new(),
@@ -107,6 +113,9 @@ impl ProjectState {
     pub(crate) fn clear_removed_roots(&mut self) {
         self.pane_roots
             .retain(|_, root| is_registered_project_config_root(root, &self.registry));
+        let pane_roots = &self.pane_roots;
+        self.pane_anchors
+            .retain(|pane_id, _| pane_roots.contains_key(pane_id));
         self.configs
             .retain(|root, _| is_registered_project_config_root(root, &self.registry));
         if self.offer.as_ref().is_some_and(|offer| {
@@ -150,10 +159,15 @@ impl ProjectState {
     pub(crate) fn inherit_pane_root(&mut self, source_pane_id: u64, pane_id: u64) {
         if let Some(root) = self.pane_roots.get(&source_pane_id).cloned() {
             self.pane_roots.insert(pane_id, root);
+            match self.pane_anchors.get(&source_pane_id).cloned() {
+                Some(anchor) => self.pane_anchors.insert(pane_id, anchor),
+                None => self.pane_anchors.remove(&pane_id),
+            };
         }
     }
 
     fn clear_pane_root(&mut self, pane_id: u64) {
+        self.pane_anchors.remove(&pane_id);
         if let Some(root) = self.pane_roots.remove(&pane_id)
             && !self
                 .pane_roots
@@ -218,7 +232,113 @@ struct ProjectDetectionResult {
     registered_root: Option<PathBuf>,
     config_root: Option<PathBuf>,
     config: Option<Result<ProjectConfig>>,
+    /// Already filtered against the registry the job ran with, so applying it
+    /// does not resolve it again on the GUI thread.
     offer_root: Option<PathBuf>,
+    anchor: Option<PaneRootAnchor>,
+}
+
+/// How a pane's reported directories map onto the canonical root its project
+/// was resolved from, so the GUI thread can tell a `cd` that stays inside the
+/// project from one that leaves it without touching the filesystem.
+///
+/// Shells report the directory as the user spelled it, which through a
+/// symlink (FreeBSD's `/home`, macOS's `/var`) is not a prefix of the
+/// canonical root; and a managed worktree sits beside, not below, its main
+/// repository. Both would otherwise read as leaving the project on every `cd`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PaneRootAnchor {
+    /// The reported spelling of `resolved`.
+    reported: PathBuf,
+    /// The canonical directory the project was reached through: the managed
+    /// worktree's root, or else the configuration root.
+    resolved: PathBuf,
+    /// Whether `resolved` is a managed worktree. Resolution consults the
+    /// worktree's metadata before the registry, so a registered root inside
+    /// the worktree (a stale duplicate registration) does not claim it.
+    managed_worktree: bool,
+}
+
+impl PaneRootAnchor {
+    fn identity(root: &Path) -> Self {
+        Self {
+            reported: root.to_path_buf(),
+            resolved: root.to_path_buf(),
+            managed_worktree: false,
+        }
+    }
+
+    /// The anchor for `resolved`, given one directory below it in both the
+    /// spelling the shell reported and its canonical form.
+    fn new(
+        reported_directory: &Path,
+        canonical_directory: &Path,
+        resolved: PathBuf,
+        managed_worktree: bool,
+    ) -> Self {
+        let reported = canonical_directory
+            .strip_prefix(&resolved)
+            .ok()
+            .filter(|suffix| reported_directory.ends_with(suffix))
+            .and_then(|suffix| {
+                reported_directory
+                    .ancestors()
+                    .nth(suffix.components().count())
+            })
+            .map_or_else(|| resolved.clone(), Path::to_path_buf);
+        Self {
+            reported,
+            resolved,
+            managed_worktree,
+        }
+    }
+
+    /// `directory` in the canonical spelling, when it is lexically below this
+    /// anchor in either spelling.
+    fn resolve(&self, directory: &Path) -> Option<PathBuf> {
+        if path_is_within_lexically(directory, &self.resolved) {
+            return Some(directory.to_path_buf());
+        }
+        directory
+            .strip_prefix(&self.reported)
+            .ok()
+            .map(|suffix| self.resolved.join(suffix))
+    }
+}
+
+/// Whether a pane in `root` may keep it while a detection for `directory`
+/// is still running, decided without touching the filesystem.
+///
+/// Keeping is the common case, a `cd` inside the project, and avoids the
+/// project's theme flickering off and back on. Anything else — a directory
+/// lexically outside the project, or one claimed by a registered project
+/// nested below it — clears the root at once, so no command acts on the old
+/// project while the background resolution is outstanding. A transition only
+/// the worker can see (a worktree-local `.zetta/config.json`, a symlink inside
+/// the project) keeps the old root until its result arrives and replaces it.
+fn detection_keeps_pane_root(
+    directory: &Path,
+    root: &Path,
+    anchor: Option<&PaneRootAnchor>,
+    registry: &ProjectRegistry,
+) -> bool {
+    let identity;
+    let anchor = match anchor {
+        Some(anchor) => anchor,
+        None => {
+            identity = PaneRootAnchor::identity(root);
+            &identity
+        }
+    };
+    let Some(resolved_directory) = anchor.resolve(directory) else {
+        return false;
+    };
+    anchor.managed_worktree
+        || registry
+            .matching_root_lexically(&resolved_directory)
+            .is_none_or(|matched| {
+                paths_equal(matched, root) || !path_is_within_lexically(matched, &anchor.resolved)
+            })
 }
 
 fn detect_project_for_directory(
@@ -227,28 +347,60 @@ fn detect_project_for_directory(
     base: &Config,
     loaded_roots: &[PathBuf],
 ) -> ProjectDetectionResult {
+    // Canonicalized once: everything below compares against this answer
+    // lexically rather than asking the filesystem again per registry root.
     let canonical = fs::canonicalize(directory).ok();
-    let directory = canonical.as_deref().unwrap_or(directory);
-    let resolution = resolve_registered_project(directory, registry);
+    let is_directory = canonical
+        .as_deref()
+        .is_some_and(|canonical| fs::metadata(canonical).is_ok_and(|metadata| metadata.is_dir()));
+    let lookup = canonical.as_deref().unwrap_or(directory);
+    let resolution = if is_directory {
+        resolve_registered_project_canonical(lookup, registry)
+    } else {
+        // Deleted, unreadable or not a directory: what the lexical path
+        // matches is all there is to know, and asking again would only wait on
+        // the same failure.
+        let root = registry.matching_root_lexically(lookup).cloned();
+        ProjectRootResolution {
+            config_root: root.clone(),
+            root,
+            managed_worktree: None,
+        }
+    };
     if let Some(root) = resolution.root {
         let config_root = resolution.config_root.unwrap_or_else(|| root.clone());
         let config = (!loaded_roots
             .iter()
             .any(|loaded| paths_equal(loaded, &config_root)))
         .then(|| ProjectConfig::load(&config_root, base));
+        let anchor = canonical
+            .as_deref()
+            .map(|canonical| match resolution.managed_worktree {
+                Some(worktree) => PaneRootAnchor::new(directory, canonical, worktree.root, true),
+                None => PaneRootAnchor::new(directory, canonical, config_root.clone(), false),
+            });
         return ProjectDetectionResult {
             registered_root: Some(root),
             config_root: Some(config_root),
             config,
             offer_root: None,
+            anchor,
         };
     }
-    let offer_root = discover_project_config(directory).ok().flatten();
+    let offer_root = is_directory
+        .then(|| discover_project_config_canonical(lookup).ok().flatten())
+        .flatten()
+        .filter(|root| {
+            resolve_registered_project_canonical(root, registry)
+                .root
+                .is_none()
+        });
     ProjectDetectionResult {
         registered_root: None,
         config_root: None,
         config: None,
         offer_root,
+        anchor: None,
     }
 }
 
@@ -494,6 +646,21 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.schedule_project_detection(tab_id, pane_id, true, window, cx);
+    }
+
+    /// [`Self::schedule_project_detection_for_pane`], refreshing a WSL pane's
+    /// tracking-file observation first when `observe_wsl_cwd_file` is set.
+    /// The refresh re-enters with it clear, so one trigger reads the file
+    /// once.
+    fn schedule_project_detection(
+        &mut self,
+        tab_id: u64,
+        pane_id: u64,
+        observe_wsl_cwd_file: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.project_context_policy(tab_id).is_remote() {
             let has_local_context = self.projects.root_for_pane(pane_id).is_some()
                 || self.projects.detections.contains_key(&pane_id)
@@ -507,15 +674,7 @@ impl Zetta {
             }
             return;
         }
-        let Some(tab) = self
-            .tabs
-            .iter()
-            .find(|tab| tab.id == tab_id)
-            .or_else(|| self.background_sessions.iter().find(|tab| tab.id == tab_id))
-        else {
-            return;
-        };
-        let Some(pane) = tab.pane(pane_id) else {
+        let Some(pane) = self.project_detection_pane(tab_id, pane_id) else {
             return;
         };
         // A Mosh client's remote shell cannot report its directory through
@@ -541,42 +700,123 @@ impl Zetta {
             return;
         }
         let is_wsl = is_wsl_shell(&pane.profile.command);
+        let wsl_cwd_file = observe_wsl_cwd_file
+            .then(|| pane.wsl_cwd_file_needs_observing(cx))
+            .flatten();
         let directory = if is_wsl {
-            pane.wsl_working_directory(cx)
+            pane.wsl_observed_working_directory(cx)
                 .and_then(|directory| wsl_reported_directory(&pane.profile, &directory))
         } else {
             pane.current_directory(cx)
                 .filter(|(_, authoritative)| *authoritative)
                 .map(|(directory, _)| directory)
         };
+        if let Some(file) = wsl_cwd_file {
+            self.observe_wsl_cwd_file(tab_id, pane_id, file, window, cx);
+        }
         let Some(directory) = directory else {
             return;
         };
         let Some(generation) = self.projects.begin_detection(pane_id, directory.clone()) else {
             return;
         };
-        let resolved_root =
-            resolve_registered_project_config_root(&directory, &self.projects.registry);
+        self.leave_project_ahead_of_detection(tab_id, pane_id, &directory, window, cx);
+        self.spawn_project_detection(tab_id, pane_id, directory, generation, window, cx);
+    }
+
+    fn project_detection_pane(&self, tab_id: u64, pane_id: u64) -> Option<&TerminalPane> {
+        self.tabs
+            .iter()
+            .find(|tab| tab.id == tab_id)
+            .or_else(|| self.background_sessions.iter().find(|tab| tab.id == tab_id))?
+            .pane(pane_id)
+    }
+
+    /// Reads a WSL pane's legacy tracking file on the background executor and,
+    /// if what it says changed, detects the project again from the new answer.
+    /// The shell's reported directory stays authoritative: this only runs for
+    /// a pane that has not reported one.
+    fn observe_wsl_cwd_file(
+        &mut self,
+        tab_id: u64,
+        pane_id: u64,
+        file: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let executor = cx.background_executor().clone();
+        let this = cx.entity().downgrade();
+        window
+            .spawn(cx, async move |cx| {
+                let observation = executor
+                    .spawn(async move { WslCwdObservation::read(file) })
+                    .await;
+                this.update_in(cx, |this, window, cx| {
+                    let changed = this
+                        .tabs
+                        .iter_mut()
+                        .chain(this.background_sessions.iter_mut())
+                        .find(|tab| tab.id == tab_id)
+                        .and_then(|tab| tab.pane_mut(pane_id))
+                        .is_some_and(|pane| pane.observe_wsl_cwd_file(observation));
+                    if changed {
+                        this.schedule_project_detection(tab_id, pane_id, false, window, cx);
+                    }
+                })
+                .ok();
+            })
+            .detach();
+    }
+
+    /// Takes the pane out of its project now, rather than when the detection
+    /// returns, when the new directory is not lexically inside it; see
+    /// [`detection_keeps_pane_root`]. Nothing here touches the filesystem: the
+    /// worker's result is what settles the project, and resolving it here as
+    /// well put canonicalization and a Git ancestor walk on the GUI thread for
+    /// every `cd`.
+    fn leave_project_ahead_of_detection(
+        &mut self,
+        tab_id: u64,
+        pane_id: u64,
+        directory: &Path,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let left_project = self.projects.root_for_pane(pane_id).is_some_and(|root| {
-            resolved_root
-                .as_ref()
-                .is_none_or(|resolved| !paths_equal(resolved, root))
+            !detection_keeps_pane_root(
+                directory,
+                root,
+                self.projects.pane_anchors.get(&pane_id),
+                &self.projects.registry,
+            )
         });
-        if left_project {
-            self.projects.clear_pane_root(pane_id);
-            self.projects.invalidate_active_context();
-            if self
-                .projects
-                .offer
-                .as_ref()
-                .is_some_and(|offer| offer.pane_id == pane_id)
-            {
-                self.projects.offer = None;
-            }
-            if self.is_active_pane(tab_id, pane_id) {
-                self.activate_current_project(window, cx);
-            }
+        if !left_project {
+            return;
         }
+        self.projects.clear_pane_root(pane_id);
+        self.projects.invalidate_active_context();
+        if self
+            .projects
+            .offer
+            .as_ref()
+            .is_some_and(|offer| offer.pane_id == pane_id)
+        {
+            self.projects.offer = None;
+        }
+        if self.is_active_pane(tab_id, pane_id) {
+            self.activate_current_project(window, cx);
+        }
+    }
+
+    fn spawn_project_detection(
+        &mut self,
+        tab_id: u64,
+        pane_id: u64,
+        directory: PathBuf,
+        generation: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let registry = self.projects.registry.clone();
         let loaded_roots = self.projects.configs.keys().cloned().collect::<Vec<_>>();
         let base = self.project_detection_base.clone();
@@ -657,14 +897,32 @@ impl Zetta {
             return;
         }
 
-        match result.registered_root {
+        // A registry replaced since the job started without invalidating
+        // detections (a project removed in settings) must not have the pane
+        // re-enter what it no longer lists.
+        let registered_root = result
+            .registered_root
+            .filter(|root| self.projects.registry.contains(root));
+        match registered_root {
             Some(registered_root) => {
                 let config_root = result
                     .config_root
                     .unwrap_or_else(|| registered_root.clone());
+                if self
+                    .projects
+                    .root_for_pane(pane_id)
+                    .is_none_or(|root| !paths_equal(root, &config_root))
+                {
+                    self.projects.clear_pane_root(pane_id);
+                    self.projects.invalidate_active_context();
+                }
                 self.projects
                     .pane_roots
                     .insert(pane_id, config_root.clone());
+                match result.anchor {
+                    Some(anchor) => self.projects.pane_anchors.insert(pane_id, anchor),
+                    None => self.projects.pane_anchors.remove(&pane_id),
+                };
                 if let Some(config) = result.config {
                     match config {
                         Ok(config) => {
@@ -689,7 +947,10 @@ impl Zetta {
                 }
             }
             None => {
-                self.projects.clear_pane_root(pane_id);
+                if self.projects.root_for_pane(pane_id).is_some() {
+                    self.projects.clear_pane_root(pane_id);
+                    self.projects.invalidate_active_context();
+                }
             }
         }
         if self.projects.offer.as_ref().is_some_and(|offer| {
@@ -702,7 +963,7 @@ impl Zetta {
             self.projects.offer = None;
         }
         if let Some(root) = result.offer_root
-            && resolve_registered_project_root(&root, &self.projects.registry).is_none()
+            && !self.projects.registry.contains(&root)
             && !self.projects.offer_is_dismissed(&root)
         {
             self.projects.offer = Some(ProjectOffer { root, pane_id });

@@ -1,5 +1,5 @@
 use super::*;
-use crate::project::PROJECT_CONFIG_DIRECTORY;
+use crate::project::{PROJECT_CONFIG_DIRECTORY, resolve_registered_project};
 use std::{path::Path, process::Command};
 
 fn git(directory: &Path, arguments: &[&str]) {
@@ -97,6 +97,22 @@ fn registered_main_projects_resolve_managed_worktree_aliases_and_local_configs()
     assert_eq!(detection.registered_root, Some(main.clone()));
     assert!(detection.config.unwrap().is_ok());
     assert!(detection.offer_root.is_none());
+    // The worktree sits beside the main repository, so only the anchor the
+    // detection learned keeps a `cd` around the worktree inside the project.
+    let anchor = detection.anchor.unwrap();
+    let elsewhere_in_worktree = linked.join("docs");
+    assert!(!detection_keeps_pane_root(
+        &elsewhere_in_worktree,
+        &main,
+        None,
+        &registry
+    ));
+    assert!(detection_keeps_pane_root(
+        &fs::canonicalize(&linked).unwrap().join("docs"),
+        &main,
+        Some(&anchor),
+        &registry
+    ));
 
     fs::create_dir_all(linked.join(PROJECT_CONFIG_DIRECTORY)).unwrap();
     fs::write(
@@ -183,6 +199,7 @@ fn discovery_offers_an_unregistered_repository_and_an_unreachable_path_stays_lex
     let result = detect_project_for_directory(&missing, &registry, &base, &[]);
     assert!(result.registered_root.is_none());
     assert!(result.offer_root.is_none());
+    assert!(result.anchor.is_none());
 }
 
 #[test]
@@ -218,6 +235,152 @@ fn detection_leaves_a_registered_project_when_the_shell_moves_outside_it() {
     assert!(result.registered_root.is_none());
     assert!(result.config.is_none());
     assert!(result.offer_root.is_none());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_cd_through_a_symlinked_spelling_of_the_project_keeps_its_root_lexically() {
+    let temporary = tempfile::tempdir().unwrap();
+    let real = temporary.path().join("real");
+    let root = real.join("project");
+    fs::create_dir_all(root.join("src")).unwrap();
+    let alias = temporary.path().join("alias");
+    std::os::unix::fs::symlink(&real, &alias).unwrap();
+    let mut registry = ProjectRegistry::load_from(temporary.path().join("registry.json")).unwrap();
+    registry.add(&root).unwrap();
+    let root = fs::canonicalize(&root).unwrap();
+
+    let reported = alias.join("project").join("src");
+    let detection = detect_project_for_directory(&reported, &registry, &base_config(), &[]);
+    assert_eq!(detection.config_root, Some(root.clone()));
+    let anchor = detection.anchor.unwrap();
+    assert_eq!(anchor.reported, alias.join("project"));
+    assert_eq!(anchor.resolved, root);
+
+    // Not created: the decision must not need the filesystem to answer it.
+    let elsewhere = alias.join("project").join("not").join("created");
+    assert!(!detection_keeps_pane_root(
+        &elsewhere, &root, None, &registry
+    ));
+    assert!(detection_keeps_pane_root(
+        &elsewhere,
+        &root,
+        Some(&anchor),
+        &registry
+    ));
+    assert!(!detection_keeps_pane_root(
+        &alias.join("other"),
+        &root,
+        Some(&anchor),
+        &registry
+    ));
+}
+
+#[test]
+fn a_registered_project_nested_below_the_pane_root_clears_it_ahead_of_detection() {
+    let temporary = tempfile::tempdir().unwrap();
+    let outer = temporary.path().join("outer");
+    let inner = outer.join("inner");
+    fs::create_dir_all(&inner).unwrap();
+    let mut registry = ProjectRegistry::load_from(temporary.path().join("registry.json")).unwrap();
+    registry.add(&outer).unwrap();
+    registry.add(&inner).unwrap();
+    let outer = fs::canonicalize(outer).unwrap();
+    let inner = fs::canonicalize(inner).unwrap();
+
+    assert!(detection_keeps_pane_root(
+        &outer.join("src"),
+        &outer,
+        None,
+        &registry
+    ));
+    assert!(!detection_keeps_pane_root(
+        &inner.join("src"),
+        &outer,
+        None,
+        &registry
+    ));
+    assert!(detection_keeps_pane_root(
+        &inner.join("src"),
+        &inner,
+        None,
+        &registry
+    ));
+    assert!(!detection_keeps_pane_root(
+        &temporary.path().join("elsewhere"),
+        &outer,
+        None,
+        &registry
+    ));
+}
+
+#[test]
+fn an_offer_for_a_repository_the_registry_already_resolves_is_filtered_by_the_worker() {
+    let temporary = tempfile::tempdir().unwrap();
+    let main = temporary.path().join("project");
+    let linked = temporary.path().join("linked");
+    fs::create_dir(&main).unwrap();
+    git(&main, &["init", "-q", "-b", "main"]);
+    git(&main, &["config", "user.email", "test@example.invalid"]);
+    git(&main, &["config", "user.name", "Zetta Test"]);
+    fs::write(main.join("file"), "base\n").unwrap();
+    git(&main, &["add", "file"]);
+    git(
+        &main,
+        &["-c", "commit.gpgsign=false", "commit", "-qm", "initial"],
+    );
+    // An ordinary branch, so the directory itself does not resolve through
+    // the managed-worktree route; only its repository root would.
+    git(
+        &main,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "feature",
+            linked.to_str().unwrap(),
+        ],
+    );
+    fs::create_dir_all(linked.join(PROJECT_CONFIG_DIRECTORY)).unwrap();
+    fs::write(ProjectConfig::path_for(&linked), "{}\n").unwrap();
+    let mut registry = ProjectRegistry::load_from(temporary.path().join("registry.json")).unwrap();
+    let child = linked.join("src");
+    fs::create_dir(&child).unwrap();
+
+    let unregistered = detect_project_for_directory(&child, &registry, &base_config(), &[]);
+    assert_eq!(
+        unregistered.offer_root,
+        Some(fs::canonicalize(&linked).unwrap())
+    );
+
+    registry.add(&linked).unwrap();
+    let registered = detect_project_for_directory(&child, &registry, &base_config(), &[]);
+    assert!(registered.registered_root.is_some());
+    assert!(registered.offer_root.is_none());
+}
+
+#[test]
+fn an_inherited_pane_root_carries_its_anchor_and_clearing_drops_it() {
+    let registry = ProjectRegistry::load_from(PathBuf::from("registry.json")).unwrap();
+    let mut projects = ProjectState::new(registry);
+    let root = PathBuf::from("/real/project");
+    let anchor = PaneRootAnchor {
+        reported: PathBuf::from("/alias/project"),
+        resolved: root.clone(),
+        managed_worktree: false,
+    };
+    projects.pane_roots.insert(1, root.clone());
+    projects.pane_anchors.insert(1, anchor.clone());
+
+    projects.inherit_pane_root(1, 2);
+    assert_eq!(projects.pane_anchors.get(&2), Some(&anchor));
+
+    projects.clear_pane_root(2);
+    assert!(!projects.pane_anchors.contains_key(&2));
+    assert_eq!(projects.pane_anchors.get(&1), Some(&anchor));
+    projects.forget_pane(1);
+    assert!(projects.pane_anchors.is_empty());
 }
 
 #[cfg(windows)]

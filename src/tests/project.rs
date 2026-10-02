@@ -145,8 +145,9 @@ fn discovery_stops_at_the_repository_root_and_config_creation_is_non_destructive
     let temporary = tempfile::tempdir().unwrap();
     let nested = temporary.path().join("src").join("nested");
     fs::create_dir_all(&nested).unwrap();
+    let nested = fs::canonicalize(nested).unwrap();
     fs::create_dir(temporary.path().join(".git")).unwrap();
-    assert_eq!(discover_project_config(&nested).unwrap(), None);
+    assert_eq!(discover_project_config_canonical(&nested).unwrap(), None);
 
     let path = ensure_project_config(temporary.path()).unwrap();
     assert_eq!(fs::read_to_string(&path).unwrap(), "{}\n");
@@ -157,7 +158,7 @@ fn discovery_stops_at_the_repository_root_and_config_creation_is_non_destructive
         "{\"theme\":\"One Dark\"}\n"
     );
     assert_eq!(
-        discover_project_config(&nested).unwrap(),
+        discover_project_config_canonical(&nested).unwrap(),
         Some(fs::canonicalize(temporary.path()).unwrap())
     );
 }

@@ -115,6 +115,10 @@ pub(crate) struct TerminalPane {
     /// entries are still retaining this pane's region.
     pub(crate) base_exited: bool,
     pub(crate) wsl_cwd_file: Option<PathBuf>,
+    /// The last directory read from `wsl_cwd_file` off the GUI thread, for
+    /// callbacks that must not read the file themselves; see
+    /// [`Self::wsl_observed_working_directory`].
+    pub(crate) wsl_cwd_observation: Option<WslCwdObservation>,
     pub(crate) pending_command: Option<String>,
     /// The command most recently reported by shell integration. Unlike a
     /// foreground process argv this is shell input the user actually started,
@@ -139,6 +143,28 @@ pub(crate) struct TerminalPane {
     /// a pane on SSH stalls with the forward while its neighbours roam, and a
     /// notice is long gone by the time that is noticed.
     pub(crate) transport_fallback: Option<gpui::SharedString>,
+}
+
+/// One read of a WSL pane's legacy working-directory tracking file.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct WslCwdObservation {
+    pub(crate) file: PathBuf,
+    pub(crate) directory: Option<String>,
+}
+
+impl WslCwdObservation {
+    /// Reads `file`. Blocking: run it on the background executor.
+    pub(crate) fn read(file: PathBuf) -> Self {
+        let directory = read_wsl_cwd_file(&file);
+        Self { file, directory }
+    }
+}
+
+fn read_wsl_cwd_file(path: &Path) -> Option<String> {
+    let directory = fs::read_to_string(path).ok()?;
+    let directory = directory.trim_end_matches(['\r', '\n']);
+    (directory.starts_with('/') && !directory.contains(['\r', '\n', '\0']))
+        .then(|| directory.to_owned())
 }
 
 pub(crate) fn select_current_directory(
@@ -295,6 +321,7 @@ impl TerminalPane {
             exit: None,
             base_exited: false,
             wsl_cwd_file: None,
+            wsl_cwd_observation: None,
             pending_command: None,
             active_command: None,
             detected_worktree_title: None,
@@ -354,11 +381,55 @@ impl TerminalPane {
             return Some(directory);
         }
 
-        let path = self.wsl_cwd_file.as_ref()?;
-        let directory = fs::read_to_string(path).ok()?;
-        let directory = directory.trim_end_matches(['\r', '\n']);
-        (directory.starts_with('/') && !directory.contains(['\r', '\n', '\0']))
-            .then(|| directory.to_owned())
+        read_wsl_cwd_file(self.wsl_cwd_file.as_ref()?)
+    }
+
+    /// [`Self::wsl_working_directory`] for a callback on the GUI thread: the
+    /// shell's reported directory when there is one, which stays
+    /// authoritative, and otherwise the last tracking-file observation rather
+    /// than a read of the file. An observation of a different file than the
+    /// pane now tracks is ignored.
+    pub(crate) fn wsl_observed_working_directory(&self, cx: &App) -> Option<String> {
+        if !is_wsl_shell(&self.profile.command) {
+            return None;
+        }
+        if let Some(directory) = self.terminal.as_ref().and_then(|terminal| {
+            terminal
+                .read(cx)
+                .reported_working_directory()
+                .map(str::to_owned)
+        }) {
+            return Some(directory);
+        }
+        let observation = self.wsl_cwd_observation.as_ref()?;
+        (self.wsl_cwd_file.as_ref() == Some(&observation.file))
+            .then(|| observation.directory.clone())
+            .flatten()
+    }
+
+    /// Whether a callback should refresh the tracking-file observation: a WSL
+    /// pane whose shell is not reporting its directory itself.
+    pub(crate) fn wsl_cwd_file_needs_observing(&self, cx: &App) -> Option<PathBuf> {
+        if !is_wsl_shell(&self.profile.command) {
+            return None;
+        }
+        let reported = self
+            .terminal
+            .as_ref()
+            .is_some_and(|terminal| terminal.read(cx).reported_working_directory().is_some());
+        (!reported).then(|| self.wsl_cwd_file.clone()).flatten()
+    }
+
+    /// Records a tracking-file read, returning whether it changed what
+    /// [`Self::wsl_observed_working_directory`] answers.
+    pub(crate) fn observe_wsl_cwd_file(&mut self, observation: WslCwdObservation) -> bool {
+        if self.wsl_cwd_file.as_ref() != Some(&observation.file)
+            || self.wsl_cwd_observation.as_ref() == Some(&observation)
+        {
+            return false;
+        }
+        self.wsl_cwd_observation = Some(observation);
+        true
     }
 
     /// Selects the native directory represented by this pane and whether that

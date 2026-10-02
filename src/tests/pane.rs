@@ -115,3 +115,45 @@ fn terminal_environment_identifies_zetta() {
     );
     assert!(!env.contains_key("ZED_TERM"));
 }
+
+fn wsl_test_pane() -> TerminalPane {
+    let profile = Profile {
+        name: "WSL: Ubuntu".to_owned(),
+        command: Shell::WithArguments {
+            program: "wsl.exe".to_owned(),
+            args: vec!["--distribution".to_owned(), "Ubuntu".to_owned()],
+            title_override: None,
+        },
+        theme: None,
+        dark_theme: None,
+        icon: ProfileIcon::default(),
+    };
+    TerminalPane::new(1, profile)
+}
+
+#[test]
+fn a_wsl_cwd_observation_is_recorded_only_when_it_changes_the_tracked_file() {
+    let temporary = tempfile::tempdir().unwrap();
+    let file = temporary.path().join("cwd");
+    let mut pane = wsl_test_pane().with_wsl_cwd_file(Some(file.clone()));
+
+    fs::write(&file, "/home/me/project\n").unwrap();
+    let observation = WslCwdObservation::read(file.clone());
+    assert_eq!(observation.directory.as_deref(), Some("/home/me/project"));
+    assert!(pane.observe_wsl_cwd_file(observation.clone()));
+    assert!(!pane.observe_wsl_cwd_file(observation));
+
+    fs::write(&file, "/home/me\n").unwrap();
+    assert!(pane.observe_wsl_cwd_file(WslCwdObservation::read(file.clone())));
+
+    // A read of a file the pane no longer tracks is stale.
+    let other = temporary.path().join("other");
+    fs::write(&other, "/tmp\n").unwrap();
+    assert!(!pane.observe_wsl_cwd_file(WslCwdObservation::read(other)));
+    assert_eq!(
+        pane.wsl_cwd_observation
+            .as_ref()
+            .and_then(|observation| observation.directory.as_deref()),
+        Some("/home/me")
+    );
+}

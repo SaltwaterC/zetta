@@ -31,7 +31,15 @@ pub(crate) fn terminal_event_requires_worktree_detection(event: &TerminalEvent) 
 /// directory that simply is not a matching worktree, so an explicit WSL or
 /// remote title is not cleared by an inspection that the host cannot perform.
 pub(crate) fn detect_worktree_metadata(path: &Path) -> Result<Option<WorktreeMetadata>> {
-    let Some((root, commondir, branch)) = inspect_linked_worktree(path)? else {
+    detect_worktree_metadata_canonical(&canonical_terminal_directory(path)?)
+}
+
+/// [`detect_worktree_metadata`] for a directory the caller has already
+/// canonicalized and confirmed is a directory.
+pub(crate) fn detect_worktree_metadata_canonical(
+    directory: &Path,
+) -> Result<Option<WorktreeMetadata>> {
+    let Some((root, commondir, branch)) = inspect_canonical_linked_worktree(directory)? else {
         return Ok(None);
     };
     let common_gitdir = read_gitdir_metadata_pointer(&commondir)?;
@@ -57,7 +65,7 @@ pub(crate) fn detect_worktree_metadata(path: &Path) -> Result<Option<WorktreeMet
     }))
 }
 
-fn inspect_linked_worktree(path: &Path) -> Result<Option<(PathBuf, PathBuf, String)>> {
+fn canonical_terminal_directory(path: &Path) -> Result<PathBuf> {
     let directory = fs::canonicalize(path)
         .with_context(|| format!("canonicalizing terminal directory {}", path.display()))?;
     anyhow::ensure!(
@@ -67,8 +75,17 @@ fn inspect_linked_worktree(path: &Path) -> Result<Option<(PathBuf, PathBuf, Stri
         "terminal working directory {} is not a directory",
         directory.display()
     );
+    Ok(directory)
+}
 
-    let Some(git_marker) = find_git_marker(&directory)? else {
+fn inspect_linked_worktree(path: &Path) -> Result<Option<(PathBuf, PathBuf, String)>> {
+    inspect_canonical_linked_worktree(&canonical_terminal_directory(path)?)
+}
+
+fn inspect_canonical_linked_worktree(
+    directory: &Path,
+) -> Result<Option<(PathBuf, PathBuf, String)>> {
+    let Some(git_marker) = find_git_marker(directory)? else {
         return Ok(None);
     };
     let marker_metadata = fs::metadata(&git_marker)

@@ -13,7 +13,9 @@ use crate::config::{Config, platform_config_dir};
 use crate::project_commands::{
     RegisteredProjectCommand, parse_project_commands, validate_environment_entry,
 };
-use crate::worktree_detection::{WorktreeMetadata, detect_worktree_metadata};
+use crate::worktree_detection::{
+    WorktreeMetadata, detect_worktree_metadata, detect_worktree_metadata_canonical,
+};
 
 pub(crate) const PROJECT_CONFIG_DIRECTORY: &str = ".zetta";
 pub(crate) const PROJECT_CONFIG_FILE: &str = "config.json";
@@ -308,6 +310,15 @@ impl ProjectRegistry {
             .max_by_key(|root| root.components().count())
     }
 
+    /// [`Self::matching_root`] without touching the filesystem: for a
+    /// directory that is already canonical, or a caller that must not block.
+    pub(crate) fn matching_root_lexically(&self, directory: &Path) -> Option<&PathBuf> {
+        self.roots
+            .iter()
+            .filter(|root| path_is_within_lexically(directory, root))
+            .max_by_key(|root| root.components().count())
+    }
+
     pub(crate) fn add(&mut self, root: &Path) -> Result<bool> {
         let root = canonical_project_root(root)?;
         if self.contains(&root) {
@@ -382,6 +393,40 @@ pub(crate) fn resolve_registered_project(
     }
 }
 
+/// [`resolve_registered_project`] for a directory the caller has already
+/// canonicalized, so nothing here canonicalizes it again: the worktree
+/// inspection and every registry comparison reuse that one answer. That is
+/// what keeps a slow mount or a WSL UNC path to a single round trip per job.
+pub(crate) fn resolve_registered_project_canonical(
+    directory: &Path,
+    registry: &ProjectRegistry,
+) -> ProjectRootResolution {
+    let worktree = detect_worktree_metadata_canonical(directory).ok().flatten();
+    if let Some(worktree) = worktree
+        && let Some(root) = registry
+            .matching_root_lexically(&worktree.main_root)
+            .cloned()
+    {
+        let config_root = if ProjectConfig::path_for(&worktree.root).is_file() {
+            worktree.root.clone()
+        } else {
+            root.clone()
+        };
+        return ProjectRootResolution {
+            root: Some(root),
+            config_root: Some(config_root),
+            managed_worktree: Some(worktree),
+        };
+    }
+
+    let root = registry.matching_root_lexically(directory).cloned();
+    ProjectRootResolution {
+        config_root: root.clone(),
+        root,
+        managed_worktree: None,
+    }
+}
+
 pub(crate) fn resolve_registered_project_root(
     directory: &Path,
     registry: &ProjectRegistry,
@@ -448,7 +493,12 @@ pub(crate) fn canonical_project_root(root: &Path) -> Result<PathBuf> {
 }
 
 pub(crate) fn find_repository_root(directory: &Path) -> Result<Option<PathBuf>> {
-    let directory = canonical_project_root(directory)?;
+    find_repository_root_canonical(&canonical_project_root(directory)?)
+}
+
+/// [`find_repository_root`] for a directory already known to be a canonical
+/// directory.
+fn find_repository_root_canonical(directory: &Path) -> Result<Option<PathBuf>> {
     for ancestor in directory.ancestors() {
         let marker = ancestor.join(".git");
         match fs::symlink_metadata(&marker) {
@@ -463,8 +513,10 @@ pub(crate) fn find_repository_root(directory: &Path) -> Result<Option<PathBuf>> 
     Ok(None)
 }
 
-pub(crate) fn discover_project_config(directory: &Path) -> Result<Option<PathBuf>> {
-    let Some(root) = find_repository_root(directory)? else {
+/// The repository root above a canonical directory, when that root has a
+/// project configuration file.
+pub(crate) fn discover_project_config_canonical(directory: &Path) -> Result<Option<PathBuf>> {
+    let Some(root) = find_repository_root_canonical(directory)? else {
         return Ok(None);
     };
     Ok(ProjectConfig::path_for(&root).is_file().then_some(root))
@@ -491,6 +543,17 @@ pub(crate) fn path_is_within(path: &Path, root: &Path) -> bool {
         // Paths that cannot be canonicalized (deleted directories, WSL UNC
         // paths) stay lexical.
         path.starts_with(root) || fs::canonicalize(path).is_ok_and(|path| path.starts_with(root))
+    }
+}
+
+/// [`path_is_within`] without the canonicalizing retry, so it never touches
+/// the filesystem. Correct for paths already spelled the same way as `root`;
+/// a symlinked spelling simply does not match.
+pub(crate) fn path_is_within_lexically(path: &Path, root: &Path) -> bool {
+    if cfg!(windows) {
+        path_is_within(path, root)
+    } else {
+        path.starts_with(root)
     }
 }
 
