@@ -829,11 +829,15 @@ impl Zetta {
     /// snapshot before any shared mutation can be made. The stable pane ids are
     /// paired with this window's ids once, then every later event uses that
     /// translation rather than guessing from the order panes happen to have.
+    ///
+    /// The subscription and snapshot were fetched off this thread by
+    /// [`super::handover::fetch_shared_binding`]; this only installs them.
     #[cfg(feature = "zmux")]
-    pub(super) fn bind_shared_session(
+    pub(super) fn install_shared_binding(
         &mut self,
         tab_id: u64,
         runtime: MuxRuntime,
+        binding: super::handover::SharedBinding,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<()> {
@@ -841,17 +845,7 @@ impl Zetta {
             .mux_panes
             .session_id(tab_id)
             .with_context(|| format!("tab {tab_id} has no shared multiplexer session"))?;
-        // Subscribe before fetching the snapshot. An operation committed in
-        // between is then queued behind the snapshot instead of being lost.
-        runtime.shared_reports().forget(session_id);
-        let receiver = runtime.shared_reports().register(session_id);
-        let state = match runtime.client().shared_snapshot(session_id) {
-            Ok(state) => state,
-            Err(error) => {
-                runtime.shared_reports().forget(session_id);
-                return Err(error);
-            }
-        };
+        let super::handover::SharedBinding { receiver, state } = binding;
         let mappings = self
             .tabs
             .iter()
@@ -865,8 +859,13 @@ impl Zetta {
             })
             .collect::<Vec<_>>();
         let key = SharedSessionKey::new(&runtime, session_id);
-        self.shared_collaboration
-            .bind(&key, tab_id, state, mappings)?;
+        if let Err(error) = self
+            .shared_collaboration
+            .bind(&key, tab_id, state, mappings)
+        {
+            runtime.shared_reports().forget(session_id);
+            return Err(error);
+        }
         self.watch_shared_session_with_receiver(&key, runtime, receiver, window, cx);
         Ok(())
     }

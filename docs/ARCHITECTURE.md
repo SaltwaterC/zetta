@@ -264,7 +264,10 @@ keyboard and the mouse came to do different things; do not add one.
   `background_session_ui/observers.rs` (what a window watches on a background
   pane, and the catalog it publishes),
   `background_session_ui/multiplexer.rs` (handing a session to `zmux` and
-  attaching one from it),
+  attaching one from it), `background_session_ui/handover.rs` (the off-thread
+  half of detaching and sharing: the work bundles a worker thread runs, the
+  per-tab registry of transitions in flight, and their generation-checked
+  commits; a closing window settles its transitions synchronously here),
   `background_session_ui/collaboration.rs` (the window-side model for a
   daemon-owned shared session: `zmux` addresses panes by stable ids while every
   window has its own pane-id namespace, and keeping that translation here makes

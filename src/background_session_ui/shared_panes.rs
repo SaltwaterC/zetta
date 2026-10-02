@@ -544,21 +544,41 @@ impl Zetta {
                 }
             };
             let attachment_client_id = attached.attachment_client_id().clone();
-            let shown = this
-                .update_in(cx, |this, window, cx| {
-                    this.complete_grant_conversion(
-                        ids,
-                        attached,
-                        attachment_client_id.clone(),
-                        terminal,
-                        options,
-                        &runtime,
-                        window,
-                        cx,
-                    )
+            // The relay's last bytes are older than anything the pty will
+            // produce, so they reach the grid first. Retired here, drained off
+            // this thread, and only then is the pty adopted; input typed in
+            // between is held for it.
+            let retired = this
+                .update(cx, |this, cx| {
+                    this.pane_still_shows(ids, &terminal)
+                        .then(|| terminal.update(cx, |terminal, _| terminal.retire_byte_stream()))
                 })
-                .unwrap_or(false);
+                .ok()
+                .flatten();
+            let drained = match retired {
+                Some(retired) => cx
+                    .background_spawn(async move { retired.finish() })
+                    .await
+                    .is_ok(),
+                None => false,
+            };
+            let shown = drained
+                && this
+                    .update_in(cx, |this, window, cx| {
+                        this.complete_grant_conversion(
+                            ids,
+                            attached,
+                            attachment_client_id.clone(),
+                            terminal.clone(),
+                            options,
+                            &runtime,
+                            window,
+                            cx,
+                        )
+                    })
+                    .unwrap_or(false);
             if !shown {
+                terminal.update(cx, |terminal, _| terminal.discard_held_input());
                 // Nothing in this window reads the pane now — its terminal
                 // would not adopt the descriptor, or the window went away while
                 // the answer was in flight — and the multiplexer stopped
@@ -596,6 +616,10 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        // The pane may have closed, or left the window, while the relay drained.
+        if !self.pane_still_shows(ids, &terminal) {
+            return false;
+        }
         let handover = crate::mux::attached_pane_handover_with_secret(
             attached,
             runtime.client().clone(),
@@ -631,13 +655,25 @@ impl Zetta {
         true
     }
 
+    /// Whether `terminal` is still the one this window shows for the pane —
+    /// what a handover that waited has to confirm before committing.
+    fn pane_still_shows(&self, ids: MuxPaneIds, terminal: &Entity<Terminal>) -> bool {
+        self.tabs
+            .iter()
+            .find(|tab| tab.id == ids.tab_id)
+            .and_then(|tab| tab.pane(ids.pane_id))
+            .and_then(|pane| pane.terminal.as_ref())
+            .is_some_and(|shown| shown == terminal)
+    }
+
     /// The multiplexer asked this window to hand an exclusively attached pane
     /// over: another client attached, and the pane is becoming shared.
     ///
-    /// The holder has to stop reading the pty — synchronously, so the
-    /// daemon's drain cannot lose output to this window's own loop — snapshot
-    /// the grid, and re-attach as a shared client whose terminal reads the
-    /// daemon's relay instead.
+    /// The holder has to stop reading the pty — and see its loop end before
+    /// anything is sent, so the daemon's drain cannot lose output to this
+    /// window's own loop — snapshot the grid, and re-attach as a shared client
+    /// whose terminal reads the daemon's relay instead. Only the retirement
+    /// happens on this thread; the wait, the snapshot and the requests do not.
     pub(crate) fn handle_pane_revoke(
         &mut self,
         ids: MuxPaneIds,
@@ -679,22 +715,14 @@ impl Zetta {
             return;
         };
         // The snapshot has to be a stable picture of what the daemon will
-        // retain, and the pty loop is the only other reader of the master.
-        if terminal
-            .update(cx, |terminal, _| terminal.stop_pty_loop())
-            .is_err()
-        {
-            let client = runtime.client().clone();
-            cx.background_spawn(async move {
-                give_pane_back(&client, session_id, mux_pane_id, &attachment_client_id);
-            })
-            .detach();
-            return;
-        }
-        let (snapshot, columns, lines) = terminal.update(cx, |terminal, _| {
+        // retain, and the pty loop is the only other reader of the master: it
+        // is retired here and finished, then snapshotted, off this thread.
+        // Input typed in between is held for the relay.
+        let (retired, source, columns, lines) = terminal.update(cx, |terminal, _| {
             let bounds = terminal.last_content().terminal_bounds;
             (
-                terminal.ansi_snapshot(SNAPSHOT_LINES),
+                terminal.retire_pty_loop(),
+                terminal.grid_snapshot_source(),
                 bounds.num_columns() as u16,
                 bounds.num_lines() as u16,
             )
@@ -709,6 +737,8 @@ impl Zetta {
         cx.spawn_in(window, async move |this, cx| {
             let outcome = cx
                 .background_spawn(async move {
+                    retired.finish()?;
+                    let snapshot = source.ansi_snapshot(SNAPSHOT_LINES);
                     if let Some((session_id, summary, state)) = refresh
                         && let Err(error) = client.share(session_id, summary, state, None, true)
                     {
@@ -732,6 +762,7 @@ impl Zetta {
                 // it did convert the pane after all, so saying it is safe even
                 // where the failure was only in hearing the answer.
                 log::debug!("the multiplexer handover of pane {mux_pane_id} did not complete");
+                terminal_handle.update(cx, |terminal, _| terminal.discard_held_input());
                 let client = runtime.client().clone();
                 cx.background_spawn(async move {
                     give_pane_back(&client, session_id, mux_pane_id, &attachment_client_id);

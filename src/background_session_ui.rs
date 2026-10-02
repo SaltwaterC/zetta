@@ -11,6 +11,8 @@
 //! - `restore.rs` — rebuilding the tab a returned session becomes.
 //! - `observers.rs` — what a window watches on a background pane.
 //! - `multiplexer.rs` — handing a session to `zmux` and attaching one from it.
+//! - `handover.rs` — the waits and daemon requests of detaching and sharing,
+//!   run off the window's thread and committed back to it.
 //! - `shared_panes.rs` — panes several windows watch at once.
 
 use super::*;
@@ -368,6 +370,8 @@ const SNAPSHOT_LINES: usize = 2_000;
 
 mod detach;
 #[cfg(feature = "zmux")]
+pub(crate) mod handover;
+#[cfg(feature = "zmux")]
 pub(crate) mod image_paste;
 #[cfg(feature = "zmux")]
 mod multiplexer;
@@ -380,7 +384,26 @@ pub(crate) mod shared_panes;
 pub(crate) mod zosh_panes;
 
 #[cfg(feature = "zmux")]
+use multiplexer::PreparedDetach;
+#[cfg(feature = "zmux")]
 pub(crate) use multiplexer::{AttachOutcomeSummary, RemoteAttachOutcome, load_remote_attach};
+
+/// Nothing to prepare: without the multiplexer a tab is never handed over.
+#[cfg(not(feature = "zmux"))]
+type PreparedDetach = std::convert::Infallible;
+
+/// Where a detached tab goes back to if the daemon refuses it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HandoverOrigin {
+    /// Detached from this window at `index`; a refusal reinserts it there.
+    #[cfg_attr(
+        not(feature = "zmux"),
+        allow(dead_code, reason = "only a daemon can refuse a handover")
+    )]
+    Tab { index: usize, shared: bool },
+    /// Detached because the window is closing; there is nowhere to put it back.
+    WindowClose,
+}
 pub(crate) use reconnect::RemoteSessionRequest;
 
 #[cfg(not(feature = "zmux"))]
@@ -410,9 +433,35 @@ impl Zetta {
         _: &mut Tab,
         _: Option<&SessionAuthentication>,
         _: &mut Context<Self>,
-    ) -> anyhow::Result<bool> {
-        Ok(false)
+    ) -> anyhow::Result<Option<PreparedDetach>> {
+        Ok(None)
     }
+
+    pub(super) fn await_multiplexer_handover(
+        &mut self,
+        _: Tab,
+        _: HandoverOrigin,
+        prepared: PreparedDetach,
+        _: Option<&mut Window>,
+        _: &mut Context<Self>,
+    ) {
+        match prepared {}
+    }
+
+    pub(crate) fn refuse_during_session_handover(&mut self, _: u64, _: &mut Context<Self>) -> bool {
+        false
+    }
+
+    pub(crate) fn settle_session_handover(
+        &mut self,
+        _: u64,
+        _: Option<u64>,
+        _: Option<&mut Window>,
+        _: &mut Context<Self>,
+    ) {
+    }
+
+    pub(crate) fn settle_session_handovers(&mut self, _: &mut Context<Self>) {}
 
     pub(crate) fn attach_multiplexer_session(
         &mut self,

@@ -11,6 +11,14 @@ use super::shared_panes::SharedPaneWriter;
 use super::zosh_panes::{ZoshPaneBuild, build_zosh_pane};
 use crate::remote_pane_transport::{RemotePaneStreams, RemotePaneTransport};
 use crate::session_state::LayoutState;
+use terminal::RetiredReader;
+
+/// A detach ready to run: the work for the background phase, and the stacked
+/// pane mappings it forgot, which a refusal restores.
+pub(crate) struct PreparedDetach {
+    pub(super) work: handover::DetachWork,
+    pub(super) stacked: Vec<(u64, u64)>,
+}
 
 /// The result of the remote data phase. Authentication outcomes contain no
 /// partially attached pane, while a successful result owns every stream needed
@@ -615,20 +623,25 @@ fn attached_tab_pane_id(
 }
 
 impl Zetta {
-    /// Gives a detached tab to the multiplexer to hold.
+    /// Prepares a detached tab to be given to the multiplexer to hold.
     ///
-    /// Returns `false` when explicit `--no-mux` mode selected the legacy
+    /// Returns `None` when explicit `--no-mux` mode selected the legacy
     /// in-process owner. Normal launches return an error when a pane cannot be
     /// handed to the daemon, so backgrounding never silently changes its
     /// lifetime guarantees.
+    ///
+    /// Only the preparation: the readers are retired but not waited for, and
+    /// nothing is sent. [`handover::DetachWork::run`] does both, off this
+    /// thread, and `handover.rs` commits the result. An error returned here
+    /// leaves every pane reading, so the tab is fully usable.
     pub(super) fn hand_session_to_multiplexer(
         &mut self,
         tab: &mut Tab,
         authentication: Option<&SessionAuthentication>,
         cx: &mut Context<Self>,
-    ) -> anyhow::Result<bool> {
+    ) -> anyhow::Result<Option<PreparedDetach>> {
         if self.no_mux {
-            return Ok(false);
+            return Ok(None);
         }
         let (Some(runtime), Some(session_id)) = (
             self.mux_panes
@@ -650,68 +663,87 @@ impl Zetta {
         self.multiplexer_session_summary(tab, session_id, authentication.is_some(), cx)?;
 
         // Stacked terminals are task terminals, not interactive terminals, and
-        // cannot be reattached yet. Stop their readers before releasing their
-        // daemon panes, then leave their durable entries for restore_stack to
-        // mark as failed instead of publishing dangling pane ids.
-        let stacked_mux_panes = tab
+        // cannot be reattached yet. Their daemon panes are released with the
+        // tab, and their durable entries left for restore_stack to mark as
+        // failed instead of publishing dangling pane ids — which is why their
+        // mappings go before the publication is built. A refusal restores the
+        // ones the daemon still holds.
+        let stacked = tab
             .panes
             .iter()
-            .flat_map(|pane| pane.stack.entries.iter().map(|entry| entry.id))
-            .filter_map(|entry_id| {
+            .flat_map(|pane| pane.stack.entries.iter())
+            .filter_map(|entry| {
                 self.mux_panes
-                    .mux_pane_id(entry_id)
-                    .map(|id| (entry_id, id))
+                    .mux_pane_id(entry.id)
+                    .map(|mux_pane_id| (entry.id, mux_pane_id, entry.terminal.clone()))
             })
             .collect::<Vec<_>>();
-        for (entry_id, mux_pane_id) in &stacked_mux_panes {
-            if let Some(terminal) = tab.panes.iter().find_map(|pane| {
-                pane.stack
-                    .entries
-                    .iter()
-                    .find(|entry| entry.id == *entry_id)
-                    .and_then(|entry| entry.terminal.clone())
-            }) {
-                terminal
-                    .update(cx, |terminal, _| terminal.stop_pty_loop())
-                    .context("stopping a stacked terminal before detach")?;
-            }
-            runtime
-                .client()
-                .close_pane(session_id, *mux_pane_id)
-                .with_context(|| format!("closing stacked daemon pane {mux_pane_id}"))?;
+        for (entry_id, _, _) in &stacked {
             self.mux_panes.forget_pane(*entry_id);
         }
+        let (summary, state) =
+            match self.session_publication(tab, session_id, authentication.is_some(), cx) {
+                Ok(publication) => publication,
+                Err(error) => {
+                    for (entry_id, mux_pane_id, _) in &stacked {
+                        self.mux_panes.record(*entry_id, *mux_pane_id);
+                    }
+                    return Err(error);
+                }
+            };
 
         // The screen as the user last saw it. The multiplexer keeps a grid of its
         // own, but it has only been reading this pane while nobody was showing
         // it — everything on screen now was drawn here — so the handover starts
-        // by giving it that screen to carry on from.
-        for pane in &tab.panes {
-            if let Some(terminal) = &pane.terminal {
-                terminal
-                    .update(cx, |terminal, _| terminal.stop_pty_loop())
-                    .context("stopping a terminal before detach")?;
-            }
-        }
-        let snapshots = if runtime.retention().keeps_snapshot() {
-            tab.panes
-                .iter()
-                .filter_map(|pane| {
-                    let mux_pane_id = self.mux_panes.mux_pane_id(pane.id)?;
-                    let terminal = pane.terminal.as_ref()?;
-                    Some((mux_pane_id, terminal.read(cx).ansi_snapshot(SNAPSHOT_LINES)))
+        // by giving it that screen to carry on from. Snapshotted once each
+        // reader has finished, off this thread.
+        let keeps_snapshot = runtime.retention().keeps_snapshot();
+        let panes = tab
+            .panes
+            .iter()
+            .filter_map(|pane| {
+                let terminal = pane.terminal.as_ref()?;
+                let mux_pane_id = self.mux_panes.mux_pane_id(pane.id)?;
+                let (reader, snapshot) = terminal.update(cx, |terminal, _| {
+                    (
+                        terminal.retire_pty_loop(),
+                        keeps_snapshot.then(|| terminal.grid_snapshot_source()),
+                    )
+                });
+                Some(handover::PaneRetirement {
+                    mux_pane_id,
+                    reader,
+                    snapshot,
                 })
-                .collect::<Vec<_>>()
-        } else {
-            Vec::new()
-        };
-
-        let (summary, state) =
-            self.session_publication(tab, session_id, authentication.is_some(), cx)?;
-        runtime
-            .client()
-            .detach(session_id, summary, state, authentication, snapshots)?;
-        Ok(true)
+            })
+            .collect();
+        let stacked_mappings = stacked
+            .iter()
+            .map(|(entry_id, mux_pane_id, _)| (*entry_id, *mux_pane_id))
+            .collect();
+        let stacked = stacked
+            .into_iter()
+            .map(
+                |(entry_id, mux_pane_id, terminal)| handover::StackedRelease {
+                    entry_id,
+                    mux_pane_id,
+                    reader: terminal.map_or_else(RetiredReader::default, |terminal| {
+                        terminal.update(cx, |terminal, _| terminal.retire_pty_loop())
+                    }),
+                },
+            )
+            .collect();
+        Ok(Some(PreparedDetach {
+            work: handover::DetachWork {
+                daemon: runtime.client().clone(),
+                session_id,
+                stacked,
+                panes,
+                publication: handover::SessionPublication { summary, state },
+                authentication: authentication.cloned(),
+            },
+            stacked: stacked_mappings,
+        }))
     }
 
     /// The public summary always uses daemon IDs; the opaque tab state retains

@@ -37,8 +37,6 @@ impl MuxPanes {
         false
     }
 
-    pub(crate) fn forget_pane(&mut self, _: u64) {}
-
     pub(crate) fn forget_tab(&mut self, _: u64) {}
 }
 

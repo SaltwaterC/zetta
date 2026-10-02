@@ -364,68 +364,28 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        #[cfg(not(feature = "zmux"))]
-        let _ = window;
         let Some(index) = self.tabs.iter().position(|tab| tab.id == tab_id) else {
             return;
         };
+        if self.refuse_during_session_handover(tab_id, cx) {
+            return;
+        }
         let previous_shared = self.tabs[index].shared;
         // The serialized publication must describe the state the daemon is
-        // being asked to enter. Roll it back below if the request is refused.
+        // being asked to enter. The commit rolls it back if the request is
+        // refused.
         self.tabs[index].shared = offered;
-        match self.publish_session_offer(index, offered, authentication, cx) {
-            Ok(true) => {
-                #[cfg(feature = "zmux")]
-                let setup = if offered {
-                    let runtime = self
-                        .mux_panes
-                        .runtime_for_tab(tab_id)
-                        .or_else(|| self.mux.clone());
-                    runtime.map_or_else(
-                        || Err(anyhow::anyhow!("shared tab has no multiplexer runtime")),
-                        |runtime| self.bind_shared_session(tab_id, runtime, window, cx),
-                    )
-                } else {
-                    self.forget_shared_session(tab_id);
-                    Ok(())
-                };
-                #[cfg(not(feature = "zmux"))]
-                let setup: anyhow::Result<()> = Ok(());
-                let setup_succeeded = match setup {
-                    Ok(()) => true,
-                    Err(error) => {
-                        self.show_error_notice(
-                            format!("Could not initialize shared tab collaboration: {error:#}"),
-                            cx,
-                        );
-                        false
-                    }
-                };
-                self.finish_background_session_change(cx);
-                // Nothing about the tab changes when it is shared, so without
-                // saying so the toggle has no visible effect at all beyond a
-                // checkmark in a menu that has already closed.
-                if setup_succeeded {
-                    self.show_notice(
-                        if offered {
-                            "This tab can now be joined from another Zetta window."
-                        } else {
-                            "This tab is no longer shared, and belongs to this window again."
-                        },
-                        cx,
-                    );
-                }
+        match self.prepare_session_offer(index, offered, authentication, cx) {
+            Ok(Some(work)) => {
+                self.await_session_offer(tab_id, offered, previous_shared, work, window, cx);
             }
-            Ok(false) => {
+            Ok(None) => {
                 self.tabs[index].shared = previous_shared;
                 self.show_notice(
                     "Sharing requires the session multiplexer; this tab is running with --no-mux.",
                     cx,
                 );
             }
-            // A refused *unshare* is guidance, not a failure: the multiplexer only
-            // scopes a session back to one window while one window has it, and it
-            // says which. The tab stays shared, which is what the menu then shows.
             Err(error) if !offered => {
                 self.tabs[index].shared = previous_shared;
                 self.show_error_notice(format!("{error:#}"), cx);
@@ -438,19 +398,20 @@ impl Zetta {
         cx.notify();
     }
 
-    /// Tells the multiplexer whether this tab's session is on offer.
+    /// Prepares telling the multiplexer whether this tab's session is on offer.
     ///
-    /// Returns `false` when the tab has no multiplexer session at all — a pane
+    /// Returns `None` when the tab has no multiplexer session at all — a pane
     /// that fell back to a local process — because there is then nothing another
-    /// window could attach to.
+    /// window could attach to. The requests themselves are made by
+    /// [`handover::OfferWork::run`], off this thread.
     #[cfg(feature = "zmux")]
-    fn publish_session_offer(
+    fn prepare_session_offer(
         &self,
         index: usize,
         offered: bool,
         authentication: Option<SessionAuthentication>,
         cx: &App,
-    ) -> anyhow::Result<bool> {
+    ) -> anyhow::Result<Option<handover::OfferWork>> {
         let tab = &self.tabs[index];
         let (Some(runtime), Some(session_id)) = (
             self.mux_panes
@@ -458,10 +419,10 @@ impl Zetta {
                 .or_else(|| self.mux.clone()),
             self.mux_panes.session_id(tab.id),
         ) else {
-            return Ok(false);
+            return Ok(None);
         };
         if runtime.is_remote() {
-            return Ok(false);
+            return Ok(None);
         }
         let protected = authentication.is_some()
             || tab
@@ -476,7 +437,7 @@ impl Zetta {
         // leaves the secret it has in place. The sealed key, when there is one,
         // travels inside the authentication so it cannot be separated from the
         // verifier it belongs to.
-        if offered && runtime.retention().keeps_snapshot() {
+        let checkpoints = if offered && runtime.retention().keeps_snapshot() {
             // An exclusively attached pane is read by this window, so the
             // daemon deliberately has no retained screen for it. Checkpoint
             // each live pane before publishing the offer; otherwise a daemon
@@ -484,48 +445,57 @@ impl Zetta {
             // pane. Panes already relayed through a shared connection are
             // already retained by the daemon and cannot accept an exclusive
             // checkpoint from this window.
-            let snapshots = tab
-                .panes
+            tab.panes
                 .iter()
                 .filter(|pane| !self.pane_is_relayed(pane.id))
                 .filter_map(|pane| {
                     let mux_pane_id = self.mux_panes.mux_pane_id(pane.id)?;
                     let terminal = pane.terminal.as_ref()?.read(cx);
                     let bounds = terminal.last_content().terminal_bounds;
-                    Some((
+                    Some(handover::PaneCheckpoint {
                         mux_pane_id,
-                        terminal.ansi_snapshot(SNAPSHOT_LINES),
-                        bounds.num_columns() as u16,
-                        bounds.num_lines() as u16,
-                    ))
+                        source: terminal.grid_snapshot_source(),
+                        columns: bounds.num_columns() as u16,
+                        lines: bounds.num_lines() as u16,
+                    })
                 })
-                .collect::<Vec<_>>();
-            for (mux_pane_id, snapshot, columns, lines) in snapshots {
-                runtime
-                    .client()
-                    .send_snapshot(session_id, mux_pane_id, snapshot, columns, lines)
-                    .with_context(|| {
-                        format!(
-                            "checkpointing pane {mux_pane_id} before sharing session {session_id}"
-                        )
-                    })?;
-            }
-        }
-        runtime
-            .client()
-            .share(session_id, summary, state, authentication.as_ref(), offered)?;
-        Ok(true)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        Ok(Some(handover::OfferWork {
+            daemon: runtime.client().clone(),
+            reports: runtime.shared_reports().clone(),
+            session_id,
+            offered,
+            checkpoints,
+            publication: handover::SessionPublication { summary, state },
+            authentication,
+        }))
     }
 
     #[cfg(not(feature = "zmux"))]
-    fn publish_session_offer(
+    fn prepare_session_offer(
         &self,
         _: usize,
         _: bool,
         _: Option<SessionAuthentication>,
         _: &App,
-    ) -> anyhow::Result<bool> {
-        Ok(false)
+    ) -> anyhow::Result<Option<std::convert::Infallible>> {
+        Ok(None)
+    }
+
+    #[cfg(not(feature = "zmux"))]
+    fn await_session_offer(
+        &mut self,
+        _: u64,
+        _: bool,
+        _: bool,
+        work: std::convert::Infallible,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) {
+        match work {}
     }
 
     /// A fresh publication for a tab that is being shared, or `None` when it is
@@ -615,6 +585,9 @@ impl Zetta {
         cx: &mut Context<Self>,
     ) {
         let tab_id = self.tabs[index].id;
+        if self.refuse_during_session_handover(tab_id, cx) {
+            return;
+        }
         self.set_tab_remote_clipboard_paste(tab_id, false, cx);
         self.remote_clipboard_paste_tabs.remove(&tab_id);
         let shared_tab = self.tabs[index].shared || self.has_shared_tab_binding(tab_id);
@@ -639,41 +612,42 @@ impl Zetta {
             self.active_tab = self.tabs.len() - 1;
         }
         self.disable_tab_move_mode_if_unavailable(cx);
-        if let Some(tab) = self.store_background_tab(tab, authentication, cx) {
-            // A normal launch must not silently turn a failed daemon handoff
-            // into an in-process background session. Put the tab back exactly
-            // where it was so the user can retry after fixing the daemon.
+        let origin = HandoverOrigin::Tab {
+            index,
+            shared: shared_tab,
+        };
+        if let Some(tab) = self.store_background_tab(tab, authentication, origin, Some(window), cx)
+        {
+            // Refused before anything was stopped, so the tab is exactly as it
+            // was: put it back where it was, still shared if it was.
             let insertion_index = index.min(self.tabs.len());
             self.tabs.insert(insertion_index, tab);
             self.active_tab = insertion_index;
             #[cfg(feature = "zmux")]
-            if shared_tab {
-                let runtime = self
+            if shared_tab
+                && let Some(runtime) = self
                     .mux_panes
                     .runtime_for_tab(tab_id)
-                    .or_else(|| self.mux.clone());
-                if let Some(runtime) = runtime
-                    && let Err(error) = self.bind_shared_session(tab_id, runtime, window, cx)
-                {
-                    self.show_error_notice(
-                        format!(
-                            "Could not restore shared tab collaboration after the failed handoff: \
-                             {error:#}"
-                        ),
-                        cx,
-                    );
-                }
+                    .or_else(|| self.mux.clone())
+            {
+                self.rebind_shared_session(tab_id, runtime, window, cx);
             }
-            #[cfg(not(feature = "zmux"))]
-            let _ = window;
         }
         self.finish_background_session_change(cx);
     }
 
+    /// Stores a tab that has left this window as a background session.
+    ///
+    /// Returns the tab when it cannot be stored and has to stay in this window.
+    /// A tab handed to the multiplexer is not returned either way: the handover
+    /// finishes off this thread, and its commit in `handover.rs` puts the tab
+    /// back itself if the daemon refuses it.
     pub(crate) fn store_background_tab(
         &mut self,
         mut tab: Tab,
         authentication: Option<SessionAuthentication>,
+        origin: HandoverOrigin,
+        window: Option<&mut Window>,
         cx: &mut Context<Self>,
     ) -> Option<Tab> {
         let terminals = tab
@@ -691,69 +665,21 @@ impl Zetta {
         let tab_id = tab.id;
 
         // Hand the session to the multiplexer, which already owns the
-        // processes. Dropping the tab then drops the PTY descriptors this
-        // process was holding, and the multiplexer resumes reading them.
+        // processes.
         match self.hand_session_to_multiplexer(&mut tab, authentication.as_ref(), cx) {
-            Ok(true) => {
-                let run_registry = crate::run_command::process_run_registry();
-                for pane in &tab.panes {
-                    run_registry.pane_closed(crate::run_command::RunPaneIdentity::new(
-                        tab.attention_id,
-                        pane.routing_id,
-                    ));
-                    for entry in &pane.stack.entries {
-                        run_registry.pane_closed(crate::run_command::RunPaneIdentity::new(
-                            tab.attention_id,
-                            entry.routing_id,
-                        ));
-                    }
-                }
-                #[cfg(feature = "zmux")]
-                {
-                    // Retire the foreground tab's event routes before forgetting
-                    // its pane mappings. Registering the same daemon pane after a
-                    // reconnect replaces these senders; leaving them behind made
-                    // their old watchers wake on channel closure and mistake that
-                    // lifecycle event for a real revoke or grant.
-                    if let Some(runtime) = self
-                        .mux_panes
-                        .runtime_for_tab(tab_id)
-                        .or_else(|| self.mux.clone())
-                    {
-                        for pane in &tab.panes {
-                            let Some(mux_pane_id) = self.mux_panes.mux_pane_id(pane.id) else {
-                                continue;
-                            };
-                            runtime.reporters().forget(mux_pane_id);
-                            runtime.revoke_reporters().forget(mux_pane_id);
-                            runtime.grant_reporters().forget(mux_pane_id);
-                        }
-                    }
-                }
-                self.mux_panes.forget_tab(tab_id);
-                for pane in &tab.panes {
-                    self.mux_panes.forget_pane(pane.id);
-                }
+            Ok(Some(prepared)) => {
+                self.await_multiplexer_handover(tab, origin, prepared, window, cx);
                 return None;
             }
-            Ok(false) => {}
+            Ok(None) => {}
             Err(error) => {
-                if !self.no_mux {
-                    self.show_error_notice(
-                        format!(
-                            "Could not hand the session to the multiplexer; it remains in this window: {error:#}"
-                        ),
-                        cx,
-                    );
-                    return Some(tab);
-                }
                 self.show_error_notice(
                     format!(
-                        "Could not hand the session to the multiplexer, so it is being kept in this \
-                         window instead: {error:#}"
+                        "Could not hand the session to the multiplexer; it remains in this window: {error:#}"
                     ),
                     cx,
                 );
+                return Some(tab);
             }
         }
 

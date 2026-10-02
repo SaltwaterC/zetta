@@ -11,6 +11,7 @@
 //! - `attention.rs` — routing an attention ID to the tab that owns it.
 
 use super::*;
+use crate::background_session_ui::HandoverOrigin;
 #[cfg(feature = "zmux")]
 use crate::background_session_ui::collaboration::SharedSessionCoordinator;
 use crate::command_panes::{PaneCommand, quote_pane_command_for_shell};
@@ -532,6 +533,9 @@ pub(crate) struct Zetta {
     /// mappings used to apply subscription snapshots safely.
     #[cfg(feature = "zmux")]
     pub(crate) shared_collaboration: SharedSessionCoordinator,
+    /// Detaches and offers whose daemon requests are still in flight.
+    #[cfg(feature = "zmux")]
+    pub(crate) session_handovers: crate::background_session_ui::handover::SessionHandovers,
     /// Panes this window has asked the daemon to close and that the canonical
     /// state still holds. A shared pane leaves the tab when the session says it
     /// has, not when the user asked, so these are shown as closing and take no
@@ -721,6 +725,9 @@ impl Zetta {
     }
 
     pub(crate) fn prepare_for_background_window_close(&mut self, cx: &mut Context<Self>) {
+        // Whatever this window still has in flight finishes first: the tab
+        // states below have to be the committed ones.
+        self.settle_session_handovers(cx);
         let shared_tabs = self
             .tabs
             .iter()
@@ -744,10 +751,19 @@ impl Zetta {
             if let Some(authentication) =
                 background_authentication_for_close(&tab.close_policy, tab.shared, true, false)
             {
-                self.store_background_tab(tab, authentication, cx);
+                self.store_background_tab(
+                    tab,
+                    authentication,
+                    HandoverOrigin::WindowClose,
+                    None,
+                    cx,
+                );
                 preserved_any = true;
             }
         }
+        // Started together so the tabs hand over at once, and waited for here
+        // because the process may quit as soon as this window has gone.
+        self.settle_session_handovers(cx);
         if preserved_any {
             self.finish_background_session_change(cx);
         }
@@ -979,6 +995,8 @@ impl Zetta {
             zosh_panes: HashMap::new(),
             #[cfg(feature = "zmux")]
             shared_collaboration: SharedSessionCoordinator::default(),
+            #[cfg(feature = "zmux")]
+            session_handovers: Default::default(),
             #[cfg(feature = "zmux")]
             closing_shared_panes: HashSet::new(),
             #[cfg(feature = "zmux")]

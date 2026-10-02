@@ -3,6 +3,7 @@ mod mappings;
 mod alacritty;
 mod clipboard_channel;
 mod pty_info;
+mod reader_handover;
 pub mod selection_clipboard;
 mod snapshot;
 pub mod terminal_settings;
@@ -98,6 +99,7 @@ use crate::mappings::colors::to_vte_rgb;
 use crate::mappings::keys::to_esc_str;
 
 pub use alacritty_terminal::tty::{AttachedChildEvents, ConsolePalette};
+pub use reader_handover::{GridSnapshotSource, RetiredReader};
 
 const PROCESS_KILL_GRACE_PERIOD: Duration = Duration::from_millis(100);
 
@@ -2148,6 +2150,7 @@ impl TerminalBuilder {
             terminal_type: TerminalType::DisplayOnly,
             subprocess: None,
             byte_stream: None,
+            held_input: Default::default(),
             image_paste_handler: None,
             input_worker: None,
             pty_control: None,
@@ -2992,6 +2995,7 @@ impl TerminalBuilder {
                 terminal_type,
                 subprocess,
                 byte_stream: None,
+                held_input: Default::default(),
                 image_paste_handler: None,
                 input_worker: None,
                 pty_control,
@@ -3260,7 +3264,7 @@ enum TerminalType {
         pty_tx: Option<PtySender>,
         /// The thread reading this pty, kept so converting the terminal to
         /// another backend can stop it synchronously. Taken by
-        /// [`Terminal::stop_pty_loop`].
+        /// [`Terminal::retire_pty_loop`].
         ///
         /// It also owns the pty for as long as it is held: the thread returns
         /// its `EventLoop` rather than dropping it, and a `JoinHandle` keeps
@@ -3280,6 +3284,9 @@ pub struct Terminal {
     subprocess: Option<SubprocessHandle>,
     /// Set for terminals connected to a blocking bidirectional byte stream.
     byte_stream: Option<ByteStreamHandle>,
+    /// Input given between a reader being retired and the next backend being
+    /// attached, kept for that backend. See `reader_handover.rs`.
+    held_input: reader_handover::HeldInput,
     /// Resolves image paste commands for a local PTY or byte stream.
     image_paste_handler: Option<Arc<dyn ImagePasteHandler>>,
     /// Serializes user input with a potentially blocking image transfer on a
@@ -4486,6 +4493,10 @@ impl Terminal {
             } else {
                 pty_tx.notify(input);
             }
+        } else {
+            // Between two readers: kept for whichever backend is attached next
+            // rather than dropped, when a handover is in progress.
+            self.held_input.hold(&input);
         }
     }
 
@@ -6145,6 +6156,7 @@ impl Terminal {
     ///
     /// Idempotent, and a no-op for a terminal that is not pty-backed.
     fn release_pty_resources(&mut self) {
+        self.discard_held_input();
         if let Some(mut input_worker) = self.input_worker.take() {
             input_worker.stop();
         }
@@ -6175,24 +6187,11 @@ impl Terminal {
     /// wait for it to actually end, or the two would consume the pty's output
     /// between them. The grid stays intact; the terminal just stops being
     /// fed until [`Terminal::attach_byte_stream`] reconnects it.
+    ///
+    /// Blocks on the loop thread. A caller on the window's thread should use
+    /// [`Terminal::retire_pty_loop`] and finish the result elsewhere.
     pub fn stop_pty_loop(&mut self) -> Result<()> {
-        if let Some(mut input_worker) = self.input_worker.take() {
-            input_worker.stop();
-        }
-        let TerminalType::Pty { pty_tx, io, info } = &mut self.terminal_type else {
-            return Ok(());
-        };
-        self.replay_barrier.abort();
-        if let Some(pty_tx) = pty_tx.take() {
-            pty_tx.shutdown();
-        }
-        // Joining drops the loop's `EventLoop`, and with it the pty master this
-        // borrows for foreground-process lookups.
-        info.close_pty_handle();
-        match io.take() {
-            Some(io) => io.join(),
-            None => Ok(()),
-        }
+        self.retire_pty_loop().finish()
     }
 
     /// Connects this terminal to a blocking bidirectional byte stream,
@@ -6207,10 +6206,11 @@ impl Terminal {
         reader: Box<dyn Read + Send>,
         writer: Box<dyn Write + Send>,
     ) -> Result<()> {
-        self.stop_pty_loop()?;
-        if let Some(mut stream) = self.byte_stream.take() {
-            stream.drain_and_stop(BYTE_STREAM_DRAIN_TIMEOUT);
-        }
+        // Normally already finished by the caller, off this thread; whatever is
+        // left is finished here, so the two readers never overlap.
+        self.retire_pty_loop()
+            .and(self.retire_byte_stream())
+            .finish()?;
         self.replay_barrier = if self.pending_replay.is_some() {
             ReplayBarrier::closed()
         } else {
@@ -6227,6 +6227,7 @@ impl Terminal {
             self.replay_barrier.clone(),
             true,
         ));
+        self.flush_held_input();
         Ok(())
     }
 
@@ -6234,6 +6235,7 @@ impl Terminal {
     /// registry. The stream owns both reader and writer workers; dropping this
     /// handle is therefore the explicit leave operation for a viewer.
     pub fn stop_byte_stream(&mut self) {
+        self.discard_held_input();
         if let Some(mut stream) = self.byte_stream.take() {
             stream.stop();
         }
@@ -6268,10 +6270,9 @@ impl Terminal {
         self.clear_shared_viewport();
         let control = handover.control.clone();
         // Everything the relay had already read, into the grid, before the pty can
-        // add to it.
-        if let Some(mut stream) = self.byte_stream.take() {
-            stream.drain_and_stop(BYTE_STREAM_DRAIN_TIMEOUT);
-        }
+        // add to it. A caller on the window's thread retires the stream and
+        // finishes it elsewhere first, which leaves nothing to wait for here.
+        self.retire_byte_stream().finish()?;
         self.replay_barrier = if self.pending_replay.is_some() {
             ReplayBarrier::closed()
         } else {
@@ -6328,6 +6329,7 @@ impl Terminal {
         self.template.shell = options.shell;
         self.template.env = options.env;
         self.ensure_input_worker();
+        self.flush_held_input();
         self.content_dirty = true;
         cx.notify();
         Ok(child_events)
@@ -6787,9 +6789,16 @@ impl ByteStreamHandle {
     ///
     /// Waits for the reader's own end-of-stream, then falls back to the flag so a
     /// multiplexer that failed to close its end cannot hang the caller.
-    fn drain_and_stop(&mut self, patience: Duration) {
+    ///
+    /// In two halves, so the wait can happen off the terminal's thread: this
+    /// one stops accepting input and is immediate, and [`Self::finish_drain`]
+    /// is the wait.
+    fn begin_drain(&mut self) {
         self.input.close_sender();
         self.replay_barrier.abort_if_closed();
+    }
+
+    fn finish_drain(&mut self, patience: Duration) {
         // `Disconnected` is the success case: the sender is dropped as the reader
         // thread returns, which is precisely "it read everything there was".
         match self.finished.recv_timeout(patience) {
@@ -6824,7 +6833,7 @@ fn spawn_byte_stream(
         .name("terminal-byte-stream-reader".to_owned())
         .spawn(move || {
             // Dropped as the thread returns, whichever way it returns, which is
-            // what `drain_and_stop` waits on.
+            // what `finish_drain` waits on.
             let _finished = finished_tx;
             let mut processor = Processor::<StdSyncHandler>::new();
             let mut buffer = [0u8; 8192];

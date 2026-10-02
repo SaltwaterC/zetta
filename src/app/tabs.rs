@@ -334,6 +334,14 @@ impl Zetta {
             return;
         }
         let tab_id = self.tabs[index].id;
+        // A tab cannot be closed out from under its own offer to the daemon,
+        // and a close is not refused the way a second toggle is: a shell that
+        // exits mid-offer would leave a tab nothing can close. Waiting is
+        // bounded by the request, and only happens in that collision.
+        self.settle_session_handover(tab_id, None, Some(window), cx);
+        let Some(index) = self.tabs.iter().position(|tab| tab.id == tab_id) else {
+            return;
+        };
         self.set_tab_remote_clipboard_paste(tab_id, false, cx);
         self.remote_clipboard_paste_tabs.remove(&tab_id);
         let remote_shared_tab = self.mux_panes.is_remote_tab(tab_id);

@@ -40,7 +40,14 @@ Retain these Zetta-specific behaviors when synchronizing:
   requests clone the grid at their event-stream position and serialize on a
   background worker. Application-wide clipboard versions reject stale results;
   terminal clipboard reads wait for pending copies. Empty selections retain
-  primary ownership, including after copy-and-clear.
+  primary ownership, including after copy-and-clear;
+- split each reader handover into a non-blocking retirement on the terminal's
+  thread and an owned, `Send` `RetiredReader` whose `finish` joins the pty loop
+  or drains the byte stream elsewhere (`reader_handover.rs`, no upstream
+  counterpart). `stop_pty_loop`, `attach_byte_stream` and `attach_pty` keep
+  their old semantics by finishing whatever is left inline. Input written
+  between a retirement and the next backend is held and flushed to that
+  backend, and `GridSnapshotSource` serializes the grid from a worker.
 
 `Content::selection_text` was removed after auditing the local public API
 consumers. Zed's agent UI and full terminal view use the upstream field, but
