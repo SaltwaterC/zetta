@@ -1,3 +1,4 @@
+mod clipboard;
 mod scrollback_temp;
 mod terminal_element;
 mod terminal_scrollbar;
@@ -1101,92 +1102,6 @@ impl TerminalView {
         context
     }
 
-    fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
-        self.terminal.update(cx, |terminal, _| terminal.copy(None));
-    }
-
-    fn copy_and_clear_selection(
-        &mut self,
-        _: &CopyAndClearSelection,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.terminal
-            .update(cx, |terminal, _| terminal.copy(Some(false)));
-    }
-
-    fn paste(&mut self, _: &Paste, _: &mut Window, cx: &mut Context<Self>) {
-        if !self.input_enabled {
-            return;
-        }
-        let Some(clipboard) = cx.read_from_clipboard() else {
-            return;
-        };
-        if self.search_query.is_some() {
-            if let Some(text) = clipboard.text() {
-                self.insert_search_text(&text, cx);
-            }
-        } else if let Some(image) = first_clipboard_image(&clipboard) {
-            self.paste_image(image, cx);
-        } else if let Some(text) = clipboard.text() {
-            self.paste_text_value(&text, cx);
-        }
-    }
-
-    fn paste_text(&mut self, _: &PasteText, _: &mut Window, cx: &mut Context<Self>) {
-        if !self.input_enabled {
-            return;
-        }
-        let Some(clipboard) = cx.read_from_clipboard() else {
-            return;
-        };
-        if let Some(text) = clipboard.text() {
-            if self.search_query.is_some() {
-                self.insert_search_text(&text, cx);
-            } else {
-                self.paste_text_value(&text, cx);
-            }
-        }
-    }
-
-    fn paste_trimmed(&mut self, _: &PasteTrimmed, _: &mut Window, cx: &mut Context<Self>) {
-        if !self.input_enabled {
-            return;
-        }
-        let Some(clipboard) = cx.read_from_clipboard() else {
-            return;
-        };
-        if let Some(text) = clipboard.text() {
-            let text = trim_paste_text(&text);
-            if self.search_query.is_some() {
-                self.insert_search_text(text, cx);
-            } else {
-                self.paste_text_value(text, cx);
-            }
-        }
-    }
-
-    fn paste_text_value(&mut self, text: &str, cx: &mut Context<Self>) {
-        self.terminal.update(cx, |terminal, _| terminal.paste(text));
-        if let Some(event) = enabled_input_event(self.emit_input_events, || {
-            TerminalViewEvent::Input(TerminalInput::Paste(text.to_owned()))
-        }) {
-            cx.emit(event);
-        }
-    }
-
-    fn paste_image(&mut self, image: Arc<gpui::Image>, cx: &mut Context<Self>) {
-        let option_as_meta = TerminalSettings::get_global(cx).option_as_meta;
-        self.terminal.update(cx, |terminal, _| {
-            terminal.paste_image(image.clone(), option_as_meta)
-        });
-        if let Some(event) = enabled_input_event(self.emit_input_events, || {
-            TerminalViewEvent::Input(TerminalInput::PasteImage(image))
-        }) {
-            cx.emit(event);
-        }
-    }
-
     fn clear(&mut self, _: &Clear, _: &mut Window, cx: &mut Context<Self>) {
         self.scroll_top = px(0.);
         self.terminal.update(cx, |terminal, _| terminal.clear());
@@ -1197,18 +1112,6 @@ impl TerminalView {
         self.terminal
             .update(cx, |terminal, _| terminal.select_all());
         cx.notify();
-    }
-
-    fn clear_clipboard(&mut self, _: &ClearClipboard, _: &mut Window, cx: &mut Context<Self>) {
-        cx.write_to_clipboard(ClipboardItem {
-            entries: Vec::new(),
-        });
-    }
-
-    fn clipboard_has_content(cx: &App) -> bool {
-        cx.read_from_clipboard().is_some_and(|clipboard| {
-            clipboard.text().is_some() || first_clipboard_image(&clipboard).is_some()
-        })
     }
 
     fn deploy_context_menu(

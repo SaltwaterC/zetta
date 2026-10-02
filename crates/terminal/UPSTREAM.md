@@ -33,6 +33,16 @@ Retain these Zetta-specific behaviors when synchronizing:
   tracking;
 - diagnose terminal grid-lock and renderable-snapshot stalls without logging
   from the UI thread.
+- render snapshots retain selection coordinates only. Selection clipboard
+  requests clone the grid at their event-stream position and serialize on a
+  background worker. Application-wide clipboard versions reject stale results;
+  terminal clipboard reads wait for pending copies. Empty selections retain
+  primary ownership, including after copy-and-clear.
+
+`Content::selection_text` was removed after auditing the local public API
+consumers. Zed's agent UI and full terminal view use the upstream field, but
+Zetta compiles its standalone `terminal_view` instead; upstream UI consumers
+must request selection text explicitly if they are ever ported here.
 
 The current local fork also contains the application-facing changes from
 Zetta's file-path and scrollback-editing work on 2026-08-03.

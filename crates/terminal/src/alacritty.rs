@@ -366,10 +366,6 @@ pub(super) fn update_selection(
     true
 }
 
-pub(super) fn selection_text(term: &AlacrittyTerm) -> Option<String> {
-    term.selection_to_string()
-}
-
 pub(super) fn scroll_to_point(term: &mut AlacrittyTerm, point: Point) {
     term.scroll_to_point(point.to_alacritty());
 }
@@ -1052,12 +1048,6 @@ pub(super) fn make_content(term: &Term<ZedListener>, last_content: &mut Content)
         cell: terminal_cell_from_alacritty(ic.cell),
     }));
 
-    let selection_text = if content.selection.is_some() {
-        term.selection_to_string()
-    } else {
-        None
-    };
-
     let grid = term.grid();
     let (last_hovered_word, grid_lines_change) = adjusted_last_hovered_word(grid, last_content);
 
@@ -1076,7 +1066,6 @@ pub(super) fn make_content(term: &Term<ZedListener>, last_content: &mut Content)
         display_offset: grid.display_offset(),
         columns: grid.columns(),
         screen_lines: grid.screen_lines(),
-        selection_text,
         selection: content
             .selection
             .map(terminal_selection_range_from_alacritty),
@@ -1578,7 +1567,10 @@ mod tests {
         );
         set_selection(&mut term, Some(&selection));
 
-        assert_eq!(selection_text(&term).as_deref(), Some("zms-demo.target"));
+        assert_eq!(
+            term.selection_to_string().as_deref(),
+            Some("zms-demo.target")
+        );
     }
 
     fn hovered_word_at(line: i32) -> HoveredWord {

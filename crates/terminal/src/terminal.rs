@@ -3,6 +3,7 @@ mod mappings;
 mod alacritty;
 mod clipboard_channel;
 mod pty_info;
+pub mod selection_clipboard;
 mod snapshot;
 pub mod terminal_settings;
 
@@ -88,10 +89,10 @@ use crate::alacritty::{
     apply_config, clear_current_line, clear_saved_screen, content_text, display_offset,
     display_only_term_config, find_from_terminal_point, full_content_range, last_non_empty_lines,
     make_content, new_term, open_pty, pty_options, pty_term_config, resize, screen_lines,
-    scroll_display, scroll_to_point, selection_text, set_default_cursor_style,
-    set_selection as set_term_selection, shrink_to_used, spawn_event_loop,
-    toggle_vi_mode as toggle_term_vi_mode, total_lines, update_selection as update_term_selection,
-    update_selection_to_vi_cursor, update_vi_cursor_for_scroll, vi_goto_point, vi_motion,
+    scroll_display, scroll_to_point, set_default_cursor_style, set_selection as set_term_selection,
+    shrink_to_used, spawn_event_loop, toggle_vi_mode as toggle_term_vi_mode, total_lines,
+    update_selection as update_term_selection, update_selection_to_vi_cursor,
+    update_vi_cursor_for_scroll, vi_goto_point, vi_motion,
 };
 use crate::mappings::colors::to_vte_rgb;
 use crate::mappings::keys::to_esc_str;
@@ -543,7 +544,6 @@ pub struct Content {
     pub display_offset: usize,
     pub columns: usize,
     pub screen_lines: usize,
-    pub selection_text: Option<String>,
     pub selection: Option<SelectionRange>,
     pub cursor: Cursor,
     pub cursor_char: char,
@@ -581,7 +581,6 @@ impl Default for Content {
             display_offset: Default::default(),
             columns: Default::default(),
             screen_lines: Default::default(),
-            selection_text: Default::default(),
             selection: Default::default(),
             cursor: Cursor {
                 shape: CursorShape::Block,
@@ -3674,17 +3673,10 @@ impl Terminal {
                 cx.emit(Event::BreadcrumbsChanged);
             }
             TerminalBackendEvent::ClipboardStore(data) => {
-                cx.write_to_clipboard(ClipboardItem::new_string(data))
+                selection_clipboard::write(ClipboardItem::new_string(data), cx)
             }
             TerminalBackendEvent::ClipboardLoad(format) => {
-                self.write_to_pty(
-                    match &cx.read_from_clipboard().and_then(|item| item.text()) {
-                        // The terminal only supports pasting strings, not images.
-                        Some(text) => format(text),
-                        _ => format(""),
-                    }
-                    .into_bytes(),
-                )
+                self.read_selection_clipboard(format, cx)
             }
             TerminalBackendEvent::ClipboardFrame(frame) => {
                 self.handle_remote_clipboard_frame(frame);
@@ -3922,9 +3914,7 @@ impl Terminal {
                     update_vi_cursor_for_scroll(term, *scroll);
                     if let Some(selection_head) = update_selection_to_vi_cursor(term) {
                         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-                        if let Some(selection_text) = selection_text(term) {
-                            cx.write_to_primary(ClipboardItem::new_string(selection_text));
-                        }
+                        selection_clipboard::primary::copy(term, cx);
 
                         self.selection_head = Some(selection_head);
                         cx.emit(Event::SelectionsChanged)
@@ -3936,9 +3926,7 @@ impl Terminal {
                 set_term_selection(term, selection.as_ref());
 
                 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-                if let Some(selection_text) = selection_text(term) {
-                    cx.write_to_primary(ClipboardItem::new_string(selection_text));
-                }
+                selection_clipboard::primary::copy(term, cx);
 
                 if let Some(selection) = selection {
                     self.selection_head = Some(selection.head);
@@ -3955,27 +3943,14 @@ impl Terminal {
 
                 if update_term_selection(term, point, side) {
                     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-                    if let Some(selection_text) = selection_text(term) {
-                        cx.write_to_primary(ClipboardItem::new_string(selection_text));
-                    }
+                    selection_clipboard::primary::copy(term, cx);
 
                     self.selection_head = Some(point);
                     cx.emit(Event::SelectionsChanged)
                 }
             }
 
-            InternalEvent::Copy(keep_selection) => {
-                trace!("Copying selection: keep_selection={keep_selection:?}");
-                if let Some(txt) = selection_text(term) {
-                    cx.write_to_clipboard(ClipboardItem::new_string(txt));
-                    if !keep_selection.unwrap_or_else(|| {
-                        let settings = TerminalSettings::get_global(cx);
-                        settings.keep_selection_on_copy
-                    }) {
-                        self.events.push_back(InternalEvent::SetSelection(None));
-                    }
-                }
-            }
+            InternalEvent::Copy(keep_selection) => self.copy_selection(*keep_selection, term, cx),
             InternalEvent::ScrollToPoint(point) => {
                 trace!("Scrolling to point: point={point:?}");
                 scroll_to_point(term, *point);
@@ -5566,20 +5541,7 @@ impl Terminal {
                             .push_back(InternalEvent::SetSelection(Some(selection)));
                     }
                 }
-                MouseButton::Middle => {
-                    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-                    let text = cx
-                        .read_from_primary()
-                        .and_then(|item| item.text())
-                        .filter(|text| !text.is_empty())
-                        .or_else(|| cx.read_from_clipboard().and_then(|item| item.text()));
-                    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
-                    let text = cx.read_from_clipboard().and_then(|item| item.text());
-
-                    if let Some(text) = text {
-                        self.paste(&text);
-                    }
-                }
+                MouseButton::Middle => self.paste_selection_clipboard(cx),
                 _ => {}
             }
         }

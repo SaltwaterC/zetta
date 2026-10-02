@@ -237,13 +237,13 @@ pub(crate) fn is_paste_chord(keystroke: &Keystroke) -> bool {
 pub(crate) fn apply_clipboard_shortcut(
     field: &mut TextField,
     keystroke: &Keystroke,
-    cx: &App,
+    cx: &mut App,
 ) -> ClipboardOutcome {
     if is_copy_chord(keystroke) {
         let Some(text) = field.selected_text() else {
             return ClipboardOutcome::Unchanged;
         };
-        cx.write_to_clipboard(ClipboardItem::new_string(text.to_owned()));
+        terminal::selection_clipboard::write(ClipboardItem::new_string(text.to_owned()), cx);
         return ClipboardOutcome::Unchanged;
     }
     if is_cut_chord(keystroke) {
@@ -254,7 +254,7 @@ pub(crate) fn apply_clipboard_shortcut(
         let Some(text) = field.selected_text() else {
             return ClipboardOutcome::Unchanged;
         };
-        cx.write_to_clipboard(ClipboardItem::new_string(text.to_owned()));
+        terminal::selection_clipboard::write(ClipboardItem::new_string(text.to_owned()), cx);
         field.select_all();
         field.insert("");
         return ClipboardOutcome::Edited;
