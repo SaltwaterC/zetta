@@ -5,6 +5,7 @@ mod clipboard_channel;
 pub mod paste_order;
 mod pty_info;
 mod reader_handover;
+mod replay;
 pub mod selection_clipboard;
 mod snapshot;
 pub mod terminal_settings;
@@ -2216,6 +2217,7 @@ impl TerminalBuilder {
             },
             child_is_the_multiplexers: false,
             pending_replay: None,
+            replay_job: replay::ReplayJob::default(),
             replay_barrier: ReplayBarrier::open(),
             redraw_attached_on_first_layout: false,
             // Explicit bounds are an initialized display-only layout even when
@@ -3067,6 +3069,7 @@ impl TerminalBuilder {
                 // `owns_child` reads from the template).
                 child_is_the_multiplexers: false,
                 pending_replay,
+                replay_job: replay::ReplayJob::default(),
                 replay_barrier,
                 redraw_attached_on_first_layout: false,
                 terminal_size_initialized: false,
@@ -3180,9 +3183,9 @@ impl TerminalBuilder {
         //Event loop
         self.terminal.event_loop_task = cx.spawn(async move |terminal, cx| {
             while let Some(event) = self.events_rx.next().await {
-                terminal.update(cx, |terminal, cx| {
+                replay::after_replay(&terminal, cx, |terminal, cx| {
                     terminal.process_pty_event(event, cx);
-                })?;
+                }).await?;
 
                 'drain: loop {
                     let mut events = Vec::new();
@@ -3222,7 +3225,7 @@ impl TerminalBuilder {
                         break 'drain;
                     }
 
-                    terminal.update(cx, |this, cx| {
+                    replay::after_replay(&terminal, cx, |this, cx| {
                         if wakeup {
                             this.process_event(TerminalBackendEvent::Wakeup, cx);
                         }
@@ -3230,7 +3233,7 @@ impl TerminalBuilder {
                         for event in events {
                             this.process_pty_event(event, cx);
                         }
-                    })?;
+                    }).await?;
                     yield_now().await;
                 }
             }
@@ -3374,8 +3377,9 @@ pub struct Terminal {
     /// width and then reflows it again, which is how a restored session ends
     /// up looking corrupted rather than resumed.
     pending_replay: Option<Vec<u8>>,
-    /// Keeps backend readers from parsing live output until `pending_replay` has
-    /// been applied at the first real layout.
+    replay_job: replay::ReplayJob,
+    /// Keeps backend readers from parsing live output until the private replay
+    /// grid has been published at the latest layout geometry.
     replay_barrier: ReplayBarrier,
     /// An existing foreground process still believes the previous terminal
     /// emulator's screen is intact. Its first layout must request a complete
@@ -3774,38 +3778,6 @@ impl Terminal {
         self.selection_phase == SelectionPhase::Selecting
     }
 
-    /// Applies retained output once the fresh-shell restore has both completed
-    /// startup integration and received a real layout size. The same helper is
-    /// called from a resize and from the startup completion path: either one
-    /// may happen first, and the replay must not depend on that timing.
-    fn replay_pending(&mut self, term: &mut AlacrittyTerm) {
-        if self.fresh_shell_restore
-            && (!self.restore_startup_ready || !self.terminal_size_initialized)
-        {
-            return;
-        }
-        let Some(replay) = self.pending_replay.take() else {
-            return;
-        };
-        if self.fresh_shell_restore {
-            term.reset_for_fresh_shell_replay();
-        }
-        self.output_processor.advance(term, &replay);
-        if self.fresh_shell_restore {
-            // Alternate-screen normalization reserializes the two bounded
-            // buffers to merge the primary history with the saved screen.
-            // Release the original replay before that second bounded buffer
-            // is built.
-            drop(replay);
-            term.normalize_for_fresh_shell();
-            self.start_fresh_shell_input();
-        }
-        // The terminal lock is still held by the caller. Readers can therefore
-        // wake now and will not parse live output until this replay is fully in
-        // the grid.
-        self.replay_barrier.release();
-    }
-
     fn redraw_attached_after_first_layout(&mut self) {
         if !self.redraw_attached_on_first_layout {
             return;
@@ -3830,6 +3802,14 @@ impl Terminal {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let awaiting_replay = self
+            .pending_replay
+            .as_ref()
+            .is_some_and(|bytes| !bytes.is_empty() || self.fresh_shell_restore)
+            && (!self.fresh_shell_restore || self.restore_startup_ready);
+        if self.replay_job.defer_event(event, awaiting_replay) {
+            return;
+        }
         self.content_dirty = true;
         match event {
             &InternalEvent::Resize {
@@ -3886,10 +3866,6 @@ impl Terminal {
                         && synchronous_reflow_is_bounded(term.history_size(), term.columns());
                     resize(term, new_bounds, reflow);
                 }
-                // The grid is now the size the pane actually has, which is the
-                // first moment a restored screen can be written without being
-                // wrapped at the wrong width.
-                self.replay_pending(term);
                 self.redraw_attached_after_first_layout();
                 if grid_size_changed || !was_size_initialized {
                     cx.emit(Event::GridSizeChanged);
@@ -3912,11 +3888,10 @@ impl Terminal {
             InternalEvent::InitializeSize => {
                 self.terminal_size_initialized = true;
                 self.size_initialization_queued = false;
-                self.replay_pending(term);
                 self.redraw_attached_after_first_layout();
                 cx.emit(Event::GridSizeChanged);
             }
-            InternalEvent::ReplayFreshShell => self.replay_pending(term),
+            InternalEvent::ReplayFreshShell => {}
             InternalEvent::Clear => {
                 trace!("Clearing");
                 clear_saved_screen(term);
@@ -4166,6 +4141,7 @@ impl Terminal {
     pub fn set_cursor_shape(&mut self, cursor_shape: SettingsCursorShape) {
         set_default_cursor_style(&mut self.term_config, cursor_shape);
         apply_config(&self.term, &self.term_config);
+        self.replay_job.configure(self.term_config.clone());
         let content = {
             let terminal = self.term.lock_unfair();
             make_content(&terminal, &mut self.last_content)
@@ -4187,6 +4163,9 @@ impl Terminal {
         let mut previous_byte_was_cr = false;
         let converted = convert_lf_to_crlf(&visible, &mut previous_byte_was_cr);
 
+        if self.replay_job.output(&converted) {
+            return;
+        }
         let mut term = self.term.lock();
         self.output_processor.advance(&mut *term, &converted);
         drop(term);
@@ -4413,6 +4392,12 @@ impl Terminal {
         } else {
             true
         };
+
+        // Publish geometry even if the replay finishes before `sync` drains
+        // this event. A prepared grid must never replace a newer layout.
+        if requires_resize {
+            self.replay_job.resize(new_bounds, reflow);
+        }
 
         match self.events.back_mut() {
             Some(InternalEvent::Resize {
@@ -4822,7 +4807,7 @@ impl Terminal {
         self.release_init_command_startup_render();
         if self.pending_replay.is_some() {
             self.events.push_back(InternalEvent::ReplayFreshShell);
-        } else {
+        } else if !self.replay_job.is_running() {
             self.start_fresh_shell_input();
         }
         cx.emit(Event::Wakeup);
@@ -5159,6 +5144,8 @@ impl Terminal {
         while let Some(e) = self.events.pop_front() {
             self.process_terminal_event(&e, &mut terminal, window, cx)
         }
+
+        self.start_pending_replay(&terminal, cx);
 
         if self.content_dirty && !self.init_command_startup_suppress_render {
             self.last_content = make_content(&terminal, &mut self.last_content);
@@ -6223,7 +6210,7 @@ impl Terminal {
         self.retire_pty_loop()
             .and(self.retire_byte_stream())
             .finish()?;
-        self.replay_barrier = if self.pending_replay.is_some() {
+        self.replay_barrier = if self.pending_replay.is_some() || self.replay_job.is_running() {
             ReplayBarrier::closed()
         } else {
             ReplayBarrier::open()
@@ -6285,7 +6272,7 @@ impl Terminal {
         // add to it. A caller on the window's thread retires the stream and
         // finishes it elsewhere first, which leaves nothing to wait for here.
         self.retire_byte_stream().finish()?;
-        self.replay_barrier = if self.pending_replay.is_some() {
+        self.replay_barrier = if self.pending_replay.is_some() || self.replay_job.is_running() {
             ReplayBarrier::closed()
         } else {
             ReplayBarrier::open()
@@ -6298,6 +6285,7 @@ impl Terminal {
             .min(MAX_SCROLL_HISTORY_LINES);
         self.term_config = pty_term_config(scrolling_history, options.cursor_shape);
         apply_config(&self.term, &self.term_config);
+        self.replay_job.configure(self.term_config.clone());
 
         #[cfg(unix)]
         let (pty, child_events) =
@@ -11825,7 +11813,12 @@ mod tests {
                 ),
                 (80, 24)
             );
-            assert!(terminal.get_content().contains("restored shared screen"));
+        });
+        window.run_until_parked();
+        terminal.read_with(window, |terminal, _| {
+            let term = terminal.term.lock();
+            assert_eq!((term.columns(), term.screen_lines()), (80, 24));
+            assert!(content_text(&term).contains("restored shared screen"));
         });
     }
 

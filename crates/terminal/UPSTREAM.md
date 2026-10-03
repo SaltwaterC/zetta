@@ -36,6 +36,12 @@ Retain these Zetta-specific behaviors when synchronizing:
 - export scrollback from a terminal cloned on the background worker under a
   short live-grid lock. Keep sealed history shared and traverse the snapshot
   only after releasing the lock used by rendering and PTY parsing;
+- parse restored replay and normalize fresh-shell screens on a private grid
+  after layout supplies geometry (`replay.rs`, no upstream counterpart).
+  Apply subsequent resize requests and injected output on the worker before
+  swapping grids, then release the existing reader barrier and fresh-shell
+  prompt input. Parser events wait for publication before inspecting the grid;
+  an empty non-fresh replay releases its reader immediately at layout;
 - render snapshots retain selection coordinates only. Selection clipboard
   requests clone the grid at their event-stream position and serialize on a
   background worker. Application-wide clipboard versions reject stale results;
