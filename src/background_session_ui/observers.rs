@@ -274,10 +274,10 @@ impl Zetta {
             })
             .collect::<Vec<_>>();
         self.background_session_picker_entries = Self::picker_entries_from_summaries(&sessions);
-        if let Err(error) = self.background_sessions.publish(sessions) {
-            eprintln!("Could not publish background session catalog: {error:#}");
-        }
-        cx.defer(refresh_process_background_sessions);
+        self.background_sessions.publish(sessions);
+        // The picker uses owned in-memory entries immediately, independently
+        // of storage latency. The daemon watcher owns refreshing disk entries.
+        cx.defer(crate::startup::refresh_local_background_sessions);
     }
 
     pub(super) fn background_session_summary(

@@ -6,11 +6,16 @@
 //! the part that only makes sense inside the application: the runner holding
 //! detached tabs, and the conversion from a terminal's exit event into the
 //! sanitized metadata the catalog publishes.
+//! `publication` owns the ordered worker: snapshots cross the thread boundary,
+//! while the publishers and their file-removing destructors stay off the GUI.
 
 use std::{path::PathBuf, time::Instant};
 
-use anyhow::Result;
 use terminal::{TerminalExitReason, TerminalExitSource, TerminalExited};
+
+mod publication;
+use publication::BackgroundCatalogPublisher;
+pub(crate) use publication::after_pending_publications;
 
 #[cfg(not(feature = "zmux"))]
 pub(crate) use crate::local_sessions::auth::{
@@ -92,7 +97,7 @@ pub(crate) fn background_pane_exit_from_terminal(
 /// remote transport can own the same runner without also owning window state.
 pub(crate) struct BackgroundSessionRunner<T> {
     sessions: Vec<DetachedSession<T>>,
-    catalog: SessionCatalogPublisher,
+    catalog: BackgroundCatalogPublisher,
 }
 
 struct DetachedSession<T> {
@@ -106,7 +111,9 @@ impl<T> Default for BackgroundSessionRunner<T> {
     fn default() -> Self {
         Self {
             sessions: Vec::new(),
-            catalog: SessionCatalogPublisher::new(&session_catalog_dir()),
+            catalog: BackgroundCatalogPublisher::new(SessionCatalogPublisher::new(
+                &session_catalog_dir(),
+            )),
         }
     }
 }
@@ -205,8 +212,8 @@ impl<T> BackgroundSessionRunner<T> {
             .map(|session| &mut session.value)
     }
 
-    pub(crate) fn publish(&mut self, sessions: Vec<BackgroundSessionSummary>) -> Result<()> {
-        self.catalog.publish_sessions(sessions)
+    pub(crate) fn publish(&self, sessions: Vec<BackgroundSessionSummary>) {
+        self.catalog.publish(sessions);
     }
 }
 

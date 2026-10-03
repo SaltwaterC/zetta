@@ -255,7 +255,9 @@ keyboard and the mouse came to do different things; do not add one.
 
 - `background_sessions.rs`: the application's half of background sessions —
   the runner, the catalog directory, and the parts that need GPUI; the schema,
-  verifier and publisher live in the `zmux` crate
+  verifier and synchronous publisher live in the `zmux` crate.
+  `background_sessions/publication.rs` owns the application's ordered catalog
+  worker, pending-snapshot coalescing, completion fences, and runner cleanup
 - `background_session_ui.rs`: background-session detach/store/reconnect and
   the reconnect picker; shared-mode panes (the `SharedPaneEntry` registry,
   arbitrated-size application, shared exit routing, and the revoke handover

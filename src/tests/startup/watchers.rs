@@ -46,3 +46,29 @@ fn persistence_manifest_changes_invalidate_the_session_catalog_stamp() {
 
     assert_ne!(before, session_catalog_stamp(directory.path()));
 }
+
+#[test]
+fn catalog_directory_and_manifest_deletion_and_recreation_change_stamps() {
+    let directory = tempfile::tempdir().unwrap();
+    let catalog = directory.path().join("sessions");
+    let missing = session_catalog_stamp(&catalog);
+    assert_eq!(missing.catalog, None);
+    let persistence = catalog.join("persistence");
+    fs::create_dir_all(&persistence).unwrap();
+    let created = session_catalog_stamp(&catalog);
+    assert_ne!(created, missing);
+
+    let manifest = persistence.join("manifest.json");
+    fs::write(&manifest, "{}").unwrap();
+    let published = session_catalog_stamp(&catalog);
+    assert_ne!(published, created);
+    fs::remove_file(&manifest).unwrap();
+    assert_eq!(session_catalog_stamp(&catalog), created);
+    fs::write(&manifest, "{}").unwrap();
+    assert_ne!(session_catalog_stamp(&catalog), created);
+
+    fs::remove_dir_all(&catalog).unwrap();
+    assert_eq!(session_catalog_stamp(&catalog), missing);
+    fs::create_dir_all(&catalog).unwrap();
+    assert_ne!(session_catalog_stamp(&catalog), missing);
+}

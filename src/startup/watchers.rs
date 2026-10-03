@@ -1,6 +1,6 @@
 //! The pollers a running process keeps.
 //!
-//! Both watch a file's metadata rather than its contents and only read when
+//! Both probe metadata off-thread rather than contents and only read when
 //! the stamp changes, so an idle process does no parsing: the configuration
 //! and keymap files, which may be edited outside the settings UI, and the
 //! multiplexer's published session catalog, which is what the reconnect list
@@ -206,7 +206,11 @@ pub(super) fn start_multiplexer_session_watcher(cx: &mut App) {
             cx.background_executor()
                 .timer(MULTIPLEXER_CATALOG_POLL)
                 .await;
-            let changed = session_catalog_stamp(&directory);
+            let changed = {
+                let directory = directory.clone();
+                cx.background_spawn(async move { session_catalog_stamp(&directory) })
+                    .await
+            };
             // A first look always refreshes: the catalog may already describe
             // sessions from before this process started.
             if last_seen.is_some_and(|last_seen| changed == last_seen) {
@@ -222,9 +226,9 @@ pub(super) fn start_multiplexer_session_watcher(cx: &mut App) {
 /// Whether a catalog read is already running, and whether another was asked for
 /// while it was.
 ///
-/// A publish happens on every `TitleChanged` of every background pane, so
-/// several can land in one frame; without this each would start its own read of
-/// the same directory. The same shape as `PtyProcessInfo`'s refresh guard.
+/// Session transitions and the stamp watcher can request reads together;
+/// without this each would start its own read of the same directory. Local
+/// title changes only recombine the cached entries, without requesting I/O.
 #[cfg(feature = "zmux")]
 static CATALOG_REFRESH_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 #[cfg(feature = "zmux")]
@@ -238,11 +242,6 @@ static CATALOG_REFRESH_PENDING: AtomicBool = AtomicBool::new(false);
 /// records. That ran on the thread that draws, on every title change of every
 /// background pane. It now runs on the background executor and only the
 /// combining step returns to the foreground.
-#[cfg(not(feature = "zmux"))]
-pub(crate) fn refresh_process_background_sessions(cx: &mut App) {
-    apply_background_session_entries(Vec::new(), cx);
-}
-
 #[cfg(feature = "zmux")]
 pub(crate) fn refresh_process_background_sessions(cx: &mut App) {
     if CATALOG_REFRESH_IN_FLIGHT.swap(true, Ordering::AcqRel) {
@@ -257,9 +256,12 @@ pub(crate) fn refresh_process_background_sessions(cx: &mut App) {
             cx.background_spawn(async { multiplexer_session_entries() })
                 .await
         };
-        cx.update(|cx| apply_background_session_entries(multiplexer_entries, cx));
+        cx.update(|cx| {
+            cx.set_global(MultiplexerPickerEntries(multiplexer_entries));
+            refresh_local_background_sessions(cx);
+        });
         CATALOG_REFRESH_IN_FLIGHT.store(false, Ordering::Release);
-        // A publish that arrived while the read was in flight described state
+        // A refresh requested while the read was in flight described state
         // this result cannot include, so it gets its own read rather than being
         // dropped.
         if CATALOG_REFRESH_PENDING.swap(false, Ordering::AcqRel) {
@@ -269,12 +271,14 @@ pub(crate) fn refresh_process_background_sessions(cx: &mut App) {
     .detach();
 }
 
-/// Combines the sessions this process holds with the ones the read found, and
-/// publishes the result. The foreground half, kept small on purpose.
-fn apply_background_session_entries(
-    multiplexer_entries: Vec<ProcessBackgroundSessionEntry>,
-    cx: &mut App,
-) {
+#[derive(Default)]
+struct MultiplexerPickerEntries(Vec<ProcessBackgroundSessionEntry>);
+
+impl Global for MultiplexerPickerEntries {}
+
+/// Combines current local state with the last daemon read. Local title and
+/// detach/reconnect changes do not wait for a catalog write or read to finish.
+pub(crate) fn refresh_local_background_sessions(cx: &mut App) {
     let entities = process_zetta_entities(cx);
     let mut entries = Vec::new();
     for zetta in &entities {
@@ -284,7 +288,9 @@ fn apply_background_session_entries(
             |(session_id, title, details)| (runner_id, *session_id, title.clone(), details.clone()),
         ));
     }
-    entries.extend(multiplexer_entries);
+    if let Some(multiplexer) = cx.try_global::<MultiplexerPickerEntries>() {
+        entries.extend(multiplexer.0.iter().cloned());
+    }
     if cx.has_global::<ZettaProcessState>() {
         cx.global_mut::<ZettaProcessState>()
             .background_session_entries = entries.into();

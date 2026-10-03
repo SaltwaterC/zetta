@@ -27,6 +27,13 @@ impl ReconnectCompletion {
             let _ = sender.send(result);
         }
     }
+
+    fn send_after_publication(mut self, result: ReconnectSessionResult) {
+        // Publication failures have always been logged rather than changing
+        // the attach result. Keep that contract, and also keep the ordering:
+        // the CLI response follows the attempt to remove the catalog entry.
+        crate::background_sessions::after_pending_publications(move || self.send(result));
+    }
 }
 
 impl Drop for ReconnectCompletion {
@@ -569,7 +576,7 @@ impl Zetta {
             } else {
                 ReconnectSessionResult::AuthenticationFailed
             };
-            completion.send(result);
+            completion.send_after_publication(result);
             return;
         }
         let Some(secret) = secret else {
@@ -612,7 +619,7 @@ impl Zetta {
                     )
                 })
                 .unwrap_or(ReconnectSessionResult::Rejected);
-            completion.send(result);
+            completion.send_after_publication(result);
         })
         .detach();
     }

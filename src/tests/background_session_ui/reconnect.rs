@@ -25,3 +25,25 @@ fn a_reconnect_result_wins_over_the_cancellation_fallback() {
     );
     assert!(receiver.try_recv().is_err());
 }
+
+#[test]
+fn a_reconnect_acknowledgement_waits_for_catalog_publication() {
+    let timeout = std::time::Duration::from_secs(10);
+    let (started_tx, started_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    crate::background_sessions::after_pending_publications(move || {
+        started_tx.send(()).unwrap();
+        release_rx.recv_timeout(timeout).unwrap();
+    });
+    started_rx.recv_timeout(timeout).unwrap();
+
+    let (sender, receiver) = mpsc::channel();
+    ReconnectCompletion::new(sender).send_after_publication(ReconnectSessionResult::Reconnected);
+    assert!(receiver.try_recv().is_err());
+    release_tx.send(()).unwrap();
+    assert_eq!(
+        receiver.recv_timeout(timeout).unwrap(),
+        ReconnectSessionResult::Reconnected
+    );
+    assert!(receiver.try_recv().is_err());
+}
