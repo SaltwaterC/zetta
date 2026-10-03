@@ -3,7 +3,7 @@ use crate::{
     TerminalBuilder,
     terminal_settings::{AlternateScroll, CursorShape, TerminalSettings},
 };
-use gpui::{AppContext as _, ClipboardItem, Entity, TestAppContext};
+use gpui::{AppContext as _, Entity, TestAppContext};
 use util::paths::PathStyle;
 
 #[test]
@@ -106,7 +106,7 @@ async fn keystrokes_typed_while_a_paste_reads_are_written_after_it(cx: &mut Test
 #[gpui::test]
 async fn a_middle_click_paste_from_a_slow_owner_keeps_its_place(cx: &mut TestAppContext) {
     let terminal = display_only_terminal(cx);
-    cx.update(|cx| cx.write_to_primary(ClipboardItem::new_string("selected".into())));
+    cx.update(|cx| cx.write_to_primary(gpui::ClipboardItem::new_string("selected".into())));
     cx.defer_clipboard_reads(true);
     terminal.update(cx, |terminal, cx| {
         terminal.paste_selection_clipboard(cx);
