@@ -25,7 +25,15 @@ Retain these Zetta patches when synchronizing:
   helper consumed by the next Wayland window activation, keeping this behavior
   in Zetta's platform fork rather than changing GPUI's upstream trait;
 - omit Zed's platform notification API because Zetta owns notifications at the
-  application layer.
+  application layer;
+- implement `read_from_clipboard_async` and `read_from_primary_async`. Cached
+  and self-owned reads answer at once, as the synchronous read does. Otherwise
+  Wayland sends `receive` and flushes on the GUI thread, for the offer current
+  at the request, then reads the pipe from a calloop source as data arrives;
+  X11 converts on a thread of its own through the reader connection it already
+  used. Both end a read once the owner goes quiet (`PIPE_READ_TIMEOUT`, X11's
+  `LONG_TIMEOUT_DUR`) or after `CLIPBOARD_READ_DEADLINE` overall, which X11's
+  synchronous read now honours too.
 
 The Wayland frame-callback lifecycle intentionally matches upstream. Do not
 request callbacks from arbitrary foreground tasks or use empty surface commits

@@ -24,6 +24,7 @@ use terminal::{
     ScrollLineDown, ScrollLineUp, ScrollPageDown, ScrollPageUp, ScrollToBottom, ScrollToTop,
     Search, ShowCharacterPalette, Terminal, TerminalBounds, ToggleViMode,
     console_palette_for_theme,
+    paste_order::{PasteOrder, PasteTicket},
     terminal_settings::{CursorShape, TerminalSettings},
 };
 use terminal_element::TerminalElement;
@@ -271,6 +272,10 @@ pub struct TerminalView {
     search_select_all: bool,
     search_cursor: usize,
     emit_input_events: bool,
+    /// Input events held behind a paste still waiting on the clipboard, so a
+    /// pane receiving this one's broadcast sees the same order this pane's own
+    /// pty does.
+    input_event_order: PasteOrder<TerminalViewEvent>,
     input_enabled: bool,
     pub(crate) focus_handle: FocusHandle,
     cursor_shape: CursorShape,
@@ -440,6 +445,7 @@ impl TerminalView {
             search_select_all: false,
             search_cursor: 0,
             emit_input_events: false,
+            input_event_order: PasteOrder::default(),
             input_enabled: true,
             focus_handle,
             cursor_shape: TerminalSettings::get_global(cx).cursor_shape,
@@ -696,8 +702,14 @@ impl TerminalView {
             if let Some(event) = enabled_input_event(self.emit_input_events, || {
                 TerminalViewEvent::Input(TerminalInput::Text(text.to_owned()))
             }) {
-                cx.emit(event);
+                self.emit_input_event(event, cx);
             }
+        }
+    }
+
+    pub(crate) fn emit_input_event(&mut self, event: TerminalViewEvent, cx: &mut Context<Self>) {
+        if let Some(event) = self.input_event_order.admit(event) {
+            cx.emit(event);
         }
     }
 
@@ -958,7 +970,7 @@ impl TerminalView {
             if let Some(event) = enabled_input_event(self.emit_input_events, || {
                 TerminalViewEvent::Input(TerminalInput::Keystroke(keystroke.clone()))
             }) {
-                cx.emit(event);
+                self.emit_input_event(event, cx);
             }
             return true;
         }
@@ -1072,7 +1084,7 @@ impl TerminalView {
             if let Some(event) = enabled_input_event(self.emit_input_events, || {
                 TerminalViewEvent::Input(TerminalInput::Keystroke(event.keystroke.clone()))
             }) {
-                cx.emit(event);
+                self.emit_input_event(event, cx);
             }
             cx.stop_propagation();
         }
@@ -1241,7 +1253,7 @@ impl TerminalView {
         if let Some(event) = enabled_input_event(self.emit_input_events, || {
             TerminalViewEvent::Input(TerminalInput::Text(text.0.clone()))
         }) {
-            cx.emit(event);
+            self.emit_input_event(event, cx);
         }
     }
 
@@ -1254,7 +1266,7 @@ impl TerminalView {
                 if let Some(event) = enabled_input_event(self.emit_input_events, || {
                     TerminalViewEvent::Input(TerminalInput::Keystroke(keystroke))
                 }) {
-                    cx.emit(event);
+                    self.emit_input_event(event, cx);
                 }
             }
         }
@@ -1428,20 +1440,17 @@ impl Render for TerminalView {
                         .last_content
                         .mode
                         .contains(Modes::MOUSE_MODE);
-                    let clipboard_has_content = !terminal_mouse_mode
-                        && !event.modifiers.shift
-                        && Self::clipboard_has_content(cx);
-                    let action = right_click_action(
-                        terminal_mouse_mode,
-                        event.modifiers.shift,
-                        clipboard_has_content,
-                    );
+                    // Whether the clipboard has content is only known once it
+                    // has been read, so a click that would paste reads first
+                    // and falls back to the menu when there was nothing.
+                    let action =
+                        right_click_action(terminal_mouse_mode, event.modifiers.shift, true);
                     match action {
                         RightClickAction::ContextMenu => {
                             this.deploy_context_menu(event.position, window, cx);
                         }
                         RightClickAction::Paste => {
-                            this.paste(&Paste, window, cx);
+                            this.paste_or_deploy_context_menu(event.position, window, cx);
                         }
                         RightClickAction::Forward => return,
                     }

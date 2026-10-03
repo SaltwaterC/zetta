@@ -42,6 +42,16 @@ Retain these Zetta patches when synchronizing:
   and device loss — run after paint. Measured at −10.6% mean and −11.2% median
   draw time, 7 of 8 paired runs (8 of 8 on the median).
 
+- `Platform::read_from_primary_async` and `App::read_from_primary_async`, the
+  primary-selection counterpart of upstream's `read_from_clipboard_async`, with
+  the same synchronous default. Linux overrides both so a paste from another
+  client's selection waits without blocking the GUI thread.
+
+- `TestAppContext::defer_clipboard_reads` and `complete_clipboard_reads`, which
+  hold the test platform's asynchronous clipboard reads as a slow owner would,
+  each answered with what the clipboard held when it was requested. They are
+  how the paste-order barrier is tested against a read that resolves late.
+
 ## Why this crate is forked at all
 
 Unlike the platform forks, `gpui` is not a leaf. Twenty-two other `zed/` crates

@@ -12,6 +12,10 @@ inline sizing, alternate-screen anchoring, and rendering-performance behavior.
 Custom block, quadrant, shade, and sextant glyphs are painted as pixel-snapped
 subcell quads rather than shaped font text; retain the ordered merge path so a
 dense image cannot turn terminal layout into a quadratic operation.
+Pastes never read the clipboard synchronously, including the right-click
+decision between pasting and the context menu. A paste's target is fixed when
+it is asked for, and one that waits holds both the pane's input and the input
+events it rebroadcasts behind it.
 A hovered word is matched by id rather than by value, because the terminal
 shifts a carried match's lines as output scrolls and comparing whole words made
 the link blink out for the frames in which the two disagreed.

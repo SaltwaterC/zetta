@@ -7,7 +7,7 @@
 
 use crate::alacritty::AlacrittyTerm;
 use futures::{FutureExt as _, future::Shared};
-use gpui::{App, ClipboardItem, Global, Task};
+use gpui::{App, ClipboardItem, ClipboardReadError, Global, Task};
 use std::sync::{
     Arc,
     atomic::{AtomicU64, Ordering},
@@ -124,13 +124,11 @@ fn pending(slot: usize, cx: &App) -> Option<Shared<Task<()>>> {
         .clone()
 }
 
-fn read_slot(
-    slot: usize,
-    read: fn(&App) -> Option<ClipboardItem>,
-    cx: &App,
-) -> Task<Option<ClipboardItem>> {
+type PlatformRead = Task<Result<Option<ClipboardItem>, ClipboardReadError>>;
+
+fn read_slot(slot: usize, read: fn(&App) -> PlatformRead, cx: &App) -> Task<Option<ClipboardItem>> {
     if pending(slot, cx).is_none() {
-        return Task::ready(read(cx));
+        return platform_read(read(cx), cx);
     }
     cx.spawn(async move |cx| {
         loop {
@@ -138,15 +136,36 @@ fn read_slot(
             if let Some(next) = next {
                 next.await;
             } else {
-                return cx.update(|cx| read(cx));
+                return cx.update(|cx| platform_read(read(cx), cx)).await;
             }
         }
     })
 }
 
+/// A read the platform answered at once stays ready, so [`try_read`] can take
+/// it without a foreground round trip; one waiting on another client resolves
+/// when that client has finished sending.
+fn platform_read(mut read: PlatformRead, cx: &App) -> Task<Option<ClipboardItem>> {
+    match (&mut read).now_or_never() {
+        Some(result) => Task::ready(read_result(result)),
+        None => cx.spawn(async move |_| read_result(read.await)),
+    }
+}
+
+fn read_result(result: Result<Option<ClipboardItem>, ClipboardReadError>) -> Option<ClipboardItem> {
+    result
+        .inspect_err(|err| log::warn!("clipboard read failed: {err}"))
+        .ok()
+        .flatten()
+}
+
 /// Wait for the newest requested selection before reading the clipboard.
+///
+/// The platform read does not block: a clipboard owned by another client
+/// resolves later, and a paste that has to wait for it reserves its input
+/// order with [`crate::Terminal::begin_paste`].
 pub fn read(cx: &App) -> Task<Option<ClipboardItem>> {
-    read_slot(0, App::read_from_clipboard, cx)
+    read_slot(0, App::read_from_clipboard_async, cx)
 }
 
 /// Return an already available read without scheduling a foreground callback.
@@ -213,10 +232,16 @@ impl crate::Terminal {
                 }
             }
             Err(clipboard) => {
+                let ticket = self.begin_paste();
                 cx.spawn(async move |terminal, cx| {
-                    if let Some(text) = clipboard.await.and_then(|item| item.text()) {
-                        let _ = terminal.update(cx, |terminal, _| terminal.paste(&text));
-                    }
+                    let text = clipboard.await.and_then(|item| item.text());
+                    let _ = terminal.update(cx, |terminal, _| {
+                        terminal.finish_paste(ticket, |terminal| {
+                            if let Some(text) = text {
+                                terminal.paste(&text);
+                            }
+                        });
+                    });
                 })
                 .detach();
             }

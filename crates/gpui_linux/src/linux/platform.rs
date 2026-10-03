@@ -20,8 +20,8 @@ use xkbcommon::xkb::{self, Keycode, Keysym, State};
 
 use crate::linux::{LinuxDispatcher, PriorityQueueCalloopReceiver};
 use gpui::{
-    Action, AnyWindowHandle, BackgroundExecutor, ClipboardItem, CursorStyle, DisplayId,
-    ForegroundExecutor, Keymap, Menu, MenuItem, OwnedMenu, PathPromptOptions, Platform,
+    Action, AnyWindowHandle, BackgroundExecutor, ClipboardItem, ClipboardReadError, CursorStyle,
+    DisplayId, ForegroundExecutor, Keymap, Menu, MenuItem, OwnedMenu, PathPromptOptions, Platform,
     PlatformDisplay, PlatformKeyboardLayout, PlatformKeyboardMapper, PlatformTextSystem,
     PlatformWindow, Result, RunnableVariant, Task, ThermalState, WindowAppearance,
     WindowButtonLayout, WindowParams,
@@ -141,6 +141,14 @@ pub(crate) trait LinuxClient {
     fn write_to_clipboard(&self, item: ClipboardItem);
     fn read_from_primary(&self) -> Option<ClipboardItem>;
     fn read_from_clipboard(&self) -> Option<ClipboardItem>;
+    /// A backend whose reads can wait on another client overrides these two;
+    /// the default answers from the synchronous read.
+    fn read_from_primary_async(&self) -> Task<Result<Option<ClipboardItem>, ClipboardReadError>> {
+        Task::ready(Ok(self.read_from_primary()))
+    }
+    fn read_from_clipboard_async(&self) -> Task<Result<Option<ClipboardItem>, ClipboardReadError>> {
+        Task::ready(Ok(self.read_from_clipboard()))
+    }
     fn active_window(&self) -> Option<AnyWindowHandle>;
     fn window_stack(&self) -> Option<Vec<AnyWindowHandle>>;
     fn run(&self);
@@ -798,6 +806,14 @@ impl<P: LinuxClient + 'static> Platform for LinuxPlatform<P> {
         self.inner.read_from_clipboard()
     }
 
+    fn read_from_primary_async(&self) -> Task<Result<Option<ClipboardItem>, ClipboardReadError>> {
+        self.inner.read_from_primary_async()
+    }
+
+    fn read_from_clipboard_async(&self) -> Task<Result<Option<ClipboardItem>, ClipboardReadError>> {
+        self.inner.read_from_clipboard_async()
+    }
+
     fn add_recent_document(&self, _path: &Path) {}
 }
 
@@ -925,6 +941,15 @@ pub(super) fn get_xkb_compose_state(cx: &xkb::Context) -> Option<xkb::compose::S
 
 #[cfg(feature = "wayland")]
 pub(super) const PIPE_READ_TIMEOUT: Duration = Duration::from_secs(4);
+
+/// How long one clipboard read may take in total, however steadily its owner
+/// keeps sending. An asynchronous read blocks no thread, but the paste that
+/// asked for it holds back that pane's later input until it resolves, so it
+/// needs an end even while the owner is still making progress. The idle limit
+/// — no data for [`PIPE_READ_TIMEOUT`] on Wayland, no event for X11's
+/// `LONG_TIMEOUT_DUR` — still ends a stalled owner long before this.
+#[cfg(any(feature = "wayland", feature = "x11"))]
+pub(super) const CLIPBOARD_READ_DEADLINE: Duration = Duration::from_secs(30);
 
 #[cfg(feature = "wayland")]
 pub(super) fn read_fd_with_timeout(

@@ -3,8 +3,8 @@ use crate::NoopTextSystem;
 #[cfg(any(test, feature = "test-support"))]
 use crate::PathPromptOptions;
 use crate::{
-    AnyWindowHandle, BackgroundExecutor, ClipboardItem, CursorStyle, DevicePixels,
-    DummyKeyboardMapper, ForegroundExecutor, Keymap, Platform, PlatformDisplay,
+    AnyWindowHandle, BackgroundExecutor, ClipboardItem, ClipboardReadError, CursorStyle,
+    DevicePixels, DummyKeyboardMapper, ForegroundExecutor, Keymap, Platform, PlatformDisplay,
     PlatformHeadlessRenderer, PlatformKeyboardLayout, PlatformKeyboardMapper, PlatformTextSystem,
     PromptButton, ScreenCaptureFrame, ScreenCaptureSource, ScreenCaptureStream, SharedString,
     SourceMetadata, SystemNotification, SystemNotificationResponse, Task, TestDisplay, TestWindow,
@@ -22,6 +22,11 @@ use std::{
     sync::Arc,
 };
 
+type DeferredClipboardRead = (
+    oneshot::Sender<Option<ClipboardItem>>,
+    Option<ClipboardItem>,
+);
+
 /// TestPlatform implements the Platform trait for use in tests.
 pub(crate) struct TestPlatform {
     background_executor: BackgroundExecutor,
@@ -35,6 +40,11 @@ pub(crate) struct TestPlatform {
     current_primary_item: Mutex<Option<ClipboardItem>>,
     #[cfg(target_os = "macos")]
     current_find_pasteboard_item: Mutex<Option<ClipboardItem>>,
+    /// Asynchronous clipboard reads held back by
+    /// `TestAppContext::defer_clipboard_reads`, standing in for an owner that
+    /// is slow to answer. Each carries the item the clipboard held when it was
+    /// requested, as a real offer does.
+    deferred_clipboard_reads: RefCell<Option<Vec<DeferredClipboardRead>>>,
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) prompts: RefCell<TestPrompts>,
     screen_capture_sources: RefCell<Vec<TestScreenCaptureSource>>,
@@ -112,6 +122,50 @@ pub(crate) struct TestPrompts {
 }
 
 impl TestPlatform {
+    /// Holds every later asynchronous clipboard read until
+    /// [`TestPlatform::complete_clipboard_reads`], or releases the held reads
+    /// and stops holding.
+    pub(crate) fn defer_clipboard_reads(&self, defer: bool) {
+        if defer {
+            self.deferred_clipboard_reads
+                .borrow_mut()
+                .get_or_insert_with(Vec::new);
+        } else {
+            self.complete_clipboard_reads();
+            self.deferred_clipboard_reads.borrow_mut().take();
+        }
+    }
+
+    /// Answers every held clipboard read with the item it was requested
+    /// against, in request order, and returns how many there were.
+    pub(crate) fn complete_clipboard_reads(&self) -> usize {
+        let reads = self
+            .deferred_clipboard_reads
+            .borrow_mut()
+            .as_mut()
+            .map(std::mem::take)
+            .unwrap_or_default();
+        let count = reads.len();
+        for (answer, item) in reads {
+            answer.send(item).ok();
+        }
+        count
+    }
+
+    fn read_async(
+        &self,
+        item: Option<ClipboardItem>,
+    ) -> Task<Result<Option<ClipboardItem>, ClipboardReadError>> {
+        let mut deferred = self.deferred_clipboard_reads.borrow_mut();
+        let Some(deferred) = deferred.as_mut() else {
+            return Task::ready(Ok(item));
+        };
+        let (answer, answered) = oneshot::channel();
+        deferred.push((answer, item));
+        self.foreground_executor
+            .spawn(async move { Ok(answered.await.ok().flatten()) })
+    }
+
     #[cfg(any(test, feature = "test-support"))]
     pub fn new(executor: BackgroundExecutor, foreground_executor: ForegroundExecutor) -> Rc<Self> {
         Self::with_platform(
@@ -154,6 +208,7 @@ impl TestPlatform {
             current_primary_item: Mutex::new(None),
             #[cfg(target_os = "macos")]
             current_find_pasteboard_item: Mutex::new(None),
+            deferred_clipboard_reads: RefCell::new(None),
             weak: weak.clone(),
             opened_url: Default::default(),
             system_notifications: Default::default(),
@@ -612,6 +667,15 @@ impl Platform for TestPlatform {
 
     fn write_to_clipboard(&self, item: ClipboardItem) {
         *self.current_clipboard_item.lock() = Some(item);
+    }
+
+    fn read_from_clipboard_async(&self) -> Task<Result<Option<ClipboardItem>, ClipboardReadError>> {
+        self.read_async(self.read_from_clipboard())
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    fn read_from_primary_async(&self) -> Task<Result<Option<ClipboardItem>, ClipboardReadError>> {
+        self.read_async(self.read_from_primary())
     }
 
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]

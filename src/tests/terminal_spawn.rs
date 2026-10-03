@@ -483,3 +483,122 @@ fn a_proposed_layout_reports_every_existing_pane_it_names() {
         "a draft has no id in the session yet, so only the existing panes are named"
     );
 }
+
+/// A display-only terminal in a view broadcasting its input, with the input
+/// events it emits collected in order. Stands in for a pane whose tab has
+/// broadcast input on, without a `Zetta` (which would spawn a shell).
+struct BroadcastingView {
+    terminal: Entity<terminal::Terminal>,
+    view: Entity<TerminalView>,
+    received: std::rc::Rc<std::cell::RefCell<Vec<TerminalInput>>>,
+}
+
+fn broadcasting_terminal_view(
+    cx: &mut gpui::TestAppContext,
+) -> (BroadcastingView, &mut gpui::VisualTestContext) {
+    cx.update(|cx| {
+        theme_settings::init(theme::LoadThemes::JustBase, cx);
+        terminal::terminal_settings::TerminalSettings::init(cx);
+    });
+    let terminal = cx.new(|cx| {
+        terminal::TerminalBuilder::new_display_only(
+            terminal::terminal_settings::CursorShape::Block,
+            terminal::terminal_settings::AlternateScroll::On,
+            None,
+            0,
+            cx.background_executor(),
+            util::paths::PathStyle::local(),
+        )
+        .subscribe(cx)
+    });
+    let (view, cx) = cx.add_window_view({
+        let terminal = terminal.clone();
+        |window, cx| TerminalView::new_with_theme(terminal, None, window, cx)
+    });
+    let received = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    view.update_in(cx, |view, window, cx| {
+        view.set_emit_input_events(true);
+        window.focus(&view.focus_handle(cx), cx);
+    });
+    cx.update({
+        let received = received.clone();
+        |_, cx| {
+            cx.subscribe(&view, move |_, event, _| {
+                if let TerminalViewEvent::Input(input) = event {
+                    received.borrow_mut().push(input.clone());
+                }
+            })
+            .detach();
+        }
+    });
+    cx.run_until_parked();
+    let pane = BroadcastingView {
+        terminal,
+        view,
+        received,
+    };
+    (pane, cx)
+}
+
+#[gpui::test]
+fn a_paste_waiting_on_the_clipboard_is_broadcast_ahead_of_later_typing(
+    cx: &mut gpui::TestAppContext,
+) {
+    cx.write_to_clipboard(gpui::ClipboardItem::new_string("pasted".to_owned()));
+    cx.defer_clipboard_reads(true);
+    let (
+        BroadcastingView {
+            terminal,
+            view,
+            received,
+        },
+        cx,
+    ) = broadcasting_terminal_view(cx);
+
+    cx.dispatch_action(terminal::Paste);
+    view.update(cx, |view, cx| {
+        assert!(view.forward_keystroke(&gpui::Keystroke::parse("enter").unwrap(), cx));
+    });
+    cx.run_until_parked();
+    assert!(
+        received.borrow().is_empty(),
+        "typing overtook a paste still reading the clipboard: {:?}",
+        received.borrow()
+    );
+    assert!(terminal.read_with(cx, |terminal, _| terminal.paste_pending()));
+
+    // The clipboard changes hands before the owner answers: the paste is of
+    // what was on the clipboard when it was asked for.
+    cx.write_to_clipboard(gpui::ClipboardItem::new_string("replaced".to_owned()));
+    assert_eq!(cx.complete_clipboard_reads(), 1);
+    cx.run_until_parked();
+
+    let received = received.borrow();
+    assert!(
+        matches!(received.as_slice(), [TerminalInput::Paste(text), typed]
+            if text == "pasted" && !matches!(typed, TerminalInput::Paste(_))),
+        "{received:?}"
+    );
+    assert!(!terminal.read_with(cx, |terminal, _| terminal.paste_pending()));
+}
+
+#[gpui::test]
+fn a_paste_aimed_at_a_search_that_closes_while_reading_goes_nowhere(cx: &mut gpui::TestAppContext) {
+    cx.write_to_clipboard(gpui::ClipboardItem::new_string("pasted".to_owned()));
+    cx.defer_clipboard_reads(true);
+    let (
+        BroadcastingView {
+            terminal, received, ..
+        },
+        cx,
+    ) = broadcasting_terminal_view(cx);
+
+    cx.dispatch_action(terminal_view::SearchScrollback);
+    cx.dispatch_action(terminal::Paste);
+    cx.dispatch_action(terminal_view::DismissSearch);
+    assert_eq!(cx.complete_clipboard_reads(), 1);
+    cx.run_until_parked();
+
+    assert!(received.borrow().is_empty(), "{:?}", received.borrow());
+    assert!(!terminal.read_with(cx, |terminal, _| terminal.paste_pending()));
+}

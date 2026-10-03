@@ -62,7 +62,7 @@ use crate::linux::{LinuxCommon, LinuxKeyboardLayout, X11Window, modifiers_from_x
 use gpui::{
     AnyWindowHandle, Bounds, ClipboardItem, CursorStyle, DisplayId, FileDropEvent, Keystroke,
     Modifiers, ModifiersChangedEvent, MouseButton, Pixels, PlatformDisplay, PlatformInput,
-    PlatformKeyboardLayout, PlatformWindow, Point, RequestFrameOptions, ScrollDelta, Size,
+    PlatformKeyboardLayout, PlatformWindow, Point, RequestFrameOptions, ScrollDelta, Size, Task,
     TouchPhase, WindowButtonLayout, WindowParams, point, px,
 };
 use gpui_wgpu::{CompositorGpuHint, GpuContext};
@@ -304,6 +304,36 @@ impl X11ClientStatePtr {
 
 #[derive(Clone)]
 pub(crate) struct X11Client(pub(crate) Rc<RefCell<X11ClientState>>);
+
+/// Converts a selection another client owns on a thread of its own and
+/// resolves on the GUI thread. The conversion waits on the owner — through
+/// `INCR` segments, for a large one — so it cannot run where input is handled,
+/// and it gets a thread rather than a background-executor worker because a
+/// slow owner would hold that worker for the read's whole deadline.
+fn read_selection_off_thread(
+    state: &X11ClientState,
+    selection: clipboard::ClipboardKind,
+) -> Task<Result<Option<gpui::ClipboardItem>, gpui::ClipboardReadError>> {
+    let reader = state.clipboard.reader();
+    let (done, finished) = futures::channel::oneshot::channel();
+    let spawned = std::thread::Builder::new()
+        .name("clipboard-read".to_owned())
+        .spawn(move || {
+            let item = reader
+                .get_any(selection)
+                .context("X11: Failed to read from clipboard")
+                .log_with_level(log::Level::Debug);
+            done.send(item).ok();
+        });
+    if let Err(err) = spawned {
+        log::error!("X11: could not start a clipboard read: {err}");
+        return Task::ready(Ok(None));
+    }
+    state
+        .common
+        .foreground_executor
+        .spawn(async move { Ok(finished.await.ok().flatten()) })
+}
 
 impl X11Client {
     pub(crate) fn new() -> anyhow::Result<Self> {
@@ -1798,6 +1828,31 @@ impl LinuxClient for X11Client {
             .get_any(clipboard::ClipboardKind::Clipboard)
             .context("X11: Failed to read from clipboard (clipboard)")
             .log_with_level(log::Level::Debug)
+    }
+
+    fn read_from_primary_async(
+        &self,
+    ) -> Task<Result<Option<gpui::ClipboardItem>, gpui::ClipboardReadError>> {
+        let state = self.0.borrow();
+        if state.clipboard.is_owner(clipboard::ClipboardKind::Primary) {
+            // Our own selection: answered from memory, with no conversion.
+            drop(state);
+            return Task::ready(Ok(self.read_from_primary()));
+        }
+        read_selection_off_thread(&state, clipboard::ClipboardKind::Primary)
+    }
+
+    fn read_from_clipboard_async(
+        &self,
+    ) -> Task<Result<Option<gpui::ClipboardItem>, gpui::ClipboardReadError>> {
+        let state = self.0.borrow();
+        if state
+            .clipboard
+            .is_owner(clipboard::ClipboardKind::Clipboard)
+        {
+            return Task::ready(Ok(state.clipboard_item.clone()));
+        }
+        read_selection_off_thread(&state, clipboard::ClipboardKind::Clipboard)
     }
 
     fn run(&self) {

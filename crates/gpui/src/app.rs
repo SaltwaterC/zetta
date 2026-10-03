@@ -1413,7 +1413,9 @@ impl App {
     /// Prefer this over [`App::read_from_clipboard`] in code that can await:
     /// on platforms where clipboard access is asynchronous and
     /// permission-gated (e.g. web), the synchronous read always returns
-    /// `None` while this method performs a real read.
+    /// `None` while this method performs a real read. On Linux the clipboard
+    /// can be owned by another client, which the synchronous read waits on
+    /// with the GUI thread blocked; this one waits without blocking it.
     pub fn read_from_clipboard_async(
         &self,
     ) -> Task<Result<Option<ClipboardItem>, ClipboardReadError>> {
@@ -1440,6 +1442,19 @@ impl App {
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     pub fn read_from_primary(&self) -> Option<ClipboardItem> {
         self.platform.read_from_primary()
+    }
+
+    /// Reads data from the primary selection buffer, resolving once the
+    /// contents are available. Only available on Linux.
+    ///
+    /// Prefer this over [`App::read_from_primary`] in code that can await: the
+    /// selection may be owned by another client, which the synchronous read
+    /// waits on with the GUI thread blocked.
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    pub fn read_from_primary_async(
+        &self,
+    ) -> Task<Result<Option<ClipboardItem>, ClipboardReadError>> {
+        self.platform.read_from_primary_async()
     }
 
     /// Writes data to the primary selection buffer.

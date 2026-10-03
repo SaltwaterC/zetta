@@ -47,6 +47,7 @@ use x11rb::{
     wrapper::ConnectionExt as _,
 };
 
+use crate::linux::platform::CLIPBOARD_READ_DEADLINE;
 use gpui::{ClipboardItem, Image, ImageFormat, hash};
 use strum::IntoEnumIterator;
 
@@ -282,7 +283,14 @@ impl Inner {
     /// `formats` must be a slice of atoms, where each atom represents a target format.
     /// The first format from `formats`, which the clipboard owner supports will be the
     /// format of the return value.
-    fn read(&self, formats: &[Atom], selection: ClipboardKind) -> Result<ClipboardData> {
+    ///
+    /// Gives up once `deadline` passes, however steadily the owner is sending.
+    fn read(
+        &self,
+        formats: &[Atom],
+        selection: ClipboardKind,
+        deadline: Instant,
+    ) -> Result<ClipboardData> {
         // if we are the current owner, we can get the current clipboard ourselves
         if self.is_owner(selection)? {
             let data = self.selection_of(selection).data.read();
@@ -300,7 +308,7 @@ impl Inner {
         let reader = XContext::new()?;
 
         let highest_precedence_format =
-            match self.read_single(&reader, selection, self.atoms.TARGETS) {
+            match self.read_single(&reader, selection, self.atoms.TARGETS, deadline) {
                 Err(err) => {
                     log::trace!("Clipboard TARGETS query failed with {err:?}");
                     None
@@ -322,7 +330,7 @@ impl Inner {
             };
 
         if let Some(&format) = highest_precedence_format {
-            let data = self.read_single(&reader, selection, format)?;
+            let data = self.read_single(&reader, selection, format, deadline)?;
             if !formats.contains(&data.format) {
                 // This shouldn't happen since the format is from the TARGETS list.
                 log::trace!(
@@ -337,7 +345,7 @@ impl Inner {
 
         log::trace!("Falling back on attempting to convert clipboard to each format.");
         for format in formats {
-            match self.read_single(&reader, selection, *format) {
+            match self.read_single(&reader, selection, *format, deadline) {
                 Ok(data) => {
                     if formats.contains(&data.format) {
                         return Ok(data);
@@ -375,6 +383,7 @@ impl Inner {
         reader: &XContext,
         selection: ClipboardKind,
         target_format: Atom,
+        deadline: Instant,
     ) -> Result<ClipboardData> {
         // Delete the property so that we can detect (using property notify)
         // when the selection owner receives our request.
@@ -403,7 +412,9 @@ impl Inner {
 
         let mut timeout_end = Instant::now() + LONG_TIMEOUT_DUR;
 
-        while Instant::now() < timeout_end {
+        // `timeout_end` is how long the owner may go quiet, and moves as INCR
+        // segments arrive; `deadline` bounds the whole read and does not.
+        while Instant::now() < timeout_end.min(deadline) {
             let event = reader.conn.poll_for_event().map_err(into_unknown)?;
             let event = match event {
                 Some(e) => e,
@@ -949,6 +960,81 @@ pub(crate) struct Clipboard {
     inner: Arc<Inner>,
 }
 
+/// See [`Clipboard::reader`].
+pub(crate) struct ClipboardReader(Arc<Inner>);
+
+impl ClipboardReader {
+    pub(crate) fn get_any(&self, selection: ClipboardKind) -> Result<ClipboardItem> {
+        self.0.get_any(selection)
+    }
+}
+
+impl Inner {
+    fn image_format_atom(&self, format: ImageFormat) -> Atom {
+        match format {
+            ImageFormat::Png => self.atoms.PNG__MIME,
+            ImageFormat::Jpeg => self.atoms.JPEG_MIME,
+            ImageFormat::Webp => self.atoms.WEBP_MIME,
+            ImageFormat::Gif => self.atoms.GIF__MIME,
+            ImageFormat::Svg => self.atoms.SVG__MIME,
+            ImageFormat::Bmp => self.atoms.BMP__MIME,
+            ImageFormat::Tiff => self.atoms.TIFF_MIME,
+            ImageFormat::Ico => self.atoms.ICO__MIME,
+            ImageFormat::Pnm => self.atoms.PNM__MIME,
+        }
+    }
+
+    fn get_any(&self, selection: ClipboardKind) -> Result<ClipboardItem> {
+        let image_entries = ImageFormat::iter()
+            .map(|format| (self.image_format_atom(format), format))
+            .collect::<Vec<_>>();
+
+        let text_format_atoms: &[Atom] = &[
+            self.atoms.UTF8_STRING,
+            self.atoms.UTF8_MIME_0,
+            self.atoms.UTF8_MIME_1,
+            self.atoms.STRING,
+            self.atoms.TEXT,
+            self.atoms.TEXT_MIME_UNKNOWN,
+        ];
+
+        // image formats first, as they are more specific, and read will return the first
+        // format that the contents can be converted to
+        let mut format_atoms = Vec::with_capacity(image_entries.len() + text_format_atoms.len());
+        format_atoms.extend(image_entries.iter().map(|(atom, _)| *atom));
+        format_atoms.extend_from_slice(text_format_atoms);
+
+        let deadline = Instant::now() + CLIPBOARD_READ_DEADLINE;
+        let result = self.read(&format_atoms, selection, deadline)?;
+
+        log::trace!(
+            "read clipboard as format {:?}",
+            self.atom_name(result.format)
+        );
+
+        for (format_atom, image_format) in image_entries {
+            if result.format == format_atom {
+                let bytes = result.bytes;
+                let id = hash(&bytes);
+                return Ok(ClipboardItem::new_image(&Image {
+                    id,
+                    format: image_format,
+                    bytes,
+                }));
+            }
+        }
+
+        let text = if result.format == self.atoms.STRING {
+            // ISO Latin-1
+            // See: https://stackoverflow.com/questions/28169745/what-are-the-options-to-convert-iso-8859-1-latin-1-to-a-string-utf-8
+            result.bytes.into_iter().map(|c| c as char).collect()
+        } else {
+            String::from_utf8(result.bytes).map_err(|_| Error::ConversionFailure)?
+        };
+        Ok(ClipboardItem::new_string(text))
+    }
+}
+
 impl Clipboard {
     pub(crate) fn new() -> Result<Self> {
         let mut global_cb = CLIPBOARD.lock();
@@ -991,17 +1077,7 @@ impl Clipboard {
     }
 
     fn image_format_atom(&self, format: ImageFormat) -> Atom {
-        match format {
-            ImageFormat::Png => self.inner.atoms.PNG__MIME,
-            ImageFormat::Jpeg => self.inner.atoms.JPEG_MIME,
-            ImageFormat::Webp => self.inner.atoms.WEBP_MIME,
-            ImageFormat::Gif => self.inner.atoms.GIF__MIME,
-            ImageFormat::Svg => self.inner.atoms.SVG__MIME,
-            ImageFormat::Bmp => self.inner.atoms.BMP__MIME,
-            ImageFormat::Tiff => self.inner.atoms.TIFF_MIME,
-            ImageFormat::Ico => self.inner.atoms.ICO__MIME,
-            ImageFormat::Pnm => self.inner.atoms.PNM__MIME,
-        }
+        self.inner.image_format_atom(format)
     }
 
     #[allow(unused)]
@@ -1020,52 +1096,17 @@ impl Clipboard {
     }
 
     pub(crate) fn get_any(&self, selection: ClipboardKind) -> Result<ClipboardItem> {
-        let image_entries = ImageFormat::iter()
-            .map(|format| (self.image_format_atom(format), format))
-            .collect::<Vec<_>>();
+        self.inner.get_any(selection)
+    }
 
-        let text_format_atoms: &[Atom] = &[
-            self.inner.atoms.UTF8_STRING,
-            self.inner.atoms.UTF8_MIME_0,
-            self.inner.atoms.UTF8_MIME_1,
-            self.inner.atoms.STRING,
-            self.inner.atoms.TEXT,
-            self.inner.atoms.TEXT_MIME_UNKNOWN,
-        ];
-
-        // image formats first, as they are more specific, and read will return the first
-        // format that the contents can be converted to
-        let mut format_atoms = Vec::with_capacity(image_entries.len() + text_format_atoms.len());
-        format_atoms.extend(image_entries.iter().map(|(atom, _)| *atom));
-        format_atoms.extend_from_slice(text_format_atoms);
-
-        let result = self.inner.read(&format_atoms, selection)?;
-
-        log::trace!(
-            "read clipboard as format {:?}",
-            self.inner.atom_name(result.format)
-        );
-
-        for (format_atom, image_format) in image_entries {
-            if result.format == format_atom {
-                let bytes = result.bytes;
-                let id = hash(&bytes);
-                return Ok(ClipboardItem::new_image(&Image {
-                    id,
-                    format: image_format,
-                    bytes,
-                }));
-            }
-        }
-
-        let text = if result.format == self.inner.atoms.STRING {
-            // ISO Latin-1
-            // See: https://stackoverflow.com/questions/28169745/what-are-the-options-to-convert-iso-8859-1-latin-1-to-a-string-utf-8
-            result.bytes.into_iter().map(|c| c as char).collect()
-        } else {
-            String::from_utf8(result.bytes).map_err(|_| Error::ConversionFailure)?
-        };
-        Ok(ClipboardItem::new_string(text))
+    /// A handle that reads from another thread. A read converts through a
+    /// connection of its own, so it needs nothing of the GUI thread's.
+    ///
+    /// The handle keeps the clipboard alive while it reads, so a read still in
+    /// flight when the last [`Clipboard`] drops skips the clipboard-manager
+    /// handover; the read's deadline bounds how long that can be the case.
+    pub(crate) fn reader(&self) -> ClipboardReader {
+        ClipboardReader(Arc::clone(&self.inner))
     }
 
     pub fn is_owner(&self, selection: ClipboardKind) -> bool {

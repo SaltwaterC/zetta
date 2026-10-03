@@ -89,7 +89,9 @@ use crate::linux::{
     modifiers_from_xkb, new_xkb_context, open_uri_internal, read_fd_with_timeout,
     reveal_path_internal,
     wayland::{
-        clipboard::{Clipboard, DataOffer, FILE_LIST_MIME_TYPE, TEXT_MIME_TYPES},
+        clipboard::{
+            Clipboard, DataOffer, FILE_LIST_MIME_TYPE, ReadPlan, ReceiveData, TEXT_MIME_TYPES,
+        },
         cursor::Cursor,
         serial::{Serial, SerialKind, SerialTracker},
         to_shape,
@@ -216,8 +218,8 @@ use gpui::{
     ForegroundExecutor, KeyDownEvent, KeyUpEvent, Keystroke, Modifiers, ModifiersChangedEvent,
     MouseButton, MouseDownEvent, MouseExitEvent, MouseMoveEvent, MouseUpEvent, NavigationDirection,
     Pixels, PlatformDisplay, PlatformInput, PlatformKeyboardLayout, PlatformWindow, Point,
-    ScrollDelta, ScrollWheelEvent, SharedString, Size, TouchPhase, WindowButtonLayout, WindowKind,
-    WindowParams, point, profiler, px, size,
+    ScrollDelta, ScrollWheelEvent, SharedString, Size, Task, TouchPhase, WindowButtonLayout,
+    WindowKind, WindowParams, point, profiler, px, size,
 };
 use gpui_wgpu::{CompositorGpuHint, GpuContext};
 use wayland_protocols::wp::linux_dmabuf::zv1::client::{
@@ -749,6 +751,41 @@ impl WaylandClientState {
 
 #[derive(Clone)]
 pub struct WaylandClient(Rc<RefCell<WaylandClientState>>);
+
+impl WaylandClient {
+    /// Starts the transfer a plan asks for — its receive is sent before this
+    /// returns — and resolves once the owner has finished writing, caching the
+    /// result for the offer it was read from.
+    fn read_planned<T>(
+        &self,
+        state: std::cell::Ref<'_, WaylandClientState>,
+        plan: ReadPlan<T>,
+        cache: fn(&mut Clipboard, &ObjectId, &Option<gpui::ClipboardItem>),
+    ) -> Task<Result<Option<gpui::ClipboardItem>, gpui::ClipboardReadError>>
+    where
+        T: ReceiveData + Proxy + 'static,
+    {
+        let transfer = match plan {
+            ReadPlan::Ready(item) => return Task::ready(Ok(item)),
+            ReadPlan::Transfer(transfer) => transfer,
+        };
+        let offer = transfer.offer_id();
+        let read = transfer.start(
+            state.clipboard.connection().clone(),
+            state.loop_handle.clone(),
+        );
+        let executor = state.common.foreground_executor.clone();
+        drop(state);
+        let client = Rc::downgrade(&self.0);
+        executor.spawn(async move {
+            let item = read.await;
+            if let Some(client) = client.upgrade() {
+                cache(&mut client.borrow_mut().clipboard, &offer, &item);
+            }
+            Ok(item)
+        })
+    }
+}
 
 impl Drop for WaylandClient {
     fn drop(&mut self) {
@@ -1322,6 +1359,26 @@ impl LinuxClient for WaylandClient {
 
     fn read_from_clipboard(&self) -> Option<gpui::ClipboardItem> {
         self.0.borrow_mut().clipboard.read()
+    }
+
+    fn read_from_primary_async(
+        &self,
+    ) -> Task<Result<Option<gpui::ClipboardItem>, gpui::ClipboardReadError>> {
+        let state = self.0.borrow();
+        let plan = state.clipboard.plan_read_primary();
+        self.read_planned(state, plan, |clipboard, offer, item| {
+            clipboard.cache_primary_read(offer, item)
+        })
+    }
+
+    fn read_from_clipboard_async(
+        &self,
+    ) -> Task<Result<Option<gpui::ClipboardItem>, gpui::ClipboardReadError>> {
+        let state = self.0.borrow();
+        let plan = state.clipboard.plan_read();
+        self.read_planned(state, plan, |clipboard, offer, item| {
+            clipboard.cache_read(offer, item)
+        })
     }
 
     fn active_window(&self) -> Option<AnyWindowHandle> {

@@ -329,6 +329,20 @@ impl TestAppContext {
         self.test_platform.read_from_clipboard()
     }
 
+    /// Simulates a clipboard owner that is slow to answer: every later
+    /// asynchronous clipboard or primary-selection read stays pending until
+    /// [`TestAppContext::complete_clipboard_reads`]. Passing `false` answers
+    /// the held reads and stops holding new ones.
+    pub fn defer_clipboard_reads(&self, defer: bool) {
+        self.test_platform.defer_clipboard_reads(defer)
+    }
+
+    /// Answers every held clipboard read with the contents the clipboard had
+    /// when that read was requested, and returns how many there were.
+    pub fn complete_clipboard_reads(&self) -> usize {
+        self.test_platform.complete_clipboard_reads()
+    }
+
     /// Simulates choosing a File in the platform's "Open" dialog.
     pub fn simulate_new_path_selection(
         &self,

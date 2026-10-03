@@ -41,6 +41,10 @@ Retain these Zetta-specific behaviors when synchronizing:
   background worker. Application-wide clipboard versions reject stale results;
   terminal clipboard reads wait for pending copies. Empty selections retain
   primary ownership, including after copy-and-clear;
+- clipboard and primary reads use the platform's asynchronous reads, and a
+  paste that has to wait takes a `PasteTicket` (`paste_order.rs`, no upstream
+  counterpart): keyboard input queued before `finish_paste` is written after
+  the paste. Program replies and mouse or focus reports are not held;
 - split each reader handover into a non-blocking retirement on the terminal's
   thread and an owned, `Send` `RetiredReader` whose `finish` joins the pty loop
   or drains the byte stream elsewhere (`reader_handover.rs`, no upstream

@@ -2,6 +2,7 @@ mod mappings;
 
 mod alacritty;
 mod clipboard_channel;
+pub mod paste_order;
 mod pty_info;
 mod reader_handover;
 pub mod selection_clipboard;
@@ -2241,6 +2242,7 @@ impl TerminalBuilder {
             init_command_startup_echo_disabled: false,
             init_command_startup_uses_nul: false,
             init_command_startup_pending_input: VecDeque::new(),
+            paste_order: Default::default(),
             event_loop_task: Task::ready(Ok(())),
             background_executor: background_executor.clone(),
             path_style,
@@ -3088,6 +3090,7 @@ impl TerminalBuilder {
                 init_command_startup_echo_disabled: false,
                 init_command_startup_uses_nul: false,
                 init_command_startup_pending_input: VecDeque::new(),
+                paste_order: Default::default(),
                 event_loop_task: Task::ready(Ok(())),
                 background_executor,
                 path_style,
@@ -3433,6 +3436,8 @@ pub struct Terminal {
     /// active. It must wait until the wrapper has restored echo, otherwise it
     /// can be consumed as the wrapper's payload or be echoed out of order.
     init_command_startup_pending_input: VecDeque<InputCommand>,
+    /// Keyboard input held behind pastes still waiting on the clipboard.
+    paste_order: paste_order::PasteOrder<InputCommand>,
     event_loop_task: Task<Result<(), anyhow::Error>>,
     background_executor: BackgroundExecutor,
     path_style: PathStyle,
@@ -4506,6 +4511,13 @@ impl Terminal {
     }
 
     fn queue_input(&mut self, input: InputCommand) {
+        if let Some(input) = self.paste_order.admit(input) {
+            self.queue_input_now(input);
+        }
+    }
+
+    /// Delivers input that is not, or is no longer, held behind a paste.
+    fn queue_input_now(&mut self, input: InputCommand) {
         self.keyboard_input_sent = true;
         // A user who types while a restored screen is waiting for shell
         // startup has taken ownership of the fresh prompt. Do not later append

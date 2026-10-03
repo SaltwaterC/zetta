@@ -7,7 +7,7 @@ pub(crate) fn copy(term: &AlacrittyTerm, cx: &mut App) {
 }
 
 pub(crate) fn read(cx: &App) -> Task<Option<ClipboardItem>> {
-    read_slot(1, App::read_from_primary, cx)
+    read_slot(1, App::read_from_primary_async, cx)
 }
 
 fn nonempty(item: &Option<ClipboardItem>) -> bool {
