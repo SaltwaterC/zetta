@@ -196,28 +196,36 @@ impl DisplayScreen {
             .scrollback
             .evicted
             .saturating_add(u64::from(height));
+        let unseen_end = self.scrollback.evicted;
+        let carried_end = self
+            .scrollback
+            .rows_first
+            .saturating_add(u64::try_from(self.scrollback.rows.len()).unwrap_or(u64::MAX));
+        let retained_from = unseen_from.max(self.scrollback.rows_first);
+        let retained_end = unseen_end.min(carried_end);
         let mut wrapping = false;
-        let mut dropped = 0_u64;
-        for index in unseen_from..self.scrollback.evicted {
-            match self.carried_row(index) {
-                Some(row) => {
-                    if dropped > 0 {
-                        Self::write_gap(&mut output, dropped, &mut wrapping);
-                        dropped = 0;
-                    }
-                    if !wrapping {
-                        output.extend_from_slice(b"\r\n");
-                    }
-                    output.extend_from_slice(&row.contents);
-                    wrapping = row.wrapped;
-                }
-                // A row the server had to drop to keep running while this
-                // client was away. Runs of them collapse into one line rather
-                // than into a screenful of blanks.
-                None => dropped += 1,
+        // Work is bounded by the carried intersection, even when the peer
+        // discarded billions of rows. With no intersection there is just one
+        // gap, including when an empty carried range sits inside the loss.
+        if retained_from < retained_end {
+            if retained_from > unseen_from {
+                Self::write_gap(&mut output, retained_from - unseen_from, &mut wrapping);
             }
-        }
-        if dropped > 0 {
+            // The intersection lies within `rows`, so both conversions and
+            // the slice end are bounded by its usize length.
+            let offset = usize::try_from(retained_from - self.scrollback.rows_first).unwrap();
+            let count = usize::try_from(retained_end - retained_from).unwrap();
+            for row in &self.scrollback.rows[offset..offset + count] {
+                if !wrapping {
+                    output.extend_from_slice(b"\r\n");
+                }
+                output.extend_from_slice(&row.contents);
+                wrapping = row.wrapped;
+            }
+            if retained_end < unseen_end {
+                Self::write_gap(&mut output, unseen_end - retained_end, &mut wrapping);
+            }
+        } else if let Some(dropped) = unseen_end.checked_sub(unseen_from).filter(|n| *n > 0) {
             Self::write_gap(&mut output, dropped, &mut wrapping);
         }
 

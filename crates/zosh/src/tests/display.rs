@@ -1,5 +1,190 @@
 use super::*;
 
+/// The original row-by-row replay, kept as a byte oracle for bounded gaps.
+fn reference_scrollback_replay(
+    current: &DisplayScreen,
+    previous: &DisplayScreen,
+) -> Option<Vec<u8>> {
+    let height = current.rows();
+    let missing = current
+        .scrollback
+        .evicted
+        .checked_sub(previous.scrollback.evicted)
+        .filter(|missing| *missing > 0)?;
+    if !current.scrollback.active || height < 1 {
+        return None;
+    }
+    let mut output = b"\x1b[r\x1b[0m".to_vec();
+    current.correct_stale_rows(previous, missing, &mut output);
+    output.extend_from_slice(format!("\x1b[{height};1H").as_bytes());
+    let mut wrapping = false;
+    let mut dropped = 0;
+    for index in previous
+        .scrollback
+        .evicted
+        .saturating_add(u64::from(height))..current.scrollback.evicted
+    {
+        if let Some(row) = current.carried_row(index) {
+            if dropped > 0 {
+                DisplayScreen::write_gap(&mut output, dropped, &mut wrapping);
+                dropped = 0;
+            }
+            if !wrapping {
+                output.extend_from_slice(b"\r\n");
+            }
+            output.extend_from_slice(&row.contents);
+            wrapping = row.wrapped;
+        } else {
+            dropped += 1;
+        }
+    }
+    if dropped > 0 {
+        DisplayScreen::write_gap(&mut output, dropped, &mut wrapping);
+    }
+    output.push(b'\r');
+    output.extend(std::iter::repeat_n(
+        b'\n',
+        usize::try_from(missing.min(u64::from(height))).unwrap(),
+    ));
+    Some(output)
+}
+
+fn carried_rows(
+    count: usize,
+    wrap_mask: usize,
+) -> std::sync::Arc<Vec<crate::scrollback::ScrollbackRow>> {
+    std::sync::Arc::new(
+        (0..count)
+            .map(|index| crate::scrollback::ScrollbackRow {
+                contents: format!("row{index}").into_bytes(),
+                wrapped: wrap_mask & (1 << (index % usize::BITS as usize)) != 0,
+            })
+            .collect(),
+    )
+}
+
+#[test]
+fn arithmetic_replay_matches_row_by_row_bytes() {
+    // Cover first contact and established sessions, both edges of every
+    // intersection, disjoint/empty carriage, all wrapping combinations, and
+    // absolute indexes whose carried end or screen height would overflow.
+    for base in [0, 5, u64::MAX - 12] {
+        for height in [1, 3] {
+            let mut previous = DisplayScreen::new(height, 20);
+            previous.scrollback.evicted = base;
+            for missing in 0..=12 {
+                let mut current = previous.clone();
+                current.scrollback.active = true;
+                current.scrollback.evicted = base + missing;
+                for first in 0..=12 {
+                    current.scrollback.rows_first = base + first;
+                    for count in 0..=4 {
+                        for wrap_mask in 0..(1 << count) {
+                            current.scrollback.rows = carried_rows(count, wrap_mask);
+                            assert_eq!(
+                                current.scrollback_replay(&previous),
+                                reference_scrollback_replay(&current, &previous),
+                                "base={base}, height={height}, missing={missing}, \
+                                 first={first}, count={count}, wrap_mask={wrap_mask}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn replay_without_new_history_stays_absent() {
+    let mut previous = DisplayScreen::new(3, 20);
+    previous.scrollback.evicted = 10;
+    let mut current = previous.clone();
+    current.scrollback.evicted = 20;
+    assert_eq!(current.scrollback_replay(&previous), None);
+    current.scrollback.active = true;
+    for evicted in [0, 9, 10] {
+        current.scrollback.evicted = evicted;
+        assert_eq!(current.scrollback_replay(&previous), None);
+    }
+}
+
+#[test]
+fn replay_of_maximum_loss_emits_one_exact_gap() {
+    let previous = DisplayScreen::new(3, 20);
+    let mut current = previous.clone();
+    current.scrollback.active = true;
+    current.scrollback.evicted = u64::MAX;
+    // Empty carriage before, inside, and after the unseen interval must all
+    // collapse to one marker, without overflowing the gap count.
+    for first in [0, 3, u64::MAX / 2, u64::MAX] {
+        current.scrollback.rows_first = first;
+        assert_eq!(
+            current.scrollback_replay(&previous).unwrap(),
+            b"\x1b[r\x1b[0m\x1b[3;1H\r\n\x1b[2m[zosh: 18446744073709551612 lines of scrollback dropped]\x1b[0m\r\n\n\n"
+        );
+    }
+    current.scrollback.rows_first = u64::MAX - 2;
+    current.scrollback.rows = carried_rows(4, 1);
+    assert_eq!(
+        current.scrollback_replay(&previous).unwrap(),
+        b"\x1b[r\x1b[0m\x1b[3;1H\r\n\x1b[2m[zosh: 18446744073709551610 lines of scrollback dropped]\x1b[0m\r\nrow0row1\r\n\n\n"
+    );
+}
+
+/// Run with `cargo test --release replay_cost_tracks_retained_rows -- --ignored --nocapture`.
+#[test]
+#[ignore = "release-mode scaling probe"]
+fn replay_cost_tracks_retained_rows() {
+    use std::{hint::black_box, time::Instant};
+
+    let previous = DisplayScreen::new(24, 80);
+    for retained in [0, 32, 4096] {
+        let mut medians = Vec::new();
+        for lost in [10_000, 100_000_000] {
+            let mut current = previous.clone();
+            current.scrollback.active = true;
+            current.scrollback.rows_first = 24 + lost;
+            current.scrollback.rows = carried_rows(retained, 0);
+            current.scrollback.evicted = 24 + lost + retained as u64;
+            let expected = reference_scrollback_replay(&current, &previous).unwrap();
+            assert_eq!(current.scrollback_replay(&previous).unwrap(), expected);
+            let mut reference_samples = Vec::new();
+            for _ in 0..9 {
+                let start = Instant::now();
+                black_box(reference_scrollback_replay(
+                    black_box(&current),
+                    black_box(&previous),
+                ));
+                reference_samples.push(start.elapsed());
+            }
+            reference_samples.sort();
+            let mut samples = Vec::new();
+            for _ in 0..9 {
+                let start = Instant::now();
+                for _ in 0..100 {
+                    black_box(black_box(&current).scrollback_replay(black_box(&previous)));
+                }
+                samples.push(start.elapsed() / 100);
+            }
+            samples.sort();
+            medians.push(samples[4]);
+            eprintln!(
+                "lost={lost} retained={retained} bytes={} median={:?} original={:?}",
+                expected.len(),
+                samples[4],
+                reference_samples[4]
+            );
+        }
+        // A 10,000-fold growth in loss must not produce linear growth in
+        // work. Allow substantial scheduler noise, especially for tiny runs.
+        assert!(
+            medians[1] < medians[0] * 20 + std::time::Duration::from_micros(100),
+            "replay cost grew with discarded rows: {medians:?}"
+        );
+    }
+}
+
 #[test]
 fn repeated_padding_preserves_columns_across_protocol_states() {
     let mut first = DisplayScreen::new(3, 40);
