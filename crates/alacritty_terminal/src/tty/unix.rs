@@ -501,7 +501,7 @@ impl Drop for Pty {
             PtyChild::Owned(child) => {
                 // `Child` caches a reaped status; do not signal a recycled PID.
                 if matches!(child.try_wait(), Ok(None)) {
-                    terminate_child(child.id() as i32);
+                    terminate_child(child.id() as i32, &self.file);
                 }
             },
             // An attached child outlives this process by design: detaching a
@@ -510,7 +510,7 @@ impl Drop for Pty {
             // would reap a process this one did not spawn.
             PtyChild::Attached { .. } => {},
             PtyChild::Reclaimed { pid } => {
-                terminate_child(*pid as i32);
+                terminate_child(*pid as i32, &self.file);
             },
         }
     }
@@ -521,13 +521,22 @@ impl Drop for Pty {
 /// before returning so application shutdown cannot abandon the cleanup.
 /// Callers must drop live PTYs outside shared locks. Attached children never
 /// reach this path.
-fn terminate_child(pid: libc::pid_t) {
+///
+/// `master` is read and discarded for as long as the child is waited on. On
+/// macOS a process cannot finish exiting while output it wrote to its terminal
+/// is still unread — not even after `SIGKILL` — and the master only closes once
+/// this returns, so nothing else will read it: a child that filled the pty
+/// after its event loop stopped reading would otherwise be waited on forever.
+/// Linux does not wait for the output, so there this only throws away bytes
+/// nobody was going to read.
+fn terminate_child(pid: libc::pid_t, master: &File) {
     if child_has_exited(pid) {
         return;
     }
     unsafe { libc::kill(pid, libc::SIGHUP) };
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(250);
     loop {
+        discard_pending_output(master);
         if child_has_exited(pid) {
             return;
         }
@@ -536,7 +545,7 @@ fn terminate_child(pid: libc::pid_t) {
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
-    kill_and_reap_child(pid);
+    kill_and_reap_child(pid, master);
 }
 
 fn child_has_exited(pid: libc::pid_t) -> bool {
@@ -552,12 +561,32 @@ fn child_has_exited(pid: libc::pid_t) -> bool {
     }
 }
 
-fn kill_and_reap_child(pid: libc::pid_t) {
+/// Polls rather than blocking in `waitpid`, because the child's exit can be
+/// waiting on this side to read the pty; see [`terminate_child`].
+fn kill_and_reap_child(pid: libc::pid_t, master: &File) {
     unsafe { libc::kill(pid, libc::SIGKILL) };
     loop {
-        let result = unsafe { libc::waitpid(pid, ptr::null_mut(), 0) };
-        if result >= 0 || Error::last_os_error().kind() != ErrorKind::Interrupted {
+        discard_pending_output(master);
+        if child_has_exited(pid) {
             return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+}
+
+/// Reads what is waiting on a nonblocking pty master and drops it.
+///
+/// Bounded per call, so a process elsewhere in the session that keeps writing
+/// cannot keep the caller here; the caller's loop comes back for more.
+fn discard_pending_output(master: &File) {
+    let mut buf = [0u8; 4096];
+    for _ in 0..64 {
+        match (&*master).read(&mut buf) {
+            Ok(0) => return,
+            Ok(_) => {},
+            Err(err) if err.kind() == ErrorKind::Interrupted => {},
+            // `WouldBlock` once drained, `EIO` once the slave side is gone.
+            Err(_) => return,
         }
     }
 }
@@ -1149,5 +1178,37 @@ mod attached_tests {
     #[test]
     fn reclaimed_pty_cleanup_does_not_wait_for_a_child_ignoring_hangup() {
         assert_hangup_resistant_child_is_reaped(true);
+    }
+
+    /// On macOS a child cannot finish exiting while its terminal output is
+    /// unread, and nothing reads a pty whose event loop has stopped. Dropping
+    /// one whose child has filled it used to wait on that child for ever.
+    #[test]
+    fn dropping_a_pty_nobody_reads_does_not_wait_for_its_output_to_drain() {
+        let options = Options {
+            shell: Some(Shell::new("/bin/sh".to_owned(), vec!["-c".to_owned(), "yes".to_owned()])),
+            ..Options::default()
+        };
+        let pty = crate::tty::new(
+            &options,
+            WindowSize { num_lines: 24, num_cols: 80, cell_width: 1, cell_height: 1 },
+            0,
+        )
+        .unwrap();
+        let pid = pty.child_pid() as libc::pid_t;
+        // Long enough for `yes` to fill the pty and block on it.
+        std::thread::sleep(Duration::from_millis(200));
+
+        let (dropped_tx, dropped) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            drop(pty);
+            let _ = dropped_tx.send(());
+        });
+        if dropped.recv_timeout(Duration::from_secs(10)).is_err() {
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+            panic!("dropping the PTY waited on a child blocked writing to it");
+        }
+        assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
+        assert_eq!(Error::last_os_error().raw_os_error(), Some(libc::ESRCH));
     }
 }

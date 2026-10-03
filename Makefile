@@ -227,6 +227,14 @@ all: fmt lint test build
 # Parallel execution helper: runs command for each item in $(1), collects results
 # Usage: $(call parallel_for,items,command_template,description)
 # command_template should use $$item for the current item
+#
+# Each item's [OK]/[FAIL] line is printed the moment it finishes, followed by
+# how many are still running, and by their names once three or fewer remain,
+# so an item that hangs is named on screen instead of stalling the whole call
+# silently. Its captured output is printed at the end only if it failed. The
+# template is evaluated in its own subshell so an `exit` in it still records a
+# status, and that status is published with a rename so the still-running scan
+# never reads one half-written.
 define parallel_for
 	@items="$(1)"; \
 	cmd_template='$(2)'; \
@@ -237,28 +245,42 @@ define parallel_for
 	idx=0; \
 	for item in $$items; do \
 		idx=$$((idx + 1)); \
+		echo "$$item" >"$$tmpdir/name.$$idx"; \
 		( \
-			eval "$$cmd_template" >"$$tmpdir/out.$$idx" 2>"$$tmpdir/err.$$idx"; \
-			echo $$? >"$$tmpdir/status.$$idx"; \
-			echo "$$item" >"$$tmpdir/name.$$idx"; \
+			started=$$(date +%s); \
+			( eval "$$cmd_template" ) >"$$tmpdir/out.$$idx" 2>"$$tmpdir/err.$$idx"; \
+			status=$$?; \
+			elapsed=$$(( $$(date +%s) - started )); \
+			echo $$status >"$$tmpdir/status.$$idx.tmp"; \
+			mv "$$tmpdir/status.$$idx.tmp" "$$tmpdir/status.$$idx"; \
+			if [ $$status -eq 0 ]; then result="OK"; else result="FAIL"; fi; \
+			running=""; \
+			left=0; \
+			n=0; \
+			for other in $$items; do \
+				n=$$((n + 1)); \
+				[ -f "$$tmpdir/status.$$n" ] && continue; \
+				running="$$running $$other"; \
+				left=$$((left + 1)); \
+			done; \
+			if [ $$left -eq 0 ]; then \
+				printf "  [%s] %s (%ss)\n" "$$result" "$$item" "$$elapsed"; \
+			elif [ $$left -le 3 ]; then \
+				printf "  [%s] %s (%ss); still running:%s\n" "$$result" "$$item" "$$elapsed" "$$running"; \
+			else \
+				printf "  [%s] %s (%ss); %s still running\n" "$$result" "$$item" "$$elapsed" "$$left"; \
+			fi; \
 		) & \
 		pids="$$pids $$!"; \
 	done; \
-	failed=0; \
 	for pid in $$pids; do \
 		wait $$pid || true; \
 	done; \
+	failed=0; \
 	for f in "$$tmpdir"/name.*; do \
 		[ -f "$$f" ] || continue; \
 		idx=$${f##*.}; \
-		name=$$(cat "$$f"); \
-		status=$$(cat "$$tmpdir/status.$$idx"); \
-		if [ "$$status" -eq 0 ]; then \
-			printf "  [OK] %s\n" "$$name"; \
-		else \
-			printf "  [FAIL] %s\n" "$$name"; \
-			failed=1; \
-		fi; \
+		[ "$$(cat "$$tmpdir/status.$$idx")" -eq 0 ] || failed=1; \
 	done; \
 	if [ $$failed -eq 1 ]; then \
 		echo ""; \

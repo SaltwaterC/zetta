@@ -22,6 +22,9 @@ Retain these Zetta changes when synchronizing:
 - Unix PTY teardown reaps owned and reclaimed children, escalating from SIGHUP
   to SIGKILL after a short grace period. A shell that ignores hangup
   must not block the multiplexer session lock or application shutdown.
+  Teardown discards the master's pending output while it waits, because on
+  macOS a child — even a `SIGKILL`ed one — cannot finish exiting while its
+  terminal output is unread, and the master only closes after the wait.
 - Unix `Pty::try_wait` exposes a direct status poll for the multiplexer daemon;
   its `SIGCHLD` pipes remain wakeup mechanisms rather than prerequisites for
   calling `waitpid`, so a notification race cannot strand a pane's exit.
