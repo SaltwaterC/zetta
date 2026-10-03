@@ -326,7 +326,7 @@ fn prune_exited_panes(daemon: &Arc<Daemon>) -> bool {
     }
     #[cfg(feature = "session-persistence")]
     {
-        let mut persistence = daemon.persistence.lock().unwrap();
+        let mut persistence = daemon.persistence.lock();
         if let Some(persistence) = persistence.as_mut() {
             for session_id in removed_session_ids {
                 if let Err(error) = persistence.forget(session_id) {
@@ -772,9 +772,7 @@ pub struct Daemon {
     /// Wakes the drain thread when a pane is attached or detached.
     drain_wake: Mutex<Option<Stream>>,
     #[cfg(feature = "session-persistence")]
-    persistence: Mutex<Option<PersistenceStore>>,
-    #[cfg(feature = "session-persistence")]
-    persistence_enabled: AtomicBool,
+    persistence: Arc<PersistenceQueue>,
     #[cfg(feature = "session-persistence")]
     restored: Mutex<Vec<RestoredSession>>,
 }
@@ -955,9 +953,7 @@ impl Daemon {
             listener_fd,
             drain_wake: Mutex::new(None),
             #[cfg(feature = "session-persistence")]
-            persistence: Mutex::new(persistence),
-            #[cfg(feature = "session-persistence")]
-            persistence_enabled: AtomicBool::new(persistence_enabled),
+            persistence: Arc::new(PersistenceQueue::new(persistence, persistence_enabled)),
             #[cfg(feature = "session-persistence")]
             restored: Mutex::new(Vec::new()),
         }
@@ -1129,7 +1125,7 @@ pub fn run(
     } else {
         // A temporary memory fallback must not make records from an earlier
         // disk daemon disappear.  Reopen the store for listing, resume, and
-        // explicit cleanup, while `persistence_enabled` below keeps this
+        // explicit cleanup, while `PersistenceQueue::enabled` keeps this
         // recovery handle from persisting new memory-mode sessions.
         PersistenceStore::open_with_recovery_state(&directory, None, false)?
     };
@@ -1182,6 +1178,15 @@ pub fn run(
         }
     }
     sweep_image_staging(&daemon)?;
+    #[cfg(feature = "session-persistence")]
+    {
+        let waker = Arc::downgrade(&daemon);
+        daemon.persistence.start(move || {
+            if let Some(daemon) = waker.upgrade() {
+                wake_drain(&daemon);
+            }
+        });
+    }
     start_reaper(daemon.clone())?;
     start_drain(daemon.clone())?;
 
@@ -1217,7 +1222,7 @@ pub fn run(
 
     #[cfg(feature = "session-persistence")]
     {
-        let mut persistence = daemon.persistence.lock().unwrap();
+        let mut persistence = daemon.persistence.lock();
         if let Some(persistence) = persistence.as_mut()
             && let Err(error) = persistence.flush_segments()
         {
@@ -1406,10 +1411,10 @@ fn publish(daemon: &Arc<Daemon>) {
 
 #[cfg(feature = "session-persistence")]
 fn persist_session(daemon: &Arc<Daemon>, session: &PersistedSession) -> Result<()> {
-    if !daemon.persistence_enabled.load(Ordering::Acquire) {
+    if !daemon.persistence.enabled() {
         return Ok(());
     }
-    if let Some(persistence) = daemon.persistence.lock().unwrap().as_mut() {
+    if let Some(persistence) = daemon.persistence.lock().as_mut() {
         persistence.save_session(session)?;
     }
     Ok(())
@@ -1453,7 +1458,7 @@ fn persisted_live_session(session: &Session) -> PersistedSession {
 
 #[cfg(feature = "session-persistence")]
 fn forget_persisted_session(daemon: &Arc<Daemon>, session_id: u64) -> Result<()> {
-    if let Some(persistence) = daemon.persistence.lock().unwrap().as_mut()
+    if let Some(persistence) = daemon.persistence.lock().as_mut()
         && persistence
             .records()
             .iter()
@@ -1464,21 +1469,11 @@ fn forget_persisted_session(daemon: &Arc<Daemon>, session_id: u64) -> Result<()>
     Ok(())
 }
 
+/// Queues what the drain read for the encrypted store. Called under the
+/// registry lock, so it must not wait on the store: see [`PersistenceQueue`].
 #[cfg(feature = "session-persistence")]
 fn record_persistence_output(daemon: &Arc<Daemon>, session_id: u64, pane_id: u64, bytes: &[u8]) {
-    if !daemon.persistence_enabled.load(Ordering::Acquire) {
-        return;
-    }
-    let result = daemon
-        .persistence
-        .lock()
-        .unwrap()
-        .as_mut()
-        .map(|persistence| persistence.append_scrollback(session_id, pane_id, bytes))
-        .transpose();
-    if let Err(error) = result {
-        log::warn!("could not persist pane {pane_id} output: {error:#}");
-    }
+    daemon.persistence.append(session_id, pane_id, bytes);
 }
 
 #[cfg(feature = "session-persistence")]
@@ -1643,6 +1638,8 @@ mod attachment;
 mod dispatch;
 mod image_store;
 mod lifecycle;
+#[cfg(feature = "session-persistence")]
+mod persistence_queue;
 mod sizing;
 mod upgrade;
 mod workers;
@@ -1655,6 +1652,8 @@ use attachment::*;
 use dispatch::*;
 use image_store::*;
 use lifecycle::*;
+#[cfg(feature = "session-persistence")]
+use persistence_queue::PersistenceQueue;
 use sizing::*;
 use upgrade::*;
 use workers::*;

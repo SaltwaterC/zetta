@@ -261,7 +261,9 @@ pub(super) fn drain_loop(daemon: Arc<Daemon>, mut wait: DrainWait) {
                         offer_exclusive_if_alone(&daemon, session_id, pane);
                         evicted = false;
                     }
-                    if held_off {
+                    // The same for the encrypted store: a slow disk holds the
+                    // program, never this lock.
+                    if held_off || persistence_backlogged(&daemon) {
                         continue;
                     }
                     // Read the pane out as far as the buffer goes before
@@ -517,6 +519,9 @@ impl DrainWait {
             events: libc::POLLIN,
             revents: 0,
         }];
+        // A full persistence queue leaves every pane unread, so its output must
+        // not end the wait; the persistence worker wakes it once there is room.
+        let backlogged = persistence_backlogged(daemon);
         {
             let sessions = daemon.sessions.lock().unwrap();
             for session in sessions.iter() {
@@ -527,9 +532,15 @@ impl DrainWait {
                     if pane.exited || !drain_reads(&pane.attachment) {
                         continue;
                     }
-                    let mut events = libc::POLLIN;
+                    let mut events = 0;
+                    if !backlogged {
+                        events |= libc::POLLIN;
+                    }
                     if !pane.pending_input.is_empty() {
                         events |= libc::POLLOUT;
+                    }
+                    if events == 0 {
+                        continue;
                     }
                     fds.push(libc::pollfd {
                         fd: pane.pty.file().as_raw_fd(),
@@ -860,6 +871,18 @@ pub(super) fn dispose_sessions(daemon: &Daemon, sessions: Vec<Session>) {
             close_host_console(daemon, console_id);
         }
     }
+}
+
+/// Whether the encrypted store's queue is over its bound, so the drain must
+/// leave panes unread until the persistence worker has caught up.
+#[cfg(feature = "session-persistence")]
+pub(super) fn persistence_backlogged(daemon: &Daemon) -> bool {
+    daemon.persistence.backlogged()
+}
+
+#[cfg(not(feature = "session-persistence"))]
+pub(super) fn persistence_backlogged(_daemon: &Daemon) -> bool {
+    false
 }
 
 pub(super) fn wake_drain(daemon: &Arc<Daemon>) {

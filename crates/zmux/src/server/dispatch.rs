@@ -413,7 +413,6 @@ pub(super) fn serve(daemon: &Arc<Daemon>, stream: Stream, token: &str) -> Result
             let mut restorable: Vec<crate::protocol::RestorableSessionRecord> = daemon
                 .persistence
                 .lock()
-                .unwrap()
                 .as_ref()
                 .map(|persistence| {
                     persistence
@@ -643,7 +642,7 @@ pub(super) fn configure_daemon(
 
     #[cfg(feature = "session-persistence")]
     let mut next_persistence = {
-        let mut persistence = daemon.persistence.lock().unwrap();
+        let mut persistence = daemon.persistence.lock();
         if let Some(persistence) = persistence.as_mut() {
             persistence
                 .flush_segments()
@@ -679,14 +678,21 @@ pub(super) fn configure_daemon(
                 persistence.save_session(session)?;
             }
         }
-        let mut persistence = daemon.persistence.lock().unwrap();
+        let mut persistence = daemon.persistence.lock();
         let persistence_enabled = matches!(retention, Retention::Disk)
             && !persistence_recipients.is_empty()
             && next_persistence.is_some();
+        // Output the drain read after the flush above was still applied to
+        // the outgoing store, and would be lost with it.
+        if let Some(previous) = persistence.as_mut()
+            && let Err(error) = previous.flush_segments()
+        {
+            log::warn!("could not flush encrypted scrollback before changing retention: {error:#}");
+        }
         *persistence = next_persistence;
         daemon
-            .persistence_enabled
-            .store(persistence_enabled, Ordering::Release);
+            .persistence
+            .set_enabled(&mut persistence, persistence_enabled);
     }
     *daemon.retention.lock().unwrap() = retention;
     wake_drain(daemon);

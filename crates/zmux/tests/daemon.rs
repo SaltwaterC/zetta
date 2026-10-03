@@ -9889,3 +9889,117 @@ fn a_window_a_relay_is_showing_a_pane_to_may_store_an_image() {
 
     client.kill(session_id).unwrap();
 }
+
+/// Rotating a disk segment — encrypting it, publishing it and rewriting the
+/// manifest — happens on the persistence worker, not under the lock every
+/// other pane's input and output go through. A busy pane rotating several
+/// segments leaves an unrelated shared pane answering, and what it rotated is
+/// published whole and in the order it was read.
+///
+/// Deliberately not a latency bound: while a pane prints this fast, a shared
+/// pane's echo waits on the drain parsing that output into the retained
+/// screen, which costs far more than rotation did and is not this test's
+/// subject. The rotation stall itself was measured separately; see
+/// `docs/PERFORMANCE_PERSISTENCE_WORKER_2026-10-02.md`.
+#[cfg(all(target_os = "linux", feature = "session-persistence"))]
+#[test]
+fn rotating_disk_segments_leaves_other_panes_live_and_keeps_output_in_order() {
+    const LINES: u32 = 3_000_000;
+    let identity = age::x25519::Identity::generate();
+    let daemon = TestDaemon::start();
+    let client = Client::connect_at_with_retention_and_persistence(
+        &daemon.sessions_dir(),
+        Retention::Disk,
+        zmux::persistence::PersistenceOptions {
+            recipients: vec![identity.to_public().to_string()],
+            identity: None,
+        },
+    )
+    .unwrap();
+    // Detached, so the daemon reads, retains and persists all of it.
+    let created = client
+        .create_shared(one_pane_shared_request(
+            &client,
+            &format!("seq 1 {LINES}; sleep 60"),
+        ))
+        .unwrap();
+    let session_id = created.session_id;
+    let echo = client
+        .create_shared(one_pane_shared_request(&client, "exec cat"))
+        .unwrap();
+    let echo_pane_id = echo.state.operation_receipts[0].draft_mappings[0].pane_id;
+    let AttachOutcome::SharedAttached {
+        pane: echo_pane, ..
+    } = client
+        .attach_shared_with_secret(echo.session_id, echo_pane_id, None)
+        .unwrap()
+    else {
+        panic!("a shared session's pane must attach shared")
+    };
+    let mut echo_reader = echo_pane.reader();
+    let persistence = daemon.sessions_dir().join("persistence");
+    let segments = || {
+        let prefix = format!("session-{session_id}-pane-");
+        let mut segments = std::fs::read_dir(&persistence)
+            .unwrap()
+            .filter_map(|entry| {
+                let name = entry.unwrap().file_name().into_string().unwrap();
+                let sequence = name
+                    .strip_prefix(&prefix)?
+                    .strip_suffix(".age")?
+                    .split_once("-segment-")?
+                    .1
+                    .parse::<u64>()
+                    .ok()?;
+                Some((sequence, persistence.join(name)))
+            })
+            .collect::<Vec<_>>();
+        segments.sort();
+        segments
+    };
+
+    let deadline = Instant::now() + Duration::from_secs(120);
+    let mut echoes = 0;
+    while segments().len() < 2 {
+        assert!(
+            Instant::now() < deadline,
+            "the busy pane never rotated two segments"
+        );
+        let marker = format!("echo-during-rotation-{echoes}");
+        echo_pane
+            .send_input(format!("{marker}\n").as_bytes())
+            .unwrap();
+        read_until_reader(&mut echo_reader, &marker);
+        echoes += 1;
+    }
+
+    let published = segments()
+        .into_iter()
+        .take(2)
+        .flat_map(|(_, path)| age::decrypt(&identity, &std::fs::read(path).unwrap()).unwrap())
+        .collect::<Vec<_>>();
+    assert!(published.len() >= 2 * 8 * 1024 * 1024);
+    let published = String::from_utf8(published).unwrap().replace("\r\n", "\n");
+    let start = published
+        .find("1\n2\n3\n")
+        .expect("the published output must start with the program's first lines");
+    let expected = (1..=LINES)
+        .map(|line| format!("{line}\n"))
+        .collect::<String>();
+    // The second segment ends wherever its read did: possibly mid-line, or
+    // between the `\r` and `\n` the terminal turned a newline into.
+    let published = published[start..].trim_end_matches('\r');
+    assert!(
+        expected.starts_with(published),
+        "published output diverged from what the program printed after {} bytes",
+        published
+            .bytes()
+            .zip(expected.bytes())
+            .take_while(|(published, expected)| published == expected)
+            .count()
+    );
+    drop(echo_reader);
+    drop(echo_pane);
+    client.kill(echo.session_id).unwrap();
+    client.kill(session_id).unwrap();
+}

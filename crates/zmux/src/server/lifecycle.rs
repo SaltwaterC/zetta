@@ -736,7 +736,7 @@ pub(super) fn create_shared(
         owner: None,
     };
     #[cfg(feature = "session-persistence")]
-    if daemon.persistence_enabled.load(Ordering::Acquire) {
+    if daemon.persistence.enabled() {
         persist_session(daemon, &persisted_live_session(&new_session))?;
     }
     sessions.push(new_session);
@@ -1593,23 +1593,21 @@ pub(super) fn resume(
         // Open a temporary recovery handle in that case so a disk record can
         // still be resumed; it is deliberately not installed on the daemon,
         // and therefore cannot make a memory-mode session durable.
-        let mut fallback_persistence = if daemon.persistence.lock().unwrap().is_none() {
+        let mut fallback_persistence = if daemon.persistence.lock().is_none() {
             PersistenceStore::open_with_recovery_state(&daemon.directory, None, false)?
         } else {
             None
         };
-        let daemon_has_record =
-            daemon
-                .persistence
-                .lock()
-                .unwrap()
-                .as_ref()
-                .is_some_and(|persistence| {
-                    persistence
-                        .records()
-                        .iter()
-                        .any(|record| record.id == request.record_id && record.restorable)
-                });
+        let daemon_has_record = daemon
+            .persistence
+            .lock()
+            .as_ref()
+            .is_some_and(|persistence| {
+                persistence
+                    .records()
+                    .iter()
+                    .any(|record| record.id == request.record_id && record.restorable)
+            });
         let fallback_has_record = fallback_persistence.as_ref().is_some_and(|persistence| {
             persistence
                 .records()
@@ -1661,7 +1659,7 @@ pub(super) fn resume(
                     crate::auth::failed_authentication_delay(request.failed_authentications)
                         .as_secs();
                 request.updated_at = unix_now();
-                let mut persistence = daemon.persistence.lock().unwrap();
+                let mut persistence = daemon.persistence.lock();
                 if let Some(persistence) = persistence.as_mut() {
                     persistence.update_authentication(
                         request.record_id,
@@ -1687,7 +1685,7 @@ pub(super) fn resume(
         // Removing the disk copy keeps it from being offered a second time or
         // mistaken for a separate restore while the first handoff is in
         // flight. A failed Spawn leaves the lease itself intact.
-        let mut persistence = daemon.persistence.lock().unwrap();
+        let mut persistence = daemon.persistence.lock();
         if let Some(persistence) = persistence.as_mut() {
             persistence.forget(request.record_id)?;
         } else if let Some(persistence) = fallback_persistence.as_mut() {
@@ -1852,43 +1850,40 @@ pub(super) fn detach(
         }
     }
     #[cfg(feature = "session-persistence")]
-    let persisted = daemon
-        .persistence_enabled
-        .load(Ordering::Acquire)
-        .then(|| PersistedSession {
-            id: session.id,
-            created_at: unix_now(),
-            updated_at: unix_now(),
-            summary: session.summary.clone(),
-            state: session.state.clone(),
-            shared_state: session.shared_state.clone(),
-            verifier: session
-                .authentication
-                .as_ref()
-                .map(|authentication| authentication.verifier().to_owned()),
-            key_envelope: session.key_envelope.clone(),
-            failed_authentications: session.failed_authentications,
-            backoff_seconds: session
-                .refuse_until
-                .map(|until| until.saturating_duration_since(Instant::now()).as_secs())
-                .unwrap_or_default(),
-            snapshots: persisted_snapshots
-                .into_iter()
-                .map(|mut snapshot| {
-                    if let Some(pane) = session
-                        .panes
-                        .iter()
-                        .find(|pane| pane.id == snapshot.pane_id)
-                    {
-                        let (columns, lines) =
-                            terminal_size(pane).unwrap_or((pane.size.columns, pane.size.lines));
-                        snapshot.columns = Some(columns);
-                        snapshot.lines = Some(lines);
-                    }
-                    snapshot
-                })
-                .collect(),
-        });
+    let persisted = daemon.persistence.enabled().then(|| PersistedSession {
+        id: session.id,
+        created_at: unix_now(),
+        updated_at: unix_now(),
+        summary: session.summary.clone(),
+        state: session.state.clone(),
+        shared_state: session.shared_state.clone(),
+        verifier: session
+            .authentication
+            .as_ref()
+            .map(|authentication| authentication.verifier().to_owned()),
+        key_envelope: session.key_envelope.clone(),
+        failed_authentications: session.failed_authentications,
+        backoff_seconds: session
+            .refuse_until
+            .map(|until| until.saturating_duration_since(Instant::now()).as_secs())
+            .unwrap_or_default(),
+        snapshots: persisted_snapshots
+            .into_iter()
+            .map(|mut snapshot| {
+                if let Some(pane) = session
+                    .panes
+                    .iter()
+                    .find(|pane| pane.id == snapshot.pane_id)
+                {
+                    let (columns, lines) =
+                        terminal_size(pane).unwrap_or((pane.size.columns, pane.size.lines));
+                    snapshot.columns = Some(columns);
+                    snapshot.lines = Some(lines);
+                }
+                snapshot
+            })
+            .collect(),
+    });
     #[cfg(feature = "session-persistence")]
     if let Some(persisted) = persisted {
         persist_session(daemon, &persisted)?;
@@ -2289,7 +2284,7 @@ pub(super) fn set_session_scope(
         session.shared_state = None;
     }
     #[cfg(feature = "session-persistence")]
-    if daemon.persistence_enabled.load(Ordering::Acquire) {
+    if daemon.persistence.enabled() {
         persist_session(daemon, &persisted_live_session(session))?;
     }
     drop(sessions);
@@ -2639,7 +2634,7 @@ pub(super) fn kill(
         drop(sessions);
         #[cfg(feature = "session-persistence")]
         {
-            let mut persistence = daemon.persistence.lock().unwrap();
+            let mut persistence = daemon.persistence.lock();
             if persistence.as_ref().is_some_and(|persistence| {
                 persistence
                     .records()
@@ -2680,7 +2675,7 @@ pub(super) fn kill(
         remove_pane_agent_links(pane_id);
     }
     #[cfg(feature = "session-persistence")]
-    if let Some(persistence) = daemon.persistence.lock().unwrap().as_mut() {
+    if let Some(persistence) = daemon.persistence.lock().as_mut() {
         persistence.forget(session_id)?;
     }
     remove_image_session(daemon, session_id);
@@ -2715,7 +2710,7 @@ pub(super) fn forget(
         drop(sessions);
         drop(discarded);
         #[cfg(feature = "session-persistence")]
-        if let Some(persistence) = daemon.persistence.lock().unwrap().as_mut() {
+        if let Some(persistence) = daemon.persistence.lock().as_mut() {
             persistence.forget(session_id)?;
         }
         remove_image_session(daemon, session_id);
@@ -2732,7 +2727,6 @@ pub(super) fn forget(
         let has_record = daemon
             .persistence
             .lock()
-            .unwrap()
             .as_ref()
             .is_some_and(|persistence| {
                 persistence
@@ -2741,7 +2735,7 @@ pub(super) fn forget(
                     .any(|record| record.id == session_id)
             });
         if has_record {
-            if let Some(persistence) = daemon.persistence.lock().unwrap().as_mut() {
+            if let Some(persistence) = daemon.persistence.lock().as_mut() {
                 persistence.forget(session_id)?;
             }
             remove_image_session(daemon, session_id);

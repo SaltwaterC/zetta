@@ -89,7 +89,7 @@ pub(super) fn prepare_upgrade(daemon: &Arc<Daemon>) -> Result<(PathBuf, std::fs:
     );
 
     #[cfg(feature = "session-persistence")]
-    if let Some(persistence) = daemon.persistence.lock().unwrap().as_mut() {
+    if let Some(persistence) = daemon.persistence.lock().as_mut() {
         persistence
             .flush_segments()
             .context("flushing encrypted scrollback before replacing the daemon")?;
