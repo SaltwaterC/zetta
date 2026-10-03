@@ -6,6 +6,12 @@
 
 use super::*;
 
+#[cfg(windows)]
+#[path = "workers_windows.rs"]
+mod windows;
+#[cfg(windows)]
+use windows::DrainWait;
+
 /// Reaps children and tells whoever is holding their terminals.
 ///
 /// The global `SIGCHLD` pipe is only a wakeup. Each pane's owned child is
@@ -163,10 +169,15 @@ pub(super) fn exit_status_raw(status: std::process::ExitStatus) -> Option<i32> {
 pub(super) fn start_drain(daemon: Arc<Daemon>) -> Result<()> {
     spawn_worker("zmux drain", move || {
         let (wake, waker) = Stream::pair().expect("creating the drain wake channel");
+        wake.set_nonblocking(true)
+            .expect("making drain notifications non-blocking");
         waker
             .set_nonblocking(true)
             .expect("making the drain wake channel non-blocking");
-        *daemon.drain_wake.lock().unwrap() = Some(wake);
+        *daemon
+            .drain_wake
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(wake);
         let wait = DrainWait::new(waker);
         let daemon = daemon.clone();
         Box::new(move || drain_loop(daemon, wait))
@@ -191,9 +202,10 @@ pub(super) fn drain_loop(daemon: Arc<Daemon>, mut wait: DrainWait) {
         // temporarily unable to run: an exit must not depend on another child
         // event arriving later.
         //
-        // Deliberately not every drain tick: this costs a syscall per pane and
-        // the drain runs at fifty hertz, whereas recovering a rare missed signal
-        // a second or two late is indistinguishable from recovering it at once.
+        // Deliberately not every drain pass: this costs a syscall per pane.
+        // IO readiness drives the drain, whereas recovering a rare missed
+        // signal a second or two late is indistinguishable from recovering
+        // it at once.
         let mut missed_exits = Vec::new();
         if last_liveness_check.elapsed() >= CLIENT_LIVENESS_INTERVAL {
             last_liveness_check = std::time::Instant::now();
@@ -469,31 +481,16 @@ pub(super) const HANGUP_BACKOFF: Duration = Duration::from_millis(1);
 /// instant return is the ordinary case of output arriving.
 pub(super) const INSTANT_IDLE_WAITS_BEFORE_BACKING_OFF: u32 = 2;
 
-/// What the drain thread sleeps on between passes.
-///
-/// Owns the wake channel on every platform, and on Windows the poller that a
-/// pseudoconsole's input pipe reports room through.
+/// The Unix drain's descriptor wait. Windows uses its IOCP-backed counterpart.
+#[cfg(unix)]
 pub(super) struct DrainWait {
     waker: Stream,
-    #[cfg(windows)]
-    poller: Arc<polling::Poller>,
-    #[cfg(windows)]
-    events: polling::Events,
 }
 
+#[cfg(unix)]
 impl DrainWait {
-    #[cfg(unix)]
     pub(super) fn new(waker: Stream) -> Self {
         Self { waker }
-    }
-
-    #[cfg(windows)]
-    pub(super) fn new(waker: Stream) -> Self {
-        Self {
-            waker,
-            poller: Arc::new(polling::Poller::new().expect("creating the drain poller")),
-            events: polling::Events::new(),
-        }
     }
 
     /// Blocks until a pane the drain is responsible for has output, has room
@@ -559,56 +556,7 @@ impl DrainWait {
         unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, millis) };
         drain_waker(&mut self.waker);
     }
-
-    /// The Windows half of [`DrainWait::wait`].
-    ///
-    /// A pseudoconsole's output pipe cannot be waited on alongside the wake
-    /// channel in one call the way a pty's descriptor can, so reads keep the
-    /// fixed tick and the latency that comes with it. Its input pipe can: the
-    /// writer thread behind it posts to a poller once it has made room, so a
-    /// pane holding queued input ends the wait as soon as it can take more.
-    #[cfg(windows)]
-    pub(super) fn wait(&mut self, daemon: &Arc<Daemon>, timeout: Duration) {
-        use alacritty_terminal::tty::EventedReadWrite as _;
-        drain_waker(&mut self.waker);
-        {
-            let mut sessions = daemon.sessions.lock().unwrap();
-            for session in sessions.iter_mut() {
-                for pane in session.panes.iter_mut() {
-                    if pane.exited
-                        || pane.pending_input.is_empty()
-                        || !drain_reads(&pane.attachment)
-                    {
-                        continue;
-                    }
-                    // Posts at once if the pipe has room already, so room made
-                    // between the flush and here is not missed.
-                    pane.pty.writer().register(
-                        &self.poller,
-                        polling::Event::writable(DRAIN_WRITABLE_KEY),
-                        polling::PollMode::Oneshot,
-                    );
-                }
-            }
-        }
-        self.events.clear();
-        if let Err(error) = self
-            .poller
-            .wait(&mut self.events, Some(timeout.min(WINDOWS_DRAIN_TICK)))
-        {
-            log::debug!("waiting on the drain poller failed: {error:#}");
-            thread::sleep(timeout.min(WINDOWS_DRAIN_TICK));
-        }
-    }
 }
-
-#[cfg(windows)]
-pub(super) const WINDOWS_DRAIN_TICK: Duration = Duration::from_millis(20);
-
-/// The key a pseudoconsole input pipe with room posts under. The drain only
-/// needs to wake, not to know which pane it was, so every pane shares it.
-#[cfg(windows)]
-const DRAIN_WRITABLE_KEY: usize = 0;
 
 /// Empties the wake channel.
 ///
@@ -886,7 +834,12 @@ pub(super) fn persistence_backlogged(_daemon: &Daemon) -> bool {
 }
 
 pub(super) fn wake_drain(daemon: &Arc<Daemon>) {
-    if let Some(wake) = daemon.drain_wake.lock().unwrap().as_mut() {
+    if let Some(wake) = daemon
+        .drain_wake
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .as_mut()
+    {
         use std::io::Write as _;
         let _ = wake.write_all(b".");
     }

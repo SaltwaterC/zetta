@@ -646,6 +646,9 @@ pub(super) fn windows_reaper_loop(daemon: Arc<Daemon>) {
                 }
             }
         }
+        if !exits.is_empty() {
+            wake_drain(&daemon);
+        }
         for (session_id, pane_id, raw_status, input_sent) in exits {
             broadcast(
                 &daemon,

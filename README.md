@@ -32,7 +32,8 @@ enabled in that tab's menu; it is off by default.
 - A no-`zmux` build mode that keeps background sessions local to the owning
   Zetta process and removes the multiplexer-only CLI surface
 - Shareable tabs: offer a tab that is still on screen and join it from another
-  Zetta window, with both driving the same panes
+  Zetta window, with both driving the same panes; Windows shared output and
+  input now wake the daemon through readiness notifications instead of a 20 ms tick
 - Remote shared sessions over OpenSSH: `zetta mux attach HOST SESSION_ID`, with
   SSH-config target completion and stream-only remote panes
 - Optional compact mode moves tabs into the title bar, keeps Menu, Profile,

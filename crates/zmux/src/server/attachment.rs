@@ -680,7 +680,13 @@ pub(super) fn attach_shared(
     // The relay is a queue and its own thread, not a write from wherever the
     // output was read: the reader holds the sessions lock, and a socket write
     // under that lock is a viewer's stall becoming everybody's.
-    let relay = spawn_relay(connection, session_id, pane_id, client_process_id)?;
+    let relay = spawn_relay(
+        connection,
+        session_id,
+        pane_id,
+        client_process_id,
+        Arc::downgrade(daemon),
+    )?;
     let attachment = next_shared_attachment();
     let Attachment::Shared(clients) = &mut pane.attachment else {
         unreachable!("the attachment was just checked to be shared");
@@ -845,6 +851,7 @@ pub(super) fn spawn_relay(
     session_id: u64,
     pane_id: u64,
     client_process_id: u32,
+    drain: std::sync::Weak<Daemon>,
 ) -> Result<Relay> {
     let writer = connection.try_clone()?;
     #[cfg(unix)]
@@ -872,6 +879,7 @@ pub(super) fn spawn_relay(
                     queued: loop_queued,
                     written: loop_written,
                     evicted: loop_evicted,
+                    drain,
                 },
                 session_id,
                 pane_id,
@@ -888,6 +896,7 @@ pub(super) fn spawn_relay(
 
 /// The relay thread's half of the counters in [`Relay`].
 pub(super) struct RelayProgress {
+    drain: std::sync::Weak<Daemon>,
     pub(super) queued: Arc<AtomicUsize>,
     pub(super) written: Arc<AtomicUsize>,
     pub(super) evicted: Arc<AtomicBool>,
@@ -919,13 +928,22 @@ pub(super) fn relay_loop(
         queued,
         written,
         evicted,
+        drain,
     } = progress;
     let mut failed = false;
     while let Ok(frame) = frames.recv_blocking() {
         let result = writer.write_all(&frame);
-        queued.fetch_sub(frame.len(), Ordering::Relaxed);
         if result.is_ok() {
             written.fetch_add(frame.len(), Ordering::Relaxed);
+        }
+        let before = queued.fetch_sub(frame.len(), Ordering::Relaxed);
+        // The drain leaves this pane's output unregistered under pressure.
+        // Wake only when it can resume, not on every relayed frame.
+        if before >= RELAY_BACKPRESSURE_BYTES
+            && before - frame.len() < RELAY_BACKPRESSURE_BYTES
+            && let Some(daemon) = drain.upgrade()
+        {
+            wake_drain(&daemon);
         }
         if let Err(error) = result {
             log::warn!("a shared client stopped accepting output: {error:#}");

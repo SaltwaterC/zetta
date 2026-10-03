@@ -18,6 +18,7 @@ fn viewer() -> (SharedClient, crate::transport::Stream) {
         1,
         2,
         std::process::id(),
+        std::sync::Weak::new(),
     )
     .unwrap();
     let client = SharedClient {

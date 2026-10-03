@@ -1,5 +1,49 @@
 use super::*;
 
+#[cfg(unix)]
+#[test]
+fn a_relay_releasing_backpressure_wakes_the_drain() {
+    let directory = tempfile::tempdir().unwrap();
+    let daemon = Arc::new(Daemon::new(
+        directory.path(),
+        Retention::None,
+        directory.path().join("clipboard"),
+        #[cfg(feature = "session-persistence")]
+        None,
+        1,
+        1,
+        #[cfg(not(target_os = "macos"))]
+        -1,
+    ));
+    let (notify, mut wait) = Stream::pair().unwrap();
+    notify.set_nonblocking(true).unwrap();
+    wait.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    *daemon
+        .drain_wake
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(notify);
+    let (server, mut client) = Stream::pair().unwrap();
+    let relay = spawn_relay(
+        &Connection::new(server),
+        1,
+        2,
+        std::process::id(),
+        Arc::downgrade(&daemon),
+    )
+    .unwrap();
+    let payload = vec![b'x'; RELAY_BACKPRESSURE_BYTES + 1];
+    relay.queued.store(payload.len(), Ordering::Relaxed);
+    relay.frames.send_blocking(payload.clone().into()).unwrap();
+    let mut received = vec![0; payload.len()];
+    client.read_exact(&mut received).unwrap();
+    assert_eq!(received, payload);
+    let mut byte = [0];
+    wait.read_exact(&mut byte)
+        .expect("releasing relay pressure must wake the drain");
+    assert_eq!(&byte, b".");
+    assert_eq!(relay.queued.load(Ordering::Relaxed), 0);
+}
+
 /// A relay's two ends, as the daemon holds them: the serve loop's connection
 /// and the client's.
 fn relay_pair() -> (Connection, Connection, Relay) {
@@ -11,7 +55,7 @@ fn relay_pair() -> (Connection, Connection, Relay) {
         .set_read_timeout(Some(Duration::from_secs(5)))
         .unwrap();
     let serve = Connection::new(daemon_side);
-    let relay = spawn_relay(&serve, 1, 2, std::process::id()).unwrap();
+    let relay = spawn_relay(&serve, 1, 2, std::process::id(), std::sync::Weak::new()).unwrap();
     (serve, Connection::new(client_side), relay)
 }
 
