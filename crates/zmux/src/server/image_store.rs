@@ -47,6 +47,9 @@ pub(super) fn store_image(
     );
 
     {
+        let proof = prove_session_secret(daemon, peer_process_id, session_secret, |session| {
+            session.id == session_id
+        });
         let mut sessions = daemon
             .sessions
             .lock()
@@ -88,7 +91,7 @@ pub(super) fn store_image(
             "client is not an active shared viewer of pane {pane_id}"
         );
         anyhow::ensure!(
-            session_control_authorized(session, peer_process_id, session_secret),
+            session_control_authorized(session, peer_process_id, &proof),
             "session {session_id} is protected and the image-paste client is not authorized"
         );
     }

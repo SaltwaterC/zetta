@@ -8,6 +8,14 @@
 
 use super::*;
 
+/// Who is attaching, carried through the phases of one attach.
+struct Attacher {
+    client_process_id: u32,
+    client_id: ClientId,
+    stream_only: bool,
+    relaying_for: Option<ClientId>,
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "the attach request's decoded fields, plus the daemon, the requesting \
@@ -25,89 +33,20 @@ pub(super) fn attach(
     relaying_for: Option<ClientId>,
     connection: &mut Connection,
 ) -> Result<()> {
-    let mut sessions = daemon.sessions.lock().unwrap();
-    let Some(session) = sessions.iter_mut().find(|session| session.id == session_id) else {
-        return connection.send(&Response::Error {
-            message: format!("session {session_id} does not exist"),
-        });
+    let attacher = Attacher {
+        client_process_id,
+        client_id,
+        stream_only,
+        relaying_for,
     };
-
-    if stream_only && !session.offered {
-        return connection.send(&Response::Error {
-            message: format!(
-                "session {session_id} is not shared; a remote client may only attach to an offered session"
-            ),
-        });
-    }
-
-    // Whose session it is, before anything is revealed about it. A backgrounded
-    // session belongs to the window that put it away; another process may only
-    // have it once somebody has said so.
-    if !session.is_in_scope_for(client_process_id) {
-        let owner = session.owner.unwrap_or_default();
-        // Two different situations, and the way out differs: that window can
-        // share the session itself, but a window that has exited cannot, so say
-        // which one this is rather than suggesting something impossible.
-        let route = if crate::process_status::is_running(owner) {
-            format!("share it from that window, or with `zmux share {session_id}`")
-        } else {
-            format!(
-                "that window has exited, and a backgrounded session does not become another \
-                 window's on its own; `zmux share {session_id}` opens it up"
-            )
-        };
-        return connection.send(&Response::Error {
-            message: format!(
-                "session {session_id} is scoped to the Zetta process that backgrounded it \
-                 (process {owner}): {route}"
-            ),
-        });
-    }
-    // Held here from now on: whoever is showing a session is who it goes back to
-    // when it is backgrounded again, and who may scope it back after sharing.
-    if !session.offered {
-        session.owner = Some(client_process_id);
-    }
-
-    // The holder answering a handover the daemon itself asked for is not a new
-    // grant of access: that client is displaying the pane right now, and was
-    // sent `Event::Revoke` a moment ago. Challenging it would make a protected
-    // session impossible to share — the handover carries no secret, because the
-    // user typed it into whichever *other* window is joining.
-    let mid_handover = session.panes.iter().any(|pane| {
-        // Either half of the handshake: the revoke has been sent and not
-        // answered yet, or it has been answered — which is what
-        // `handed_over` records — and this is the answering client coming
-        // back to join. Any pane of the session counts, because the client
-        // that is mid-handover on one is the client displaying them all.
-        matches!(pane.attachment, Attachment::Revoking { holder } | Attachment::Granting { holder } if holder == client_process_id)
-            || pane
-                .handed_over
-                .as_ref()
-                .is_some_and(|handover| handover.client_process_id == client_process_id)
-    });
-    if let Some(authentication) = session.authentication.clone().filter(|_| !mid_handover) {
-        let Some(secret) = secret else {
-            return connection.send(&Response::AuthenticationRequired);
-        };
-        // An attempt inside the backoff window is refused without being
-        // evaluated, and reports the same failure as a wrong secret so the
-        // window cannot be probed.
-        let refused = session
-            .refuse_until
-            .is_some_and(|until| std::time::Instant::now() < until);
-        if refused || authentication.verify(&secret).is_none() {
-            if !refused {
-                session.failed_authentications = session.failed_authentications.saturating_add(1);
-                session.refuse_until = std::time::Instant::now().checked_add(
-                    crate::auth::failed_authentication_delay(session.failed_authentications),
-                );
-            }
-            return connection.send(&Response::AuthenticationFailed);
-        }
-        session.failed_authentications = 0;
-        session.refuse_until = None;
-    }
+    let mut sessions = match authorize_attach(daemon, session_id, secret.as_deref(), &attacher) {
+        Ok(sessions) => sessions,
+        Err(refusal) => return connection.send(&*refusal),
+    };
+    let session = sessions
+        .iter_mut()
+        .find(|session| session.id == session_id)
+        .expect("authorize_attach returns the lock it found the session under");
 
     if session.offered {
         normalize_shared_state(daemon, session)?;
@@ -122,21 +61,27 @@ pub(super) fn attach(
         None => match session.panes.iter().find(|pane| !pane.exited) {
             Some(pane) => pane.id,
             None => {
-                return connection.send(&Response::Error {
-                    message: format!("session {session_id} has no panes"),
-                });
+                return respond_unlocked(
+                    sessions,
+                    connection,
+                    format!("session {session_id} has no panes"),
+                );
             }
         },
     };
     let Some(pane) = session.panes.iter_mut().find(|pane| pane.id == pane_id) else {
-        return connection.send(&Response::Error {
-            message: format!("session {session_id} has no pane {pane_id}"),
-        });
+        return respond_unlocked(
+            sessions,
+            connection,
+            format!("session {session_id} has no pane {pane_id}"),
+        );
     };
     if pane.exited {
-        return connection.send(&Response::Error {
-            message: format!("session {session_id} pane {pane_id} has ended"),
-        });
+        return respond_unlocked(
+            sessions,
+            connection,
+            format!("session {session_id} pane {pane_id} has ended"),
+        );
     }
 
     // A pane nobody is reading, or that this same process already holds, can
@@ -157,9 +102,9 @@ pub(super) fn attach(
             session_id,
             pane_id,
             client_process_id,
-            client_id,
+            attacher.client_id,
             stream_only,
-            relaying_for,
+            attacher.relaying_for,
             state,
             summary,
             connection,
@@ -167,11 +112,11 @@ pub(super) fn attach(
         );
     }
     if force_shared {
-        return connection.send(&Response::Error {
-            message: format!(
-                "session {session_id} pane {pane_id} is not available as a shared stream"
-            ),
-        });
+        return respond_unlocked(
+            sessions,
+            connection,
+            format!("session {session_id} pane {pane_id} is not available as a shared stream"),
+        );
     }
     if !stream_only
         && (matches!(pane.attachment, Attachment::None)
@@ -183,7 +128,7 @@ pub(super) fn attach(
             session_id,
             pane_id,
             client_process_id,
-            &client_id,
+            &attacher.client_id,
             state,
             summary,
             connection,
@@ -196,9 +141,9 @@ pub(super) fn attach(
             session_id,
             pane_id,
             client_process_id,
-            client_id,
+            attacher.client_id,
             stream_only,
-            relaying_for,
+            attacher.relaying_for,
             state,
             summary,
             connection,
@@ -222,8 +167,11 @@ pub(super) fn attach(
                  {stream_only}, relaying for: {})",
                 crate::process_status::describe(client_process_id),
                 crate::process_status::describe(holder),
-                client_id.as_str(),
-                relaying_for.as_ref().map_or("nobody", ClientId::as_str),
+                attacher.client_id.as_str(),
+                attacher
+                    .relaying_for
+                    .as_ref()
+                    .map_or("nobody", ClientId::as_str),
             );
             // Ask the holder to hand the terminal over, and wait for its
             // snapshot. The wait releases the sessions lock, so the snapshot
@@ -250,6 +198,169 @@ pub(super) fn attach(
     pane.handover_waiters = pane.handover_waiters.saturating_add(1);
     let _ = pane;
 
+    await_handover(daemon, sessions, session_id, pane_id, &attacher, connection)
+}
+
+/// Whether this client may have session `session_id` at all, decided before
+/// anything about the session is revealed to it: that the session exists, that
+/// a remote client reaches only an offered one, that a backgrounded one is in
+/// scope for it, and that its secret is right.
+///
+/// Returns the sessions lock with every check passed against the state it
+/// guards, so the attach that follows acts on the session they were made
+/// against. The secret is checked with that lock released — see
+/// [`secret_check`] — so the checks are made again on whatever the session has
+/// become by then: rescoped, reprotected, or ended.
+///
+/// A refusal comes back as the response to send, for the caller to send after
+/// the lock is gone.
+fn authorize_attach<'a>(
+    daemon: &'a Daemon,
+    session_id: u64,
+    secret: Option<&str>,
+    attacher: &Attacher,
+) -> Result<MutexGuard<'a, Vec<Session>>, Box<Response>> {
+    let client_process_id = attacher.client_process_id;
+    let mut proof = None;
+    loop {
+        let mut sessions = daemon
+            .sessions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(session) = sessions.iter_mut().find(|session| session.id == session_id) else {
+            return Err(Box::new(Response::Error {
+                message: format!("session {session_id} does not exist"),
+            }));
+        };
+
+        if attacher.stream_only && !session.offered {
+            return Err(Box::new(Response::Error {
+                message: format!(
+                    "session {session_id} is not shared; a remote client may only attach to an offered session"
+                ),
+            }));
+        }
+
+        // Whose session it is, before anything is revealed about it. A
+        // backgrounded session belongs to the window that put it away; another
+        // process may only have it once somebody has said so.
+        if !session.is_in_scope_for(client_process_id) {
+            return Err(Box::new(out_of_scope_refusal(
+                session_id,
+                session.owner.unwrap_or_default(),
+            )));
+        }
+
+        let authentication = session
+            .authentication
+            .as_ref()
+            .filter(|_| !answers_handover(session, client_process_id));
+        let authorized = authentication.is_none_or(|authentication| {
+            proof
+                .as_ref()
+                .is_some_and(|proof| authentication.authorizes(proof))
+        });
+        if authorized {
+            // Held here from now on: whoever is showing a session is who it
+            // goes back to when it is backgrounded again, and who may scope it
+            // back after sharing. Only once authorized — claiming it before the
+            // secret was checked let a wrong secret, or none, take an
+            // unclaimed protected session's owner controls.
+            if !session.offered {
+                session.owner = Some(client_process_id);
+            }
+            return Ok(sessions);
+        }
+        let Some(secret) = secret else {
+            return Err(Box::new(Response::AuthenticationRequired));
+        };
+        drop(sessions);
+        // The backoff, and its rule that an attempt inside the window reports
+        // the same failure as a wrong secret, are `check_session_secret`'s.
+        match check_session_secret(daemon, session_id, secret) {
+            SecretCheck::Verified(verified) => proof = Some(verified),
+            SecretCheck::Failed => return Err(Box::new(Response::AuthenticationFailed)),
+            // Ended or unprotected meanwhile; the next pass says which.
+            SecretCheck::NotApplicable => {}
+        }
+    }
+}
+
+/// Why a backgrounded session cannot be attached by this process.
+fn out_of_scope_refusal(session_id: u64, owner: u32) -> Response {
+    // Two different situations, and the way out differs: that window can
+    // share the session itself, but a window that has exited cannot, so say
+    // which one this is rather than suggesting something impossible.
+    let route = if crate::process_status::is_running(owner) {
+        format!("share it from that window, or with `zmux share {session_id}`")
+    } else {
+        format!(
+            "that window has exited, and a backgrounded session does not become another \
+             window's on its own; `zmux share {session_id}` opens it up"
+        )
+    };
+    Response::Error {
+        message: format!(
+            "session {session_id} is scoped to the Zetta process that backgrounded it \
+             (process {owner}): {route}"
+        ),
+    }
+}
+
+/// Whether `client_process_id` is the holder answering a handover the daemon
+/// itself asked for.
+///
+/// That is not a new grant of access: that client is displaying the pane right
+/// now, and was sent `Event::Revoke` a moment ago. Challenging it would make a
+/// protected session impossible to share — the handover carries no secret,
+/// because the user typed it into whichever *other* window is joining.
+fn answers_handover(session: &Session, client_process_id: u32) -> bool {
+    session.panes.iter().any(|pane| {
+        // Either half of the handshake: the revoke has been sent and not
+        // answered yet, or it has been answered — which is what
+        // `handed_over` records — and this is the answering client coming
+        // back to join. Any pane of the session counts, because the client
+        // that is mid-handover on one is the client displaying them all.
+        matches!(pane.attachment, Attachment::Revoking { holder } | Attachment::Granting { holder } if holder == client_process_id)
+            || pane
+                .handed_over
+                .as_ref()
+                .is_some_and(|handover| handover.client_process_id == client_process_id)
+    })
+}
+
+/// Sends an error once `sessions` has been released.
+///
+/// A client's connection may be an SSH forward that has stopped reading, and a
+/// write that blocks under the sessions lock blocks every pane the daemon holds.
+fn respond_unlocked(
+    sessions: MutexGuard<'_, Vec<Session>>,
+    connection: &mut Connection,
+    message: String,
+) -> Result<()> {
+    drop(sessions);
+    connection.send(&Response::Error { message })
+}
+
+/// Waits for the client holding pane `pane_id` to hand it over, then attaches
+/// this client to whatever the pane has become.
+///
+/// Entered with the pane's revoke already sent and this request counted in its
+/// `handover_waiters`; every way out releases that count.
+fn await_handover(
+    daemon: &Arc<Daemon>,
+    mut sessions: MutexGuard<'_, Vec<Session>>,
+    session_id: u64,
+    pane_id: u64,
+    attacher: &Attacher,
+    connection: &mut Connection,
+) -> Result<()> {
+    let Attacher {
+        client_process_id,
+        ref client_id,
+        stream_only,
+        ref relaying_for,
+    } = *attacher;
     let deadline = Instant::now() + REVOKE_TIMEOUT;
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -259,12 +370,14 @@ pub(super) fn attach(
             {
                 finish_handover_waiter(pane, true);
             }
-            return connection.send(&Response::Error {
-                message: format!(
+            return respond_unlocked(
+                sessions,
+                connection,
+                format!(
                     "the session's current viewer did not hand over pane {pane_id} within \
                      {REVOKE_TIMEOUT:?}"
                 ),
-            });
+            );
         }
         let (guard, _) = match daemon.sessions_condvar.wait_timeout(sessions, remaining) {
             Ok(result) => result,
@@ -274,9 +387,11 @@ pub(super) fn attach(
         };
         sessions = guard;
         let Some(session) = sessions.iter_mut().find(|session| session.id == session_id) else {
-            return connection.send(&Response::Error {
-                message: format!("session {session_id} does not exist"),
-            });
+            return respond_unlocked(
+                sessions,
+                connection,
+                format!("session {session_id} does not exist"),
+            );
         };
         // Re-read rather than reusing what was read before the revoke. The
         // holder of a *live* session republishes its state as part of answering
@@ -287,15 +402,19 @@ pub(super) fn attach(
         let state = session.state.clone();
         let summary = Box::new(catalog_summary(session));
         let Some(pane) = session.panes.iter_mut().find(|pane| pane.id == pane_id) else {
-            return connection.send(&Response::Error {
-                message: format!("session {session_id} has no pane {pane_id}"),
-            });
+            return respond_unlocked(
+                sessions,
+                connection,
+                format!("session {session_id} has no pane {pane_id}"),
+            );
         };
         if pane.exited {
             finish_handover_waiter(pane, true);
-            return connection.send(&Response::Error {
-                message: format!("session {session_id} pane {pane_id} has ended"),
-            });
+            return respond_unlocked(
+                sessions,
+                connection,
+                format!("session {session_id} pane {pane_id} has ended"),
+            );
         }
         match pane.attachment {
             Attachment::Shared(_) => {
@@ -341,7 +460,7 @@ pub(super) fn attach(
                     session_id,
                     pane_id,
                     client_process_id,
-                    &client_id,
+                    client_id,
                     state,
                     summary,
                     connection,
@@ -353,8 +472,8 @@ pub(super) fn attach(
                 // liveness sweep — and whichever waiter wakes first takes it
                 // exclusively, so a second waiter finds it exclusive again. That
                 // is another client holding the pane, which is exactly the case
-                // this function already handles from the top, so start over
-                // rather than treating it as impossible.
+                // `attach` already handles from the top, so start over rather
+                // than treating it as impossible.
                 if !stream_only && holder == client_process_id {
                     finish_handover_waiter(pane, true);
                     return attach_exclusive(
@@ -363,7 +482,7 @@ pub(super) fn attach(
                         session_id,
                         pane_id,
                         client_process_id,
-                        &client_id,
+                        client_id,
                         state,
                         summary,
                         connection,
@@ -392,7 +511,7 @@ pub(super) fn attach(
                     session_id,
                     pane_id,
                     client_process_id,
-                    &client_id,
+                    client_id,
                     state,
                     summary,
                     connection,
@@ -443,19 +562,25 @@ pub(super) fn attach_exclusive(
     connection: &mut Connection,
 ) -> Result<()> {
     let Some(session) = sessions.iter_mut().find(|session| session.id == session_id) else {
-        return connection.send(&Response::Error {
-            message: format!("session {session_id} does not exist"),
-        });
+        return respond_unlocked(
+            sessions,
+            connection,
+            format!("session {session_id} does not exist"),
+        );
     };
     let Some(pane) = session.panes.iter_mut().find(|pane| pane.id == pane_id) else {
-        return connection.send(&Response::Error {
-            message: format!("session {session_id} has no pane {pane_id}"),
-        });
+        return respond_unlocked(
+            sessions,
+            connection,
+            format!("session {session_id} has no pane {pane_id}"),
+        );
     };
     if let Err(error) = pause_pane_reader(pane) {
-        return connection.send(&Response::Error {
-            message: format!("could not stop the pane reader before attaching: {error:#}"),
-        });
+        return respond_unlocked(
+            sessions,
+            connection,
+            format!("could not stop the pane reader before attaching: {error:#}"),
+        );
     }
     pane.attachment = exclusive_attachment(client_process_id);
     pane.attachment_client_id = (client_process_id != 0).then(|| client_id.clone());
@@ -530,14 +655,18 @@ pub(super) fn attach_shared(
     spawned_state: Option<crate::messages::SharedSessionState>,
 ) -> Result<()> {
     let Some(session) = sessions.iter_mut().find(|session| session.id == session_id) else {
-        return connection.send(&Response::Error {
-            message: format!("session {session_id} does not exist"),
-        });
+        return respond_unlocked(
+            sessions,
+            connection,
+            format!("session {session_id} does not exist"),
+        );
     };
     let Some(pane) = session.panes.iter_mut().find(|pane| pane.id == pane_id) else {
-        return connection.send(&Response::Error {
-            message: format!("session {session_id} has no pane {pane_id}"),
-        });
+        return respond_unlocked(
+            sessions,
+            connection,
+            format!("session {session_id} has no pane {pane_id}"),
+        );
     };
     anyhow::ensure!(
         matches!(pane.attachment, Attachment::Shared(_)),

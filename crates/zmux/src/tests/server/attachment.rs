@@ -64,3 +64,76 @@ fn shared_attachments_are_never_reused() {
     let second = next_shared_attachment();
     assert_ne!(first, second);
 }
+
+#[cfg(all(unix, not(target_os = "macos")))]
+mod authorization {
+    use super::*;
+    use crate::server::secret_check::tests::fixtures::*;
+
+    fn attacher(client_process_id: u32) -> Attacher {
+        Attacher {
+            client_process_id,
+            client_id: ClientId::new("attacher"),
+            stream_only: false,
+            relaying_for: None,
+        }
+    }
+
+    fn owner(daemon: &Daemon) -> Option<u32> {
+        daemon.sessions.lock().unwrap()[0].owner
+    }
+
+    #[test]
+    fn an_attach_claims_an_unclaimed_protected_session_only_once_authorized() {
+        let (daemon, _directory) = daemon_with(vec![protected_session(1, None)]);
+
+        let refusal = authorize_attach(&daemon, 1, None, &attacher(9999)).err();
+        assert!(matches!(
+            refusal.as_deref(),
+            Some(Response::AuthenticationRequired)
+        ));
+        assert_eq!(owner(&daemon), None, "asking for the secret claimed it");
+
+        let refusal = authorize_attach(&daemon, 1, Some("wrong"), &attacher(9999)).err();
+        assert!(matches!(
+            refusal.as_deref(),
+            Some(Response::AuthenticationFailed)
+        ));
+        assert_eq!(owner(&daemon), None, "a wrong secret claimed it");
+
+        daemon.sessions.lock().unwrap()[0].refuse_until = None;
+        drop(
+            authorize_attach(&daemon, 1, Some(SECRET), &attacher(4321))
+                .ok()
+                .unwrap(),
+        );
+        assert_eq!(owner(&daemon), Some(4321));
+    }
+
+    #[test]
+    fn an_attach_whose_session_ends_during_the_check_is_told_so() {
+        let (daemon, _directory) = daemon_with(vec![protected_session(1, None)]);
+        let attach = {
+            let daemon = Arc::clone(&daemon);
+            thread::spawn(move || {
+                authorize_attach(&daemon, 1, Some(SECRET), &attacher(4321))
+                    .err()
+                    .map(|refusal| format!("{refusal:?}"))
+            })
+        };
+        // Ended while its check runs, which is the window releasing the lock
+        // opened: the attach must notice rather than act on a session that is
+        // no longer there.
+        while !check_in_flight(&daemon) {
+            assert!(
+                !attach.is_finished(),
+                "the check ended before it was observed"
+            );
+            thread::yield_now();
+        }
+        daemon.sessions.lock().unwrap().clear();
+
+        let refusal = attach.join().unwrap().expect("the attach was refused");
+        assert!(refusal.contains("does not exist"), "{refusal}");
+    }
+}

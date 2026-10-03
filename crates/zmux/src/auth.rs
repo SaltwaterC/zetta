@@ -182,6 +182,13 @@ impl SessionAuthentication {
         Arc::ptr_eq(&self.verifier, &authorization.verifier)
     }
 
+    /// Whether `other` is this same verifier rather than a replacement for it —
+    /// by identity, as [`Self::authorizes`] is, so a session reprotected with
+    /// the very same secret still counts as replaced.
+    pub fn is_same_verifier(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.verifier, &other.verifier)
+    }
+
     #[cfg(test)]
     fn encoded(&self) -> &str {
         &self.verifier

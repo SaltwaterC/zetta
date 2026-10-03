@@ -820,7 +820,7 @@ struct SharedBatchCommitContext<'a> {
     mapping_map: &'a HashMap<u64, u64>,
     replacement: &'a BackgroundPaneLayout,
     peer_process_id: Option<u32>,
-    session_secret: Option<&'a str>,
+    proof: &'a SecretProof,
 }
 
 fn commit_shared_batch(
@@ -839,7 +839,7 @@ fn commit_shared_batch(
         .find(|session| session.id == request.session_id)
         .with_context(|| format!("session {} does not exist", request.session_id))?;
     anyhow::ensure!(
-        session_control_authorized(session, context.peer_process_id, context.session_secret),
+        session_control_authorized(session, context.peer_process_id, context.proof),
         "shared session {} is not authorized for this client",
         request.session_id
     );
@@ -1019,15 +1019,22 @@ pub(super) fn spawn(
         );
         // Check the authorization without consuming the lock needed by the
         // actual spawn. The revision is checked again immediately before the
-        // new pane is committed, closing the race with another mutation.
+        // new pane is committed, closing the race with another mutation. The
+        // secret is proved in the gap, with no lock held, so the session may
+        // have ended by the time it is found again.
         drop(sessions);
+        let proof = prove_session_secret(daemon, peer_process_id, session_secret, |session| {
+            session.id == shared_request.session_id
+        });
         let mut sessions = daemon.sessions.lock().unwrap();
-        let session = sessions
+        let Some(session) = sessions
             .iter_mut()
             .find(|session| session.id == shared_request.session_id)
-            .expect("the shared session was checked above");
+        else {
+            anyhow::bail!("session {} does not exist", shared_request.session_id);
+        };
         anyhow::ensure!(
-            session_control_authorized(session, peer_process_id, session_secret),
+            session_control_authorized(session, peer_process_id, &proof),
             "shared session {} is not authorized for this client",
             shared_request.session_id
         );
@@ -1440,6 +1447,11 @@ pub(super) fn spawn_shared_batch(
         "shared draft pane IDs must be unique"
     );
 
+    // Proved once, before the lock, and honoured by both checks below: the one
+    // here and the one at commit, which runs after the panes have spawned.
+    let proof = prove_session_secret(daemon, peer_process_id, session_secret, |session| {
+        session.id == request.session_id
+    });
     {
         let mut sessions = daemon
             .sessions
@@ -1455,7 +1467,7 @@ pub(super) fn spawn_shared_batch(
             request.session_id
         );
         anyhow::ensure!(
-            session_control_authorized(session, peer_process_id, session_secret),
+            session_control_authorized(session, peer_process_id, &proof),
             "shared session {} is not authorized for this client",
             request.session_id
         );
@@ -1511,7 +1523,7 @@ pub(super) fn spawn_shared_batch(
             mapping_map: &mapping_map,
             replacement: &replacement,
             peer_process_id,
-            session_secret,
+            proof: &proof,
         },
     );
 
@@ -1777,7 +1789,7 @@ pub(super) fn detach(
         });
     };
     anyhow::ensure!(
-        session_control_authorized(session, peer_process_id, None),
+        session_control_authorized(session, peer_process_id, &SecretProof::NONE),
         "session {} is protected and can only be detached by its owner or current holder",
         request.session_id
     );
@@ -1912,6 +1924,9 @@ pub(super) fn share(
     session_secret: Option<&str>,
     connection: &mut Connection,
 ) -> Result<()> {
+    let proof = prove_session_secret(daemon, peer_process_id, session_secret, |session| {
+        session.id == request.session_id
+    });
     let mut sessions = daemon.sessions.lock().unwrap();
     let Some(session) = sessions
         .iter_mut()
@@ -1937,7 +1952,7 @@ pub(super) fn share(
     let holder_authorized =
         holder_process_id.is_some_and(|process_id| session_is_held_by(session, process_id));
     let secret_authorized = session.authentication.is_some()
-        && session_control_authorized(session, peer_process_id, session_secret);
+        && session_control_authorized(session, peer_process_id, &proof);
     if !holder_authorized && !secret_authorized {
         return connection.send(&Response::Error {
             message: format!(
@@ -2035,6 +2050,9 @@ pub(super) fn shared_snapshot(
     session_secret: Option<&str>,
     connection: &mut Connection,
 ) -> Result<()> {
+    let proof = prove_session_secret(daemon, peer_process_id, session_secret, |session| {
+        session.id == session_id
+    });
     let mut sessions = daemon.sessions.lock().unwrap();
     let Some(session) = sessions.iter_mut().find(|session| session.id == session_id) else {
         anyhow::bail!("session {session_id} does not exist");
@@ -2044,7 +2062,7 @@ pub(super) fn shared_snapshot(
         "session {session_id} is not offered for shared collaboration"
     );
     anyhow::ensure!(
-        session_control_authorized(session, peer_process_id, session_secret),
+        session_control_authorized(session, peer_process_id, &proof),
         "shared session {session_id} is not authorized for this client"
     );
     let state = normalize_shared_state(daemon, session)?;
@@ -2070,6 +2088,9 @@ pub(super) fn apply_shared(
     let is_close = close_pane_id.is_some();
     let mut removed_pane = None;
     let state = {
+        let proof = prove_session_secret(daemon, peer_process_id, session_secret, |session| {
+            session.id == request.session_id
+        });
         let mut sessions = daemon.sessions.lock().unwrap();
         let Some(session) = sessions
             .iter_mut()
@@ -2083,7 +2104,7 @@ pub(super) fn apply_shared(
             request.session_id
         );
         anyhow::ensure!(
-            session_control_authorized(session, peer_process_id, session_secret),
+            session_control_authorized(session, peer_process_id, &proof),
             "shared session {} is not authorized for this client",
             request.session_id
         );
@@ -2164,12 +2185,15 @@ pub(super) fn leave_shared(
     session_secret: Option<&str>,
     connection: &mut Connection,
 ) -> Result<()> {
+    let proof = prove_session_secret(daemon, peer_process_id, session_secret, |session| {
+        session.id == session_id
+    });
     let mut sessions = daemon.sessions.lock().unwrap();
     let Some(session) = sessions.iter_mut().find(|session| session.id == session_id) else {
         anyhow::bail!("session {session_id} does not exist");
     };
     anyhow::ensure!(
-        session_control_authorized(session, peer_process_id, session_secret),
+        session_control_authorized(session, peer_process_id, &proof),
         "shared session {session_id} is not authorized for this client"
     );
     let revision = session
@@ -2222,6 +2246,9 @@ pub(super) fn set_session_scope(
     stream_only: bool,
     connection: &mut Connection,
 ) -> Result<()> {
+    let proof = prove_session_secret(daemon, peer_process_id, session_secret, |session| {
+        session.id == session_id
+    });
     let mut sessions = daemon.sessions.lock().unwrap();
     let Some(session) = sessions.iter_mut().find(|session| session.id == session_id) else {
         return connection.send(&Response::Error {
@@ -2240,7 +2267,7 @@ pub(super) fn set_session_scope(
         });
     }
     anyhow::ensure!(
-        session_control_authorized(session, peer_process_id, session_secret)
+        session_control_authorized(session, peer_process_id, &proof)
             || (!stream_only
                 && stranded_session_may_be_offered(session, shared, verifier.is_some())),
         "session {session_id} is protected and can only be changed by its owner or current holder"
@@ -2338,46 +2365,30 @@ pub(super) fn stranded_session_may_be_offered(
     shared && !replaces_verifier && !session.owner.is_some_and(crate::process_status::is_running)
 }
 
+/// Whether `peer_process_id` may control a protected session.
+///
+/// The owner or a holder may by identity alone. Anyone else — chiefly a remote
+/// stream-only client, which cannot prove a local PID through the SSH socket —
+/// needs `proof` of the session secret, established before the caller took the
+/// sessions lock by [`prove_session_secret`] with the same Argon2 verifier and
+/// refusal window attach uses.
 pub(super) fn session_control_authorized(
-    session: &mut Session,
+    session: &Session,
     peer_process_id: Option<u32>,
-    session_secret: Option<&str>,
+    proof: &SecretProof,
 ) -> bool {
-    if session.authentication.is_none() {
+    let Some(authentication) = session.authentication.as_ref() else {
         return true;
-    }
-    if peer_process_id.is_some_and(|process_id| {
-        session.owner == Some(process_id) || session_is_held_by(session, process_id)
-    }) {
-        return true;
-    }
-    // Remote stream-only clients cannot prove a local PID through the SSH
-    // socket. Their session secret is the explicit authorization for safe
-    // administration, checked with the same constant-time Argon2 verifier and
-    // exponential refusal window used by attach/resume.
-    let Some(secret) = session_secret else {
-        return false;
     };
-    let refused = session
-        .refuse_until
-        .is_some_and(|until| Instant::now() < until);
-    let verified = !refused
-        && session
-            .authentication
-            .as_ref()
-            .is_some_and(|authentication| authentication.verify(secret).is_some());
-    if verified {
-        session.failed_authentications = 0;
-        session.refuse_until = None;
-        return true;
-    }
-    if !refused {
-        session.failed_authentications = session.failed_authentications.saturating_add(1);
-        session.refuse_until = Instant::now().checked_add(
-            crate::auth::failed_authentication_delay(session.failed_authentications),
-        );
-    }
-    false
+    session_identity_authorized(session, peer_process_id) || proof.authorizes(authentication)
+}
+
+/// Whether a vouched-for peer owns or holds `session`, which is what lets it
+/// control a protected session without presenting the secret.
+pub(super) fn session_identity_authorized(session: &Session, peer_process_id: Option<u32>) -> bool {
+    peer_process_id.is_some_and(|process_id| {
+        session.owner == Some(process_id) || session_is_held_by(session, process_id)
+    })
 }
 
 /// Whether this request's answer could depend on who the peer is, on a platform
@@ -2527,6 +2538,9 @@ pub(super) fn resize_pane(daemon: &Arc<Daemon>, context: ResizePaneContext<'_>) 
         peer_process_id,
         session_secret,
     } = context;
+    let proof = prove_session_secret(daemon, peer_process_id, session_secret, |session| {
+        session.id == session_id
+    });
     let mut sessions = daemon.sessions.lock().unwrap();
     let Some(session) = sessions.iter_mut().find(|session| session.id == session_id) else {
         anyhow::bail!("session {session_id} does not exist");
@@ -2547,7 +2561,7 @@ pub(super) fn resize_pane(daemon: &Arc<Daemon>, context: ResizePaneContext<'_>) 
     }
     if session.authentication.is_some()
         && !protected_holder_authorized(session, peer_process_id)
-        && !session_control_authorized(session, peer_process_id, session_secret)
+        && !session_control_authorized(session, peer_process_id, &proof)
     {
         anyhow::bail!(
             "session {session_id} is protected and can only be resized by its current holder or session secret"
@@ -2588,6 +2602,9 @@ pub(super) fn set_console_palette(
     peer_process_id: Option<u32>,
     session_secret: Option<&str>,
 ) -> Result<()> {
+    let proof = prove_session_secret(daemon, peer_process_id, session_secret, |session| {
+        session.id == session_id
+    });
     let mut sessions = daemon.sessions.lock().unwrap();
     let Some(session) = sessions.iter_mut().find(|session| session.id == session_id) else {
         anyhow::bail!("session {session_id} does not exist");
@@ -2601,7 +2618,7 @@ pub(super) fn set_console_palette(
     };
     let secret_authorized = protected
         && !holder_authorized
-        && session_control_authorized(session, peer_process_id, session_secret);
+        && session_control_authorized(session, peer_process_id, &proof);
     if !holder_authorized && !secret_authorized {
         if protected {
             anyhow::bail!(
@@ -2629,6 +2646,9 @@ pub(super) fn kill(
     peer_process_id: Option<u32>,
     session_secret: Option<&str>,
 ) -> Result<()> {
+    let proof = prove_session_secret(daemon, peer_process_id, session_secret, |session| {
+        session.id == session_id
+    });
     let mut sessions = daemon.sessions.lock().unwrap();
     let Some(session) = sessions.iter_mut().find(|session| session.id == session_id) else {
         drop(sessions);
@@ -2652,7 +2672,7 @@ pub(super) fn kill(
         anyhow::bail!("session {session_id} does not exist");
     };
     anyhow::ensure!(
-        session_control_authorized(session, peer_process_id, session_secret),
+        session_control_authorized(session, peer_process_id, &proof),
         "session {session_id} is protected and can only be ended by its owner or current holder"
     );
     // Dropping the panes drops their PTYs, which hangs up the children.
@@ -2692,10 +2712,13 @@ pub(super) fn forget(
     peer_process_id: Option<u32>,
     session_secret: Option<&str>,
 ) -> Result<()> {
+    let proof = prove_session_secret(daemon, peer_process_id, session_secret, |session| {
+        session.id == session_id
+    });
     let mut sessions = daemon.sessions.lock().unwrap();
     if let Some(session) = sessions.iter_mut().find(|session| session.id == session_id) {
         anyhow::ensure!(
-            session_control_authorized(session, peer_process_id, session_secret),
+            session_control_authorized(session, peer_process_id, &proof),
             "session {session_id} is protected and can only be forgotten by its owner or current holder"
         );
         #[cfg(windows)]
@@ -2767,7 +2790,13 @@ pub(super) fn pane_states(
     peer_process_id: Option<u32>,
     session_secret: Option<&str>,
 ) -> Vec<crate::messages::PaneStateReport> {
-    let mut sessions = daemon.sessions.lock().unwrap();
+    // One check per protected session the panes belong to, not one per pane:
+    // a poll naming every pane of a session used to run Argon2, and charge a
+    // wrong secret, once for each of them.
+    let proof = prove_session_secret(daemon, peer_process_id, session_secret, |session| {
+        session.panes.iter().any(|pane| pane_ids.contains(&pane.id))
+    });
+    let sessions = daemon.sessions.lock().unwrap();
     pane_ids
         .iter()
         .map(|&pane_id| {
@@ -2775,11 +2804,8 @@ pub(super) fn pane_states(
                 .iter()
                 .position(|session| session.panes.iter().any(|pane| pane.id == pane_id));
             if let Some(index) = session_index {
-                let protected = {
-                    let session = &mut sessions[index];
-                    session.authentication.is_some()
-                        && !session_control_authorized(session, peer_process_id, session_secret)
-                };
+                let protected =
+                    !session_control_authorized(&sessions[index], peer_process_id, &proof);
                 if protected {
                     return crate::messages::PaneStateReport {
                         pane_id,
@@ -2829,12 +2855,15 @@ pub(super) fn close_pane(
     session_secret: Option<&str>,
 ) -> Result<()> {
     let client_process_id = control_process_id(client_process_id, peer_process_id);
+    let proof = prove_session_secret(daemon, peer_process_id, session_secret, |session| {
+        session.id == session_id
+    });
     let mut sessions = daemon.sessions.lock().unwrap();
     let Some(session) = sessions.iter_mut().find(|session| session.id == session_id) else {
         anyhow::bail!("session {session_id} does not exist");
     };
     anyhow::ensure!(
-        session_control_authorized(session, peer_process_id, session_secret),
+        session_control_authorized(session, peer_process_id, &proof),
         "session {session_id} is protected and can only be changed by its owner or current holder"
     );
     let Some(pane) = session.panes.iter_mut().find(|pane| pane.id == pane_id) else {

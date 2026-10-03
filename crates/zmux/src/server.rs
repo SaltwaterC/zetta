@@ -735,6 +735,9 @@ pub struct Daemon {
     /// pane's attachment under that lock and notifies here, and the attach
     /// waits on it while the lock is released.
     sessions_condvar: Condvar,
+    /// Admits session-secret checks, which run with [`Daemon::sessions`]
+    /// released — see [`secret_check`].
+    verification_gate: VerificationGate,
     next_session_id: AtomicU64,
     next_pane_id: AtomicU64,
     /// The clients' long-lived event connections, keyed by client process.
@@ -934,6 +937,7 @@ impl Daemon {
         Self {
             sessions: Mutex::new(Vec::new()),
             sessions_condvar: Condvar::new(),
+            verification_gate: VerificationGate::default(),
             next_session_id: AtomicU64::new(next_session_id),
             next_pane_id: AtomicU64::new(1),
             subscribers: Mutex::new(HashMap::new()),
@@ -1640,6 +1644,7 @@ mod image_store;
 mod lifecycle;
 #[cfg(feature = "session-persistence")]
 mod persistence_queue;
+mod secret_check;
 mod sizing;
 mod upgrade;
 mod workers;
@@ -1654,6 +1659,7 @@ use image_store::*;
 use lifecycle::*;
 #[cfg(feature = "session-persistence")]
 use persistence_queue::PersistenceQueue;
+use secret_check::*;
 use sizing::*;
 use upgrade::*;
 use workers::*;
