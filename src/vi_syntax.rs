@@ -133,6 +133,37 @@ struct LanguageEntry {
     language: tree_sitter::Language,
     suffixes: Vec<String>,
     first_line_pattern: Option<String>,
+    configuration: GrammarConfiguration,
+}
+
+/// One grammar's fallible, deduplicated initialization. Published queries are
+/// immutable, so readers and snapshots never need the compilation lock. An
+/// error leaves the slot empty for a later retry.
+#[derive(Default)]
+struct GrammarConfiguration {
+    ready: OnceLock<Arc<HighlightConfiguration>>,
+    initializing: Mutex<()>,
+}
+
+impl GrammarConfiguration {
+    fn get_or_try_init(
+        &self,
+        compile: impl FnOnce() -> anyhow::Result<HighlightConfiguration>,
+    ) -> anyhow::Result<Arc<HighlightConfiguration>> {
+        if let Some(configuration) = self.ready.get() {
+            return Ok(Arc::clone(configuration));
+        }
+        let _initializing = self
+            .initializing
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // Another caller may have finished while we waited for this grammar.
+        if let Some(configuration) = self.ready.get() {
+            return Ok(Arc::clone(configuration));
+        }
+        let configuration = Arc::new(compile()?);
+        Ok(Arc::clone(self.ready.get_or_init(|| configuration)))
+    }
 }
 
 /// The syntax theme, resolved on a worker thread.
@@ -317,7 +348,6 @@ pub(crate) struct GrammarSet {
     theme: SyntaxThemeHandle,
     theme_watcher: Option<SyntaxThemeWatcher>,
     styles: Mutex<Option<Arc<[Option<HighlightStyle>]>>>,
-    configurations: Mutex<Vec<Option<Arc<HighlightConfiguration>>>>,
 }
 
 impl GrammarSet {
@@ -358,11 +388,11 @@ impl GrammarSet {
                 language,
                 suffixes: language_config.path_suffixes,
                 first_line_pattern: language_config.first_line_pattern,
+                configuration: GrammarConfiguration::default(),
             });
         }
 
         let capture_names = collect_capture_names(&grammar_ids)?;
-        let configurations = Mutex::new(vec![None; languages.len()]);
         Ok(Arc::new(Self {
             languages,
             language_names,
@@ -371,7 +401,6 @@ impl GrammarSet {
             theme,
             theme_watcher,
             styles: Mutex::new(None),
-            configurations,
         }))
     }
 
@@ -484,47 +513,40 @@ impl GrammarSet {
 
     /// Compile a grammar's Zed queries the first time that grammar is used.
     ///
-    /// The lock is deliberately held across the compile: when the preview and
-    /// the background parse race for the same grammar, the loser waits for the
-    /// winner's result instead of repeating tens of milliseconds of work.
+    /// Every registry entry owns its initialization slot. When the preview and
+    /// background parse need the same cold grammar, they share one compile;
+    /// neither cached lookups nor other grammars wait for that compile.
     fn configuration(&self, language_index: usize) -> anyhow::Result<Arc<HighlightConfiguration>> {
-        let mut configurations = self
-            .configurations
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        if let Some(configuration) = configurations[language_index].as_ref() {
-            return Ok(Arc::clone(configuration));
-        }
-
         let language = &self.languages[language_index];
-        let name = language.name;
-        let highlights_query = load_query(name, "highlights")?;
-        if highlights_query.is_empty() {
-            anyhow::bail!("missing highlights query for native grammar {name:?}");
-        }
-        let injections_query = load_query(name, "injections")?;
-        let mut configuration = HighlightConfiguration::new(
-            language.language.clone(),
-            name,
-            &highlights_query,
-            &injections_query,
-            "",
-        )?;
-        // Every grammar resolves against the same capture table, which is what
-        // lets Tree-sitter's numeric highlight ids stay valid when an injection
-        // switches from Markdown to Rust, JSONC, and so on.
-        configuration.configure(&self.capture_names);
-
-        let configuration = Arc::new(configuration);
-        configurations[language_index] = Some(Arc::clone(&configuration));
-        Ok(configuration)
+        language.configuration.get_or_try_init(|| {
+            let name = language.name;
+            let highlights_query = load_query(name, "highlights")?;
+            if highlights_query.is_empty() {
+                anyhow::bail!("missing highlights query for native grammar {name:?}");
+            }
+            let injections_query = load_query(name, "injections")?;
+            let mut configuration = HighlightConfiguration::new(
+                language.language.clone(),
+                name,
+                &highlights_query,
+                &injections_query,
+                "",
+            )?;
+            // Every grammar resolves against the same capture table, which is
+            // what keeps highlight ids valid across injected languages.
+            configuration.configure(&self.capture_names);
+            Ok(configuration)
+        })
     }
 
+    /// Snapshot only published queries. A missing injected grammar is resolved
+    /// by `configuration` before returning any preview spans, so a concurrent
+    /// compile cannot make the first frame omit its visible injected syntax.
     fn configuration_snapshot(&self) -> Vec<Option<Arc<HighlightConfiguration>>> {
-        self.configurations
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .clone()
+        self.languages
+            .iter()
+            .map(|language| language.configuration.ready.get().cloned())
+            .collect()
     }
 
     #[cfg(test)]

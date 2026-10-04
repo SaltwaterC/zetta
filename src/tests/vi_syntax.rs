@@ -148,6 +148,159 @@ fn compiles_queries_only_for_the_selected_language() {
 }
 
 #[test]
+fn unrelated_initialization_does_not_block_a_fully_highlighted_preview() {
+    let grammars = grammar_set(&["title", "keyword"]);
+    let cpp = grammars.language_index_for_name("cpp").unwrap();
+    let rust = grammars.language_index_for_name("rust").unwrap();
+    let markdown = grammars.language_index_for_name("markdown").unwrap();
+    let root = grammars.configuration(markdown).unwrap();
+    // Stand in for an offscreen C++ injection compiling on the parser worker.
+    // Hold the gate until the complete preview and snapshot have returned.
+    let initializing = grammars.languages[cpp]
+        .configuration
+        .initializing
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (completed, result) = mpsc::channel();
+    let preview_grammars = Arc::clone(&grammars);
+    let worker = thread::spawn(move || {
+        let mut highlighter = ZedSyntaxHighlighter::new(Arc::clone(&preview_grammars));
+        let source = b"# Heading\n\n```rust\nfn main() {}\n```\n";
+        let spans = highlighter.highlight_visible_path(
+            Some(Path::new("README.md")),
+            source,
+            0..source.len(),
+        );
+        completed
+            .send((spans, preview_grammars.configuration_snapshot()))
+            .unwrap();
+    });
+    let preview = result.recv_timeout(Duration::from_secs(5));
+    // Release before asserting or joining so a regression cannot hang the suite.
+    drop(initializing);
+    worker.join().unwrap();
+    let (spans, snapshot) = preview.expect("unrelated compile blocked the preview");
+    assert_eq!(
+        foreground_for_range(&spans, 19..21),
+        Some(to_terminal_color(red()))
+    );
+    assert_eq!(
+        foreground_for_range(&spans, 0..10),
+        Some(to_terminal_color(red()))
+    );
+    assert!(snapshot[cpp].is_none());
+    assert!(snapshot[rust].is_some());
+    assert!(Arc::ptr_eq(snapshot[markdown].as_ref().unwrap(), &root));
+}
+
+fn compile_test_configuration() -> anyhow::Result<HighlightConfiguration> {
+    Ok(HighlightConfiguration::new(
+        tree_sitter_json::LANGUAGE.into(),
+        "json",
+        "(string) @string",
+        "",
+        "",
+    )?)
+}
+
+#[test]
+fn concurrent_requests_for_one_grammar_share_one_compile() {
+    let slot = Arc::new(GrammarConfiguration::default());
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let (entered, started) = mpsc::channel();
+    let (release, resume) = mpsc::channel();
+    let first_slot = Arc::clone(&slot);
+    let first_attempts = Arc::clone(&attempts);
+    let first = thread::spawn(move || {
+        first_slot.get_or_try_init(|| {
+            first_attempts.fetch_add(1, Ordering::Relaxed);
+            entered.send(()).unwrap();
+            resume.recv_timeout(Duration::from_secs(5)).unwrap();
+            compile_test_configuration()
+        })
+    });
+    started.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert!(
+        slot.ready.get().is_none(),
+        "queries published before completion"
+    );
+    let (entered, started) = mpsc::channel();
+    let (completed, result) = mpsc::channel();
+    let second_slot = Arc::clone(&slot);
+    let second_attempts = Arc::clone(&attempts);
+    let second = thread::spawn(move || {
+        entered.send(()).unwrap();
+        let configuration = second_slot.get_or_try_init(|| {
+            second_attempts.fetch_add(1, Ordering::Relaxed);
+            compile_test_configuration()
+        });
+        completed.send(configuration).unwrap();
+    });
+    started.recv_timeout(Duration::from_secs(5)).unwrap();
+    let premature = result.recv_timeout(Duration::from_millis(100));
+    release.send(()).unwrap();
+    let first = first.join().unwrap().unwrap();
+    second.join().unwrap();
+    assert!(matches!(premature, Err(mpsc::RecvTimeoutError::Timeout)));
+    let second = result.recv().unwrap().unwrap();
+    assert!(Arc::ptr_eq(&first, &second));
+    assert_eq!(attempts.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn failed_grammar_initialization_can_be_retried() {
+    let slot = GrammarConfiguration::default();
+    let failed = slot.get_or_try_init(|| anyhow::bail!("invalid query"));
+    assert_eq!(
+        failed.err().expect("query must fail").to_string(),
+        "invalid query"
+    );
+    assert!(slot.ready.get().is_none());
+
+    let configuration = slot.get_or_try_init(compile_test_configuration).unwrap();
+    let cached = slot
+        .get_or_try_init(|| panic!("successful queries must not be recompiled"))
+        .unwrap();
+    assert!(Arc::ptr_eq(&configuration, &cached));
+}
+
+#[test]
+fn a_busy_visible_injection_is_ready_before_the_preview_returns() {
+    let grammars = grammar_set(&["title", "keyword"]);
+    let rust = grammars.language_index_for_name("rust").unwrap();
+    let initializing = grammars.languages[rust]
+        .configuration
+        .initializing
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (entered, started) = mpsc::channel();
+    let (completed, result) = mpsc::channel();
+    let preview_grammars = Arc::clone(&grammars);
+    let worker = thread::spawn(move || {
+        let mut highlighter = ZedSyntaxHighlighter::new(preview_grammars);
+        let source = b"# Heading\n\n```rust\nfn main() {}\n```\n";
+        entered.send(()).unwrap();
+        let spans = highlighter.highlight_visible_path(
+            Some(Path::new("README.md")),
+            source,
+            0..source.len(),
+        );
+        completed.send(spans).unwrap();
+    });
+    started.recv_timeout(Duration::from_secs(5)).unwrap();
+    let premature = result.recv_timeout(Duration::from_millis(100));
+    drop(initializing);
+    worker.join().unwrap();
+    assert!(matches!(premature, Err(mpsc::RecvTimeoutError::Timeout)));
+    let spans = result.recv().unwrap();
+    assert_eq!(
+        foreground_for_range(&spans, 19..21),
+        Some(to_terminal_color(red()))
+    );
+    assert!(grammars.has_configuration(rust));
+}
+
+#[test]
 fn background_highlighter_returns_the_current_revision() {
     let mut highlighter = BackgroundZedSyntaxHighlighter::new(
         Some(PathBuf::from("main.rs")),
@@ -474,6 +627,10 @@ fn scanned_capture_names_cover_every_compiled_grammar() {
         let configuration = grammars
             .configuration(language_index)
             .unwrap_or_else(|error| panic!("compiling {name:?}: {error:#}"));
+        assert!(Arc::ptr_eq(
+            &configuration,
+            &grammars.configuration(language_index).unwrap()
+        ));
         for capture_name in configuration.names() {
             assert!(
                 known.contains(capture_name),
