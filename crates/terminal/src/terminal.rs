@@ -5729,15 +5729,25 @@ impl Terminal {
     }
 
     pub fn find_matches(&self, searcher: Search, cx: &Context<Self>) -> Task<SearchMatches> {
-        // Snapshotting copies only the bounded directly mutable live prefix and shares sealed
-        // immutable history chunks. Searching that snapshot keeps the live PTY/render lock free
-        // for input and drawing.
-        let term = self.term.lock().clone();
+        // Queue only the live handle: tab search submits every pane in one foreground update.
+        // A cancelled job that has not started must not copy any terminal rows.
+        let term = self.term.clone();
+        #[cfg(test)]
+        let gate = self.content_snapshot_gate.clone();
         let executor = cx.background_executor().clone();
         executor.spawn_with_priority(Priority::Low, async move {
-            let mut search = ScrollbackSearch::new(&term, searcher);
+            // Copy the bounded mutable prefix and share sealed history on the worker. Release
+            // the live PTY/render lock before yielding or traversing the captured contents.
+            let snapshot = term.lock().clone();
+            #[cfg(test)]
+            if let Some(gate) = gate {
+                gate.after_capture(&term, &snapshot).await;
+            }
+            // Query replacement during capture can cancel before the first scan chunk too.
+            yield_now().await;
+            let mut search = ScrollbackSearch::new(&snapshot, searcher);
             loop {
-                let finished = search.advance(&term, SEARCH_CHUNK_LINES, MAX_SEARCH_MATCHES);
+                let finished = search.advance(&snapshot, SEARCH_CHUNK_LINES, MAX_SEARCH_MATCHES);
                 if finished {
                     return search.finish();
                 }
@@ -11105,7 +11115,7 @@ mod tests {
             {
                 let live = live
                     .try_lock_unfair()
-                    .expect("export still holds the live lock");
+                    .expect("snapshot still holds the live lock");
                 let copied_rows = (snapshot.topmost_line().0..=snapshot.bottommost_line().0)
                     .filter(|&line| {
                         live.grid().row_storage_id(Line(line))
@@ -11122,6 +11132,135 @@ mod tests {
             self.captured.send(()).await.unwrap();
             self.resume.recv().await.unwrap();
         }
+    }
+
+    fn search_test_terminal(cx: &mut TestAppContext) -> gpui::Entity<Terminal> {
+        cx.new(|cx| {
+            TerminalBuilder::new_display_only(
+                SettingsCursorShape::default(),
+                AlternateScroll::On,
+                Some(4_000),
+                0,
+                cx.background_executor(),
+                PathStyle::local(),
+            )
+            .subscribe(cx)
+        })
+    }
+
+    #[gpui::test]
+    async fn test_search_snapshot_is_captured_when_the_worker_runs(cx: &mut TestAppContext) {
+        let terminal = search_test_terminal(cx);
+        let task = terminal.update(cx, |terminal, cx| {
+            terminal.write_output(b"before request\r\n", cx);
+            let task = terminal.find_matches(Search::new_literal("needle").unwrap(), cx);
+            // The test scheduler cannot run the worker within this update. A foreground
+            // snapshot would miss this output, even though the task has not started yet.
+            terminal.write_output(b"needle after request\r\n", cx);
+            task
+        });
+        let result = task.await;
+        assert_eq!(result.total_count, 1);
+        assert_eq!(result.ranges.len(), 1);
+        assert!(!result.limit_reached);
+    }
+
+    #[gpui::test]
+    async fn test_search_snapshot_releases_live_grid_and_preserves_matches(
+        cx: &mut TestAppContext,
+    ) {
+        let terminal = search_test_terminal(cx);
+        let output = (0..3_000)
+            .map(|line| format!("retained line {line}\r\n"))
+            .collect::<String>();
+        let (captured_tx, captured_rx) = async_channel::bounded(1);
+        let (resume_tx, resume_rx) = async_channel::bounded(1);
+        let (task, expected) = terminal.update(cx, |terminal, cx| {
+            terminal.write_output(output.as_bytes(), cx);
+            let pattern = Search::new_literal("retained").unwrap();
+            let expected = {
+                let term = terminal.term.lock();
+                let mut search = ScrollbackSearch::new(&term, pattern.clone());
+                while !search.advance(&term, SEARCH_CHUNK_LINES, MAX_SEARCH_MATCHES) {}
+                search.finish()
+            };
+            terminal.content_snapshot_gate = Some(ContentSnapshotGate {
+                captured: captured_tx,
+                resume: resume_rx,
+            });
+            (terminal.find_matches(pattern, cx), expected)
+        });
+        // The gate checks that the live lock is free and archived rows remain shared.
+        captured_rx.recv().await.unwrap();
+        terminal.update(cx, |terminal, cx| {
+            terminal.write_output(b"retained after capture\r\n", cx);
+            assert!(terminal.get_content().contains("retained after capture"));
+            terminal.input(b"typed while searching".to_vec());
+            assert_eq!(
+                terminal.take_input_log(),
+                [b"typed while searching".to_vec()]
+            );
+        });
+        resume_tx.send(()).await.unwrap();
+        let result = task.await;
+        assert_eq!(result.total_count, 3_000);
+        assert_eq!(result.ranges.len(), MAX_SEARCH_MATCHES);
+        assert!(result.limit_reached);
+        assert_eq!(result.ranges, expected.ranges);
+    }
+
+    #[gpui::test]
+    fn test_search_snapshot_cancelled_before_capture_releases_the_job(cx: &mut TestAppContext) {
+        let terminal = search_test_terminal(cx);
+        cx.run_until_parked();
+        let live = terminal.read_with(cx, |terminal, _| terminal.term.clone());
+        let owners = Arc::strong_count(&live);
+        let (captured_tx, captured_rx) = async_channel::bounded(1);
+        let (_resume_tx, resume_rx) = async_channel::bounded(1);
+        let task = terminal.update(cx, |terminal, cx| {
+            terminal.content_snapshot_gate = Some(ContentSnapshotGate {
+                captured: captured_tx,
+                resume: resume_rx,
+            });
+            terminal.find_matches(Search::new_literal("cancelled").unwrap(), cx)
+        });
+        assert_eq!(Arc::strong_count(&live), owners + 1);
+        drop(task);
+        cx.run_until_parked();
+        assert_eq!(Arc::strong_count(&live), owners);
+        assert!(matches!(
+            captured_rx.try_recv(),
+            Err(async_channel::TryRecvError::Empty)
+        ));
+    }
+
+    #[gpui::test]
+    fn test_search_snapshot_yields_before_the_first_scan(cx: &mut TestAppContext) {
+        let terminal = search_test_terminal(cx);
+        // Enough history for the gate's shared-archive assertion, but less than one scan
+        // chunk. Without the post-capture yield this search would finish in its first poll.
+        terminal.update(cx, |terminal, cx| {
+            terminal.write_output("retained\r\n".repeat(1_500).as_bytes(), cx);
+        });
+        cx.run_until_parked();
+        let (captured_tx, captured_rx) = async_channel::bounded(1);
+        let (resume_tx, resume_rx) = async_channel::bounded(1);
+        resume_tx.try_send(()).unwrap();
+        let task = terminal.update(cx, |terminal, cx| {
+            terminal.content_snapshot_gate = Some(ContentSnapshotGate {
+                captured: captured_tx,
+                resume: resume_rx,
+            });
+            terminal.find_matches(Search::new_literal("retained").unwrap(), cx)
+        });
+        // Stop after the poll that captured the snapshot; the prefilled gate never parks.
+        while captured_rx.try_recv().is_err() {
+            assert!(cx.executor().tick(), "search never captured a snapshot");
+        }
+        // Polling once consumes and cancels the still-pending task. A completed first scan
+        // would return Some here, so this pins the production cancellation point itself.
+        assert!(task.now_or_never().is_none());
+        cx.run_until_parked();
     }
 
     #[gpui::test]

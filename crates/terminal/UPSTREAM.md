@@ -15,7 +15,10 @@ Retain these Zetta-specific behaviors when synchronizing:
   resize requests, Win32 input records, shell quoting, and Zetta environment
   identity;
 - provide literal, incremental scrollback search and foreground-process
-  refresh throttling;
+  refresh throttling. Queue only the live terminal handle on the foreground;
+  capture search snapshots on the low-priority worker under a short grid lock,
+  release it before scanning, and yield after capture and between scan chunks
+  so obsolete jobs can be cancelled;
 - capture and terminate both the shell and foreground process groups during
   PTY teardown, including application shutdown. Upstream reverted its own
   version of this in `492acd6c81`; do not import that revert. The regression it
