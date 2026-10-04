@@ -28,3 +28,6 @@ util = { path = "../../zed/crates/util" }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
+
+[dev-dependencies]
+gpui = { path = "../gpui", default-features = false, features = ["test-support"] }

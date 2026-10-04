@@ -1,3 +1,4 @@
+mod blink_manager;
 mod clipboard;
 mod scrollback_temp;
 mod terminal_element;
@@ -38,7 +39,7 @@ use ui::{
 };
 use util::paths::{PathStyle, PathWithPosition, home_dir};
 
-const CURSOR_BLINK_INTERVAL: Duration = Duration::from_millis(500);
+use blink_manager::BlinkManager;
 
 #[derive(Clone, Debug, Default, Deserialize, JsonSchema, PartialEq, Action)]
 #[action(namespace = terminal)]
@@ -185,77 +186,6 @@ pub(crate) struct ImeState {
 pub(crate) struct HoverTarget {
     pub(crate) tooltip: String,
     pub(crate) hovered_word: HoveredWord,
-}
-
-struct BlinkManager {
-    blink_epoch: usize,
-    paused: bool,
-    visible: bool,
-    enabled: bool,
-}
-
-impl BlinkManager {
-    fn new() -> Self {
-        Self {
-            blink_epoch: 0,
-            paused: false,
-            visible: true,
-            enabled: false,
-        }
-    }
-
-    fn next_epoch(&mut self) -> usize {
-        self.blink_epoch += 1;
-        self.blink_epoch
-    }
-
-    fn enable(&mut self, cx: &mut Context<Self>) {
-        if self.enabled {
-            return;
-        }
-        self.enabled = true;
-        self.visible = false;
-        self.blink(self.blink_epoch, cx);
-    }
-
-    fn disable(&mut self, cx: &mut Context<Self>) {
-        self.enabled = false;
-        self.visible = true;
-        self.next_epoch();
-        cx.notify();
-    }
-
-    fn pause(&mut self, cx: &mut Context<Self>) {
-        self.visible = true;
-        self.paused = true;
-        let epoch = self.next_epoch();
-        cx.notify();
-        cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(CURSOR_BLINK_INTERVAL).await;
-            this.update(cx, |this, cx| {
-                if this.blink_epoch == epoch {
-                    this.paused = false;
-                    this.blink(epoch, cx);
-                }
-            })
-            .ok();
-        })
-        .detach();
-    }
-
-    fn blink(&mut self, epoch: usize, cx: &mut Context<Self>) {
-        if !self.enabled || self.paused || epoch != self.blink_epoch {
-            return;
-        }
-        self.visible = !self.visible;
-        cx.notify();
-        let next_epoch = self.next_epoch();
-        cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(CURSOR_BLINK_INTERVAL).await;
-            this.update(cx, |this, cx| this.blink(next_epoch, cx)).ok();
-        })
-        .detach();
-    }
 }
 
 pub struct TerminalView {
