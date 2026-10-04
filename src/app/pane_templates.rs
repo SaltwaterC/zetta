@@ -470,7 +470,7 @@ impl Zetta {
             pane.stack = PaneStack::default();
             pane.profile = active_leaf.profile.clone();
             pane.environment_overrides = active_leaf.environment.clone();
-            pane.wsl_cwd_file = active_wsl_cwd_file.clone();
+            pane.set_wsl_cwd_file(active_wsl_cwd_file.clone());
             apply_pane_split_overlay(pane, active_leaf);
         } else if let Some(pane) = tab.pane_mut(active_pane_id) {
             pane.profile = active_leaf.profile.clone();
@@ -691,7 +691,7 @@ impl Zetta {
         pane.stack = PaneStack::default();
         pane.profile = profile.clone();
         pane.environment_overrides.clear();
-        pane.wsl_cwd_file = wsl_cwd_file.clone();
+        pane.set_wsl_cwd_file(wsl_cwd_file.clone());
         self.retain_open_visible_terminals();
         self.spawn_terminal(
             TerminalSpawnRequest {

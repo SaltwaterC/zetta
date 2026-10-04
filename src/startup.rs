@@ -646,6 +646,7 @@ fn initialize_process_state(
     cx.set_global(ZettaProcessState {
         windows: HashMap::new(),
         dormant: Vec::new(),
+        closing: HashMap::new(),
         runners: HashMap::new(),
         next_attention_id: 1,
         silent_mode: SilentModeState::default(),

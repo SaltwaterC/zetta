@@ -117,8 +117,9 @@ pub(crate) struct TerminalPane {
     pub(crate) wsl_cwd_file: Option<PathBuf>,
     /// The last directory read from `wsl_cwd_file` off the GUI thread, for
     /// callbacks that must not read the file themselves; see
-    /// [`Self::wsl_observed_working_directory`].
+    /// [`Self::wsl_working_directory`].
     pub(crate) wsl_cwd_observation: Option<WslCwdObservation>,
+    wsl_cwd_generation: u64,
     pub(crate) pending_command: Option<String>,
     /// The command most recently reported by shell integration. Unlike a
     /// foreground process argv this is shell input the user actually started,
@@ -322,6 +323,7 @@ impl TerminalPane {
             base_exited: false,
             wsl_cwd_file: None,
             wsl_cwd_observation: None,
+            wsl_cwd_generation: 0,
             pending_command: None,
             active_command: None,
             detected_worktree_title: None,
@@ -349,7 +351,7 @@ impl TerminalPane {
     }
 
     pub(crate) fn with_wsl_cwd_file(mut self, file: Option<PathBuf>) -> Self {
-        self.wsl_cwd_file = file;
+        self.set_wsl_cwd_file(file);
         self
     }
 
@@ -368,28 +370,11 @@ impl TerminalPane {
             .unwrap_or_else(|| format!("Pane {}", self.label_number))
     }
 
+    /// The authoritative OSC directory, or the latest accepted background
+    /// tracking-file observation. GUI callers never open the tracking file.
+    /// Before the first observation, launch actions use their existing profile
+    /// or application directory fallback.
     pub(crate) fn wsl_working_directory(&self, cx: &App) -> Option<String> {
-        if !is_wsl_shell(&self.profile.command) {
-            return None;
-        }
-        if let Some(directory) = self.terminal.as_ref().and_then(|terminal| {
-            terminal
-                .read(cx)
-                .reported_working_directory()
-                .map(str::to_owned)
-        }) {
-            return Some(directory);
-        }
-
-        read_wsl_cwd_file(self.wsl_cwd_file.as_ref()?)
-    }
-
-    /// [`Self::wsl_working_directory`] for a callback on the GUI thread: the
-    /// shell's reported directory when there is one, which stays
-    /// authoritative, and otherwise the last tracking-file observation rather
-    /// than a read of the file. An observation of a different file than the
-    /// pane now tracks is ignored.
-    pub(crate) fn wsl_observed_working_directory(&self, cx: &App) -> Option<String> {
         if !is_wsl_shell(&self.profile.command) {
             return None;
         }
@@ -420,10 +405,26 @@ impl TerminalPane {
         (!reported).then(|| self.wsl_cwd_file.clone()).flatten()
     }
 
-    /// Records a tracking-file read, returning whether it changed what
-    /// [`Self::wsl_observed_working_directory`] answers.
-    pub(crate) fn observe_wsl_cwd_file(&mut self, observation: WslCwdObservation) -> bool {
-        if self.wsl_cwd_file.as_ref() != Some(&observation.file)
+    /// Invalidate observations even when a replacement shell reuses the path.
+    pub(crate) fn set_wsl_cwd_file(&mut self, file: Option<PathBuf>) {
+        self.wsl_cwd_generation = self.wsl_cwd_generation.wrapping_add(1);
+        self.wsl_cwd_file = file;
+        self.wsl_cwd_observation = None;
+    }
+
+    pub(crate) fn begin_wsl_cwd_observation(&mut self) -> u64 {
+        self.wsl_cwd_generation = self.wsl_cwd_generation.wrapping_add(1);
+        self.wsl_cwd_generation
+    }
+
+    /// Accept only the latest request for this shell's tracking file.
+    pub(crate) fn observe_wsl_cwd_file(
+        &mut self,
+        generation: u64,
+        observation: WslCwdObservation,
+    ) -> bool {
+        if generation != self.wsl_cwd_generation
+            || self.wsl_cwd_file.as_ref() != Some(&observation.file)
             || self.wsl_cwd_observation.as_ref() == Some(&observation)
         {
             return false;

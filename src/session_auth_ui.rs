@@ -1170,14 +1170,12 @@ impl Zetta {
                     SessionAuthenticationField::Secret => &mut prompt.secret,
                     SessionAuthenticationField::Confirmation => &mut prompt.confirmation,
                 };
-                let command =
-                    event.keystroke.modifiers.control || event.keystroke.modifiers.platform;
                 match key {
                     // Paste only, and handled here rather than through the shared
                     // clipboard shortcuts: a masked secret must not be copyable
                     // or cuttable out of the field it was typed into.
-                    "v" if command => {
-                        if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+                    _ if crate::text_edit::is_paste_chord(&event.keystroke) => {
+                        if let Some(text) = crate::overlay_clipboard::resolved_text(cx) {
                             field.insert(&text);
                         }
                     }

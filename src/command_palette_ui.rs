@@ -170,6 +170,17 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.queue_overlay_clipboard(event, window, cx) {
+            self.dispatch_overlay_key(event, window, cx);
+        }
+    }
+
+    pub(crate) fn dispatch_overlay_key(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.close_confirmation_key_down(event, window, cx) {
             return;
         }

@@ -111,6 +111,9 @@ layering rule: every module named here is a sibling under `src/`.
 - `ui_tokens.rs`: the shared design values — the modal scrim, corner radii,
   the disabled fade, settings column and row sizes, palette and dialog widths,
   and the overlay inset under the chrome. Colours stay with the theme
+- `overlay_clipboard.rs`: starts overlay clipboard reads at invocation and
+  queues subsequent keyboard edits until the captured value is ready; field
+  identity and edit snapshots reject late pastes into replaced or edited fields
 - `overlay_frame.rs`: the frames every modal is drawn in — the occluding
   backdrop and its click policy, the panel, the palette header/section/footer,
   the dialog panel/title/buttons, list rows with match highlighting, and the
@@ -273,7 +276,8 @@ keyboard and the mouse came to do different things; do not add one.
   attaching one from it), `background_session_ui/handover.rs` (the off-thread
   half of detaching and sharing: the work bundles a worker thread runs, the
   per-tab registry of transitions in flight, and their generation-checked
-  commits; a closing window settles its transitions synchronously here),
+  commits; tab/window close awaits completion without blocking the GUI, and
+  `startup/window.rs` retains closing entities until those commits finish),
   `background_session_ui/collaboration.rs` (the window-side model for a
   daemon-owned shared session: `zmux` addresses panes by stable ids while every
   window has its own pane-id namespace, and keeping that translation here makes

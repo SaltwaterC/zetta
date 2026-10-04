@@ -452,16 +452,19 @@ impl Zetta {
         false
     }
 
-    pub(crate) fn settle_session_handover(
+    pub(crate) fn defer_tab_close_for_handover(
         &mut self,
         _: u64,
-        _: Option<u64>,
-        _: Option<&mut Window>,
+        _: bool,
+        _: &mut Window,
         _: &mut Context<Self>,
-    ) {
+    ) -> bool {
+        false
     }
 
-    pub(crate) fn settle_session_handovers(&mut self, _: &mut Context<Self>) {}
+    pub(crate) fn settle_session_handovers(&mut self, _: &mut Context<Self>) -> Task<()> {
+        Task::ready(())
+    }
 
     pub(crate) fn attach_multiplexer_session(
         &mut self,

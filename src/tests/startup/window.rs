@@ -2,9 +2,13 @@ use super::*;
 
 #[test]
 fn process_quits_only_without_windows_or_dormant_session_runners() {
-    assert!(should_quit_after_window_closed(0, 0));
-    assert!(!should_quit_after_window_closed(0, 1));
-    assert!(!should_quit_after_window_closed(1, 0));
+    assert!(should_quit_after_window_closed(0, 0, 0));
+    assert!(!should_quit_after_window_closed(0, 1, 0));
+    assert!(!should_quit_after_window_closed(1, 0, 0));
+    assert!(
+        !should_quit_after_window_closed(0, 0, 1),
+        "a final closing window still owns pending handovers"
+    );
 }
 
 #[test]

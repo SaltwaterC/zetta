@@ -51,6 +51,9 @@ use crate::linux::platform::CLIPBOARD_READ_DEADLINE;
 use gpui::{ClipboardItem, Image, ImageFormat, hash};
 use strum::IntoEnumIterator;
 
+mod capture;
+use capture::CapturedSelection;
+
 type Result<T, E = Error> = std::result::Result<T, E>;
 
 static CLIPBOARD: Mutex<Option<GlobalClipboard>> = parking_lot::const_mutex(None);
@@ -290,9 +293,10 @@ impl Inner {
         formats: &[Atom],
         selection: ClipboardKind,
         deadline: Instant,
+        captured: Option<&CapturedSelection>,
     ) -> Result<ClipboardData> {
         // if we are the current owner, we can get the current clipboard ourselves
-        if self.is_owner(selection)? {
+        if captured.is_none() && self.is_owner(selection)? {
             let data = self.selection_of(selection).data.read();
             if let Some(data_list) = &*data {
                 for data in data_list {
@@ -305,10 +309,17 @@ impl Inner {
             }
             return Err(Error::ContentNotAvailable);
         }
-        let reader = XContext::new()?;
+        let fresh;
+        let reader = match captured {
+            Some(captured) => &captured.context,
+            None => {
+                fresh = XContext::new()?;
+                &fresh
+            }
+        };
 
         let highest_precedence_format =
-            match self.read_single(&reader, selection, self.atoms.TARGETS, deadline) {
+            match self.read_single(reader, selection, self.atoms.TARGETS, deadline, captured) {
                 Err(err) => {
                     log::trace!("Clipboard TARGETS query failed with {err:?}");
                     None
@@ -330,7 +341,7 @@ impl Inner {
             };
 
         if let Some(&format) = highest_precedence_format {
-            let data = self.read_single(&reader, selection, format, deadline)?;
+            let data = self.read_single(reader, selection, format, deadline, captured)?;
             if !formats.contains(&data.format) {
                 // This shouldn't happen since the format is from the TARGETS list.
                 log::trace!(
@@ -345,7 +356,7 @@ impl Inner {
 
         log::trace!("Falling back on attempting to convert clipboard to each format.");
         for format in formats {
-            match self.read_single(&reader, selection, *format, deadline) {
+            match self.read_single(reader, selection, *format, deadline, captured) {
                 Ok(data) => {
                     if formats.contains(&data.format) {
                         return Ok(data);
@@ -384,7 +395,11 @@ impl Inner {
         selection: ClipboardKind,
         target_format: Atom,
         deadline: Instant,
+        captured: Option<&CapturedSelection>,
     ) -> Result<ClipboardData> {
+        if let Some(captured) = captured {
+            captured.validate(self.atom_of(selection))?;
+        }
         // Delete the property so that we can detect (using property notify)
         // when the selection owner receives our request.
         reader
@@ -424,6 +439,10 @@ impl Inner {
                 }
             };
             match event {
+                Event::XfixesSelectionNotify(_) if captured.is_some() => {
+                    captured.unwrap().invalidated.set(true);
+                    return Err(Error::ContentNotAvailable);
+                }
                 // The first response after requesting a selection.
                 Event::SelectionNotify(event) => {
                     log::trace!("Read SelectionNotify");
@@ -961,11 +980,14 @@ pub(crate) struct Clipboard {
 }
 
 /// See [`Clipboard::reader`].
-pub(crate) struct ClipboardReader(Arc<Inner>);
+pub(crate) struct ClipboardReader {
+    inner: Arc<Inner>,
+    captured: CapturedSelection,
+}
 
 impl ClipboardReader {
     pub(crate) fn get_any(&self, selection: ClipboardKind) -> Result<ClipboardItem> {
-        self.0.get_any(selection)
+        self.inner.get_any_captured(selection, Some(&self.captured))
     }
 }
 
@@ -985,6 +1007,14 @@ impl Inner {
     }
 
     fn get_any(&self, selection: ClipboardKind) -> Result<ClipboardItem> {
+        self.get_any_captured(selection, None)
+    }
+
+    fn get_any_captured(
+        &self,
+        selection: ClipboardKind,
+        captured: Option<&CapturedSelection>,
+    ) -> Result<ClipboardItem> {
         let image_entries = ImageFormat::iter()
             .map(|format| (self.image_format_atom(format), format))
             .collect::<Vec<_>>();
@@ -1004,8 +1034,14 @@ impl Inner {
         format_atoms.extend(image_entries.iter().map(|(atom, _)| *atom));
         format_atoms.extend_from_slice(text_format_atoms);
 
-        let deadline = Instant::now() + CLIPBOARD_READ_DEADLINE;
-        let result = self.read(&format_atoms, selection, deadline)?;
+        let deadline = captured.map_or_else(
+            || Instant::now() + CLIPBOARD_READ_DEADLINE,
+            |read| read.deadline,
+        );
+        let result = self.read(&format_atoms, selection, deadline, captured)?;
+        if let Some(captured) = captured {
+            captured.validate(self.atom_of(selection))?;
+        }
 
         log::trace!(
             "read clipboard as format {:?}",
@@ -1105,8 +1141,11 @@ impl Clipboard {
     /// The handle keeps the clipboard alive while it reads, so a read still in
     /// flight when the last [`Clipboard`] drops skips the clipboard-manager
     /// handover; the read's deadline bounds how long that can be the case.
-    pub(crate) fn reader(&self) -> ClipboardReader {
-        ClipboardReader(Arc::clone(&self.inner))
+    pub(crate) fn reader(&self, selection: ClipboardKind) -> Result<ClipboardReader> {
+        Ok(ClipboardReader {
+            captured: CapturedSelection::new(self.inner.atom_of(selection))?,
+            inner: Arc::clone(&self.inner),
+        })
     }
 
     pub fn is_owner(&self, selection: ClipboardKind) -> bool {

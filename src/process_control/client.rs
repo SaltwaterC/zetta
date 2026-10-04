@@ -822,8 +822,8 @@ fn send_set_overlay_request(
 /// the payload fields and the command name. Wiring the token in at each call
 /// site let a request be built against one endpoint's token and sent to
 /// another, and cost every sender three lines of timeout setup that must not
-/// drift: `CONTROL_CLIENT_TIMEOUT` is what stops a wedged window from hanging
-/// a CLI invocation.
+/// drift: `CONTROL_CLIENT_TIMEOUT` bounds ordinary requests. Configuration
+/// reload waits for its actual commit, including slow worker preparation.
 ///
 /// `request_process_run_wait` connects for itself: it keeps the stream after
 /// the first response and reads with no timeout, because a run wrapper blocks
@@ -834,7 +834,10 @@ fn send_control_request(
     request: ControlRequest,
 ) -> Result<ControlResponse> {
     let mut stream = UnixStream::connect(&endpoint.socket_path)?;
-    stream.set_read_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
+    // Reload acknowledges actual application, including slow disk/daemon
+    // preparation. The server closes this connection on shutdown or failure.
+    let timeout = (command != "reload_configuration").then_some(CONTROL_CLIENT_TIMEOUT);
+    stream.set_read_timeout(timeout)?;
     stream.set_write_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
     write_message(
         &mut stream,

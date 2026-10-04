@@ -35,6 +35,7 @@ mod mux;
 mod mux;
 #[cfg(feature = "session-persistence")]
 mod mux_identity;
+mod overlay_clipboard;
 mod process_control;
 mod profile_cli;
 mod profile_icon;
@@ -369,6 +370,7 @@ pub(crate) struct ConfigFileStamp {
 struct ZettaProcessState {
     windows: HashMap<WindowId, Entity<Zetta>>,
     dormant: Vec<Entity<Zetta>>,
+    closing: HashMap<WindowId, Entity<Zetta>>,
     runners: HashMap<u64, Entity<Zetta>>,
     next_attention_id: u64,
     silent_mode: SilentModeState,

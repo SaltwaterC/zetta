@@ -359,7 +359,7 @@ fn control_server_delivers_pane_label_listing() {
 }
 
 #[test]
-fn control_server_delivers_a_configuration_reload_request() {
+fn a_slow_configuration_reload_acknowledges_application_after_the_normal_timeout() {
     let directory = tempfile::tempdir().unwrap();
     let endpoint_path = directory.path().join("control.json");
     let (commands, mut received) = futures::channel::mpsc::unbounded();
@@ -381,6 +381,11 @@ fn control_server_delivers_a_configuration_reload_request() {
         panic!("unexpected process control command");
     };
     assert_eq!(received_path, config_path);
+    thread::sleep(CONTROL_CLIENT_TIMEOUT + Duration::from_millis(100));
+    assert!(
+        !client.is_finished(),
+        "reload reported completion before application"
+    );
     completion.send(true).unwrap();
     assert!(client.join().unwrap());
 }

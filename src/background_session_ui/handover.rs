@@ -23,15 +23,14 @@
 //!
 //! A tab with a transition in flight refuses another lifecycle action rather
 //! than racing it. Closing such a tab, and closing a window, settle the
-//! transition synchronously first: a closing window may be followed by the
-//! process quitting, and a detach that has not reached the daemon by then is a
-//! session lost.
+//! transition asynchronously first. The process keeps closing window entities
+//! alive until their handovers commit, so the last close cannot lose a session.
 
 use super::*;
 
 use std::sync::{Arc, mpsc};
 
-use futures::channel::oneshot;
+use futures::{FutureExt as _, channel::oneshot, future::Shared};
 use terminal::{GridSnapshotSource, RetiredReader};
 use zmux::client::{SharedSessionEvent, SharedSessionReports};
 use zmux::messages::SharedSessionState;
@@ -365,8 +364,8 @@ pub(crate) fn fetch_shared_binding(
 }
 
 /// Runs `work` on a thread of its own. The outcome is read from the first
-/// receiver — by the commit once the second says it is there, or by a window
-/// that is closing and has to wait for it.
+/// receiver once the second has asynchronously signalled completion, including
+/// when a closing window is waiting for the transition.
 fn spawn_handover_worker<T: Send + 'static>(
     work: impl FnOnce() -> T + Send + 'static,
 ) -> (mpsc::Receiver<T>, oneshot::Receiver<()>) {
@@ -403,6 +402,7 @@ enum PendingHandover {
 pub(crate) struct SessionHandovers {
     generation: u64,
     pending: HashMap<u64, (u64, PendingHandover)>,
+    completion: HashMap<u64, Shared<oneshot::Receiver<()>>>,
 }
 
 impl SessionHandovers {
@@ -427,11 +427,8 @@ impl SessionHandovers {
         if generation.is_some_and(|generation| generation != *current) {
             return None;
         }
+        self.completion.remove(&tab_id);
         self.pending.remove(&tab_id).map(|(_, pending)| pending)
-    }
-
-    fn tab_ids(&self) -> Vec<u64> {
-        self.pending.keys().copied().collect()
     }
 }
 
@@ -513,32 +510,43 @@ impl Zetta {
         window: Option<&mut Window>,
         cx: &mut Context<Self>,
     ) {
-        match window {
-            Some(window) => cx
-                .spawn_in(window, async move |this, cx| {
-                    done.await.ok();
-                    this.update_in(cx, |this, window, cx| {
-                        this.settle_session_handover(tab_id, Some(generation), Some(window), cx);
+        let done = done.shared();
+        self.session_handovers
+            .completion
+            .insert(tab_id, done.clone());
+        let window = window.map(|window| window.window_handle());
+        cx.spawn(async move |this, cx| {
+            done.await.ok();
+            // The window may have closed while its worker ran. Its entity is
+            // retained by the process until all these commits finish.
+            if let Some(window) = window {
+                let this = this.clone();
+                if window
+                    .update(cx, |_, window, cx| {
+                        this.update(cx, |this, cx| {
+                            this.settle_session_handover(
+                                tab_id,
+                                Some(generation),
+                                Some(window),
+                                cx,
+                            );
+                        })
                     })
-                    .ok();
-                })
-                .detach(),
-            None => cx
-                .spawn(async move |this, cx| {
-                    done.await.ok();
-                    this.update(cx, |this, cx| {
-                        this.settle_session_handover(tab_id, Some(generation), None, cx);
-                    })
-                    .ok();
-                })
-                .detach(),
-        }
+                    .is_ok()
+                {
+                    return;
+                }
+            }
+            this.update(cx, |this, cx| {
+                this.settle_session_handover(tab_id, Some(generation), None, cx);
+            })
+            .ok();
+        })
+        .detach();
     }
 
-    /// Commits `tab_id`'s transition, waiting for its worker if it has not
-    /// finished. Called by the commit itself, when the worker already has, and
-    /// by anything that has to see the transition finished before it acts —
-    /// closing the tab, or the window.
+    /// Commits a completed transition. Callers await its completion first;
+    /// this method never waits for a worker on the GUI thread.
     ///
     /// Without a window a successful offer is not bound to the session's
     /// canonical state: only a window that is going away commits that way.
@@ -549,6 +557,14 @@ impl Zetta {
         window: Option<&mut Window>,
         cx: &mut Context<Self>,
     ) {
+        if self
+            .session_handovers
+            .completion
+            .get(&tab_id)
+            .is_some_and(|done| done.clone().now_or_never().is_none())
+        {
+            return;
+        }
         let Some(pending) = self.session_handovers.take(tab_id, generation) else {
             return;
         };
@@ -559,7 +575,7 @@ impl Zetta {
                 stacked,
                 outcome,
             } => {
-                let outcome = outcome.recv().unwrap_or_else(|_| DetachOutcome {
+                let outcome = outcome.try_recv().unwrap_or_else(|_| DetachOutcome {
                     released_stacked: Vec::new(),
                     result: Err(anyhow::anyhow!(
                         "the handover worker ended without an answer"
@@ -572,7 +588,7 @@ impl Zetta {
                 previous_shared,
                 outcome,
             } => {
-                let outcome = outcome.recv().unwrap_or_else(|_| OfferOutcome {
+                let outcome = outcome.try_recv().unwrap_or_else(|_| OfferOutcome {
                     published: Err(anyhow::anyhow!(
                         "the handover worker ended without an answer"
                     )),
@@ -583,13 +599,63 @@ impl Zetta {
         }
     }
 
-    /// Settles every transition this window has in flight, waiting for each.
-    /// For a window that is closing, which cannot leave them to a commit that
-    /// may never run.
-    pub(crate) fn settle_session_handovers(&mut self, cx: &mut Context<Self>) {
-        for tab_id in self.session_handovers.tab_ids() {
-            self.settle_session_handover(tab_id, None, None, cx);
-        }
+    /// Waits without holding foreground state, then commits all ready work.
+    pub(crate) fn settle_session_handovers(&mut self, cx: &mut Context<Self>) -> Task<()> {
+        cx.spawn(async move |this, cx| {
+            loop {
+                let Ok(waiting) = this.update(cx, |this, _| {
+                    this.session_handovers
+                        .completion
+                        .values()
+                        .cloned()
+                        .collect::<Vec<_>>()
+                }) else {
+                    return;
+                };
+                if waiting.is_empty() {
+                    return;
+                }
+                futures::future::join_all(waiting).await;
+                this.update(cx, |this, cx| {
+                    let ready = this
+                        .session_handovers
+                        .completion
+                        .iter()
+                        .filter(|(_, done)| (*done).clone().now_or_never().is_some())
+                        .map(|(id, _)| *id)
+                        .collect::<Vec<_>>();
+                    for id in ready {
+                        this.settle_session_handover(id, None, None, cx);
+                    }
+                })
+                .ok();
+            }
+        })
+    }
+
+    /// A close waits behind this tab's offer without delaying input elsewhere.
+    pub(crate) fn defer_tab_close_for_handover(
+        &mut self,
+        tab_id: u64,
+        background_if_pinned: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(done) = self.session_handovers.completion.get(&tab_id).cloned() else {
+            return false;
+        };
+        cx.spawn_in(window, async move |this, cx| {
+            done.await.ok();
+            this.update_in(cx, |this, window, cx| {
+                this.settle_session_handover(tab_id, None, Some(window), cx);
+                if let Some(index) = this.tabs.iter().position(|tab| tab.id == tab_id) {
+                    this.close_tab_at_with_policy(index, background_if_pinned, window, cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+        true
     }
 
     /// The commit of a detach: forget a tab the daemon now holds, or put back

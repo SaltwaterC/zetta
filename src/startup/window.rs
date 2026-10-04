@@ -43,7 +43,6 @@ pub(crate) fn open_zetta_window(
             window.set_window_title("Zetta");
             let zetta = cx.new(|cx| Zetta::new(config, configuration_error, launch, window, cx));
             track_zetta_window(&zetta, window, cx);
-            prepare_background_tabs_before_window_close(&zetta, window, cx);
             if let Some(name) = launch_split {
                 zetta.update(cx, |zetta, cx| {
                     zetta.apply_pane_split_template(&ApplyPaneSplitTemplate { name }, window, cx);
@@ -165,22 +164,6 @@ fn track_zetta_window(zetta: &Entity<Zetta>, window: &Window, cx: &mut App) {
     }
 }
 
-fn prepare_background_tabs_before_window_close(
-    zetta: &Entity<Zetta>,
-    window: &mut Window,
-    cx: &mut App,
-) {
-    let zetta = zetta.downgrade();
-    window.on_window_should_close(cx, move |_, cx| {
-        zetta
-            .update(cx, |zetta, cx| {
-                zetta.prepare_for_background_window_close(cx);
-            })
-            .ok();
-        true
-    });
-}
-
 pub(crate) fn process_zetta_entities(cx: &App) -> Vec<Entity<Zetta>> {
     if !cx.has_global::<ZettaProcessState>() {
         return Vec::new();
@@ -287,8 +270,9 @@ pub(crate) fn zetta_for_runner(runner_id: u64, cx: &App) -> Option<Entity<Zetta>
 pub(super) fn should_quit_after_window_closed(
     window_count: usize,
     dormant_runner_count: usize,
+    closing_window_count: usize,
 ) -> bool {
-    window_count == 0 && dormant_runner_count == 0
+    window_count == 0 && dormant_runner_count == 0 && closing_window_count == 0
 }
 
 pub(super) fn zetta_quit_mode() -> gpui::QuitMode {
@@ -385,7 +369,6 @@ pub(crate) fn open_dormant_or_new_window(cx: &mut App) -> Result<()> {
             window.set_window_title("Zetta");
             zetta_for_window.update(cx, |zetta, cx| zetta.attach_to_reopened_window(window, cx));
             track_zetta_window(&zetta_for_window, window, cx);
-            prepare_background_tabs_before_window_close(&zetta_for_window, window, cx);
             zetta_for_window
         }) {
             Ok(_) => (),
@@ -479,26 +462,36 @@ pub(super) fn handle_zetta_window_closed(cx: &mut App, window_id: WindowId) {
         .windows
         .remove(&window_id);
     if let Some(entity) = entity {
-        entity.update(cx, |zetta, cx| {
-            zetta.prepare_for_background_window_close(cx);
+        cx.global_mut::<ZettaProcessState>()
+            .closing
+            .insert(window_id, entity.clone());
+        let prepared = entity.update(cx, |zetta, cx| {
+            zetta.prepare_for_background_window_close(cx)
         });
-        let (has_background_sessions, runner_id) = {
-            let entity_state = entity.read(cx);
-            (
-                !entity_state.background_sessions.is_empty(),
-                entity_state.background_sessions.runner_id(),
-            )
-        };
-        if has_background_sessions {
-            cx.global_mut::<ZettaProcessState>().dormant.push(entity);
-        } else {
-            cx.global_mut::<ZettaProcessState>()
-                .runners
-                .remove(&runner_id);
-        }
+        cx.spawn(async move |cx| {
+            prepared.await;
+            cx.update(|cx| finish_zetta_window_close(window_id, entity, cx));
+        })
+        .detach();
     }
-    let process = cx.global::<ZettaProcessState>();
-    if should_quit_after_window_closed(process.windows.len(), process.dormant.len()) {
+}
+
+fn finish_zetta_window_close(window_id: WindowId, entity: Entity<Zetta>, cx: &mut App) {
+    let state = entity.read(cx);
+    let has_background_sessions = !state.background_sessions.is_empty();
+    let runner_id = state.background_sessions.runner_id();
+    let process = cx.global_mut::<ZettaProcessState>();
+    process.closing.remove(&window_id);
+    if has_background_sessions {
+        process.dormant.push(entity);
+    } else {
+        process.runners.remove(&runner_id);
+    }
+    if should_quit_after_window_closed(
+        process.windows.len(),
+        process.dormant.len(),
+        process.closing.len(),
+    ) {
         quit_zetta_process(cx);
     }
 }

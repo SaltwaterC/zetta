@@ -323,7 +323,7 @@ impl Zetta {
         self.close_tab_at_with_policy(index, true, window, cx);
     }
 
-    pub(super) fn close_tab_at_with_policy(
+    pub(crate) fn close_tab_at_with_policy(
         &mut self,
         index: usize,
         background_if_pinned: bool,
@@ -334,11 +334,9 @@ impl Zetta {
             return;
         }
         let tab_id = self.tabs[index].id;
-        // A tab cannot be closed out from under its own offer to the daemon,
-        // and a close is not refused the way a second toggle is: a shell that
-        // exits mid-offer would leave a tab nothing can close. Waiting is
-        // bounded by the request, and only happens in that collision.
-        self.settle_session_handover(tab_id, None, Some(window), cx);
+        if self.defer_tab_close_for_handover(tab_id, background_if_pinned, window, cx) {
+            return;
+        }
         let Some(index) = self.tabs.iter().position(|tab| tab.id == tab_id) else {
             return;
         };

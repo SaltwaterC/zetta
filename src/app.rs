@@ -605,6 +605,7 @@ pub(crate) struct Zetta {
     pub(crate) next_tab_id: u64,
     pub(crate) next_attention_id: u64,
     pub(crate) next_pane_id: u64,
+    pub(crate) overlay_clipboard: crate::overlay_clipboard::OverlayClipboard,
     pub(crate) rename_focus: gpui::FocusHandle,
     /// Focused while the overlay-style selector is open, so the section
     /// keys, arrow keys, Enter, and Escape operate it instead of reaching
@@ -724,10 +725,24 @@ impl Zetta {
         }
     }
 
-    pub(crate) fn prepare_for_background_window_close(&mut self, cx: &mut Context<Self>) {
-        // Whatever this window still has in flight finishes first: the tab
-        // states below have to be the committed ones.
-        self.settle_session_handovers(cx);
+    pub(crate) fn prepare_for_background_window_close(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Task<()> {
+        let settled = self.settle_session_handovers(cx);
+        cx.spawn(async move |this, cx| {
+            settled.await;
+            let Ok(settled) = this.update(cx, |this, cx| {
+                this.preserve_tabs_for_window_close(cx);
+                this.settle_session_handovers(cx)
+            }) else {
+                return;
+            };
+            settled.await;
+        })
+    }
+
+    fn preserve_tabs_for_window_close(&mut self, cx: &mut Context<Self>) {
         let shared_tabs = self
             .tabs
             .iter()
@@ -761,9 +776,6 @@ impl Zetta {
                 preserved_any = true;
             }
         }
-        // Started together so the tabs hand over at once, and waited for here
-        // because the process may quit as soon as this window has gone.
-        self.settle_session_handovers(cx);
         if preserved_any {
             self.finish_background_session_change(cx);
         }
@@ -1042,6 +1054,7 @@ impl Zetta {
             next_tab_id: 1,
             next_attention_id: 1,
             next_pane_id: 1,
+            overlay_clipboard: Default::default(),
             rename_focus: cx.focus_handle(),
             overlay_style_focus: cx.focus_handle(),
             command_palette_focus: cx.focus_handle(),

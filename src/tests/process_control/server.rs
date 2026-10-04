@@ -222,3 +222,17 @@ fn a_request_that_does_not_decode_is_answered_rather_than_dropped() {
         "a rejected request must not reach the window"
     );
 }
+
+#[test]
+fn reload_completion_ends_on_shutdown_failure_or_worker_loss() {
+    let stopping = AtomicBool::new(true);
+    let (_sender, receiver) = channel();
+    assert!(!wait_for_reload_completion(&receiver, &stopping));
+    stopping.store(false, Ordering::Release);
+    let (sender, receiver) = channel();
+    sender.send(false).unwrap();
+    assert!(!wait_for_reload_completion(&receiver, &stopping));
+    let (sender, receiver) = channel();
+    drop(sender);
+    assert!(!wait_for_reload_completion(&receiver, &stopping));
+}

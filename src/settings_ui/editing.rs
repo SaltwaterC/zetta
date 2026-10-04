@@ -424,27 +424,7 @@ impl Zetta {
         let Some(input) = editor.focused_input else {
             return;
         };
-        let field = match input {
-            SettingsInput::Configuration(field) => editor.configuration.text_mut(field),
-            SettingsInput::Keymap(field) => editor.keymap.text_mut(field),
-            SettingsInput::PaneTemplate(field) => {
-                pane_templates::pane_template_text_mut(editor, field)
-            }
-            SettingsInput::Project(field) => editor
-                .project
-                .as_mut()
-                .and_then(|project| project.form.text_mut(field)),
-            SettingsInput::ThemeSearch => Some(&mut editor.theme_extension_query),
-            SettingsInput::FontSearch => editor.font_query.as_mut(),
-            SettingsInput::KeymapSearch => Some(&mut editor.keymap_search),
-            SettingsInput::ProfileDraft(field) => {
-                editor.profile_draft.as_mut().and_then(|draft| match field {
-                    ProfileDraftField::Name => Some(&mut draft.name),
-                    ProfileDraftField::Program => Some(&mut draft.program),
-                    ProfileDraftField::Argument(argument) => draft.arguments.get_mut(argument),
-                })
-            }
-        };
+        let field = settings_text_field(editor, input);
         let Some(field) = field else {
             return;
         };
@@ -753,6 +733,31 @@ impl Zetta {
             editor.numeric_repeat_generation = editor.numeric_repeat_generation.wrapping_add(1);
         }
         cx.notify();
+    }
+}
+
+pub(crate) fn settings_text_field(
+    editor: &mut SettingsEditor,
+    input: SettingsInput,
+) -> Option<&mut TextField> {
+    match input {
+        SettingsInput::Configuration(field) => editor.configuration.text_mut(field),
+        SettingsInput::Keymap(field) => editor.keymap.text_mut(field),
+        SettingsInput::PaneTemplate(field) => pane_templates::pane_template_text_mut(editor, field),
+        SettingsInput::Project(field) => editor
+            .project
+            .as_mut()
+            .and_then(|project| project.form.text_mut(field)),
+        SettingsInput::ThemeSearch => Some(&mut editor.theme_extension_query),
+        SettingsInput::FontSearch => editor.font_query.as_mut(),
+        SettingsInput::KeymapSearch => Some(&mut editor.keymap_search),
+        SettingsInput::ProfileDraft(field) => {
+            editor.profile_draft.as_mut().and_then(|draft| match field {
+                ProfileDraftField::Name => Some(&mut draft.name),
+                ProfileDraftField::Program => Some(&mut draft.program),
+                ProfileDraftField::Argument(argument) => draft.arguments.get_mut(argument),
+            })
+        }
     }
 }
 

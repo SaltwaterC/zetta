@@ -138,22 +138,61 @@ fn a_wsl_cwd_observation_is_recorded_only_when_it_changes_the_tracked_file() {
     let mut pane = wsl_test_pane().with_wsl_cwd_file(Some(file.clone()));
 
     fs::write(&file, "/home/me/project\n").unwrap();
+    let generation = pane.begin_wsl_cwd_observation();
     let observation = WslCwdObservation::read(file.clone());
     assert_eq!(observation.directory.as_deref(), Some("/home/me/project"));
-    assert!(pane.observe_wsl_cwd_file(observation.clone()));
-    assert!(!pane.observe_wsl_cwd_file(observation));
+    assert!(pane.observe_wsl_cwd_file(generation, observation.clone()));
+    assert!(!pane.observe_wsl_cwd_file(generation, observation));
 
     fs::write(&file, "/home/me\n").unwrap();
-    assert!(pane.observe_wsl_cwd_file(WslCwdObservation::read(file.clone())));
+    assert!(pane.observe_wsl_cwd_file(generation, WslCwdObservation::read(file.clone())));
 
     // A read of a file the pane no longer tracks is stale.
     let other = temporary.path().join("other");
     fs::write(&other, "/tmp\n").unwrap();
-    assert!(!pane.observe_wsl_cwd_file(WslCwdObservation::read(other)));
+    assert!(!pane.observe_wsl_cwd_file(generation, WslCwdObservation::read(other)));
     assert_eq!(
         pane.wsl_cwd_observation
             .as_ref()
             .and_then(|observation| observation.directory.as_deref()),
         Some("/home/me")
     );
+}
+
+#[test]
+fn wsl_cwd_observations_reject_reversed_completion_and_replaced_files() {
+    let file = PathBuf::from("cwd");
+    let mut pane = wsl_test_pane().with_wsl_cwd_file(Some(file.clone()));
+    let old = pane.begin_wsl_cwd_observation();
+    let new = pane.begin_wsl_cwd_observation();
+    let observation = |directory: &str| WslCwdObservation {
+        file: file.clone(),
+        directory: Some(directory.to_owned()),
+    };
+    assert!(pane.observe_wsl_cwd_file(new, observation("/new")));
+    assert!(!pane.observe_wsl_cwd_file(old, observation("/old")));
+    assert_eq!(
+        pane.wsl_cwd_observation
+            .as_ref()
+            .unwrap()
+            .directory
+            .as_deref(),
+        Some("/new")
+    );
+    pane.set_wsl_cwd_file(Some(file.clone()));
+    assert!(!pane.observe_wsl_cwd_file(new, observation("/obsolete-shell")));
+}
+
+#[gpui::test]
+fn wsl_gui_directory_reads_only_the_accepted_observation(cx: &mut gpui::TestAppContext) {
+    let temporary = tempfile::tempdir().unwrap();
+    let file = temporary.path().join("cwd");
+    let mut pane = wsl_test_pane().with_wsl_cwd_file(Some(file.clone()));
+    fs::write(&file, "/first").unwrap();
+    let generation = pane.begin_wsl_cwd_observation();
+    assert!(pane.observe_wsl_cwd_file(generation, WslCwdObservation::read(file.clone())));
+    fs::write(&file, "/unobserved").unwrap();
+    cx.update(|cx| assert_eq!(pane.wsl_working_directory(cx).as_deref(), Some("/first")));
+    pane.set_wsl_cwd_file(Some(file));
+    cx.update(|cx| assert_eq!(pane.wsl_working_directory(cx), None));
 }

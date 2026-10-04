@@ -28,17 +28,40 @@ use gpui::{App, ClipboardItem, Keystroke};
 /// all-or-nothing: `Ctrl-A` selects the lot, and typing or pasting over it
 /// replaces the lot, so there is no partial range to track. The cursor is always
 /// a `char` boundary, which is what the boundary helpers below are for.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub struct TextField {
+    identity: u64,
     pub text: String,
     pub cursor: usize,
     pub select_all: bool,
 }
 
+impl Default for TextField {
+    fn default() -> Self {
+        Self::new("")
+    }
+}
+
+impl PartialEq for TextField {
+    fn eq(&self, other: &Self) -> bool {
+        self.text == other.text
+            && self.cursor == other.cursor
+            && self.select_all == other.select_all
+    }
+}
+impl Eq for TextField {}
+
 impl TextField {
+    /// Stable across moves and snapshots, distinct for a newly opened field.
+    pub(crate) fn identity(&self) -> u64 {
+        self.identity
+    }
+
     pub fn new(text: impl Into<String>) -> Self {
         let text = text.into();
+        static NEXT_FIELD: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         Self {
+            identity: NEXT_FIELD.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             cursor: text.len(),
             text,
             select_all: false,
@@ -260,7 +283,7 @@ pub(crate) fn apply_clipboard_shortcut(
         return ClipboardOutcome::Edited;
     }
     if is_paste_chord(keystroke) {
-        let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else {
+        let Some(text) = crate::overlay_clipboard::resolved_text(cx) else {
             return ClipboardOutcome::Unchanged;
         };
         if text.is_empty() {

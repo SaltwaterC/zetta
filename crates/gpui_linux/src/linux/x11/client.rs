@@ -314,7 +314,14 @@ fn read_selection_off_thread(
     state: &X11ClientState,
     selection: clipboard::ClipboardKind,
 ) -> Task<Result<Option<gpui::ClipboardItem>, gpui::ClipboardReadError>> {
-    let reader = state.clipboard.reader();
+    let Some(reader) = state
+        .clipboard
+        .reader(selection)
+        .context("X11: capturing clipboard ownership")
+        .log_with_level(log::Level::Debug)
+    else {
+        return Task::ready(Ok(None));
+    };
     let (done, finished) = futures::channel::oneshot::channel();
     let spawned = std::thread::Builder::new()
         .name("clipboard-read".to_owned())

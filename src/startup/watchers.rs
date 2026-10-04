@@ -326,7 +326,11 @@ pub(crate) fn prune_empty_dormant_runners(cx: &mut App) {
     for runner_id in removed_runner_ids {
         process.runners.remove(&runner_id);
     }
-    if should_quit_after_window_closed(process.windows.len(), process.dormant.len()) {
+    if should_quit_after_window_closed(
+        process.windows.len(),
+        process.dormant.len(),
+        process.closing.len(),
+    ) {
         quit_zetta_process(cx);
     }
 }

@@ -30,10 +30,19 @@ Retain these Zetta patches when synchronizing:
   and self-owned reads answer at once, as the synchronous read does. Otherwise
   Wayland sends `receive` and flushes on the GUI thread, for the offer current
   at the request, then reads the pipe from a calloop source as data arrives;
-  X11 converts on a thread of its own through the reader connection it already
-  used. Both end a read once the owner goes quiet (`PIPE_READ_TIMEOUT`, X11's
+  X11 subscribes a dedicated connection to XFixes selection notifications and
+  captures the owner at invocation (`linux/x11/clipboard/capture.rs`), then
+  converts on a worker. Replacing ownership, including a write by the same
+  owner window, invalidates the read across TARGETS, fallback and INCR instead
+  of pasting the successor's data. External asynchronous reads require XFixes;
+  setup failure returns an empty read. Setup still makes X-server round trips
+  on the foreground, but never waits there for an external owner's payload.
+  Both end a read once the owner goes quiet (`PIPE_READ_TIMEOUT`, X11's
   `LONG_TIMEOUT_DUR`) or after `CLIPBOARD_READ_DEADLINE` overall, which X11's
-  synchronous read now honours too.
+  synchronous read now honours too. Native ownership regressions live in
+  `src/tests/linux/x11/clipboard_capture.rs`; run the ignored
+  `captured_selection_tests` with `--features test-support -- --ignored
+  --test-threads=1` against an isolated X server.
 
 The Wayland frame-callback lifecycle intentionally matches upstream. Do not
 request callbacks from arbitrary foreground tasks or use empty surface commits

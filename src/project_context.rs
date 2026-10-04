@@ -704,7 +704,7 @@ impl Zetta {
             .then(|| pane.wsl_cwd_file_needs_observing(cx))
             .flatten();
         let directory = if is_wsl {
-            pane.wsl_observed_working_directory(cx)
+            pane.wsl_working_directory(cx)
                 .and_then(|directory| wsl_reported_directory(&pane.profile, &directory))
         } else {
             pane.current_directory(cx)
@@ -744,6 +744,16 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let Some(pane) = self
+            .tabs
+            .iter_mut()
+            .chain(self.background_sessions.iter_mut())
+            .find(|tab| tab.id == tab_id)
+            .and_then(|tab| tab.pane_mut(pane_id))
+        else {
+            return;
+        };
+        let generation = pane.begin_wsl_cwd_observation();
         let executor = cx.background_executor().clone();
         let this = cx.entity().downgrade();
         window
@@ -758,7 +768,7 @@ impl Zetta {
                         .chain(this.background_sessions.iter_mut())
                         .find(|tab| tab.id == tab_id)
                         .and_then(|tab| tab.pane_mut(pane_id))
-                        .is_some_and(|pane| pane.observe_wsl_cwd_file(observation));
+                        .is_some_and(|pane| pane.observe_wsl_cwd_file(generation, observation));
                     if changed {
                         this.schedule_project_detection(tab_id, pane_id, false, window, cx);
                     }
@@ -1291,20 +1301,24 @@ impl Zetta {
             );
             return;
         }
-        let config_root = working_directory
-            .as_deref()
-            .and_then(|directory| {
-                resolve_registered_project_config_root(directory, &self.projects.registry)
-            })
-            .unwrap_or_else(|| root.clone());
+        let registry = self.projects.registry.clone();
         let base = self.launch_config.clone();
         let executor = cx.background_executor().clone();
         let this = cx.entity().downgrade();
         window
             .spawn(cx, async move |cx| {
-                let project_root = config_root.clone();
-                let result = executor
-                    .spawn(async move { ProjectConfig::load(&project_root, &base) })
+                let directory = working_directory.clone();
+                let (config_root, result) = executor
+                    .spawn(async move {
+                        let config_root = directory
+                            .as_deref()
+                            .and_then(|directory| {
+                                resolve_registered_project_config_root(directory, &registry)
+                            })
+                            .unwrap_or(root);
+                        let result = ProjectConfig::load(&config_root, &base);
+                        (config_root, result)
+                    })
                     .await;
                 this.update_in(cx, |this, window, cx| match result {
                     Ok(project) => match working_directory {

@@ -265,10 +265,19 @@ fn apply_window_command(
 ) -> &'static str {
     match command {
         ControlRequestCommand::ReloadConfiguration { config_path } => {
-            dispatch.send(|completion| ProcessControlCommand::ReloadConfiguration {
-                config_path,
-                completion,
-            })
+            let (completion, completed) = channel();
+            let sent = dispatch
+                .commands
+                .unbounded_send(ProcessControlCommand::ReloadConfiguration {
+                    config_path,
+                    completion,
+                })
+                .is_ok();
+            if sent && wait_for_reload_completion(&completed, dispatch.stopping) {
+                "ok"
+            } else {
+                "rejected"
+            }
         }
         ControlRequestCommand::OpenWindow => {
             dispatch.send(|completion| ProcessControlCommand::OpenWindow { completion })
@@ -979,6 +988,23 @@ fn wait_for_run_registration(
                     RunWaitRegistration::NoRegistration
                 };
             }
+        }
+    }
+}
+
+/// Reload preparation may legitimately outlast the ordinary control timeout.
+/// Completion means applied (or failed), never merely queued. Shutdown and a
+/// dropped completion sender still end the wait; this runs on a connection
+/// thread, not the GUI thread.
+fn wait_for_reload_completion(completed: &Receiver<bool>, stopping: &AtomicBool) -> bool {
+    loop {
+        if stopping.load(Ordering::Acquire) {
+            return false;
+        }
+        match completed.recv_timeout(RUN_WAIT_SUPERVISION_INTERVAL) {
+            Ok(accepted) => return accepted && !stopping.load(Ordering::Acquire),
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => return false,
         }
     }
 }

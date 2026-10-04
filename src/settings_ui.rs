@@ -1279,3 +1279,5 @@ impl Zetta {
 #[cfg(test)]
 #[path = "tests/settings_ui.rs"]
 mod tests;
+
+pub(crate) use editing::settings_text_field;

@@ -519,17 +519,16 @@ fn a_refused_detach_puts_the_tab_back(cx: &mut gpui::TestAppContext) {
     });
 }
 
-/// A closing window cannot leave a detach to a commit that may never run, so
-/// it waits for the daemon's answer before it lets go.
+/// The close barrier remains pending while the foreground can process updates.
 #[gpui::test]
-fn a_closing_window_waits_for_its_detach(cx: &mut gpui::TestAppContext) {
+fn a_closing_window_awaits_its_detach_without_blocking(cx: &mut gpui::TestAppContext) {
     let (zetta, cx) = zetta_window(cx);
     let gate = Gate::default();
     let daemon = Arc::new(FakeDaemon {
         gate: Some(gate.clone()),
         ..Default::default()
     });
-    zetta.update(cx, |zetta, cx| {
+    let close = zetta.update(cx, |zetta, cx| {
         zetta.await_multiplexer_handover(
             tab(5),
             HandoverOrigin::WindowClose,
@@ -540,16 +539,85 @@ fn a_closing_window_waits_for_its_detach(cx: &mut gpui::TestAppContext) {
             None,
             cx,
         );
+        zetta.prepare_for_background_window_close(cx)
     });
-    let releaser = std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(50));
-        gate.release();
-    });
+    let finished = std::rc::Rc::new(std::cell::Cell::new(false));
+    let observed = finished.clone();
+    cx.spawn(async move |_| {
+        close.await;
+        observed.set(true);
+    })
+    .detach();
+    cx.run_until_parked();
+    assert!(!finished.get());
     zetta.update(cx, |zetta, cx| {
-        zetta.settle_session_handovers(cx);
-        assert!(!zetta.session_handover_in_flight(5));
-        assert!(zetta.tabs.is_empty(), "a detached tab is not put back");
+        assert!(zetta.session_handover_in_flight(5));
+        cx.notify();
     });
+    assert!(daemon.calls().is_empty());
+    gate.release();
+    settle_until(&zetta, cx, |_| finished.get());
     assert_eq!(daemon.calls(), ["detach []"]);
-    releaser.join().unwrap();
+}
+
+#[gpui::test]
+fn closing_a_tab_during_an_offer_defers_until_the_reply(cx: &mut gpui::TestAppContext) {
+    let (zetta, cx) = zetta_window(cx);
+    let gate = Gate::default();
+    let daemon = Arc::new(FakeDaemon {
+        gate: Some(gate.clone()),
+        refuse_share: true,
+        ..Default::default()
+    });
+    zetta.update_in(cx, |zetta, window, cx| {
+        zetta.tabs.push(tab(5));
+        zetta.tabs.push(tab(6));
+        zetta.await_session_offer(
+            5,
+            true,
+            false,
+            offer_work(&daemon, true, Vec::new()),
+            window,
+            cx,
+        );
+        zetta.close_tab_at_with_policy(0, false, window, cx);
+        assert_eq!(zetta.tabs.len(), 2);
+    });
+    cx.run_until_parked();
+    assert!(daemon.calls().is_empty());
+    gate.release();
+    settle_until(&zetta, cx, |zetta| zetta.tabs.len() == 1);
+    zetta.read_with(cx, |zetta, _| assert_eq!(zetta.tabs[0].id, 6));
+}
+
+#[gpui::test]
+fn a_handover_commits_after_its_window_is_removed(cx: &mut gpui::TestAppContext) {
+    let (zetta, cx) = zetta_window(cx);
+    let gate = Gate::default();
+    let daemon = Arc::new(FakeDaemon {
+        gate: Some(gate.clone()),
+        ..Default::default()
+    });
+    zetta.update_in(cx, |zetta, window, cx| {
+        zetta.await_multiplexer_handover(
+            tab(5),
+            HandoverOrigin::WindowClose,
+            PreparedDetach {
+                work: detach_work(&daemon, Vec::new(), Vec::new()),
+                stacked: Vec::new(),
+            },
+            Some(window),
+            cx,
+        );
+        window.remove_window();
+    });
+    cx.run_until_parked();
+    assert!(zetta.read_with(cx, |zetta, _| zetta.session_handover_in_flight(5)));
+    // A second window can run while the first is gone and its worker is held.
+    let (other, other_cx) = zetta_window(&mut cx.cx);
+    other.update(other_cx, |_, cx| cx.notify());
+    other_cx.run_until_parked();
+    gate.release();
+    settle_until(&zetta, cx, |zetta| !zetta.session_handover_in_flight(5));
+    assert_eq!(daemon.calls(), ["detach []"]);
 }
