@@ -125,9 +125,11 @@ impl Scanner {
         input: &'a [u8],
         on_frame: impl FnMut(Frame),
     ) -> Cow<'a, [u8]> {
+        // `contains` clears escape-free text a word at a time; only the rest needs the pairwise
+        // search, which tests every byte.
         if self.pending.is_empty()
-            && !input.ends_with(b"\x1b")
-            && !input.windows(2).any(|pair| pair == b"\x1b]")
+            && (!input.contains(&0x1b)
+                || (!input.ends_with(b"\x1b") && !input.windows(2).any(|pair| pair == b"\x1b]")))
         {
             return Cow::Borrowed(input);
         }

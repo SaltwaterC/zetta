@@ -714,6 +714,16 @@ enum ResizeRequestParserState {
     },
 }
 
+/// The first ESC in `bytes`. `contains` rules out escape-free text a word at a time, where
+/// `position` alone tests every byte of it.
+#[inline]
+fn find_escape(bytes: &[u8]) -> Option<usize> {
+    if !bytes.contains(&0x1b) {
+        return None;
+    }
+    bytes.iter().position(|byte| *byte == 0x1b)
+}
+
 impl ResizeRequestParser {
     fn advance(&mut self, mut bytes: &[u8], mut on_request: impl FnMut(u16, u16)) {
         // Ordinary output carries no escapes, so `Ground` skips ahead to the
@@ -727,7 +737,7 @@ impl ResizeRequestParser {
         // pty produces, in addition to the vte parser.
         while !bytes.is_empty() {
             if matches!(self.state, ResizeRequestParserState::Ground) {
-                let Some(escape) = bytes.iter().position(|byte| *byte == 0x1b) else {
+                let Some(escape) = find_escape(bytes) else {
                     return;
                 };
                 self.state = ResizeRequestParserState::Escape;

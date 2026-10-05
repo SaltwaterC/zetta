@@ -2693,20 +2693,10 @@ mod tests {
         self, CharsetIndex, Handler, Processor, StandardCharset, StdSyncHandler,
     };
 
-    #[test]
-    #[ignore = "manual optimized-build throughput check"]
-    fn plain_text_output_throughput_benchmark() {
-        const PAYLOAD_BYTES: usize = 10 * 1024 * 1024;
-        const LINE_BYTES: usize = 80;
-        const TEXT: &[u8] = b"0123456789 abcdefghijklmnopqrstuvwxyz ABCDEFGHIJKLMNOPQRSTUVWXYZ";
-
-        let payload = (0..PAYLOAD_BYTES)
-            .map(|index| {
-                let column = index % LINE_BYTES;
-                if column == LINE_BYTES - 1 { b'\n' } else { TEXT[column % TEXT.len()] }
-            })
-            .collect::<Vec<_>>();
-        let size = TermSize::new(98, 50);
+    /// Parse `payload` into a terminal with unlimited history, as Zetta configures it by default,
+    /// and report the throughput.
+    fn output_throughput(payload: &[u8], columns: usize, lines: usize) -> Term<VoidListener> {
+        let size = TermSize::new(columns, lines);
         let config = Config { scrolling_history: i32::MAX as usize, ..Config::default() };
         let mut term = Term::new(config, &size, VoidListener);
         let mut processor = Processor::<StdSyncHandler>::new();
@@ -2723,7 +2713,66 @@ mod tests {
             payload.len() as f64 / (1024.0 * 1024.0),
             elapsed.as_secs_f64(),
         );
+        term
+    }
+
+    /// `zetta benchmark output`'s repeated-lines payload, `newline` being what each line ends
+    /// with by the time it reaches the terminal.
+    fn repeated_lines_payload(bytes: usize, newline: &[u8]) -> Vec<u8> {
+        const LINE_TEXT_BYTES: usize = 79;
+        const TEXT: &[u8] = b"0123456789 abcdefghijklmnopqrstuvwxyz ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+
+        let line = (0..LINE_TEXT_BYTES)
+            .map(|column| TEXT[column % TEXT.len()])
+            .chain(newline.iter().copied())
+            .collect::<Vec<_>>();
+        let mut payload = line.repeat(bytes.div_ceil(line.len()));
+        payload.truncate(bytes);
+        payload
+    }
+
+    /// Repeated output seals uniform history chunks, whose spare rows become the next lines
+    /// scrolled in. Those must arrive exactly as blank as a fresh row would.
+    #[test]
+    fn lines_scrolled_in_after_uniform_history_are_blank() {
+        let size = TermSize::new(8, 3);
+        let config = Config { scrolling_history: i32::MAX as usize, ..Config::default() };
+        let mut term = Term::new(config, &size, VoidListener);
+        let mut processor = Processor::<StdSyncHandler>::new();
+
+        processor.advance(&mut term, "abc\r\n".repeat(4_096).as_bytes());
+        assert_eq!(term.grid.cursor.point, Point::new(Line(2), Column(0)));
+        assert!(term.grid[Line(2)][..].iter().all(|cell| *cell == Cell::default()));
+
+        // The erase background applies to the whole scrolled-in line, as it would to a new row.
+        processor.advance(&mut term, b"\x1b[41m\r\n");
+        let red = Color::Named(NamedColor::Red);
+        assert!(term.grid[Line(2)][..].iter().all(|cell| cell.c == ' ' && cell.bg == red));
+
+        let history = term.history_size() as i32;
+        assert_eq!(history, 4_096 - 1);
+        for line in [Line(0), Line(-1), Line(-1_500), Line(-history)] {
+            let text = term.grid[line][..].iter().map(|cell| cell.c).collect::<String>();
+            assert_eq!(text, "abc     ", "{line:?}");
+        }
+    }
+
+    #[test]
+    #[ignore = "manual optimized-build throughput check"]
+    fn plain_text_output_throughput_benchmark() {
+        let payload = repeated_lines_payload(10 * 1024 * 1024, b"\n");
+        let term = output_throughput(&payload, 98, 50);
         assert!(term.history_size() > 130_000);
+    }
+
+    /// The same payload as a pty delivers it: `ONLCR` turns every newline into CR LF, so each
+    /// line starts at the first column and every row of history is identical.
+    #[test]
+    #[ignore = "manual optimized-build throughput check"]
+    fn repeated_lines_through_a_pty_throughput_benchmark() {
+        let payload = repeated_lines_payload(100 * 1024 * 1024, b"\r\n");
+        let term = output_throughput(&payload, 118, 31);
+        assert!(term.history_size() > 1_200_000);
     }
 
     #[test]

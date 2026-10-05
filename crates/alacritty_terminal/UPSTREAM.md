@@ -14,7 +14,12 @@ Retain these Zetta changes when synchronizing:
   is `lib.rs`, which declares the module; its tests live in
   `crates/terminal/src/tests/snapshot.rs`, where the harness for building a
   terminal from bytes already is.
-- hybrid scrollback storage using a small ring buffer and chunked archive;
+- hybrid scrollback storage using a small ring buffer and chunked archive.
+  Sealing a uniform chunk keeps its spare rows (bounded, never copied by a
+  snapshot) as the next rows scrolled in, and dropping the oldest row of a full
+  history does not copy a row a uniform chunk shares: the grid resets every row
+  it scrolls in, so only the allocation is reused. Without that, repeated
+  output allocated, initialised, compared and freed a row per line;
 - scrollback allocator, large-history, and benchmark fixes;
 - Windows ConPTY fragmented-read coalescing and terminal-hangup handling;
 - shell integration, resize, and sequence handling needed by Zetta's PTY

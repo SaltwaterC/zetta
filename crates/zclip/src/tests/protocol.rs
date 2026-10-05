@@ -56,3 +56,36 @@ fn malformed_and_duplicate_fields_are_preserved() {
     let bytes = b"\x1b]777;zclip;1;00000000000000000000000000000000;probe;extra\x07";
     assert_eq!(scanner.filter(bytes, |_| panic!("malformed frame")), bytes);
 }
+
+#[test]
+fn filter_cow_borrows_output_without_an_osc_and_still_finds_a_split_frame() {
+    let frame = Frame {
+        id: [2; 16],
+        message: Message::Probe,
+    };
+    let mut scanner = Scanner::default();
+    let mut found = Vec::new();
+    assert!(matches!(
+        scanner.filter_cow(b"plain text\r\n", |_| panic!("no frame")),
+        Cow::Borrowed(_)
+    ));
+    assert!(matches!(
+        scanner.filter_cow(b"\x1b[1mbold\x1b[0m", |_| panic!("no frame")),
+        Cow::Borrowed(_)
+    ));
+
+    // The second read carries no ESC at all, so only the held partial frame sends it through
+    // the state machine.
+    let encoded = frame.encode();
+    let (escape, rest) = encoded.split_at(1);
+    let mut first = b"text".to_vec();
+    first.extend_from_slice(escape);
+    let mut output = scanner
+        .filter_cow(&first, |frame| found.push(frame))
+        .into_owned();
+    assert!(!rest.contains(&0x1b));
+    output.extend_from_slice(&scanner.filter_cow(rest, |frame| found.push(frame)));
+
+    assert_eq!(output, b"text");
+    assert_eq!(found, vec![frame]);
+}
