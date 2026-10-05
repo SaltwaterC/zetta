@@ -299,6 +299,12 @@ commands documented in the [configuration guide](docs/configuration.md).
 Changes are validated before being saved and request a best-effort live reload
 for a Zetta process using the same configuration file.
 
+Live reloads run serially. Requests received during preparation are combined
+into one follow-up; the running reload commits first so the window and daemon
+stay consistent. The command waits for the actual reload result, including
+slow preparation. If a window cannot apply it, that window keeps its previous
+configuration and reports the error.
+
 Register repository-local configuration with `zetta project add`, then place
 project settings in `.zetta/config.json`. `zetta project open`, `list`, and
 `remove` manage the separate project registry; removal preserves the repository
@@ -308,6 +314,18 @@ builds a project's configuration with typed controls, pane-template editor
 included, and leaves anything set to *Inherit* out of the file. See
 [Projects](docs/configuration.md#projects) for supported fields, WSL behavior,
 registered commands, and the template/command trust boundary.
+
+For WSL profiles, a shell-reported working directory takes precedence. Legacy
+tracking files are observed in the background; new tabs, splits and commands
+use the latest completed observation, falling back to the launch directory
+until the first observation arrives.
+
+Pasting into text overlays keeps subsequent typing in order while the clipboard
+owner responds. Closing or replacing the field discards a pending paste. On
+X11, replacing the selection owner during conversion cancels that paste.
+Closing a tab or window during a session handover lets the transfer finish
+asynchronously; the process stays alive until closing windows finish handing
+off their sessions.
 
 Project commands use the shell of the active profile and run in the existing
 active pane:
