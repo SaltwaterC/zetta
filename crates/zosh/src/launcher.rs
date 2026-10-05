@@ -848,9 +848,9 @@ fn run_ssh_bootstrap(
         BootstrapStdin::Terminal => Stdio::inherit(),
         BootstrapStdin::None => Stdio::null(),
     });
-    if let Some(relay) = relay.as_ref() {
-        ssh.env("SSH_AUTH_SOCK", relay.path());
-    }
+    // Preserve SSH_AUTH_SOCK: IdentityAgent may refer to it, and agent
+    // applications can use it while authorizing the login. ForwardAgent
+    // already selects the capture relay without changing authentication.
     if command.remote_ip == RemoteIpMode::Proxy {
         ssh.env("SHELL", "/bin/sh");
     }
@@ -944,11 +944,7 @@ fn finish_ssh_bootstrap(
                 status: status.code(),
             });
         }
-        return Err(anyhow::anyhow!(
-            "SSH bootstrap failed with {}{}",
-            status,
-            format_diagnostics(&combined)
-        ));
+        return Err(ssh_bootstrap_failure(command, status, &combined));
     }
     if combined.contains("MOSH CONNECT ") {
         let endpoint = parse_bootstrap_output(&combined)?;
@@ -961,6 +957,39 @@ fn finish_ssh_bootstrap(
     }
     forward_diagnostics(&combined);
     Err(anyhow::anyhow!("SSH bootstrap did not print MOSH CONNECT"))
+}
+
+/// Explain authentication failures without burying the remedy under repeated
+/// password attempts and address-discovery output.
+fn ssh_bootstrap_failure(command: &MoshCommand, status: ExitStatus, output: &str) -> anyhow::Error {
+    let Some(denial) = output
+        .lines()
+        .find(|line| line.contains("Permission denied ("))
+    else {
+        return anyhow::anyhow!(
+            "SSH bootstrap failed with {status}{}",
+            format_diagnostics(output)
+        );
+    };
+    let mut explanation = String::from("SSH authentication failed for the Zosh startup login. ");
+    if command.embedded && command.forward_agent {
+        explanation.push_str(
+            "Agent forwarding requires a separate SSH login, even when the session's existing \
+             SSH connection works. ",
+        );
+    }
+    explanation.push_str(
+        "Unlock your SSH agent (such as 1Password) and authorize the new login, then reconnect. ",
+    );
+    if output
+        .lines()
+        .any(|line| line.contains("ssh_askpass:") && line.contains("No such file or directory"))
+    {
+        explanation.push_str(
+            "SSH also could not prompt for a password because its local askpass helper is missing. ",
+        );
+    }
+    anyhow::anyhow!("{explanation}{}", denial.trim())
 }
 
 fn spawn_bootstrap_reader<R>(reader: R, sender: mpsc::Sender<String>) -> thread::JoinHandle<()>

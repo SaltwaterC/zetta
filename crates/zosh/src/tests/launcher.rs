@@ -505,6 +505,114 @@ fn identity_agent_config_preserves_paths_with_spaces() {
     assert_eq!(parse_identity_agent("identityagent none\n"), None);
 }
 
+/// Run the bootstrap with an agent selected through SSH_AUTH_SOCK. The fake
+/// SSH process checks both the login environment and the separate forwarding
+/// socket, without connecting to a host or authorizing a real agent request.
+#[cfg(unix)]
+#[test]
+fn forwarding_bootstrap_preserves_the_login_agent_environment() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    const CHILD: &str = "ZOSH_BOOTSTRAP_LOGIN_AGENT";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = std::env::temp_dir().join(format!("zosh-login-{}", std::process::id()));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("agent.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        let ssh = directory.join("mock-ssh");
+        std::fs::write(&ssh, include_str!("launcher_bootstrap_agent.sh")).unwrap();
+        std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "launcher::tests::forwarding_bootstrap_preserves_the_login_agent_environment",
+                "--nocapture",
+            ])
+            .env(CHILD, &path)
+            .env("SSH_AUTH_SOCK", &path)
+            .env("ZOSH_BOOTSTRAP_MOCK_SSH", &ssh)
+            .output()
+            .unwrap();
+        drop(listener);
+        std::fs::remove_dir_all(directory).unwrap();
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+        return;
+    }
+    let command = MoshCommand {
+        embedded: true,
+        forward_agent: true,
+        remote_ip: RemoteIpMode::Remote,
+        ssh: vec![std::env::var("ZOSH_BOOTSTRAP_MOCK_SSH").unwrap()],
+        ..MoshCommand::default()
+    };
+    let result = run_ssh_bootstrap(&command, "pi", EMBEDDED_COLOR_COUNT, BootstrapStdin::None)
+        .expect("the forwarding relay must not replace the login agent environment");
+    let BootstrapResult::Endpoint(endpoint) = result else {
+        panic!("the mock SSH bootstrap must return an endpoint");
+    };
+    assert_eq!(
+        endpoint.agent_path,
+        Some(PathBuf::from(std::env::var_os(CHILD).unwrap()))
+    );
+}
+
+#[test]
+fn authentication_failure_explains_the_separate_login_and_missing_password_prompt() {
+    let status = Command::new(std::env::current_exe().unwrap())
+        .arg("--invalid-zosh-test-option")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .unwrap();
+    assert!(!status.success());
+    let command = MoshCommand {
+        embedded: true,
+        forward_agent: true,
+        ..MoshCommand::default()
+    };
+    let output = "MOSH IP 192.168.0.50\n\
+        ssh_askpass: exec(/usr/bin/ssh-askpass): No such file or directory\n\
+        Permission denied, please try again.\n\
+        ssh_askpass: exec(/usr/bin/ssh-askpass): No such file or directory\n\
+        user@192.168.0.50: Permission denied (publickey,password).\n";
+    let error = ssh_bootstrap_failure(&command, status, output).to_string();
+    assert!(error.contains("separate SSH login"), "{error}");
+    assert!(error.contains("1Password"), "{error}");
+    assert!(error.contains("authorize the new login"), "{error}");
+    assert!(error.contains("local askpass helper is missing"), "{error}");
+    assert!(
+        error.contains("user@192.168.0.50: Permission denied"),
+        "{error}"
+    );
+    assert!(!error.contains("MOSH IP"), "{error}");
+    assert!(!error.contains("please try again"), "{error}");
+
+    let no_forwarding = ssh_bootstrap_failure(&MoshCommand::default(), status, output).to_string();
+    assert!(
+        !no_forwarding.contains("separate SSH login"),
+        "{no_forwarding}"
+    );
+    let key_only =
+        ssh_bootstrap_failure(&command, status, "user@pi: Permission denied (publickey).")
+            .to_string();
+    assert!(!key_only.contains("askpass"), "{key_only}");
+    let other_failure = ssh_bootstrap_failure(&command, status, "Connection refused").to_string();
+    assert!(
+        other_failure.contains("Connection refused"),
+        "{other_failure}"
+    );
+    assert!(
+        !other_failure.contains("authentication failed"),
+        "{other_failure}"
+    );
+}
+
 #[test]
 fn the_bundled_server_gets_forwarding_only_when_requested() {
     let command = MoshCommand {

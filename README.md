@@ -98,10 +98,15 @@ Zetta falls back to the SSH byte stream when a pane's Mosh link cannot be
 brought up, and marks that pane with an **SSH** chip whose tooltip says why. Native background sessions on this machine are local and
 need no transport at all.
 
-Each remote host costs one SSH login, however many panes and requests follow.
+Without Zosh agent forwarding, each remote host costs one SSH login, however
+many panes and requests follow.
 On Linux and macOS, Zetta keeps a private OpenSSH control connection to the
 host and runs everything else — the endpoint query, the socket forward, Zosh
-pane startup — as sessions on it. Windows OpenSSH can neither share a
+pane startup — as sessions on it. Zosh agent forwarding requires a separate
+SSH login per pane to capture its forwarding credentials; an agent such as
+1Password may need to authorize that login even when the existing connection
+works. A failed login leaves the pane on SSH and explains the authentication
+failure. Windows OpenSSH can neither share a
 connection nor forward a local Unix socket, so there Zetta runs one remote
 `zmux proxy-mux` through the system SSH client and carries every connection
 over it; install a `zmux` build with that command on the remote host before
