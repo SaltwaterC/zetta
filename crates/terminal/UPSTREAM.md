@@ -18,7 +18,8 @@ Retain these Zetta-specific behaviors when synchronizing:
   refresh throttling. Queue only the live terminal handle on the foreground;
   capture search snapshots on the low-priority worker under a short grid lock,
   release it before scanning, and yield after capture and between scan chunks
-  so obsolete jobs can be cancelled;
+  so obsolete jobs can be cancelled. Release the snapshot's decoded compact
+  history between scan chunks, so a search never holds all of it decoded;
 - capture and terminate both the shell and foreground process groups during
   PTY teardown, including application shutdown. Upstream reverted its own
   version of this in `492acd6c81`; do not import that revert. The regression it
@@ -38,7 +39,9 @@ Retain these Zetta-specific behaviors when synchronizing:
   from the UI thread.
 - export scrollback from a terminal cloned on the background worker under a
   short live-grid lock. Keep sealed history shared and traverse the snapshot
-  only after releasing the lock used by rendering and PTY parsing;
+  only after releasing the lock used by rendering and PTY parsing, through
+  `bounds_to_string_releasing_history` so compact history is decoded a step at
+  a time;
 - parse restored replay and normalize fresh-shell screens on a private grid
   after layout supplies geometry (`replay.rs`, no upstream counterpart).
   Apply subsequent resize requests and injected output on the worker before

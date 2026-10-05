@@ -10,6 +10,7 @@ use crate::index::{Column, Line, Point};
 use crate::term::cell::{Flags, ResetDiscriminant};
 use crate::vte::ansi::{CharsetIndex, StandardCharset};
 
+mod archive;
 pub mod resize;
 mod row;
 mod storage;
@@ -43,6 +44,23 @@ pub trait GridCell: Sized + Clone {
 
     fn flags(&self) -> &Flags;
     fn flags_mut(&mut self) -> &mut Flags;
+
+    /// The character this cell holds, if sealed history may store it compactly: as this
+    /// character plus a cell that [`Self::same_archive_attributes`] says carries everything
+    /// else. `None` keeps history of this cell type as rows.
+    fn archive_char(&self) -> Option<char> {
+        None
+    }
+
+    /// Whether `self` and `other` differ in nothing but [`Self::archive_char`].
+    fn same_archive_attributes(&self, _other: &Self) -> bool {
+        false
+    }
+
+    /// This cell with its character replaced by `c`.
+    fn with_archive_char(&self, _c: char) -> Self {
+        unreachable!("a cell without an archive character is never decoded")
+    }
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -446,6 +464,16 @@ impl<T: Clone> Grid<T> {
     #[inline]
     pub fn row_storage_id(&self, line: Line) -> usize {
         self.raw.row_storage_id(line)
+    }
+
+    /// Release the history rows decoded for reading so far.
+    ///
+    /// Compact history is decoded a chunk at a time as it is read, and the decoded rows are only
+    /// released when the grid is next changed. A reader walking all of history in steps, such
+    /// as a search over a snapshot, releases them between steps to keep at most one step's worth.
+    #[inline]
+    pub fn release_history_cache(&mut self) {
+        self.raw.release_decoded();
     }
 
     /// Iterate over all visible cells.

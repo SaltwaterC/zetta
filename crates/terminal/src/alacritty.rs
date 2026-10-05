@@ -1086,6 +1086,13 @@ pub(super) fn content_text(term: &Term<ZedListener>) -> String {
     term.bounds_to_string(start, end)
 }
 
+/// [`content_text`] of a snapshot, releasing compact history as it is decoded.
+pub(super) fn snapshot_content_text(term: &mut Term<ZedListener>) -> String {
+    let start = AlacPoint::new(term.topmost_line(), Column(0));
+    let end = AlacPoint::new(term.bottommost_line(), term.last_column());
+    term.bounds_to_string_releasing_history(start, end)
+}
+
 pub(super) fn total_lines(term: &Term<ZedListener>) -> usize {
     term.total_lines()
 }

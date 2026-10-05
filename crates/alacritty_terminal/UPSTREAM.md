@@ -20,6 +20,23 @@ Retain these Zetta changes when synchronizing:
   history does not copy a row a uniform chunk shares: the grid resets every row
   it scrolls in, so only the allocation is reused. Without that, repeated
   output allocated, initialised, compared and freed a row per line;
+- compact sealed history: `src/grid/archive.rs`, a Zetta-authored module (tests
+  in `src/tests/grid/archive.rs`), encodes every sealed chunk that is not one
+  row repeated as attribute runs plus UTF-8 text, about 90 bytes for an
+  80-column line instead of 24 bytes a cell, and hands the chunk's rows back as
+  the next rows scrolled in. Unlimited scrollback had grown about 3 GB per
+  100 MiB of distinct output, and faulting that memory in dominated throughput.
+  It touches upstream code in three places: `GridCell` gains three provided
+  methods (`archive_char`, `same_archive_attributes`, `with_archive_char`;
+  the default keeps a cell type's history as rows) which `Cell` implements;
+  compact rows are decoded a chunk at a time into a cache that only a mutable
+  borrow releases, so `&Row`/`&Cell` borrowed from the grid stay valid; and
+  `Grid::release_history_cache`, `Term::release_history_cache` and
+  `Term::bounds_to_string_releasing_history` let a reader walking all of
+  history on a snapshot keep one step of it decoded. `row_storage_id` of a
+  compact row is an address inside its chunk's encoded bytes, never the
+  decoded row's, so it stays stable when the cache is released. Serde writes
+  compact chunks out as rows;
 - scrollback allocator, large-history, and benchmark fixes;
 - Windows ConPTY fragmented-read coalescing and terminal-hangup handling;
 - shell integration, resize, and sequence handling needed by Zetta's PTY

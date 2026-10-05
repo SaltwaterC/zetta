@@ -252,6 +252,30 @@ impl GridCell for Cell {
     fn reset(&mut self, template: &Self) {
         *self = Cell { bg: template.bg, ..Cell::default() };
     }
+
+    #[inline]
+    fn archive_char(&self) -> Option<char> {
+        Some(self.c)
+    }
+
+    /// Shared `extra` storage counts as the same only when it is the same allocation, which is
+    /// how the cells written under one cursor template share it.
+    #[inline]
+    fn same_archive_attributes(&self, other: &Self) -> bool {
+        self.fg == other.fg
+            && self.bg == other.bg
+            && self.flags == other.flags
+            && match (&self.extra, &other.extra) {
+                (None, None) => true,
+                (Some(extra), Some(other)) => Arc::ptr_eq(extra, other),
+                _ => false,
+            }
+    }
+
+    #[inline]
+    fn with_archive_char(&self, c: char) -> Self {
+        Cell { c, ..self.clone() }
+    }
 }
 
 impl From<Color> for Cell {

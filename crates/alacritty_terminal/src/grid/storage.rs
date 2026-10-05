@@ -5,7 +5,8 @@ use std::sync::Arc;
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
-use super::Row;
+use super::archive::{CompactRows, DecodedChunks};
+use super::{GridCell, Row};
 use crate::index::Line;
 
 /// Recent history retained with the visible grid in directly mutable storage.
@@ -23,11 +24,38 @@ const RECYCLED_ROWS_LIMIT: usize = ARCHIVE_CHUNK_ROWS;
 ///
 /// Uniform chunks preserve the memory benefit of the previous per-row deduplication without
 /// comparing rows or touching reference counts for every character written to the live grid.
+/// Any other chunk is compact when its cells allow it, and only rows when they do not; see
+/// [`super::archive`].
 #[derive(Clone, Debug)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serde", derive(Deserialize))]
 enum ArchivedRows<T> {
-    Uniform { row: Arc<Row<T>>, len: usize },
+    Uniform {
+        row: Arc<Row<T>>,
+        len: usize,
+    },
     Dense(Vec<Row<T>>),
+    /// Serialized as `Dense`, which keeps the format free of the encoding; last, so that the
+    /// other variants keep their indices.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    Compact(CompactRows<T>),
+}
+
+#[cfg(feature = "serde")]
+impl<T: Serialize> Serialize for ArchivedRows<T> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        #[derive(Serialize)]
+        #[serde(rename = "ArchivedRows")]
+        enum Rows<'a, T> {
+            Uniform { row: &'a Arc<Row<T>>, len: usize },
+            Dense(&'a [Row<T>]),
+        }
+
+        match self {
+            Self::Uniform { row, len } => Rows::Uniform { row, len: *len }.serialize(serializer),
+            Self::Dense(rows) => Rows::Dense(rows).serialize(serializer),
+            Self::Compact(rows) => Rows::Dense(&rows.rows()).serialize(serializer),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -40,38 +68,37 @@ impl<T> ArchivedChunk<T> {
     fn uniform_row(&self) -> Option<&Arc<Row<T>>> {
         match &self.rows {
             ArchivedRows::Uniform { row, .. } => Some(row),
-            ArchivedRows::Dense(_) => None,
+            ArchivedRows::Compact(_) | ArchivedRows::Dense(_) => None,
         }
+    }
+
+    /// Whether every row is its own allocation, so that removing one yields a reusable row.
+    fn owns_rows(&self) -> bool {
+        matches!(self.rows, ArchivedRows::Dense(_))
     }
 
     fn len(&self) -> usize {
         match &self.rows {
             ArchivedRows::Uniform { len, .. } => *len,
+            ArchivedRows::Compact(rows) => rows.len(),
             ArchivedRows::Dense(rows) => rows.len(),
-        }
-    }
-
-    fn row(&self, index: usize) -> &Row<T> {
-        match &self.rows {
-            ArchivedRows::Uniform { row, len } => {
-                debug_assert!(index < *len);
-                row
-            },
-            ArchivedRows::Dense(rows) => &rows[index],
         }
     }
 }
 
 impl<T: Clone> ArchivedChunk<T> {
     fn row_mut(&mut self, index: usize) -> &mut Row<T> {
-        if let ArchivedRows::Uniform { row, len } = &self.rows {
-            let rows = vec![(**row).clone(); *len];
-            self.rows = ArchivedRows::Dense(rows);
+        match &self.rows {
+            ArchivedRows::Uniform { row, len } => {
+                self.rows = ArchivedRows::Dense(vec![(**row).clone(); *len]);
+            },
+            ArchivedRows::Compact(rows) => self.rows = ArchivedRows::Dense(rows.rows()),
+            ArchivedRows::Dense(_) => (),
         }
 
         match &mut self.rows {
             ArchivedRows::Dense(rows) => &mut rows[index],
-            ArchivedRows::Uniform { .. } => unreachable!(),
+            ArchivedRows::Uniform { .. } | ArchivedRows::Compact(_) => unreachable!(),
         }
     }
 
@@ -79,6 +106,7 @@ impl<T: Clone> ArchivedChunk<T> {
         debug_assert!(count <= self.len());
         match &mut self.rows {
             ArchivedRows::Uniform { len, .. } => *len -= count,
+            ArchivedRows::Compact(rows) => rows.truncate_oldest(count),
             ArchivedRows::Dense(rows) => rows.truncate(rows.len() - count),
         }
     }
@@ -89,16 +117,28 @@ impl<T: Clone> ArchivedChunk<T> {
                 *len -= 1;
                 (**row).clone()
             },
+            ArchivedRows::Compact(rows) => {
+                let row = rows.row(rows.len() - 1);
+                rows.truncate_oldest(1);
+                row
+            },
             ArchivedRows::Dense(rows) => rows.pop().unwrap(),
         }
     }
 
+    /// Resize every row with `map`, which resizes to `columns`. Compact rows apply the resize
+    /// as they are decoded instead.
     fn map_rows(
         &mut self,
+        columns: usize,
         map: &mut impl FnMut(&mut Row<T>),
         previous_uniform: &mut Option<(usize, Arc<Row<T>>)>,
     ) {
         match &mut self.rows {
+            ArchivedRows::Compact(rows) => {
+                *previous_uniform = None;
+                rows.resize_columns(columns);
+            },
             ArchivedRows::Uniform { row, .. } => {
                 let source = Arc::as_ptr(row) as usize;
                 if let Some((previous_source, replacement)) = previous_uniform
@@ -126,13 +166,14 @@ impl<T: Clone> ArchivedChunk<T> {
     fn into_rows(self) -> Vec<Row<T>> {
         match self.rows {
             ArchivedRows::Uniform { row, len } => vec![(*row).clone(); len],
+            ArchivedRows::Compact(rows) => rows.rows(),
             ArchivedRows::Dense(rows) => rows,
         }
     }
 }
 
-impl<T: Clone + PartialEq> ArchivedChunk<T> {
-    /// Seal `rows`, handing the rows a uniform chunk no longer needs to `recycled`.
+impl<T: GridCell + Default + PartialEq> ArchivedChunk<T> {
+    /// Seal `rows`, handing the rows a uniform or compact chunk no longer needs to `recycled`.
     fn seal(
         rows: Vec<Row<T>>,
         adjacent_uniform_row: Option<&Arc<Row<T>>>,
@@ -153,6 +194,9 @@ impl<T: Clone + PartialEq> ArchivedChunk<T> {
                 None => Arc::new(row),
             };
             ArchivedRows::Uniform { row, len }
+        } else if let Some(compact) = CompactRows::encode(&rows) {
+            recycled.extend(rows.into_iter());
+            ArchivedRows::Compact(compact)
         } else {
             ArchivedRows::Dense(rows)
         };
@@ -160,12 +204,12 @@ impl<T: Clone + PartialEq> ArchivedChunk<T> {
     }
 }
 
-/// Rows a sealed uniform chunk no longer needs, kept as the next lines scrolled into the grid.
+/// Rows a sealed uniform or compact chunk no longer needs, kept as the next lines scrolled into
+/// the grid.
 ///
-/// Repeated output seals a uniform chunk every `ARCHIVE_CHUNK_ROWS` lines. Without reuse, every
-/// scrolled line allocated and initialized a row only for sealing to compare it and free it. The
-/// grid resets a row as it scrolls in, so these are spare allocations rather than content:
-/// snapshots do not copy them.
+/// Output seals a chunk every `ARCHIVE_CHUNK_ROWS` lines. Without reuse, every scrolled line
+/// allocated and initialized a row only for sealing to free it. The grid resets a row as it
+/// scrolls in, so these are spare allocations rather than content: snapshots do not copy them.
 #[derive(Debug)]
 struct RecycledRows<T>(Vec<Row<T>>);
 
@@ -227,6 +271,8 @@ pub struct Storage<T> {
     visible_lines: usize,
     #[cfg_attr(feature = "serde", serde(skip))]
     recycled: RecycledRows<T>,
+    #[cfg_attr(feature = "serde", serde(skip))]
+    decoded: DecodedChunks<ArchivedChunk<T>, T>,
 }
 
 impl<T: PartialEq> PartialEq for Storage<T> {
@@ -269,17 +315,42 @@ impl<T> Storage<T> {
         index -= self.archive_head.len();
 
         if index < self.archived_lines {
-            let chunk_index = index / ARCHIVE_CHUNK_ROWS;
+            let chunk = &self.archive_chunks[index / ARCHIVE_CHUNK_ROWS];
             let row_index = index % ARCHIVE_CHUNK_ROWS;
-            return self.archive_chunks[chunk_index].row(row_index);
+            return match &chunk.rows {
+                ArchivedRows::Uniform { row, len } => {
+                    debug_assert!(row_index < *len);
+                    row
+                },
+                ArchivedRows::Compact(rows) => self.decoded.row(chunk, row_index, || rows.rows()),
+                ArchivedRows::Dense(rows) => &rows[row_index],
+            };
         }
         index -= self.archived_lines;
 
         &self.pending[index]
     }
 
+    /// A value equal for two lines exactly when they share storage, stable while the row is.
     pub(crate) fn row_storage_id(&self, requested: Line) -> usize {
-        self.row_at(self.compute_index(requested)) as *const Row<T> as usize
+        let index = self.compute_index(requested);
+        // A decoded compact row lives only until the decoded chunk is released, which would
+        // let its address be reused for another row.
+        if let Some(archived) = index
+            .checked_sub(self.live.len() + self.archive_head.len())
+            .filter(|&archived| archived < self.archived_lines)
+            && let ArchivedRows::Compact(rows) =
+                &self.archive_chunks[archived / ARCHIVE_CHUNK_ROWS].rows
+        {
+            return rows.row_id(archived % ARCHIVE_CHUNK_ROWS);
+        }
+        self.row_at(index) as *const Row<T> as usize
+    }
+
+    /// Release decoded compact chunks. Reading them again decodes them again.
+    #[inline]
+    pub(crate) fn release_decoded(&mut self) {
+        self.decoded.clear();
     }
 }
 
@@ -298,6 +369,7 @@ impl<T: Clone> Storage<T> {
             pending: VecDeque::new(),
             visible_lines,
             recycled: RecycledRows::default(),
+            decoded: DecodedChunks::default(),
         }
     }
 
@@ -313,6 +385,7 @@ impl<T: Clone> Storage<T> {
 
     #[inline(never)]
     fn history_row_at_mut(&mut self, mut index: usize) -> &mut Row<T> {
+        self.release_decoded();
         if index < self.archive_head.len() {
             return &mut self.archive_head[index];
         }
@@ -350,6 +423,7 @@ impl<T: Clone> Storage<T> {
 
     /// Remove the oldest lines from the buffer.
     pub fn shrink_lines(&mut self, mut shrinkage: usize) {
+        self.release_decoded();
         let pending = shrinkage.min(self.pending.len());
         self.pending.truncate(self.pending.len() - pending);
         shrinkage -= pending;
@@ -378,6 +452,7 @@ impl<T: Clone> Storage<T> {
     /// Detach all history rows without destroying their cell allocations.
     #[inline]
     pub fn take_history(&mut self) -> Self {
+        self.release_decoded();
         let history_live = self.live.split_off(self.visible_lines);
         Self {
             live: history_live,
@@ -387,14 +462,16 @@ impl<T: Clone> Storage<T> {
             pending: std::mem::take(&mut self.pending),
             visible_lines: 0,
             recycled: RecycledRows::default(),
+            decoded: DecodedChunks::default(),
         }
     }
 
     /// Resize every retained row, cloning only archive chunks held by an active snapshot.
     pub(crate) fn resize_columns_without_reflow(&mut self, columns: usize)
     where
-        T: Default + crate::grid::GridCell,
+        T: Default + GridCell,
     {
+        self.release_decoded();
         let mut resize = |row: &mut Row<T>| {
             if row.len() < columns {
                 row.grow(columns);
@@ -411,7 +488,7 @@ impl<T: Clone> Storage<T> {
         }
         let mut previous_uniform = None;
         for chunk in &mut self.archive_chunks {
-            Arc::make_mut(chunk).map_rows(&mut resize, &mut previous_uniform);
+            Arc::make_mut(chunk).map_rows(columns, &mut resize, &mut previous_uniform);
         }
         for row in &mut self.pending {
             resize(row);
@@ -421,6 +498,7 @@ impl<T: Clone> Storage<T> {
 
     /// Destroy at most one bounded allocation group.
     pub fn reclaim_next_chunk(&mut self) -> bool {
+        self.release_decoded();
         if !self.pending.is_empty() {
             let keep = self.pending.len().saturating_sub(ARCHIVE_CHUNK_ROWS);
             self.pending.truncate(keep);
@@ -450,6 +528,7 @@ impl<T: Clone> Storage<T> {
         self.archive_head.shrink_to_fit();
         self.pending.shrink_to_fit();
         self.recycled.clear();
+        self.release_decoded();
     }
 
     /// Append rows at the oldest end. Normal terminal scrolling uses [`Self::scroll_up`].
@@ -481,9 +560,10 @@ impl<T: Clone> Storage<T> {
     /// Fast path for moving complete viewport rows into history.
     pub fn scroll_up(&mut self, positions: usize, growth: usize, columns: usize)
     where
-        T: Default + PartialEq,
+        T: GridCell + Default + PartialEq,
     {
         debug_assert!(growth <= positions);
+        self.release_decoded();
         // The grid resets every row scrolled in, so only the allocation is reused here.
         for index in 0..positions {
             let row = if index < growth {
@@ -500,8 +580,9 @@ impl<T: Clone> Storage<T> {
     /// Rotate the complete logical buffer. This is not used by the normal output scroll path.
     pub fn rotate(&mut self, count: isize)
     where
-        T: PartialEq,
+        T: GridCell + Default + PartialEq,
     {
+        self.release_decoded();
         debug_assert!(count.unsigned_abs() <= self.len());
         if count > 0 {
             self.rotate_down(count as usize);
@@ -519,6 +600,7 @@ impl<T: Clone> Storage<T> {
     where
         T: PartialEq,
     {
+        self.release_decoded();
         debug_assert!(count <= self.len());
         for _ in 0..count {
             let row = self.live.pop_front().unwrap();
@@ -534,8 +616,9 @@ impl<T: Clone> Storage<T> {
     /// Replace all raw rows.
     pub fn replace_inner(&mut self, rows: Vec<Row<T>>)
     where
-        T: PartialEq,
+        T: GridCell + Default + PartialEq,
     {
+        self.release_decoded();
         self.live.clear();
         self.archive_head.clear();
         self.archive_chunks.clear();
@@ -551,6 +634,7 @@ impl<T: Clone> Storage<T> {
 
     /// Remove and return all rows in bottom-to-top order.
     pub fn take_all(&mut self) -> Vec<Row<T>> {
+        self.release_decoded();
         let mut rows = Vec::with_capacity(self.len());
         rows.extend(std::mem::take(&mut self.live));
         rows.extend(std::mem::take(&mut self.archive_head));
@@ -580,12 +664,13 @@ impl<T: Clone> Storage<T> {
         self.archive_head.pop_back().or_else(|| self.live.pop_back())
     }
 
-    /// Remove the oldest row for its allocation alone. Unlike [`Self::pop_oldest`], a row shared
-    /// by a uniform chunk is not copied to be thrown away.
+    /// Remove the oldest row for its allocation alone. Unlike [`Self::pop_oldest`], a row a
+    /// uniform or compact chunk does not hold as its own allocation is not built to be thrown
+    /// away.
     fn pop_oldest_allocation(&mut self, columns: usize) -> Option<Row<T>> {
         if self.pending.is_empty()
             && let Some(chunk) = self.archive_chunks.back_mut()
-            && chunk.uniform_row().is_some()
+            && !chunk.owns_rows()
         {
             Arc::make_mut(chunk).truncate_oldest(1);
             self.archived_lines -= 1;
@@ -618,7 +703,7 @@ impl<T: Clone> Storage<T> {
 
     fn archive_live_excess(&mut self)
     where
-        T: PartialEq,
+        T: GridCell + Default + PartialEq,
     {
         let live_limit = self.visible_lines.saturating_add(LIVE_HISTORY_ROWS);
         while self.live.len() > live_limit {
@@ -637,7 +722,7 @@ impl<T: Clone> Storage<T> {
 
     fn rebuild_archive(&mut self, rows: Vec<Row<T>>)
     where
-        T: PartialEq,
+        T: GridCell + Default + PartialEq,
     {
         if rows.is_empty() {
             return;
@@ -699,6 +784,18 @@ mod tests {
 
         fn flags_mut(&mut self) -> &mut Flags {
             unimplemented!();
+        }
+
+        fn archive_char(&self) -> Option<char> {
+            Some(*self)
+        }
+
+        fn same_archive_attributes(&self, _other: &Self) -> bool {
+            true
+        }
+
+        fn with_archive_char(&self, c: char) -> Self {
+            c
         }
     }
 
@@ -767,8 +864,9 @@ mod tests {
             storage.scroll_up(1, 1, 1);
         }
 
+        // The newest visible row is a reused allocation, which the grid resets and storage does
+        // not.
         assert_eq!(storage.len(), 3 + LIVE_HISTORY_ROWS + ARCHIVE_CHUNK_ROWS + 4);
-        assert_eq!(storage[Line(2)][Column(0)], '\0');
         assert_eq!(storage[Line(-1)][Column(0)], 'j');
         assert_eq!(
             storage[Line(-((LIVE_HISTORY_ROWS + ARCHIVE_CHUNK_ROWS) as i32))][Column(0)],
@@ -887,17 +985,141 @@ mod tests {
         assert_eq!(storage[archived_line][Column(0)], 'x');
     }
 
+    /// Scroll `lines` distinct rows into history, `columns` wide.
+    fn distinct_history(lines: usize, columns: usize) -> Storage<char> {
+        let mut storage = Storage::<char>::with_capacity(1, columns);
+        for index in 0..lines {
+            for column in 0..columns {
+                storage[Line(0)][Column(column)] = letter(index + column);
+            }
+            storage.scroll_up(1, 1, columns);
+        }
+        storage
+    }
+
+    fn letter(index: usize) -> char {
+        char::from_u32((index % 26) as u32 + u32::from(b'a')).unwrap()
+    }
+
+    /// The row scrolled off `back` lines ago in [`distinct_history`] of `lines` rows.
+    fn distinct_row(lines: usize, back: usize, columns: usize) -> String {
+        (0..columns).map(|column| letter(lines - back + column)).collect()
+    }
+
+    fn text(row: &Row<char>) -> String {
+        row[..].iter().collect()
+    }
+
     #[test]
-    fn dense_chunks_keep_every_row_and_recycle_none() {
-        let mut storage = Storage::<char>::with_capacity(1, 1);
+    fn distinct_rows_seal_compactly_and_hand_their_rows_on() {
+        let lines = LIVE_HISTORY_ROWS + ARCHIVE_CHUNK_ROWS;
+        let storage = distinct_history(lines, 3);
+
+        assert!(matches!(storage.archive_chunks[0].rows, ArchivedRows::Compact(_)));
+        assert_eq!(storage.recycled.0.len(), ARCHIVE_CHUNK_ROWS);
+        for back in [1, LIVE_HISTORY_ROWS, LIVE_HISTORY_ROWS + 1, lines] {
+            let line = Line(-(back as i32));
+            assert_eq!(text(&storage[line]), distinct_row(lines, back, 3), "{line:?}");
+        }
+    }
+
+    #[test]
+    fn cells_without_an_archive_character_stay_rows() {
+        let mut storage = Storage::<usize>::with_capacity(1, 1);
         for index in 0..(LIVE_HISTORY_ROWS + ARCHIVE_CHUNK_ROWS) {
-            storage[Line(0)][Column(0)] =
-                char::from_u32((index % 26) as u32 + u32::from(b'a')).unwrap();
+            storage[Line(0)][Column(0)] = index + 1;
             storage.scroll_up(1, 1, 1);
         }
 
         assert!(matches!(storage.archive_chunks[0].rows, ArchivedRows::Dense(_)));
         assert!(storage.recycled.0.is_empty());
+    }
+
+    #[test]
+    fn compact_rows_decode_once_until_storage_is_changed() {
+        let lines = LIVE_HISTORY_ROWS + 2 * ARCHIVE_CHUNK_ROWS;
+        let mut storage = distinct_history(lines, 2);
+        let oldest = Line(-(lines as i32));
+        let newest_archived = Line(-(LIVE_HISTORY_ROWS as i32 + 1));
+
+        let first = &storage[oldest] as *const Row<char>;
+        assert_eq!(&storage[oldest] as *const Row<char>, first);
+        let _ = &storage[newest_archived];
+        assert_eq!(storage.decoded.len(), 2);
+
+        // Ids name rows, not where a decoded row happens to live.
+        for line in [Line(0), Line(-1), Line(-(LIVE_HISTORY_ROWS as i32))] {
+            let address = &storage[line] as *const Row<char> as usize;
+            assert_eq!(storage.row_storage_id(line), address, "{line:?}");
+        }
+        let id = storage.row_storage_id(oldest);
+        assert_ne!(id, storage.row_storage_id(Line(oldest.0 + 1)));
+        storage.release_decoded();
+        assert_eq!(storage.decoded.len(), 0);
+        assert_eq!(storage.row_storage_id(oldest), id);
+        assert_eq!(text(&storage[oldest]), distinct_row(lines, lines, 2));
+
+        storage.scroll_up(1, 1, 2);
+        assert_eq!(storage.decoded.len(), 0);
+    }
+
+    #[test]
+    fn snapshots_decode_compact_rows_for_themselves() {
+        let lines = LIVE_HISTORY_ROWS + ARCHIVE_CHUNK_ROWS;
+        let storage = distinct_history(lines, 2);
+        let snapshot = storage.clone();
+        let oldest = Line(-(lines as i32));
+
+        assert_eq!(text(&snapshot[oldest]), distinct_row(lines, lines, 2));
+        assert_eq!(snapshot.decoded.len(), 1);
+        assert_eq!(storage.decoded.len(), 0);
+        assert!(snapshot == storage);
+    }
+
+    #[test]
+    fn compact_rows_round_trip_through_every_way_out_of_the_archive() {
+        let lines = LIVE_HISTORY_ROWS + 2 * ARCHIVE_CHUNK_ROWS;
+        let storage = distinct_history(lines, 3);
+        let expected = (1..=lines).map(|back| distinct_row(lines, back, 3)).collect::<Vec<_>>();
+        let history = |rows: Vec<Row<char>>| rows[1..].iter().map(text).collect::<Vec<_>>();
+
+        assert_eq!(history(storage.clone().take_all()), expected);
+
+        // Making an archived row mutable expands its chunk.
+        let mut mutable = storage.clone();
+        let oldest = Line(-(lines as i32));
+        mutable[oldest][Column(0)] = '!';
+        assert!(mutable.archive_chunks.iter().any(|chunk| chunk.owns_rows()));
+        assert_eq!(text(&mutable[oldest]), format!("!{}", &expected[lines - 1][1..]));
+
+        // Pulling archived rows back into the live region, as shrinking the window does.
+        let mut rotated = storage.clone();
+        rotated.rotate_down(LIVE_HISTORY_ROWS + 1);
+        assert_eq!(rotated.len(), storage.len());
+
+        // Dropping the oldest rows of a full history.
+        let mut full = storage.clone();
+        full.scroll_up(1, 0, 3);
+        assert_eq!(full.len(), storage.len());
+        assert_eq!(text(&full[oldest]), expected[lines - 2]);
+    }
+
+    #[test]
+    fn compact_rows_resize_like_rows_without_being_decoded() {
+        let lines = LIVE_HISTORY_ROWS + ARCHIVE_CHUNK_ROWS;
+        let mut storage = distinct_history(lines, 4);
+        let oldest = Line(-(lines as i32));
+        let original = distinct_row(lines, lines, 4);
+
+        storage.resize_columns_without_reflow(6);
+        assert_eq!(storage.decoded.len(), 0);
+        assert_eq!(text(&storage[oldest]), format!("{original}\0\0"));
+
+        // Shrinking drops cells, which growing again does not bring back.
+        storage.resize_columns_without_reflow(2);
+        assert_eq!(text(&storage[oldest]), original[..2]);
+        storage.resize_columns_without_reflow(5);
+        assert_eq!(text(&storage[oldest]), format!("{}\0\0\0", &original[..2]));
     }
 
     #[test]

@@ -93,8 +93,8 @@ use crate::alacritty::{
     display_only_term_config, find_from_terminal_point, full_content_range, last_non_empty_lines,
     make_content, new_term, open_pty, pty_options, pty_term_config, resize, screen_lines,
     scroll_display, scroll_to_point, set_default_cursor_style, set_selection as set_term_selection,
-    shrink_to_used, spawn_event_loop, toggle_vi_mode as toggle_term_vi_mode, total_lines,
-    update_selection as update_term_selection, update_selection_to_vi_cursor,
+    shrink_to_used, snapshot_content_text, spawn_event_loop, toggle_vi_mode as toggle_term_vi_mode,
+    total_lines, update_selection as update_term_selection, update_selection_to_vi_cursor,
     update_vi_cursor_for_scroll, vi_goto_point, vi_motion,
 };
 use crate::mappings::colors::to_vte_rgb;
@@ -5187,12 +5187,12 @@ impl Terminal {
             // Only the mutable prefix is copied; sealed history chunks stay shared.
             // End the guard's lifetime here so PTY parsing and rendering can proceed
             // throughout the history-sized traversal and allocation below.
-            let snapshot = term.lock_unfair().clone();
+            let mut snapshot = term.lock_unfair().clone();
             #[cfg(test)]
             if let Some(gate) = gate {
                 gate.after_capture(&term, &snapshot).await;
             }
-            content_text(&snapshot)
+            snapshot_content_text(&mut snapshot)
         })
     }
 
@@ -5738,7 +5738,7 @@ impl Terminal {
         executor.spawn_with_priority(Priority::Low, async move {
             // Copy the bounded mutable prefix and share sealed history on the worker. Release
             // the live PTY/render lock before yielding or traversing the captured contents.
-            let snapshot = term.lock().clone();
+            let mut snapshot = term.lock().clone();
             #[cfg(test)]
             if let Some(gate) = gate {
                 gate.after_capture(&term, &snapshot).await;
@@ -5751,6 +5751,9 @@ impl Terminal {
                 if finished {
                     return search.finish();
                 }
+                // Compact history decodes as it is read; keep one chunk of lines decoded rather
+                // than all of history by the end of the search.
+                snapshot.release_history_cache();
                 // Dropping the owning GPUI task (for example when the query or tab closes)
                 // cancels between chunks. The search runs at low priority against an immutable
                 // snapshot, so no live terminal lock needs an artificial scheduling delay.

@@ -633,13 +633,35 @@ impl<T> Term<T> {
         let mut res = String::new();
 
         for line in (start.line.0..=end.line.0).map(Line::from) {
-            let start_col = if line == start.line { start.column } else { Column(0) };
-            let end_col = if line == end.line { end.column } else { self.last_column() };
-
-            res += &self.line_to_string(line, start_col..end_col, line == end.line);
+            res += &self.bounded_line_to_string(line, start, end);
         }
 
         res.strip_suffix('\n').map(str::to_owned).unwrap_or(res)
+    }
+
+    /// [`Self::bounds_to_string`] for a range that may span all of history. Compact history
+    /// decoded on the way is released every few thousand lines rather than held to the end,
+    /// which for a long history is the difference between one chunk of it decoded and all of it.
+    pub fn bounds_to_string_releasing_history(&mut self, start: Point, end: Point) -> String {
+        const LINES_PER_RELEASE: usize = 4_096;
+
+        let mut res = String::new();
+        for (index, line) in (start.line.0..=end.line.0).map(Line::from).enumerate() {
+            res += &self.bounded_line_to_string(line, start, end);
+            if index % LINES_PER_RELEASE == LINES_PER_RELEASE - 1 {
+                self.release_history_cache();
+            }
+        }
+
+        res.strip_suffix('\n').map(str::to_owned).unwrap_or(res)
+    }
+
+    /// One line of [`Self::bounds_to_string`].
+    fn bounded_line_to_string(&self, line: Line, start: Point, end: Point) -> String {
+        let start_col = if line == start.line { start.column } else { Column(0) };
+        let end_col = if line == end.line { end.column } else { self.last_column() };
+
+        self.line_to_string(line, start_col..end_col, line == end.line)
     }
 
     /// Convert a single line in the grid to a String.
@@ -723,6 +745,13 @@ impl<T> Term<T> {
     /// Mutable access to the raw grid data structure.
     pub fn grid_mut(&mut self) -> &mut Grid<Cell> {
         &mut self.grid
+    }
+
+    /// Release the history rows both screens decoded for reading; see
+    /// [`Grid::release_history_cache`].
+    pub fn release_history_cache(&mut self) {
+        self.grid.release_history_cache();
+        self.inactive_grid.release_history_cache();
     }
 
     /// Access to the inactive screen buffer.
@@ -2775,6 +2804,27 @@ mod tests {
         assert!(term.history_size() > 1_200_000);
     }
 
+    /// `zetta benchmark output --output-type unique` as a pty delivers it: every line differs, so
+    /// all of history is dense.
+    #[test]
+    #[ignore = "manual optimized-build throughput check"]
+    fn unique_lines_through_a_pty_throughput_benchmark() {
+        const TEXT: &[u8] = b"0123456789 abcdefghijklmnopqrstuvwxyz ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+        const BYTES: usize = 100 * 1024 * 1024;
+
+        let mut payload = Vec::with_capacity(BYTES + 81);
+        let mut index = 0usize;
+        while payload.len() < BYTES {
+            payload.extend_from_slice(format!("line {index:016x} ").as_bytes());
+            payload.extend((0..57).map(|offset| TEXT[(index + offset) % TEXT.len()]));
+            payload.extend_from_slice(b"\r\n");
+            index += 1;
+        }
+        payload.truncate(BYTES);
+        let term = output_throughput(&payload, 94, 51);
+        assert!(term.history_size() > 1_200_000);
+    }
+
     #[test]
     fn scroll_display_page_up() {
         let size = TermSize::new(5, 10);
@@ -3001,6 +3051,60 @@ mod tests {
         let deserialized = serde_json::from_str::<Grid<Cell>>(&serialized).expect("de");
 
         assert_eq!(deserialized, grid);
+    }
+
+    /// Compact history is written out as rows, and reads back equal.
+    #[test]
+    #[cfg(feature = "serde")]
+    fn grid_serde_with_compact_history() {
+        let size = TermSize::new(20, 4);
+        let config = Config { scrolling_history: i32::MAX as usize, ..Config::default() };
+        let mut term = Term::new(config, &size, VoidListener);
+        let mut processor = Processor::<StdSyncHandler>::new();
+        for index in 0..2_000 {
+            processor
+                .advance(&mut term, format!("\x1b[3{}mline {index}\r\n", index % 8).as_bytes());
+        }
+
+        let serialized = serde_json::to_string(term.grid()).expect("ser");
+        let deserialized = serde_json::from_str::<Grid<Cell>>(&serialized).expect("de");
+
+        assert_eq!(&deserialized, term.grid());
+    }
+
+    /// History sealed into compact chunks reads back exactly as written, through every reader
+    /// the terminal has: indexing, iteration and text extraction.
+    #[test]
+    fn compact_history_reads_back_as_written() {
+        let size = TermSize::new(30, 5);
+        let config = Config { scrolling_history: i32::MAX as usize, ..Config::default() };
+        let mut term = Term::new(config, &size, VoidListener);
+        let mut processor = Processor::<StdSyncHandler>::new();
+        let mut expected = String::new();
+        for index in 0..3_000 {
+            let line = format!("{index:05} é界 \x1b[1;3{}mbold\x1b[0m end", index % 8);
+            processor.advance(&mut term, format!("{line}\r\n").as_bytes());
+            expected.push_str(&format!("{index:05} é界 bold end\n"));
+        }
+
+        // Only history: the newest lines are still on screen.
+        let history = term.history_size();
+        let expected =
+            expected.lines().take(history).map(|line| format!("{line}\n")).collect::<String>();
+        let start = Point::new(term.topmost_line(), Column(0));
+        let end = Point::new(Line(-1), term.last_column());
+        assert_eq!(term.bounds_to_string(start, end) + "\n", expected);
+        assert_eq!(term.bounds_to_string_releasing_history(start, end) + "\n", expected);
+
+        // `界` takes two columns, and an iterator yields the cells after its start.
+        let oldest = term.topmost_line();
+        let bold = &term.grid()[Point::new(oldest, Column(10))];
+        let iterated = term.grid().iter_from(Point::new(oldest, Column(0))).nth(9).unwrap();
+        assert_eq!(iterated.point, Point::new(oldest, Column(10)));
+        assert_eq!(*iterated, bold);
+        assert_eq!(bold.c, 'b');
+        assert!(bold.flags.contains(Flags::BOLD));
+        assert_eq!(bold.fg, Color::Named(NamedColor::Black));
     }
 
     #[test]
