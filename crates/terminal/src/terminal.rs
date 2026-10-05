@@ -6849,6 +6849,12 @@ fn spawn_byte_stream(
             // what `finish_drain` waits on.
             let _finished = finished_tx;
             let mut processor = Processor::<StdSyncHandler>::new();
+            // Every shared and zosh pane reads through here rather than the
+            // pty loop, so this has to report clipboard requests the way that
+            // loop does. Without it a remote helper's probe reached the window
+            // and was dropped, and the helper fell back to its own machine's
+            // clipboard after the probe timeout.
+            let mut clipboard_frames = zclip::protocol::Scanner::default();
             let mut buffer = [0u8; 8192];
             let mut previous_byte_was_cr = false;
             while !reader_stopped.load(Ordering::Acquire) {
@@ -6880,6 +6886,14 @@ fn spawn_byte_stream(
                         break;
                     }
                     Ok(count) => {
+                        // Not behind the wakeup gate: a hidden pane still answers.
+                        clipboard_frames.observe(&buffer[..count], |frame| {
+                            reader_events
+                                .unbounded_send(PtyEvent::Event(
+                                    TerminalBackendEvent::ClipboardFrame(frame),
+                                ))
+                                .ok();
+                        });
                         let converted = if reader_raw_output.load(Ordering::Acquire) {
                             Cow::Borrowed(&buffer[..count])
                         } else {
@@ -8266,10 +8280,8 @@ mod tests {
 
     /// A writer that records what a terminal sends, so a test can tell whether
     /// input reached the byte stream or vanished into a stopped pty loop.
-    #[cfg(unix)]
     struct RecordingWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
 
-    #[cfg(unix)]
     impl std::io::Write for RecordingWriter {
         fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
             self.0.lock().unwrap().extend_from_slice(buffer);
@@ -12760,6 +12772,51 @@ mod tests {
             terminal.write_output(&request.encode(), cx);
             assert!(terminal.take_pty_write_log().is_empty());
         });
+    }
+
+    /// Shared and zosh panes read through the byte stream, not the pty loop.
+    /// A remote helper's probe that the reader did not report went unanswered,
+    /// and the helper fell back to its own machine's clipboard.
+    #[gpui::test]
+    async fn a_byte_stream_answers_a_remote_clipboard_probe(cx: &mut TestAppContext) {
+        init_test(cx);
+        cx.executor().allow_parking();
+        let request = zclip::protocol::Frame {
+            id: [7; 16],
+            message: zclip::protocol::Message::Probe,
+        };
+        let written = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let terminal = cx.new(|cx| {
+            TerminalBuilder::new_byte_stream(
+                Box::new(CannedReader {
+                    bytes: request.encode(),
+                }),
+                Box::new(RecordingWriter(written.clone())),
+                String::new(),
+                SettingsCursorShape::default(),
+                AlternateScroll::On,
+                None,
+                0,
+                cx.background_executor(),
+                PathStyle::local(),
+            )
+            .with_pty_control(Arc::new(RecordingPtyControl::default()))
+            .subscribe(cx)
+        });
+
+        let expected = zclip::protocol::Frame {
+            id: request.id,
+            message: zclip::protocol::Message::Ready,
+        }
+        .encode();
+        // Both the reader and the writer are threads of their own.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while written.lock().unwrap().is_empty() && std::time::Instant::now() < deadline {
+            cx.run_until_parked();
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(*written.lock().unwrap(), expected);
+        drop(terminal);
     }
 
     #[gpui::test]
