@@ -69,6 +69,7 @@ ZETTA_CRATE_DIRS := \
 	crates/zntfy \
 	crates/zclip \
 	crates/zwt \
+	crates/wslx \
 	crates/zmux \
 	crates/zosh \
 	crates/zosh/server
@@ -82,6 +83,7 @@ ZETTA_TEST_CRATE_DIRS := \
 	crates/zntfy \
 	crates/zclip \
 	crates/zwt \
+	crates/wslx \
 	crates/zmux \
 	crates/zosh \
 	crates/zosh/server
@@ -521,10 +523,10 @@ build:
 	cmd.exe /d /c scripts\build-windows.cmd $(CARGO_PROFILE_ARGS)
 
 install: build
-	powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/install-windows.ps1 -Action Install -SourceBinary "$(BUILD_TARGET_DIR)/zetta.exe" -SourceGuiBinary "$(BUILD_TARGET_DIR)/zetta-gui.exe" $(WINDOWS_ZMUX_ARGS)$(WINDOWS_ZMUX_UPGRADE_ARGS) $(WINDOWS_ZOSH_ARGS)$(WINDOWS_ZWT_ARGS)$(WINDOWS_NOTIFY_ARGS)$(WINDOWS_CLIP_ARGS)
+	powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/install-windows.ps1 -Action Install -SourceBinary "$(BUILD_TARGET_DIR)/zetta.exe" -SourceGuiBinary "$(BUILD_TARGET_DIR)/zetta-gui.exe" -SourceWslxBinary "$(BUILD_TARGET_DIR)/wslx.exe" $(WINDOWS_ZMUX_ARGS)$(WINDOWS_ZMUX_UPGRADE_ARGS) $(WINDOWS_ZOSH_ARGS)$(WINDOWS_ZWT_ARGS)$(WINDOWS_NOTIFY_ARGS)$(WINDOWS_CLIP_ARGS)
 
 install-binary:
-	powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/install-windows.ps1 -Action InstallBinary -SourceBinary "$(BUILD_TARGET_DIR)/zetta.exe" -SourceGuiBinary "$(BUILD_TARGET_DIR)/zetta-gui.exe" $(WINDOWS_ZMUX_ARGS) $(WINDOWS_ZOSH_ARGS)$(WINDOWS_ZWT_ARGS)$(WINDOWS_NOTIFY_ARGS)$(WINDOWS_CLIP_ARGS)
+	powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/install-windows.ps1 -Action InstallBinary -SourceBinary "$(BUILD_TARGET_DIR)/zetta.exe" -SourceGuiBinary "$(BUILD_TARGET_DIR)/zetta-gui.exe" -SourceWslxBinary "$(BUILD_TARGET_DIR)/wslx.exe" $(WINDOWS_ZMUX_ARGS) $(WINDOWS_ZOSH_ARGS)$(WINDOWS_ZWT_ARGS)$(WINDOWS_NOTIFY_ARGS)$(WINDOWS_CLIP_ARGS)
 
 install-capabilities:
 

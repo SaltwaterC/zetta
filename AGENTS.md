@@ -255,6 +255,7 @@ Run `cargo clippy --all-targets` for broader Rust changes when practical.
 (cd crates/terminal && cargo test)
 (cd crates/zetta_profiles && cargo test)
 (cd crates/zmux && cargo build --bin zmux && cargo test)
+(cd crates/wslx && cargo test)
 ```
 
 `cargo build --bin zmux` first is not optional there: those tests start the

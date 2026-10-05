@@ -185,6 +185,17 @@ The build target locates the Visual Studio C++ toolchain with `vswhere.exe` and
 initializes its x64 build environment automatically. The **Desktop development
 with C++** workload must be installed.
 
+`wslx.exe` carries a static Linux relay for each WSL architecture, which the
+build compiles for the `x86_64-unknown-linux-musl` and
+`aarch64-unknown-linux-musl` targets and links with the `rust-lld` that ships
+with Rust; no Linux C toolchain is needed. `rust-toolchain.toml` lists both
+targets, so rustup normally installs them with the pinned toolchain. If the
+build reports one missing, install them with:
+
+```sh
+rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl
+```
+
 To check the Windows GNU target from Linux, including WSL2, install the Rust
 target and Linux-hosted MinGW-w64 tools. On Debian/Ubuntu:
 
@@ -206,6 +217,9 @@ The build produces the following runtime files in `target\debug`:
 
 - `zetta.exe`, the console executable
 - `zetta-gui.exe`, the no-console launcher used by the Start Menu shortcut
+- `wslx.exe`, `wsl.exe` with the shell's SSH agent carried into the
+  distribution (see [SSH agents inside WSL](usage.md#ssh-agents-inside-wsl));
+  built and installed whatever features are enabled
 - `zmux.exe`, the standalone background-session multiplexer
 - `zosh.exe`, the bundled standalone Zosh client
 - `zosh-server.exe`, the bundled Rust Zosh server
@@ -229,8 +243,8 @@ For an optimized release build, use `make build RELEASE=1` and
 This copies the runtime to `%LOCALAPPDATA%\Programs\Zetta`, adds that directory
 to the per-user Windows `PATH`, and creates a Start Menu shortcut. The PATH
 change is inherited by new processes, so open a new console (or restart a
-process that was already running) before invoking `zetta`, `zmux`, `zosh`,
-`zosh-server`, `zwt`, or `zntfy`. The shortcut launches `zetta-gui.exe`, which starts
+process that was already running) before invoking `zetta`, `wslx`, `zmux`,
+`zosh`, `zosh-server`, `zwt`, or `zntfy`. The shortcut launches `zetta-gui.exe`, which starts
 the console-native executable without opening an extra console window.
 
 Zetta can be reinstalled while it is running. Windows keeps the previous

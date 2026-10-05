@@ -19,6 +19,7 @@ param(
     [string]$SourceNotifyBinary,
     [string]$SourceCopyBinary,
     [string]$SourcePasteBinary,
+    [string]$SourceWslxBinary,
     [switch]$WorktreeEnabled,
     [switch]$MuxDisabled,
     [switch]$UpgradeMux,
@@ -53,6 +54,11 @@ if (-not $SourceBinary) {
 }
 if (-not $SourceGuiBinary) {
     $SourceGuiBinary = Join-Path (Split-Path -Parent $SourceBinary) "zetta-gui.exe"
+}
+# wslx.exe is part of every build rather than a feature, so it is always
+# installed and always expected beside zetta.exe.
+if (-not $SourceWslxBinary) {
+    $SourceWslxBinary = Join-Path (Split-Path -Parent $SourceBinary) "wslx.exe"
 }
 if ($muxEnabled -and -not $SourceMuxBinary) {
     $SourceMuxBinary = Join-Path (Split-Path -Parent $SourceBinary) "zmux.exe"
@@ -93,6 +99,7 @@ if (-not $ShortcutPath) {
 
 $installedBinary = Join-Path $InstallDirectory "zetta.exe"
 $installedGuiBinary = Join-Path $InstallDirectory "zetta-gui.exe"
+$installedWslxBinary = Join-Path $InstallDirectory "wslx.exe"
 $installedMuxBinary = Join-Path $InstallDirectory "zmux.exe"
 $installedPtyBinary = Join-Path $InstallDirectory "zmux-pty.exe"
 $installedZoshBinary = Join-Path $InstallDirectory "zosh.exe"
@@ -154,7 +161,8 @@ function Get-AvailableRollbackPath([string]$Path) {
 function Get-InstallFiles {
     $files = @(
         [pscustomobject]@{ Source = $SourceBinary; Destination = $installedBinary },
-        [pscustomobject]@{ Source = $SourceGuiBinary; Destination = $installedGuiBinary }
+        [pscustomobject]@{ Source = $SourceGuiBinary; Destination = $installedGuiBinary },
+        [pscustomobject]@{ Source = $SourceWslxBinary; Destination = $installedWslxBinary }
     )
     if ($muxEnabled) {
         $files += [pscustomobject]@{ Source = $SourceMuxBinary; Destination = $installedMuxBinary }

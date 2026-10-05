@@ -2,3 +2,7 @@
 channel = "1.95.0"
 profile = "minimal"
 components = ["rustfmt", "clippy"]
+# `wslx.exe` embeds a static Linux relay for each WSL architecture, built by
+# `crates/wslx/build.rs` whenever the target is Windows (including
+# `make check-windows` from Linux or macOS).
+targets = ["x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl"]

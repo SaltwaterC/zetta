@@ -10286,6 +10286,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ffae5123b2d3fc086436f8834ae3ab053a283cfac8fe0a0b8eaae044768a4c4"
 
 [[package]]
+name = "wslx"
+version = "0.1.0"
+
+[[package]]
 name = "x-wing"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10892,6 +10896,7 @@ dependencies = [
  "windows 0.61.3",
  "windows-core 0.61.2",
  "windows-registry 0.5.3",
+ "wslx",
  "zbus",
  "zclip",
  "zed_actions",

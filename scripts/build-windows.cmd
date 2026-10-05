@@ -53,8 +53,9 @@ call :append_feature "%WORKTREE%" worktree
 call :append_feature "%ZOSH_CLIENT%" zosh-client
 call :append_feature "%ZOSH_SERVER%" zosh-server
 
-set "BINARIES=--bin zetta --bin zetta-gui"
-set "VERIFY_ARGS="
+rem wslx is part of every Windows build: it is not behind a feature.
+set "BINARIES=--bin zetta --bin zetta-gui --bin wslx"
+set "VERIFY_ARGS=-WslxBinaryPath !TARGET_DIR!\wslx.exe"
 if /i not "%ZMUX%"=="0" if /i not "%ZMUX%"=="false" if /i not "%ZMUX%"=="no" if /i not "%ZMUX%"=="off" (
     set "BINARIES=!BINARIES! --bin zmux --bin zmux-pty"
     set "VERIFY_ARGS=!VERIFY_ARGS! -MuxBinaryPath !TARGET_DIR!\zmux.exe -PtyBinaryPath !TARGET_DIR!\zmux-pty.exe"

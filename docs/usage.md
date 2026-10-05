@@ -188,6 +188,31 @@ is set. A Windows `zosh-server.exe` host works with cmd or PowerShell as the
 OpenSSH default shell. The local agent must be running, and the remote server
 must permit SSH agent forwarding during bootstrap.
 
+### SSH agents inside WSL
+
+On a Windows host, a shell's agent is a named pipe — for example the
+`\\.\pipe\zosh-agent-…` a Zosh pane is given — and a WSL2 distribution
+cannot reach a Windows pipe. Run `wslx` in place of `wsl` to carry it across:
+
+```powershell
+wslx                    # the default distribution
+wslx -d Ubuntu -u root  # any wsl.exe arguments, passed through unchanged
+```
+
+`wslx` hands every argument to `wsl.exe` and exits with its status. When
+`SSH_AUTH_SOCK` names a pipe and the arguments start a session (rather than,
+say, `--list` or `--shutdown`), it first starts a small relay in the same
+distribution as the same user, then starts the session with `SSH_AUTH_SOCK`
+pointing at the relay's Unix socket. The socket lives in a directory only
+that user can open and is removed when the session ends.
+
+The relay is a static Linux binary carried inside `wslx.exe` for x86-64 and
+Arm64 distributions. The first session of each Zetta build copies it to
+`~/.cache/zetta/wslx` inside the distribution; nothing needs to be installed
+there. If the relay cannot start, `wslx` says why and starts the session
+without an agent. When `SSH_AUTH_SOCK` is unset or is not a pipe, `wslx`
+behaves exactly like `wsl`.
+
 ## CLI command panes
 
 Run a command in the active pane, a pane selected by label, or a newly created

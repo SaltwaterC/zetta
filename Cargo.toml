@@ -54,6 +54,14 @@ name = "zetta-gui"
 path = "src/bin/zetta_gui.rs"
 required-features = ["windows-gui"]
 
+# Windows only, and part of every Windows build whatever its features: a WSL
+# profile is core terminal behaviour, and a Zosh pane's forwarded agent is a
+# named pipe WSL cannot reach without it. On other platforms it is a stub that
+# says so; nothing installs it there.
+[[bin]]
+name = "wslx"
+path = "src/bin/wslx.rs"
+
 # The multiplexer ships as its own executable so a session outlives every Zetta
 # process. This target exists here so the normal build produces it alongside
 # `zetta`; `crates/zmux` also builds standalone, which is how a stripped-down
@@ -171,6 +179,7 @@ vt100 = { version = "0.16.2", optional = true }
 zwt = { path = "crates/zwt", optional = true }
 
 [target.'cfg(windows)'.dependencies]
+wslx = { path = "crates/wslx" }
 # async-tar's Windows symlink path uses async-std's unstable filesystem API.
 async-std = { version = "1.13", features = ["unstable"] }
 uds_windows = "1.2"

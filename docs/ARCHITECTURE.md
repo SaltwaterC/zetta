@@ -409,5 +409,6 @@ without that feature, so no call site needs a feature predicate:
 
 `src/bin/` holds the executables built alongside the application: `zmux.rs`
 (the multiplexer a client resolves beside its own executable — this is the one
-that runs, not `crates/zmux`'s), `zmux_pty.rs`, `zosh.rs`, `zwt.rs`, and
-`zetta_gui.rs`.
+that runs, not `crates/zmux`'s), `zmux_pty.rs`, `zosh.rs`, `zwt.rs`,
+`zetta_gui.rs`, and `wslx.rs` (Windows only and built without any feature;
+everything it does lives in `crates/wslx`).

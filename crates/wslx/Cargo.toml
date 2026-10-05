@@ -1,0 +1,23 @@
+[package]
+name = "wslx"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "GPL-3.0-or-later"
+description = "wsl.exe with the Windows SSH agent carried into the distribution"
+
+[lib]
+path = "src/lib.rs"
+doctest = false
+
+# The Linux half. `build.rs` cross-builds it for each WSL architecture when the
+# crate is built for Windows, and `wslx.exe` embeds the results; it is never
+# installed on its own.
+[[bin]]
+name = "wslx-relay"
+path = "src/bin/wslx-relay.rs"
+
+# Deliberately no dependencies: the relay is built as a static musl binary
+# linked by `rust-lld` alone, and anything that compiles C would need a musl C
+# toolchain on every machine that builds Zetta for Windows.
+[dependencies]

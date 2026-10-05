@@ -62,6 +62,7 @@ function Invoke-Installer([string]$Action = "InstallBinary", [bool]$ClipboardEna
         "-Action", $Action,
         "-SourceBinary", (Join-Path $sourceDirectory "zetta.exe"),
         "-SourceGuiBinary", (Join-Path $sourceDirectory "zetta-gui.exe"),
+        "-SourceWslxBinary", (Join-Path $sourceDirectory "wslx.exe"),
         "-SourceMuxBinary", (Join-Path $sourceDirectory "zmux.exe"),
         "-SourcePtyBinary", (Join-Path $sourceDirectory "zmux-pty.exe"),
         "-SourceZoshBinary", (Join-Path $sourceDirectory "zosh.exe"),
@@ -88,6 +89,7 @@ function Assert-InstallerSucceeded($Result, [string]$Message) {
 function Set-SourceGeneration([string]$Generation) {
     Write-TestFile (Join-Path $sourceDirectory "zetta.exe") "zetta-$Generation"
     Write-TestFile (Join-Path $sourceDirectory "zetta-gui.exe") "gui-$Generation"
+    Write-TestFile (Join-Path $sourceDirectory "wslx.exe") "wslx-$Generation"
     Write-TestFile (Join-Path $sourceDirectory "zmux.exe") "mux-$Generation"
     Write-TestFile (Join-Path $sourceDirectory "zmux-pty.exe") "pty-$Generation"
     Write-TestFile (Join-Path $sourceDirectory "zosh.exe") "zosh-$Generation"
@@ -132,6 +134,7 @@ try {
 
     Assert-InstallerSucceeded (Invoke-Installer) "initial install failed"
     Assert-FileContents $installedPty "pty-first" "initial helper was not installed"
+    Assert-FileContents (Join-Path $installDirectory "wslx.exe") "wslx-first" "wslx was not installed"
     Assert-FileContents (Join-Path $installDirectory "zosh.exe") "zosh-first" "zosh was not installed"
     Assert-FileContents (Join-Path $installDirectory "zosh-server.exe") "zosh-server-first" "zosh-server was not installed"
     Assert-FileContents (Join-Path $installDirectory "zntfy.exe") "zntfy-first" "zntfy was not installed"
@@ -249,6 +252,7 @@ try {
     Assert-True (-not (Get-UserPathEntries | Where-Object {
         $_.Equals($installDirectory, [StringComparison]::OrdinalIgnoreCase)
     })) "uninstall left the installed directory in the user PATH"
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $installDirectory "wslx.exe"))) "uninstall left wslx"
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $installDirectory "zosh.exe"))) "uninstall left zosh"
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $installDirectory "zosh-server.exe"))) "uninstall left zosh-server"
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $installDirectory "zntfy.exe"))) "uninstall left zntfy"

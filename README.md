@@ -26,6 +26,8 @@ enabled in that tab's menu; it is off by default.
   directory tracking
 - Image paste into Windows WSL profiles stages a PNG inside the selected
   distribution and pastes its Linux path for applications such as Codex
+- `wslx.exe`, a drop-in `wsl.exe` that carries a Windows pane's SSH agent —
+  including one Zosh forwarded — into the WSL2 distribution it starts
 - Detachable background sessions, held by the `zmux` multiplexer so they
   outlive Zetta itself,
   with retained diagnostics for unexpected terminal exits

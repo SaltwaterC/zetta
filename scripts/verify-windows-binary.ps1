@@ -11,7 +11,8 @@ param(
     [string]$WorktreeBinaryPath,
     [string]$NotifyBinaryPath,
     [string]$CopyBinaryPath,
-    [string]$PasteBinaryPath
+    [string]$PasteBinaryPath,
+    [string]$WslxBinaryPath
 )
 
 $ErrorActionPreference = "Stop"
@@ -188,6 +189,33 @@ if ($notifyBinary) {
     }
 }
 
+# wslx.exe only forwards to wsl.exe, which a build machine need not have, so it
+# is not run. What can go wrong in its build is the embedded Linux relays, one
+# per WSL architecture; check both are there.
+$wslxBinary = $null
+if ($WslxBinaryPath) {
+    $wslxBinary = (Resolve-Path -LiteralPath $WslxBinaryPath).Path
+    if ((Get-PeSubsystem $wslxBinary) -ne $consoleSubsystem) {
+        throw "$wslxBinary does not use the console subsystem"
+    }
+    $wslxBytes = [System.IO.File]::ReadAllBytes($wslxBinary)
+    # Latin-1 maps every byte to one char, so string search finds byte offsets.
+    $wslxText = [System.Text.Encoding]::GetEncoding(28591).GetString($wslxBytes)
+    $elfMagic = [string][char]0x7f + "ELF"
+    $elfHeaders = @{}
+    $offset = $wslxText.IndexOf($elfMagic, [StringComparison]::Ordinal)
+    while ($offset -ge 0 -and $offset -le $wslxBytes.Length - 20) {
+        if ($wslxBytes[$offset + 4] -eq 2) {
+            $elfHeaders[[BitConverter]::ToUInt16($wslxBytes, $offset + 18)] = $true
+        }
+        $offset = $wslxText.IndexOf($elfMagic, $offset + 1, [StringComparison]::Ordinal)
+    }
+    # e_machine: 0x3e is x86-64, 0xb7 is AArch64.
+    if (-not ($elfHeaders.ContainsKey([uint16]0x3e) -and $elfHeaders.ContainsKey([uint16]0xb7))) {
+        throw "$wslxBinary does not embed the x86_64 and aarch64 WSL relays"
+    }
+}
+
 foreach ($clipboardTool in @(
     @{ Path = $CopyBinaryPath; Name = "zcopy" },
     @{ Path = $PasteBinaryPath; Name = "zpaste" }
@@ -221,4 +249,7 @@ if ($worktreeBinary) {
 }
 if ($notifyBinary) {
     Write-Host "Verified standalone notification executable: $notifyBinary"
+}
+if ($wslxBinary) {
+    Write-Host "Verified WSL agent wrapper: $wslxBinary"
 }
