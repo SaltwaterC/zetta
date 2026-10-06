@@ -1621,7 +1621,7 @@ impl Client {
 
     fn open_as_with_endpoint_and_secret(
         &self,
-        request: Request,
+        mut request: Request,
         client_process_id: u32,
         endpoint: &Endpoint,
         secret: Option<&SessionSecret>,
@@ -1636,6 +1636,9 @@ impl Client {
                 Stream::connect(&endpoint.socket_path).context("connecting to the multiplexer")?,
             )
         };
+        if let Some(remote) = &self.remote {
+            remote.inherit_login_context(&mut request)?;
+        }
         stream
             .set_read_timeout(Some(REQUEST_TIMEOUT))
             .context("setting the multiplexer request read timeout")?;

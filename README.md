@@ -18,6 +18,11 @@ enabled in that tab's menu; it is off by default.
 Applications that manage their own selections can also copy through OSC 52
 in local PTY, shared SSH, and Zosh panes. Zosh copying requires the updated
 bundled client and `zosh-server` on the remote host.
+Panes created through the remote picker inherit the actual SSH login's
+`SSH_CONNECTION`, including when their daemon was started locally. This lets
+applications such as Codex forward copies to the viewing window even when the
+remote machine has a working native clipboard. Existing processes keep the
+environment they started with; create a new remote pane to apply this context.
 
 ## Highlights
 

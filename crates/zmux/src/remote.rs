@@ -35,6 +35,8 @@
 //! [`release_idle_transports`] before exiting: a transport held by a static is
 //! never dropped, and its SSH process would outlive this one.
 
+mod login_context;
+
 #[cfg(unix)]
 use std::sync::atomic::AtomicU64;
 use std::{
@@ -291,6 +293,9 @@ struct RemoteState {
     link_verified_at: Option<Instant>,
     /// The remote host's own `zmux`, learned alongside the endpoint.
     program: Option<PathBuf>,
+    /// SSH provenance for panes this transport creates, never the daemon's.
+    /// Outer `None` means not queried; inner `None` means the login has none.
+    login_connection: Option<Option<String>>,
 }
 
 impl RemoteState {
@@ -304,6 +309,7 @@ impl RemoteState {
             link_endpoint: None,
             link_verified_at: None,
             program: None,
+            login_connection: None,
         }
     }
 }
@@ -778,6 +784,7 @@ impl RemoteTransport {
     /// socket path and token may have changed. The SSH login itself is kept.
     pub fn refresh(&self) -> Result<Endpoint> {
         let mut state = self.lock_state();
+        state.login_connection = None;
         #[cfg(unix)]
         {
             self.forward_or_link(
@@ -844,6 +851,7 @@ impl RemoteTransport {
             state.forward = None;
             state.master = None;
         }
+        state.login_connection = None;
         let master = self.start_master()?;
         let control_path = master.control_path.clone();
         state.master = Some(master);
@@ -1008,6 +1016,7 @@ impl RemoteTransport {
             state.link_verified_at = None;
         }
         if state.link.is_none() {
+            state.login_connection = None;
             let link = self.start_link(state)?;
             let info = link.bridge.initial_info().clone();
             state.link = Some(link);

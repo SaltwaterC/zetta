@@ -12755,6 +12755,49 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn controlled_byte_stream_reader_delivers_osc52_copy(cx: &mut TestAppContext) {
+        init_test(cx);
+        cx.executor().allow_parking();
+        cx.update(|cx| {
+            cx.write_to_clipboard(ClipboardItem::new_string("original".to_owned()));
+        });
+        let terminal = cx.new(|cx| {
+            TerminalBuilder::new_byte_stream(
+                Box::new(CannedReader {
+                    // Codex's standard clipboard write, terminated with ST.
+                    bytes: b"\x1b]52;c;T3BlbkFJIENvZGV4\x1b\\".to_vec(),
+                }),
+                Box::new(std::io::sink()),
+                String::new(),
+                SettingsCursorShape::default(),
+                AlternateScroll::On,
+                None,
+                0,
+                cx.background_executor(),
+                PathStyle::local(),
+            )
+            .with_raw_output()
+            .with_pty_control(Arc::new(RecordingPtyControl::default()))
+            .subscribe(cx)
+        });
+        // The reader runs on an OS thread, independently of GPUI's executor.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            cx.run_until_parked();
+            let copied = cx.update(|cx| cx.read_from_clipboard().and_then(|item| item.text()));
+            if copied.as_deref() == Some("OpenAI Codex") {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "byte-stream clipboard write was lost"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        drop(terminal);
+    }
+
+    #[gpui::test]
     async fn controlled_byte_stream_output_accepts_osc52_copy(cx: &mut TestAppContext) {
         cx.update(TerminalSettings::init);
         let terminal = cx.new(|cx| {

@@ -8,7 +8,7 @@ use super::*;
 /// kernel lets it — after the first success no writer can appear again. The
 /// guard line is what makes that run harmless.
 #[cfg(unix)]
-fn write_script(path: &Path, content: impl AsRef<str>) {
+pub(super) fn write_script(path: &Path, content: impl AsRef<str>) {
     use std::os::unix::fs::PermissionsExt as _;
 
     const PROBE: &str = "--zetta-test-probe";
@@ -813,7 +813,7 @@ fn a_proven_endpoint_is_not_probed_again_until_something_fails() {
 /// socket to the remote one, and anything else runs the remote command
 /// locally, with a `zmux` on `PATH` that reports `endpoint`.
 #[cfg(unix)]
-fn fake_ssh(directory: &Path, endpoint: &Endpoint) -> (PathBuf, PathBuf) {
+pub(super) fn fake_ssh(directory: &Path, endpoint: &Endpoint) -> (PathBuf, PathBuf) {
     let bin = directory.join("bin");
     std::fs::create_dir(&bin).unwrap();
     let zmux = bin.join("zmux");

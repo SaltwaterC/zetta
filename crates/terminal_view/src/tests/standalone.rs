@@ -4,6 +4,32 @@ use std::path::PathBuf;
 use terminal::{PathLikeTarget, is_hyperlink_modifier};
 use util::paths::{PathStyle, home_dir};
 
+#[derive(Clone, Default)]
+struct RecordedStreamInput(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl RecordedStreamInput {
+    fn bytes(&self) -> Vec<u8> {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+}
+
+impl std::io::Write for RecordedStreamInput {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 #[gpui::test]
 async fn ctrl_c_copies_selection_before_forwarding_interrupt(cx: &mut gpui::TestAppContext) {
     cx.update(|cx| {
@@ -77,6 +103,94 @@ async fn ctrl_c_copies_selection_before_forwarding_interrupt(cx: &mut gpui::Test
         interrupts.get(),
         1,
         "Ctrl+C without selection reaches the application"
+    );
+}
+
+#[gpui::test]
+async fn normal_drag_in_mouse_mode_leaves_ctrl_c_with_the_application(
+    cx: &mut gpui::TestAppContext,
+) {
+    cx.executor().allow_parking();
+    cx.update(|cx| {
+        theme_settings::init(theme::LoadThemes::JustBase, cx);
+        TerminalSettings::init(cx);
+        cx.bind_keys([gpui::KeyBinding::new(
+            "ctrl-c",
+            CopyAndClearSelection,
+            Some("Terminal && selection"),
+        )]);
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string("original".to_owned()));
+    });
+    let input = RecordedStreamInput::default();
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        let terminal = cx.new(|cx| {
+            terminal::TerminalBuilder::new_byte_stream(
+                Box::new(std::io::empty()),
+                Box::new(input.clone()),
+                String::new(),
+                terminal::terminal_settings::CursorShape::Block,
+                terminal::terminal_settings::AlternateScroll::On,
+                None,
+                0,
+                cx.background_executor(),
+                PathStyle::local(),
+            )
+            .subscribe(cx)
+        });
+        let mut view = TerminalView::new(terminal, window, cx);
+        view.set_emit_input_events(true);
+        view.focus_handle.focus(window, cx);
+        view
+    });
+    let copies = std::rc::Rc::new(std::cell::Cell::new(0));
+    let received = copies.clone();
+    cx.update(|_, cx| {
+        cx.subscribe(&view, move |_, event, _| {
+            if let TerminalViewEvent::Input(TerminalInput::Keystroke(key)) = event {
+                assert_eq!(key, &Keystroke::parse("ctrl-c").unwrap());
+                received.set(received.get() + 1);
+            }
+        })
+        .detach();
+    });
+    view.update(cx, |view, cx| {
+        view.terminal.update(cx, |terminal, cx| {
+            terminal.write_output(b"\x1b[?1049h\x1b[?1002h\x1b[?1006hOpenAI Codex\r\n", cx);
+        });
+        cx.notify();
+    });
+    cx.run_until_parked();
+    let bounds = view.read_with(cx, |view, cx| view.terminal_bounds(cx));
+    let start = bounds.bounds.origin + gpui::point(bounds.cell_width / 2., bounds.line_height / 2.);
+    let end = start + gpui::point(bounds.cell_width * 10., gpui::px(0.));
+    cx.simulate_mouse_down(start, gpui::MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_move(end, gpui::MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_up(end, gpui::MouseButton::Left, Modifiers::none());
+    assert!(view.read_with(cx, |view, cx| {
+        view.terminal.read(cx).last_content.selection.is_none()
+    }));
+    cx.simulate_keystrokes("ctrl-c");
+    assert_eq!(
+        copies.get(),
+        1,
+        "the application owns the normal-drag selection"
+    );
+    let expected = b"\x1b[<0;1;1M\x1b[<32;11;1M\x1b[<0;11;1m\x03";
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while input.bytes().len() < expected.len() && std::time::Instant::now() < deadline {
+        cx.run_until_parked();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert_eq!(
+        input.bytes(),
+        expected,
+        "mouse selection and Ctrl+C reach the remote stream"
+    );
+    assert_eq!(
+        cx.update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text()))
+            .as_deref(),
+        Some("original"),
+        "an application's mouse selection is not a terminal-grid selection"
     );
 }
 

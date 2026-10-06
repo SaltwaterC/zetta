@@ -130,7 +130,7 @@ pub(crate) fn parse_program_path(text: &str) -> Result<PathBuf> {
 /// Encoded, because whether the account's shell is PowerShell or cmd, and
 /// however it splits the command line OpenSSH joined, base64 has nothing in it
 /// for either to reinterpret.
-fn encoded(script: &str) -> String {
+pub(crate) fn encoded(script: &str) -> String {
     let utf16 = script
         .encode_utf16()
         .flat_map(u16::to_le_bytes)
