@@ -27,6 +27,10 @@ vt100 = { path = "../../vt100" }
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# Holds the systemd-logind sleep inhibitor; see sleep_guard.rs.
+[target.'cfg(target_os = "linux")'.dependencies]
+zbus = { version = "5.17", default-features = false, features = ["async-io", "blocking-api"] }
+
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.61", features = [
     "Win32_Foundation",
@@ -36,6 +40,7 @@ windows = { version = "0.61", features = [
     "Win32_System_Console",
     "Win32_System_IO",
     "Win32_System_Pipes",
+    "Win32_System_Power",
     "Win32_System_Registry",
     "Win32_System_Threading",
 ] }

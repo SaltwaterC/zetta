@@ -27,14 +27,27 @@ fn the_linger_outlasts_the_keep_alive_linger() {
     assert!(PRESENCE_LINGER > crate::server::KEEP_ALIVE_LINGER);
 }
 
+/// Whether this host is expected to grant the assertion. Linux grants it only
+/// where logind is reachable on the system bus, which a build container may
+/// not have, so there the release half is asserted and the acquire half is
+/// whatever the host allows.
+fn assertion_expected(guard: &IdleSleepGuard) -> bool {
+    if cfg!(target_os = "linux") {
+        guard.assertion.is_some()
+    } else {
+        cfg!(any(target_os = "macos", windows))
+    }
+}
+
 #[test]
 fn the_guard_follows_presence_transitions() {
     let mut guard = IdleSleepGuard::new();
     guard.update(true, false);
     assert!(guard.present);
-    assert_eq!(guard.assertion.is_some(), cfg!(target_os = "macos"));
+    let expected = assertion_expected(&guard);
+    assert_eq!(guard.assertion.is_some(), expected);
     guard.update(true, false);
-    assert_eq!(guard.assertion.is_some(), cfg!(target_os = "macos"));
+    assert_eq!(guard.assertion.is_some(), expected);
     guard.update(false, false);
     assert!(!guard.present);
     assert!(guard.assertion.is_none());

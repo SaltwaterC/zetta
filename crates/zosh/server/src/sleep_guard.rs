@@ -1,4 +1,5 @@
-//! Keeps a macOS host from idle-sleeping while a client is talking to it.
+//! Keeps a macOS, Windows or Linux host from idle-sleeping while a client is
+//! talking to it.
 //!
 //! A Mac idle-sleeps with its lid open: once the display is off and the
 //! `pmset sleep` timer runs out, it sleeps regardless of what its daemons are
@@ -18,6 +19,32 @@
 //! for maintenance sleep regardless. On AC power the assertion holds in dark
 //! or full wake; on battery it only prevents idle sleep. Neither stops a lid
 //! close or an explicit sleep, the same as an SSH session.
+//!
+//! Windows has the same failure with a different mechanism: the idle timer
+//! counts only local input, so a laptop sleeps (S3, or Modern Standby's
+//! low-power state) under a live remote session, and an inbound datagram does
+//! not wake it. Windows OpenSSH holds no power request for its sessions
+//! either. There the guard holds a `PowerRequestSystemRequired` power request,
+//! which `powercfg /requests` lists under the reason string below. It
+//! prevents idle sleep on AC and on battery; like the macOS assertion, it does
+//! not stop a lid close, the power button or an explicit sleep. A power
+//! request rather than `SetThreadExecutionState`, because the latter belongs
+//! to the calling thread and is released when that thread exits, where a
+//! request is a handle that lives exactly as long as the guard.
+//!
+//! Linux, likewise: GNOME and KDE suspend an idle laptop under a live remote
+//! session, and sshd takes nothing to stop them. There the guard holds a
+//! systemd-logind `sleep` inhibitor in `block` mode, which `systemd-inhibit
+//! --list` shows under the same reason. Idle suspend reaches logind as a
+//! `Suspend` call, which the inhibitor refuses. Lid close is not stopped,
+//! because logind's `LidSwitchIgnoreInhibited` defaults to on. Unlike the
+//! other platforms an explicit suspend is refused too, unless the caller may
+//! ignore inhibitors (root, or `systemctl suspend -i`): that is what a block
+//! inhibitor means, and logind offers no idle-only alternative that the
+//! desktops honour. `idle` is deliberately not inhibited, as that would also
+//! stop the screen locking on an unattended laptop. A host without logind
+//! (no systemd, or a container without the system bus) fails to acquire,
+//! which is reported with `-v` and otherwise ignored.
 //!
 //! It is held only while the peer is present, as IOKit asks, so a detached
 //! session whose client has gone does not keep a laptop awake for the life of
@@ -158,10 +185,106 @@ mod platform {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(windows)]
 mod platform {
-    /// Nothing on this platform lets the host sleep under a live session in
-    /// the way macOS does, so there is nothing to hold.
+    use windows::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows::Win32::System::Power::{
+        PowerClearRequest, PowerCreateRequest, PowerRequestSystemRequired, PowerSetRequest,
+    };
+    use windows::Win32::System::Threading::{
+        POWER_REQUEST_CONTEXT_SIMPLE_STRING, REASON_CONTEXT, REASON_CONTEXT_0,
+    };
+    use windows::core::PWSTR;
+
+    /// `POWER_REQUEST_CONTEXT_VERSION`, which the bindings do not export.
+    const POWER_REQUEST_CONTEXT_VERSION: u32 = 0;
+
+    pub struct Assertion(HANDLE);
+
+    impl Assertion {
+        pub fn acquire() -> Result<Option<Self>, String> {
+            // The reason is copied by `PowerCreateRequest`, so it only has to
+            // outlive the call.
+            let mut reason: Vec<u16> = "zosh-server: Mosh client attached"
+                .encode_utf16()
+                .chain(std::iter::once(0))
+                .collect();
+            let context = REASON_CONTEXT {
+                Version: POWER_REQUEST_CONTEXT_VERSION,
+                Flags: POWER_REQUEST_CONTEXT_SIMPLE_STRING,
+                Reason: REASON_CONTEXT_0 {
+                    SimpleReasonString: PWSTR(reason.as_mut_ptr()),
+                },
+            };
+            let request = unsafe { PowerCreateRequest(&context) }
+                .map_err(|error| format!("PowerCreateRequest failed: {error}"))?;
+            if let Err(error) = unsafe { PowerSetRequest(request, PowerRequestSystemRequired) } {
+                unsafe {
+                    let _ = CloseHandle(request);
+                }
+                return Err(format!("PowerSetRequest failed: {error}"));
+            }
+            Ok(Some(Self(request)))
+        }
+    }
+
+    impl Drop for Assertion {
+        fn drop(&mut self) {
+            // Closing the handle also clears the request; clearing first
+            // states the intent rather than relying on it.
+            unsafe {
+                let _ = PowerClearRequest(self.0, PowerRequestSystemRequired);
+                let _ = CloseHandle(self.0);
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+mod platform {
+    use std::os::fd::OwnedFd;
+    use std::time::Duration;
+
+    /// How long acquisition may hold up the server loop. It runs on the loop
+    /// thread, once per client arrival, and logind normally answers in about
+    /// a millisecond; this bounds the damage of a wedged logind to one stall.
+    const LOGIND_TIMEOUT: Duration = Duration::from_secs(2);
+
+    /// The inhibitor lasts exactly as long as logind's end of this descriptor
+    /// stays open, so holding it is the whole of the lock and closing it (on
+    /// drop, or on exit) releases it.
+    pub struct Assertion {
+        _lock: OwnedFd,
+    }
+
+    impl Assertion {
+        pub fn acquire() -> Result<Option<Self>, String> {
+            // The connection is only needed for the call: the descriptor
+            // outlives it.
+            let connection = zbus::blocking::connection::Builder::system()
+                .and_then(|builder| builder.method_timeout(LOGIND_TIMEOUT).build())
+                .map_err(|error| format!("connecting to the system bus: {error}"))?;
+            let reply = connection
+                .call_method(
+                    Some("org.freedesktop.login1"),
+                    "/org/freedesktop/login1",
+                    Some("org.freedesktop.login1.Manager"),
+                    "Inhibit",
+                    &("sleep", "zosh-server", "Mosh client attached", "block"),
+                )
+                .map_err(|error| format!("logind Inhibit failed: {error}"))?;
+            let lock: zbus::zvariant::OwnedFd = reply
+                .body()
+                .deserialize()
+                .map_err(|error| format!("logind Inhibit replied unexpectedly: {error}"))?;
+            Ok(Some(Self { _lock: lock.into() }))
+        }
+    }
+}
+
+#[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
+mod platform {
+    /// No assertion is taken on this platform.
     pub struct Assertion;
 
     impl Assertion {

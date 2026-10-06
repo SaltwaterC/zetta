@@ -195,6 +195,7 @@ windows = { version = "0.61", features = [
     "Win32_System_Ioctl",
     "Win32_System_LibraryLoader",
     "Win32_System_Pipes",
+    "Win32_System_Power",
     "Win32_System_Registry",
     "Win32_System_SystemServices",
     "Win32_System_Threading",
@@ -211,7 +212,9 @@ windows-core = "0.61"
 url = "2.2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
-zbus = { version = "5.17", default-features = false, features = ["async-io"] }
+# `blocking-api` is for zosh-server's sleep inhibitor, which takes it from the
+# server's synchronous loop.
+zbus = { version = "5.17", default-features = false, features = ["async-io", "blocking-api"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 zntfy = { path = "crates/zntfy", optional = true }
