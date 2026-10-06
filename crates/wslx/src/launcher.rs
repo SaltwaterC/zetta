@@ -5,7 +5,7 @@ use std::{
     env,
     ffi::{OsStr, OsString},
     fs::{File, OpenOptions},
-    io::{self, BufReader, Read},
+    io::{self, BufReader, Read, Write},
     os::windows::process::CommandExt,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
@@ -19,7 +19,7 @@ use crate::{
     bootstrap::{self, RelayImage, RelayImages},
     bridge,
     environment::{self, AGENT_VARIABLE},
-    lock,
+    help, lock,
 };
 
 static RELAY_X86_64: &[u8] = include_bytes!(env!("WSLX_RELAY_X86_64"));
@@ -47,17 +47,37 @@ pub fn run() -> i32 {
     ignore_console_interrupts();
     let args: Vec<OsString> = env::args_os().skip(1).collect();
     let wsl = wsl_executable();
-    let socket = start_agent_relay(&wsl, &args);
-
     let mut command = Command::new(&wsl);
     command.args(&args);
-    if let Some(socket) = &socket {
-        let wslenv = env::var_os("WSLENV");
-        let wslenv = wslenv.as_deref().map(OsStr::to_string_lossy);
-        command
-            .env(AGENT_VARIABLE, socket)
-            .env("WSLENV", environment::wslenv_with_agent(wslenv.as_deref()));
+    match args::classify(&args) {
+        Invocation::Help => print_help(&mut command),
+        Invocation::Session { target } => {
+            if let Some(socket) = start_agent_relay(&wsl, &target) {
+                let wslenv = env::var_os("WSLENV");
+                let wslenv = wslenv.as_deref().map(OsStr::to_string_lossy);
+                command
+                    .env(AGENT_VARIABLE, socket)
+                    .env("WSLENV", environment::wslenv_with_agent(wslenv.as_deref()));
+            }
+        }
+        Invocation::Management => {}
     }
+    run_wsl(&mut command, &wsl)
+    // The relay's stdin closes with this process, which is what stops it.
+}
+
+/// Prints what `wslx.exe` adds, ahead of the help `command` prints.
+fn print_help(command: &mut Command) {
+    let mut stdout = io::stdout().lock();
+    let _ = stdout
+        .write_all(help::HELP.as_bytes())
+        .and_then(|()| stdout.flush());
+    // Redirected, `wsl.exe` writes UTF-16 unless told otherwise, which would
+    // garble `wslx --help | more` after the UTF-8 above.
+    command.env("WSL_UTF8", "1");
+}
+
+fn run_wsl(command: &mut Command, wsl: &Path) -> i32 {
     match command.status() {
         // `wsl.exe` reports the Linux command's status, which can use all 32
         // bits; `std::process::exit` passes them on unchanged.
@@ -67,17 +87,14 @@ pub fn run() -> i32 {
             1
         }
     }
-    // The relay's stdin closes with this process, which is what stops it.
 }
 
-/// Brings the relay up and returns its socket, or `None` — after saying why,
-/// when it was attempted — so the session starts without an agent.
-fn start_agent_relay(wsl: &Path, args: &[OsString]) -> Option<String> {
+/// Brings the relay up for a session started with `target` and returns its
+/// socket, or `None` — after saying why, when it was attempted — so the
+/// session starts without an agent.
+fn start_agent_relay(wsl: &Path, target: &[&OsStr]) -> Option<String> {
     let pipe = environment::agent_pipe(&env::var_os(AGENT_VARIABLE)?)?;
-    let Invocation::Session { target } = args::classify(args) else {
-        return None;
-    };
-    match spawn_relay(wsl, &target, pipe) {
+    match spawn_relay(wsl, target, pipe) {
         Ok(socket) => Some(socket),
         Err(error) => {
             eprintln!("wslx: the SSH agent is not available inside WSL: {error}");

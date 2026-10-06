@@ -13,7 +13,7 @@ fn target_of(args: &[&str]) -> Option<Vec<String>> {
                 .map(|value| value.to_string_lossy().into_owned())
                 .collect(),
         ),
-        Invocation::Management => None,
+        Invocation::Help | Invocation::Management => None,
     }
 }
 
@@ -82,7 +82,6 @@ fn management_commands_get_no_relay() {
         &["-l"],
         &["--shutdown"],
         &["--install"],
-        &["--help"],
         &["--version"],
         &["-d", "Ubuntu", "--terminate"],
         &["--set-default", "Ubuntu"],
@@ -104,4 +103,29 @@ fn a_tilde_is_only_the_home_shortcut_in_first_place() {
 fn an_option_missing_its_value_is_left_to_wsl_to_report() {
     assert_eq!(target_of(&["-d"]), None);
     assert_eq!(target_of(&["--cd"]), None);
+}
+
+#[test]
+fn help_ahead_of_the_command_line_is_a_help_request() {
+    for args in [
+        &["--help"][..],
+        &["-d", "Ubuntu", "--help"],
+        &["--cd", "~", "--help"],
+    ] {
+        assert_eq!(classify(&arguments(args)), Invocation::Help, "{args:?}");
+    }
+}
+
+#[test]
+fn help_inside_the_command_line_belongs_to_the_command() {
+    for args in [
+        &["-e", "ls", "--help"][..],
+        &["--", "--help"],
+        &["git", "--help"],
+    ] {
+        assert!(
+            matches!(classify(&arguments(args)), Invocation::Session { .. }),
+            "{args:?}"
+        );
+    }
 }

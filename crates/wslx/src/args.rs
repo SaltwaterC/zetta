@@ -1,6 +1,7 @@
 //! Reading `wsl.exe`'s own command line, which `wslx.exe` forwards untouched.
 //!
-//! It is read for two answers only. Does this invocation run something in a
+//! It is read for three answers only. Is this a request for help, which
+//! `wslx.exe` adds its own section to? Does it run something in a
 //! distribution, as opposed to `--list`, `--shutdown` or `--install`, which
 //! get no agent? And which distribution and user does it run as, so that the
 //! relay is started in the same place and its socket belongs to the user who
@@ -19,6 +20,9 @@ pub enum Invocation<'a> {
     /// A session, and the arguments that select where it runs and as whom —
     /// the ones the relay has to be started with too.
     Session { target: Vec<&'a OsStr> },
+    /// `--help` ahead of the command line: `wslx.exe` prints what it adds,
+    /// then `wsl.exe` prints its own.
+    Help,
     /// Anything else; `wsl.exe` runs it without an agent.
     Management,
 }
@@ -59,6 +63,8 @@ pub fn classify(args: &[OsString]) -> Invocation<'_> {
                 return Invocation::Management;
             }
             index += 2;
+        } else if text == "--help" {
+            return Invocation::Help;
         } else if text == "~" && index == 0 {
             // `wsl ~` starts in the home directory, and only as the first
             // argument.

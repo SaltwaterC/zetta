@@ -199,6 +199,8 @@ wslx                    # the default distribution
 wslx -d Ubuntu -u root  # any wsl.exe arguments, passed through unchanged
 ```
 
+`wslx --help` describes what it adds, followed by `wsl.exe`'s own help.
+
 `wslx` hands every argument to `wsl.exe` and exits with its status. When
 `SSH_AUTH_SOCK` names a pipe and the arguments start a session (rather than,
 say, `--list` or `--shutdown`), it first starts a small relay in the same
@@ -212,6 +214,16 @@ Arm64 distributions. The first session of each Zetta build copies it to
 there. If the relay cannot start, `wslx` says why and starts the session
 without an agent. When `SSH_AUTH_SOCK` is unset or is not a pipe, `wslx`
 behaves exactly like `wsl`.
+
+A shell startup file that sets `SSH_AUTH_SOCK` itself — `wsl2-ssh-agent`,
+`keychain`, or `eval $(ssh-agent)` — runs after `wslx` and replaces the
+forwarded agent. Make it set its own only when no agent socket was handed in:
+
+```sh
+[ -S "$SSH_AUTH_SOCK" ] || eval "$("$HOME/bin/wsl2-ssh-agent")"
+```
+
+Plain `wsl` passes no `SSH_AUTH_SOCK`, so it keeps using the local agent.
 
 ## CLI command panes
 

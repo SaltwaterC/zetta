@@ -27,6 +27,7 @@ pub mod args;
 pub mod bootstrap;
 pub mod bridge;
 pub mod environment;
+pub mod help;
 pub mod protocol;
 #[cfg(unix)]
 pub mod relay;
