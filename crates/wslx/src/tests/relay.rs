@@ -51,6 +51,19 @@ fn round_trip(client: &mut UnixStream, body: &[u8]) -> Option<Vec<u8>> {
 }
 
 #[test]
+fn the_socket_path_fits_the_macos_limit() {
+    // Use the longest scratch name among the relay fixtures, and check the
+    // macOS limit even when these tests run on Linux.
+    let scratch = ScratchDir::new("relay-unreachable");
+    let relay = Relay::bind(scratch.path()).unwrap();
+    assert!(
+        relay.socket_path().as_os_str().len() < 104,
+        "the socket path must leave room for a terminator in macOS's sun_path: {}",
+        relay.socket_path().display()
+    );
+}
+
+#[test]
 fn requests_reach_the_agent_and_replies_come_back() {
     let scratch = ScratchDir::new("relay-round-trip");
     let socket = start(&scratch, || fake_agent(12));

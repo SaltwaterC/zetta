@@ -7,7 +7,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-/// A fresh directory under the system temporary directory, removed on drop.
+/// A fresh directory under `/tmp`, removed on drop.
 /// Only the Unix tests need a directory: a socket, or a home for the script.
 #[cfg(unix)]
 pub struct ScratchDir(PathBuf);
@@ -18,9 +18,11 @@ impl ScratchDir {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |elapsed| elapsed.as_nanos());
-        let path =
-            std::env::temp_dir().join(format!("wslx-test-{name}-{}-{nonce:x}", std::process::id()));
-        fs::create_dir_all(&path).expect("creating a scratch directory");
+        // macOS's system temporary directory is too long once the relay adds
+        // its own directory and socket name. Keep both the parent and prefix
+        // short so the complete path fits the Unix socket address.
+        let path = Path::new("/tmp").join(format!("wslx-{name}-{}-{nonce:x}", std::process::id()));
+        fs::create_dir(&path).expect("creating a scratch directory");
         Self(path)
     }
 
