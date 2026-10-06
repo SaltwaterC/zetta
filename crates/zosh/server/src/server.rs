@@ -6,7 +6,8 @@ use crate::lifecycle;
 use crate::protocol::{AgentHostRecord, ServerTransport, encode_host_message_with_agent};
 use crate::session_io::{LoopWait, PTY_CHUNK, PtyEvent, PtyIo, PtyWrite, UdpIo};
 use crate::sleep_guard::{self, IdleSleepGuard};
-use crate::terminal_state::{QueryResponder, TerminalState};
+use crate::terminal_queries::QueryResponder;
+use crate::terminal_state::TerminalState;
 use crate::timing;
 use crate::user_stream::{UserEvent, UserStreamTracker};
 use crate::wake::{WakeDeadline, Waker};
@@ -824,7 +825,10 @@ fn drain_pty_events(
                 terminal.process(&bytes);
                 let replies = responder.feed(&bytes, terminal.cursor_position(), terminal.size());
                 for query in responder.take_terminal_queries() {
-                    if zclip::protocol::Frame::parse(&query).is_some() && !clipboard_supported {
+                    if !clipboard_supported
+                        && (zclip::osc52::is_write(&query)
+                            || zclip::protocol::Frame::parse(&query).is_some())
+                    {
                         continue;
                     }
                     if terminal.add_query(query.clone()) == 0

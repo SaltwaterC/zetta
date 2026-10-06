@@ -6,6 +6,7 @@ mod protocol;
 mod server;
 mod session_io;
 mod sleep_guard;
+mod terminal_queries;
 mod terminal_state;
 mod timing;
 mod user_stream;

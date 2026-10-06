@@ -859,6 +859,11 @@ nothing is selected, while `Ctrl-Insert` copies selected text. `Ctrl-V` and
 `Shift-Insert` paste; `Ctrl-V` takes precedence over the shell's traditional
 quoted-insert use of that chord.
 
+Applications such as Codex that manage their own selections can copy through
+OSC 52 in local PTY, shared SSH, and Zosh panes. Zosh requires the updated
+bundled client and `zosh-server` on the remote host. Zetta accepts these
+clipboard writes without enabling OSC 52 clipboard reads.
+
 A plain right-click pastes when the clipboard contains text and opens the
 context menu when it does not. `Shift`-right-click always opens the context
 menu. **Paste Trimmed** removes leading and trailing whitespace while preserving

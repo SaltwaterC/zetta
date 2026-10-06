@@ -138,6 +138,28 @@ fn forwarded_terminal_queries_are_written_and_registered() {
     );
 }
 
+#[test]
+fn osc52_writes_are_forwarded_without_waiting_for_responses() {
+    let sequence = b"\x1b]52;c;c2VsZWN0ZWQgdGV4dA==\x07";
+    let mut proxy = TerminalQueryProxy::default();
+    let mut output = Vec::new();
+    for id in 0..=MAX_PENDING_TERMINAL_QUERIES {
+        forward_terminal_queries(
+            &[HostEvent::TerminalQuery {
+                id: id as u64,
+                bytes: sequence.to_vec(),
+            }],
+            &mut proxy,
+            &mut output,
+        )
+        .unwrap();
+    }
+    assert_eq!(output, sequence.repeat(MAX_PENDING_TERMINAL_QUERIES + 1));
+    assert!(proxy.pending.is_empty(), "clipboard writes have no reply");
+    assert!(proxy.register_query(b"\x1b]10;?\x07"));
+    assert!(!proxy.register_query(b"\x1b]52;c;?\x07"));
+}
+
 #[cfg(not(unix))]
 #[test]
 fn control_and_special_keys_are_encoded_as_terminal_bytes() {

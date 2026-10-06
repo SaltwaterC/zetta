@@ -15,6 +15,9 @@ Clipboard builds also ship standalone `zcopy` and `zpaste` commands. `zetta copy
 In an interactive SSH or zosh pane, the helpers use the clipboard of the
 displaying Zetta window. Remote paste needs **Allow Remote Clipboard Paste**
 enabled in that tab's menu; it is off by default.
+Applications that manage their own selections can also copy through OSC 52
+in local PTY, shared SSH, and Zosh panes. Zosh copying requires the updated
+bundled client and `zosh-server` on the remote host.
 
 ## Highlights
 

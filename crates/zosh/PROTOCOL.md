@@ -113,11 +113,19 @@ input remain compatible.
 
 The client announces clipboard relay version 1 in field 24 of a standalone
 `ClientBuffers.Instruction`. The server forwards private clipboard OSC frames
-only after receiving that capability. They use the same deduplicated field 20
+and standard OSC 52 clipboard writes only after receiving that capability.
+They use the same deduplicated field 20
 terminal-query path and the ordered field 21 terminal-response path described
 above. A stock Mosh peer ignores the new field and does not take part in the
 relay. The server keeps at most 2 MiB of unacknowledged terminal queries; if
 the queue fills, it sends an error response to the remote helper.
+
+Standard OSC 52 writes accept BEL or ST terminators and are bounded to 256 KiB
+per escape, including their encoded payload and framing. The client forwards
+each write once without registering a response ticket, since writes have no
+reply. Clipboard reads (`OSC 52 ; TARGET ; ?`) are not forwarded. Both the
+bundled client and Rust `zosh-server` must support this forwarding; stock Mosh
+and older Zosh versions do not carry standard clipboard writes.
 
 The private frame syntax is `ESC ] 777 ; zclip ; 1 ; ID ; KIND [; ...] BEL`.
 `ID` is a random 128-bit lowercase hex request ID. `KIND` is `probe`,

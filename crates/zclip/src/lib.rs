@@ -3,6 +3,7 @@ use anyhow::{Context as _, Result};
 use std::ffi::OsString;
 
 pub mod host;
+pub mod osc52;
 pub mod protocol;
 pub mod remote;
 

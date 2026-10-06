@@ -53,6 +53,9 @@ Retain these Zetta-specific behaviors when synchronizing:
   background worker. Application-wide clipboard versions reject stale results;
   terminal clipboard reads wait for pending copies. Empty selections retain
   primary ownership, including after copy-and-clear;
+- enable OSC 52 copy for interactive byte-stream panes when their PTY
+  controller is installed, matching local PTYs. Display-only logs keep OSC 52
+  disabled, and interactive panes do not accept OSC 52 clipboard reads;
 - clipboard and primary reads use the platform's asynchronous reads, and a
   paste that has to wait takes a `PasteTicket` (`paste_order.rs`, no upstream
   counterpart): keyboard input queued before `finish_paste` is written after

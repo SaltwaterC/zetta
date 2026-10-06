@@ -83,6 +83,11 @@ pub(crate) enum ProxiedInput {
 
 impl TerminalQueryProxy {
     pub(crate) fn register_query(&mut self, query: &[u8]) -> bool {
+        // OSC 52 writes have no response. Forward them without consuming a
+        // pending-query slot, or repeated copies would exhaust the relay.
+        if zclip::osc52::is_write(query) {
+            return true;
+        }
         let kind = terminal_color_query_kind(query)
             .map(TerminalQueryKind::Color)
             .or_else(|| {

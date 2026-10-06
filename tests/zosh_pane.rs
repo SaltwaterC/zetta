@@ -36,6 +36,41 @@ use zmux::{
 
 const TEST_SECRET: &str = "relayed-pane-secret";
 
+/// Applications such as Codex copy their own selections through OSC 52. The
+/// escape must survive screen synchronization and reach Zetta's terminal once.
+#[test]
+#[ignore = "drives separately built zmux and zosh-server binaries; see the module docs"]
+fn ctrl_c_clipboard_write_survives_a_zosh_relayed_pane() {
+    let daemon = TestDaemon::start();
+    let client = daemon.client();
+    let pane = shared_protected_session(&client);
+    let mut relayed = spawn_relayed_pane(
+        &client,
+        pane.session_id,
+        concat!(
+            "stty -echo -icanon -isig; printf 'clipboard-pane-ready'; ",
+            "key=$(dd bs=1 count=1 2>/dev/null | od -An -tu1); ",
+            "if test \"$key\" -eq 3; then ",
+            r"printf '\033]52;c;c2VsZWN0ZWQgQ29kZXggb3V0cHV0\007'; ",
+            "printf 'clipboard-pane-copied'; fi; sleep 60",
+        ),
+        &daemon.config,
+        None,
+    );
+    let frames = Frames::collect(relayed.session.take_reader().expect("the pane's reader"));
+    frames.wait_for("clipboard-pane-ready");
+    use std::io::Write as _;
+    relayed
+        .session
+        .writer()
+        .write_all(b"\x03")
+        .expect("sending Ctrl+C to the application");
+    frames.wait_for("clipboard-pane-copied");
+    let sequence = "\x1b]52;c;c2VsZWN0ZWQgQ29kZXggb3V0cHV0\x07";
+    let output = frames.wait_for(sequence);
+    assert_eq!(output.matches(sequence).count(), 1);
+}
+
 /// The whole path a Zosh pane's bytes take: the multiplexer's shared stream,
 /// the relay's stdio, the Mosh server's emulator, the link, and the session
 /// this side renders it with. Input goes back the same way.

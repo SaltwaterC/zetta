@@ -4,6 +4,82 @@ use std::path::PathBuf;
 use terminal::{PathLikeTarget, is_hyperlink_modifier};
 use util::paths::{PathStyle, home_dir};
 
+#[gpui::test]
+async fn ctrl_c_copies_selection_before_forwarding_interrupt(cx: &mut gpui::TestAppContext) {
+    cx.update(|cx| {
+        theme_settings::init(theme::LoadThemes::JustBase, cx);
+        TerminalSettings::init(cx);
+        cx.bind_keys([gpui::KeyBinding::new(
+            "ctrl-c",
+            CopyAndClearSelection,
+            Some("Terminal && selection"),
+        )]);
+    });
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        let terminal = cx.new(|cx| {
+            terminal::TerminalBuilder::new_display_only(
+                terminal::terminal_settings::CursorShape::Block,
+                terminal::terminal_settings::AlternateScroll::On,
+                None,
+                0,
+                cx.background_executor(),
+                PathStyle::local(),
+            )
+            .subscribe(cx)
+        });
+        let mut view = TerminalView::new(terminal, window, cx);
+        view.set_emit_input_events(true);
+        view.focus_handle.focus(window, cx);
+        view
+    });
+    let interrupts = std::rc::Rc::new(std::cell::Cell::new(0));
+    let received = interrupts.clone();
+    cx.update(|_, cx| {
+        cx.subscribe(&view, move |_, event, _| {
+            if let TerminalViewEvent::Input(TerminalInput::Keystroke(key)) = event {
+                assert_eq!(key, &Keystroke::parse("ctrl-c").unwrap());
+                received.set(received.get() + 1);
+            }
+        })
+        .detach();
+    });
+    cx.run_until_parked();
+    view.update_in(cx, |view, _window, cx| {
+        view.terminal.update(cx, |terminal, cx| {
+            terminal.write_output(
+                b"\x1b[?1049h\x1b[?1000h\x1b[?1006hselected terminal output\r\n",
+                cx,
+            );
+            terminal.select_all();
+        });
+        cx.notify();
+    });
+    cx.simulate_keystrokes("ctrl-c");
+    assert_eq!(
+        interrupts.get(),
+        0,
+        "copy must not interrupt the application"
+    );
+    let clipboard = cx.update(|_, cx| terminal::selection_clipboard::read(cx));
+    assert!(view.update(cx, |view, cx| {
+        view.terminal.read(cx).last_content.selection.is_none()
+    }));
+    assert_eq!(
+        clipboard
+            .await
+            .and_then(|item| item.text())
+            .as_deref()
+            .map(str::trim_end),
+        Some("selected terminal output")
+    );
+    cx.simulate_keystrokes("ctrl-c");
+    assert_eq!(
+        interrupts.get(),
+        1,
+        "Ctrl+C without selection reaches the application"
+    );
+}
+
 #[test]
 fn pane_customization_context_menu_entries_have_stable_order() {
     let entries = pane_customization_context_menu_entries();

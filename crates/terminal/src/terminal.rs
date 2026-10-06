@@ -2505,6 +2505,11 @@ impl TerminalBuilder {
     pub fn with_pty_control(mut self, control: Arc<dyn PtyControl>) -> Self {
         self.terminal.pty_control = Some(control);
         self.terminal.console_palette_enabled = cfg!(windows);
+        // This stream carries an interactive PTY, so applications such as
+        // Codex can copy their own selections through OSC 52, as in a local
+        // PTY. Ordinary display-only logs retain their disabled clipboard.
+        self.terminal.term_config.osc52 = alacritty_terminal::term::Osc52::OnlyCopy;
+        apply_config(&self.terminal.term, &self.terminal.term_config);
         self
     }
 
@@ -12747,6 +12752,40 @@ mod tests {
 
         let clipboard_text = cx.update(|cx| cx.read_from_clipboard().and_then(|item| item.text()));
         assert_eq!(clipboard_text.as_deref(), Some("original"));
+    }
+
+    #[gpui::test]
+    async fn controlled_byte_stream_output_accepts_osc52_copy(cx: &mut TestAppContext) {
+        cx.update(TerminalSettings::init);
+        let terminal = cx.new(|cx| {
+            TerminalBuilder::new_display_only(
+                SettingsCursorShape::default(),
+                AlternateScroll::On,
+                None,
+                0,
+                cx.background_executor(),
+                PathStyle::local(),
+            )
+            .with_pty_control(Arc::new(RecordingPtyControl::default()))
+            .subscribe(cx)
+        });
+        terminal.update(cx, |terminal, cx| {
+            terminal.write_output(b"\x1b]52;c;c2VsZWN0ZWQgdGV4dA==\x07", cx);
+        });
+        cx.run_until_parked();
+        let clipboard = cx.update(|cx| selection_clipboard::read(cx));
+        assert_eq!(
+            clipboard.await.and_then(|item| item.text()).as_deref(),
+            Some("selected text")
+        );
+
+        terminal.update(cx, |terminal, cx| {
+            terminal.write_output(b"\x1b]52;c;?\x07", cx);
+        });
+        cx.run_until_parked();
+        terminal.update(cx, |terminal, _| {
+            assert!(terminal.take_pty_write_log().is_empty());
+        });
     }
 
     #[gpui::test]
