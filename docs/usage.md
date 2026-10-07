@@ -978,6 +978,11 @@ mode, `/` also opens scrollback search.
 `Ctrl-Shift-F` searches every pane in the active tab. It highlights all matches
 and activates the pane containing the current result as you navigate.
 
+Both searches show the newest matches as soon as they are found, without
+waiting for the whole scrollback to be read. Until it has been, the match count
+ends in `+` (or reads `Searching…` before the first match), and it settles on
+the exact count when the search finishes.
+
 ## Command palette
 
 `Ctrl-Shift-P` opens the command palette. It lists actions available in the

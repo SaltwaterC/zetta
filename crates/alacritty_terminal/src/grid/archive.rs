@@ -11,7 +11,9 @@
 //! Readers borrow history rows as `&Row` for as long as they borrow the grid, and hold several
 //! at once, so a compact row is read through [`DecodedChunks`]: the whole chunk is decoded once
 //! into rows whose address stays fixed until the storage is next borrowed mutably. That is the
-//! only time decoded chunks are released, which keeps every handed-out reference valid.
+//! only time decoded chunks are released, which keeps every handed-out reference valid. A reader
+//! that wants only the characters, such as scrollback search, reads the encoding directly through
+//! [`super::text`] instead, and never decodes.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -20,7 +22,10 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 
+use super::text::{RowText, SPACERS, has_zerowidth};
 use super::{GridCell, Row};
+use crate::index::{Column, Line, Point};
+use crate::term::cell::{Cell, Flags};
 
 /// Above this many distinct attributes a chunk stays as rows. Looking them up is linear, and
 /// output colourful enough to need more is too rare to be worth a hash table on every run.
@@ -221,6 +226,120 @@ fn decode_row<T: GridCell + Default>(rows: &CompactRows<T>, index: usize) -> Row
     Row::from_vec(cells, occupied)
 }
 
+/// The fill's attribute index is the varint written just before the row's last character, which
+/// is only readable backwards because it is always one byte.
+const _: () = assert!(MAX_ATTRIBUTES < 0x80);
+
+/// Reading rows as text; see [`super::text`]. Each mirrors [`decode_row`] without building cells.
+impl CompactRows<Cell> {
+    /// A reader past row `index`'s header, the row's explicit cell count, and how many of its
+    /// cells are kept out of how many columns it now has.
+    fn header(&self, index: usize) -> (Reader<'_>, usize, usize, usize) {
+        debug_assert!(index < self.len);
+        let mut reader = Reader { bytes: &self.bytes, position: self.offsets[index] as usize };
+        let len = reader.varint();
+        let explicit = reader.varint();
+        let (kept, columns) = self
+            .resized
+            .map_or((len, len), |resize| (resize.kept_columns.min(len), resize.columns));
+        (reader, explicit, kept, columns)
+    }
+
+    /// Append row `index`, as `line`, to `text`.
+    pub(super) fn append_text(&self, index: usize, line: Line, text: &mut RowText) {
+        let (mut reader, explicit, kept, columns) = self.header(index);
+        // The text ends after the last occupied cell, unless the row wraps.
+        let mut occupied_end = text.len();
+        let mut last_flags = Flags::empty();
+        let runs = explicit.min(kept);
+        let mut column = 0;
+        while column < runs {
+            let attributes = &self.attributes[reader.varint()];
+            let run = reader.run_length().min(runs - column);
+            let spacer = attributes.flags.intersects(SPACERS);
+            let point = Point::new(line, Column(column));
+            if let Some(ascii) = reader.ascii(run) {
+                let start = text.len();
+                if !spacer {
+                    text.push_ascii(ascii, point);
+                }
+                if has_zerowidth(attributes) {
+                    occupied_end = text.len();
+                } else if let Some(last) = ascii.bytes().rposition(|byte| byte != b' ') {
+                    occupied_end = if spacer { text.len() } else { start + last + 1 };
+                }
+            } else {
+                for offset in 0..run {
+                    let c = reader.char();
+                    if !spacer {
+                        text.push_char(c, Point::new(line, point.column + offset));
+                    }
+                    if c != ' ' || has_zerowidth(attributes) {
+                        occupied_end = text.len();
+                    }
+                }
+            }
+            last_flags = attributes.flags;
+            column += run;
+        }
+
+        let fill = (kept > explicit).then(|| {
+            let attributes = &self.attributes[reader.varint()];
+            last_flags = attributes.flags;
+            (attributes, reader.char())
+        });
+        // A row narrower than its columns ends in default cells, which never wrap.
+        let wraps = columns == kept && last_flags.contains(Flags::WRAPLINE);
+        if let Some((attributes, c)) = fill {
+            if wraps || c != ' ' || has_zerowidth(attributes) {
+                if !attributes.flags.intersects(SPACERS) {
+                    text.push_repeated(c, kept - explicit, Point::new(line, Column(explicit)));
+                }
+                occupied_end = text.len();
+            }
+        }
+        if wraps {
+            occupied_end = text.len();
+        }
+        text.truncate(occupied_end);
+    }
+
+    /// Whether row `index`'s last cell carries [`Flags::WRAPLINE`].
+    pub(super) fn wraps(&self, index: usize) -> bool {
+        let (mut reader, explicit, kept, columns) = self.header(index);
+        if columns > kept {
+            return false;
+        }
+        let last = kept - 1;
+        let attribute = if last >= explicit {
+            self.fill_attribute(index)
+        } else {
+            // Only a row narrowed below its explicit cells ends inside a run.
+            let mut start = 0;
+            loop {
+                let attribute = reader.varint();
+                let run = reader.run_length();
+                if last < start + run {
+                    break attribute;
+                }
+                reader.skip_chars(run);
+                start += run;
+            }
+        };
+        self.attributes[attribute].flags.contains(Flags::WRAPLINE)
+    }
+
+    /// The attribute index of row `index`'s fill, read back from the row's end.
+    fn fill_attribute(&self, index: usize) -> usize {
+        let end = self.offsets.get(index + 1).map_or(self.bytes.len(), |&end| end as usize);
+        let mut fill = end - 1;
+        while self.bytes[fill] & 0xc0 == 0x80 {
+            fill -= 1;
+        }
+        usize::from(self.bytes[fill - 1])
+    }
+}
+
 fn write_varint(bytes: &mut Vec<u8>, mut value: usize) {
     while value >= 0x80 {
         bytes.push(value as u8 | 0x80);
@@ -242,7 +361,26 @@ struct Reader<'a> {
     position: usize,
 }
 
-impl Reader<'_> {
+impl<'a> Reader<'a> {
+    /// The next `count` characters when they are all ASCII, else `None` without moving.
+    #[inline]
+    fn ascii(&mut self, count: usize) -> Option<&'a str> {
+        let bytes = self.bytes.get(self.position..self.position + count)?;
+        if !bytes.is_ascii() {
+            return None;
+        }
+        self.position += count;
+        std::str::from_utf8(bytes).ok()
+    }
+
+    fn skip_chars(&mut self, count: usize) {
+        if self.ascii(count).is_none() {
+            for _ in 0..count {
+                self.char();
+            }
+        }
+    }
+
     fn run_length(&mut self) -> usize {
         let length = u16::from_le_bytes([self.bytes[self.position], self.bytes[self.position + 1]]);
         self.position += 2;

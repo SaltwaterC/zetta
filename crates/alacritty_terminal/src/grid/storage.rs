@@ -204,6 +204,13 @@ impl<T: GridCell + Default + PartialEq> ArchivedChunk<T> {
     }
 }
 
+/// A row as storage keeps it: compact history is not decoded to hand it out.
+pub(super) enum StoredRow<'a, T> {
+    Row(&'a Row<T>),
+    /// Row `.1` of a compact chunk.
+    Compact(&'a CompactRows<T>, usize),
+}
+
 /// Rows a sealed uniform or compact chunk no longer needs, kept as the next lines scrolled into
 /// the grid.
 ///
@@ -336,15 +343,35 @@ impl<T> Storage<T> {
         let index = self.compute_index(requested);
         // A decoded compact row lives only until the decoded chunk is released, which would
         // let its address be reused for another row.
-        if let Some(archived) = index
-            .checked_sub(self.live.len() + self.archive_head.len())
-            .filter(|&archived| archived < self.archived_lines)
-            && let ArchivedRows::Compact(rows) =
-                &self.archive_chunks[archived / ARCHIVE_CHUNK_ROWS].rows
-        {
-            return rows.row_id(archived % ARCHIVE_CHUNK_ROWS);
+        if let Some((rows, row_index)) = self.compact_row(index) {
+            return rows.row_id(row_index);
         }
         self.row_at(index) as *const Row<T> as usize
+    }
+
+    /// Row `requested`, left encoded when it is compact history.
+    pub(super) fn stored_row(&self, requested: Line) -> StoredRow<'_, T> {
+        let index = self.compute_index(requested);
+        match self.compact_row(index) {
+            Some((rows, row_index)) => StoredRow::Compact(rows, row_index),
+            None => StoredRow::Row(self.row_at(index)),
+        }
+    }
+
+    #[inline]
+    fn compact_row(&self, index: usize) -> Option<(&CompactRows<T>, usize)> {
+        let archived = index
+            .checked_sub(self.live.len() + self.archive_head.len())
+            .filter(|&archived| archived < self.archived_lines)?;
+        match &self.archive_chunks[archived / ARCHIVE_CHUNK_ROWS].rows {
+            ArchivedRows::Compact(rows) => Some((rows, archived % ARCHIVE_CHUNK_ROWS)),
+            ArchivedRows::Uniform { .. } | ArchivedRows::Dense(_) => None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn decoded_len(&self) -> usize {
+        self.decoded.len()
     }
 
     /// Release decoded compact chunks. Reading them again decodes them again.

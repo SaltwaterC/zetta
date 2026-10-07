@@ -149,13 +149,13 @@ use settings_editor::{
 use silent_mode::{FocusStatusAccess, SilentModeState};
 use task::{Shell, ShellBuilder, SpawnInTerminal, TaskId};
 use terminal::{
-    Clear, Event as TerminalEvent, Paste, PasteTrimmed, Search, TaskState, TaskStatus, Terminal,
-    TerminalBuilder, TerminalExited, terminal_settings::TerminalSettings,
+    Clear, Event as TerminalEvent, Paste, PasteTrimmed, Search, SearchMatches, TaskState,
+    TaskStatus, Terminal, TerminalBuilder, TerminalExited, terminal_settings::TerminalSettings,
 };
 use terminal_view::{
     ChangePaneTheme, ClearClipboard, CopyAndClearSelection, DismissSearch, EditScrollback,
-    SavePaneOutput, SearchNextMatch, SearchPreviousMatch, SearchScrollback, SelectAll,
-    SelectAllSearchText, SetPaneOverlay, TerminalInput, TerminalView, TerminalViewEvent,
+    SavePaneOutput, SearchNextMatch, SearchPreviousMatch, SearchScrollback, SearchStatus,
+    SelectAll, SelectAllSearchText, SetPaneOverlay, TerminalInput, TerminalView, TerminalViewEvent,
 };
 use text_edit::{
     ClipboardOutcome, TextField, TextFieldEdit, apply_clipboard_shortcut, apply_text_field_key,

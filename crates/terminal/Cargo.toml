@@ -28,6 +28,7 @@ libc = "0.2"
 log = { version = "0.4.16", features = ["kv_unstable_serde", "serde"] }
 parking_lot = "0.12.1"
 percent-encoding = "2.3.2"
+memchr = "2.8"
 regex = "1.5"
 release_channel = { path = "../release_channel" }
 schemars = { version = "1.0", features = ["indexmap2"] }

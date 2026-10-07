@@ -4430,6 +4430,7 @@ dependencies = [
  "itertools 0.14.0",
  "libc",
  "log",
+ "memchr",
  "parking_lot",
  "percent-encoding",
  "regex",

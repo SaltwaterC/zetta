@@ -16,9 +16,11 @@ mod row;
 mod storage;
 #[cfg(test)]
 mod tests;
+mod text;
 
 pub use self::row::Row;
 use self::storage::Storage;
+pub use self::text::RowText;
 
 /// Rows detached from a live terminal grid for deferred destruction.
 pub(crate) struct DetachedRows<T> {
@@ -470,7 +472,9 @@ impl<T: Clone> Grid<T> {
     ///
     /// Compact history is decoded a chunk at a time as it is read, and the decoded rows are only
     /// released when the grid is next changed. A reader walking all of history in steps, such
-    /// as a search over a snapshot, releases them between steps to keep at most one step's worth.
+    /// as exporting a snapshot's text, releases them between steps to keep at most one step's
+    /// worth. A reader that needs only characters can use [`Grid::row_text`], which decodes
+    /// nothing.
     #[inline]
     pub fn release_history_cache(&mut self) {
         self.raw.release_decoded();

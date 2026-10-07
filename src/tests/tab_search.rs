@@ -10,6 +10,7 @@ fn stale_tab_search_work_is_rejected() {
         active_match: None,
         limit_reached: false,
         total_count: 0,
+        complete: true,
         task: None,
     };
     assert!(tab_search_request_is_current(Some(&search), 7, 4, "cargo"));
@@ -27,6 +28,7 @@ fn tab_search_is_targeted_only_by_its_own_tab() {
         active_match: None,
         limit_reached: false,
         total_count: 0,
+        complete: true,
         task: None,
     };
 

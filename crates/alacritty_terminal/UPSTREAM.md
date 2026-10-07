@@ -37,6 +37,14 @@ Retain these Zetta changes when synchronizing:
   compact row is an address inside its chunk's encoded bytes, never the
   decoded row's, so it stays stable when the cache is released. Serde writes
   compact chunks out as rows;
+- rows read as text: `src/grid/text.rs`, a Zetta-authored module (tests in
+  `src/tests/grid/text.rs`), gives `Grid<Cell>::row_text`/`row_wraps` and
+  `RowText`, which read a compact row's encoded runs directly instead of
+  decoding its chunk into cells. Scrollback search over unique output spent
+  three quarters of its time decoding cells it then read only the characters
+  of. It touches upstream code only by declaring the module in `grid/mod.rs`;
+  `Storage::stored_row` and `CompactRows<Cell>::append_text`/`wraps` are in
+  Zetta-authored code;
 - scrollback allocator, large-history, and benchmark fixes;
 - Windows ConPTY fragmented-read coalescing and terminal-hangup handling;
 - shell integration, resize, and sequence handling needed by Zetta's PTY

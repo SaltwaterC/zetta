@@ -517,3 +517,30 @@ fn control_is_a_hyperlink_modifier_on_every_platform() {
         ..Default::default()
     }));
 }
+
+#[test]
+fn search_status_marks_a_count_that_is_still_growing() {
+    let label = |active_match, shown, total_count, limit_reached, complete| {
+        SearchStatus {
+            active_match,
+            shown,
+            total_count,
+            limit_reached,
+            complete,
+        }
+        .label()
+    };
+
+    assert_eq!(label(None, 0, 0, false, false), "Searching…");
+    assert_eq!(label(None, 0, 0, false, true), "0 / 0");
+    assert_eq!(label(Some(2), 3, 3, false, false), "3 / 3+");
+    assert_eq!(label(Some(2), 3, 3, false, true), "3 / 3");
+    assert_eq!(
+        label(Some(255), 256, 9_000, true, false),
+        "256 / 256 shown · 9000+ matches"
+    );
+    assert_eq!(
+        label(Some(255), 256, 9_000, true, true),
+        "256 / 256 shown · 9000 matches"
+    );
+}

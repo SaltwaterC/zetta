@@ -23,7 +23,7 @@ use settings_content::{TerminalBell, TerminalBlink};
 use terminal::{
     Clear, Copy, Event, HoveredWord, MaybeNavigationTarget, Modes, Paste, PasteText, PasteTrimmed,
     ScrollLineDown, ScrollLineUp, ScrollPageDown, ScrollPageUp, ScrollToBottom, ScrollToTop,
-    Search, ShowCharacterPalette, Terminal, TerminalBounds, ToggleViMode,
+    Search, SearchMatches, ShowCharacterPalette, Terminal, TerminalBounds, ToggleViMode,
     console_palette_for_theme,
     paste_order::{PasteOrder, PasteTicket},
     terminal_settings::{CursorShape, TerminalSettings},
@@ -199,6 +199,8 @@ pub struct TerminalView {
     search_generation: u64,
     search_matches_limited: bool,
     search_total_matches: usize,
+    /// The running search has read all of the scrollback, so its count is exact.
+    search_complete: bool,
     search_task: Option<Task<()>>,
     search_select_all: bool,
     search_cursor: usize,
@@ -372,6 +374,7 @@ impl TerminalView {
             search_generation: 0,
             search_matches_limited: false,
             search_total_matches: 0,
+            search_complete: true,
             search_task: None,
             search_select_all: false,
             search_cursor: 0,
@@ -821,6 +824,7 @@ impl TerminalView {
         let generation = self.search_generation;
         self.search_matches_limited = false;
         self.search_total_matches = 0;
+        self.search_complete = query.is_empty();
         if query.is_empty() {
             self.search_active_match = None;
             self.terminal.update(cx, |terminal, _| {
@@ -836,7 +840,7 @@ impl TerminalView {
         let executor = cx.background_executor().clone();
         let task = cx.spawn(async move |this, cx| {
             executor.timer(Duration::from_millis(75)).await;
-            let Some(search_task) = this
+            let Some(mut job) = this
                 .update(cx, |this, cx| {
                     search_request_is_current(
                         generation,
@@ -851,31 +855,54 @@ impl TerminalView {
             else {
                 return;
             };
-            let result = search_task.await;
-            this.update(cx, |this, cx| {
-                if !search_request_is_current(
-                    generation,
-                    &query,
-                    this.search_generation,
-                    this.search_query.as_deref(),
-                ) {
+            let mut first = true;
+            while let Some(result) = job.next().await {
+                let current = this
+                    .update(cx, |this, cx| {
+                        let current = search_request_is_current(
+                            generation,
+                            &query,
+                            this.search_generation,
+                            this.search_query.as_deref(),
+                        );
+                        if current {
+                            this.apply_search_matches(result, first, cx);
+                        }
+                        current
+                    })
+                    .unwrap_or(false);
+                if !current {
                     return;
                 }
-                let active_match = result.ranges.len().checked_sub(1);
-                this.search_active_match = active_match;
-                this.search_matches_limited = result.limit_reached;
-                this.search_total_matches = result.total_count;
-                this.terminal.update(cx, |terminal, _| {
-                    terminal.matches = Arc::new(result.ranges);
-                    if let Some(index) = active_match {
-                        terminal.activate_match(index);
-                    }
-                });
-                cx.notify();
-            })
-            .ok();
+                first = false;
+            }
         });
         self.search_task = Some(task);
+    }
+
+    /// Show a running search's latest results. The first results of a query activate its newest
+    /// match; later ones keep whichever match is active.
+    fn apply_search_matches(&mut self, result: SearchMatches, first: bool, cx: &mut Context<Self>) {
+        let previous = self.terminal.read(cx).matches.len();
+        let active_match = (!first)
+            .then_some(self.search_active_match)
+            .flatten()
+            .map(|index| result.carried_index(index, previous))
+            .or_else(|| result.ranges.len().checked_sub(1));
+        let activate = (first || self.search_active_match.is_none())
+            .then_some(active_match)
+            .flatten();
+        self.search_active_match = active_match;
+        self.search_matches_limited = result.limit_reached;
+        self.search_total_matches = result.total_count;
+        self.search_complete = result.complete;
+        self.terminal.update(cx, |terminal, _| {
+            terminal.matches = Arc::new(result.ranges);
+            if let Some(index) = activate {
+                terminal.activate_match(index);
+            }
+        });
+        cx.notify();
     }
 
     fn process_keystroke(&mut self, keystroke: &Keystroke, cx: &mut Context<Self>) -> bool {
@@ -1241,21 +1268,14 @@ impl Render for TerminalView {
             focused || self.has_open_context_menu() || self.search_query.is_some();
         let theme = self.theme.clone().unwrap_or_else(|| cx.theme().clone());
         let search_overlay = self.search_query.as_ref().map(|query| {
-            let match_count = self.terminal.read(cx).matches.len();
-            let status = if self.search_matches_limited {
-                let position = self
-                    .search_active_match
-                    .map(|index| (index + 1).to_string())
-                    .unwrap_or_else(|| "0".to_owned());
-                format!(
-                    "{position} / {match_count} shown · {} matches",
-                    self.search_total_matches
-                )
-            } else {
-                self.search_active_match
-                    .map(|index| format!("{} / {}", index + 1, self.search_total_matches))
-                    .unwrap_or_else(|| format!("0 / {}", self.search_total_matches))
-            };
+            let status = SearchStatus {
+                active_match: self.search_active_match,
+                shown: self.terminal.read(cx).matches.len(),
+                total_count: self.search_total_matches,
+                limit_reached: self.search_matches_limited,
+                complete: self.search_complete,
+            }
+            .label();
             let cursor = self.search_cursor.min(query.len());
             let (query_before, query_after) = query.split_at(cursor);
             let query_before = query_before.to_owned();
@@ -1462,6 +1482,37 @@ fn next_char_boundary(text: &str, cursor: usize) -> usize {
         .next()
         .map(|character| cursor + character.len_utf8())
         .unwrap_or(text.len())
+}
+
+/// The match counter a scrollback search field shows.
+#[derive(Clone, Copy, Debug)]
+pub struct SearchStatus {
+    pub active_match: Option<usize>,
+    /// Matches highlighted, at most the search's limit.
+    pub shown: usize,
+    pub total_count: usize,
+    pub limit_reached: bool,
+    /// While a search runs its count only grows, which the label marks with a `+`.
+    pub complete: bool,
+}
+
+impl SearchStatus {
+    pub fn label(self) -> String {
+        if !self.complete && self.total_count == 0 {
+            return "Searching…".to_owned();
+        }
+        let total = if self.complete {
+            self.total_count.to_string()
+        } else {
+            format!("{}+", self.total_count)
+        };
+        let position = self.active_match.map_or(0, |index| index + 1);
+        if self.limit_reached {
+            format!("{position} / {} shown · {total} matches", self.shown)
+        } else {
+            format!("{position} / {total}")
+        }
+    }
 }
 
 fn navigated_match_index(

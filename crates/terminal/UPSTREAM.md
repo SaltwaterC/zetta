@@ -16,10 +16,15 @@ Retain these Zetta-specific behaviors when synchronizing:
   identity;
 - provide literal, incremental scrollback search and foreground-process
   refresh throttling. Queue only the live terminal handle on the foreground;
-  capture search snapshots on the low-priority worker under a short grid lock,
+  capture a grid snapshot on the low-priority worker under a short grid lock,
   release it before scanning, and yield after capture and between scan chunks
-  so obsolete jobs can be cancelled. Release the snapshot's decoded compact
-  history between scan chunks, so a search never holds all of it decoded;
+  so obsolete jobs can be cancelled. The search engine is `alacritty/search.rs`
+  (no upstream counterpart): it reads rows as text through the Alacritty fork's
+  `Grid::row_text`, which never decodes compact history, matches ASCII queries
+  with `memmem` and others with a Unicode smart-case regex, splits a large
+  snapshot across parallel low-priority workers, and reports provisional
+  results (`SearchJob`, `SearchMatches::complete`) newest first while the
+  exact count is still being taken;
 - capture and terminate both the shell and foreground process groups during
   PTY teardown, including application shutdown. Upstream reverted its own
   version of this in `492acd6c81`; do not import that revert. The regression it

@@ -1,3 +1,29 @@
+//! Terminal state, PTY input/output, and the events exposed to the window.
+//!
+//! # Security boundary: bytes printed into a pane
+//!
+//! Treat every output byte as untrusted, including output from a remote host,
+//! a local child, a file displayed with `cat`, and restored scrollback. Output
+//! can choose screen contents, titles, hyperlinks, and clipboard-copy contents;
+//! those values do not prove which program produced them. Shell-integration
+//! markers are output too, and must not authorize local execution, session
+//! control, or access to host secrets merely because their syntax is valid.
+//!
+//! Clipboard reads require the viewer's explicit permission. Native OSC 52
+//! reads are disabled by the PTY's copy-only policy; the private zclip channel
+//! has a separate per-tab opt-in. Its request IDs correlate messages, they do
+//! not authenticate a program: enabling reads trusts all output in that tab.
+//! Display-only terminals must not perform clipboard I/O. Replies to terminal
+//! queries must contain only protocol-defined data, never arbitrary title or
+//! command text that a shell could interpret as input. Opening a hyperlink is
+//! a user action, and its destination still needs scheme and display checks.
+//!
+//! Parsers and transfer state must have bounds on total memory, disk, work,
+//! and lifetime, not just individual frame size. Malformed output must not
+//! panic. These are the intended boundaries, not a claim that all are currently
+//! enforced: `docs/security-remediation-plan.md` records the remaining gaps,
+//! including unauthenticated markers, OSC 8 targets, and zclip/parser limits.
+
 mod mappings;
 
 mod alacritty;
@@ -86,15 +112,15 @@ use gpui::{
 #[cfg(not(windows))]
 use crate::alacritty::current_child_signal_mask;
 use crate::alacritty::{
-    AlacrittyCell, AlacrittyGridIterator, AlacrittyHyperlink, AlacrittyPty, AlacrittySearch,
-    AlacrittyTerm, AlacrittyTermConfig, AlacrittyTermLock, HyperlinkMatch, PtyIo, PtySender,
-    RegexSearches, ReplayBarrier, ScrollbackSearch, WakeupGate, ZedListener, append_text_to_term,
-    apply_config, clear_current_line, clear_saved_screen, content_text, display_offset,
-    display_only_term_config, find_from_terminal_point, full_content_range, last_non_empty_lines,
-    make_content, new_term, open_pty, pty_options, pty_term_config, resize, screen_lines,
-    scroll_display, scroll_to_point, set_default_cursor_style, set_selection as set_term_selection,
-    shrink_to_used, snapshot_content_text, spawn_event_loop, toggle_vi_mode as toggle_term_vi_mode,
-    total_lines, update_selection as update_term_selection, update_selection_to_vi_cursor,
+    AlacrittyCell, AlacrittyGridIterator, AlacrittyHyperlink, AlacrittyPty, AlacrittyTerm,
+    AlacrittyTermConfig, AlacrittyTermLock, HyperlinkMatch, PtyIo, PtySender, RegexSearches,
+    ReplayBarrier, SearchMatcher, WakeupGate, ZedListener, append_text_to_term, apply_config,
+    clear_current_line, clear_saved_screen, content_text, display_offset, display_only_term_config,
+    find_from_terminal_point, full_content_range, last_non_empty_lines, make_content, new_term,
+    open_pty, pty_options, pty_term_config, resize, screen_lines, scroll_display, scroll_to_point,
+    search_grid, set_default_cursor_style, set_selection as set_term_selection, shrink_to_used,
+    snapshot_content_text, spawn_event_loop, toggle_vi_mode as toggle_term_vi_mode, total_lines,
+    update_selection as update_term_selection, update_selection_to_vi_cursor,
     update_vi_cursor_for_scroll, vi_goto_point, vi_motion,
 };
 use crate::mappings::colors::to_vte_rgb;
@@ -167,16 +193,47 @@ enum ViMotion {
     ParagraphDown,
 }
 
+/// A scrollback search query, built by [`Search::new`] or [`Search::new_literal`].
 #[derive(Clone, Debug)]
 pub struct Search {
-    search: AlacrittySearch,
-    literal: Option<String>,
+    matcher: SearchMatcher,
 }
 
+/// What a scrollback search has found: provisional while it runs, then complete.
+#[derive(Clone, Debug, Default)]
 pub struct SearchMatches {
+    /// The newest matches, oldest first, up to the highlight limit.
     pub ranges: Vec<Range>,
+    /// Every match counted so far.
     pub total_count: usize,
+    /// More matches were counted than `ranges` holds.
     pub limit_reached: bool,
+    /// The whole snapshot has been searched, so `total_count` is exact. While a search runs,
+    /// `ranges` grows only towards older output, so a match keeps its distance from the end.
+    pub complete: bool,
+}
+
+/// A running scrollback search, from [`Terminal::find_matches`]. Dropping it cancels the search.
+pub struct SearchJob {
+    updates: async_channel::Receiver<SearchMatches>,
+    _task: Task<()>,
+}
+
+impl SearchJob {
+    /// The next results: provisional ones while the search runs, the complete ones last, and
+    /// then `None`.
+    pub async fn next(&mut self) -> Option<SearchMatches> {
+        self.updates.recv().await.ok()
+    }
+
+    /// The complete results, skipping provisional ones.
+    pub async fn finish(mut self) -> SearchMatches {
+        let mut last = SearchMatches::default();
+        while let Some(matches) = self.next().await {
+            last = matches;
+        }
+        last
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1677,12 +1734,6 @@ static TERMINAL_SYNC_WATCHDOG: Once = Once::new();
 static TERMINAL_SYNC_STARTED_AT: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
 static TERMINAL_SYNC_STARTED_MS: AtomicU64 = AtomicU64::new(0);
 static TERMINAL_SYNC_SEQUENCE: AtomicU64 = AtomicU64::new(0);
-const SEARCH_CHUNK_LINES: usize = 2_048;
-// Rendering thousands of highlighted terminal ranges monopolizes the UI thread
-// and prevents subsequent query keystrokes from being handled. This is a
-// highlight/navigation cap, not a minimum-query-length restriction: selective
-// queries still scan the complete snapshot and report their exact match count.
-const MAX_SEARCH_MATCHES: usize = 256;
 static TERMINAL_SYNC_PHASE: AtomicU8 = AtomicU8::new(TERMINAL_SYNC_IDLE);
 static NEXT_INIT_COMMAND_STARTUP_MARKER_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -5195,7 +5246,7 @@ impl Terminal {
             let mut snapshot = term.lock_unfair().clone();
             #[cfg(test)]
             if let Some(gate) = gate {
-                gate.after_capture(&term, &snapshot).await;
+                gate.after_capture(&term, snapshot.grid()).await;
             }
             snapshot_content_text(&mut snapshot)
         })
@@ -5733,38 +5784,38 @@ impl Terminal {
         }
     }
 
-    pub fn find_matches(&self, searcher: Search, cx: &Context<Self>) -> Task<SearchMatches> {
+    /// Search the scrollback for `searcher`, newest output first.
+    ///
+    /// The search runs on background workers against a snapshot of the grid, and reports
+    /// provisional results while it runs (see [`SearchMatches::complete`]).
+    pub fn find_matches(&self, searcher: Search, cx: &Context<Self>) -> SearchJob {
         // Queue only the live handle: tab search submits every pane in one foreground update.
         // A cancelled job that has not started must not copy any terminal rows.
         let term = self.term.clone();
         #[cfg(test)]
         let gate = self.content_snapshot_gate.clone();
         let executor = cx.background_executor().clone();
-        executor.spawn_with_priority(Priority::Low, async move {
-            // Copy the bounded mutable prefix and share sealed history on the worker. Release
-            // the live PTY/render lock before yielding or traversing the captured contents.
-            let mut snapshot = term.lock().clone();
-            #[cfg(test)]
-            if let Some(gate) = gate {
-                gate.after_capture(&term, &snapshot).await;
-            }
-            // Query replacement during capture can cancel before the first scan chunk too.
-            yield_now().await;
-            let mut search = ScrollbackSearch::new(&snapshot, searcher);
-            loop {
-                let finished = search.advance(&snapshot, SEARCH_CHUNK_LINES, MAX_SEARCH_MATCHES);
-                if finished {
-                    return search.finish();
+        let (updates_tx, updates) = async_channel::unbounded();
+        let task = cx
+            .background_executor()
+            .spawn_with_priority(Priority::Low, async move {
+                // Copy the bounded mutable prefix and share sealed history on the worker. Release
+                // the live PTY/render lock before yielding or traversing the captured contents.
+                let snapshot = Arc::new(term.lock().grid().clone());
+                #[cfg(test)]
+                if let Some(gate) = gate {
+                    gate.after_capture(&term, &snapshot).await;
                 }
-                // Compact history decodes as it is read; keep one chunk of lines decoded rather
-                // than all of history by the end of the search.
-                snapshot.release_history_cache();
-                // Dropping the owning GPUI task (for example when the query or tab closes)
-                // cancels between chunks. The search runs at low priority against an immutable
-                // snapshot, so no live terminal lock needs an artificial scheduling delay.
+                // Query replacement during capture can cancel before the first scan chunk too.
                 yield_now().await;
-            }
-        })
+                // The snapshot is immutable and read as text, which never decodes compact history,
+                // so its workers share it without a lock and nothing needs releasing between steps.
+                search_grid(snapshot, searcher, &executor, &updates_tx).await;
+            });
+        SearchJob {
+            updates,
+            _task: task,
+        }
     }
 
     /// Records that the shell moved, attributing the move to the command that
@@ -7395,6 +7446,7 @@ mod tests {
     }
 
     use super::*;
+    use crate::alacritty::{MAX_SEARCH_MATCHES, SEARCH_CHUNK_LINES, ScrollbackSearch};
     use crate::{
         Cell, Content, IndexedCell, TerminalBounds, TerminalBuilder, content_index_for_mouse,
         rgb_for_index,
@@ -11128,7 +11180,7 @@ mod tests {
         pub(super) async fn after_capture(
             &self,
             live: &AlacrittyTermLock,
-            snapshot: &AlacrittyTerm,
+            snapshot: &alacritty_terminal::grid::Grid<AlacrittyCell>,
         ) {
             use alacritty_terminal::{grid::Dimensions, index::Line};
 
@@ -11139,7 +11191,7 @@ mod tests {
                 let copied_rows = (snapshot.topmost_line().0..=snapshot.bottommost_line().0)
                     .filter(|&line| {
                         live.grid().row_storage_id(Line(line))
-                            != snapshot.grid().row_storage_id(Line(line))
+                            != snapshot.row_storage_id(Line(line))
                     })
                     .count();
                 // Visible rows, 1,024 live history rows, and at most one unsealed chunk.
@@ -11179,10 +11231,11 @@ mod tests {
             terminal.write_output(b"needle after request\r\n", cx);
             task
         });
-        let result = task.await;
+        let result = task.finish().await;
         assert_eq!(result.total_count, 1);
         assert_eq!(result.ranges.len(), 1);
         assert!(!result.limit_reached);
+        assert!(result.complete);
     }
 
     #[gpui::test]
@@ -11200,8 +11253,8 @@ mod tests {
             let pattern = Search::new_literal("retained").unwrap();
             let expected = {
                 let term = terminal.term.lock();
-                let mut search = ScrollbackSearch::new(&term, pattern.clone());
-                while !search.advance(&term, SEARCH_CHUNK_LINES, MAX_SEARCH_MATCHES) {}
+                let mut search = ScrollbackSearch::new(term.grid(), pattern.clone());
+                while !search.advance(term.grid(), SEARCH_CHUNK_LINES, MAX_SEARCH_MATCHES) {}
                 search.finish()
             };
             terminal.content_snapshot_gate = Some(ContentSnapshotGate {
@@ -11222,7 +11275,7 @@ mod tests {
             );
         });
         resume_tx.send(()).await.unwrap();
-        let result = task.await;
+        let result = task.finish().await;
         assert_eq!(result.total_count, 3_000);
         assert_eq!(result.ranges.len(), MAX_SEARCH_MATCHES);
         assert!(result.limit_reached);
@@ -11279,7 +11332,7 @@ mod tests {
         }
         // Polling once consumes and cancels the still-pending task. A completed first scan
         // would return Some here, so this pins the production cancellation point itself.
-        assert!(task.now_or_never().is_none());
+        assert!(task.finish().now_or_never().is_none());
         cx.run_until_parked();
     }
 
