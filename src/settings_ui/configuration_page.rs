@@ -48,7 +48,9 @@ impl ConfigurationSection {
     pub(crate) fn description(self) -> &'static str {
         match self {
             Self::NewTabs => "What a new tab runs, and where it starts",
-            Self::Terminal => "How terminal text looks, and how much of it is kept",
+            Self::Terminal => {
+                "How terminal text looks, how much of it is kept, and what the mouse does with it"
+            }
             Self::Window => "Pane dimming, compact mode, and what the title bar shows",
             Self::BackgroundSessions => {
                 if cfg!(feature = "session-persistence") {
@@ -107,6 +109,7 @@ impl ConfigSetting {
             Self::FontSize => "Font size",
             Self::FontFamily => "Font family",
             Self::ScrollHistory => "Scrollback history",
+            Self::MouseClipboard => "Mouse clipboard",
             Self::InactivePaneOpacity => "Inactive pane opacity",
             Self::CompactMode => "Compact mode",
             Self::ShowPaneSize => "Show pane size",
@@ -151,6 +154,10 @@ impl ConfigSetting {
             Self::FontFamily => "Search bundled and system-installed font families",
             Self::ScrollHistory => {
                 "Lines, from 0 through Max; the steppers speed up as you hold them"
+            }
+            Self::MouseClipboard => {
+                "Copy text when a mouse selection ends and paste on right-click; Ctrl-C copies \
+                 a selection either way"
             }
             Self::InactivePaneOpacity => {
                 "How much of a pane without focus stays visible; 100% does not dim it"
@@ -253,6 +260,7 @@ pub(crate) fn configuration_layout(editor: &SettingsEditor) -> Vec<Configuration
         Row(R::FontSize),
         Row(R::FontFamily),
         Row(R::ScrollHistory),
+        Row(R::MouseClipboard),
         Heading(S::Window),
         Row(R::InactivePaneOpacity),
         Row(R::CompactMode),

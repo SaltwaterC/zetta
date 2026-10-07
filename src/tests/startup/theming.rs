@@ -197,3 +197,28 @@ fn baking_theme_overrides_is_a_no_op_the_second_time(cx: &mut gpui::TestAppConte
         assert_eq!(after.styles.colors.scrollbar_thumb_background, before);
     });
 }
+
+/// `mouse_clipboard` is the one switch over both mouse gestures: turning it off
+/// must stop a finished drag from copying and a right-click from pasting, and
+/// turning it back on (a configuration reload) must restore both.
+#[gpui::test]
+fn mouse_clipboard_drives_copy_on_select_and_right_click_paste(cx: &mut gpui::TestAppContext) {
+    cx.update(|cx| {
+        theme_settings::init(theme::LoadThemes::All(Box::new(ZettaAssets)), cx);
+        theme_settings::load_bundled_themes(&ThemeRegistry::global(cx));
+        TerminalSettings::init(cx);
+
+        let mut config = Config::defaults(None, None);
+        config.mouse_clipboard = false;
+        apply_config_settings(&config, cx).unwrap();
+        let settings = TerminalSettings::get_global(cx);
+        assert!(!settings.copy_on_select);
+        assert!(!settings.right_click_paste);
+
+        config.mouse_clipboard = true;
+        apply_config_settings(&config, cx).unwrap();
+        let settings = TerminalSettings::get_global(cx);
+        assert!(settings.copy_on_select);
+        assert!(settings.right_click_paste);
+    });
+}

@@ -870,6 +870,12 @@ menu. **Paste Trimmed** removes leading and trailing whitespace while preserving
 whitespace inside the text. Middle-click is passed to the terminal as a mouse
 event; it is not a paste gesture.
 
+Set `"mouse_clipboard": false` in `config.json`, or turn off **Mouse
+clipboard** under Settings > Configuration, to stop the mouse touching the
+clipboard: a finished selection no longer copies itself, and a plain
+right-click opens the context menu instead of pasting. Dragging still selects
+text, and `Ctrl-C` or `Ctrl-Insert` still copy it.
+
 ### Pasting images
 
 Pasting while the clipboard holds an image sends the terminal application the

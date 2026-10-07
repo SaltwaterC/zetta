@@ -570,6 +570,7 @@ struct ConfigFile {
     terminal_font_size: Setting<f64>,
     terminal_font_family: Setting<String>,
     max_scroll_history_lines: Setting<u64>,
+    mouse_clipboard: Setting<bool>,
     inactive_pane_opacity: Setting<f64>,
     compact_mode: Setting<bool>,
     hide_pane_size: Setting<bool>,
@@ -658,6 +659,9 @@ pub struct Config {
     pub terminal_font_size: Option<f32>,
     pub terminal_font_family: String,
     pub max_scroll_history_lines: usize,
+    /// Whether a mouse selection copies itself and a plain right-click pastes.
+    /// Selecting and copying with `Ctrl-C` work either way.
+    pub mouse_clipboard: bool,
     pub inactive_pane_opacity: f32,
     pub compact_mode: bool,
     pub hide_pane_size: bool,
@@ -694,6 +698,7 @@ impl Config {
             terminal_font_size: None,
             terminal_font_family: DEFAULT_TERMINAL_FONT_FAMILY.to_owned(),
             max_scroll_history_lines: DEFAULT_MAX_SCROLL_HISTORY_LINES,
+            mouse_clipboard: true,
             inactive_pane_opacity: DEFAULT_INACTIVE_PANE_OPACITY,
             compact_mode: false,
             hide_pane_size: true,
@@ -812,6 +817,9 @@ impl Config {
         }
         if let Some(history_lines) = file.max_scroll_history_lines.get() {
             self.max_scroll_history_lines = parse_max_scroll_history_lines(history_lines)?;
+        }
+        if let Some(enabled) = file.mouse_clipboard.get() {
+            self.mouse_clipboard = enabled;
         }
         if let Some(opacity) = file.inactive_pane_opacity.get() {
             self.inactive_pane_opacity = parse_inactive_pane_opacity(opacity)?;

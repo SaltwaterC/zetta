@@ -85,6 +85,7 @@ fn values_off_their_defaults_are_written_where_the_file_keeps_them_and_load_back
     let mut form = form_from("zetta-table-written", "{}");
     ConfigSetting::CompactMode.set_switch_shown(&mut form, true);
     ConfigSetting::ShowPaneSize.set_switch_shown(&mut form, true);
+    ConfigSetting::MouseClipboard.set_switch_shown(&mut form, false);
     ConfigSetting::SessionRetention.set_choice(&mut form, 0);
     ConfigSetting::RemoteProtocol.set_choice(&mut form, 1);
     form.max_scroll_history_lines.text = "5000".to_owned();
@@ -96,6 +97,7 @@ fn values_off_their_defaults_are_written_where_the_file_keeps_them_and_load_back
     assert_eq!(at(&["compact_mode"]), Some(json!(true)));
     // A "Show" switch over a `hide_` key writes the opposite of what it shows.
     assert_eq!(at(&["hide_pane_size"]), Some(json!(false)));
+    assert_eq!(at(&["mouse_clipboard"]), Some(json!(false)));
     assert_eq!(at(&["sessions", "retention"]), Some(json!("none")));
     assert_eq!(at(&["sessions", "remote", "protocol"]), Some(json!("zosh")));
     assert_eq!(

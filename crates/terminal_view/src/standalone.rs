@@ -118,11 +118,12 @@ enum RightClickAction {
 fn right_click_action(
     terminal_mouse_mode: bool,
     shift: bool,
+    right_click_paste: bool,
     clipboard_has_content: bool,
 ) -> RightClickAction {
     if terminal_mouse_mode && !shift {
         RightClickAction::Forward
-    } else if shift || !clipboard_has_content {
+    } else if shift || !right_click_paste || !clipboard_has_content {
         RightClickAction::ContextMenu
     } else {
         RightClickAction::Paste
@@ -1373,8 +1374,12 @@ impl Render for TerminalView {
                     // Whether the clipboard has content is only known once it
                     // has been read, so a click that would paste reads first
                     // and falls back to the menu when there was nothing.
-                    let action =
-                        right_click_action(terminal_mouse_mode, event.modifiers.shift, true);
+                    let action = right_click_action(
+                        terminal_mouse_mode,
+                        event.modifiers.shift,
+                        TerminalSettings::get_global(cx).right_click_paste,
+                        true,
+                    );
                     match action {
                         RightClickAction::ContextMenu => {
                             this.deploy_context_menu(event.position, window, cx);

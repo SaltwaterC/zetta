@@ -143,6 +143,14 @@ fn default_working_directory_is_the_user_home() {
     assert!(!config.hide_title_bar_labels);
     assert!(!config.hide_title_bar_buttons);
     assert_eq!(config.hide_title_bar_menus, cfg!(target_os = "macos"));
+    assert!(config.mouse_clipboard);
+}
+
+#[test]
+fn mouse_clipboard_can_be_turned_off_and_rejects_non_booleans() {
+    let config = Config::parse(r#"{"mouse_clipboard": false}"#, None, None).unwrap();
+    assert!(!config.mouse_clipboard);
+    assert!(Config::parse(r#"{"mouse_clipboard": "no"}"#, None, None).is_err());
 }
 
 #[test]

@@ -581,7 +581,8 @@ with MesloLGS NF as the font. Common appearance settings include:
   "hide_title_bar_menus": true,
   "pane_controls_position": "right",
   "pane_controls_hidden_by_default": false,
-  "max_scroll_history_lines": 2147483647
+  "max_scroll_history_lines": 2147483647,
+  "mouse_clipboard": true
 }
 ```
 
@@ -617,6 +618,12 @@ pane to the selected default visibility.
 line-coordinate ceiling of 2,147,483,647 lines, which is effectively unlimited
 for typical use. Retained output consumes memory. Set it to 0 to disable
 scrollback. Changes apply to newly opened tabs.
+
+`mouse_clipboard` defaults to `true`, which copies a selection to the clipboard
+when the drag ends and pastes on a plain right-click. Set it to `false` to keep
+the mouse away from the clipboard: selecting still works, `Ctrl-C` and
+`Ctrl-Insert` still copy the selection, and right-click opens the context menu.
+The change applies to open panes when the configuration reloads.
 
 The standard font-size shortcuts apply to all terminals. `Ctrl-Alt` variants
 apply only to the active pane, allowing split panes to use independent sizes.

@@ -173,7 +173,8 @@ pub(crate) fn apply_config_settings(config: &Config, cx: &mut App) -> Result<()>
         config.terminal_font_family.clone().into(),
     ));
     terminal_settings.font_size = config.terminal_font_size.map(px);
-    terminal_settings.copy_on_select = true;
+    terminal_settings.copy_on_select = config.mouse_clipboard;
+    terminal_settings.right_click_paste = config.mouse_clipboard;
     terminal_settings.max_scroll_history_lines = Some(config.max_scroll_history_lines);
     TerminalSettings::override_global(terminal_settings, cx);
     Ok(())

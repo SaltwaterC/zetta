@@ -261,11 +261,11 @@ fn silent_mode_only_gates_the_system_bell() {
 #[test]
 fn shifted_right_click_opens_the_context_menu() {
     assert_eq!(
-        right_click_action(true, true, true),
+        right_click_action(true, true, true, true),
         RightClickAction::ContextMenu
     );
     assert_eq!(
-        right_click_action(true, true, false),
+        right_click_action(true, true, true, false),
         RightClickAction::ContextMenu
     );
 }
@@ -273,7 +273,7 @@ fn shifted_right_click_opens_the_context_menu() {
 #[test]
 fn plain_right_click_pastes_when_clipboard_has_content() {
     assert_eq!(
-        right_click_action(false, false, true),
+        right_click_action(false, false, true, true),
         RightClickAction::Paste
     );
 }
@@ -301,15 +301,29 @@ fn the_first_nonempty_clipboard_image_is_selected_for_paste() {
 #[test]
 fn plain_right_click_opens_the_context_menu_without_clipboard_text() {
     assert_eq!(
-        right_click_action(false, false, false),
+        right_click_action(false, false, true, false),
         RightClickAction::ContextMenu
+    );
+}
+
+#[test]
+fn plain_right_click_opens_the_context_menu_when_right_click_paste_is_off() {
+    assert_eq!(
+        right_click_action(false, false, false, true),
+        RightClickAction::ContextMenu
+    );
+    // Turning paste off does not take the click away from an application
+    // that asked for mouse reports.
+    assert_eq!(
+        right_click_action(true, false, false, true),
+        RightClickAction::Forward
     );
 }
 
 #[test]
 fn plain_right_click_is_forwarded_in_terminal_mouse_mode() {
     assert_eq!(
-        right_click_action(true, false, true),
+        right_click_action(true, false, true, true),
         RightClickAction::Forward
     );
 }

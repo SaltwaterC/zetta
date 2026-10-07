@@ -35,6 +35,10 @@ pub struct TerminalSettings {
     pub alternate_scroll: AlternateScroll,
     pub option_as_meta: bool,
     pub copy_on_select: bool,
+    /// Whether a plain right-click outside terminal mouse mode pastes the
+    /// clipboard. When `false` it opens the context menu instead, which still
+    /// offers Paste.
+    pub right_click_paste: bool,
     pub keep_selection_on_copy: bool,
     pub open_links_in_mouse_mode: bool,
     pub max_scroll_history_lines: Option<usize>,
@@ -98,6 +102,7 @@ impl Default for TerminalSettings {
             alternate_scroll: AlternateScroll::On,
             option_as_meta: false,
             copy_on_select: false,
+            right_click_paste: true,
             keep_selection_on_copy: true,
             open_links_in_mouse_mode: true,
             max_scroll_history_lines: Some(10_000),

@@ -32,6 +32,7 @@ pub(crate) enum ConfigSetting {
     FontSize,
     FontFamily,
     ScrollHistory,
+    MouseClipboard,
     InactivePaneOpacity,
     CompactMode,
     ShowPaneSize,
@@ -71,6 +72,7 @@ pub(crate) const ALL_SETTINGS: &[ConfigSetting] = &[
     ConfigSetting::FontSize,
     ConfigSetting::FontFamily,
     ConfigSetting::ScrollHistory,
+    ConfigSetting::MouseClipboard,
     ConfigSetting::InactivePaneOpacity,
     ConfigSetting::CompactMode,
     ConfigSetting::ShowPaneSize,
@@ -418,6 +420,7 @@ impl ConfigSetting {
                     start: Start::Value(0.),
                 }),
             ),
+            Self::MouseClipboard => (&["mouse_clipboard"], switch!(mouse_clipboard, default true)),
             Self::InactivePaneOpacity => (
                 &["inactive_pane_opacity"],
                 K::Custom(CustomSpec {
