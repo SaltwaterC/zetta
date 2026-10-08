@@ -318,6 +318,9 @@ keyboard and the mouse came to do different things; do not add one.
   window, all sent through `send_control_request`), and
   `process_control/endpoint.rs` (endpoint discovery, publication, and the
   dead-process reaping)
+- `tab_capability.rs`: the `*_from_control` entry points
+  `startup/process_control_loop.rs` reaches a tab through, which refuse to act
+  inside a protected tab
 - `run_command.rs`: the `zetta pane wait` registry shared by wrapper clients
   and terminal lifecycle events; deliberately GPUI-free
 - `command_panes.rs`: `PaneCommand`/`ShellCommandRequest` and the pane-opening

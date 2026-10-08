@@ -92,8 +92,14 @@ fn configures_bash_to_report_prompt_directories_and_foreground_commands() {
     assert!(environment[0].1.contains("trap '__zetta_preexec' DEBUG"));
     assert!(environment[0].1.contains("__zetta_at_prompt=0"));
     assert!(environment[0].1.contains("__zetta_at_prompt=1"));
-    assert!(environment[0].1.contains("zetta-cmd:%s"));
-    assert!(environment[0].1.contains("zetta-cmd:bash"));
+    assert!(environment[0].1.contains("zetta-cmd;%s:%s"));
+    assert!(environment[0].1.contains("zetta-cmd;%s:bash"));
+    assert!(
+        environment[0]
+            .1
+            .contains("unset __ZETTA_COMMAND_MARKER_NONCE")
+    );
+    assert!(!environment[0].1.contains("zetta-cmd:"));
 }
 
 #[cfg(windows)]
@@ -117,8 +123,10 @@ fn configures_zsh_to_report_directories_and_commands_without_changing_user_files
     assert!(integration.contains("add-zsh-hook precmd __zetta_report_cwd"));
     assert!(integration.contains("add-zsh-hook preexec __zetta_report_preexec"));
     assert!(integration.contains("zetta-cwd:%s"));
-    assert!(integration.contains("zetta-cmd:%s"));
-    assert!(integration.contains("zetta-cmd:zsh"));
+    assert!(integration.contains("zetta-cmd;%s:%s"));
+    assert!(integration.contains("zetta-cmd;%s:zsh"));
+    assert!(integration.contains("unset __ZETTA_COMMAND_MARKER_NONCE"));
+    assert!(!integration.contains("zetta-cmd:"));
     assert!(integration.contains("source \"$original_zdotdir/.zshenv\""));
 }
 
@@ -218,7 +226,9 @@ fn configures_cygwin_shell_tracking_and_preserves_the_inherited_path() {
         environment
             .iter()
             .find_map(|(name, value)| (name == "PROMPT_COMMAND").then_some(value.as_str()))
-            .is_some_and(|value| value.contains("zetta-cwd:%s") && value.contains("zetta-cmd:bash"))
+            .is_some_and(
+                |value| value.contains("zetta-cwd:%s") && value.contains("zetta-cmd;%s:bash")
+            )
     );
 
     let mut final_environment = HashMap::from([
@@ -267,7 +277,9 @@ fn configures_cygwin_fish_and_nushell_startup_hooks() {
     assert!(contents.contains("pre_execution"));
     assert!(contents.contains("commandline"));
     assert!(contents.contains("zetta-cwd:"));
-    assert!(contents.contains("zetta-cmd:"));
+    assert!(contents.contains("zetta-cmd;($zetta_marker_nonce):"));
+    assert!(contents.contains("hide-env -i __ZETTA_COMMAND_MARKER_NONCE"));
+    assert!(!contents.contains("zetta-cmd:"));
 }
 
 #[test]
@@ -658,9 +670,57 @@ fn wsl_wrapper_prefers_prompt_cwd_reports_and_keeps_a_shell_fallback() {
 
     // Windows-side process inspection can't see into the WSL VM's own process
     // namespace, so the running command is reported explicitly by each shell's
-    // preexec-equivalent hook via the `zetta-cmd:` title marker.
+    // preexec-equivalent hook via the `zetta-cmd;<nonce>:` title marker.
     assert!(WSL_CWD_TRACKER.contains("trap '__zetta_preexec' DEBUG"));
     assert!(WSL_CWD_TRACKER.contains("--on-event fish_preexec"));
     assert!(WSL_CWD_TRACKER.contains("add-zsh-hook preexec __zetta_report_preexec"));
-    assert!(WSL_CWD_TRACKER.contains("]2;zetta-cmd:"));
+    assert!(WSL_CWD_TRACKER.contains("]2;zetta-cmd;%s:%s"));
+    // Without the nonce the marker cannot drive image paste, so no shell may
+    // still report the unauthenticated form.
+    assert!(!WSL_CWD_TRACKER.contains("]2;zetta-cmd:"));
+}
+
+/// The WSL tracker hands the command-marker nonce to the shell it starts and
+/// to nothing else: the shell's markers carry it, its children do not inherit
+/// it. Run against the host's own `sh` and `bash`, which is what a WSL
+/// distribution runs it with.
+#[cfg(unix)]
+#[test]
+fn the_wsl_tracker_marks_commands_with_a_nonce_its_children_do_not_inherit() {
+    use std::io::Write as _;
+
+    if !Path::new("/bin/bash").is_file() {
+        return;
+    }
+    let home = tempfile::tempdir().unwrap();
+    let mut child = std::process::Command::new("/bin/sh")
+        .args(["-c", WSL_CWD_TRACKER])
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("HOME", home.path())
+        .env("SHELL", "/bin/bash")
+        .env(terminal::COMMAND_MARKER_NONCE_ENV, "0123abcd")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    // A non-interactive login shell does not run PROMPT_COMMAND by itself.
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(
+            b"eval \"$PROMPT_COMMAND\"\n\
+              printf 'inherited:[%s]\\n' \"$(env | grep -c '^__ZETTA_COMMAND_MARKER_NONCE=')\"\n",
+        )
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        stdout.contains("\x1b]2;zetta-cmd;0123abcd:bash\x1b\\"),
+        "{stdout:?}"
+    );
+    assert!(stdout.contains("inherited:[0]"), "{stdout:?}");
 }

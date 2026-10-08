@@ -178,12 +178,14 @@ pub(super) fn serve(daemon: &Arc<Daemon>, stream: Stream, token: &str) -> Result
                 message: format!("{error:#}"),
             }),
         },
-        Request::CreateShared(request) => match create_shared(daemon, request, &mut connection) {
-            Ok(()) => Ok(()),
-            Err(error) => connection.send(&Response::Error {
-                message: format!("{error:#}"),
-            }),
-        },
+        Request::CreateShared(request) => {
+            match create_shared(daemon, request, peer_process_id, &mut connection) {
+                Ok(()) => Ok(()),
+                Err(error) => connection.send(&Response::Error {
+                    message: format!("{error:#}"),
+                }),
+            }
+        }
         Request::ApplyShared(request) => apply_shared(
             daemon,
             request,
@@ -535,12 +537,14 @@ pub(super) fn serve(daemon: &Arc<Daemon>, stream: Stream, token: &str) -> Result
         Request::Configure {
             retention,
             persistence_recipients,
-        } if !stream_only => match configure_daemon(daemon, retention, persistence_recipients) {
-            Ok(()) => connection.send(&Response::Ok),
-            Err(error) => connection.send(&Response::Error {
-                message: format!("{error:#}"),
-            }),
-        },
+        } if !stream_only => {
+            match configure_daemon(daemon, retention, persistence_recipients, peer_process_id) {
+                Ok(()) => connection.send(&Response::Ok),
+                Err(error) => connection.send(&Response::Error {
+                    message: format!("{error:#}"),
+                }),
+            }
+        }
         Request::Upgrade if !stream_only => {
             #[cfg(any(unix, windows))]
             {
@@ -615,10 +619,19 @@ pub(super) fn configure_daemon(
     daemon: &Arc<Daemon>,
     retention: Retention,
     persistence_recipients: Vec<String>,
+    peer_process_id: Option<u32>,
 ) -> Result<()> {
     retention.validate()?;
     #[cfg(not(feature = "session-persistence"))]
-    let _ = persistence_recipients;
+    let _ = (persistence_recipients, peer_process_id);
+    // Resolved before anything changes, so what a session is pinned to is
+    // exactly what the store will be opened with.
+    #[cfg(feature = "session-persistence")]
+    let persistence_recipients = if matches!(retention, Retention::Disk) {
+        crate::persistence::resolve_recipient_strings(&persistence_recipients)?
+    } else {
+        Vec::new()
+    };
 
     let old_retention = *daemon.retention.lock().unwrap();
     let mut sessions = daemon.sessions.lock().unwrap();
@@ -632,19 +645,36 @@ pub(super) fn configure_daemon(
             }
         }
     }
+    // Before anything is written under the new recipients: a protected session
+    // this peer neither owns nor holds keeps the recipients it had.
     #[cfg(feature = "session-persistence")]
-    let persisted_sessions = if matches!(retention, Retention::Disk) {
-        sessions
-            .iter()
-            .filter(|session| session.keep || session.offered)
-            .map(persisted_live_session)
-            .collect::<Vec<_>>()
-    } else {
-        Vec::new()
-    };
+    {
+        configure_seals(
+            daemon,
+            &mut sessions,
+            peer_process_id,
+            &persistence_recipients,
+        );
+        // Still under the session lock, so no session is protected between
+        // being sealed in the new store and the store being installed.
+        install_configured_store(daemon, &sessions, retention, &persistence_recipients)?;
+    }
     drop(sessions);
+    *daemon.retention.lock().unwrap() = retention;
+    wake_drain(daemon);
+    publish(daemon);
+    Ok(())
+}
 
-    #[cfg(feature = "session-persistence")]
+/// Opens the store a `Configure` selected, writes the kept and offered
+/// sessions to it, and installs it. The caller holds the session lock.
+#[cfg(feature = "session-persistence")]
+fn install_configured_store(
+    daemon: &Daemon,
+    sessions: &[Session],
+    retention: Retention,
+    persistence_recipients: &[String],
+) -> Result<()> {
     let mut next_persistence = {
         let mut persistence = daemon.persistence.lock();
         if let Some(persistence) = persistence.as_mut() {
@@ -660,7 +690,7 @@ pub(super) fn configure_daemon(
             // available again.
             PersistenceStore::open_with_recovery_state(
                 &session_catalog_dir(),
-                Some(&persistence_recipients),
+                Some(persistence_recipients),
                 false,
             )?
         } else {
@@ -672,34 +702,33 @@ pub(super) fn configure_daemon(
             PersistenceStore::open_with_recovery_state(&session_catalog_dir(), None, false)?
         }
     };
-
-    #[cfg(feature = "session-persistence")]
-    {
-        if matches!(retention, Retention::Disk)
-            && let Some(persistence) = next_persistence.as_mut()
-        {
-            for session in &persisted_sessions {
-                persistence.save_session(session)?;
+    if let Some(persistence) = next_persistence.as_mut() {
+        // The new store starts knowing nothing, and withholds what it does not
+        // know; it is told about every session before anything reaches it.
+        reseal_all(persistence, sessions);
+        if matches!(retention, Retention::Disk) {
+            for session in sessions
+                .iter()
+                .filter(|session| session.keep || session.offered)
+            {
+                persistence.save_session(&persisted_live_session(session))?;
             }
         }
-        let mut persistence = daemon.persistence.lock();
-        let persistence_enabled = matches!(retention, Retention::Disk)
-            && !persistence_recipients.is_empty()
-            && next_persistence.is_some();
-        // Output the drain read after the flush above was still applied to
-        // the outgoing store, and would be lost with it.
-        if let Some(previous) = persistence.as_mut()
-            && let Err(error) = previous.flush_segments()
-        {
-            log::warn!("could not flush encrypted scrollback before changing retention: {error:#}");
-        }
-        *persistence = next_persistence;
-        daemon
-            .persistence
-            .set_enabled(&mut persistence, persistence_enabled);
     }
-    *daemon.retention.lock().unwrap() = retention;
-    wake_drain(daemon);
-    publish(daemon);
+    let mut persistence = daemon.persistence.lock();
+    let persistence_enabled = matches!(retention, Retention::Disk)
+        && !persistence_recipients.is_empty()
+        && next_persistence.is_some();
+    // Output the drain read after the flush above was still applied to
+    // the outgoing store, and would be lost with it.
+    if let Some(previous) = persistence.as_mut()
+        && let Err(error) = previous.flush_segments()
+    {
+        log::warn!("could not flush encrypted scrollback before changing retention: {error:#}");
+    }
+    *persistence = next_persistence;
+    daemon
+        .persistence
+        .set_enabled(&mut persistence, persistence_enabled);
     Ok(())
 }

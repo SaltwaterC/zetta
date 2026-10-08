@@ -167,6 +167,13 @@ fn read_until(file: &mut std::fs::File, needle: &str, deadline: Instant) -> Resu
 /// came up believing its terminal had no colour.
 fn shared_draft_process(
     draft: &crate::messages::SharedPaneDraft,
+    #[cfg_attr(
+        windows,
+        allow(
+            unused_variables,
+            reason = "on Windows the pane's agent pipe name comes from the listener that serves it"
+        )
+    )]
     pane_id: u64,
 ) -> (zetta_profiles::ProfileCommand, HashMap<String, String>) {
     let command = draft
@@ -207,13 +214,6 @@ fn shared_draft_process(
     env.insert(
         "SSH_AUTH_SOCK".to_owned(),
         crate::paths::pane_forwarded_agent_socket(pane_id)
-            .to_string_lossy()
-            .into_owned(),
-    );
-    #[cfg(windows)]
-    env.insert(
-        "SSH_AUTH_SOCK".to_owned(),
-        crate::paths::pane_forwarded_agent_pipe(pane_id)
             .to_string_lossy()
             .into_owned(),
     );
@@ -288,12 +288,38 @@ fn start_shared_draft(
     let pane_id = daemon.next_pane_id.fetch_add(1, Ordering::Relaxed);
     #[cfg(unix)]
     let agent_fallback = pane_agent_fallback(&draft.env);
+    #[cfg(unix)]
     let (command, env) = shared_draft_process(draft, pane_id);
+    #[cfg(windows)]
+    let (command, mut env) = shared_draft_process(draft, pane_id);
     #[cfg(unix)]
     prepare_pane_agent_links(pane_id, &agent_fallback);
     // Before the shell starts, so its first `ssh` finds the pipe listening.
     #[cfg(windows)]
-    super::agent_pipe::serve(pane_id, pane_agent_fallback(&draft.env));
+    {
+        let agent_fallback = pane_agent_fallback(&draft.env);
+        match super::agent_pipe::serve(pane_id, agent_fallback.clone()) {
+            Some(pipe) => {
+                env.insert(
+                    "SSH_AUTH_SOCK".to_owned(),
+                    pipe.to_string_lossy().into_owned(),
+                );
+            }
+            // Without a pipe of its own the pane keeps the agent it would have
+            // had, rather than a name nothing serves.
+            None => match agent_fallback {
+                Some(agent) => {
+                    env.insert(
+                        "SSH_AUTH_SOCK".to_owned(),
+                        agent.to_string_lossy().into_owned(),
+                    );
+                }
+                None => {
+                    env.remove("SSH_AUTH_SOCK");
+                }
+            },
+        }
+    }
     #[cfg(unix)]
     let bootstrap_command = command.clone();
     let working_directory = pane_start_directory(draft.working_directory.clone().or_else(|| {
@@ -573,6 +599,7 @@ enum SharedBatchCommit {
 pub(super) fn create_shared(
     daemon: &Arc<Daemon>,
     request: crate::messages::CreateSharedRequest,
+    peer_process_id: Option<u32>,
     connection: &mut Connection,
 ) -> Result<()> {
     validate_create_request(&request)?;
@@ -719,7 +746,7 @@ pub(super) fn create_shared(
         draft_mappings,
     });
     summary = state.summary.clone();
-    let new_session = Session {
+    let mut new_session = Session {
         id: session_id,
         summary,
         state: serde_json::Value::Null,
@@ -734,10 +761,12 @@ pub(super) fn create_shared(
         keep: true,
         offered: true,
         owner: None,
+        sealed_to: None,
     };
+    pin_protected(daemon, &mut new_session, peer_process_id);
     #[cfg(feature = "session-persistence")]
     if daemon.persistence.enabled() {
-        persist_session(daemon, &persisted_live_session(&new_session))?;
+        persist_live_session(daemon, &new_session)?;
     }
     sessions.push(new_session);
     drop(sessions);
@@ -1196,7 +1225,11 @@ pub(super) fn spawn(
                 keep: false,
                 offered: restored.request.shared_state.is_some(),
                 owner: Some(client_process_id),
+                sealed_to: None,
             });
+            let restored_session = sessions.last_mut().expect("the session was just pushed");
+            pin_protected(daemon, restored_session, restored.authorized_peer);
+            reseal(daemon, restored_session);
             id
         }
         _ => {
@@ -1227,7 +1260,13 @@ pub(super) fn spawn(
                 // backgrounded later is already this process's and needs no
                 // separate claim.
                 owner: Some(request.client_process_id),
+                sealed_to: None,
             });
+            #[cfg(feature = "session-persistence")]
+            reseal(
+                daemon,
+                sessions.last().expect("the session was just pushed"),
+            );
             id
         }
     };
@@ -1854,6 +1893,7 @@ pub(super) fn detach(
         session.key_envelope = request.key_envelope;
         session.failed_authentications = 0;
         session.refuse_until = None;
+        protected_by(daemon, session, peer_process_id);
     }
     session.summary.authentication_required = session.authentication.is_some();
     if session.offered {
@@ -1934,7 +1974,7 @@ pub(super) fn detach(
     });
     #[cfg(feature = "session-persistence")]
     if let Some(persisted) = persisted {
-        persist_session(daemon, &persisted)?;
+        persist_session(daemon, &persisted, &seal_for(session))?;
     }
     drop(sessions);
 
@@ -2040,6 +2080,7 @@ pub(super) fn share(
         session.key_envelope = request.key_envelope;
         session.failed_authentications = 0;
         session.refuse_until = None;
+        protected_by(daemon, session, peer_process_id);
     }
     session.summary.authentication_required = session.authentication.is_some();
     session.shared_state = request.offered.then(|| {
@@ -2060,7 +2101,7 @@ pub(super) fn share(
     }
     #[cfg(feature = "session-persistence")]
     if request.offered {
-        persist_session(daemon, &persisted_live_session(session))?;
+        persist_live_session(daemon, session)?;
     }
     if !request.offered {
         // Scoped to one window now, so a pane still being relayed to its single
@@ -2314,6 +2355,7 @@ pub(super) fn set_session_scope(
         session.failed_authentications = 0;
         session.refuse_until = None;
         session.summary.authentication_required = true;
+        protected_by(daemon, session, peer_process_id);
     }
     if !shared {
         let Some(owner) = session
@@ -2348,7 +2390,7 @@ pub(super) fn set_session_scope(
     }
     #[cfg(feature = "session-persistence")]
     if daemon.persistence.enabled() {
-        persist_session(daemon, &persisted_live_session(session))?;
+        persist_live_session(daemon, session)?;
     }
     drop(sessions);
     publish(daemon);
@@ -2453,11 +2495,13 @@ pub(super) fn session_identity_authorized(session: &Session, peer_process_id: Op
 /// their message, so there is nowhere to interject a challenge. Those ask to be
 /// identified first, with [`Request::Attest`].
 ///
-/// A local `Attach` and `TakeExclusive` are the exceptions to "only protected
-/// sessions". An attach is where a window's identity is recorded for later —
-/// whose backgrounded session it is, which viewer may take a shared pane back
-/// — and those checks accept only a vouched-for peer; unattested, a window
-/// would lose its own panes. A stream-only client is remote and cannot answer.
+/// A local `Attach`, `TakeExclusive` and `Configure` are the exceptions to
+/// "only protected sessions". Each is where a window's identity is recorded for
+/// later — whose backgrounded session it is, which viewer may take a shared
+/// pane back, which recipients its protected sessions are sealed to — and those
+/// checks accept only a vouched-for peer; unattested, a window would lose its
+/// own panes, or its sessions' disk records. A stream-only client is remote and
+/// cannot answer.
 #[cfg(windows)]
 pub(super) fn attestation_needed(
     daemon: &Arc<Daemon>,
@@ -2467,8 +2511,20 @@ pub(super) fn attestation_needed(
     if !stream_only
         && matches!(
             request,
-            Request::Attach { .. } | Request::TakeExclusive { .. }
+            Request::Attach { .. } | Request::TakeExclusive { .. } | Request::Configure { .. }
         )
+    {
+        return true;
+    }
+    // A session being protected is sealed to what the protecting window
+    // configured, which only a vouched-for window has; see `sealing`.
+    if !stream_only
+        && match request {
+            Request::CreateShared(request) => request.verifier.is_some(),
+            Request::Share(request) => request.verifier.is_some(),
+            Request::SetSessionScope { verifier, .. } => verifier.is_some(),
+            _ => false,
+        }
     {
         return true;
     }

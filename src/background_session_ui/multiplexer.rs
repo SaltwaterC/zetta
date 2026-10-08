@@ -921,6 +921,9 @@ impl Zetta {
                 })
         })?;
         tab.id = tab_id;
+        // The multiplexer's own word, so a protected session stays protected
+        // here however it was reached: secret, sealed key, or remote host.
+        tab.protected = summary.authentication_required;
         // The catalog's title is what the user picked this session out of the
         // list by. A restored tab whose terminal has not yet reprinted its
         // title would otherwise fall back to a generic name, so the tab they

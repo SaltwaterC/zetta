@@ -38,6 +38,12 @@ use crate::messages::ClientId;
 /// hand its state to the build that introduced them.
 pub const HANDOVER_VERSION: u32 = 8;
 
+/// Whether this image can adopt a handover of `version`, which is what
+/// `--resume-check` answers.
+pub fn accepts_handover_version(version: u32) -> bool {
+    version == HANDOVER_VERSION
+}
+
 /// Everything the next image needs to carry on.
 ///
 /// The listening socket is passed separately as an inherited descriptor on
@@ -60,6 +66,11 @@ pub struct Handover {
     #[serde(default)]
     pub retention: crate::retention::Retention,
     pub sessions: Vec<SessionHandover>,
+    /// Which recipients each client configured, so a session protected after
+    /// the upgrade is still sealed to its own client's choice. Absent from an
+    /// older image; see `server::sealing::adopted_grants`.
+    #[serde(default)]
+    pub recipient_grants: Option<crate::server::RecipientGrants>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -101,6 +112,11 @@ pub struct SessionHandover {
     /// is a monotonic instant with no meaning in another image.
     pub failed_authentications: u32,
     pub refuse_for: Option<Duration>,
+    /// The recipients a protected session's records are pinned to. Carried
+    /// because the replacement cannot tell them from whatever the store was
+    /// last configured with; absent from an older image, which pinned nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sealed_to: Option<Vec<String>>,
     pub panes: Vec<PaneHandover>,
 }
 

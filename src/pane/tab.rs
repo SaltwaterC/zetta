@@ -83,6 +83,11 @@ pub(crate) struct Tab {
     pub(crate) broadcast_input: bool,
     pub(crate) silent_mode: bool,
     pub(crate) close_policy: TabClosePolicy,
+    /// Whether a secret protects this tab's session, as this window saw it
+    /// being protected or the multiplexer reported it on attach. Never cleared:
+    /// a session keeps its verifier once it has one. Decides whether the control
+    /// socket may act inside the tab; see `tab_capability`.
+    pub(crate) protected: bool,
     /// Whether this tab's session is offered to other Zetta windows, so one of
     /// them can join it and both then drive the same panes.
     ///

@@ -24,6 +24,7 @@ fn session_owned_by(owner: u32, protected: bool) -> Session {
         keep: true,
         offered: false,
         owner: Some(owner),
+        sealed_to: None,
     }
 }
 

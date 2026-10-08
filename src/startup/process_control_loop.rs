@@ -565,7 +565,7 @@ fn replace_pane(request: ReplacePaneRequest, cx: &mut App) -> bool {
     };
     gpui::WindowHandle::<Zetta>::new(window_id)
         .update(cx, |zetta, window, cx| {
-            zetta.replace_active_pane_from_cli(request, window, cx)
+            zetta.replace_active_pane_from_control(request, window, cx)
         })
         .unwrap_or(false)
 }
@@ -606,7 +606,7 @@ fn run_pane(
     gpui::WindowHandle::<Zetta>::new(window_id)
         .update(cx, |zetta, window, cx| {
             zetta
-                .run_command_pane(request, window, cx)
+                .run_command_pane_from_control(request, window, cx)
                 .map_err(|error| format!("{error:#}"))
         })
         .map_err(|error| format!("{error:#}"))?
@@ -625,7 +625,7 @@ fn run_shell_command(
     gpui::WindowHandle::<Zetta>::new(window_id)
         .update(cx, |zetta, window, cx| {
             zetta
-                .run_shell_command(request, window, cx)
+                .run_shell_command_from_control(request, window, cx)
                 .map_err(|error| format!("{error:#}"))
         })
         .map_err(|error| format!("{error:#}"))?
@@ -651,7 +651,7 @@ fn run_wait(
         return entity
             .update(cx, |zetta, cx| {
                 zetta
-                    .register_run_wait(request, &process_run_registry(), cx)
+                    .register_run_wait_from_control(request, &process_run_registry(), cx)
                     .map_err(|error| format!("{error:#}"))
             })
             .map_err(|error| format!("{error:#}"));
@@ -673,9 +673,11 @@ fn list_pane_labels(
             if !entity.read(cx).has_tab_by_attention_id(attention_id) {
                 continue;
             }
-            return Ok(entity.update(cx, |zetta, _| {
-                zetta.command_pane_labels_for_attention(Some(attention_id))
-            }));
+            return entity.update(cx, |zetta, _| {
+                zetta
+                    .command_pane_labels_from_control(Some(attention_id))
+                    .map_err(|error| format!("{error:#}"))
+            });
         }
         return Err("the originating Zetta tab is no longer available".to_owned());
     }
@@ -684,7 +686,9 @@ fn list_pane_labels(
     };
     gpui::WindowHandle::<Zetta>::new(window_id)
         .update(cx, |zetta, _, _| {
-            Ok(zetta.command_pane_labels_for_attention(None))
+            zetta
+                .command_pane_labels_from_control(None)
+                .map_err(|error| format!("{error:#}"))
         })
         .map_err(|error| format!("{error:#}"))?
 }

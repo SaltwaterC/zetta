@@ -574,6 +574,7 @@ fn disk_recovery_after_memory_fallback_reenables_orphaned_records() {
         let mut store = PersistenceStore::open(&daemon.sessions_dir(), &[recipient])
             .unwrap()
             .unwrap();
+        seal_fabricated_records(&mut store);
         store
             .save_session(&PersistedSession {
                 id: session_id,
@@ -626,6 +627,7 @@ fn an_existing_memory_daemon_can_resume_a_disk_record() {
         let mut store = PersistenceStore::open(&daemon.sessions_dir(), &[recipient])
             .unwrap()
             .unwrap();
+        seal_fabricated_records(&mut store);
         store
             .save_session(&PersistedSession {
                 id: session_id,
@@ -703,6 +705,7 @@ fn starting_in_memory_mode_keeps_old_disk_records_visible() {
         let mut store = PersistenceStore::open(&sessions, &[recipient])
             .unwrap()
             .unwrap();
+        seal_fabricated_records(&mut store);
         store
             .save_session(&PersistedSession {
                 id: session_id,
@@ -821,6 +824,7 @@ fn cli_kill_and_forget_remove_orphaned_disk_records_with_a_live_memory_daemon() 
             PersistenceStore::open(&daemon.sessions_dir(), std::slice::from_ref(&recipient))
                 .unwrap()
                 .unwrap();
+        seal_fabricated_records(&mut store);
         store
             .save_session(&PersistedSession {
                 id: session_id,
@@ -880,6 +884,7 @@ fn cli_kill_removes_an_orphaned_disk_record_without_a_daemon() {
     let mut store = PersistenceStore::open(&sessions, &[recipient])
         .unwrap()
         .unwrap();
+    seal_fabricated_records(&mut store);
     store
         .save_session(&PersistedSession {
             id: 96,
@@ -967,6 +972,7 @@ fn an_opaque_listing_offers_a_record_whose_daemon_is_gone_and_reveals_nothing_of
     let mut store = PersistenceStore::open(&sessions, &[recipient])
         .unwrap()
         .unwrap();
+    seal_fabricated_records(&mut store);
     store.save_session(&secret_session(41)).unwrap();
     drop(store);
 
@@ -1007,6 +1013,7 @@ fn an_opaque_listing_leaves_a_record_alone_while_its_daemon_answers() {
     let mut store = PersistenceStore::open(&daemon.sessions_dir(), &[recipient])
         .unwrap()
         .unwrap();
+    seal_fabricated_records(&mut store);
     store.save_session(&secret_session(42)).unwrap();
     drop(store);
 
@@ -1118,6 +1125,121 @@ fn reconfiguring_to_disk_keeps_an_existing_process_and_creates_encrypted_persist
             .join(format!("session-{}.age", pane.session_id))
             .is_file()
     );
+    client.kill(pane.session_id).unwrap();
+}
+
+/// Records these tests fabricate through the store directly stand for ones a
+/// daemon wrote for an unprotected session, so they are sealed the same way.
+#[cfg(feature = "session-persistence")]
+fn seal_fabricated_records(store: &mut PersistenceStore) {
+    for id in 0..=128 {
+        store.seal(id, &zmux::persistence::Seal::Store).unwrap();
+    }
+}
+
+/// Whether `session_id`'s metadata record opens with `identity`.
+#[cfg(feature = "session-persistence")]
+fn record_opens_with(
+    daemon: &TestDaemon,
+    session_id: u64,
+    identity: &age::x25519::Identity,
+) -> bool {
+    let path = daemon
+        .sessions_dir()
+        .join("persistence")
+        .join(format!("session-{session_id}.age"));
+    age::decrypt(identity, &std::fs::read(path).unwrap()).is_ok()
+}
+
+/// `Configure` replaces the store's recipients and any token holder may send
+/// it. Re-encrypting a protected session under the sender's key would hand its
+/// verifier, state and scrollback to whoever chose that key, without the secret.
+#[cfg(feature = "session-persistence")]
+#[test]
+fn another_client_cannot_reseal_a_protected_session_to_its_own_recipient() {
+    let owner = age::x25519::Identity::generate();
+    let attacker = age::x25519::Identity::generate();
+    let daemon = TestDaemon::start_with_recipient(&owner.to_public().to_string());
+    let client = daemon.client();
+    // A real process the session belongs to, so the kernel can tell it apart
+    // from this one, which plays the other client.
+    let mut window = Command::new("/bin/sleep").arg("120").spawn().unwrap();
+    let pane = client
+        .spawn(spawn_request_as(
+            None,
+            "printf ready; sleep 60",
+            window.id(),
+        ))
+        .unwrap();
+    let descriptor = std::fs::File::from(pane.descriptor);
+    read_until(&descriptor, "ready");
+    drop(descriptor);
+    client
+        .detach_as(
+            pane.session_id,
+            summary(pane.session_id, pane.pane_id),
+            serde_json::json!({"private": true}),
+            Some(&test_verifier()),
+            window.id(),
+        )
+        .unwrap();
+    assert!(record_opens_with(&daemon, pane.session_id, &owner));
+
+    client
+        .configure(Retention::Disk, vec![attacker.to_public().to_string()])
+        .unwrap();
+
+    // Reconfiguring rewrote the kept session, under its own recipients.
+    assert!(
+        !record_opens_with(&daemon, pane.session_id, &attacker),
+        "a protected session was re-encrypted to the reconfiguring client's key"
+    );
+    assert!(record_opens_with(&daemon, pane.session_id, &owner));
+    window.kill().ok();
+    window.wait().ok();
+}
+
+/// The session's own window rotating its recipients is the legitimate case:
+/// configuring alone does not move a pinned session, because a reload can be
+/// asked for by anything holding the control token; protecting it again does.
+#[cfg(feature = "session-persistence")]
+#[test]
+fn a_protected_sessions_own_window_rotates_its_recipients_by_protecting_it_again() {
+    let before = age::x25519::Identity::generate();
+    let after = age::x25519::Identity::generate();
+    let daemon = TestDaemon::start_with_recipient(&before.to_public().to_string());
+    let client = daemon.client();
+    let pane = client
+        .spawn(spawn_request(None, "printf ready; sleep 60"))
+        .unwrap();
+    let descriptor = std::fs::File::from(pane.descriptor);
+    read_until(&descriptor, "ready");
+    drop(descriptor);
+    let detach = |state: serde_json::Value| {
+        client
+            .detach(
+                pane.session_id,
+                summary(pane.session_id, pane.pane_id),
+                state,
+                Some(&test_verifier()),
+                Vec::new(),
+            )
+            .unwrap();
+    };
+    detach(serde_json::json!({"private": 1}));
+    assert!(record_opens_with(&daemon, pane.session_id, &before));
+
+    client
+        .configure(Retention::Disk, vec![after.to_public().to_string()])
+        .unwrap();
+    assert!(
+        record_opens_with(&daemon, pane.session_id, &before),
+        "configuring re-pinned an already protected session"
+    );
+
+    detach(serde_json::json!({"private": 2}));
+    assert!(record_opens_with(&daemon, pane.session_id, &after));
+    assert!(!record_opens_with(&daemon, pane.session_id, &before));
     client.kill(pane.session_id).unwrap();
 }
 
@@ -1476,6 +1598,7 @@ fn protected_disk_resume_preserves_failed_authentication_backoff() {
         let mut store = PersistenceStore::open_with_recovery(&sessions_dir, None)
             .unwrap()
             .unwrap();
+        seal_fabricated_records(&mut store);
         store
             .update_authentication(
                 pane.session_id,

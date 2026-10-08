@@ -99,3 +99,25 @@ fn every_pane_gets_a_distinct_agent_socket_name() {
         session_catalog_dir().join("forwarded-agent-42.fallback")
     );
 }
+
+/// A pane's agent pipe is created first by whoever names it first, so the name
+/// must not be one another account can work out before the daemon creates it.
+#[test]
+fn a_panes_agent_pipe_name_cannot_be_predicted() {
+    let first = new_pane_forwarded_agent_pipe(42).unwrap();
+    let second = new_pane_forwarded_agent_pipe(42).unwrap();
+    let legacy = legacy_pane_forwarded_agent_pipe(42);
+
+    assert_ne!(first, second, "two panes 42 must not share a name");
+    assert_ne!(first, legacy);
+    for name in [&first, &second, &legacy] {
+        assert!(name.to_string_lossy().starts_with(PANE_AGENT_PIPE_PREFIX));
+    }
+    let nonce = first
+        .to_string_lossy()
+        .rsplit_once('-')
+        .map(|(_, nonce)| nonce.to_owned())
+        .unwrap();
+    assert_eq!(nonce.len(), 32, "128 random bits, hex encoded");
+    assert!(nonce.bytes().all(|byte| byte.is_ascii_hexdigit()));
+}

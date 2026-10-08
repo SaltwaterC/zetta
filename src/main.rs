@@ -453,6 +453,7 @@ mod remote_session_ui;
 mod remote_session_ui;
 mod stacked_panes;
 mod tab_bar_render;
+mod tab_capability;
 use tab_bar_render::*;
 mod tab_body_render;
 mod title_bar_render;

@@ -16,6 +16,15 @@
 //! no SSH or Mosh target is reported, `wsl` stages the image in that profile's
 //! distribution instead of asking its Linux application to read the clipboard.
 //!
+//! The command line this module reads is untrusted, and it starts a process
+//! from it. On a WSL, MSYS2 or Cygwin pane it is the shell integration's
+//! `zetta-cmd` title marker, which the terminal accepts only with the nonce it
+//! gave that shell — otherwise any output could name the command. Even then,
+//! nothing is passed through as written: the `ssh` executable is chosen here
+//! (`with_trusted_program`), and the options are rebuilt from an allowlist
+//! (`parse_ssh_argv`), so neither a `ProxyCommand` nor an `ssh` planted in a
+//! working directory runs on a paste.
+//!
 //! Recognising a Mosh foreground process is also what project detection needs
 //! (see [`foreground_is_mosh_session`]), so that predicate lives here too.
 
@@ -153,7 +162,10 @@ impl ImagePasteHandler for SshImagePasteHandler {
         image: &Image,
         foreground_process: Option<&[String]>,
     ) -> Result<ImagePasteResult> {
-        let Some(argv) = foreground_process.and_then(foreground_invocation) else {
+        let invocation = foreground_process
+            .and_then(foreground_invocation)
+            .and_then(|invocation| self.execution.with_trusted_program(invocation));
+        let Some(argv) = invocation else {
             #[cfg(any(windows, test))]
             if is_wsl_shell(&self.execution.shell) {
                 return self
@@ -183,6 +195,36 @@ struct SshExecution {
 }
 
 impl SshExecution {
+    /// `invocation` with the program that will actually run the upload,
+    /// chosen here rather than taken from the command line it was parsed
+    /// from. `None` when the reported program is not an `ssh` this module will
+    /// start; the pane then gets whatever a non-SSH foreground process gets.
+    fn with_trusted_program(&self, mut invocation: OpenSshInvocation) -> Option<OpenSshInvocation> {
+        let Some(program) = self.trusted_ssh_program(&invocation.executable) else {
+            log::debug!(
+                "image paste declined the SSH executable {:?}",
+                invocation.executable
+            );
+            return None;
+        };
+        invocation.executable = program;
+        Some(invocation)
+    }
+
+    fn trusted_ssh_program(&self, reported: &str) -> Option<String> {
+        #[cfg(any(windows, test))]
+        if is_wsl_shell(&self.shell) {
+            return posix_environment_ssh_program(reported);
+        }
+        #[cfg(windows)]
+        if msys2_profile(&self.shell).is_some() || cygwin_profile(&self.shell).is_some() {
+            // The launch spec starts the installation's own `ssh.exe` whatever
+            // this returns; the reported name is only vetted.
+            return posix_environment_ssh_program(reported);
+        }
+        native_ssh_program(reported, &self.environment)
+    }
+
     fn run(
         &self,
         invocation: &OpenSshInvocation,
@@ -434,6 +476,77 @@ fn is_open_ssh(program: &str) -> bool {
     program_is_named(program, &["ssh", "ssh.exe"])
 }
 
+/// The `ssh` a WSL, MSYS2 or Cygwin session reported, if it is that
+/// environment's own: the bare name, which the environment's `PATH` resolves
+/// without the current directory, or the conventional `/usr/bin/ssh` or
+/// `/bin/ssh`. Any other path is refused, because the report is title text and
+/// the path in it could name anything.
+#[cfg(any(windows, test))]
+fn posix_environment_ssh_program(reported: &str) -> Option<String> {
+    let program = reported
+        .len()
+        .checked_sub(".exe".len())
+        .filter(|&end| {
+            reported.is_char_boundary(end) && reported[end..].eq_ignore_ascii_case(".exe")
+        })
+        .map_or(reported, |end| &reported[..end]);
+    matches!(program, "ssh" | "/usr/bin/ssh" | "/bin/ssh").then(|| program.to_owned())
+}
+
+/// The native `ssh` to start: the one a search of the system directories and
+/// the absolute `PATH` entries finds, never the pane's working directory.
+/// A reported bare name selects it; a reported path is accepted only when it
+/// is that same executable, so an `ssh` elsewhere — in a project checkout, in
+/// a directory something else wrote — is never run on a paste.
+fn native_ssh_program(reported: &str, environment: &HashMap<String, String>) -> Option<String> {
+    let resolved = resolve_native_ssh(environment)?;
+    if reported.contains(['/', '\\', ':']) {
+        let reported = std::path::Path::new(reported);
+        if !reported.is_absolute() {
+            return None;
+        }
+        let same = std::fs::canonicalize(reported)
+            .ok()
+            .zip(std::fs::canonicalize(&resolved).ok())
+            .is_some_and(|(reported, resolved)| reported == resolved);
+        if !same {
+            return None;
+        }
+    }
+    Some(resolved.to_string_lossy().into_owned())
+}
+
+#[cfg(windows)]
+fn resolve_native_ssh(environment: &HashMap<String, String>) -> Option<PathBuf> {
+    let path = environment
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("PATH"))
+        .map(|(_, value)| std::ffi::OsString::from(value))
+        .or_else(|| std::env::var_os("PATH"));
+    terminal::resolve_application("ssh.exe", path)
+        .ok()
+        .flatten()
+}
+
+#[cfg(unix)]
+fn resolve_native_ssh(environment: &HashMap<String, String>) -> Option<PathBuf> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let path = environment
+        .get("PATH")
+        .map(std::ffi::OsString::from)
+        .or_else(|| std::env::var_os("PATH"))?;
+    std::env::split_paths(&path)
+        // An empty or relative entry is the current directory.
+        .filter(|directory| directory.is_absolute())
+        .map(|directory| directory.join("ssh"))
+        .find(|candidate| {
+            std::fs::metadata(candidate).is_ok_and(|metadata| {
+                metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+            })
+        })
+}
+
 /// Whether a pane's foreground process is a Mosh session: the bundled `zosh`,
 /// an upstream `mosh` launcher, or the `mosh-client` either one runs.
 ///
@@ -469,6 +582,15 @@ fn program_is_named(program: &str, names: &[&str]) -> bool {
         .is_some_and(|program| names.iter().any(|name| program.eq_ignore_ascii_case(name)))
 }
 
+/// Rebuilds the auxiliary connection from a reported `ssh` command line.
+///
+/// The command line is untrusted input even when it is authentic — on a
+/// WSL/MSYS2/Cygwin pane it arrives as printed title text — so nothing in it
+/// is passed through as written. Every option is normalized, and only the
+/// ones on [`short_option`]'s and [`config_option`]'s allowlists survive.
+/// Anything that could run a command, load code, read another configuration
+/// or write a file rejects the whole invocation, which leaves the native
+/// paste chord in place.
 fn parse_ssh_argv(argv: &[String]) -> Option<OpenSshInvocation> {
     let executable = argv.first()?.clone();
     if !is_open_ssh(&executable) {
@@ -507,146 +629,228 @@ fn parse_ssh_argv(argv: &[String]) -> Option<OpenSshInvocation> {
             });
         }
 
-        let (action, consumed) = parse_ssh_option(argv, index)?;
-        match action {
-            SshOptionAction::Keep(arguments) => options.extend(arguments),
-            SshOptionAction::Drop => {}
-            SshOptionAction::Reject => return None,
-        }
-        index += consumed;
+        index += parse_ssh_option_group(argv, index, &mut options)?;
     }
     None
 }
 
-enum SshOptionAction {
-    Keep(Vec<String>),
+/// Reads the short-option group at `argv[index]` — `-v`, `-vvi key`,
+/// `-p2222`, `-oKey=value` — appending what survives to `options` one option
+/// at a time, and returns how many arguments it consumed.
+///
+/// `None` rejects the invocation: an option off the allowlist, a long option,
+/// or a value that is missing.
+fn parse_ssh_option_group(
+    argv: &[String],
+    index: usize,
+    options: &mut Vec<String>,
+) -> Option<usize> {
+    let group = argv.get(index)?.strip_prefix('-')?;
+    if group.is_empty() || group.starts_with('-') {
+        return None;
+    }
+    for (offset, letter) in group.char_indices() {
+        let kind = short_option(letter);
+        let takes_value = matches!(
+            kind,
+            ShortOption::KeepValue | ShortOption::DropValue | ShortOption::Config
+        );
+        if !takes_value {
+            match kind {
+                ShortOption::Keep => options.push(format!("-{letter}")),
+                ShortOption::Drop => {}
+                _ => return None,
+            }
+            continue;
+        }
+        // The rest of the group is the value, as `getopt` reads it; only when
+        // nothing is left is it the next argument. Either way it is opaque:
+        // `-Llocalhost:22:...` is not a run of option letters.
+        let attached = &group[offset + letter.len_utf8()..];
+        let (value, consumed) = if attached.is_empty() {
+            (argv.get(index + 1)?.as_str(), 2)
+        } else {
+            (attached, 1)
+        };
+        if value.chars().any(char::is_control) {
+            return None;
+        }
+        match kind {
+            ShortOption::KeepValue => options.extend([format!("-{letter}"), value.to_owned()]),
+            ShortOption::DropValue => {}
+            ShortOption::Config => {
+                if let Some(option) = config_option(value)? {
+                    options.extend(["-o".to_owned(), option]);
+                }
+            }
+            _ => unreachable!("only value-taking options reach here"),
+        }
+        return Some(consumed);
+    }
+    Some(1)
+}
+
+/// What a short `ssh` option means for the auxiliary connection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ShortOption {
+    /// A flag that may change how the connection is made; kept.
+    Keep,
+    /// A flag only the interactive session needs; dropped.
     Drop,
+    /// An option whose value is kept: target, port, user, identity, jump
+    /// host and the like.
+    KeepValue,
+    /// An option whose value only the interactive session needs, such as a
+    /// port forward the session already holds; dropped with its value.
+    DropValue,
+    /// `-o`, whose value goes through [`config_option`].
+    Config,
+    /// Everything else. Covers the options that would run a command or load
+    /// code (`-F`, `-I`, `-w`), write a file (`-E`), or turn the connection
+    /// into something that cannot carry an upload on stdin (`-N`, `-W`, `-s`).
     Reject,
 }
 
-fn parse_ssh_option(argv: &[String], index: usize) -> Option<(SshOptionAction, usize)> {
-    let argument = argv.get(index)?;
-    let option = argument.strip_prefix('-')?;
-    if option.is_empty() {
+fn short_option(letter: char) -> ShortOption {
+    match letter {
+        '4' | '6' | 'C' | 'K' | 'k' | 'q' | 'v' => ShortOption::Keep,
+        'A' | 'a' | 'g' | 'M' | 'T' | 't' | 'X' | 'x' | 'Y' => ShortOption::Drop,
+        'B' | 'b' | 'c' | 'i' | 'J' | 'l' | 'm' | 'p' | 'S' => ShortOption::KeepValue,
+        'D' | 'e' | 'L' | 'R' => ShortOption::DropValue,
+        'o' => ShortOption::Config,
+        _ => ShortOption::Reject,
+    }
+}
+
+/// `ssh_config` keywords the auxiliary connection keeps from the session's
+/// command line, lowercased. They choose where and how to connect and
+/// authenticate; none of them runs a program or reads another configuration.
+const KEPT_CONFIG_OPTIONS: &[&str] = &[
+    "addressfamily",
+    "bindaddress",
+    "bindinterface",
+    "canonicaldomains",
+    "canonicalizefallbacklocal",
+    "canonicalizehostname",
+    "canonicalizemaxdots",
+    "canonicalizepermittedcnames",
+    "certificatefile",
+    "challengeresponseauthentication",
+    "checkhostip",
+    "ciphers",
+    "compression",
+    "connectionattempts",
+    "controlpath",
+    "fingerprinthash",
+    "globalknownhostsfile",
+    "gssapiauthentication",
+    "gssapidelegatecredentials",
+    "hashknownhosts",
+    "hostbasedacceptedalgorithms",
+    "hostbasedauthentication",
+    "hostkeyalgorithms",
+    "hostkeyalias",
+    "hostname",
+    "identitiesonly",
+    "identityagent",
+    "identityfile",
+    "ipqos",
+    "kbdinteractiveauthentication",
+    "kbdinteractivedevices",
+    "kexalgorithms",
+    "loglevel",
+    "macs",
+    "nohostauthenticationforlocalhost",
+    "numberofpasswordprompts",
+    "passwordauthentication",
+    "port",
+    "preferredauthentications",
+    "proxyjump",
+    "pubkeyacceptedalgorithms",
+    "pubkeyacceptedkeytypes",
+    "pubkeyauthentication",
+    "rekeylimit",
+    "requiredrsasize",
+    "serveralivecountmax",
+    "serveraliveinterval",
+    "stricthostkeychecking",
+    "tcpkeepalive",
+    "updatehostkeys",
+    "user",
+    "userknownhostsfile",
+    "verifyhostkeydns",
+];
+
+/// `ssh_config` keywords that shape only the interactive session, or that the
+/// auxiliary connection sets itself in [`OpenSshInvocation::batch_args`];
+/// dropped. `ControlMaster`/`ControlPersist` are here so an upload can reuse a
+/// session's master through `ControlPath` but never becomes one.
+const DROPPED_CONFIG_OPTIONS: &[&str] = &[
+    "addkeystoagent",
+    "batchmode",
+    "clearallforwardings",
+    "connecttimeout",
+    "controlmaster",
+    "controlpersist",
+    "dynamicforward",
+    "escapechar",
+    "exitonforwardfailure",
+    "forwardagent",
+    "forwardx11",
+    "forwardx11timeout",
+    "forwardx11trusted",
+    "gatewayports",
+    "localforward",
+    "remotecommand",
+    "remoteforward",
+    "requesttty",
+    "sendenv",
+    "setenv",
+    "streamlocalbindmask",
+    "streamlocalbindunlink",
+    "visualhostkey",
+];
+
+/// Normalizes one `-o` value to `Key=value` and applies the allowlist.
+///
+/// Returns `Some(Some(_))` to keep the option, `Some(None)` to drop it, and
+/// `None` to reject the invocation. The keyword is split off the way `ssh` reads a
+/// configuration line — leading blanks, then up to a blank or `=`, then one
+/// `=` with blanks either side — so `-o ProxyCommand=x`, `-oProxyCommand x`
+/// and `-o " proxycommand = x"` all reach the same decision. A keyword that is
+/// not plain ASCII letters and digits (a quoted one, say) is rejected, as is
+/// every keyword on neither list: `ProxyCommand`, `LocalCommand`,
+/// `PermitLocalCommand`, `KnownHostsCommand`, `Include`, `PKCS11Provider`,
+/// `SecurityKeyProvider` and whatever a future OpenSSH adds.
+fn config_option(value: &str) -> Option<Option<String>> {
+    const BLANK: [char; 4] = [' ', '\t', '\r', '\n'];
+    let line = value.trim_start_matches(BLANK);
+    let key_end = line.find(|character: char| BLANK.contains(&character) || character == '=');
+    let (key, rest) = line.split_at(key_end.unwrap_or(line.len()));
+    if key.is_empty() || !key.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
         return None;
     }
+    let rest = rest.trim_start_matches(BLANK);
+    let argument = rest.strip_prefix('=').unwrap_or(rest).trim_matches(BLANK);
+    let name = key.to_ascii_lowercase();
 
-    if option.starts_with('-') {
-        return Some((SshOptionAction::Reject, 1));
-    }
-    if option.starts_with('o') {
-        return parse_o_option(argv, index, option.strip_prefix('o').unwrap_or_default());
-    }
-
-    let mut saw_tty_flag = false;
-    let mut saw_other_flag = false;
-    for (offset, option_name) in option.char_indices() {
-        if matches!(option_name, 't' | 'T') {
-            saw_tty_flag = true;
-            continue;
+    match name.as_str() {
+        "stdinnull" => {
+            return (!argument.eq_ignore_ascii_case("yes")).then_some(None);
         }
-        if matches!(
-            option_name,
-            'n' | 'N' | 'f' | 'W' | 'O' | 'Q' | 'G' | 'V' | 's'
-        ) {
-            return Some((SshOptionAction::Reject, 1));
+        "sessiontype" => {
+            let session_type = argument.to_ascii_lowercase();
+            return (!matches!(session_type.as_str(), "none" | "subsystem")).then_some(None);
         }
-
-        saw_other_flag = true;
-        if short_option_takes_value(option_name) {
-            if saw_tty_flag {
-                return Some((SshOptionAction::Reject, 1));
-            }
-            let value_start = offset + option_name.len_utf8();
-            if value_start < option.len() {
-                // The rest of a short-option group is the value. Do not
-                // inspect it for option letters: `-Llocalhost:22:...` and
-                // `-i~/.ssh/...` are valid and their values are opaque.
-                return Some((SshOptionAction::Keep(vec![argument.clone()]), 1));
-            }
-            let value = argv.get(index + 1)?.clone();
-            return Some((SshOptionAction::Keep(vec![argument.clone(), value]), 2));
-        }
+        _ => {}
     }
-    if saw_tty_flag {
-        if saw_other_flag {
-            return Some((SshOptionAction::Reject, 1));
-        }
-        return Some((SshOptionAction::Drop, 1));
+    if DROPPED_CONFIG_OPTIONS.contains(&name.as_str()) {
+        return Some(None);
     }
-    Some((SshOptionAction::Keep(vec![argument.clone()]), 1))
-}
-
-fn parse_o_option(
-    argv: &[String],
-    index: usize,
-    attached: &str,
-) -> Option<(SshOptionAction, usize)> {
-    if attached.is_empty() {
-        let value = argv.get(index + 1)?.clone();
-        return parse_o_value(&value).map(|action| (action, 2));
+    if !KEPT_CONFIG_OPTIONS.contains(&name.as_str()) || argument.is_empty() {
+        return None;
     }
-    parse_o_value(attached).map(|action| (action, 1))
-}
-
-fn parse_o_value(value: &str) -> Option<SshOptionAction> {
-    let name = value.split_once('=').map_or(value, |(name, _)| name);
-    if name.eq_ignore_ascii_case("requesttty")
-        || name.eq_ignore_ascii_case("remotecommand")
-        || name.eq_ignore_ascii_case("batchmode")
-        || name.eq_ignore_ascii_case("connecttimeout")
-    {
-        return Some(SshOptionAction::Drop);
-    }
-    if name.eq_ignore_ascii_case("stdinnull") {
-        let enabled = value
-            .split_once('=')
-            .is_some_and(|(_, value)| value.eq_ignore_ascii_case("yes"));
-        return Some(if enabled {
-            SshOptionAction::Reject
-        } else {
-            SshOptionAction::Drop
-        });
-    }
-    if name.eq_ignore_ascii_case("sessiontype") {
-        let session_type = value
-            .split_once('=')
-            .map_or("default", |(_, value)| value)
-            .to_ascii_lowercase();
-        if matches!(session_type.as_str(), "none" | "subsystem") {
-            return Some(SshOptionAction::Reject);
-        }
-        return Some(SshOptionAction::Drop);
-    }
-    if name.is_empty() {
-        return Some(SshOptionAction::Reject);
-    }
-    Some(SshOptionAction::Keep(vec![
-        "-o".to_owned(),
-        value.to_owned(),
-    ]))
-}
-
-fn short_option_takes_value(option: char) -> bool {
-    matches!(
-        option,
-        'B' | 'b'
-            | 'c'
-            | 'D'
-            | 'E'
-            | 'e'
-            | 'F'
-            | 'I'
-            | 'i'
-            | 'J'
-            | 'L'
-            | 'l'
-            | 'm'
-            | 'p'
-            | 'R'
-            | 'S'
-            | 'w'
-    )
+    Some(Some(format!("{key}={argument}")))
 }
 
 fn parse_shell_command(command: &str) -> Result<Vec<String>> {

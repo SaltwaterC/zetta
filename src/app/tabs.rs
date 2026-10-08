@@ -261,6 +261,7 @@ impl Zetta {
             broadcast_input: false,
             silent_mode: false,
             close_policy: TabClosePolicy::Close,
+            protected: false,
             shared: false,
             custom_title: None,
             worktree_seed_title: None,

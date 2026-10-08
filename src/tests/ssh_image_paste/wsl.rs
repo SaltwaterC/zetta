@@ -171,22 +171,26 @@ mod process_tests {
     #[test]
     fn an_ssh_foreground_process_in_a_wsl_profile_keeps_the_ssh_upload_route() {
         let directory = tempfile::tempdir().unwrap();
-        let ssh = executable(directory.path(), "ssh", SSH);
+        executable(directory.path(), "ssh", SSH);
+        // The distribution's own `ssh`, found on its `PATH` — which the test
+        // launcher stands in for with this process's.
+        let path = std::env::join_paths(
+            std::iter::once(directory.path().to_path_buf())
+                .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+        )
+        .unwrap();
         let handler = handler(
             directory.path(),
-            HashMap::from([(
-                "TMPDIR".to_owned(),
-                directory.path().to_string_lossy().into_owned(),
-            )]),
+            HashMap::from([
+                (
+                    "TMPDIR".to_owned(),
+                    directory.path().to_string_lossy().into_owned(),
+                ),
+                ("PATH".to_owned(), path.to_string_lossy().into_owned()),
+            ]),
         );
         let result = handler
-            .paste_image(
-                &image(),
-                Some(&[
-                    ssh.to_string_lossy().into_owned(),
-                    "host.example".to_owned(),
-                ]),
-            )
+            .paste_image(&image(), Some(&["ssh host.example".to_owned()]))
             .unwrap();
         let ImagePasteResult::ResolvedPath(path) = result else {
             panic!("the SSH upload must return its remote image path");
@@ -202,6 +206,30 @@ mod process_tests {
             thread::sleep(Duration::from_millis(10));
         }
         assert!(!path.parent().unwrap().exists());
+    }
+
+    /// A reported `ssh` path is title text; the one it names is never run. The
+    /// paste is handled as for any other foreground process instead.
+    #[test]
+    fn a_reported_ssh_path_in_a_wsl_profile_is_not_run() {
+        let directory = tempfile::tempdir().unwrap();
+        let planted = executable(
+            directory.path(),
+            "ssh",
+            "#!/bin/sh\ntouch \"$0.ran\"\nexit 1\n",
+        );
+        let handler = handler(directory.path(), HashMap::new());
+        let result = handler
+            .paste_image(
+                &image(),
+                Some(&[format!("{} host.example", planted.display())]),
+            )
+            .unwrap();
+        let ImagePasteResult::ResolvedPath(path) = result else {
+            panic!("WSL must stage the image rather than send the native shortcut");
+        };
+        assert!(!PathBuf::from(path).starts_with(directory.path()));
+        assert!(!planted.with_extension("ran").exists());
     }
 
     #[test]

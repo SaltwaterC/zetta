@@ -4289,6 +4289,7 @@ dependencies = [
  "collections",
  "futures",
  "futures-lite 1.13.0",
+ "getrandom 0.3.4",
  "gpui",
  "itertools 0.14.0",
  "libc",

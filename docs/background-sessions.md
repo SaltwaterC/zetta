@@ -351,6 +351,18 @@ session's protection and failed-attempt backoff survive. The replacement is
 checked before the old daemon is stopped, so a candidate that cannot take over
 keeps the running sessions safe.
 
+The state handed over includes each protected session's verifier and retained
+output, and it is never written to disk. Unix passes it in an anonymous memory
+file (or an unlinked one) across the `execv`. Windows writes it into an
+anonymous pipe whose read end exists only in the replacement process: the old
+daemon duplicates that end into the process it started and closes its own, so no
+other process — including another one running as you — is handed anything to
+open, and an interrupted upgrade leaves nothing behind. That narrows the
+exposure to the two daemons' own memory, which on Windows is still readable by
+any process running as you (see below). Each pane's SSH-agent pipe is handed
+over the same way, as an open instance, so its name is held throughout and no
+other account can create it while the daemons change places.
+
 Panes that are on screen at the time are unaffected, whether or not they were
 ever detached. Zetta holds their terminals itself, so they keep displaying output
 and accepting input straight through the replacement. What does not survive is
@@ -410,6 +422,19 @@ age-v1 metadata and 64-KiB-stream scrollback segments only while the pane is
 detached or shared. Attached panes stay on the direct descriptor path. If disk
 has no recipients, it behaves like the in-memory screen and creates no
 persistence files.
+
+Recipients are chosen per window, and the multiplexer is shared, so a protected
+session is sealed to the recipients *its own* window configured — the one that
+owns or holds it, as the kernel (or, on Windows, an attestation) identifies it.
+Another window, or any other process holding the endpoint token, reconfiguring
+the multiplexer changes what unprotected sessions are written to, never a
+protected one's. Not even its own window's reconfiguring moves it — a reload can
+be requested through the control socket, by whoever can also edit the
+configuration file — so changing recipients reaches an existing protected
+session the next time it is protected (detached or shared with a secret). A
+protected session whose window has not configured any recipients is kept in
+memory only rather than written under somebody else's key, and anything written
+for it before it was protected is removed.
 
 What is kept is a bounded *terminal grid*, rather than raw bytes: the multiplexer runs an off-screen
 terminal for every pane it reads, feeds it the same output the pane produces, and
@@ -790,6 +815,14 @@ session. Each is granted only to the process the socket vouched for — on
 Windows, the one that answered the daemon's attestation challenge — and anyone
 else is asked for the secret. Renaming, attention, and silent-mode queries also
 skip protected sessions.
+
+The window itself is not a way around this either. `zetta pane`,
+`zetta project run`, and `zetta pane wait` act inside the active (or named) tab,
+by typing into a pane, opening one beside it, or listing its panes. A protected
+tab refuses all of them, from any process: nothing a request can carry proves it
+comes from inside the tab (an inherited environment variable can be read from
+`/proc` by any process running as you), so the only safe answer is no. Run them
+in an unprotected tab instead.
 
 The secret is never stored. Only a uniquely salted Argon2id verifier lives in
 the `zmux` daemon's memory during Phase 0–2, and it is never written to

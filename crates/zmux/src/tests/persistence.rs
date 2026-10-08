@@ -1,6 +1,14 @@
 use super::*;
 use crate::protocol::BackgroundPaneLayout;
 
+/// These tests exercise storage rather than sealing, so every session id they
+/// use is sealed to the store, as the daemon seals an unprotected session.
+fn seal_to_store(store: &mut PersistenceStore) {
+    for id in 0..=256 {
+        store.seal(id, &Seal::Store).unwrap();
+    }
+}
+
 #[test]
 fn scrollback_rotation_keeps_sequences_and_existing_segments() {
     let directory = tempfile::tempdir().unwrap();
@@ -8,6 +16,7 @@ fn scrollback_rotation_keeps_sequences_and_existing_segments() {
     let mut store = PersistenceStore::open(directory.path(), &[identity.to_public().to_string()])
         .unwrap()
         .unwrap();
+    seal_to_store(&mut store);
     let full = vec![b'x'; SEGMENT_BYTES];
     store.append_scrollback(7, 1, &full).unwrap();
     assert!(store.segments.is_empty(), "size threshold must rotate");
@@ -49,6 +58,7 @@ fn scrollback_recovery_reconciles_orphans_and_each_panes_highest_sequence() {
             PersistenceStore::open(directory.path(), &[identity.to_public().to_string()])
                 .unwrap()
                 .unwrap();
+        seal_to_store(&mut store);
         store.append_scrollback(7, 1, b"first").unwrap();
         store.flush_segments().unwrap();
         // No manifest record: these also model publication followed by a crash
@@ -71,6 +81,7 @@ fn scrollback_recovery_reconciles_orphans_and_each_panes_highest_sequence() {
         let mut store = PersistenceStore::open_with_recovery_state(directory.path(), None, handoff)
             .unwrap()
             .unwrap();
+        seal_to_store(&mut store);
         for (session, pane, expected) in [(7, 1, 11), (7, 2, 21), (8, 1, 31), (8, 2, 1)] {
             store.append_scrollback(session, pane, b"next").unwrap();
             assert_eq!(store.segments[&(session, pane)].sequence, expected);
@@ -92,6 +103,7 @@ fn scrollback_publication_skips_collisions_without_overwriting() {
     let mut store = PersistenceStore::open(directory.path(), &[identity.to_public().to_string()])
         .unwrap()
         .unwrap();
+    seal_to_store(&mut store);
     store.append_scrollback(7, 1, b"new").unwrap();
     // Arrive after the sequence is reserved, including a second collision.
     for sequence in [1, 2] {
@@ -136,6 +148,7 @@ fn scrollback_publication_reserves_its_sequence_even_if_the_manifest_write_fails
     let mut store = PersistenceStore::open(directory.path(), &[identity.to_public().to_string()])
         .unwrap()
         .unwrap();
+    seal_to_store(&mut store);
     store
         .append_scrollback(7, 1, b"published before error")
         .unwrap();
@@ -178,6 +191,7 @@ fn scrollback_sequence_exhaustion_never_reuses_the_last_file() {
     let mut recovered = PersistenceStore::open_with_recovery(directory.path(), None)
         .unwrap()
         .unwrap();
+    seal_to_store(&mut recovered);
     assert!(
         recovered
             .append_scrollback(3, 1, b"overflow after restart")
@@ -230,6 +244,7 @@ fn disk_segments_are_encrypted_and_manifest_sizes_are_updated() {
     let mut store = PersistenceStore::open(directory.path(), &[recipient])
         .unwrap()
         .unwrap();
+    seal_to_store(&mut store);
     store
         .save_session(&PersistedSession {
             id: 7,
@@ -326,6 +341,7 @@ fn dimensioned_disk_snapshots_replay_each_encrypted_pane_scrollback() {
     let mut store = PersistenceStore::open(directory.path(), &[recipient])
         .unwrap()
         .unwrap();
+    seal_to_store(&mut store);
     store
         .save_session(&PersistedSession {
             id: 17,
@@ -434,6 +450,7 @@ fn disk_restore_keeps_scrollback_when_replayed_into_a_fresh_terminal() {
     let mut store = PersistenceStore::open(directory.path(), &[recipient])
         .unwrap()
         .unwrap();
+    seal_to_store(&mut store);
     let mut saved = Vec::new();
     for line in 0..30 {
         saved.extend_from_slice(format!("line {line}\r\n").as_bytes());
@@ -510,6 +527,7 @@ fn reopening_an_existing_store_recovers_its_private_recipient_options() {
     let mut reopened = PersistenceStore::open(directory.path(), &[])
         .unwrap()
         .unwrap();
+    seal_to_store(&mut reopened);
     reopened
         .save_session(&PersistedSession {
             id: 8,
@@ -548,6 +566,7 @@ fn store_with_one_live_record(directory: &Path) -> PersistenceStore {
     let mut store = PersistenceStore::open(directory, &[recipient])
         .unwrap()
         .unwrap();
+    seal_to_store(&mut store);
     store
         .save_session(&PersistedSession {
             id: 3,
@@ -660,6 +679,7 @@ fn cleanup_keeps_the_fixed_record_bound() {
     let mut store = PersistenceStore::open(directory.path(), &[recipient])
         .unwrap()
         .unwrap();
+    seal_to_store(&mut store);
     let now = unix_now();
     for id in 1..=MAX_RECORDS as u64 + 3 {
         store
@@ -692,6 +712,128 @@ fn cleanup_keeps_the_fixed_record_bound() {
     let mut store = PersistenceStore::open_with_recovery(directory.path(), None)
         .unwrap()
         .unwrap();
+    seal_to_store(&mut store);
     store.prune(&HashSet::new()).unwrap();
     assert!(store.records().len() <= MAX_RECORDS);
+}
+
+fn sealing_test_session(id: u64) -> PersistedSession {
+    PersistedSession {
+        id,
+        created_at: 10,
+        updated_at: 11,
+        summary: BackgroundSessionSummary {
+            id,
+            title: "protected".to_owned(),
+            authentication_required: true,
+            active_pane: 1,
+            layout: BackgroundPaneLayout::Pane { pane_id: 1 },
+            panes: Vec::new(),
+            held: false,
+            scoped_to: None,
+            key_envelope: None,
+        },
+        state: serde_json::json!({"cwd": "/secret"}),
+        shared_state: None,
+        verifier: Some("$argon2id$v=19$m=1,t=1,p=1$c2FsdA$aGFzaA".to_owned()),
+        key_envelope: None,
+        failed_authentications: 0,
+        backoff_seconds: 0,
+        snapshots: vec![PersistedSnapshot {
+            pane_id: 1,
+            bytes: b"private screen".to_vec(),
+            columns: None,
+            lines: None,
+        }],
+    }
+}
+
+fn written_files(directory: &Path) -> Vec<String> {
+    let mut names = fs::read_dir(directory.join("persistence"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with("session-"))
+        .collect::<Vec<_>>();
+    names.sort();
+    names
+}
+
+/// The daemon decides what a session is sealed to; a store that was never
+/// told must not fall back to whatever it was last configured with.
+#[test]
+fn a_session_the_store_was_not_told_about_is_not_written() {
+    let directory = tempfile::tempdir().unwrap();
+    let configured = age::x25519::Identity::generate().to_public().to_string();
+    let mut store = PersistenceStore::open(directory.path(), &[configured])
+        .unwrap()
+        .unwrap();
+    store.save_session(&sealing_test_session(7)).unwrap();
+    store.append_scrollback(7, 1, b"private output").unwrap();
+    store.flush_segments().unwrap();
+
+    assert!(written_files(directory.path()).is_empty());
+    assert!(store.records().is_empty());
+}
+
+#[test]
+fn a_pinned_session_is_written_to_its_own_recipients_not_the_stores() {
+    let directory = tempfile::tempdir().unwrap();
+    let configured = age::x25519::Identity::generate();
+    let owner = age::x25519::Identity::generate();
+    let mut store = PersistenceStore::open(directory.path(), &[configured.to_public().to_string()])
+        .unwrap()
+        .unwrap();
+    store
+        .seal(7, &Seal::Recipients(vec![owner.to_public().to_string()]))
+        .unwrap();
+    store.save_session(&sealing_test_session(7)).unwrap();
+    store.append_scrollback(7, 1, b"private output").unwrap();
+    store.flush_segments().unwrap();
+
+    let files = written_files(directory.path());
+    assert_eq!(files.len(), 3, "metadata, screens and output: {files:?}");
+    for name in files {
+        let ciphertext = fs::read(directory.path().join("persistence").join(&name)).unwrap();
+        assert!(
+            age::decrypt(&configured, &ciphertext).is_err(),
+            "{name} must not open with the store's recipient"
+        );
+        assert!(age::decrypt(&owner, &ciphertext).is_ok(), "{name}");
+    }
+}
+
+#[test]
+fn withholding_a_session_drops_its_buffered_output() {
+    let directory = tempfile::tempdir().unwrap();
+    let configured = age::x25519::Identity::generate().to_public().to_string();
+    let mut store = PersistenceStore::open(directory.path(), &[configured])
+        .unwrap()
+        .unwrap();
+    store.seal(7, &Seal::Store).unwrap();
+    store.append_scrollback(7, 1, b"before protection").unwrap();
+    store.seal(7, &Seal::Withheld).unwrap();
+    store.append_scrollback(7, 1, b"after protection").unwrap();
+    store.flush_segments().unwrap();
+
+    assert!(written_files(directory.path()).is_empty());
+}
+
+/// What was written before a session was protected carries no verifier; a
+/// recovered daemon would otherwise offer it for resuming without the secret.
+#[test]
+fn withholding_a_session_removes_what_was_written_before_it_was_protected() {
+    let directory = tempfile::tempdir().unwrap();
+    let configured = age::x25519::Identity::generate().to_public().to_string();
+    let mut store = PersistenceStore::open(directory.path(), &[configured])
+        .unwrap()
+        .unwrap();
+    store.seal(7, &Seal::Store).unwrap();
+    let mut unprotected = sealing_test_session(7);
+    unprotected.verifier = None;
+    store.save_session(&unprotected).unwrap();
+    assert_eq!(store.records().len(), 1);
+
+    store.seal(7, &Seal::Withheld).unwrap();
+    assert!(store.records().is_empty());
+    assert!(written_files(directory.path()).is_empty());
 }

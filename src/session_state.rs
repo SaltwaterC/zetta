@@ -551,6 +551,7 @@ impl TabState {
             } else {
                 TabClosePolicy::Close
             },
+            protected: false,
             shared: self.shared,
             custom_title: self.custom_title,
             worktree_seed_title: self.worktree_seed_title,

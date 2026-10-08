@@ -268,8 +268,24 @@ When run from MSYS2 or Cygwin on Windows, Zetta resolves its Unix-style `$HOME`
 with `cygpath` before writing `.bashrc` or `.zshrc`, including for installations
 outside their conventional roots. Cygwin profiles also install session-local
 prompt and foreground-command hooks for Bash, Zsh, Fish, and Nushell; these
-hooks report `zetta-cwd:` and `zetta-cmd:` markers without changing the user's
-shell startup files. Native editor dispatch uses `cygpath` for Cygwin paths.
+hooks report `zetta-cwd:` and `zetta-cmd;<nonce>:` markers without changing the
+user's shell startup files. Native editor dispatch uses `cygpath` for Cygwin paths.
+
+The foreground-command marker is title text, so anything printed into the pane
+— a remote host's output, `cat` of a file — can produce one. Image paste acts
+on it (it opens an SSH side connection with the options the marker names), so
+each WSL, MSYS2 and Cygwin pane gets a random nonce in
+`__ZETTA_COMMAND_MARKER_NONCE`, and only a marker carrying it is acted on.
+The hooks move the nonce into a shell variable and unset it, so programs the
+pane runs do not inherit it, and it is outside the `ZETTA_` prefix that shared
+sessions and a `SendEnv ZETTA_*` would carry elsewhere. A marker without the
+nonce still updates the tab title. A pane reattached from the multiplexer has
+no nonce its window knows, so image paste there uses the native shortcut (or,
+on WSL, stages the image in the distribution) rather than SSH. Even an
+authenticated marker is not run as written: the SSH executable is the
+environment's own, and its options are rebuilt from an allowlist that refuses
+`ProxyCommand`, `LocalCommand`, `KnownHostsCommand`, `Include`, `-F`, `-I` and
+`-E`, among others.
 
 The startup files and commands are:
 

@@ -11,8 +11,6 @@ fn ssh(arguments: &[&str]) -> Vec<String> {
 fn parses_and_preserves_open_ssh_connection_options() {
     let argv = [
         r"C:\Windows\System32\OpenSSH\ssh.exe".to_owned(),
-        "-F".to_owned(),
-        "config with spaces".to_owned(),
         "-i".to_owned(),
         "key with spaces".to_owned(),
         "-p2222".to_owned(),
@@ -34,11 +32,10 @@ fn parses_and_preserves_open_ssh_connection_options() {
     assert_eq!(
         invocation.options,
         [
-            "-F",
-            "config with spaces",
             "-i",
             "key with spaces",
-            "-p2222",
+            "-p",
+            "2222",
             "-o",
             "ProxyJump=bastion",
             "-v",
@@ -47,11 +44,10 @@ fn parses_and_preserves_open_ssh_connection_options() {
     assert_eq!(
         invocation.batch_args("printf sentinel".to_owned()),
         [
-            "-F",
-            "config with spaces",
             "-i",
             "key with spaces",
-            "-p2222",
+            "-p",
+            "2222",
             "-o",
             "ProxyJump=bastion",
             "-v",
@@ -108,7 +104,179 @@ fn preserves_bundled_flags_before_a_value_taking_option() {
         .expect("the foreground process is ssh");
 
     assert_eq!(invocation.target, "host");
-    assert_eq!(invocation.options, ["-vvi", "key"]);
+    assert_eq!(invocation.options, ["-v", "-v", "-i", "key"]);
+}
+
+/// Each of these runs a program, loads code, reads a configuration the user
+/// did not choose for this connection, or writes a file. A reported command
+/// line carrying any of them is not used at all, however it spells the option.
+#[test]
+fn options_that_run_load_or_write_anything_reject_the_invocation() {
+    for arguments in [
+        ["-F", "config", "host"].as_slice(),
+        ["-Fconfig", "host"].as_slice(),
+        ["-I", "pkcs11.so", "host"].as_slice(),
+        ["-E", "log", "host"].as_slice(),
+        ["-w", "0:0", "host"].as_slice(),
+        ["-P", "tag", "host"].as_slice(),
+        ["-o", "ProxyCommand=calc", "host"].as_slice(),
+        ["-oProxyCommand=calc", "host"].as_slice(),
+        ["-o", "ProxyCommand calc", "host"].as_slice(),
+        ["-o", " proxycommand = calc", "host"].as_slice(),
+        ["-o", "PROXYCOMMAND=calc", "host"].as_slice(),
+        ["-o", "\"ProxyCommand\" calc", "host"].as_slice(),
+        // A flag group ending in `o` used to pass through as written.
+        ["-vo", "ProxyCommand=calc", "host"].as_slice(),
+        ["-qvoProxyCommand=calc", "host"].as_slice(),
+        ["-o", "LocalCommand=calc", "host"].as_slice(),
+        ["-o", "PermitLocalCommand=yes", "host"].as_slice(),
+        ["-o", "KnownHostsCommand=calc", "host"].as_slice(),
+        ["-o", "Include=/tmp/evil", "host"].as_slice(),
+        ["-o", "PKCS11Provider=/tmp/evil.so", "host"].as_slice(),
+        ["-o", "SecurityKeyProvider=/tmp/evil.so", "host"].as_slice(),
+        ["-o", "ProxyUseFdpass=yes", "host"].as_slice(),
+        ["-o", "Tunnel=yes", "host"].as_slice(),
+        // Whatever a future OpenSSH adds is refused until it is reviewed.
+        ["-o", "SomeFutureOption=yes", "host"].as_slice(),
+        ["-o", "=calc", "host"].as_slice(),
+        ["-o", "Port=", "host"].as_slice(),
+        ["--proxy", "host"].as_slice(),
+        ["-Z", "host"].as_slice(),
+    ] {
+        assert!(
+            foreground_ssh_argv(&ssh(arguments)).is_none(),
+            "ssh {arguments:?} must not be used for an image upload"
+        );
+    }
+}
+
+#[test]
+fn session_only_options_are_dropped_and_kept_ones_are_normalized() {
+    let invocation = foreground_ssh_argv(&ssh(&[
+        "-A",
+        "-X",
+        "-L",
+        "8080:localhost:80",
+        "-R8081:localhost:81",
+        "-D",
+        "1080",
+        "-o",
+        "ForwardAgent=yes",
+        "-o",
+        "LocalForward 9090 localhost:90",
+        "-o",
+        "ControlMaster=auto",
+        "-o",
+        "ControlPersist=10m",
+        "-o",
+        "ControlPath=~/.ssh/cm-%r@%h:%p",
+        "-o",
+        "Port 2222",
+        "-oUser=alice",
+        "-o",
+        " IdentityFile = key with spaces ",
+        "-J",
+        "bastion",
+        "-4C",
+        "host",
+    ]))
+    .expect("every option here is allowed or dropped");
+
+    assert_eq!(
+        invocation.options,
+        [
+            "-o",
+            "ControlPath=~/.ssh/cm-%r@%h:%p",
+            "-o",
+            "Port=2222",
+            "-o",
+            "User=alice",
+            "-o",
+            "IdentityFile=key with spaces",
+            "-J",
+            "bastion",
+            "-4",
+            "-C",
+        ]
+    );
+    assert_eq!(invocation.target, "host");
+}
+
+/// What the shell integration reports is one quoted string. Quoting a value
+/// with spaces is ordinary and has to keep working.
+#[test]
+fn quoted_values_in_a_reported_command_line_remain_usable() {
+    let command = "ssh -i 'key with spaces' -o 'UserKnownHostsFile=/tmp/known hosts' \
+                   -o \"HostKeyAlias=my host\" -l 'a user' -J bastion alice@example.test";
+    let invocation =
+        foreground_ssh_argv(&[command.to_owned()]).expect("quoted values are not dangerous");
+
+    assert_eq!(invocation.target, "alice@example.test");
+    assert_eq!(
+        invocation.options,
+        [
+            "-i",
+            "key with spaces",
+            "-o",
+            "UserKnownHostsFile=/tmp/known hosts",
+            "-o",
+            "HostKeyAlias=my host",
+            "-l",
+            "a user",
+            "-J",
+            "bastion",
+        ]
+    );
+}
+
+/// A WSL, MSYS2 or Cygwin pane names its `ssh` in title text. Only that
+/// environment's own `ssh` is started, never a path the text chose.
+#[test]
+fn a_posix_environment_runs_only_its_own_ssh() {
+    for (reported, expected) in [
+        ("ssh", "ssh"),
+        ("ssh.exe", "ssh"),
+        ("SSH.EXE", ""),
+        ("/usr/bin/ssh", "/usr/bin/ssh"),
+        ("/bin/ssh", "/bin/ssh"),
+        ("/usr/bin/ssh.exe", "/usr/bin/ssh"),
+    ] {
+        assert_eq!(
+            posix_environment_ssh_program(reported),
+            (!expected.is_empty()).then(|| expected.to_owned()),
+            "{reported:?}"
+        );
+    }
+    for reported in [
+        "/tmp/evil/ssh",
+        "./ssh",
+        "../ssh",
+        "/home/me/project/ssh",
+        r"C:\Users\me\Downloads\ssh.exe",
+        "/cygdrive/c/tmp/ssh.exe",
+    ] {
+        assert_eq!(
+            posix_environment_ssh_program(reported),
+            None,
+            "{reported:?}"
+        );
+    }
+}
+
+#[test]
+fn a_wsl_pane_never_starts_a_reported_ssh_path() {
+    let handler =
+        SshImagePasteHandler::new(Shell::Program("wsl.exe".to_owned()), HashMap::new(), None);
+    let invocation = foreground_ssh_argv(&ssh(&["host"])).unwrap();
+    assert_eq!(
+        handler
+            .execution
+            .with_trusted_program(invocation)
+            .map(|invocation| invocation.executable),
+        Some("ssh".to_owned())
+    );
+    let planted = foreground_ssh_argv(&["/tmp/evil/ssh".to_owned(), "host".to_owned()]).unwrap();
+    assert!(handler.execution.with_trusted_program(planted).is_none());
 }
 
 #[test]
@@ -596,10 +764,8 @@ mod process_tests {
         assert!(error.to_string().contains("timed out"), "{error:#}");
     }
 
-    #[cfg(feature = "zosh-client")]
     struct TemporaryDirectory(PathBuf);
 
-    #[cfg(feature = "zosh-client")]
     impl Drop for TemporaryDirectory {
         fn drop(&mut self) {
             fs::remove_dir_all(&self.0).ok();
@@ -609,7 +775,6 @@ mod process_tests {
     /// A stand-in for OpenSSH that runs the remote command locally. The upload
     /// path recognizes a client only by the name `ssh`, so the executable has
     /// to be called that and therefore needs a directory of its own.
-    #[cfg(feature = "zosh-client")]
     fn fake_ssh_in_its_own_directory() -> (TemporaryDirectory, PathBuf) {
         let directory = TemporaryDirectory(temporary_path("ssh-image-home"));
         fs::create_dir_all(&directory.0).unwrap();
@@ -624,6 +789,72 @@ mod process_tests {
         permissions.set_mode(0o700);
         fs::set_permissions(&path, permissions).unwrap();
         (directory, path)
+    }
+
+    #[cfg(feature = "zosh-client")]
+    fn path_with(directory: &Path) -> String {
+        std::env::join_paths(
+            std::iter::once(directory.to_path_buf())
+                .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+        )
+        .unwrap()
+        .to_string_lossy()
+        .into_owned()
+    }
+
+    /// The native `ssh` is the one an absolute `PATH` entry names. A reported
+    /// path is accepted only when it is that executable; an `ssh` anywhere
+    /// else, or one only the current directory would find, is not run.
+    #[test]
+    fn a_native_pane_runs_only_the_ssh_its_path_resolves() {
+        let (trusted, trusted_ssh) = fake_ssh_in_its_own_directory();
+        let (_planted, planted_ssh) = fake_ssh_in_its_own_directory();
+        let environment =
+            HashMap::from([("PATH".to_owned(), trusted.0.to_string_lossy().into_owned())]);
+        let resolved = Some(trusted_ssh.to_string_lossy().into_owned());
+
+        assert_eq!(native_ssh_program("ssh", &environment), resolved);
+        assert_eq!(
+            native_ssh_program(&trusted_ssh.to_string_lossy(), &environment),
+            resolved
+        );
+        assert_eq!(
+            native_ssh_program(&planted_ssh.to_string_lossy(), &environment),
+            None
+        );
+        assert_eq!(native_ssh_program("./ssh", &environment), None);
+
+        // An empty or relative `PATH` entry is the current directory.
+        let current_directory_only = HashMap::from([("PATH".to_owned(), ".::bin".to_owned())]);
+        assert_eq!(native_ssh_program("ssh", &current_directory_only), None);
+    }
+
+    #[test]
+    fn a_planted_ssh_path_keeps_the_native_paste_action() {
+        let (trusted, _) = fake_ssh_in_its_own_directory();
+        let (_planted, planted_ssh) = fake_ssh_in_its_own_directory();
+        let handler = SshImagePasteHandler::new(
+            Shell::System,
+            HashMap::from([("PATH".to_owned(), trusted.0.to_string_lossy().into_owned())]),
+            None,
+        );
+        let image = gpui::Image {
+            format: gpui::ImageFormat::Png,
+            bytes: b"\x89PNG\r\n\x1a\n".to_vec(),
+            id: 1,
+        };
+        assert_eq!(
+            handler
+                .paste_image(
+                    &image,
+                    Some(&[
+                        planted_ssh.to_string_lossy().into_owned(),
+                        "host".to_owned()
+                    ]),
+                )
+                .unwrap(),
+            ImagePasteResult::UseNativeShortcut
+        );
     }
 
     #[cfg(feature = "zosh-client")]
@@ -649,8 +880,14 @@ mod process_tests {
     #[cfg(feature = "zosh-client")]
     #[test]
     fn a_mosh_pane_uploads_a_clipboard_image_through_its_ssh_command() {
-        let (_directory, ssh) = fake_ssh_in_its_own_directory();
-        let handler = SshImagePasteHandler::new(Shell::System, HashMap::new(), None);
+        let (directory, ssh) = fake_ssh_in_its_own_directory();
+        // The `--ssh` path is only accepted because it is the `ssh` this
+        // pane's `PATH` resolves to.
+        let handler = SshImagePasteHandler::new(
+            Shell::System,
+            HashMap::from([("PATH".to_owned(), path_with(&directory.0))]),
+            None,
+        );
         let foreground = [
             "/usr/local/bin/zosh".to_owned(),
             format!("--ssh={}", ssh.display()),

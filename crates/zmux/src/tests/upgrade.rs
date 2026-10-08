@@ -52,6 +52,7 @@ fn handover() -> Handover {
             key_envelope: None,
             failed_authentications: 3,
             refuse_for: Some(Duration::from_secs(4)),
+            sealed_to: Some(vec!["age1owner".to_owned()]),
             panes: vec![PaneHandover {
                 id: 2,
                 descriptor: 7,
@@ -74,6 +75,10 @@ fn handover() -> Handover {
                 retained: b"output".to_vec(),
             }],
         }],
+        recipient_grants: Some(crate::server::RecipientGrants {
+            startup: None,
+            by_process: vec![(4321, vec!["age1owner".to_owned()])],
+        }),
     }
 }
 
@@ -107,6 +112,38 @@ fn a_protected_session_keeps_its_verifier_and_its_backoff() {
     // limit, which is the thing the backoff exists to prevent.
     assert_eq!(session.failed_authentications, 3);
     assert_eq!(session.refuse_for, Some(Duration::from_secs(4)));
+}
+
+/// Re-deriving them in the replacement would trust whatever the store was last
+/// configured with, which any client holding the token can choose.
+#[test]
+fn a_protected_sessions_recipients_and_who_chose_them_survive_the_handover() {
+    let file = write_handover(&handover()).unwrap();
+    let restored = read_handover(file.into_raw_fd()).unwrap();
+
+    assert_eq!(
+        restored.sessions[0].sealed_to,
+        Some(vec!["age1owner".to_owned()])
+    );
+    let grants = restored.recipient_grants.expect("grants are carried");
+    assert_eq!(
+        grants.by_process,
+        vec![(4321, vec!["age1owner".to_owned()])]
+    );
+}
+
+#[test]
+fn a_handover_from_before_sealing_is_still_accepted() {
+    let mut encoded = serde_json::to_value(handover()).unwrap();
+    encoded.as_object_mut().unwrap().remove("recipient_grants");
+    encoded["sessions"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("sealed_to");
+
+    let restored: Handover = serde_json::from_value(encoded).unwrap();
+    assert!(restored.recipient_grants.is_none());
+    assert!(restored.sessions[0].sealed_to.is_none());
 }
 
 #[test]

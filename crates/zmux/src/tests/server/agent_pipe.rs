@@ -71,7 +71,7 @@ fn without_a_relay_the_pane_keeps_the_agent_it_would_have_had() {
 
 #[test]
 fn a_pane_pipe_is_never_relayed_into_itself() {
-    let own = crate::paths::pane_forwarded_agent_pipe(3);
+    let own = crate::paths::new_pane_forwarded_agent_pipe(3).unwrap();
     let own = own.to_string_lossy();
     assert_eq!(
         upstream_candidates(Some(&own), Some(Path::new(&*own))),

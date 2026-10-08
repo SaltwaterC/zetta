@@ -70,6 +70,7 @@ fn local_tab(tab_id: u64, pane_id: u64) -> Tab {
         broadcast_input: false,
         silent_mode: false,
         close_policy: TabClosePolicy::Close,
+        protected: false,
         shared: true,
         custom_title: None,
         worktree_seed_title: None,

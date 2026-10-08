@@ -129,6 +129,10 @@ use crate::alacritty::{
 use crate::mappings::colors::to_vte_rgb;
 use crate::mappings::keys::to_esc_str;
 
+/// The current-directory-free program search ConPTY launches with, for
+/// callers that start a process of their own.
+#[cfg(windows)]
+pub use alacritty_terminal::tty::resolve_application;
 pub use alacritty_terminal::tty::{AttachedChildEvents, ConsolePalette};
 pub use reader_handover::{GridSnapshotSource, RetiredReader};
 
@@ -1372,6 +1376,16 @@ pub(crate) enum TerminalBackendEvent {
 
 const REPORTED_WORKING_DIRECTORY_TITLE_PREFIX: &str = "zetta-cwd:";
 const REPORTED_FOREGROUND_COMMAND_TITLE_PREFIX: &str = "zetta-cmd:";
+const AUTHENTICATED_FOREGROUND_COMMAND_TITLE_PREFIX: &str = "zetta-cmd;";
+
+/// The environment variable a WSL/MSYS2/Cygwin pane's shell integration reads
+/// its command-marker nonce from (see [`authenticated_foreground_command_from_title`]).
+///
+/// Deliberately outside the `ZETTA_` namespace: shared-session drafts carry
+/// `ZETTA_*` to the machine that runs the pane, and a `SendEnv ZETTA_*` would
+/// forward it over SSH. The integrations copy it into a shell variable and
+/// unset it, so the programs a pane runs do not inherit it either.
+pub const COMMAND_MARKER_NONCE_ENV: &str = "__ZETTA_COMMAND_MARKER_NONCE";
 const REPORTED_LIFECYCLE_EVENT_PREFIX: &str = "zetta-event:";
 
 #[cfg(any(windows, test))]
@@ -1490,15 +1504,111 @@ fn reported_working_directory_from_title(title: &str) -> Option<String> {
     (is_unix_absolute || is_native_absolute).then(|| directory.to_owned())
 }
 
-/// Parses the `zetta-cmd:<command>` marker that WSL, MSYS2, and Cygwin sessions report
-/// via prompt/preexec shell hooks. Windows-side process inspection cannot see
-/// into WSL and does not reliably represent MSYS2's POSIX process hierarchy.
-fn reported_foreground_command_from_title(title: &str) -> Option<String> {
-    let command = title.strip_prefix(REPORTED_FOREGROUND_COMMAND_TITLE_PREFIX)?;
+/// Parses the foreground-command marker that WSL, MSYS2, and Cygwin sessions
+/// report via prompt/preexec shell hooks. Windows-side process inspection
+/// cannot see into WSL and does not reliably represent MSYS2's POSIX process
+/// hierarchy.
+///
+/// Two forms: `zetta-cmd:<command>`, and `zetta-cmd;<nonce>:<command>` from a
+/// shell integration that was given [`COMMAND_MARKER_NONCE_ENV`]. Both are
+/// title text any program printing into the pane can produce; only the second
+/// can be told apart from such a forgery, and only by the terminal that chose
+/// the nonce — see [`authenticated_foreground_command_from_title`].
+///
+/// Returns the nonce, when the marker carried one, and the command.
+fn foreground_command_marker(title: &str) -> Option<(Option<&str>, &str)> {
+    let (nonce, command) =
+        if let Some(marked) = title.strip_prefix(AUTHENTICATED_FOREGROUND_COMMAND_TITLE_PREFIX) {
+            let (nonce, command) = marked.split_once(':')?;
+            (Some(nonce), command)
+        } else {
+            (
+                None,
+                title.strip_prefix(REPORTED_FOREGROUND_COMMAND_TITLE_PREFIX)?,
+            )
+        };
     if command.chars().any(char::is_control) {
         return None;
     }
-    Some(command.to_owned())
+    Some((nonce, command))
+}
+
+/// The command a marker reports, in either form. Good for display and for
+/// observations nothing acts on; never for choosing a process to run.
+fn reported_foreground_command_from_title(title: &str) -> Option<String> {
+    foreground_command_marker(title).map(|(_, command)| command.to_owned())
+}
+
+/// The command a marker reports, only if it carries `expected`, the nonce this
+/// terminal gave its shell. A terminal that gave none accepts nothing.
+#[cfg(any(windows, test))]
+fn authenticated_foreground_command_from_title(
+    title: &str,
+    expected: Option<&str>,
+) -> Option<String> {
+    let (nonce, command) = foreground_command_marker(title)?;
+    let expected = expected.filter(|expected| !expected.is_empty())?;
+    nonces_match(nonce?, expected).then(|| command.to_owned())
+}
+
+/// Compares two nonces without stopping at the first difference.
+#[cfg(any(windows, test))]
+fn nonces_match(reported: &str, expected: &str) -> bool {
+    reported.len() == expected.len()
+        && reported
+            .bytes()
+            .zip(expected.bytes())
+            .fold(0u8, |difference, (left, right)| difference | (left ^ right))
+            == 0
+}
+
+/// Gives a WSL/MSYS2/Cygwin shell the nonce its command markers have to carry,
+/// and returns it. Any nonce already in `env` — a duplicated pane's template,
+/// or one inherited from a Zetta started inside such a pane — is replaced, so
+/// no two terminals share one.
+///
+/// `None`, with the variable removed, for every other shell, and when no
+/// random nonce could be drawn: that terminal then trusts no marker.
+///
+/// A WSL distribution sees only the variables `WSLENV` names, so the nonce is
+/// added there, one way (`/u`), for the WSL tracker to read. That is the local
+/// VM, not a remote host: nothing forwards it further.
+#[cfg(windows)]
+fn install_command_marker_nonce(
+    shell: &Shell,
+    env: &mut HashMap<String, String>,
+) -> Option<String> {
+    env.remove(COMMAND_MARKER_NONCE_ENV);
+    let host = posix_host(shell)?;
+    let mut bytes = [0u8; 16];
+    if let Err(error) = getrandom::fill(&mut bytes) {
+        log::warn!("could not draw a command-marker nonce: {error}");
+        return None;
+    }
+    let nonce = bytes
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    env.insert(COMMAND_MARKER_NONCE_ENV.to_owned(), nonce.clone());
+    if matches!(host, PosixHost::Wsl) {
+        let mut wslenv = env
+            .get("WSLENV")
+            .cloned()
+            .or_else(|| std::env::var("WSLENV").ok())
+            .unwrap_or_default();
+        let listed = wslenv
+            .split(':')
+            .any(|entry| entry.split('/').next() == Some(COMMAND_MARKER_NONCE_ENV));
+        if !listed {
+            if !wslenv.is_empty() {
+                wslenv.push(':');
+            }
+            wslenv.push_str(COMMAND_MARKER_NONCE_ENV);
+            wslenv.push_str("/u");
+        }
+        env.insert("WSLENV".to_owned(), wslenv);
+    }
+    Some(nonce)
 }
 
 fn lifecycle_event_from_title(title: &str) -> Option<Event> {
@@ -2262,6 +2372,10 @@ impl TerminalBuilder {
             shell_program: None,
             #[cfg(windows)]
             wsl_startup_timing: None,
+            #[cfg(windows)]
+            command_marker_nonce: None,
+            #[cfg(windows)]
+            authenticated_foreground_command: None,
             activation_script: Vec::new(),
             template: CopyTemplate {
                 pty_provider: None,
@@ -2740,6 +2854,8 @@ impl TerminalBuilder {
         #[cfg(windows)]
         let is_wsl_startup = matches!(posix_host(&shell), Some(PosixHost::Wsl));
         #[cfg(windows)]
+        let command_marker_nonce = install_command_marker_nonce(&shell, &mut env);
+        #[cfg(windows)]
         let console_palette_enabled = initial_console_palette.is_some() && !is_wsl_startup;
         #[cfg(not(windows))]
         let console_palette_enabled = false;
@@ -3117,6 +3233,10 @@ impl TerminalBuilder {
                 shell_program,
                 #[cfg(windows)]
                 wsl_startup_timing,
+                #[cfg(windows)]
+                command_marker_nonce,
+                #[cfg(windows)]
+                authenticated_foreground_command: None,
                 activation_script: activation_script.clone(),
                 template: CopyTemplate {
                     pty_provider: pty_provider.clone(),
@@ -3425,6 +3545,17 @@ pub struct Terminal {
     shell_program: Option<String>,
     #[cfg(windows)]
     wsl_startup_timing: Option<WslStartupTiming>,
+    /// The nonce this terminal gave its WSL/MSYS2/Cygwin shell in
+    /// [`COMMAND_MARKER_NONCE_ENV`]. `None` for every terminal that did not
+    /// start its own shell — an attached multiplexer pane included — so none
+    /// of them can accept a command marker as authenticated.
+    #[cfg(windows)]
+    command_marker_nonce: Option<String>,
+    /// The last foreground command reported with [`Self::command_marker_nonce`].
+    /// Unlike `reported_foreground_command`, which any printed title can set,
+    /// this is what actions (image paste over SSH) may act on.
+    #[cfg(windows)]
+    authenticated_foreground_command: Option<String>,
     template: CopyTemplate,
     /// Whether the child this terminal's pty runs belongs to the multiplexer.
     ///
@@ -3717,6 +3848,13 @@ impl Terminal {
                 }
 
                 if let Some(command) = reported_foreground_command_from_title(&title) {
+                    #[cfg(windows)]
+                    if let Some(authenticated) = authenticated_foreground_command_from_title(
+                        &title,
+                        self.command_marker_nonce.as_deref(),
+                    ) {
+                        self.authenticated_foreground_command = Some(authenticated);
+                    }
                     // Only the Windows startup-timing log below reads this.
                     #[cfg(windows)]
                     let first_shell_marker = self.reported_shell_command.is_none();
@@ -5953,11 +6091,16 @@ impl Terminal {
     /// The periodic title refresh is intentionally not treated as current
     /// enough for an image paste, where a stale `ssh` process could upload an
     /// image after the terminal has already returned to its shell.
+    ///
+    /// A WSL/MSYS2/Cygwin pane's process tree is not visible from here, so its
+    /// answer is the shell integration's report — and only a report carrying
+    /// this terminal's nonce, because image paste runs `ssh` with the options
+    /// it names and any output can print an unauthenticated one.
     pub fn foreground_process_command_line_now(&self) -> Option<Vec<String>> {
         #[cfg(windows)]
         if posix_host(&self.template.shell).is_some() {
             return self
-                .reported_foreground_command
+                .authenticated_foreground_command
                 .clone()
                 .map(|command| vec![command]);
         }
@@ -7885,6 +8028,53 @@ mod tests {
             reported_foreground_command_from_title("zetta-cmd:with\ncontrol"),
             None
         );
+        // The authenticated form still names a command for display.
+        assert_eq!(
+            reported_foreground_command_from_title("zetta-cmd;0123abcd:ssh host"),
+            Some("ssh host".to_owned())
+        );
+        assert_eq!(
+            reported_foreground_command_from_title("zetta-cmd;no-separator"),
+            None
+        );
+    }
+
+    /// Image paste runs `ssh` with the options a WSL/MSYS2/Cygwin pane's
+    /// marker names, and any output can print a marker. Only one carrying the
+    /// nonce this terminal handed its own shell may be acted on.
+    #[test]
+    fn only_a_marker_carrying_this_terminals_nonce_is_authenticated() {
+        let nonce = Some("00112233445566778899aabbccddeeff");
+        assert_eq!(
+            authenticated_foreground_command_from_title(
+                "zetta-cmd;00112233445566778899aabbccddeeff:ssh -p 22 host",
+                nonce,
+            ),
+            Some("ssh -p 22 host".to_owned())
+        );
+        for forged in [
+            // What printed output produces, and what the integration used to.
+            "zetta-cmd:ssh -oProxyCommand=calc host",
+            // Another pane's nonce, or a guess.
+            "zetta-cmd;ffeeddccbbaa99887766554433221100:ssh host",
+            "zetta-cmd;00112233445566778899aabbccddeef:ssh host",
+            "zetta-cmd;:ssh host",
+            "zetta-cmd;00112233445566778899aabbccddeeff:ssh host\u{7}",
+        ] {
+            assert_eq!(
+                authenticated_foreground_command_from_title(forged, nonce),
+                None,
+                "{forged:?}"
+            );
+        }
+        // A terminal that gave its shell no nonce — an attached multiplexer
+        // pane — accepts no marker, including one with an empty nonce.
+        for expected in [None, Some("")] {
+            assert_eq!(
+                authenticated_foreground_command_from_title("zetta-cmd;:ssh host", expected),
+                None
+            );
+        }
     }
 
     #[test]
@@ -9997,6 +10187,38 @@ mod tests {
             editor_invocation_command("zetta", &posix_path_argument, true),
             "zetta edit --delete-after -- '/tmp/zetta scrollback.txt'"
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn only_posix_host_shells_are_given_a_fresh_command_marker_nonce() {
+        let msys2 = Shell::WithArguments {
+            program: "cmd.exe".to_owned(),
+            args: vec![r#""C:\msys64\msys2_shell.cmd" -shell bash"#.to_owned()],
+            title_override: None,
+        };
+        let inherited = || {
+            HashMap::from_iter([(
+                COMMAND_MARKER_NONCE_ENV.to_owned(),
+                "inherited-from-a-template".to_owned(),
+            )])
+        };
+
+        let mut env = inherited();
+        let nonce = install_command_marker_nonce(&msys2, &mut env).expect("MSYS2 gets a nonce");
+        assert_eq!(nonce.len(), 32);
+        assert!(nonce.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        assert_eq!(env.get(COMMAND_MARKER_NONCE_ENV), Some(&nonce));
+        let mut second = inherited();
+        assert_ne!(
+            install_command_marker_nonce(&msys2, &mut second),
+            Some(nonce)
+        );
+
+        let mut env = inherited();
+        let powershell = Shell::Program("powershell.exe".to_owned());
+        assert_eq!(install_command_marker_nonce(&powershell, &mut env), None);
+        assert!(!env.contains_key(COMMAND_MARKER_NONCE_ENV));
     }
 
     #[cfg(windows)]

@@ -103,6 +103,7 @@ pub(super) fn prepare_upgrade(daemon: &Arc<Daemon>) -> Result<(PathBuf, std::fs:
         next_session_id: daemon.next_session_id.load(Ordering::SeqCst),
         next_pane_id: daemon.next_pane_id.load(Ordering::SeqCst),
         retention: *daemon.retention.lock().unwrap(),
+        recipient_grants: Some(lock_grants(daemon).clone()),
         sessions: sessions
             .iter_mut()
             .map(|session| {
@@ -125,6 +126,7 @@ pub(super) fn prepare_upgrade(daemon: &Arc<Daemon>) -> Result<(PathBuf, std::fs:
                     refuse_for: session
                         .refuse_until
                         .and_then(|until| until.checked_duration_since(now)),
+                    sealed_to: session.sealed_to.clone(),
                     panes: session
                         .panes
                         .iter_mut()
@@ -180,23 +182,28 @@ pub(super) fn upgrade_daemon(
     daemon: &Arc<Daemon>,
     connection: &mut Connection,
 ) -> std::result::Result<(), UpgradeRefused> {
-    let (executable, handover, ready) = prepare_upgrade(daemon).map_err(UpgradeRefused::Before)?;
-    let mut replacement = match crate::upgrade::spawn_replacement(&executable, &handover, &ready) {
-        Ok(child) => child,
-        Err(error) => {
-            crate::upgrade::remove_handover(&handover, &ready);
-            return Err(UpgradeRefused::Before(error));
-        }
-    };
-    if let Err(error) = crate::upgrade::wait_for_ready(&mut replacement, &ready) {
+    let (executable, mut handover) = prepare_upgrade(daemon).map_err(UpgradeRefused::Before)?;
+    let ready =
+        crate::upgrade::ready_path(&session_catalog_dir()).map_err(UpgradeRefused::Before)?;
+    let mut replacement =
+        crate::upgrade::spawn_replacement(&executable, &ready).map_err(UpgradeRefused::Before)?;
+    // Everything the replacement was given — the handover pipe, the agent pipe
+    // instances — goes with it if it is stopped here.
+    let refuse = |replacement: &mut std::process::Child, error: anyhow::Error| {
         let _ = replacement.kill();
-        crate::upgrade::remove_handover(&handover, &ready);
-        return Err(UpgradeRefused::Before(error));
+        crate::upgrade::remove_ready(&ready);
+        Err(UpgradeRefused::Before(error))
+    };
+    hand_over_agent_pipes(&mut handover, &replacement);
+    if let Err(error) = crate::upgrade::send_handover(&mut replacement, &handover) {
+        return refuse(&mut replacement, error);
+    }
+    drop(handover);
+    if let Err(error) = crate::upgrade::wait_for_ready(&mut replacement, &ready) {
+        return refuse(&mut replacement, error);
     }
     if let Err(error) = connection.send(&Response::Ok) {
-        let _ = replacement.kill();
-        crate::upgrade::remove_handover(&handover, &ready);
-        return Err(UpgradeRefused::Before(error));
+        return refuse(&mut replacement, error);
     }
     broadcast(daemon, &Event::Replacing);
     daemon.running.store(false, Ordering::SeqCst);
@@ -204,8 +211,30 @@ pub(super) fn upgrade_daemon(
     Ok(())
 }
 
+/// Gives the replacement an instance of every pane's agent pipe, so each name
+/// stays held while this daemon exits; see `agent_pipe/listener.rs`.
 #[cfg(windows)]
-pub(super) fn prepare_upgrade(daemon: &Arc<Daemon>) -> Result<(PathBuf, PathBuf, PathBuf)> {
+fn hand_over_agent_pipes(
+    handover: &mut crate::upgrade::Handover,
+    replacement: &std::process::Child,
+) {
+    use std::os::windows::io::AsRawHandle as _;
+
+    let process = windows::Win32::Foundation::HANDLE(replacement.as_raw_handle());
+    for pane in handover
+        .sessions
+        .iter_mut()
+        .flat_map(|session| session.panes.iter_mut())
+    {
+        if let Some((name, instance)) = super::agent_pipe::hand_over(pane.id, process) {
+            pane.agent_pipe = Some(name.to_string_lossy().into_owned());
+            pane.agent_pipe_instance = instance;
+        }
+    }
+}
+
+#[cfg(windows)]
+pub(super) fn prepare_upgrade(daemon: &Arc<Daemon>) -> Result<(PathBuf, crate::upgrade::Handover)> {
     let executable = daemon
         .executable
         .clone()
@@ -230,6 +259,7 @@ pub(super) fn prepare_upgrade(daemon: &Arc<Daemon>) -> Result<(PathBuf, PathBuf,
         next_session_id: daemon.next_session_id.load(Ordering::SeqCst),
         next_pane_id: daemon.next_pane_id.load(Ordering::SeqCst),
         retention: *daemon.retention.lock().unwrap(),
+        recipient_grants: Some(lock_grants(daemon).clone()),
         sessions: sessions
             .iter_mut()
             .map(|session| crate::upgrade::SessionHandover {
@@ -249,6 +279,7 @@ pub(super) fn prepare_upgrade(daemon: &Arc<Daemon>) -> Result<(PathBuf, PathBuf,
                 refuse_for: session
                     .refuse_until
                     .and_then(|until| until.checked_duration_since(now)),
+                sealed_to: session.sealed_to.clone(),
                 panes: session
                     .panes
                     .iter_mut()
@@ -265,6 +296,10 @@ pub(super) fn prepare_upgrade(daemon: &Arc<Daemon>) -> Result<(PathBuf, PathBuf,
                             exited: pane.exited,
                             exit_status: pane.exit_status,
                             retained,
+                            // Filled in once the replacement exists to hold
+                            // an instance: `hand_over_agent_pipes`.
+                            agent_pipe: None,
+                            agent_pipe_instance: None,
                         }
                     })
                     .collect(),
@@ -273,8 +308,7 @@ pub(super) fn prepare_upgrade(daemon: &Arc<Daemon>) -> Result<(PathBuf, PathBuf,
     };
     drop(sessions);
     validate_handover_with_host(&daemon.pty_host, &handover)?;
-    let (handover, ready) = crate::upgrade::write_handover(&session_catalog_dir(), &handover)?;
-    Ok((executable, handover, ready))
+    Ok((executable, handover))
 }
 
 /// A pane's attachment in the form that crosses an exec.
@@ -452,6 +486,7 @@ pub(super) fn adopt_handover(
             keep: session.keep,
             offered: session.offered,
             owner: session.owner,
+            sealed_to: session.sealed_to,
         });
     }
     // Derived from what was actually adopted, not merely taken from the
@@ -488,9 +523,13 @@ pub(super) fn adopt_handover(
 ) -> Result<usize> {
     let mut sessions = daemon.sessions.lock().unwrap();
     let now = Instant::now();
+    let version = handover.version;
     for session in handover.sessions {
         if sessions.iter().any(|existing| existing.id == session.id) {
             log::warn!("ignoring session {}, which is already held", session.id);
+            for pane in &session.panes {
+                super::agent_pipe::discard(pane.agent_pipe_instance);
+            }
             continue;
         }
         let mut summary = session.summary;
@@ -516,14 +555,28 @@ pub(super) fn adopt_handover(
             let (pty, child_events) = tty::attach(conout, conin, child_pid)
                 .context("attaching an adopted pseudoconsole to the daemon")?;
             // The previous daemon's listener dies with it; the shell still has
-            // this pane's pipe name. What it fell back to did not survive the
-            // handover, so this daemon's own agent stands in.
-            super::agent_pipe::serve(
-                pane.id,
-                std::env::var_os("SSH_AUTH_SOCK")
-                    .filter(|path| !path.is_empty())
-                    .map(PathBuf::from),
-            );
+            // this pane's pipe name, which the instance it passed keeps held.
+            // What the pane fell back to did not survive the handover, so this
+            // daemon's own agent stands in.
+            let agent_pipe = match pane.agent_pipe {
+                Some(name) => Some(PathBuf::from(name)),
+                // Every pane had a predictable name before names carried a
+                // random part, and no instance came with it.
+                None if version == crate::upgrade::FILE_HANDOVER_VERSION => {
+                    Some(crate::paths::legacy_pane_forwarded_agent_pipe(pane.id))
+                }
+                None => None,
+            };
+            if let Some(name) = agent_pipe {
+                super::agent_pipe::adopt(
+                    pane.id,
+                    name,
+                    pane.agent_pipe_instance,
+                    std::env::var_os("SSH_AUTH_SOCK")
+                        .filter(|path| !path.is_empty())
+                        .map(PathBuf::from),
+                );
+            }
             let retention = *daemon.retention.lock().unwrap();
             let mut retained = retention.new_retained(pane.columns, pane.lines);
             retained.seed(pane.retained);
@@ -565,6 +618,7 @@ pub(super) fn adopt_handover(
             keep: session.keep,
             offered: session.offered,
             owner: session.owner,
+            sealed_to: session.sealed_to,
         });
     }
     let session_ids = sessions

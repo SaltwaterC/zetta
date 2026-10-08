@@ -617,7 +617,7 @@ pub fn run_with_defaults(arguments: &[OsString], defaults: ClientDefaults) -> Re
     #[cfg(unix)]
     let mut resume_from: Option<i32> = None;
     #[cfg(windows)]
-    let mut resume_from: Option<std::path::PathBuf> = None;
+    let mut resume_from: Option<upgrade::HandoverSource> = None;
     #[cfg(feature = "session-persistence")]
     let mut daemon_options = None;
     // Explicit paths append to the configured ones rather than replacing them,
@@ -947,7 +947,7 @@ pub fn run_with_defaults(arguments: &[OsString], defaults: ClientDefaults) -> Re
                     });
                 let understood = supported
                     .and_then(|version| version.trim().parse::<u32>().ok())
-                    .is_some_and(|version| version == upgrade::HANDOVER_VERSION);
+                    .is_some_and(upgrade::accepts_handover_version);
                 std::process::exit(if understood { 0 } else { 1 });
             }
             // Hidden: set by the previous image when it replaced itself.
@@ -958,13 +958,22 @@ pub fn run_with_defaults(arguments: &[OsString], defaults: ClientDefaults) -> Re
                     .and_then(|(_, descriptor)| descriptor.parse::<i32>().ok());
                 anyhow::ensure!(resume_from.is_some(), "unusable --resume-from descriptor");
             }
+            // Hidden: how a daemon from before the handover pipe still hands
+            // over to this one. The file is removed once read.
             #[cfg(windows)]
             value if value.starts_with("--resume-from=") => {
                 resume_from = value
                     .split_once('=')
                     .map(|(_, path)| std::path::PathBuf::from(path))
-                    .filter(|path| !path.as_os_str().is_empty());
+                    .filter(|path| !path.as_os_str().is_empty())
+                    .map(upgrade::HandoverSource::File);
                 anyhow::ensure!(resume_from.is_some(), "unusable --resume-from path");
+            }
+            // Hidden: set by the previous image, which then sends the handover
+            // over a pipe it announces on stdin.
+            #[cfg(windows)]
+            "--resume-from-pipe" => {
+                resume_from = Some(upgrade::HandoverSource::Pipe);
             }
             // Hidden: inherited by the replacement on platforms where the
             // listening socket's peer credentials survive an upgrade. macOS

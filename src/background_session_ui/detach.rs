@@ -106,6 +106,18 @@ impl Zetta {
         .detach();
     }
 
+    /// Whether a secret protects this tab's session, whoever holds it.
+    ///
+    /// The tab's own flag is what counts while it is on screen: a private
+    /// session this window holds is left out of the published catalog, so the
+    /// catalog alone would read it as unprotected.
+    pub(crate) fn tab_is_protected(&self, tab_id: u64) -> bool {
+        self.tabs
+            .iter()
+            .any(|tab| tab.id == tab_id && tab.protected)
+            || self.existing_protection(tab_id).is_some()
+    }
+
     /// What already protects this tab's session, if anything.
     ///
     /// `Some(Some(_))` is a secret this window chose and can send again;
@@ -279,6 +291,14 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Marked before the action, which may fail after the secret has
+        // reached the multiplexer; a tab wrongly marked only refuses control
+        // requests it could have taken.
+        if authentication.is_some()
+            && let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id)
+        {
+            tab.protected = true;
+        }
         match action {
             ProtectedSessionAction::Detach => {
                 self.detach_tab_by_id(tab_id, authentication, window, cx);

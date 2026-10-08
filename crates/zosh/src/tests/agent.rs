@@ -306,8 +306,12 @@ fn windows_bootstrap_pipe_captures_binding_and_forwards_requests() {
         .encode_wide()
         .chain(std::iter::once(0))
         .collect::<Vec<_>>();
-    let handle =
-        windows_pipe::create(windows::core::PCWSTR(wide.as_ptr()), AGENT_MAX_FRAME as u32).unwrap();
+    let handle = windows_pipe::create(
+        windows::core::PCWSTR(wide.as_ptr()),
+        AGENT_MAX_FRAME as u32,
+        true,
+    )
+    .unwrap();
     let handle_value = handle.0 as usize;
     let binding = session_bind_frame(true);
     let request = frame(&[11]);
@@ -343,4 +347,25 @@ fn windows_bootstrap_pipe_captures_binding_and_forwards_requests() {
     drop(forwarded);
     agent_thread.join().unwrap();
     drop(relay);
+}
+
+/// A pipe name somebody already holds is refused rather than joined: a later
+/// instance would carry the first creator's DACL.
+#[cfg(windows)]
+#[test]
+fn windows_agent_pipe_refuses_a_name_that_already_exists() {
+    use std::os::windows::ffi::OsStrExt as _;
+    use windows::Win32::Foundation::CloseHandle;
+
+    let wide = create_bootstrap_pipe_path()
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let name = windows::core::PCWSTR(wide.as_ptr());
+    let squatter = windows_pipe::create(name, 1024, true).expect("the first instance");
+
+    assert!(windows_pipe::create(name, 1024, true).is_err());
+
+    let _ = unsafe { CloseHandle(squatter) };
 }

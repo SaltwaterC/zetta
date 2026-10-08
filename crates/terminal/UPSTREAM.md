@@ -71,7 +71,12 @@ Retain these Zetta-specific behaviors when synchronizing:
   counterpart). `stop_pty_loop`, `attach_byte_stream` and `attach_pty` keep
   their old semantics by finishing whatever is left inline. Input written
   between a retirement and the next backend is held and flushed to that
-  backend, and `GridSnapshotSource` serializes the grid from a worker.
+  backend, and `GridSnapshotSource` serializes the grid from a worker;
+- give each WSL/MSYS2/Cygwin shell a random nonce in
+  `__ZETTA_COMMAND_MARKER_NONCE` and let only a `zetta-cmd;<nonce>:` marker
+  carrying it reach `foreground_process_command_line_now`, which image paste
+  turns into an SSH command. Unauthenticated `zetta-cmd:` markers still set
+  the title. Attached terminals have no nonce and trust no marker.
 
 `Content::selection_text` was removed after auditing the local public API
 consumers. Zed's agent UI and full terminal view use the upstream field, but

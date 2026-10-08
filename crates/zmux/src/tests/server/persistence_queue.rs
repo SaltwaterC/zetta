@@ -12,9 +12,13 @@ fn store(directory: &Path) -> (PersistenceStore, IdentitySet) {
     let identity = age::x25519::Identity::generate();
     let path = directory.join("identity.txt");
     fs::write(&path, format!("{}\n", identity.to_string().expose_secret())).unwrap();
-    let store = PersistenceStore::open(directory, &[identity.to_public().to_string()])
+    let mut store = PersistenceStore::open(directory, &[identity.to_public().to_string()])
         .unwrap()
         .unwrap();
+    // As the daemon seals an unprotected session.
+    for id in 0..=16 {
+        store.seal(id, &crate::persistence::Seal::Store).unwrap();
+    }
     (store, IdentitySet::from_paths(&[path]).unwrap())
 }
 

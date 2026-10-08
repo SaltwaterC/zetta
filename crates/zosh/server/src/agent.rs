@@ -601,43 +601,52 @@ fn create_named_pipe_listener(events: WakingSender<LocalEvent>) -> io::Result<Wi
         .spawn({
             let stop = Arc::clone(&stop);
             move || {
-                let mut ready_tx = Some(ready_tx);
-                loop {
-                    let handle = match windows_pipe::create(
-                        windows::core::PCWSTR(wide.as_ptr()),
-                        MAX_FRAME as u32,
-                    ) {
-                        Ok(handle) => handle,
-                        Err(error) => {
-                            if let Some(ready) = ready_tx.take() {
-                                let _ = ready.send(Err(error));
-                            }
-                            break;
-                        }
-                    };
-                    if let Some(ready) = ready_tx.take() {
-                        let _ = ready.send(Ok(()));
+                let name = windows::core::PCWSTR(wide.as_ptr());
+                let mut pending = match windows_pipe::create(name, MAX_FRAME as u32, true) {
+                    Ok(handle) => {
+                        let _ = ready_tx.send(Ok(()));
+                        handle
                     }
+                    Err(error) => {
+                        let _ = ready_tx.send(Err(error));
+                        return;
+                    }
+                };
+                loop {
                     if stop.load(Ordering::Acquire) {
-                        let _ = unsafe { CloseHandle(handle) };
+                        let _ = unsafe { CloseHandle(pending) };
                         break;
                     }
-                    let connected = unsafe { ConnectNamedPipe(handle, None) };
-                    if let Err(error) = connected
-                        && error.code().0 as u32 & 0xffff != ERROR_PIPE_CONNECTED.0
-                    {
-                        let _ = unsafe { CloseHandle(handle) };
+                    let connected = unsafe { ConnectNamedPipe(pending, None) };
+                    if stop.load(Ordering::Acquire) {
+                        let _ = unsafe { CloseHandle(pending) };
+                        break;
+                    }
+                    // Created while `pending` still exists, so the name is
+                    // never without an instance for another account to claim.
+                    let Ok(next) = windows_pipe::create(name, MAX_FRAME as u32, false) else {
+                        let _ = unsafe { CloseHandle(pending) };
+                        break;
+                    };
+                    let accepted = match connected {
+                        Ok(()) => true,
+                        Err(error) => error.code().0 as u32 & 0xffff == ERROR_PIPE_CONNECTED.0,
+                    };
+                    if !accepted {
+                        let _ = unsafe { CloseHandle(pending) };
+                        pending = next;
                         continue;
                     }
-                    let stream = unsafe { std::fs::File::from_raw_handle(handle.0 as _) };
-                    if stop.load(Ordering::Acquire) {
-                        break;
-                    }
+                    let stream = unsafe { std::fs::File::from_raw_handle(pending.0 as _) };
+                    pending = next;
                     match events.try_send(LocalEvent::Connected {
                         stream: Box::new(stream),
                     }) {
                         Ok(()) | Err(std::sync::mpsc::TrySendError::Full(_)) => {}
-                        Err(std::sync::mpsc::TrySendError::Disconnected(_)) => break,
+                        Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                            let _ = unsafe { CloseHandle(pending) };
+                            break;
+                        }
                     }
                 }
             }

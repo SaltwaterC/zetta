@@ -780,42 +780,46 @@ fn relay_pipe_accept_loop(
         .encode_wide()
         .chain(std::iter::once(0))
         .collect::<Vec<_>>();
-    let mut ready = Some(ready);
-    while !stop.load(Ordering::Acquire) {
-        let handle = match windows_pipe::create(
-            windows::core::PCWSTR(wide.as_ptr()),
-            AGENT_MAX_FRAME as u32,
-        ) {
-            Ok(handle) => handle,
-            Err(error) => {
-                if let Some(ready) = ready.take() {
-                    let _ = ready.send(Err(error));
-                }
-                break;
-            }
-        };
-        if let Some(ready) = ready.take() {
+    let name = windows::core::PCWSTR(wide.as_ptr());
+    let mut pending = match windows_pipe::create(name, AGENT_MAX_FRAME as u32, true) {
+        Ok(handle) => {
             let _ = ready.send(Ok(()));
+            handle
         }
+        Err(error) => {
+            let _ = ready.send(Err(error));
+            return;
+        }
+    };
+    loop {
         if stop.load(Ordering::Acquire) {
-            let _ = unsafe { CloseHandle(handle) };
+            let _ = unsafe { CloseHandle(pending) };
             break;
         }
-        let connected = unsafe { ConnectNamedPipe(handle, None) };
-        if let Err(error) = connected
-            && error.code().0 as u32 & 0xffff != ERROR_PIPE_CONNECTED.0
-        {
-            let _ = unsafe { CloseHandle(handle) };
-            continue;
-        }
-        let stream = unsafe { std::fs::File::from_raw_handle(handle.0 as _) };
+        let connected = unsafe { ConnectNamedPipe(pending, None) };
         if stop.load(Ordering::Acquire) {
-            drop(stream);
+            let _ = unsafe { CloseHandle(pending) };
             break;
         }
-        let agent_path = agent_path.clone();
-        let binding = Arc::clone(&binding);
-        thread::spawn(move || relay_connection(Box::new(stream), &agent_path, &binding));
+        // Created while `pending` still exists, so the name is never without
+        // an instance for another account to claim.
+        let Ok(next) = windows_pipe::create(name, AGENT_MAX_FRAME as u32, false) else {
+            let _ = unsafe { CloseHandle(pending) };
+            break;
+        };
+        let accepted = match connected {
+            Ok(()) => true,
+            Err(error) => error.code().0 as u32 & 0xffff == ERROR_PIPE_CONNECTED.0,
+        };
+        if accepted {
+            let stream = unsafe { std::fs::File::from_raw_handle(pending.0 as _) };
+            let agent_path = agent_path.clone();
+            let binding = Arc::clone(&binding);
+            thread::spawn(move || relay_connection(Box::new(stream), &agent_path, &binding));
+        } else {
+            let _ = unsafe { CloseHandle(pending) };
+        }
+        pending = next;
     }
 }
 

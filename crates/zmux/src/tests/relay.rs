@@ -162,7 +162,7 @@ fn an_older_relay_does_not_remove_a_newer_agent_target() {
 fn a_relay_never_points_a_pane_agent_at_a_daemon_pipe() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("forwarded-agent-7.target");
-    let own_pipe = crate::paths::pane_forwarded_agent_pipe(7);
+    let own_pipe = crate::paths::new_pane_forwarded_agent_pipe(7).unwrap();
 
     for target in [
         own_pipe.to_string_lossy().into_owned(),

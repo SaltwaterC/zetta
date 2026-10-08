@@ -1,4 +1,10 @@
 //! Creates a private Windows named pipe for SSH-agent forwarding.
+//!
+//! The name is random, but any account can list pipe names once they exist,
+//! and a name with no instance left is free for any of them to create. So the
+//! first instance refuses a name somebody else already holds
+//! (`FILE_FLAG_FIRST_PIPE_INSTANCE`), and a listener creates each further
+//! instance before it lets go of the previous one.
 
 use std::io;
 use windows::{
@@ -12,7 +18,7 @@ use windows::{
             GetTokenInformation, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, TOKEN_QUERY,
             TOKEN_USER, TokenUser,
         },
-        Storage::FileSystem::PIPE_ACCESS_DUPLEX,
+        Storage::FileSystem::{FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_ACCESS_DUPLEX},
         System::{
             Pipes::{
                 CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE,
@@ -24,7 +30,9 @@ use windows::{
     core::{BOOL, PCWSTR, PWSTR},
 };
 
-pub(super) fn create(name: PCWSTR, buffer_size: u32) -> io::Result<HANDLE> {
+/// Creates an instance of `name`. `first_instance` refuses a name that already
+/// exists, which is what a listener's first instance must do.
+pub(super) fn create(name: PCWSTR, buffer_size: u32, first_instance: bool) -> io::Result<HANDLE> {
     let sddl = user_only_descriptor()?
         .encode_utf16()
         .chain(std::iter::once(0))
@@ -45,10 +53,15 @@ pub(super) fn create(name: PCWSTR, buffer_size: u32) -> io::Result<HANDLE> {
         lpSecurityDescriptor: descriptor.0,
         bInheritHandle: BOOL(0),
     };
+    let open_mode = if first_instance {
+        PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE
+    } else {
+        PIPE_ACCESS_DUPLEX
+    };
     let handle = unsafe {
         CreateNamedPipeW(
             name,
-            PIPE_ACCESS_DUPLEX,
+            open_mode,
             PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
             PIPE_UNLIMITED_INSTANCES,
             buffer_size,

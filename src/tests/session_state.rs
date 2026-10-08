@@ -37,6 +37,7 @@ fn populated_tab() -> Tab {
         close_policy: TabClosePolicy::Background {
             authentication: None,
         },
+        protected: false,
         shared: true,
         custom_title: Some("release build".to_owned()),
         worktree_seed_title: Some("feature".to_owned()),

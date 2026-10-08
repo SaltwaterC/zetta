@@ -339,6 +339,7 @@ fn prune_exited_panes(daemon: &Arc<Daemon>) -> bool {
         let mut persistence = daemon.persistence.lock();
         if let Some(persistence) = persistence.as_mut() {
             for session_id in removed_session_ids {
+                persistence.unseal(session_id);
                 if let Err(error) = persistence.forget(session_id) {
                     log::warn!("could not remove persisted session {session_id}: {error:#}");
                 }
@@ -479,6 +480,11 @@ struct Session {
     ///
     /// `None` only for a session nobody has held yet.
     owner: Option<u32>,
+    /// The recipients this session's disk records are encrypted to while it is
+    /// protected, chosen by its own clients rather than whoever configured the
+    /// store last. `None` withholds a protected session from disk; see
+    /// [`sealing`].
+    sealed_to: Option<Vec<String>>,
 }
 
 /// Ensures an offered session's collaboration snapshot describes the panes the
@@ -518,7 +524,7 @@ fn normalize_shared_state(
 
     if repaired {
         #[cfg(feature = "session-persistence")]
-        persist_session(daemon, &persisted_live_session(session))?;
+        persist_live_session(daemon, session)?;
         broadcast(
             daemon,
             &Event::SharedSessionUpdated {
@@ -788,6 +794,7 @@ pub struct Daemon {
     persistence: Arc<PersistenceQueue>,
     #[cfg(feature = "session-persistence")]
     restored: Mutex<Vec<RestoredSession>>,
+    recipient_grants: Mutex<RecipientGrants>,
 }
 
 struct Subscriber {
@@ -970,6 +977,7 @@ impl Daemon {
             persistence: Arc::new(PersistenceQueue::new(persistence, persistence_enabled)),
             #[cfg(feature = "session-persistence")]
             restored: Mutex::new(Vec::new()),
+            recipient_grants: Mutex::new(RecipientGrants::default()),
         }
     }
 }
@@ -990,7 +998,7 @@ pub fn run(
     retention: Retention,
     persistence_recipients: Option<Vec<String>>,
     #[cfg(unix)] resume_from: Option<i32>,
-    #[cfg(windows)] resume_from: Option<PathBuf>,
+    #[cfg(windows)] resume_from: Option<crate::upgrade::HandoverSource>,
     #[cfg(unix)] resume_listener: Option<i32>,
     #[cfg(windows)] resume_ready: Option<PathBuf>,
 ) -> Result<()> {
@@ -1009,8 +1017,8 @@ pub fn run(
         .context("reading the multiplexer upgrade handover")?;
     #[cfg(windows)]
     let resumed_handover = resume_from
-        .as_deref()
-        .map(crate::upgrade::read_handover)
+        .as_ref()
+        .map(crate::upgrade::receive_handover)
         .transpose()
         .context("reading the multiplexer upgrade handover")?;
     #[cfg(unix)]
@@ -1143,6 +1151,19 @@ pub fn run(
         // recovery handle from persisting new memory-mode sessions.
         PersistenceStore::open_with_recovery_state(&directory, None, false)?
     };
+    // Only recipients the starting client passed are trusted as startup, never
+    // the ones a recovery open read back from whoever configured last.
+    #[cfg(feature = "session-persistence")]
+    let startup_recipients = persistence_recipients
+        .is_some()
+        .then(|| {
+            persistence
+                .as_ref()
+                .map(|store| store.recipient_values().to_vec())
+        })
+        .flatten();
+    #[cfg(not(feature = "session-persistence"))]
+    let startup_recipients = None;
     #[cfg(feature = "session-persistence")]
     let next_session_id = crate::persistence::next_record_id(&directory)?;
     #[cfg(not(feature = "session-persistence"))]
@@ -1160,8 +1181,10 @@ pub fn run(
         #[cfg(windows)]
         pty_host,
     ));
+    *lock_grants(&daemon) = RecipientGrants::starting_with(startup_recipients);
     #[cfg(unix)]
-    if let Some(handover) = resumed_handover {
+    if let Some(mut handover) = resumed_handover {
+        let grants = handover.recipient_grants.take();
         // The previous image left its sessions behind in this same process:
         // the descriptors are still open and the shells are still this
         // process's children, so they are adopted rather than restarted.
@@ -1169,6 +1192,7 @@ pub fn run(
             Ok(count) => log::info!("zmux resumed {count} session(s) across an upgrade"),
             Err(error) => log::error!("could not resume sessions across the upgrade: {error:#}"),
         }
+        adopt_seals(&daemon, grants);
         // An older image could hand over panes whose process ended before the
         // exec: the reaper never re-examines a pane already marked exited, so
         // prune what an upgraded daemon should not offer.
@@ -1176,19 +1200,16 @@ pub fn run(
         publish(&daemon);
     }
     #[cfg(windows)]
-    if let Some(handover) = resumed_handover {
+    if let Some(mut handover) = resumed_handover {
+        let grants = handover.recipient_grants.take();
         let count = adopt_handover(&daemon, handover)
             .context("adopting sessions across the Windows upgrade")?;
+        adopt_seals(&daemon, grants);
         log::info!("zmux resumed {count} session(s) across an upgrade");
         prune_exited_panes(&daemon);
         publish(&daemon);
-        if let Some(path) = resume_from.as_deref() {
-            crate::upgrade::remove_handover(
-                path,
-                resume_ready
-                    .as_deref()
-                    .expect("validated Windows replacement readiness path"),
-            );
+        if let Some(ready) = resume_ready.as_deref() {
+            crate::upgrade::remove_ready(ready);
         }
     }
     sweep_image_staging(&daemon)?;
@@ -1423,15 +1444,26 @@ fn publish(daemon: &Arc<Daemon>) {
     }
 }
 
+/// Writes `persisted` under `seal`, which is what its session is sealed to now.
 #[cfg(feature = "session-persistence")]
-fn persist_session(daemon: &Arc<Daemon>, session: &PersistedSession) -> Result<()> {
+fn persist_session(
+    daemon: &Arc<Daemon>,
+    persisted: &PersistedSession,
+    seal: &crate::persistence::Seal,
+) -> Result<()> {
     if !daemon.persistence.enabled() {
         return Ok(());
     }
     if let Some(persistence) = daemon.persistence.lock().as_mut() {
-        persistence.save_session(session)?;
+        persistence.seal(persisted.id, seal)?;
+        persistence.save_session(persisted)?;
     }
     Ok(())
+}
+
+#[cfg(feature = "session-persistence")]
+fn persist_live_session(daemon: &Arc<Daemon>, session: &Session) -> Result<()> {
+    persist_session(daemon, &persisted_live_session(session), &seal_for(session))
 }
 
 #[cfg(feature = "session-persistence")]
@@ -1654,6 +1686,7 @@ mod image_store;
 mod lifecycle;
 #[cfg(feature = "session-persistence")]
 mod persistence_queue;
+mod sealing;
 mod secret_check;
 mod sizing;
 mod upgrade;
@@ -1669,6 +1702,8 @@ use image_store::*;
 use lifecycle::*;
 #[cfg(feature = "session-persistence")]
 use persistence_queue::PersistenceQueue;
+pub use sealing::RecipientGrants;
+use sealing::*;
 use secret_check::*;
 use sizing::*;
 use upgrade::*;

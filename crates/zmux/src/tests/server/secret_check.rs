@@ -124,6 +124,7 @@ pub(in crate::server) mod fixtures {
             keep: true,
             offered: false,
             owner,
+            sealed_to: None,
         }
     }
 

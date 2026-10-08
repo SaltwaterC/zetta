@@ -91,6 +91,10 @@ fn store_session(directory: &Path, recipient: &str) {
     let mut store = PersistenceStore::open(directory, std::slice::from_ref(&recipient.to_owned()))
         .expect("opening the encrypted store")
         .expect("recipients were configured, so a store must exist");
+    // As the daemon seals an unprotected session.
+    store
+        .seal(3, &zmux::persistence::Seal::Store)
+        .expect("sealing the session to the store");
     store
         .save_session(&PersistedSession {
             id: 3,

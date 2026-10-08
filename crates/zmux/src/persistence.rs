@@ -462,11 +462,38 @@ fn take_sequence(next: &mut Option<u64>) -> Result<u64> {
     Ok(sequence)
 }
 
+/// Who a live session's files may be encrypted to.
+///
+/// The store's own recipients are whatever the last client configured, and any
+/// same-user process holding the endpoint token can configure. That is fine
+/// for an unprotected session, which the same process could simply attach; a
+/// protected one is sealed only to recipients its own owner or holder chose,
+/// and is not written at all when nobody the daemon can vouch for has chosen
+/// any. The daemon decides which applies; the store only refuses to guess, so
+/// a session it was never told about is withheld rather than written.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Seal {
+    /// The store's current recipients.
+    Store,
+    /// These resolved recipients, whoever configures the store next.
+    Recipients(Vec<String>),
+    /// Nothing is written for the session.
+    Withheld,
+}
+
+enum SessionSeal {
+    Store,
+    Recipients(RecipientSet),
+    Withheld,
+}
+
 /// The encrypted store below the private session directory.
 pub struct PersistenceStore {
     directory: PathBuf,
     manifest_path: PathBuf,
     recipients: RecipientSet,
+    recipient_values: Vec<String>,
+    seals: HashMap<u64, SessionSeal>,
     manifest: Manifest,
     segments: HashMap<(u64, u64), SegmentBuffer>,
     // None means exhausted, so u64::MAX can never wrap or be reused. Entries
@@ -552,6 +579,8 @@ impl PersistenceStore {
             directory,
             manifest_path,
             recipients,
+            recipient_values: resolved_values,
+            seals: HashMap::new(),
             manifest,
             segments: HashMap::new(),
             next_sequences: HashMap::new(),
@@ -566,6 +595,51 @@ impl PersistenceStore {
 
     pub fn records(&self) -> &[RestorableRecord] {
         &self.manifest.records
+    }
+
+    /// The resolved recipients the store encrypts to under [`Seal::Store`].
+    pub fn recipient_values(&self) -> &[String] {
+        &self.recipient_values
+    }
+
+    /// Decides what `session_id`'s later writes are encrypted to. Output
+    /// buffered for a session that becomes withheld is dropped unwritten.
+    pub fn seal(&mut self, session_id: u64, seal: &Seal) -> Result<()> {
+        let seal = match seal {
+            Seal::Store => SessionSeal::Store,
+            Seal::Recipients(values) => SessionSeal::Recipients(RecipientSet::parse(values)?),
+            Seal::Withheld => {
+                self.segments
+                    .retain(|(session, _), _| *session != session_id);
+                // Written before the session was protected, so it carries no
+                // verifier: left behind, a recovered daemon would offer it to
+                // be resumed without the secret.
+                if self
+                    .manifest
+                    .records
+                    .iter()
+                    .any(|record| record.id == session_id)
+                {
+                    self.forget(session_id)?;
+                }
+                SessionSeal::Withheld
+            }
+        };
+        self.seals.insert(session_id, seal);
+        Ok(())
+    }
+
+    /// Forgets the seal of a session that no longer exists.
+    pub fn unseal(&mut self, session_id: u64) {
+        self.seals.remove(&session_id);
+    }
+
+    fn recipients_for(&self, session_id: u64) -> Option<&RecipientSet> {
+        match self.seals.get(&session_id)? {
+            SessionSeal::Store => Some(&self.recipients),
+            SessionSeal::Recipients(recipients) => Some(recipients),
+            SessionSeal::Withheld => None,
+        }
     }
 
     pub fn save_session(&mut self, session: &PersistedSession) -> Result<()> {
@@ -606,6 +680,10 @@ impl PersistenceStore {
         };
         let plaintext =
             serde_json::to_vec(&authentication).context("serializing session authentication")?;
+        // Sealed to the store rather than to the record's own recipients, which
+        // the daemon cannot know for a record it did not write: a counter and a
+        // delay are worth less to whoever configured the store than refusing to
+        // record a failed resume would be to a guesser.
         let ciphertext = self.recipients.encrypt(&plaintext)?;
         let path = authentication_path(&self.directory, id);
         let previous_bytes = fs::metadata(&path)
@@ -623,6 +701,9 @@ impl PersistenceStore {
     }
 
     fn write_session(&mut self, session: &PersistedSession, restorable: bool) -> Result<()> {
+        if self.recipients_for(session.id).is_none() {
+            return Ok(());
+        }
         let (snapshots, snapshot_bytes) =
             self.write_snapshot_stream(session.id, &session.snapshots)?;
         let metadata = PersistedSessionMetadata {
@@ -640,7 +721,10 @@ impl PersistenceStore {
         };
         let plaintext =
             serde_json::to_vec(&metadata).context("serializing persisted session metadata")?;
-        let ciphertext = self.recipients.encrypt(&plaintext)?;
+        let ciphertext = self
+            .recipients_for(session.id)
+            .context("session was withheld while it was being written")?
+            .encrypt(&plaintext)?;
         atomic_write(&self.session_path(session.id), &ciphertext)?;
         // A complete session write carries the authoritative counters in its
         // metadata, so an older failed-resume sidecar must not override it on
@@ -690,7 +774,7 @@ impl PersistenceStore {
     }
 
     pub fn append_scrollback(&mut self, session_id: u64, pane_id: u64, bytes: &[u8]) -> Result<()> {
-        if bytes.is_empty() {
+        if bytes.is_empty() || self.recipients_for(session_id).is_none() {
             return Ok(());
         }
         let now = unix_now();
@@ -790,7 +874,10 @@ impl PersistenceStore {
     }
 
     fn flush_snapshot_segment(&self, session_id: u64, sequence: u64, bytes: &[u8]) -> Result<u64> {
-        let ciphertext = self.recipients.encrypt(bytes)?;
+        let ciphertext = self
+            .recipients_for(session_id)
+            .context("session was withheld while its screens were being written")?
+            .encrypt(bytes)?;
         let path = snapshot_path(&self.directory, session_id, sequence);
         atomic_write(&path, &ciphertext)?;
         Ok(ciphertext.len() as u64)
@@ -947,7 +1034,13 @@ impl PersistenceStore {
         pane_id: u64,
         segment: &mut SegmentBuffer,
     ) -> Result<()> {
-        let ciphertext = self.recipients.encrypt(&segment.bytes)?;
+        // A seal can change between buffering and flushing; what it is now is
+        // what the bytes are written under, or whether they are written at all.
+        let Some(recipients) = self.recipients_for(session_id) else {
+            segment.bytes.clear();
+            return Ok(());
+        };
+        let ciphertext = recipients.encrypt(&segment.bytes)?;
         let mut temporary = tempfile::NamedTempFile::new_in(&self.directory)
             .context("creating private scrollback segment")?;
         temporary

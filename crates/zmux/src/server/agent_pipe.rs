@@ -1,5 +1,8 @@
 //! Each daemon-owned pane's stable SSH-agent name on a Windows host.
 //!
+//! The name is random and held for the pane's whole life, upgrades included;
+//! `listener.rs` says why both matter.
+//!
 //! On Unix a pane inherits a symlink the daemon owns and a Zosh relay repoints
 //! (see `lifecycle::prepare_pane_agent_links`). A named pipe cannot be
 //! symlinked, so on Windows the daemon serves the stable name itself: every
@@ -26,7 +29,7 @@ use std::{
 #[cfg(windows)]
 mod listener;
 #[cfg(windows)]
-pub(super) use listener::{serve, stop};
+pub(super) use listener::{adopt, discard, hand_over, serve, stop};
 
 /// The agent Windows OpenSSH asks when `SSH_AUTH_SOCK` is unset.
 const WINDOWS_OPENSSH_AGENT: &str = r"\\.\pipe\openssh-ssh-agent";

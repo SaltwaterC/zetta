@@ -1429,3 +1429,137 @@ fn shared_input_the_child_does_not_read_leaves_the_drain_idle() {
     let _ = client.kill(session_id);
     let _ = client.shutdown();
 }
+
+fn zmux_agent_pipes() -> Vec<String> {
+    std::fs::read_dir(r"\\.\pipe\")
+        .expect("listing named pipes")
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with("zmux-agent-"))
+        .collect()
+}
+
+/// Whether another process could create `name` now — which is to say whether
+/// the name is free for another account to claim.
+fn pipe_name_is_free(name: &str) -> bool {
+    use windows::Win32::{
+        Foundation::{CloseHandle, INVALID_HANDLE_VALUE},
+        Storage::FileSystem::{FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_ACCESS_DUPLEX},
+        System::Pipes::{CreateNamedPipeW, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES},
+    };
+
+    let wide = format!(r"\\.\pipe\{name}")
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let handle = unsafe {
+        CreateNamedPipeW(
+            windows::core::PCWSTR(wide.as_ptr()),
+            PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
+            PIPE_TYPE_BYTE,
+            PIPE_UNLIMITED_INSTANCES,
+            1024,
+            1024,
+            0,
+            None,
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return false;
+    }
+    let _ = unsafe { CloseHandle(handle) };
+    true
+}
+
+/// A pane's agent pipe is a name another account could create first and then
+/// serve to the pane. It must be unpredictable, and held by the daemon for the
+/// pane's whole life — across an upgrade, whose handover must also leave no
+/// plaintext behind.
+#[test]
+fn a_panes_agent_pipe_is_unpredictable_and_stays_held_across_an_upgrade() {
+    let daemon = TestDaemon::start();
+    let client = daemon.client();
+    let before = zmux_agent_pipes();
+    let created = client
+        .create_shared(CreateSharedRequest {
+            operation_id: client.next_shared_operation_id(),
+            title: "agent pipe".to_owned(),
+            replacement: SharedDraftLayout::Draft { draft_id: 1 },
+            panes: vec![SharedPaneDraft {
+                draft_id: 1,
+                profile: "Command Prompt".to_owned(),
+                command: Some(zetta_profiles::ProfileCommand::with_args(
+                    "cmd.exe",
+                    vec![
+                        "/D".to_owned(),
+                        "/C".to_owned(),
+                        "ping 127.0.0.1 -n 60 >NUL".to_owned(),
+                    ],
+                )),
+                env: HashMap::new(),
+                working_directory: None,
+                inherit_working_directory_from: None,
+                load_shell_integration: false,
+                size: spawn_request().size,
+                console_palette: ConsolePalette::default(),
+                metadata: BackgroundPaneSummary {
+                    id: 0,
+                    label: "pane".to_owned(),
+                    profile: "Command Prompt".to_owned(),
+                    configured_command: String::new(),
+                    application: "cmd.exe".to_owned(),
+                    foreground_command: None,
+                    terminal_title: None,
+                    working_directory: None,
+                    state: BackgroundPaneState::Starting,
+                    exit: None,
+                },
+            }],
+            active_pane: Some(SharedPaneRef::Draft { draft_id: 1 }),
+            verifier: None,
+        })
+        .expect("creating a shared pseudoconsole session");
+    let session_id = created.session_id;
+    let pipe = zmux_agent_pipes()
+        .into_iter()
+        .find(|name| !before.contains(name))
+        .expect("the pane's agent pipe is served");
+    let nonce = pipe.rsplit_once('-').map(|(_, nonce)| nonce).unwrap();
+    assert!(
+        nonce.len() == 32 && nonce.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        "the agent pipe name {pipe:?} carries no random component"
+    );
+    assert!(
+        !pipe_name_is_free(&pipe),
+        "the daemon does not hold {pipe:?}"
+    );
+
+    let upgrade = Command::new(daemon_binary())
+        .arg("--upgrade")
+        .env("APPDATA", &daemon.config)
+        .output()
+        .expect("running zmux --upgrade");
+    assert!(
+        upgrade.status.success(),
+        "zmux --upgrade failed: {}",
+        String::from_utf8_lossy(&upgrade.stderr)
+    );
+    let replacement = daemon.client();
+    assert!(
+        !pipe_name_is_free(&pipe),
+        "the replacement does not hold {pipe:?}"
+    );
+    let leftovers = std::fs::read_dir(daemon.sessions_dir())
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with("zmux-handover-"))
+        .collect::<Vec<_>>();
+    assert!(
+        leftovers.is_empty(),
+        "the upgrade left handover files behind: {leftovers:?}"
+    );
+
+    let _ = replacement.kill(session_id);
+    let _ = replacement.shutdown();
+}

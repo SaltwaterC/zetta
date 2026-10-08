@@ -181,6 +181,7 @@ fn a_pane_that_fell_back_to_ssh_is_marked_in_its_corner(cx: &mut gpui::TestAppCo
                 broadcast_input: false,
                 silent_mode: false,
                 close_policy: TabClosePolicy::Close,
+                protected: false,
                 shared: false,
                 custom_title: None,
                 worktree_seed_title: None,

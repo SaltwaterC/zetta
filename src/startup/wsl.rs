@@ -426,7 +426,11 @@ pub(crate) fn paths_for_external_editor(arguments: &[String]) -> Vec<String> {
 }
 
 #[cfg(windows)]
-const MSYS2_BASH_TRACKER: &str = r#"__zetta_at_prompt=0
+const MSYS2_BASH_TRACKER: &str = r#"if [[ -n ${__ZETTA_COMMAND_MARKER_NONCE+x} ]]; then
+    __zetta_marker_nonce=$__ZETTA_COMMAND_MARKER_NONCE
+    unset __ZETTA_COMMAND_MARKER_NONCE
+fi
+__zetta_at_prompt=0
 __zetta_command_started=0
 __zetta_preexec() {
     [[ "$__zetta_at_prompt" == 1 ]] || return
@@ -436,7 +440,7 @@ __zetta_preexec() {
     esac
     __zetta_command_started=1
     printf '\033]2;zetta-event:command-started:%s\033\\' "$BASH_COMMAND"
-    printf '\033]2;zetta-cmd:%s\033\\' "$BASH_COMMAND"
+    printf '\033]2;zetta-cmd;%s:%s\033\\' "${__zetta_marker_nonce-}" "$BASH_COMMAND"
 }
 __zetta_precmd() {
     local status=$?
@@ -445,7 +449,7 @@ __zetta_precmd() {
         __zetta_command_started=0
     fi
     printf '\033]2;zetta-cwd:%s\033\\' "$PWD"
-    printf '\033]2;zetta-cmd:bash\033\\'
+    printf '\033]2;zetta-cmd;%s:bash\033\\' "${__zetta_marker_nonce-}"
     return "$status"
 }
 __zetta_mark_prompt() {
@@ -461,6 +465,8 @@ const MSYS2_ZSH_TRACKER: &str = r#"if [[ -n ${ZETTA_ORIGINAL_ZDOTDIR+x} ]]; then
 else
     unset ZDOTDIR
 fi
+typeset -g __zetta_marker_nonce="${__ZETTA_COMMAND_MARKER_NONCE-}"
+unset __ZETTA_COMMAND_MARKER_NONCE
 original_zdotdir="${ZDOTDIR:-$HOME}"
 [[ -r "$original_zdotdir/.zshenv" ]] && source "$original_zdotdir/.zshenv"
 
@@ -471,13 +477,13 @@ function __zetta_report_cwd() {
         __ZETTA_COMMAND_STARTED=0
     fi
     [[ "$PWD" == /* ]] && printf '\033]2;zetta-cwd:%s\033\\' "$PWD"
-    printf '\033]2;zetta-cmd:zsh\033\\'
+    printf '\033]2;zetta-cmd;%s:zsh\033\\' "$__zetta_marker_nonce"
     return $zetta_status
 }
 function __zetta_report_preexec() {
     __ZETTA_COMMAND_STARTED=1
     printf '\033]2;zetta-event:command-started:%s\033\\' "$1"
-    printf '\033]2;zetta-cmd:%s\033\\' "$1"
+    printf '\033]2;zetta-cmd;%s:%s\033\\' "$__zetta_marker_nonce" "$1"
 }
 typeset -g __ZETTA_COMMAND_STARTED=0
 autoload -Uz add-zsh-hook
@@ -489,7 +495,11 @@ printf '\033]2;zetta-event:tracking-ready\033\\'
 "#;
 
 #[cfg(windows)]
-const CYGWIN_BASH_TRACKER: &str = r#"__zetta_at_prompt=0
+const CYGWIN_BASH_TRACKER: &str = r#"if [[ -n ${__ZETTA_COMMAND_MARKER_NONCE+x} ]]; then
+    __zetta_marker_nonce=$__ZETTA_COMMAND_MARKER_NONCE
+    unset __ZETTA_COMMAND_MARKER_NONCE
+fi
+__zetta_at_prompt=0
 __zetta_command_started=0
 __zetta_preexec() {
     [[ "$__zetta_at_prompt" == 1 ]] || return
@@ -499,7 +509,7 @@ __zetta_preexec() {
     esac
     __zetta_command_started=1
     printf '\033]2;zetta-event:command-started:%s\033\\' "$BASH_COMMAND"
-    printf '\033]2;zetta-cmd:%s\033\\' "$BASH_COMMAND"
+    printf '\033]2;zetta-cmd;%s:%s\033\\' "${__zetta_marker_nonce-}" "$BASH_COMMAND"
 }
 __zetta_precmd() {
     local status=$?
@@ -510,7 +520,7 @@ __zetta_precmd() {
     case "$PWD" in
         /*) printf '\033]7;file://localhost%s\033\\\033]2;zetta-cwd:%s\033\\' "$PWD" "$PWD" ;;
     esac
-    printf '\033]2;zetta-cmd:bash\033\\'
+    printf '\033]2;zetta-cmd;%s:bash\033\\' "${__zetta_marker_nonce-}"
     return "$status"
 }
 __zetta_mark_prompt() {
@@ -526,6 +536,8 @@ const CYGWIN_ZSH_TRACKER: &str = r#"if [[ -n ${ZETTA_ORIGINAL_ZDOTDIR+x} ]]; the
 else
     unset ZDOTDIR
 fi
+typeset -g __zetta_marker_nonce="${__ZETTA_COMMAND_MARKER_NONCE-}"
+unset __ZETTA_COMMAND_MARKER_NONCE
 original_zdotdir="${ZDOTDIR:-$HOME}"
 [[ -r "$original_zdotdir/.zshenv" ]] && source "$original_zdotdir/.zshenv"
 
@@ -536,13 +548,13 @@ function __zetta_report_cwd() {
         __ZETTA_COMMAND_STARTED=0
     fi
     [[ "$PWD" == /* ]] && printf '\033]7;file://localhost%s\033\\\033]2;zetta-cwd:%s\033\\' "$PWD" "$PWD"
-    printf '\033]2;zetta-cmd:zsh\033\\'
+    printf '\033]2;zetta-cmd;%s:zsh\033\\' "$__zetta_marker_nonce"
     return $zetta_status
 }
 function __zetta_report_preexec() {
     __ZETTA_COMMAND_STARTED=1
     printf '\033]2;zetta-event:command-started:%s\033\\' "$1"
-    printf '\033]2;zetta-cmd:%s\033\\' "$1"
+    printf '\033]2;zetta-cmd;%s:%s\033\\' "$__zetta_marker_nonce" "$1"
 }
 typeset -g __ZETTA_COMMAND_STARTED=0
 autoload -Uz add-zsh-hook
@@ -554,12 +566,14 @@ printf '\033]2;zetta-event:tracking-ready\033\\'
 "#;
 
 #[cfg(windows)]
-const CYGWIN_FISH_TRACKER: &str = r#"set -g __ZETTA_COMMAND_STARTED 0; function __zetta_report_cwd --on-event fish_prompt; set -l command_status $status; if test "$__ZETTA_COMMAND_STARTED" = 1; printf '\033]2;zetta-event:command-finished:%s\033\\' "$command_status"; set -g __ZETTA_COMMAND_STARTED 0; end; if string match -qr '^/' -- "$PWD"; printf '\033]7;file://localhost%s\033\\' "$PWD"; printf '\033]2;zetta-cwd:%s\033\\' "$PWD"; end; printf '\033]2;zetta-cmd:fish\033\\'; end; function __zetta_report_preexec --on-event fish_preexec; set -g __ZETTA_COMMAND_STARTED 1; printf '\033]2;zetta-event:command-started:%s\033\\' "$argv[1]"; printf '\033]2;zetta-cmd:%s\033\\' "$argv[1]"; end; printf '\033]2;zetta-event:tracking-ready\033\\'"#;
+const CYGWIN_FISH_TRACKER: &str = r#"set -g __zetta_marker_nonce "$__ZETTA_COMMAND_MARKER_NONCE"; set -e __ZETTA_COMMAND_MARKER_NONCE; set -g __ZETTA_COMMAND_STARTED 0; function __zetta_report_cwd --on-event fish_prompt; set -l command_status $status; if test "$__ZETTA_COMMAND_STARTED" = 1; printf '\033]2;zetta-event:command-finished:%s\033\\' "$command_status"; set -g __ZETTA_COMMAND_STARTED 0; end; if string match -qr '^/' -- "$PWD"; printf '\033]7;file://localhost%s\033\\' "$PWD"; printf '\033]2;zetta-cwd:%s\033\\' "$PWD"; end; printf '\033]2;zetta-cmd;%s:fish\033\\' "$__zetta_marker_nonce"; end; function __zetta_report_preexec --on-event fish_preexec; set -g __ZETTA_COMMAND_STARTED 1; printf '\033]2;zetta-event:command-started:%s\033\\' "$argv[1]"; printf '\033]2;zetta-cmd;%s:%s\033\\' "$__zetta_marker_nonce" "$argv[1]"; end; printf '\033]2;zetta-event:tracking-ready\033\\'"#;
 
 #[cfg(windows)]
 fn cygwin_nushell_tracker(config_path: &str) -> String {
     format!(
-        r#"let zetta_user_config = ($nu.default-config-dir | path join 'config.nu')
+        r#"let zetta_marker_nonce = ($env.__ZETTA_COMMAND_MARKER_NONCE? | default '')
+hide-env -i __ZETTA_COMMAND_MARKER_NONCE
+let zetta_user_config = ($nu.default-config-dir | path join 'config.nu')
 if ($zetta_user_config | path exists) {{ source $zetta_user_config }}
 $env.config.hooks.pre_prompt = ($env.config.hooks.pre_prompt | append {{||
     if ($env.ZETTA_COMMAND_STARTED? | default false) {{
@@ -569,13 +583,13 @@ $env.config.hooks.pre_prompt = ($env.config.hooks.pre_prompt | append {{||
     }}
     print -n $"\e]7;file://localhost($env.PWD)\e\\"
     print -n $"\e]2;zetta-cwd:($env.PWD)\e\\"
-    print -n "\e]2;zetta-cmd:nu\e\\"
+    print -n $"\e]2;zetta-cmd;($zetta_marker_nonce):nu\e\\"
 }})
 $env.config.hooks.pre_execution = ($env.config.hooks.pre_execution | append {{||
     let command = (commandline)
     $env.ZETTA_COMMAND_STARTED = true
     print -n $"\e]2;zetta-event:command-started:($command)\e\\"
-    print -n $"\e]2;zetta-cmd:($command)\e\\"
+    print -n $"\e]2;zetta-cmd;($zetta_marker_nonce):($command)\e\\"
 }})
 print -n "\e]2;zetta-event:tracking-ready\e\\"
 ^rm -f -- '{}'
@@ -902,6 +916,11 @@ pub(crate) fn wsl_cwd_tracking_file(profile: &Profile, pane_id: u64) -> Option<P
 
 pub(crate) const WSL_CWD_TRACKER: &str = r#"marker="${ZETTA_CWD_TRACKING_FILE:-}"
 unset ZETTA_CWD_TRACKING_FILE
+# The nonce `zetta-cmd;` markers carry. Only the shells integrated below are
+# handed it back, and each moves it into a shell variable, so the programs a
+# pane runs do not inherit it.
+zetta_marker_nonce="${__ZETTA_COMMAND_MARKER_NONCE:-}"
+unset __ZETTA_COMMAND_MARKER_NONCE
 shell="${SHELL:-}"
 if [ ! -x "$shell" ]; then
     shell="$(getent passwd "$(id -u)" 2>/dev/null | cut -d: -f7)"
@@ -910,14 +929,16 @@ fi
 # Windows-side process inspection can't see into the WSL VM's own process
 # namespace, so the tab title can't be derived from the host process tree the
 # way it is for native Windows shells. Report it explicitly instead: a
-# `zetta-cmd:<value>` title marker carrying the shell name at idle, or the
-# command about to run, mirrored by `reported_foreground_command_from_title`
-# in crates/terminal/src/terminal.rs.
+# `zetta-cmd;<nonce>:<value>` title marker carrying the shell name at idle, or
+# the command about to run, mirrored by `foreground_command_marker` in
+# crates/terminal/src/terminal.rs.
 export ZETTA_SHELL_NAME="${shell##*/}"
 
 case "${shell##*/}" in
     bash)
         zetta_full_prompt_command="$(cat <<'ZETTA_BASH_PROMPT'
+__zetta_marker_nonce=${__ZETTA_COMMAND_MARKER_NONCE-}
+unset __ZETTA_COMMAND_MARKER_NONCE
 __zetta_preexec() {
     [[ "${__zetta_at_prompt:-0}" == 1 ]] || return
     __zetta_at_prompt=0
@@ -926,7 +947,7 @@ __zetta_preexec() {
     esac
     __zetta_command_started=1
     printf '\033]2;zetta-event:command-started:%s\033\\' "$BASH_COMMAND"
-    printf '\033]2;zetta-cmd:%s\033\\' "$BASH_COMMAND"
+    printf '\033]2;zetta-cmd;%s:%s\033\\' "${__zetta_marker_nonce-}" "$BASH_COMMAND"
 }
 __zetta_precmd() {
     local status=$?
@@ -942,7 +963,7 @@ __zetta_precmd() {
     case "$PWD" in
         /*) printf '\033]7;file://localhost%s\033\\\033]2;zetta-cwd:%s\033\\' "$PWD" "$PWD" ;;
     esac
-    printf '\033]2;zetta-cmd:%s\033\\' "$ZETTA_SHELL_NAME"
+    printf '\033]2;zetta-cmd;%s:%s\033\\' "${__zetta_marker_nonce-}" "$ZETTA_SHELL_NAME"
     return "$status"
 }
 __zetta_mark_prompt() {
@@ -957,10 +978,12 @@ ZETTA_BASH_PROMPT
         export ZETTA_ORIGINAL_PROMPT_COMMAND="$PROMPT_COMMAND"
         PROMPT_COMMAND="$zetta_full_prompt_command"
         export PROMPT_COMMAND
+        export __ZETTA_COMMAND_MARKER_NONCE="$zetta_marker_nonce"
         exec "$shell" -l
         ;;
     fish)
-        exec "$shell" -l -C 'set -g __ZETTA_COMMAND_STARTED 0; function __zetta_report_cwd --on-event fish_prompt; set -l command_status $status; if test "$__ZETTA_COMMAND_STARTED" = 1; printf "\033]2;zetta-event:command-finished:%s\033\\" "$command_status"; set -g __ZETTA_COMMAND_STARTED 0; end; if string match -qr "^/" -- "$PWD"; printf "\033]7;file://localhost%s\033\\" "$PWD"; printf "\033]2;zetta-cwd:%s\033\\" "$PWD"; end; printf "\033]2;zetta-cmd:%s\033\\" "$ZETTA_SHELL_NAME"; end; function __zetta_report_preexec --on-event fish_preexec; set -g __ZETTA_COMMAND_STARTED 1; printf "\033]2;zetta-event:command-started:%s\033\\" "$argv[1]"; printf "\033]2;zetta-cmd:%s\033\\" "$argv[1]"; end; printf "\033]2;zetta-event:tracking-ready\033\\"; if test -n "$ZETTA_HOST_EXECUTABLE"; and not functions -q __zetta_at_subcommand; $ZETTA_HOST_EXECUTABLE init fish | source; end'
+        export __ZETTA_COMMAND_MARKER_NONCE="$zetta_marker_nonce"
+        exec "$shell" -l -C 'set -g __zetta_marker_nonce "$__ZETTA_COMMAND_MARKER_NONCE"; set -e __ZETTA_COMMAND_MARKER_NONCE; set -g __ZETTA_COMMAND_STARTED 0; function __zetta_report_cwd --on-event fish_prompt; set -l command_status $status; if test "$__ZETTA_COMMAND_STARTED" = 1; printf "\033]2;zetta-event:command-finished:%s\033\\" "$command_status"; set -g __ZETTA_COMMAND_STARTED 0; end; if string match -qr "^/" -- "$PWD"; printf "\033]7;file://localhost%s\033\\" "$PWD"; printf "\033]2;zetta-cwd:%s\033\\" "$PWD"; end; printf "\033]2;zetta-cmd;%s:%s\033\\" "$__zetta_marker_nonce" "$ZETTA_SHELL_NAME"; end; function __zetta_report_preexec --on-event fish_preexec; set -g __ZETTA_COMMAND_STARTED 1; printf "\033]2;zetta-event:command-started:%s\033\\" "$argv[1]"; printf "\033]2;zetta-cmd;%s:%s\033\\" "$__zetta_marker_nonce" "$argv[1]"; end; printf "\033]2;zetta-event:tracking-ready\033\\"; if test -n "$ZETTA_HOST_EXECUTABLE"; and not functions -q __zetta_at_subcommand; $ZETTA_HOST_EXECUTABLE init fish | source; end'
         ;;
     zsh)
         integration_zdotdir="$(mktemp -d "${TMPDIR:-/tmp}/zetta-zsh-XXXXXX" 2>/dev/null || true)"
@@ -968,6 +991,8 @@ ZETTA_BASH_PROMPT
             export ZETTA_ORIGINAL_ZDOTDIR="${ZDOTDIR:-$HOME}"
             export ZETTA_INTEGRATION_ZDOTDIR="$integration_zdotdir"
             cat > "$integration_zdotdir/.zshenv" <<'ZETTA_ZSHENV'
+typeset -g __zetta_marker_nonce="${__ZETTA_COMMAND_MARKER_NONCE-}"
+unset __ZETTA_COMMAND_MARKER_NONCE
 ZDOTDIR="$ZETTA_ORIGINAL_ZDOTDIR"
 [[ -r "$ZDOTDIR/.zshenv" ]] && source "$ZDOTDIR/.zshenv"
 
@@ -982,13 +1007,13 @@ function __zetta_report_cwd() {
         __ZETTA_COMMAND_STARTED=0
     fi
     [[ "$PWD" == /* ]] && printf '\033]7;file://localhost%s\033\\\033]2;zetta-cwd:%s\033\\' "$PWD" "$PWD"
-    printf '\033]2;zetta-cmd:%s\033\\' "$ZETTA_SHELL_NAME"
+    printf '\033]2;zetta-cmd;%s:%s\033\\' "$__zetta_marker_nonce" "$ZETTA_SHELL_NAME"
     return $zetta_status
 }
 function __zetta_report_preexec() {
     __ZETTA_COMMAND_STARTED=1
     printf '\033]2;zetta-event:command-started:%s\033\\' "$1"
-    printf '\033]2;zetta-cmd:%s\033\\' "$1"
+    printf '\033]2;zetta-cmd;%s:%s\033\\' "$__zetta_marker_nonce" "$1"
 }
 typeset -g __ZETTA_COMMAND_STARTED=0
 function __zetta_load_shell_integration() {
@@ -1007,6 +1032,7 @@ printf '\033]2;zetta-event:tracking-ready\033\\'
 ZETTA_ZSHENV
             ZDOTDIR="$integration_zdotdir"
             export ZDOTDIR
+            export __ZETTA_COMMAND_MARKER_NONCE="$zetta_marker_nonce"
             exec "$shell" -l
         fi
         ;;

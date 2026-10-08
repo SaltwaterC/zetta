@@ -105,6 +105,7 @@ fn shift_f9_arms_the_focused_terminal_and_escape_cancels(cx: &mut TestAppContext
             broadcast_input: false,
             silent_mode: false,
             close_policy: TabClosePolicy::Close,
+            protected: false,
             shared: false,
             custom_title: None,
             worktree_seed_title: None,

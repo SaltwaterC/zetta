@@ -47,6 +47,7 @@ zetta_profiles = { path = "../zetta_profiles" }
 zclip = { path = "../zclip", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
+getrandom = "0.3"
 windows = { version = "0.61", features = [
     "Foundation_Numerics",
     "Globalization_DateTimeFormatting",

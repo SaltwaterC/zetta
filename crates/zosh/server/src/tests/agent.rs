@@ -213,7 +213,7 @@ fn windows_bootstrap_primes_the_forwarded_agent_pipe() {
         .encode_wide()
         .chain(std::iter::once(0))
         .collect::<Vec<_>>();
-    let handle = windows_pipe::create(windows::core::PCWSTR(wide.as_ptr()), 1024)
+    let handle = windows_pipe::create(windows::core::PCWSTR(wide.as_ptr()), 1024, true)
         .expect("create test agent pipe");
     let handle = handle.0 as usize;
     let agent = thread::spawn(move || {
@@ -232,4 +232,23 @@ fn windows_bootstrap_primes_the_forwarded_agent_pipe() {
     });
     prime_agent_path(&path).expect("prime a Windows forwarded agent");
     agent.join().unwrap();
+}
+
+/// A pipe name somebody already holds is refused rather than joined: a later
+/// instance would carry the first creator's DACL.
+#[cfg(windows)]
+#[test]
+fn windows_agent_pipe_refuses_a_name_that_already_exists() {
+    use windows::Win32::Foundation::CloseHandle;
+
+    let wide = format!(r"\\.\pipe\zosh-first-instance-test-{}", std::process::id())
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let name = windows::core::PCWSTR(wide.as_ptr());
+    let squatter = windows_pipe::create(name, 1024, true).expect("the first instance");
+
+    assert!(windows_pipe::create(name, 1024, true).is_err());
+
+    let _ = unsafe { CloseHandle(squatter) };
 }

@@ -1699,18 +1699,18 @@ pub(super) fn snapshot(
     seed_retained_screen_with_fallback(pane, bytes, (columns, lines));
     pane.attachment = Attachment::Shared(Vec::new());
     pane.attachment_client_id = None;
+    // Written under the session lock, so the seal it is written under cannot
+    // be overtaken by the session being protected meanwhile.
     #[cfg(feature = "session-persistence")]
-    let persisted = session.offered.then(|| persisted_live_session(session));
-    drop(sessions);
-    #[cfg(feature = "session-persistence")]
-    if let Some(persisted) = persisted
-        && let Err(error) = persist_session(daemon, &persisted)
+    if session.offered
+        && let Err(error) = persist_live_session(daemon, session)
     {
         // The handover is already committed in memory. A persistence failure
         // must not strand the pane in a revoke state; the next publication can
         // retry the disk write.
         log::warn!("could not persist the shared pane snapshot: {error:#}");
     }
+    drop(sessions);
     daemon.sessions_condvar.notify_all();
     publish(daemon);
     wake_drain(daemon);

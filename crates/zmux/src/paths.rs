@@ -94,22 +94,43 @@ pub fn pane_forwarded_agent_target(pane_id: u64) -> PathBuf {
     session_catalog_dir().join(format!("forwarded-agent-{pane_id}.target"))
 }
 
-/// The stable named pipe a daemon-owned pane on Windows is given as its
-/// `SSH_AUTH_SOCK`.
+/// A fresh named pipe for a daemon-owned pane on Windows to be given as its
+/// `SSH_AUTH_SOCK`, stable for the pane's lifetime.
 ///
-/// The pipe namespace is machine-wide, so the name is scoped by the session
-/// directory: that keeps two accounts, and a development daemon beside an
-/// installed one, from claiming each other's names.
+/// The pipe namespace is machine-wide and any account may create a name in it.
+/// A pipe created first keeps its creator's DACL, so a name another account
+/// can predict is one it can claim before the daemon does and serve to the
+/// pane itself — becoming the pane's agent, and receiving every key `ssh-add`
+/// hands it. The random component keeps the name out of reach until it exists.
+/// From then on the listener holds an instance for as long as the pane lives
+/// (`server/agent_pipe/listener.rs`), including across an upgrade, because any
+/// account can list existing pipe names: randomness covers the interval before
+/// creation, never a gap after it.
+///
+/// The session-directory scope keeps a development daemon's pipes apart from an
+/// installed one's in a pipe listing.
 #[cfg(any(windows, test))]
-pub fn pane_forwarded_agent_pipe(pane_id: u64) -> PathBuf {
-    pane_forwarded_agent_pipe_in(&session_catalog_dir(), pane_id)
+pub fn new_pane_forwarded_agent_pipe(pane_id: u64) -> anyhow::Result<PathBuf> {
+    let nonce = crate::transport::random_hex(16)?;
+    Ok(pane_forwarded_agent_pipe_in(
+        &session_catalog_dir(),
+        pane_id,
+        Some(&nonce),
+    ))
+}
+
+/// The predictable name a daemon from before [`new_pane_forwarded_agent_pipe`]
+/// gave a pane, which adopting such a daemon's handover still has to serve.
+#[cfg(any(windows, test))]
+pub fn legacy_pane_forwarded_agent_pipe(pane_id: u64) -> PathBuf {
+    pane_forwarded_agent_pipe_in(&session_catalog_dir(), pane_id, None)
 }
 
 #[cfg(any(windows, test))]
 pub(crate) const PANE_AGENT_PIPE_PREFIX: &str = r"\\.\pipe\zmux-agent-";
 
 #[cfg(any(windows, test))]
-fn pane_forwarded_agent_pipe_in(session_dir: &Path, pane_id: u64) -> PathBuf {
+fn pane_forwarded_agent_pipe_in(session_dir: &Path, pane_id: u64, nonce: Option<&str>) -> PathBuf {
     // FNV-1a over the lowercased path: Windows paths compare case-insensitively,
     // and this only has to be stable, not secret.
     let scope = session_dir
@@ -119,7 +140,12 @@ fn pane_forwarded_agent_pipe_in(session_dir: &Path, pane_id: u64) -> PathBuf {
         .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
             (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
         });
-    PathBuf::from(format!("{PANE_AGENT_PIPE_PREFIX}{scope:016x}-{pane_id}"))
+    match nonce {
+        Some(nonce) => PathBuf::from(format!(
+            "{PANE_AGENT_PIPE_PREFIX}{scope:016x}-{pane_id}-{nonce}"
+        )),
+        None => PathBuf::from(format!("{PANE_AGENT_PIPE_PREFIX}{scope:016x}-{pane_id}")),
+    }
 }
 
 fn is_target_debug_binary(path: &Path) -> bool {
