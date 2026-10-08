@@ -1070,17 +1070,35 @@ pub(super) fn spawn(
     #[cfg(not(feature = "session-persistence"))]
     let restored: Option<()> = None;
 
+    // A plain spawn into a live session adds a pane running whatever the caller
+    // names, and that pane keeps the session alive: for a protected one it is
+    // the same control `SpawnShared` checks above, so it takes the same proof.
+    // Proved now, with no lock held, and checked both before the child starts
+    // and again where the pane is committed, in case the session was protected
+    // in between.
+    let live_proof = match (request.session_id, &shared_request) {
+        (Some(session_id), None) => {
+            prove_session_secret(daemon, peer_process_id, session_secret, |session| {
+                session.id == session_id
+            })
+        }
+        _ => SecretProof::NONE,
+    };
     if let Some(session_id) = request.session_id {
-        let live = daemon
-            .sessions
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|session| session.id == session_id);
+        let sessions = daemon.sessions.lock().unwrap();
+        let live = sessions.iter().find(|session| session.id == session_id);
         anyhow::ensure!(
-            live || restored.is_some(),
+            live.is_some() || restored.is_some(),
             "session {session_id} does not exist"
         );
+        if shared_request.is_none()
+            && let Some(session) = live
+        {
+            anyhow::ensure!(
+                session_control_authorized(session, peer_process_id, &live_proof),
+                "session {session_id} is not authorized for this client"
+            );
+        }
     }
 
     let start_directory = pane_start_directory(request.working_directory);
@@ -1147,8 +1165,11 @@ pub(super) fn spawn(
                 .is_some_and(|session_id| session.id == session_id)
         })
         .map_or(0, |session| session.panes.len());
+    let joins_live_session = request
+        .session_id
+        .is_some_and(|id| sessions.iter().any(|session| session.id == id));
     let session_id = match request.session_id {
-        Some(id) if sessions.iter().any(|session| session.id == id) => id,
+        Some(id) if joins_live_session => id,
         #[cfg(feature = "session-persistence")]
         Some(id) if restored.is_some() => {
             let restored = restored.as_ref().expect("restore lease was checked");
@@ -1214,6 +1235,18 @@ pub(super) fn spawn(
         .iter_mut()
         .find(|session| session.id == session_id)
         .expect("the session was just located or created");
+    if shared_request.is_none()
+        && joins_live_session
+        && !session_control_authorized(session, peer_process_id, &live_proof)
+    {
+        // Protected while the child was starting. Nothing names the pane yet,
+        // so the child goes with it, as it does for a shared conflict below.
+        drop(sessions);
+        drop(pty);
+        #[cfg(windows)]
+        let _ = daemon.pty_host.close(console_id);
+        anyhow::bail!("session {session_id} is not authorized for this client");
+    }
 
     if let Some(shared_request) = &shared_request {
         anyhow::ensure!(
@@ -1345,12 +1378,15 @@ pub(super) fn spawn(
             sessions,
             session_id,
             pane_id,
-            client_process_id,
-            client_id,
-            stream_only,
-            // A spawn is the client asking for a pane of its own, never a relay
-            // standing in for somebody else's view of one.
-            None,
+            Attacher {
+                client_process_id,
+                peer_process_id,
+                client_id,
+                stream_only,
+                // A spawn is the client asking for a pane of its own, never a
+                // relay standing in for somebody else's view of one.
+                relaying_for: None,
+            },
             response_state.state.clone(),
             response_summary,
             connection,
@@ -2331,6 +2367,20 @@ pub(super) fn control_process_id(client_process_id: u32, peer_process_id: Option
     peer_process_id.unwrap_or(client_process_id)
 }
 
+/// The envelope's process where the transport confirmed it is the one asking,
+/// and `None` where it could not, or found somebody else.
+///
+/// Unlike [`control_process_id`], never the claim on its own: this is the
+/// identity for checks that grant something — answering a handover, attaching
+/// a backgrounded session, taking a pane back — which a same-user process
+/// naming another must not pass.
+pub(super) fn verified_process_id(
+    client_process_id: u32,
+    peer_process_id: Option<u32>,
+) -> Option<u32> {
+    peer_process_id.filter(|peer| *peer == client_process_id)
+}
+
 /// Whether a protected session may be acted on by this peer as one of the
 /// clients currently showing it.
 ///
@@ -2402,12 +2452,26 @@ pub(super) fn session_identity_authorized(session: &Session, peer_process_id: Op
 /// `Detach` and `Resume` are absent on purpose: they stream raw bytes after
 /// their message, so there is nowhere to interject a challenge. Those ask to be
 /// identified first, with [`Request::Attest`].
+///
+/// A local `Attach` and `TakeExclusive` are the exceptions to "only protected
+/// sessions". An attach is where a window's identity is recorded for later —
+/// whose backgrounded session it is, which viewer may take a shared pane back
+/// — and those checks accept only a vouched-for peer; unattested, a window
+/// would lose its own panes. A stream-only client is remote and cannot answer.
 #[cfg(windows)]
 pub(super) fn attestation_needed(
     daemon: &Arc<Daemon>,
     request: &Request,
     stream_only: bool,
 ) -> bool {
+    if !stream_only
+        && matches!(
+            request,
+            Request::Attach { .. } | Request::TakeExclusive { .. }
+        )
+    {
+        return true;
+    }
     #[cfg(feature = "session-persistence")]
     if let Request::Spawn(SpawnRequest {
         session_id: Some(session_id),
@@ -2420,6 +2484,12 @@ pub(super) fn attestation_needed(
         return true;
     }
     let session_id = match request {
+        // Adding a pane to a live session; a new session has no secret yet.
+        Request::Spawn(SpawnRequest {
+            session_id: Some(session_id),
+            ..
+        }) => Some(*session_id),
+        Request::ReleaseExclusive { session_id, .. } => Some(*session_id),
         Request::SpawnShared(request) => Some(request.session_id),
         Request::SpawnSharedBatch(request) => Some(request.session_id),
         Request::ApplyShared(request) => Some(request.session_id),

@@ -14,8 +14,8 @@ use std::{cmp, ops::Range as StdRange, path::PathBuf, sync::Arc, time::Duration}
 use gpui::{
     Action, AnyElement, App, AppContext as _, ClipboardEntry, ClipboardItem, Context, Corners,
     DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, KeyContext, KeyDownEvent,
-    Keystroke, MouseButton, MouseDownEvent, Pixels, Point, Render, ScrollWheelEvent, Subscription,
-    Task, Window, actions, anchored, deferred, div, px,
+    Keystroke, MouseButton, MouseDownEvent, Pixels, Point, PromptButton, PromptLevel, Render,
+    ScrollWheelEvent, Subscription, Task, Window, actions, anchored, deferred, div, px,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -25,6 +25,7 @@ use terminal::{
     ScrollLineDown, ScrollLineUp, ScrollPageDown, ScrollPageUp, ScrollToBottom, ScrollToTop,
     Search, SearchMatches, ShowCharacterPalette, Terminal, TerminalBounds, ToggleViMode,
     console_palette_for_theme,
+    link_policy::display_safe_link_text,
     paste_order::{PasteOrder, PasteTicket},
     terminal_settings::{CursorShape, TerminalSettings},
 };
@@ -189,6 +190,31 @@ pub(crate) struct HoverTarget {
     pub(crate) hovered_word: HoveredWord,
 }
 
+/// Opens a link whose scheme `terminal::link_policy` does not open unasked,
+/// once the user has seen where it goes. The OS hands such a link to whatever
+/// program registered the scheme, and the text printed over an OSC 8 link
+/// need not resemble its destination.
+fn confirm_open_url(url: String, window: &mut Window, cx: &mut Context<TerminalView>) {
+    let detail = format!(
+        "{}\n\nThis link was printed by the program running in the terminal. \
+         Opening it hands it to the application registered for its scheme.",
+        display_safe_link_text(&url)
+    );
+    let answer = window.prompt(
+        PromptLevel::Warning,
+        "Open this link?",
+        Some(&detail),
+        &[PromptButton::cancel("Cancel"), PromptButton::ok("Open")],
+        cx,
+    );
+    cx.spawn(async move |_, cx| {
+        if answer.await == Ok(1) {
+            cx.update(|cx| cx.open_url(&url));
+        }
+    })
+    .detach();
+}
+
 pub struct TerminalView {
     terminal: Entity<Terminal>,
     theme: Option<Arc<Theme>>,
@@ -339,13 +365,13 @@ impl TerminalView {
                     {
                         Some((MaybeNavigationTarget::Url(url), hovered_word)) => {
                             Some(HoverTarget {
-                                tooltip: url.clone(),
+                                tooltip: display_safe_link_text(url),
                                 hovered_word,
                             })
                         }
                         Some((MaybeNavigationTarget::PathLike(path), hovered_word)) => {
                             Some(HoverTarget {
-                                tooltip: path.maybe_path.clone(),
+                                tooltip: display_safe_link_text(&path.maybe_path),
                                 hovered_word,
                             })
                         }
@@ -354,6 +380,7 @@ impl TerminalView {
                     cx.notify();
                 }
                 Event::Open(MaybeNavigationTarget::Url(url)) => cx.open_url(url),
+                Event::ConfirmOpenUrl(url) => confirm_open_url(url.clone(), window, cx),
                 Event::Open(MaybeNavigationTarget::PathLike(target)) => {
                     match local_path_open_action(target) {
                         LocalPathOpenAction::OpenDirectory(path) => cx.open_with_system(&path),

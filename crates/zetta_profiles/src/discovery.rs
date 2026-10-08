@@ -40,22 +40,22 @@ fn discover_profiles() -> Vec<ProfileDefinition> {
     }];
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     let homebrew_prefixes = homebrew_prefixes();
-    let candidates: &[(&str, &str)] = if cfg!(windows) {
-        &[
-            ("PowerShell", "powershell.exe"),
-            ("PowerShell 7", "pwsh.exe"),
-            ("Command Prompt", "cmd.exe"),
-        ]
-    } else {
-        &[
-            ("Zsh", "zsh"),
-            ("Bash", "bash"),
-            ("Fish", "fish"),
-            ("Nushell", "nu"),
-        ]
-    };
+    #[cfg(windows)]
+    let system_directory = system_directory();
+    #[cfg(windows)]
+    profiles.extend(windows_shell_profiles(
+        system_directory.as_deref(),
+        env::var_os("PATH").as_deref(),
+    ));
+    #[cfg(not(windows))]
     let mut seen = HashSet::new();
-    for (name, program) in candidates {
+    #[cfg(not(windows))]
+    for (name, program) in [
+        ("Zsh", "zsh"),
+        ("Bash", "bash"),
+        ("Fish", "fish"),
+        ("Nushell", "nu"),
+    ] {
         if let Some(path) = command_path(program)
             && seen.insert(path.clone())
         {
@@ -63,14 +63,14 @@ fn discover_profiles() -> Vec<ProfileDefinition> {
             let profile =
                 homebrew_profile_for_path(&path, &homebrew_prefixes).unwrap_or_else(|| {
                     ProfileDefinition {
-                        name: (*name).to_owned(),
-                        command: ProfileCommand::program(*program),
+                        name: name.to_owned(),
+                        command: ProfileCommand::program(program),
                     }
                 });
             #[cfg(not(any(target_os = "macos", target_os = "linux")))]
             let profile = ProfileDefinition {
-                name: (*name).to_owned(),
-                command: ProfileCommand::program(*program),
+                name: name.to_owned(),
+                command: ProfileCommand::program(program),
             };
             profiles.push(profile);
         }
@@ -87,8 +87,12 @@ fn discover_profiles() -> Vec<ProfileDefinition> {
             }),
     );
     #[cfg(windows)]
-    if let Some(root) = msys2_installation_root() {
-        profiles.extend(msys2_profiles(&root));
+    if let Some(root) = msys2_installation_root()
+        && let Some(cmd) = system_directory
+            .as_deref()
+            .map(|system| system.join("cmd.exe"))
+    {
+        profiles.extend(msys2_profiles(&root, &cmd));
     }
     #[cfg(windows)]
     if let Some(root) = cygwin_installation_root() {
@@ -99,6 +103,74 @@ fn discover_profiles() -> Vec<ProfileDefinition> {
         profiles.extend(discovered_wsl_profiles(&program));
     }
     profiles
+}
+
+/// Where one of Windows' own shells is installed.
+#[cfg(any(windows, test))]
+enum WindowsShell {
+    /// Under the system directory, which is where Windows keeps it whatever
+    /// `PATH` says.
+    System(&'static [&'static str]),
+    /// Found on `PATH`, because it is installed separately.
+    Path(&'static str),
+}
+
+#[cfg(any(windows, test))]
+const WINDOWS_PROFILE_CANDIDATES: &[(&str, WindowsShell)] = &[
+    (
+        "PowerShell",
+        WindowsShell::System(&["WindowsPowerShell", "v1.0", "powershell.exe"]),
+    ),
+    ("PowerShell 7", WindowsShell::Path("pwsh.exe")),
+    ("Command Prompt", WindowsShell::System(&["cmd.exe"])),
+];
+
+/// Windows' own shells, each spelled as the absolute path it was found at.
+///
+/// A bare `cmd.exe` is searched for when the pane starts, and Windows' search
+/// includes the current directory — the pane's, for the palette bootstrap —
+/// before the system one. The path found here is the one that should run, so
+/// it is the one the profile carries.
+#[cfg(any(windows, test))]
+fn windows_shell_profiles(
+    system_directory: Option<&Path>,
+    path: Option<&OsStr>,
+) -> Vec<ProfileDefinition> {
+    let mut seen = HashSet::new();
+    WINDOWS_PROFILE_CANDIDATES
+        .iter()
+        .filter_map(|(name, shell)| {
+            let program = match shell {
+                WindowsShell::System(components) => {
+                    let program = system_directory?.join(components.iter().collect::<PathBuf>());
+                    program.is_file().then_some(program)?
+                }
+                WindowsShell::Path(program) => command_path_in(program, path?)?,
+            };
+            seen.insert(program.clone()).then(|| ProfileDefinition {
+                name: (*name).to_owned(),
+                command: ProfileCommand::program(program.display().to_string()),
+            })
+        })
+        .collect()
+}
+
+/// `GetSystemDirectoryW`: `System32` wherever Windows is installed.
+#[cfg(windows)]
+fn system_directory() -> Option<PathBuf> {
+    use std::os::windows::ffi::OsStringExt as _;
+    use windows::Win32::System::SystemInformation::GetSystemDirectoryW;
+
+    let length = unsafe { GetSystemDirectoryW(None) } as usize;
+    if length == 0 {
+        return None;
+    }
+    let mut buffer = vec![0u16; length];
+    let written = unsafe { GetSystemDirectoryW(Some(&mut buffer)) } as usize;
+    (written > 0 && written < buffer.len()).then(|| {
+        buffer.truncate(written);
+        PathBuf::from(std::ffi::OsString::from_wide(&buffer))
+    })
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -359,7 +431,7 @@ fn msys2_registered_installation_roots() -> Vec<PathBuf> {
 }
 
 #[cfg(any(windows, test))]
-fn msys2_profiles(root: &Path) -> Vec<ProfileDefinition> {
+fn msys2_profiles(root: &Path, cmd: &Path) -> Vec<ProfileDefinition> {
     let launcher = root.join("msys2_shell.cmd");
     [("MSYS2", "bash"), ("MSYS2: Zsh", "zsh")]
         .into_iter()
@@ -372,7 +444,7 @@ fn msys2_profiles(root: &Path) -> Vec<ProfileDefinition> {
             ProfileDefinition {
                 name: name.to_owned(),
                 command: ProfileCommand::with_args(
-                    "cmd.exe",
+                    cmd.display().to_string(),
                     vec!["/d".to_owned(), "/s".to_owned(), "/c".to_owned(), command],
                 ),
             }
@@ -682,7 +754,7 @@ fn wsl_program() -> Option<String> {
 
     system_wsl
         .filter(|program| Path::new(program).is_file())
-        .or_else(|| command_exists("wsl.exe").then(|| "wsl.exe".to_owned()))
+        .or_else(|| command_path("wsl.exe").map(|path| path.display().to_string()))
 }
 
 #[cfg(windows)]
@@ -767,30 +839,32 @@ fn command_path(program: &str) -> Option<PathBuf> {
     env::var_os("PATH").and_then(|path| command_path_in(program, &path))
 }
 
+/// Looks `program` up in the absolute entries of `path`.
+///
+/// An empty or relative entry names the current directory, which is wherever
+/// the process happened to start: a program found there is not installed, it
+/// is just nearby, and on Windows it would be run in place of the real one.
 fn command_path_in(program: &str, path: &OsStr) -> Option<PathBuf> {
-    env::split_paths(path).find_map(|directory| {
-        if cfg!(windows) {
-            if directory.join(program).is_file() {
-                Some(directory.join(program))
-            } else if !program.to_ascii_lowercase().ends_with(".exe")
-                && directory.join(format!("{program}.exe")).is_file()
-            {
-                Some(directory.join(format!("{program}.exe")))
+    env::split_paths(path)
+        .filter(|directory| directory.is_absolute())
+        .find_map(|directory| {
+            if cfg!(windows) {
+                if directory.join(program).is_file() {
+                    Some(directory.join(program))
+                } else if !program.to_ascii_lowercase().ends_with(".exe")
+                    && directory.join(format!("{program}.exe")).is_file()
+                {
+                    Some(directory.join(format!("{program}.exe")))
+                } else {
+                    None
+                }
             } else {
-                None
+                directory
+                    .join(program)
+                    .is_file()
+                    .then(|| directory.join(program))
             }
-        } else {
-            directory
-                .join(program)
-                .is_file()
-                .then(|| directory.join(program))
-        }
-    })
-}
-
-#[cfg(windows)]
-fn command_exists(program: &str) -> bool {
-    command_path(program).is_some()
+        })
 }
 
 #[cfg(test)]

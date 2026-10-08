@@ -16,18 +16,21 @@
 //! Display-only terminals must not perform clipboard I/O. Replies to terminal
 //! queries must contain only protocol-defined data, never arbitrary title or
 //! command text that a shell could interpret as input. Opening a hyperlink is
-//! a user action, and its destination still needs scheme and display checks.
+//! a user action, and its destination still needs scheme and display checks:
+//! `link_policy` opens only web and mail links unasked, routes `file:` links
+//! to the reveal path, and escapes format characters in what it displays.
 //!
 //! Parsers and transfer state must have bounds on total memory, disk, work,
 //! and lifetime, not just individual frame size. Malformed output must not
 //! panic. These are the intended boundaries, not a claim that all are currently
 //! enforced: `docs/security-remediation-plan.md` records the remaining gaps,
-//! including unauthenticated markers, OSC 8 targets, and zclip/parser limits.
+//! including unauthenticated markers and zclip/parser limits.
 
 mod mappings;
 
 mod alacritty;
 mod clipboard_channel;
+pub mod link_policy;
 pub mod paste_order;
 mod pty_info;
 mod reader_handover;
@@ -82,7 +85,7 @@ fn successful_exit() -> ExitStatus {
 }
 use std::{
     borrow::Cow,
-    cmp::{self, min},
+    cmp,
     fmt::{self, Display, Formatter},
     future::Future,
     io::{Read, Write},
@@ -840,7 +843,12 @@ pub enum Event {
     LocalGridSizeChanged,
     SelectionsChanged,
     NewNavigationTarget(Option<MaybeNavigationTarget>),
+    /// A click on a link the view may open unasked: a URL whose scheme
+    /// [`link_policy::url_open_policy`] allows, or a path to reveal.
     Open(MaybeNavigationTarget),
+    /// A click on a URL whose scheme is not opened without asking. The view
+    /// must show the destination and get the user's consent before opening it.
+    ConfirmOpenUrl(String),
 }
 
 /// Where the terminal learned that its child had stopped.
@@ -4105,7 +4113,15 @@ impl Terminal {
         };
 
         if open {
-            cx.emit(Event::Open(target));
+            cx.emit(match target {
+                MaybeNavigationTarget::Url(url)
+                    if link_policy::url_open_policy(&url)
+                        == link_policy::UrlOpenPolicy::Confirm =>
+                {
+                    Event::ConfirmOpenUrl(url)
+                }
+                target => Event::Open(target),
+            });
         } else {
             self.update_selected_word(prev_hovered_word, range, maybe_url_or_path, target, cx);
         }
@@ -5689,23 +5705,14 @@ impl Terminal {
             // An OSC 8 hyperlink carries a URI chosen by whatever wrote to the
             // terminal, and the visible text need not resemble it. Requiring the
             // same modifier as a detected URL means output cannot turn an
-            // ordinary click into a system-handled open of, say, a `file://` or
-            // custom-scheme target.
+            // ordinary click into a system-handled open. `FindHyperlink` finds
+            // OSC 8 links as well as detected ones, so this click takes the same
+            // route as the mouse-mode one above: `file:` links are revealed and
+            // every other scheme goes through `link_policy`.
             if self.selection_phase == SelectionPhase::Ended && is_hyperlink_modifier(&e.modifiers)
             {
-                let mouse_cell_index =
-                    content_index_for_mouse(position, &self.last_content.terminal_bounds);
-                if let Some(link) = self
-                    .last_content
-                    .cells
-                    .get(mouse_cell_index)
-                    .and_then(|cell| cell.hyperlink())
-                {
-                    cx.open_url(link.uri());
-                } else {
-                    self.events
-                        .push_back(InternalEvent::FindHyperlink(position, true));
-                }
+                self.events
+                    .push_back(InternalEvent::FindHyperlink(position, true));
             }
         }
 
@@ -7229,11 +7236,14 @@ fn normalize_script_command_name(argument: &str) -> Option<String> {
         .and_then(normalize_path_command_name)
 }
 
+// Only tests index cells by mouse position now: a link click resolves the
+// hyperlink from the grid through `FindHyperlink` instead.
+#[cfg(test)]
 fn content_index_for_mouse(pos: GpuiPoint<Pixels>, terminal_bounds: &TerminalBounds) -> usize {
     let col = (pos.x / terminal_bounds.cell_width()).round() as usize;
-    let clamped_col = min(col, terminal_bounds.num_columns().saturating_sub(1));
+    let clamped_col = cmp::min(col, terminal_bounds.num_columns().saturating_sub(1));
     let row = (pos.y / terminal_bounds.line_height()).round() as usize;
-    let clamped_row = min(row, terminal_bounds.num_lines().saturating_sub(1));
+    let clamped_row = cmp::min(row, terminal_bounds.num_lines().saturating_sub(1));
     clamped_row * terminal_bounds.num_columns() + clamped_col
 }
 
@@ -12971,6 +12981,120 @@ mod tests {
                 "Should have ProcessHyperlink event when ctrl+clicking on same hyperlink position"
             );
         });
+    }
+
+    /// How a hyperlink click reaches the view: the `Open`/`ConfirmOpenUrl`
+    /// events it emits once the queued lookup has run.
+    #[derive(Clone, Copy)]
+    enum LinkClick {
+        /// Press and release on the link: `mouse_down` remembers it and
+        /// `mouse_up` queues `ProcessHyperlink`.
+        PressAndRelease,
+        /// A release with the modifier and no remembered press: the fallback
+        /// in `mouse_up` that used to hand an OSC 8 URI straight to the OS.
+        ReleaseOnly,
+    }
+
+    fn link_click_events(cx: &mut TestAppContext, output: &[u8], click: LinkClick) -> Vec<Event> {
+        let terminal = init_ctrl_click_hyperlink_test(cx, output);
+        let (events_tx, events_rx) = async_channel::unbounded();
+        cx.update(|cx| {
+            cx.subscribe(&terminal, move |_, event: &Event, _| {
+                events_tx.send_blocking(event.clone()).unwrap();
+            })
+        })
+        .detach();
+
+        // Within the top half of the first row: the cell lookup the old
+        // fallback used rounds rather than floors the row.
+        let click_position = point(px(50.0), px(5.0));
+        terminal.update(cx, |terminal, cx| {
+            if matches!(click, LinkClick::PressAndRelease) {
+                ctrl_mouse_down_at(terminal, click_position, cx);
+            }
+            ctrl_mouse_up_at(terminal, click_position, cx);
+        });
+        let window = cx.add_empty_window();
+        window.update(|window, cx| terminal.update(cx, |terminal, cx| terminal.sync(window, cx)));
+        window.run_until_parked();
+
+        std::iter::from_fn(|| events_rx.try_recv().ok())
+            .filter(|event| matches!(event, Event::Open(_) | Event::ConfirmOpenUrl(_)))
+            .collect()
+    }
+
+    #[gpui::test]
+    async fn an_osc8_link_with_another_scheme_asks_before_opening(cx: &mut TestAppContext) {
+        init_test(cx);
+        for click in [LinkClick::PressAndRelease, LinkClick::ReleaseOnly] {
+            let events = link_click_events(
+                cx,
+                b"\x1b]8;;javascript:alert(1)\x1b\\Visit our docs\x1b]8;;\x1b\\\r\n",
+                click,
+            );
+            assert_eq!(
+                events,
+                vec![Event::ConfirmOpenUrl("javascript:alert(1)".to_owned())]
+            );
+            assert_eq!(cx.opened_url(), None, "nothing may be opened unasked");
+        }
+    }
+
+    #[gpui::test]
+    async fn an_osc8_web_link_opens_on_both_click_paths(cx: &mut TestAppContext) {
+        init_test(cx);
+        for click in [LinkClick::PressAndRelease, LinkClick::ReleaseOnly] {
+            let events = link_click_events(
+                cx,
+                b"\x1b]8;;https://example.com/\x1b\\Visit our docs\x1b]8;;\x1b\\\r\n",
+                click,
+            );
+            assert_eq!(
+                events,
+                vec![Event::Open(MaybeNavigationTarget::Url(
+                    "https://example.com/".to_owned()
+                ))]
+            );
+        }
+    }
+
+    #[gpui::test]
+    async fn an_osc8_file_link_is_revealed_on_both_click_paths(cx: &mut TestAppContext) {
+        init_test(cx);
+        for click in [LinkClick::PressAndRelease, LinkClick::ReleaseOnly] {
+            let events = link_click_events(
+                cx,
+                b"\x1b]8;;file:///tmp/notes.txt\x1b\\Visit our docs\x1b]8;;\x1b\\\r\n",
+                click,
+            );
+            assert!(
+                matches!(
+                    events.as_slice(),
+                    [Event::Open(MaybeNavigationTarget::PathLike(target))]
+                        if target.maybe_path.ends_with("notes.txt")
+                ),
+                "a file link must take the reveal path, got {events:?}"
+            );
+            assert_eq!(
+                cx.opened_url(),
+                None,
+                "a file link must not reach the OS opener"
+            );
+        }
+    }
+
+    #[gpui::test]
+    async fn a_detected_url_with_another_scheme_asks_before_opening(cx: &mut TestAppContext) {
+        init_test(cx);
+        let events = link_click_events(
+            cx,
+            b"ssh:example.com/repo for more\r\n",
+            LinkClick::PressAndRelease,
+        );
+        assert_eq!(
+            events,
+            vec![Event::ConfirmOpenUrl("ssh:example.com/repo".to_owned())]
+        );
     }
 
     #[gpui::test]

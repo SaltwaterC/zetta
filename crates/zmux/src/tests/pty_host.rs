@@ -15,6 +15,40 @@ fn bootstrap_command_validation_accepts_only_nonempty_bounded_payloads() {
 }
 
 #[test]
+fn a_bare_bootstrap_program_is_started_from_the_system_directory() {
+    // `CreateProcessW` would look for a bare `cmd.exe` in the bootstrap's
+    // current directory — the pane's — before System32.
+    let application = bootstrap_application(OsStr::new("cmd.exe /c echo REAL-CMD"))
+        .unwrap()
+        .unwrap();
+    let application =
+        PathBuf::from(String::from_utf16(&application[..application.len() - 1]).unwrap());
+    assert!(application.is_absolute(), "{application:?}");
+    assert!(
+        application
+            .file_name()
+            .is_some_and(|name| name.eq_ignore_ascii_case("cmd.exe"))
+    );
+    assert_ne!(
+        application.parent(),
+        Some(std::env::current_dir().unwrap().as_path())
+    );
+}
+
+#[test]
+fn a_quoted_absolute_bootstrap_program_is_kept() {
+    let system = tty::resolve_application("cmd.exe", None).unwrap().unwrap();
+    let command_line = format!("\"{}\" /d", system.display());
+    let application = bootstrap_application(OsStr::new(&command_line))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        String::from_utf16(&application[..application.len() - 1]).unwrap(),
+        system.display().to_string()
+    );
+}
+
+#[test]
 fn the_host_protocol_is_additive_only() {
     // The host is the part that does not get upgraded: after a daemon replaces
     // itself it finds the *old* host still running, so the daemon must be able

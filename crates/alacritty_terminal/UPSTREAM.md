@@ -96,6 +96,15 @@ Retain these Zetta changes when synchronizing:
   drain. Zetta releases an exited PTY as soon as it receives that report, so
   reporting first could abort the drain and discard the child process's final
   output.
+- Windows: `src/tty/program_search.rs`, a Zetta-authored module (tests in
+  `src/tests/tty/program_search.rs`), resolves a pane's program the way
+  `CreateProcessW` would but never from the current directory or a relative
+  `PATH` entry. `conpty` passes the result as `lpApplicationName`, and
+  `cmdline` quotes the program and spells it as that absolute path, because
+  the palette bootstrap re-launches the line from the pane's directory, where a
+  planted `cmd.exe` would otherwise win. `zmux`'s bootstrap calls
+  `tty::resolve_application` and `program_search` too, so both ends share one
+  policy.
 
 The eight Zetta commits carrying these changes are `d6aa84b`, `d7b896f`,
 `57ecffe`, `d83beb7`, `1f6b1f7`, `9de38c6`, `31c3303`, and `7ba5a85`.

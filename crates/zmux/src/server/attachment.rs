@@ -9,36 +9,44 @@
 use super::*;
 
 /// Who is attaching, carried through the phases of one attach.
-struct Attacher {
-    client_process_id: u32,
-    client_id: ClientId,
-    stream_only: bool,
-    relaying_for: Option<ClientId>,
+#[derive(Clone)]
+pub(super) struct Attacher {
+    /// The process the envelope names. Recorded as the pane's holder or viewer,
+    /// and where a revoke is sent, but never on its own proof of anything: any
+    /// same-user process can name any other.
+    pub(super) client_process_id: u32,
+    /// What the transport vouched for — the kernel's peer credentials, or a
+    /// Windows attestation — and the only identity a check that grants access
+    /// may rely on.
+    pub(super) peer_process_id: Option<u32>,
+    pub(super) client_id: ClientId,
+    pub(super) stream_only: bool,
+    pub(super) relaying_for: Option<ClientId>,
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the attach request's decoded fields, plus the daemon, the requesting \
-              client's identity, and the connection to answer on"
-)]
+impl Attacher {
+    /// The envelope's process, where the transport confirmed it is the one
+    /// asking; `None` where it could not, or where it found someone else.
+    ///
+    /// What "is this the window that holds the pane" has to be answered
+    /// against. Answered from the claim alone, any process holding the endpoint
+    /// token could name a window mid-handover and skip that session's secret.
+    pub(super) fn verified_process_id(&self) -> Option<u32> {
+        verified_process_id(self.client_process_id, self.peer_process_id)
+    }
+}
+
 pub(super) fn attach(
     daemon: &Arc<Daemon>,
     session_id: u64,
     pane_id: Option<u64>,
     secret: Option<String>,
-    client_process_id: u32,
-    client_id: ClientId,
-    stream_only: bool,
+    attacher: Attacher,
     force_shared: bool,
-    relaying_for: Option<ClientId>,
     connection: &mut Connection,
 ) -> Result<()> {
-    let attacher = Attacher {
-        client_process_id,
-        client_id,
-        stream_only,
-        relaying_for,
-    };
+    let client_process_id = attacher.client_process_id;
+    let stream_only = attacher.stream_only;
     let mut sessions = match authorize_attach(daemon, session_id, secret.as_deref(), &attacher) {
         Ok(sessions) => sessions,
         Err(refusal) => return connection.send(&*refusal),
@@ -97,18 +105,7 @@ pub(super) fn attach(
     }
     if (stream_only || force_shared) && matches!(pane.attachment, Attachment::Shared(_)) {
         return attach_shared(
-            daemon,
-            sessions,
-            session_id,
-            pane_id,
-            client_process_id,
-            attacher.client_id,
-            stream_only,
-            attacher.relaying_for,
-            state,
-            summary,
-            connection,
-            None,
+            daemon, sessions, session_id, pane_id, attacher, state, summary, connection, None,
         );
     }
     if force_shared {
@@ -120,7 +117,7 @@ pub(super) fn attach(
     }
     if !stream_only
         && (matches!(pane.attachment, Attachment::None)
-            || matches!(pane.attachment, Attachment::Exclusive(holder) if holder == client_process_id))
+            || matches!(pane.attachment, Attachment::Exclusive(holder) if Some(holder) == attacher.verified_process_id()))
     {
         return attach_exclusive(
             daemon,
@@ -136,18 +133,7 @@ pub(super) fn attach(
     }
     if matches!(pane.attachment, Attachment::Shared(_)) {
         return attach_shared(
-            daemon,
-            sessions,
-            session_id,
-            pane_id,
-            client_process_id,
-            attacher.client_id,
-            stream_only,
-            attacher.relaying_for,
-            state,
-            summary,
-            connection,
-            None,
+            daemon, sessions, session_id, pane_id, attacher, state, summary, connection, None,
         );
     }
 
@@ -221,6 +207,7 @@ fn authorize_attach<'a>(
     attacher: &Attacher,
 ) -> Result<MutexGuard<'a, Vec<Session>>, Box<Response>> {
     let client_process_id = attacher.client_process_id;
+    let verified_process_id = attacher.verified_process_id();
     let mut proof = None;
     loop {
         let mut sessions = daemon
@@ -244,17 +231,16 @@ fn authorize_attach<'a>(
         // Whose session it is, before anything is revealed about it. A
         // backgrounded session belongs to the window that put it away; another
         // process may only have it once somebody has said so.
-        if !session.is_in_scope_for(client_process_id) {
+        if !session.is_in_scope_for(verified_process_id) {
             return Err(Box::new(out_of_scope_refusal(
                 session_id,
                 session.owner.unwrap_or_default(),
             )));
         }
 
-        let authentication = session
-            .authentication
-            .as_ref()
-            .filter(|_| !answers_handover(session, client_process_id));
+        let authentication = session.authentication.as_ref().filter(|_| {
+            !verified_process_id.is_some_and(|holder| answers_handover(session, holder))
+        });
         let authorized = authentication.is_none_or(|authentication| {
             proof
                 .as_ref()
@@ -314,6 +300,11 @@ fn out_of_scope_refusal(session_id: u64, owner: u32) -> Response {
 /// now, and was sent `Event::Revoke` a moment ago. Challenging it would make a
 /// protected session impossible to share — the handover carries no secret,
 /// because the user typed it into whichever *other* window is joining.
+///
+/// Only ever asked about a process the transport vouched for — see
+/// [`Attacher::verified_process_id`]. Asked about a claimed one, it let any
+/// process naming the holder join a protected session's relay while a
+/// handover was open.
 fn answers_handover(session: &Session, client_process_id: u32) -> bool {
     session.panes.iter().any(|pane| {
         // Either half of the handshake: the revoke has been sent and not
@@ -359,8 +350,9 @@ fn await_handover(
         client_process_id,
         ref client_id,
         stream_only,
-        ref relaying_for,
+        ..
     } = *attacher;
+    let verified_process_id = attacher.verified_process_id();
     let deadline = Instant::now() + REVOKE_TIMEOUT;
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -424,10 +416,7 @@ fn await_handover(
                     sessions,
                     session_id,
                     pane_id,
-                    client_process_id,
-                    client_id.clone(),
-                    stream_only,
-                    relaying_for.clone(),
+                    attacher.clone(),
                     state,
                     summary,
                     connection,
@@ -444,10 +433,7 @@ fn await_handover(
                         sessions,
                         session_id,
                         pane_id,
-                        client_process_id,
-                        client_id.clone(),
-                        true,
-                        relaying_for.clone(),
+                        attacher.clone(),
                         state,
                         summary,
                         connection,
@@ -474,7 +460,7 @@ fn await_handover(
                 // is another client holding the pane, which is exactly the case
                 // `attach` already handles from the top, so start over rather
                 // than treating it as impossible.
-                if !stream_only && holder == client_process_id {
+                if !stream_only && Some(holder) == verified_process_id {
                     finish_handover_waiter(pane, true);
                     return attach_exclusive(
                         daemon,
@@ -645,15 +631,19 @@ pub(super) fn attach_shared(
     mut sessions: MutexGuard<'_, Vec<Session>>,
     session_id: u64,
     pane_id: u64,
-    client_process_id: u32,
-    client_id: ClientId,
-    stream_only: bool,
-    relaying_for: Option<ClientId>,
+    attacher: Attacher,
     state: serde_json::Value,
     summary: Box<BackgroundSessionSummary>,
     connection: &mut Connection,
     spawned_state: Option<crate::messages::SharedSessionState>,
 ) -> Result<()> {
+    let Attacher {
+        client_process_id,
+        peer_process_id,
+        client_id,
+        stream_only,
+        relaying_for,
+    } = attacher;
     let Some(session) = sessions.iter_mut().find(|session| session.id == session_id) else {
         return respond_unlocked(
             sessions,
@@ -696,6 +686,7 @@ pub(super) fn attach_shared(
     // unlaid-out terminal must not constrain the other viewers with it.
     clients.push(SharedClient {
         process_id: client_process_id,
+        peer_process_id,
         client_id: client_id.clone(),
         attachment,
         stream_only,
@@ -714,9 +705,13 @@ pub(super) fn attach_shared(
     // is a screen of holes where its static text should be. Matched by client
     // rather than by being first, because the joining client that triggered the
     // revoke races the holder's own re-attach.
+    // Matched against the verified peer: the replay is the holder's own screen
+    // diff, and handing it to whoever names the holder left the holder itself
+    // re-attaching to a screen of holes.
+    let verified = verified_process_id(client_process_id, peer_process_id);
     let replay = match pane
         .handed_over
-        .take_if(|handover| handover.client_process_id == client_process_id)
+        .take_if(|handover| Some(handover.client_process_id) == verified)
     {
         // The client that handed the pane over is still showing the screen it
         // handed over, so it gets the difference rather than the screen.
@@ -1166,11 +1161,26 @@ pub(super) const GRANT_FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
 /// before the descriptor does. So the pane stops being read, the queue is allowed
 /// to empty, this end of the relay is shut down so the client's reader sees the
 /// end of it, and only then does the descriptor go out.
+///
+/// Only the viewer itself may ask, and that is decided on the process the
+/// transport vouched for, against the one it vouched for when the viewer
+/// attached. Nothing else authorizes this: the viewer's attach was where any
+/// secret was checked, so being that viewer is what being allowed means, and
+/// the pane's terminal is what a protected session's secret protects. Matched
+/// on a claimed process or client ID instead, any process holding the endpoint
+/// token could take a protected pane from a relay viewer.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the request's two IDs, the envelope's three identity fields, the \
+              transport's peer, and the daemon and connection; the identity \
+              fields are only bundled as an `Attacher` on the attach path"
+)]
 pub(super) fn take_exclusive(
     daemon: &Arc<Daemon>,
     session_id: u64,
     pane_id: u64,
     client_process_id: u32,
+    peer_process_id: Option<u32>,
     client_id: ClientId,
     stream_only: bool,
     connection: &mut Connection,
@@ -1180,6 +1190,14 @@ pub(super) fn take_exclusive(
             message: "stream-only clients cannot take an exclusive pane".to_owned(),
         });
     }
+    let Some(caller) = verified_process_id(client_process_id, peer_process_id) else {
+        return connection.send(&Response::Error {
+            message: format!(
+                "could not confirm that process {client_process_id} is the one asking for \
+                 pane {pane_id}"
+            ),
+        });
+    };
     let mut sessions = daemon.sessions.lock().unwrap();
     let Some(pane) = sessions
         .iter_mut()
@@ -1190,8 +1208,7 @@ pub(super) fn take_exclusive(
             message: format!("session {session_id} has no pane {pane_id}"),
         });
     };
-    if !matches!(&pane.attachment, Attachment::Shared(clients) if clients.len() == 1 && (clients[0].client_id == client_id || (!stream_only && clients[0].process_id == client_process_id)))
-    {
+    if !matches!(&pane.attachment, Attachment::Shared(clients) if is_sole_viewer(clients, caller)) {
         return connection.send(&Response::Error {
             message: format!("pane {pane_id} is not shared with client {client_process_id} alone"),
         });
@@ -1205,11 +1222,7 @@ pub(super) fn take_exclusive(
     // pane has to keep being relayed, and handing the descriptor over would stop
     // the others being read to.
     let relay = match &mut pane.attachment {
-        Attachment::Shared(clients)
-            if clients.len() == 1
-                && (clients[0].client_id == client_id
-                    || (!stream_only && clients[0].process_id == client_process_id)) =>
-        {
+        Attachment::Shared(clients) if is_sole_viewer(clients, caller) => {
             let Attachment::Shared(mut clients) = std::mem::replace(
                 &mut pane.attachment,
                 Attachment::Granting {
@@ -1325,6 +1338,12 @@ pub(super) fn take_exclusive(
     Ok(())
 }
 
+/// Whether `clients` is a single local viewer whose attach was vouched for as
+/// coming from `caller`.
+fn is_sole_viewer(clients: &[SharedClient], caller: u32) -> bool {
+    matches!(clients, [client] if !client.stream_only && client.peer_process_id == Some(caller))
+}
+
 /// Gives a taken pane back, at the request of the client that took it.
 ///
 /// The other half of [`release_failed_handover`]: that one covers a handover
@@ -1344,12 +1363,22 @@ pub(super) fn release_exclusive(
     connection: &mut Connection,
 ) -> Result<()> {
     let sessions = daemon.sessions.lock().unwrap();
-    let caller_process_id = control_process_id(client_process_id, peer_process_id);
-    let Some(pane) = sessions
-        .iter()
-        .find(|session| session.id == session_id)
-        .and_then(|session| session.panes.iter().find(|pane| pane.id == pane_id))
-    else {
+    let Some(session) = sessions.iter().find(|session| session.id == session_id) else {
+        drop(sessions);
+        return connection.send(&Response::Error {
+            message: format!("session {session_id} has no pane {pane_id}"),
+        });
+    };
+    // Releasing a protected pane knocks its window off it, so the claim alone
+    // is not enough there: the holder has to be the process the transport
+    // vouched for. Elsewhere it is the inconvenience `control_process_id`
+    // describes, and an unattested client keeps working.
+    let caller_process_id = if session.authentication.is_some() {
+        verified_process_id(client_process_id, peer_process_id)
+    } else {
+        Some(control_process_id(client_process_id, peer_process_id))
+    };
+    let Some(pane) = session.panes.iter().find(|pane| pane.id == pane_id) else {
         drop(sessions);
         return connection.send(&Response::Error {
             message: format!("session {session_id} has no pane {pane_id}"),
@@ -1370,7 +1399,7 @@ pub(super) fn release_exclusive(
             });
         }
     };
-    if holder != caller_process_id {
+    if Some(holder) != caller_process_id {
         drop(sessions);
         return connection.send(&Response::Error {
             message: format!("session {session_id} pane {pane_id} is held by another client"),
@@ -1624,11 +1653,15 @@ pub(super) fn snapshot(
             message: format!("session {session_id} has no pane {pane_id}"),
         });
     };
-    // On platforms with peer credentials, use the identity the socket vouched
-    // for whenever the caller is allowed to change a protected session. The
-    // envelope remains the fallback for unprotected sessions and for Windows
-    // builds where an unprotected request does not need an attestation.
-    let caller_process_id = control_process_id(client_process_id, peer_process_id);
+    // A protected session takes only the identity the transport vouched for:
+    // answering a revoke as its holder decides the screen a joining client is
+    // shown. The envelope remains the fallback for unprotected sessions and for
+    // Windows builds where an unprotected request does not need an attestation.
+    let caller_process_id = if session.authentication.is_some() {
+        verified_process_id(client_process_id, peer_process_id)
+    } else {
+        Some(control_process_id(client_process_id, peer_process_id))
+    };
     let Some((revoking, holder)) = (match &pane.attachment {
         Attachment::Revoking { holder } => Some((true, *holder)),
         Attachment::Exclusive(holder) => Some((false, *holder)),
@@ -1638,7 +1671,7 @@ pub(super) fn snapshot(
             message: format!("session {session_id} pane {pane_id} is not showing exclusively"),
         });
     };
-    if holder != caller_process_id {
+    if Some(holder) != caller_process_id {
         return connection.send(&Response::Error {
             message: if revoking {
                 format!(

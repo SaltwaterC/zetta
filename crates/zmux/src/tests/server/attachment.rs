@@ -114,9 +114,11 @@ mod authorization {
     use super::*;
     use crate::server::secret_check::tests::fixtures::*;
 
+    /// A local window the kernel vouches for, as every real one is.
     fn attacher(client_process_id: u32) -> Attacher {
         Attacher {
             client_process_id,
+            peer_process_id: Some(client_process_id),
             client_id: ClientId::new("attacher"),
             stream_only: false,
             relaying_for: None,

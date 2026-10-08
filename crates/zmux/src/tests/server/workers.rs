@@ -23,6 +23,7 @@ fn viewer() -> (SharedClient, crate::transport::Stream) {
     .unwrap();
     let client = SharedClient {
         process_id: std::process::id(),
+        peer_process_id: Some(std::process::id()),
         client_id: ClientId::new("viewer"),
         attachment: 1,
         stream_only: true,

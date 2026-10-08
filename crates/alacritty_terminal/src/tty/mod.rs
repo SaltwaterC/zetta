@@ -21,6 +21,9 @@ pub mod windows;
 #[cfg(windows)]
 pub use self::windows::*;
 
+#[cfg(any(windows, test))]
+pub mod program_search;
+
 /// Configuration for the `Pty` interface.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct Options {

@@ -783,7 +783,13 @@ and protection flag; direct pane-state observation and administrative commands
 (`kill`, `forget`, `resize`, `close`, and scope changes) require the session
 owner or a current holder. On Linux the daemon binds that decision to the
 Unix-socket peer PID, so changing only the JSON process-ID field is not enough.
-Renaming, attention, and silent-mode queries also skip protected sessions.
+The same goes for every shortcut past the secret: the holder re-attaching while
+it hands a pane over, a window reattaching the session it backgrounded, a sole
+viewer taking a shared pane's terminal back, and adding a pane to a live
+session. Each is granted only to the process the socket vouched for — on
+Windows, the one that answered the daemon's attestation challenge — and anyone
+else is asked for the secret. Renaming, attention, and silent-mode queries also
+skip protected sessions.
 
 The secret is never stored. Only a uniquely salted Argon2id verifier lives in
 the `zmux` daemon's memory during Phase 0–2, and it is never written to

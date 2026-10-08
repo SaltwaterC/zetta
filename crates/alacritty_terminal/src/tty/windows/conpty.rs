@@ -24,7 +24,7 @@ use windows_sys::Win32::System::Threading::{
 
 use crate::event::{OnResize, WindowSize};
 use crate::tty::windows::child::ChildExitWatcher;
-use crate::tty::windows::{cmdline, normalize_working_directory, win32_string};
+use crate::tty::windows::{command, normalize_working_directory, win32_string};
 use crate::tty::{ConsolePalette, Options};
 
 /// Visible to the parent module so an *attached* console is unblocked through
@@ -200,7 +200,11 @@ fn spawn_palette_bootstrap(
     bootstrap
         .env
         .insert(PALETTE_HELPER_ENV.to_owned(), config.console_palette.to_private_payload());
-    bootstrap.env.insert(PALETTE_BOOTSTRAP_ENV.to_owned(), cmdline(config));
+    // The bootstrap starts this line from the pane's directory. Resolving the
+    // program here spells it as an absolute path, so the bootstrap's own
+    // `CreateProcessW` has no search in which that directory could take part.
+    let (_, command_line) = command(config)?;
+    bootstrap.env.insert(PALETTE_BOOTSTRAP_ENV.to_owned(), command_line);
     spawn_attached_process(pty_handle, &bootstrap)
 }
 
@@ -325,7 +329,9 @@ fn spawn_attached_process(pty_handle: HPCON, config: &Options) -> Result<PROCESS
         }
     }
 
-    let mut command_line = win32_string(&cmdline(config));
+    let (application, command_line) = command(config)?;
+    let application = application.map(|application| win32_string(application.as_os_str()));
+    let mut command_line = win32_string(&command_line);
     let cwd = config.working_directory.as_deref().map(|directory| {
         let directory = normalize_working_directory(directory);
         win32_string(directory.as_os_str())
@@ -339,7 +345,7 @@ fn spawn_attached_process(pty_handle: HPCON, config: &Options) -> Result<PROCESS
     let mut process: PROCESS_INFORMATION = unsafe { mem::zeroed() };
     let success = unsafe {
         CreateProcessW(
-            ptr::null(),
+            application.as_ref().map_or_else(ptr::null, |value| value.as_ptr()),
             command_line.as_mut_ptr() as PWSTR,
             ptr::null_mut(),
             ptr::null_mut(),

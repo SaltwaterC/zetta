@@ -544,3 +544,123 @@ fn search_status_marks_a_count_that_is_still_growing() {
         "256 / 256 shown · 9000 matches"
     );
 }
+
+fn link_test_view(
+    cx: &mut gpui::TestAppContext,
+) -> (Entity<TerminalView>, &mut gpui::VisualTestContext) {
+    cx.update(|cx| {
+        theme_settings::init(theme::LoadThemes::JustBase, cx);
+        TerminalSettings::init(cx);
+    });
+    cx.add_window_view(|window, cx| {
+        let terminal = cx.new(|cx| {
+            terminal::TerminalBuilder::new_display_only(
+                terminal::terminal_settings::CursorShape::Block,
+                terminal::terminal_settings::AlternateScroll::On,
+                None,
+                0,
+                cx.background_executor(),
+                PathStyle::local(),
+            )
+            .subscribe(cx)
+        });
+        TerminalView::new(terminal, window, cx)
+    })
+}
+
+fn emit_terminal_event(
+    view: &Entity<TerminalView>,
+    event: Event,
+    cx: &mut gpui::VisualTestContext,
+) {
+    view.update_in(cx, |view, _, cx| {
+        view.terminal.update(cx, |_, cx| cx.emit(event));
+    });
+    cx.run_until_parked();
+}
+
+/// The terminal asks for confirmation for a link whose scheme an OS handler
+/// would otherwise receive unasked; the view must not open it until the user
+/// agrees, and must not open it at all when they decline.
+#[gpui::test]
+async fn a_link_needing_confirmation_opens_only_once_the_user_agrees(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (view, cx) = link_test_view(cx);
+    let url = "vscode://file/\u{202E}txt.exe".to_owned();
+
+    emit_terminal_event(&view, Event::ConfirmOpenUrl(url.clone()), cx);
+    let (_, detail) = cx.pending_prompt().expect("the user must be asked first");
+    assert!(
+        detail.starts_with("vscode://file/\\u{202E}txt.exe"),
+        "the prompt shows the destination with its bidi override escaped: {detail:?}"
+    );
+    assert_eq!(cx.opened_url(), None);
+    cx.simulate_prompt_answer("Cancel");
+    cx.run_until_parked();
+    assert_eq!(cx.opened_url(), None, "a declined link must not be opened");
+
+    emit_terminal_event(&view, Event::ConfirmOpenUrl(url.clone()), cx);
+    cx.simulate_prompt_answer("Open");
+    cx.run_until_parked();
+    assert_eq!(cx.opened_url(), Some(url));
+}
+
+#[gpui::test]
+async fn a_web_link_opens_without_asking(cx: &mut gpui::TestAppContext) {
+    let (view, cx) = link_test_view(cx);
+    emit_terminal_event(
+        &view,
+        Event::Open(MaybeNavigationTarget::Url(
+            "https://example.com/".to_owned(),
+        )),
+        cx,
+    );
+    assert!(!cx.has_pending_prompt());
+    assert_eq!(cx.opened_url().as_deref(), Some("https://example.com/"));
+}
+
+#[gpui::test]
+async fn a_hover_tooltip_shows_format_characters_escaped(cx: &mut gpui::TestAppContext) {
+    let (view, cx) = link_test_view(cx);
+    view.update_in(cx, |view, _, cx| {
+        view.terminal.update(cx, |terminal, _| {
+            terminal.last_content.last_hovered_word = Some(HoveredWord {
+                word: "click me".to_owned(),
+                word_match: terminal::Range::new(
+                    terminal::Point::new(0, 0),
+                    terminal::Point::new(0, 7),
+                ),
+                id: 0,
+            });
+        });
+    });
+    emit_terminal_event(
+        &view,
+        Event::NewNavigationTarget(Some(MaybeNavigationTarget::Url(
+            "https://example.com/\u{2066}evil\u{2069}".to_owned(),
+        ))),
+        cx,
+    );
+    let tooltip = view.read_with(cx, |view, _| {
+        view.hover.as_ref().map(|hover| hover.tooltip.clone())
+    });
+    assert_eq!(
+        tooltip.as_deref(),
+        Some("https://example.com/\\u{2066}evil\\u{2069}")
+    );
+
+    emit_terminal_event(
+        &view,
+        Event::NewNavigationTarget(Some(MaybeNavigationTarget::PathLike(PathLikeTarget {
+            maybe_path: "/tmp/\u{202E}gpj.sh".to_owned(),
+            terminal_dir: None,
+            path_style: PathStyle::local(),
+        }))),
+        cx,
+    );
+    let tooltip = view.read_with(cx, |view, _| {
+        view.hover.as_ref().map(|hover| hover.tooltip.clone())
+    });
+    assert_eq!(tooltip.as_deref(), Some("/tmp/\\u{202E}gpj.sh"));
+}

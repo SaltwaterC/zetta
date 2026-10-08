@@ -6906,6 +6906,237 @@ fn protected_controls_reject_a_claimed_owner_without_peer_authority() {
     reap(owner);
 }
 
+/// Sends one request on a fresh local connection, naming whichever process the
+/// test likes. The kernel still reports this test process as the peer, which
+/// is exactly the gap between a claim and an identity these tests probe.
+fn connect_claiming(daemon: &TestDaemon, client_process_id: u32, request: Request) -> Connection {
+    let endpoint: zmux::transport::Endpoint =
+        serde_json::from_slice(&std::fs::read(daemon.sessions_dir().join("zmux.json")).unwrap())
+            .unwrap();
+    let mut connection = Connection::new(Stream::connect(&endpoint.socket_path).unwrap());
+    connection
+        .set_read_timeout(Some(Duration::from_secs(20)))
+        .unwrap();
+    connection
+        .send(&Envelope {
+            version: zmux::messages::PROTOCOL_VERSION,
+            token: endpoint.token,
+            client_process_id,
+            client_id: ClientId::new("claimant"),
+            stream_only: false,
+            session_secret: None,
+            request,
+        })
+        .unwrap();
+    connection
+}
+
+/// Naming the window that is handing a protected pane over is not being it.
+///
+/// The holder answering its own revoke re-attaches without the secret, which
+/// is what makes a protected session shareable at all. Decided on the claimed
+/// process, that let anything holding the endpoint token join the relay —
+/// reading the pane and typing into it — for as long as a handover was open.
+#[test]
+fn a_claimed_holder_does_not_skip_the_secret_during_a_handover() {
+    let daemon = TestDaemon::start();
+    let client = daemon.client();
+    // A real process, so the liveness sweep leaves its handover open, but not
+    // this one, so the kernel can tell the two apart.
+    let holder = Command::new("/bin/sleep").arg("120").spawn().unwrap();
+    let holder_pid = holder.id();
+    let pane = client
+        .spawn(spawn_request_as(
+            None,
+            "printf ready; sleep 120",
+            holder_pid,
+        ))
+        .unwrap();
+    let descriptor = std::fs::File::from(pane.descriptor);
+    read_until(&descriptor, "ready");
+    drop(descriptor);
+    // Protected and offered while nobody shows it, then taken by the holder with
+    // the secret, so the pane is held, by a process this test is not.
+    client
+        .detach_as(
+            pane.session_id,
+            summary(pane.session_id, pane.pane_id),
+            serde_json::Value::Null,
+            None,
+            holder_pid,
+        )
+        .unwrap();
+    client
+        .set_session_scope(pane.session_id, true, Some(&test_verifier()))
+        .unwrap();
+    let AttachOutcome::Attached { pane: held, .. } = client
+        .attach_as(
+            pane.session_id,
+            pane.pane_id,
+            holder_pid,
+            Some(TEST_SECRET.to_owned()),
+        )
+        .unwrap()
+    else {
+        panic!("the holder did not take the pane");
+    };
+    let descriptor = std::fs::File::from(held.descriptor);
+
+    // A second window joins with the secret, which revokes the holder's pane.
+    // Nobody answers for the holder, so the handover stays open.
+    let joiner = Command::new("/bin/sleep").arg("120").spawn().unwrap();
+    let joining = {
+        let client = daemon.client();
+        let (session_id, pane_id, joiner_pid) = (pane.session_id, pane.pane_id, joiner.id());
+        std::thread::spawn(move || {
+            client
+                .attach_as(
+                    session_id,
+                    pane_id,
+                    joiner_pid,
+                    Some(TEST_SECRET.to_owned()),
+                )
+                .map(|_| ())
+        })
+    };
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while client
+        .list()
+        .unwrap()
+        .iter()
+        .any(|session| session.id == pane.session_id && session.held)
+    {
+        assert!(Instant::now() < deadline, "the handover never started");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    let outcome = client
+        .attach_as(pane.session_id, pane.pane_id, holder_pid, None)
+        .map_err(|error| error.to_string());
+    assert!(
+        matches!(outcome, Ok(AttachOutcome::AuthenticationRequired)),
+        "claiming the holder's process must not skip the secret: {:?}",
+        outcome.map(|_| ())
+    );
+
+    // Ending the holder is what releases the waiting joiner.
+    reap(holder);
+    let _ = joining.join().unwrap();
+    drop(descriptor);
+    reap(joiner);
+}
+
+/// A plain spawn naming a live protected session adds a pane to it, running
+/// whatever the caller chose, and keeps the session alive. That is control of
+/// the session, so it needs the owner, a holder, or the secret — as
+/// `SpawnShared` always did.
+#[test]
+fn an_unauthenticated_spawn_cannot_join_a_live_protected_session() {
+    let daemon = TestDaemon::start();
+    let client = daemon.client();
+    let owner = Command::new("/bin/sleep").arg("120").spawn().unwrap();
+    let pane = client
+        .spawn(spawn_request_as(
+            None,
+            "printf ready; sleep 120",
+            owner.id(),
+        ))
+        .unwrap();
+    let descriptor = std::fs::File::from(pane.descriptor);
+    read_until(&descriptor, "ready");
+    drop(descriptor);
+    client
+        .detach_as(
+            pane.session_id,
+            summary(pane.session_id, pane.pane_id),
+            serde_json::Value::Null,
+            None,
+            owner.id(),
+        )
+        .unwrap();
+    client
+        .set_session_scope(pane.session_id, true, Some(&test_verifier()))
+        .unwrap();
+
+    let error = match client.spawn(spawn_request(
+        Some(pane.session_id),
+        "printf intruder; sleep 120",
+    )) {
+        Err(error) => error.to_string(),
+        Ok(_) => panic!("a spawn without the secret joined a protected session"),
+    };
+    assert!(error.contains("not authorized"), "{error}");
+
+    reap(owner);
+}
+
+/// Taking a shared pane's terminal is for its sole viewer, and which process
+/// that is was vouched for when it attached. A connection that only names the
+/// viewer's process is somebody else.
+#[test]
+fn a_claimed_viewer_cannot_take_a_protected_pane() {
+    let daemon = TestDaemon::start();
+    let client = daemon.client();
+    let pane = client
+        .spawn(spawn_request(None, "printf first-ready; sleep 120"))
+        .unwrap();
+    let descriptor = std::fs::File::from(pane.descriptor);
+    read_until(&descriptor, "first-ready");
+    share_session(&client, pane.session_id, pane.pane_id);
+    let request = spawn_request(Some(pane.session_id), "printf shared-ready; cat");
+    let spawned = client
+        .spawn_shared(SharedSpawnRequest {
+            session_id: pane.session_id,
+            base_revision: SessionRevision::INITIAL,
+            operation_id: client.next_shared_operation_id(),
+            program: request.program,
+            args: request.args,
+            env: request.env,
+            working_directory: request.working_directory,
+            size: request.size,
+            console_palette: request.console_palette,
+        })
+        .unwrap();
+    let shared_pane_id = spawned.pane.pane_id();
+    drop(spawned);
+
+    // The viewer, as the multiplexer recorded it, names another process.
+    let viewer = Command::new("/bin/sleep").arg("120").spawn().unwrap();
+    let viewer_pid = viewer.id();
+    let AttachOutcome::SharedAttached { pane: viewing, .. } = client
+        .attach_shared_as(
+            pane.session_id,
+            shared_pane_id,
+            viewer_pid,
+            Some(TEST_SECRET.to_owned()),
+        )
+        .unwrap()
+    else {
+        panic!("the viewer did not join the shared pane");
+    };
+
+    let mut claimant = connect_claiming(
+        &daemon,
+        viewer_pid,
+        Request::TakeExclusive {
+            session_id: pane.session_id,
+            pane_id: shared_pane_id,
+        },
+    );
+    // Before the fix the refusal, when there was one, was about the number of
+    // viewers; this one is decided before the viewers are looked at.
+    match claimant.receive::<Response>().unwrap().0 {
+        Response::Error { message } => {
+            assert!(message.contains("could not confirm"), "{message}");
+        }
+        other => panic!("a claimed viewer was answered with {other:?}"),
+    }
+
+    drop(viewing);
+    drop(descriptor);
+    reap(viewer);
+}
+
 /// A backgrounded session stays its window's, even after that window is gone.
 ///
 /// Releasing the scope when the process exited made backgrounding a slow way of

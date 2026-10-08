@@ -164,6 +164,12 @@ enum Attachment {
 /// One client attached in shared mode.
 struct SharedClient {
     process_id: u32,
+    /// The process the transport vouched for when this client attached, which
+    /// is what a later request has to match to act as this viewer — taking the
+    /// pane exclusively above all. `process_id` is only what the client said.
+    /// `None` where nothing vouched for it: an unattested Windows peer, or a
+    /// viewer carried across an upgrade, which re-attaches before it matters.
+    peer_process_id: Option<u32>,
     client_id: ClientId,
     /// This one attachment, among any others the same client has. A client
     /// that recovers a failed stream attaches again under the same
@@ -261,8 +267,12 @@ impl Session {
     /// is nobody's in particular. Being owned by a process that has since exited
     /// is *not* the same as being unowned: that session stays out of every other
     /// window's reach until somebody shares it.
-    fn is_in_scope_for(&self, client: u32) -> bool {
-        self.offered || self.owner.is_none_or(|owner| owner == client)
+    ///
+    /// `client` is the verified peer, not the envelope's claim — see
+    /// `Attacher::verified_process_id`. A peer nobody could vouch for is in
+    /// scope only where everyone is.
+    fn is_in_scope_for(&self, client: Option<u32>) -> bool {
+        self.offered || self.owner.is_none_or(|owner| Some(owner) == client)
     }
 }
 

@@ -71,6 +71,39 @@ fn validated_bootstrap_command(command_line: &OsStr) -> Option<Vec<u16>> {
         .then(|| command_line.into_iter().chain(std::iter::once(0)).collect())
 }
 
+/// The executable `command_line` names, for `lpApplicationName`.
+///
+/// The bootstrap runs in the pane's directory, and `CreateProcessW` given no
+/// application name searches the current directory for a bare program before
+/// the system directories — so a `cmd.exe` planted where a pane opens would
+/// run instead of the system one. The launcher already spells the program as
+/// an absolute path; resolving it here as well covers a launcher that does not
+/// (a host started before that change) and keeps the search in one policy,
+/// `tty::program_search`. `None` is a relative path the profile spelled out.
+fn bootstrap_application(command_line: &OsStr) -> std::io::Result<Option<Vec<u16>>> {
+    let command_line = command_line.to_str().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "the command line is not Unicode",
+        )
+    })?;
+    let program = tty::program_search::command_line_program(command_line);
+    // The bootstrap was started with the child's environment, so this is the
+    // `PATH` the child itself would search.
+    let application = tty::resolve_application(program, std::env::var_os("PATH"))?
+        // An absolute program that is not there is an unquoted path with a
+        // space in it from a launcher that predates quoting it; leave that
+        // line to `CreateProcessW`, whose splitting of it never consults the
+        // current directory.
+        .filter(|path| path.is_file());
+    Ok(application.map(|path| {
+        path.as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect()
+    }))
+}
+
 /// Launches the requested process and applies the initial palette at its
 /// loader breakpoint. Keeping this sequencing inside the attached bootstrap
 /// process lets the caller start servicing ConPTY immediately; some native
@@ -88,12 +121,19 @@ pub fn run_palette_bootstrap_from_env() -> Option<i32> {
         CreateProcessW, DEBUG_ONLY_THIS_PROCESS, GetExitCodeProcess, PROCESS_INFORMATION,
         STARTUPINFOW, WaitForSingleObject,
     };
-    use windows::core::PWSTR;
+    use windows::core::{PCWSTR, PWSTR};
 
     let command_line = std::env::var_os(PALETTE_BOOTSTRAP_ENV)?;
     unsafe { std::env::remove_var(PALETTE_BOOTSTRAP_ENV) };
-    let Some(mut command_line) = validated_bootstrap_command(&command_line) else {
+    let Some(mut validated) = validated_bootstrap_command(&command_line) else {
         return Some(2);
+    };
+    let application = match bootstrap_application(&command_line) {
+        Ok(application) => application,
+        Err(error) => {
+            eprintln!("zmux-pty: could not find the console child: {error}");
+            return Some(1);
+        }
     };
 
     let palette = std::env::var_os(PALETTE_HELPER_ENV)
@@ -116,8 +156,10 @@ pub fn run_palette_bootstrap_from_env() -> Option<i32> {
     let mut process = PROCESS_INFORMATION::default();
     let spawned = unsafe {
         CreateProcessW(
-            None,
-            Some(PWSTR(command_line.as_mut_ptr())),
+            application
+                .as_ref()
+                .map_or(PCWSTR::null(), |application| PCWSTR(application.as_ptr())),
+            Some(PWSTR(validated.as_mut_ptr())),
             None,
             None,
             true,

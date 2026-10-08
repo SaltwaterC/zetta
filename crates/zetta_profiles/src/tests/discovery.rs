@@ -106,6 +106,130 @@ fn creates_a_profile_for_each_wsl_distribution() {
     );
 }
 
+/// A fake Windows installation: `System32` with Windows PowerShell and `cmd.exe`
+/// where Windows keeps them, and a PowerShell 7 on `PATH`.
+fn fake_windows_installation(root: &Path) -> (PathBuf, PathBuf) {
+    let system = root.join("System32");
+    let powershell = system.join("WindowsPowerShell").join("v1.0");
+    let pwsh = root.join("PowerShell").join("7");
+    fs::create_dir_all(&powershell).unwrap();
+    fs::create_dir_all(&pwsh).unwrap();
+    fs::write(system.join("cmd.exe"), "").unwrap();
+    fs::write(powershell.join("powershell.exe"), "").unwrap();
+    fs::write(pwsh.join("pwsh.exe"), "").unwrap();
+    (system, pwsh)
+}
+
+#[test]
+fn windows_shell_profiles_carry_the_absolute_paths_they_were_found_at() {
+    let root = tempfile::tempdir().unwrap();
+    let (system, pwsh) = fake_windows_installation(root.path());
+    let path = env::join_paths([&pwsh]).unwrap();
+
+    let profiles = windows_shell_profiles(Some(&system), Some(&path));
+
+    let commands = profiles
+        .iter()
+        .map(|profile| {
+            (
+                profile.name.as_str(),
+                profile.command.program.clone().unwrap(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let expected = |path: PathBuf| path.display().to_string();
+    assert_eq!(
+        commands,
+        [
+            (
+                "PowerShell",
+                expected(
+                    system
+                        .join("WindowsPowerShell")
+                        .join("v1.0")
+                        .join("powershell.exe")
+                )
+            ),
+            ("PowerShell 7", expected(pwsh.join("pwsh.exe"))),
+            ("Command Prompt", expected(system.join("cmd.exe"))),
+        ]
+    );
+    for (_, program) in &commands {
+        assert!(Path::new(program).is_absolute(), "{program}");
+    }
+}
+
+#[test]
+fn windows_system_shells_are_not_taken_from_path() {
+    // A `cmd.exe` on `PATH` is not the Command Prompt: without a system
+    // directory there is no Command Prompt or Windows PowerShell profile.
+    let root = tempfile::tempdir().unwrap();
+    let (system, pwsh) = fake_windows_installation(root.path());
+    let path = env::join_paths([&system, &pwsh]).unwrap();
+
+    let profiles = windows_shell_profiles(None, Some(&path));
+
+    assert_eq!(
+        profiles
+            .iter()
+            .map(|profile| profile.name.as_str())
+            .collect::<Vec<_>>(),
+        ["PowerShell 7"]
+    );
+}
+
+#[test]
+fn relative_and_empty_path_entries_are_not_searched() {
+    let root = tempfile::tempdir().unwrap();
+    let (_, pwsh) = fake_windows_installation(root.path());
+    let relative = pathdiff_from_current_directory(&pwsh);
+    let path = env::join_paths([PathBuf::new(), PathBuf::from("."), relative.clone()]).unwrap();
+
+    assert!(relative.is_relative());
+    assert_eq!(command_path_in("pwsh.exe", &path), None);
+    let absolute = env::join_paths([pwsh.clone()]).unwrap();
+    assert_eq!(
+        command_path_in("pwsh.exe", &absolute),
+        Some(pwsh.join("pwsh.exe"))
+    );
+}
+
+/// `target` spelled relative to the current directory, so a relative `PATH`
+/// entry that does lead to it can be shown not to be searched.
+fn pathdiff_from_current_directory(target: &Path) -> PathBuf {
+    let current = env::current_dir().unwrap();
+    let common = current
+        .components()
+        .zip(target.components())
+        .take_while(|(left, right)| left == right)
+        .count();
+    current
+        .components()
+        .skip(common)
+        .map(|_| std::path::Component::ParentDir.as_os_str().to_owned())
+        .chain(
+            target
+                .components()
+                .skip(common)
+                .map(|component| component.as_os_str().to_owned()),
+        )
+        .collect()
+}
+
+#[cfg(windows)]
+#[test]
+fn discovered_windows_shells_carry_absolute_paths() {
+    for profile in discover_profiles() {
+        if let Some(program) = &profile.command.program {
+            assert!(
+                Path::new(program).is_absolute(),
+                "{}: {program}",
+                profile.name
+            );
+        }
+    }
+}
+
 #[test]
 fn creates_msys2_profiles_for_installed_shells_using_the_launcher() {
     let root = tempfile::tempdir().unwrap();
@@ -114,7 +238,8 @@ fn creates_msys2_profiles_for_installed_shells_using_the_launcher() {
     fs::write(root.path().join("usr/bin/bash.exe"), "").unwrap();
     fs::write(root.path().join("usr/bin/zsh.exe"), "").unwrap();
 
-    let profiles = msys2_profiles(root.path());
+    let cmd = root.path().join("System32").join("cmd.exe");
+    let profiles = msys2_profiles(root.path(), &cmd);
 
     assert_eq!(
         profiles
@@ -125,7 +250,10 @@ fn creates_msys2_profiles_for_installed_shells_using_the_launcher() {
     );
     for (profile, shell) in profiles.iter().zip(["bash", "zsh"]) {
         let args = &profile.command.args;
-        assert_eq!(profile.command.program.as_deref(), Some("cmd.exe"));
+        assert_eq!(
+            profile.command.program.as_deref(),
+            Some(cmd.display().to_string().as_str())
+        );
         assert_eq!(args[..3], ["/d", "/s", "/c"]);
         assert!(args[3].starts_with("\"\""));
         assert!(args[3].contains("msys2_shell.cmd\" -defterm"));
@@ -140,7 +268,7 @@ fn omits_msys2_zsh_profile_when_zsh_is_not_installed() {
     fs::create_dir_all(root.path().join("usr/bin")).unwrap();
     fs::write(root.path().join("usr/bin/bash.exe"), "").unwrap();
 
-    let profiles = msys2_profiles(root.path());
+    let profiles = msys2_profiles(root.path(), Path::new("cmd.exe"));
 
     assert_eq!(profiles.len(), 1);
     assert_eq!(profiles[0].name, "MSYS2");
@@ -249,7 +377,8 @@ fn msys2_launcher_command_supports_custom_paths_with_spaces() {
     )
     .unwrap();
     fs::write(root.join("usr/bin/zsh.exe"), "").unwrap();
-    let profile = msys2_profiles(&root).pop().unwrap();
+    let cmd = system_directory().unwrap().join("cmd.exe");
+    let profile = msys2_profiles(&root, &cmd).pop().unwrap();
     let program = profile
         .command
         .program

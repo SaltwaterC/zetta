@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::sync::mpsc::TryRecvError;
 
 use crate::event::{OnResize, WindowSize};
+use crate::tty::program_search;
 use crate::tty::windows::child::ChildExitWatcher;
 use crate::tty::{ChildEvent, ConsolePalette, EventedPty, EventedReadWrite, Options, Shell};
 
@@ -406,11 +407,115 @@ fn push_escaped_arg(cmd: &mut String, arg: &str) {
 }
 
 fn cmdline(config: &Options) -> String {
-    let default_shell = Shell::new("powershell".to_owned(), Vec::new());
+    let default_shell = default_shell();
+    let shell = config.shell.as_ref().unwrap_or(&default_shell);
+    cmdline_with_program(&shell.program, config)
+}
+
+fn default_shell() -> Shell {
+    Shell::new("powershell".to_owned(), Vec::new())
+}
+
+/// The executable to start and the command line to start it with.
+///
+/// The program is resolved as `program_search` describes, never from the
+/// current directory, and the command line spells it as that same path, so a
+/// launcher that re-reads the line — the palette bootstrap, which runs in the
+/// pane's directory — has nothing left to search. `None` is a relative path
+/// the configuration spelled out, left to `CreateProcessW` as before.
+fn command(config: &Options) -> Result<(Option<PathBuf>, String)> {
+    let default_shell = default_shell();
+    let shell = config.shell.as_ref().unwrap_or(&default_shell);
+    // The child is started with `config.env` over this process's environment,
+    // so its `PATH` is the one a profile's own `PATH` would be found on.
+    let path = program_search::effective_path(&config.env, std::env::var_os("PATH"));
+    let application = resolve_application(&shell.program, path)?;
+    let command_line = match &application {
+        Some(application) => cmdline_with_program(&application.to_string_lossy(), config),
+        None => cmdline(config),
+    };
+    Ok((application, command_line))
+}
+
+/// Resolves `program` for `lpApplicationName`, searching this executable's
+/// directory, the system directories and the absolute entries of `path`.
+///
+/// `Ok(None)` is a relative path with a directory in it, which the caller
+/// leaves to `CreateProcessW`; a bare name found nowhere is an error rather
+/// than a fall back to a search that would include the current directory.
+pub fn resolve_application(
+    program: &str,
+    path: Option<std::ffi::OsString>,
+) -> Result<Option<PathBuf>> {
+    let directories = program_search::SearchDirectories {
+        application: std::env::current_exe()
+            .ok()
+            .and_then(|executable| executable.parent().map(Path::to_path_buf)),
+        system: system_directories(),
+        path,
+    };
+    match program_search::resolve_program(program, &directories, is_launchable_file) {
+        program_search::Resolution::Found(path) => Ok(Some(path)),
+        program_search::Resolution::Relative => Ok(None),
+        program_search::Resolution::Missing => Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("{program} was not found in the system directories or on PATH"),
+        )),
+    }
+}
+
+/// Whether `path` is a file `CreateProcessW` can start.
+///
+/// `Path::is_file` follows reparse points, and an App Execution Alias — how a
+/// Store install such as PowerShell 7's puts `pwsh.exe` on `PATH` — cannot be
+/// opened that way, so it would read as missing. Its own metadata still says
+/// it is not a directory.
+fn is_launchable_file(path: &Path) -> bool {
+    path.is_file() || std::fs::symlink_metadata(path).is_ok_and(|metadata| !metadata.is_dir())
+}
+
+/// The system directory, the 16-bit system directory and the Windows
+/// directory, as `CreateProcessW` searches them after the current directory.
+fn system_directories() -> Vec<PathBuf> {
+    use windows_sys::Win32::System::SystemInformation::{
+        GetSystemDirectoryW, GetWindowsDirectoryW,
+    };
+
+    fn read(get: unsafe extern "system" fn(*mut u16, u32) -> u32) -> Option<PathBuf> {
+        use std::os::windows::ffi::OsStringExt as _;
+
+        let mut buffer = vec![0u16; 260];
+        loop {
+            let length = unsafe { get(buffer.as_mut_ptr(), buffer.len() as u32) } as usize;
+            if length == 0 {
+                return None;
+            }
+            // On a short buffer the result is the size needed, terminator
+            // included; otherwise it is the length written, without it.
+            if length < buffer.len() {
+                buffer.truncate(length);
+                return Some(PathBuf::from(std::ffi::OsString::from_wide(&buffer)));
+            }
+            buffer.resize(length, 0);
+        }
+    }
+
+    let mut directories = Vec::new();
+    directories.extend(read(GetSystemDirectoryW));
+    if let Some(windows) = read(GetWindowsDirectoryW) {
+        directories.push(windows.join("System"));
+        directories.push(windows);
+    }
+    directories
+}
+
+/// `program` and `config`'s arguments as one Windows command line, with the
+/// program quoted when it has to be.
+fn cmdline_with_program(program: &str, config: &Options) -> String {
+    let default_shell = default_shell();
     let shell = config.shell.as_ref().unwrap_or(&default_shell);
 
-    let mut cmd = String::new();
-    cmd.push_str(&shell.program);
+    let mut cmd = program_search::quote_program(program);
 
     for arg in &shell.args {
         cmd.push(' ');
@@ -498,6 +603,36 @@ mod test {
 
         options.escape_args = true;
         assert_eq!(cmdline(&options), "echo \"hello world\"");
+    }
+
+    #[test]
+    fn a_program_with_a_space_is_quoted_as_one_token() {
+        let options = Options {
+            shell: Some(Shell {
+                program: r"C:\Program Files\PowerShell\7\pwsh.exe".to_owned(),
+                args: vec!["-NoLogo".to_owned()],
+            }),
+            escape_args: true,
+            ..Options::default()
+        };
+        assert_eq!(cmdline(&options), r#""C:\Program Files\PowerShell\7\pwsh.exe" -NoLogo"#);
+    }
+
+    #[test]
+    fn a_bare_shell_is_started_from_the_system_directory_by_absolute_path() {
+        let options = Options {
+            shell: Some(Shell { program: "cmd.exe".to_owned(), args: vec!["/d".to_owned()] }),
+            escape_args: true,
+            ..Options::default()
+        };
+        let (application, command_line) = super::command(&options).unwrap();
+        let application = application.unwrap();
+        assert!(application.is_absolute());
+        assert_eq!(application, super::system_directories()[0].join("cmd.exe"));
+        assert_eq!(
+            super::program_search::command_line_program(&command_line),
+            application.to_string_lossy()
+        );
     }
 
     #[test]
