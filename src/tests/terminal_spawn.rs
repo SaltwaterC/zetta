@@ -602,3 +602,17 @@ fn a_paste_aimed_at_a_search_that_closes_while_reading_goes_nowhere(cx: &mut gpu
     assert!(received.borrow().is_empty(), "{:?}", received.borrow());
     assert!(!terminal.read_with(cx, |terminal, _| terminal.paste_pending()));
 }
+
+#[test]
+fn pending_command_waits_for_the_shell_integration_line() {
+    // Typed first, `zetta edit` is swallowed by the startup marker's `read`
+    // and runs hidden: an empty pane and a leaked editor.
+    assert_eq!(
+        pending_command_delivery("zetta edit -- f".into(), true),
+        PendingCommandDelivery::AfterIntegration("zetta edit -- f".into())
+    );
+    assert_eq!(
+        pending_command_delivery("zetta edit -- f".into(), false),
+        PendingCommandDelivery::Now("zetta edit -- f".into())
+    );
+}

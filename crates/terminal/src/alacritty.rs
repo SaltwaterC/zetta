@@ -50,6 +50,7 @@ use util::paths::PathStyle;
 use vte::ansi::Handler;
 
 pub(super) use hyperlinks::{HyperlinkMatch, RegexSearches};
+pub use search::SearchRanges;
 #[cfg(test)]
 pub(super) use search::{MAX_SEARCH_MATCHES, SEARCH_CHUNK_LINES, ScrollbackSearch};
 pub(super) use search::{SearchMatcher, search_grid};

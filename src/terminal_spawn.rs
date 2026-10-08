@@ -2322,6 +2322,7 @@ impl Zetta {
         let should_focus =
             this.configure_spawned_terminal_focus(tab_id, pane_id, &view, window, cx);
         let tab_index = this.tabs.iter().position(|tab| tab.id == tab_id);
+        let mut deferred_pending_command = None;
         if let Some(pane) = tab_index
             .and_then(|index| this.tabs.get_mut(index))
             .and_then(|tab| tab.pane_mut(pane_id))
@@ -2334,9 +2335,17 @@ impl Zetta {
             if restore_options.is_none()
                 && let Some(command) = pane.pending_command.take()
             {
-                view.update(cx, |view, cx| {
-                    view.apply_input(&TerminalInput::Text(format!("{command}\r")), cx);
-                });
+                match pending_command_delivery(command, shell_integration_startup_command.is_some())
+                {
+                    PendingCommandDelivery::Now(command) => {
+                        view.update(cx, |view, cx| {
+                            view.apply_input(&TerminalInput::Text(format!("{command}\r")), cx);
+                        });
+                    }
+                    PendingCommandDelivery::AfterIntegration(command) => {
+                        deferred_pending_command = Some(command);
+                    }
+                }
             }
         } else {
             let stored_in_background = {
@@ -2423,11 +2432,17 @@ impl Zetta {
             });
             let command = command.clone();
             let terminal_for_startup = terminal.clone();
+            let view_for_startup = view.clone();
             cx.spawn(async move |_this, cx| {
                 startup_handshake.await;
                 terminal_for_startup.update(cx, |terminal, cx| {
                     terminal.write_init_command_after_startup(command, cx);
                 });
+                if let Some(command) = deferred_pending_command {
+                    view_for_startup.update(cx, |view, cx| {
+                        view.apply_input(&TerminalInput::Text(format!("{command}\r")), cx);
+                    });
+                }
             })
             .detach();
         }
@@ -2602,6 +2617,28 @@ pub(crate) fn stacked_task_shell(
         program,
         args,
         title_override: None,
+    }
+}
+
+/// When a pane's pending command may be typed into its shell.
+#[derive(Debug, PartialEq, Eq)]
+enum PendingCommandDelivery {
+    Now(String),
+    AfterIntegration(String),
+}
+
+/// The startup handshake leaves a marker command reading its payload with echo
+/// and rendering suppressed. A command typed before the integration line is
+/// written would be consumed as that payload and run invisibly (an empty pane,
+/// and a process the pane cannot kill), so it has to wait for the line.
+fn pending_command_delivery(
+    command: String,
+    integration_line_pending: bool,
+) -> PendingCommandDelivery {
+    if integration_line_pending {
+        PendingCommandDelivery::AfterIntegration(command)
+    } else {
+        PendingCommandDelivery::Now(command)
     }
 }
 

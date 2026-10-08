@@ -82,8 +82,8 @@ fn scrollback_search_yields_between_chunks_and_limits_to_newest_matches() {
     assert!(result.limit_reached);
     assert_eq!(result.ranges.len(), 2);
     assert_eq!(result.total_count, 4);
-    assert_eq!(result.ranges[0].start().line, 2);
-    assert_eq!(result.ranges[1].start().line, 3);
+    assert_eq!(result.ranges.get(0).unwrap().start().line, 2);
+    assert_eq!(result.ranges.get(1).unwrap().start().line, 3);
 }
 
 #[test]
@@ -91,10 +91,10 @@ fn scrollback_search_narrows_from_capped_character_matches_to_exact_word_matches
     let term = term_with_lines(80, std::iter::repeat_n("zzzz Zetta benchmark output", 101));
 
     let mut broad = ScrollbackSearch::new(term.grid(), literal("z"));
-    while !broad.advance(term.grid(), 7, MAX_SEARCH_MATCHES) {}
+    while !broad.advance(term.grid(), 7, 256) {}
     let broad = broad.finish();
     assert!(broad.limit_reached);
-    assert_eq!(broad.ranges.len(), MAX_SEARCH_MATCHES);
+    assert_eq!(broad.ranges.len(), 256);
     assert_eq!(broad.total_count, 505);
 
     let (narrow, physical_rows_scanned) = search_all(term.grid(), literal("zetta"), 7);
@@ -232,10 +232,13 @@ fn partitions_cover_the_grid_and_keep_wrapped_lines_whole() {
     assert_eq!(partitions(grid, 1).len(), 1);
 }
 
+fn range(line: i32) -> Range {
+    Range::new(crate::Point::new(line, 0), crate::Point::new(line, 0))
+}
+
 #[test]
-fn progress_shows_only_matches_known_to_be_the_newest() {
-    let range = |line| Range::new(crate::Point::new(line, 0), crate::Point::new(line, 0));
-    let mut progress = Progress::new(2, 3);
+fn progress_reports_only_matches_known_to_be_the_newest_and_each_once() {
+    let mut progress = Progress::new(2, 10);
     progress.record(Report {
         partition: 1,
         matches: vec![range(-10), range(-11)],
@@ -249,10 +252,13 @@ fn progress_shows_only_matches_known_to_be_the_newest() {
         finished: false,
     });
 
-    let provisional = progress.matches();
-    assert_eq!(provisional.ranges, [range(5)]);
+    assert!(progress.has_newest());
+    let provisional = progress.update();
+    assert_eq!(provisional.older_matches, [range(5)]);
     assert_eq!(provisional.total_count, 3);
+    assert!(provisional.limit_reached);
     assert!(!provisional.complete);
+    assert!(!progress.changed());
 
     progress.record(Report {
         partition: 0,
@@ -260,30 +266,96 @@ fn progress_shows_only_matches_known_to_be_the_newest() {
         counted: 0,
         finished: true,
     });
+    // The older partition's matches follow once the newer one has finished.
+    let settled = progress.update();
+    assert_eq!(settled.older_matches, [range(-10), range(-11)]);
+    assert!(!settled.limit_reached);
+    assert!(!settled.complete);
+
     progress.record(Report {
         partition: 1,
-        matches: Vec::new(),
-        counted: 0,
+        matches: vec![range(-12)],
+        counted: 1,
         finished: true,
     });
-    let complete = progress.matches();
-    assert_eq!(complete.ranges, [range(-11), range(-10), range(5)]);
+    let complete = progress.update();
+    assert_eq!(complete.older_matches, [range(-12)]);
+    assert_eq!(complete.total_count, 4);
     assert!(complete.complete);
     assert!(!complete.limit_reached);
 }
 
 #[test]
-fn a_match_keeps_its_place_as_older_results_arrive() {
-    let range = |line| Range::new(crate::Point::new(line, 0), crate::Point::new(line, 0));
-    let grown = SearchMatches {
-        ranges: (0..5).map(range).collect(),
-        ..SearchMatches::default()
-    };
+fn progress_stops_keeping_matches_at_the_limit() {
+    let mut progress = Progress::new(2, 3);
+    progress.record(Report {
+        partition: 0,
+        matches: vec![range(5), range(4)],
+        counted: 2,
+        finished: true,
+    });
+    progress.record(Report {
+        partition: 1,
+        matches: vec![range(-1), range(-2)],
+        counted: 2,
+        finished: false,
+    });
+    assert_eq!(
+        progress.update().older_matches,
+        [range(5), range(4), range(-1)]
+    );
 
-    // Two older matches arrived in front of the three shown before.
-    assert_eq!(grown.carried_index(2, 3), 4);
-    assert_eq!(grown.carried_index(0, 3), 2);
-    assert_eq!(grown.carried_index(4, 5), 4);
+    progress.record(Report {
+        partition: 1,
+        matches: vec![range(-3)],
+        counted: 1,
+        finished: true,
+    });
+    assert!(!progress.has_newest());
+    let complete = progress.update();
+    assert!(complete.older_matches.is_empty());
+    assert_eq!(complete.total_count, 5);
+    assert!(complete.limit_reached);
+    assert!(complete.complete);
+}
+
+#[test]
+fn ranges_are_indexed_oldest_first_and_keep_their_place_as_older_ones_arrive() {
+    let mut ranges = SearchRanges::default();
+    ranges.extend_older([range(5), range(4)]);
+    assert_eq!(ranges.get(1), Some(&range(5)));
+
+    // Two older matches arrive: the newest is still the last, two places further on.
+    ranges.extend_older([range(2), range(1)]);
+    assert_eq!(ranges.len(), 4);
+    assert_eq!(ranges.get(0), Some(&range(1)));
+    assert_eq!(ranges.get(3), Some(&range(5)));
+    assert_eq!(ranges.get(4), None);
+    assert_eq!(
+        ranges.iter().copied().collect::<Vec<_>>(),
+        [range(1), range(2), range(4), range(5)]
+    );
+}
+
+#[test]
+fn ranges_on_screen_are_found_including_ones_crossing_its_edges() {
+    let span = |start, end| Range::new(crate::Point::new(start, 0), crate::Point::new(end, 2));
+    let mut ranges = SearchRanges::default();
+    ranges.extend_older([
+        span(3, 3),
+        span(1, 2),
+        span(0, 0),
+        span(-3, -2),
+        span(-6, -4),
+        span(-8, -7),
+    ]);
+
+    let visible = ranges.intersecting(-5..=0).copied().collect::<Vec<_>>();
+
+    assert_eq!(visible, [span(0, 0), span(-3, -2), span(-6, -4)]);
+    assert_eq!(ranges.intersecting(10..=12).count(), 0);
+    assert_eq!(ranges.intersecting(-20..=-9).count(), 0);
+    assert_eq!(SearchRanges::default().intersecting(0..=5).count(), 0);
 }
 
 #[gpui::test]
@@ -299,11 +371,17 @@ async fn parallel_search_matches_a_sequential_one(cx: &mut TestAppContext) {
         let (updates_tx, updates) = async_channel::unbounded();
         search_grid(grid.clone(), literal(query), &cx.executor(), &updates_tx).await;
         drop(updates_tx);
-        let mut last = None;
+        let mut result = SearchMatches::default();
+        let mut reports = 0;
         while let Ok(update) = updates.try_recv() {
-            last = Some(update);
+            assert!(
+                !result.complete,
+                "{query}: an update after the complete one"
+            );
+            result.record(update);
+            reports += 1;
         }
-        let result = last.expect("a search always reports its result");
+        assert!(reports > 0, "{query}: a search always reports its result");
 
         assert!(result.complete, "{query}");
         assert_eq!(result.total_count, expected.total_count, "{query}");

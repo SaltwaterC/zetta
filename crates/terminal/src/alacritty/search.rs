@@ -9,9 +9,12 @@
 //! [`search_grid`] splits a large snapshot into partitions searched in parallel, each newest first,
 //! and reports results while it runs. Only matches that are known to be the newest are reported:
 //! those of the newest partition so far, and of an older one once every newer one has finished.
-//! The count keeps growing until the whole snapshot has been read, so the exact total still
-//! arrives, just no longer gating the first results behind it.
+//! So the newest matches arrive first and every later report only adds older ones, which is what
+//! lets a report carry just the matches found since the previous one, and [`SearchRanges`] append
+//! them without moving the ones already shown. The count keeps growing until the whole snapshot
+//! has been read, so the exact total still arrives, just no longer gating the first results.
 
+use std::ops::RangeInclusive;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -24,15 +27,19 @@ use futures_lite::future::{self, yield_now};
 use gpui::{BackgroundExecutor, Priority, Task};
 use memchr::memmem;
 
-use crate::{Range, Search, SearchMatches};
+#[cfg(test)]
+use crate::SearchMatches;
+use crate::{Range, Search, SearchUpdate};
 
 /// Physical rows one scan step reads before yielding, so a replaced query cancels promptly.
 pub(crate) const SEARCH_CHUNK_LINES: usize = 2_048;
-// Rendering thousands of highlighted terminal ranges monopolizes the UI thread
-// and prevents subsequent query keystrokes from being handled. This is a
-// highlight/navigation cap, not a minimum-query-length restriction: selective
-// queries still scan the complete snapshot and report their exact match count.
-pub(crate) const MAX_SEARCH_MATCHES: usize = 256;
+/// The newest matches a search keeps for highlighting and navigation; it still counts the rest.
+///
+/// This bounds memory, not drawing: a frame looks up only the matches it shows (see
+/// [`SearchRanges::intersecting`]) and an update carries only new matches, so neither costs more
+/// as the matches grow. A match is 32 bytes, and until every newer partition has finished, each of
+/// a search's workers may hold up to this many of its own.
+pub(crate) const MAX_SEARCH_MATCHES: usize = 100_000;
 /// A snapshot smaller than this is searched by one worker; splitting it costs more than it saves.
 const MIN_PARTITION_LINES: usize = 65_536;
 /// Workers a single search may use. Tab search starts one search per pane.
@@ -40,6 +47,61 @@ const MAX_SEARCH_WORKERS: usize = 8;
 /// How long a search runs before its first provisional results, and how often after that it
 /// reports a growing count. A search finishing sooner reports only its result.
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
+
+/// A search's matches, indexed oldest first, the order navigation visits them in.
+///
+/// They are stored newest first, the order a running search finds them in, so its older results
+/// append rather than shift every match already shown. Both the starts and the ends of the matches
+/// are ordered (matches do not nest), which is what lets [`Self::intersecting`] find the matches
+/// on screen by binary search instead of walking them all.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SearchRanges {
+    newest_first: Vec<Range>,
+}
+
+impl SearchRanges {
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.newest_first.len()
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.newest_first.is_empty()
+    }
+
+    pub fn clear(&mut self) {
+        self.newest_first.clear();
+    }
+
+    /// Match `index`, counting from the oldest.
+    pub fn get(&self, index: usize) -> Option<&Range> {
+        let from_newest = self.newest_first.len().checked_sub(index)?.checked_sub(1)?;
+        self.newest_first.get(from_newest)
+    }
+
+    /// Oldest first.
+    pub fn iter(&self) -> impl DoubleEndedIterator<Item = &Range> + ExactSizeIterator {
+        self.newest_first.iter().rev()
+    }
+
+    /// Add `older`, newest first, each older than every match already held. The matches held
+    /// keep their distance from the newest, so their indices move up by `older`'s length.
+    pub fn extend_older(&mut self, older: impl IntoIterator<Item = Range>) {
+        self.newest_first.extend(older);
+    }
+
+    /// The matches on any of `lines`, newest first.
+    pub fn intersecting(&self, lines: RangeInclusive<i32>) -> impl Iterator<Item = &Range> {
+        let (top, bottom) = lines.into_inner();
+        let below = self
+            .newest_first
+            .partition_point(|range| range.start().line > bottom);
+        self.newest_first[below..]
+            .iter()
+            .take_while(move |range| range.end().line >= top)
+    }
+}
 
 /// How a [`Search`] matches text.
 #[derive(Clone, Debug)]
@@ -271,27 +333,15 @@ impl ScrollbackSearch {
 
     /// All the matches found, for a search driven to its end in one place.
     #[cfg(test)]
-    pub(crate) fn finish(mut self) -> SearchMatches {
-        // Searches run newest first, while the terminal selection and navigation APIs expect
-        // the original oldest-first ordering.
-        self.matches.reverse();
+    pub(crate) fn finish(self) -> SearchMatches {
         SearchMatches {
             limit_reached: self.total_count > self.matches.len(),
             total_count: self.total_count,
-            ranges: self.matches,
+            ranges: SearchRanges {
+                newest_first: self.matches,
+            },
             complete: true,
         }
-    }
-}
-
-impl SearchMatches {
-    /// Where match `index` of a running search's previous `previous_len` results is in these.
-    ///
-    /// Results grow only towards older output, so a match keeps its distance from the newest.
-    pub fn carried_index(&self, index: usize, previous_len: usize) -> usize {
-        (self.ranges.len() + index)
-            .saturating_sub(previous_len)
-            .min(self.ranges.len().saturating_sub(1))
     }
 }
 
@@ -330,7 +380,7 @@ struct Report {
 
 #[derive(Default)]
 struct PartitionProgress {
-    /// Newest first.
+    /// Not yet reported, newest first.
     matches: Vec<Range>,
     total_count: usize,
     finished: bool,
@@ -340,6 +390,10 @@ struct PartitionProgress {
 struct Progress {
     partitions: Vec<PartitionProgress>,
     match_limit: usize,
+    /// Matches handed on in updates so far.
+    reported: usize,
+    /// The count the last update carried.
+    reported_count: usize,
 }
 
 impl Progress {
@@ -349,12 +403,17 @@ impl Progress {
                 .map(|_| PartitionProgress::default())
                 .collect(),
             match_limit,
+            reported: 0,
+            reported_count: 0,
         }
     }
 
     fn record(&mut self, report: Report) {
         let partition = &mut self.partitions[report.partition];
-        partition.matches.extend(report.matches);
+        // Once the limit has been reported, every match still to come is too old to keep.
+        if self.reported < self.match_limit {
+            partition.matches.extend(report.matches);
+        }
         partition.total_count = partition.total_count.saturating_add(report.counted);
         partition.finished |= report.finished;
     }
@@ -363,17 +422,28 @@ impl Progress {
         self.partitions.iter().all(|partition| partition.finished)
     }
 
-    /// The matches known to be the newest: every newer partition has finished.
-    fn newest_matches(&self) -> impl Iterator<Item = &Range> {
+    /// The partitions whose matches are known to be the newest: every newer one has finished.
+    fn settled(&mut self) -> &mut [PartitionProgress] {
         let unfinished = self
             .partitions
             .iter()
             .position(|partition| !partition.finished)
             .map_or(self.partitions.len(), |index| index + 1);
-        self.partitions[..unfinished]
-            .iter()
-            .flat_map(|partition| &partition.matches)
-            .take(self.match_limit)
+        &mut self.partitions[..unfinished]
+    }
+
+    /// Whether an update would carry matches.
+    fn has_newest(&mut self) -> bool {
+        self.reported < self.match_limit
+            && self
+                .settled()
+                .iter()
+                .any(|partition| !partition.matches.is_empty())
+    }
+
+    /// Whether an update would show anything new.
+    fn changed(&mut self) -> bool {
+        self.total_count() != self.reported_count || self.has_newest()
     }
 
     fn total_count(&self) -> usize {
@@ -382,15 +452,25 @@ impl Progress {
         })
     }
 
-    fn matches(&self) -> SearchMatches {
-        let mut ranges = self.newest_matches().cloned().collect::<Vec<_>>();
-        // Oldest first, as the terminal's selection and navigation expect.
-        ranges.reverse();
-        let total_count = self.total_count();
-        SearchMatches {
-            limit_reached: total_count > ranges.len(),
-            total_count,
-            ranges,
+    /// The newest matches not yet reported, up to the limit, and the count so far.
+    fn update(&mut self) -> SearchUpdate {
+        let mut older_matches = Vec::new();
+        let mut room = self.match_limit - self.reported;
+        for partition in self.settled() {
+            partition.matches.truncate(room);
+            room -= partition.matches.len();
+            if older_matches.is_empty() {
+                older_matches = std::mem::take(&mut partition.matches);
+            } else {
+                older_matches.append(&mut partition.matches);
+            }
+        }
+        self.reported += older_matches.len();
+        self.reported_count = self.total_count();
+        SearchUpdate {
+            older_matches,
+            total_count: self.reported_count,
+            limit_reached: self.reported_count > self.reported,
             complete: self.complete(),
         }
     }
@@ -428,7 +508,7 @@ pub(crate) async fn search_grid(
     grid: Arc<Grid<Cell>>,
     search: Search,
     executor: &BackgroundExecutor,
-    updates: &async_channel::Sender<SearchMatches>,
+    updates: &async_channel::Sender<SearchUpdate>,
 ) {
     let workers = executor
         .num_cpus()
@@ -451,10 +531,10 @@ pub(crate) async fn search_grid(
 
     let mut progress = Progress::new(partitions.len(), MAX_SEARCH_MATCHES);
     let started = Instant::now();
-    // When provisional results were last sent, and how many matches they showed.
-    let mut reported: Option<(Instant, usize)> = None;
+    // When provisional results were last due, whether or not there were any to send.
+    let mut last_due: Option<Instant> = None;
     loop {
-        let next_report_at = reported.map_or(started, |(at, _)| at) + PROGRESS_INTERVAL;
+        let next_report_at = last_due.unwrap_or(started) + PROGRESS_INTERVAL;
         let wait = next_report_at.saturating_duration_since(Instant::now());
         let event = future::or(async { reports.recv().await.ok() }, async {
             executor.timer(wait).await;
@@ -473,21 +553,20 @@ pub(crate) async fn search_grid(
         if now < started + PROGRESS_INTERVAL {
             continue;
         }
-        // The first matches, and the moment the shown set is final, are reported at once; a
-        // growing count once an interval.
-        let shown = progress.newest_matches().count();
-        let urgent = reported.map_or(shown > 0, |(_, was)| {
-            shown != was && (was == 0 || shown == MAX_SEARCH_MATCHES)
-        });
-        let due = reported.is_none_or(|(at, _)| now >= at + PROGRESS_INTERVAL);
-        if urgent || due {
-            reported = Some((now, shown));
-            if updates.send(progress.matches()).await.is_err() {
-                return;
-            }
+        // The first matches are reported at once; more matches and a growing count once an
+        // interval, which bounds how often the window redraws for a long search.
+        let urgent = progress.reported == 0 && progress.has_newest();
+        let due = last_due.is_none_or(|at| now >= at + PROGRESS_INTERVAL);
+        if !urgent && !due {
+            continue;
+        }
+        // Restart the interval even when nothing changed, or the timer would fire at once again.
+        last_due = Some(now);
+        if progress.changed() && updates.send(progress.update()).await.is_err() {
+            return;
         }
     }
-    updates.send(progress.matches()).await.ok();
+    updates.send(progress.update()).await.ok();
 }
 
 #[cfg(test)]

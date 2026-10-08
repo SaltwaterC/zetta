@@ -22,9 +22,11 @@ Retain these Zetta-specific behaviors when synchronizing:
   (no upstream counterpart): it reads rows as text through the Alacritty fork's
   `Grid::row_text`, which never decodes compact history, matches ASCII queries
   with `memmem` and others with a Unicode smart-case regex, splits a large
-  snapshot across parallel low-priority workers, and reports provisional
-  results (`SearchJob`, `SearchMatches::complete`) newest first while the
-  exact count is still being taken;
+  snapshot across parallel low-priority workers, and reports results
+  (`SearchJob`, `SearchUpdate`) newest first while the exact count is still
+  being taken. Each update carries only the matches found since the previous
+  one; `Terminal::matches` is a `SearchRanges`, stored newest first so those
+  append, and looked up by binary search for the lines on screen;
 - capture and terminate both the shell and foreground process groups during
   PTY teardown, including application shutdown. Upstream reverted its own
   version of this in `492acd6c81`; do not import that revert. The regression it

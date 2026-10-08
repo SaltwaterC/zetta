@@ -979,9 +979,12 @@ mode, `/` also opens scrollback search.
 and activates the pane containing the current result as you navigate.
 
 Both searches show the newest matches as soon as they are found, without
-waiting for the whole scrollback to be read. Until it has been, the match count
-ends in `+` (or reads `Searching…` before the first match), and it settles on
-the exact count when the search finishes.
+waiting for the whole scrollback to be read, and keep adding older ones in the
+background while you navigate. Until the whole scrollback has been read, the
+match count ends in `+` (or reads `Searching…` before the first match), and it
+settles on the exact count when the search finishes. Each pane highlights and
+navigates its newest 100,000 matches; past that, the counter reads
+`n / 100000 shown · N matches`, and a more specific query narrows them.
 
 ## Command palette
 

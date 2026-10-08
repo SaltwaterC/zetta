@@ -23,7 +23,7 @@ use settings_content::{TerminalBell, TerminalBlink};
 use terminal::{
     Clear, Copy, Event, HoveredWord, MaybeNavigationTarget, Modes, Paste, PasteText, PasteTrimmed,
     ScrollLineDown, ScrollLineUp, ScrollPageDown, ScrollPageUp, ScrollToBottom, ScrollToTop,
-    Search, SearchMatches, ShowCharacterPalette, Terminal, TerminalBounds, ToggleViMode,
+    Search, SearchUpdate, ShowCharacterPalette, Terminal, TerminalBounds, ToggleViMode,
     console_palette_for_theme,
     link_policy::display_safe_link_text,
     paste_order::{PasteOrder, PasteTicket},
@@ -883,7 +883,7 @@ impl TerminalView {
                 return;
             };
             let mut first = true;
-            while let Some(result) = job.next().await {
+            while let Some(update) = job.next().await {
                 let current = this
                     .update(cx, |this, cx| {
                         let current = search_request_is_current(
@@ -893,7 +893,7 @@ impl TerminalView {
                             this.search_query.as_deref(),
                         );
                         if current {
-                            this.apply_search_matches(result, first, cx);
+                            this.apply_search_update(update, first, cx);
                         }
                         current
                     })
@@ -907,28 +907,34 @@ impl TerminalView {
         self.search_task = Some(task);
     }
 
-    /// Show a running search's latest results. The first results of a query activate its newest
-    /// match; later ones keep whichever match is active.
-    fn apply_search_matches(&mut self, result: SearchMatches, first: bool, cx: &mut Context<Self>) {
-        let previous = self.terminal.read(cx).matches.len();
-        let active_match = (!first)
-            .then_some(self.search_active_match)
-            .flatten()
-            .map(|index| result.carried_index(index, previous))
-            .or_else(|| result.ranges.len().checked_sub(1));
-        let activate = (first || self.search_active_match.is_none())
-            .then_some(active_match)
-            .flatten();
-        self.search_active_match = active_match;
-        self.search_matches_limited = result.limit_reached;
-        self.search_total_matches = result.total_count;
-        self.search_complete = result.complete;
-        self.terminal.update(cx, |terminal, _| {
-            terminal.matches = Arc::new(result.ranges);
-            if let Some(index) = activate {
+    /// Show a running search's latest results. The first matches of a query activate its newest
+    /// one; later ones are older, and keep whichever match is active.
+    fn apply_search_update(&mut self, update: SearchUpdate, first: bool, cx: &mut Context<Self>) {
+        let added = update.older_matches.len();
+        let active = (!first).then_some(self.search_active_match).flatten();
+        self.search_matches_limited = update.limit_reached;
+        self.search_total_matches = update.total_count;
+        self.search_complete = update.complete;
+        let active_match = self.terminal.update(cx, |terminal, _| {
+            // The previous query's matches stay on screen until the first of this one's arrive.
+            if first {
+                terminal.matches = Arc::default();
+            }
+            if added > 0 {
+                Arc::make_mut(&mut terminal.matches).extend_older(update.older_matches);
+            }
+            let active_match = match active {
+                Some(index) => Some(index + added),
+                None => terminal.matches.len().checked_sub(1),
+            };
+            if active.is_none()
+                && let Some(index) = active_match
+            {
                 terminal.activate_match(index);
             }
+            active_match
         });
+        self.search_active_match = active_match;
         cx.notify();
     }
 

@@ -106,9 +106,34 @@ fn with_path_prompt<P: LinuxClient + 'static>(
     platform: LinuxPlatform<P>,
 ) -> (Rc<dyn gpui::Platform>, DirectoryPathPrompt) {
     let platform = Rc::new(platform);
-    let prompt = platform.clone();
+    // Weak, because the application owns the platform and the prompt is kept in a thread-local.
+    // Owning it from there kept the platform alive until thread-local teardown, where dropping
+    // its GPU context touched wgpu's own, already destroyed, thread-locals and aborted the exit.
+    let prompt = Rc::downgrade(&platform);
     (
         platform,
-        Rc::new(move |directory, options| prompt.prompt_for_paths_in(directory, options)),
+        Rc::new(move |directory, options| match prompt.upgrade() {
+            Some(platform) => platform.prompt_for_paths_in(directory, options),
+            // Nothing can ask once the application is gone; a dropped sender reads as cancelled.
+            None => futures::channel::oneshot::channel().1,
+        }),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_path_prompt_does_not_keep_the_platform_alive() {
+        let (platform, prompt) = with_path_prompt(LinuxPlatform {
+            inner: HeadlessClient::new(),
+        });
+        let weak = Rc::downgrade(&platform);
+
+        drop(platform);
+
+        assert!(weak.upgrade().is_none());
+        drop(prompt);
+    }
 }

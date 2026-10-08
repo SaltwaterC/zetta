@@ -1761,16 +1761,13 @@ impl Element for TerminalElement {
 
                 // searches, highlights to a single range representations
                 let mut relative_highlighted_ranges = Vec::new();
-                let visible_lines = cells
-                    .first()
-                    .zip(cells.last())
-                    .map(|(first, last)| first.point.line..=last.point.line);
-                for search_match in search_matches.iter().filter(|search_match| {
-                    visible_lines
-                        .as_ref()
-                        .is_some_and(|visible| range_intersects_lines(search_match, visible))
-                }) {
-                    relative_highlighted_ranges.push((*search_match, match_color))
+                // A search may hold many more matches than fit on screen; look up only these.
+                if let Some((first, last)) = cells.first().zip(cells.last()) {
+                    relative_highlighted_ranges.extend(
+                        search_matches
+                            .intersecting(first.point.line..=last.point.line)
+                            .map(|search_match| (*search_match, match_color)),
+                    );
                 }
                 if let Some(selection) = selection {
                     relative_highlighted_ranges
@@ -2227,13 +2224,6 @@ fn paint_grid_layer<T>(
     });
 }
 
-fn range_intersects_lines(
-    range: &terminal::Range,
-    visible: &std::ops::RangeInclusive<i32>,
-) -> bool {
-    range.end().line >= *visible.start() && range.start().line <= *visible.end()
-}
-
 impl IntoElement for TerminalElement {
     type Element = Self;
 
@@ -2517,19 +2507,6 @@ mod tests {
     use super::*;
     use gpui::{AbsoluteLength, Hsla, font};
     use ui::utils::apca_contrast;
-
-    #[test]
-    fn search_highlights_are_limited_to_visible_lines() {
-        let above = terminal::Range::new(terminal::Point::new(-10, 0), terminal::Point::new(-8, 2));
-        let crossing =
-            terminal::Range::new(terminal::Point::new(-6, 0), terminal::Point::new(-3, 2));
-        let below = terminal::Range::new(terminal::Point::new(1, 0), terminal::Point::new(2, 2));
-        let visible = -5..=0;
-
-        assert!(!range_intersects_lines(&above, &visible));
-        assert!(range_intersects_lines(&crossing, &visible));
-        assert!(!range_intersects_lines(&below, &visible));
-    }
 
     #[test]
     fn test_is_decorative_character() {

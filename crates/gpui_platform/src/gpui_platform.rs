@@ -21,6 +21,10 @@ thread_local! {
     /// The picker belonging to the platform the application was built on. Only
     /// [`application`] and [`headless`] register one, so a platform built for a
     /// test or for a bare executor never displaces the running application's.
+    ///
+    /// Each picker holds its platform weakly: the application owns the platform,
+    /// and one kept alive from here is dropped during thread-local teardown,
+    /// where wgpu's own thread-locals are already gone and the exit aborts.
     static PATH_PROMPT: RefCell<Option<DirectoryPathPrompt>> = const { RefCell::new(None) };
 }
 
@@ -75,11 +79,13 @@ fn platform_with_path_prompt(headless: bool) -> Rc<dyn Platform> {
         #[cfg(target_os = "macos")]
         let (platform, prompt) = {
             let platform = Rc::new(gpui_macos::MacPlatform::new(headless));
-            let picker = platform.clone();
+            let picker = Rc::downgrade(&platform);
             (
                 platform as Rc<dyn Platform>,
-                Rc::new(move |directory, options| picker.prompt_for_paths_in(directory, options))
-                    as DirectoryPathPrompt,
+                Rc::new(move |directory, options| match picker.upgrade() {
+                    Some(picker) => picker.prompt_for_paths_in(directory, options),
+                    None => futures::channel::oneshot::channel().1,
+                }) as DirectoryPathPrompt,
             )
         };
 
@@ -89,11 +95,13 @@ fn platform_with_path_prompt(headless: bool) -> Rc<dyn Platform> {
                 gpui_windows::WindowsPlatform::new(headless)
                     .expect("failed to initialize Windows platform"),
             );
-            let picker = platform.clone();
+            let picker = Rc::downgrade(&platform);
             (
                 platform as Rc<dyn Platform>,
-                Rc::new(move |directory, options| picker.prompt_for_paths_in(directory, options))
-                    as DirectoryPathPrompt,
+                Rc::new(move |directory, options| match picker.upgrade() {
+                    Some(picker) => picker.prompt_for_paths_in(directory, options),
+                    None => futures::channel::oneshot::channel().1,
+                }) as DirectoryPathPrompt,
             )
         };
 

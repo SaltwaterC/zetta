@@ -129,6 +129,7 @@ use crate::alacritty::{
 use crate::mappings::colors::to_vte_rgb;
 use crate::mappings::keys::to_esc_str;
 
+pub use crate::alacritty::SearchRanges;
 /// The current-directory-free program search ConPTY launches with, for
 /// callers that start a process of their own.
 #[cfg(windows)]
@@ -206,40 +207,61 @@ pub struct Search {
     matcher: SearchMatcher,
 }
 
-/// What a scrollback search has found: provisional while it runs, then complete.
+/// What a running scrollback search reports: the matches it found since its previous report.
+///
+/// A search finds matches newest first, so each update carries only older ones, which
+/// [`SearchRanges::extend_older`] appends without moving the matches already shown.
 #[derive(Clone, Debug, Default)]
-pub struct SearchMatches {
-    /// The newest matches, oldest first, up to the highlight limit.
-    pub ranges: Vec<Range>,
+pub struct SearchUpdate {
+    /// Matches found since the previous update, newest first, each older than every match
+    /// reported before it.
+    pub older_matches: Vec<Range>,
     /// Every match counted so far.
     pub total_count: usize,
-    /// More matches were counted than `ranges` holds.
+    /// More matches were counted than have been reported.
     pub limit_reached: bool,
-    /// The whole snapshot has been searched, so `total_count` is exact. While a search runs,
-    /// `ranges` grows only towards older output, so a match keeps its distance from the end.
+    /// The whole snapshot has been searched, so `total_count` is exact and no update follows.
     pub complete: bool,
+}
+
+/// Everything a scrollback search has reported, as [`SearchJob::finish`] collects it.
+#[derive(Clone, Debug, Default)]
+pub struct SearchMatches {
+    pub ranges: SearchRanges,
+    pub total_count: usize,
+    pub limit_reached: bool,
+    pub complete: bool,
+}
+
+impl SearchMatches {
+    pub fn record(&mut self, update: SearchUpdate) {
+        self.ranges.extend_older(update.older_matches);
+        self.total_count = update.total_count;
+        self.limit_reached = update.limit_reached;
+        self.complete = update.complete;
+    }
 }
 
 /// A running scrollback search, from [`Terminal::find_matches`]. Dropping it cancels the search.
 pub struct SearchJob {
-    updates: async_channel::Receiver<SearchMatches>,
+    updates: async_channel::Receiver<SearchUpdate>,
     _task: Task<()>,
 }
 
 impl SearchJob {
     /// The next results: provisional ones while the search runs, the complete ones last, and
     /// then `None`.
-    pub async fn next(&mut self) -> Option<SearchMatches> {
+    pub async fn next(&mut self) -> Option<SearchUpdate> {
         self.updates.recv().await.ok()
     }
 
-    /// The complete results, skipping provisional ones.
+    /// Every update collected, once the search has finished.
     pub async fn finish(mut self) -> SearchMatches {
-        let mut last = SearchMatches::default();
-        while let Some(matches) = self.next().await {
-            last = matches;
+        let mut matches = SearchMatches::default();
+        while let Some(update) = self.next().await {
+            matches.record(update);
         }
-        last
+        matches
     }
 }
 
@@ -2347,7 +2369,7 @@ impl TerminalBuilder {
             },
             last_mouse: None,
             mouse_down_position: None,
-            matches: Arc::new(Vec::new()),
+            matches: Arc::default(),
             content_dirty: true,
             content_revision: 0,
             reflow_on_next_resize: true,
@@ -3202,7 +3224,7 @@ impl TerminalBuilder {
                 last_content: Default::default(),
                 last_mouse: None,
                 mouse_down_position: None,
-                matches: Arc::new(Vec::new()),
+                matches: Arc::default(),
                 content_dirty: true,
                 content_revision: 0,
                 reflow_on_next_resize: true,
@@ -3512,7 +3534,7 @@ pub struct Terminal {
     /// Window-relative position of the most recent left mouse-down. Used to
     /// apply a drag threshold before starting a selection (see #58970).
     mouse_down_position: Option<GpuiPoint<Pixels>>,
-    pub matches: Arc<Vec<Range>>,
+    pub matches: Arc<SearchRanges>,
     pub last_content: Content,
     content_dirty: bool,
     content_revision: u64,
@@ -5932,7 +5954,7 @@ impl Terminal {
     /// Search the scrollback for `searcher`, newest output first.
     ///
     /// The search runs on background workers against a snapshot of the grid, and reports
-    /// provisional results while it runs (see [`SearchMatches::complete`]).
+    /// provisional results while it runs (see [`SearchUpdate`]).
     pub fn find_matches(&self, searcher: Search, cx: &Context<Self>) -> SearchJob {
         // Queue only the live handle: tab search submits every pane in one foreground update.
         // A cancelled job that has not started must not copy any terminal rows.
@@ -11509,8 +11531,8 @@ mod tests {
         resume_tx.send(()).await.unwrap();
         let result = task.finish().await;
         assert_eq!(result.total_count, 3_000);
-        assert_eq!(result.ranges.len(), MAX_SEARCH_MATCHES);
-        assert!(result.limit_reached);
+        assert_eq!(result.ranges.len(), 3_000);
+        assert!(!result.limit_reached);
         assert_eq!(result.ranges, expected.ranges);
     }
 
