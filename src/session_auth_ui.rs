@@ -272,7 +272,7 @@ impl Zetta {
         cx.spawn_in(window, async move |this, cx| {
             let result = cx
                 .background_spawn(async move {
-                    let secret = auto_protect.open(&envelope, passphrase)?;
+                    let secret = auto_protect.open_for_remote(&envelope, passphrase, &target)?;
                     load_remote_attach(target, session_id, Some(secret), transport)
                 })
                 .await;

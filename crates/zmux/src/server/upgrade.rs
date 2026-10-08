@@ -476,7 +476,7 @@ pub(super) fn adopt_handover(
             shared_state: session.shared_state,
             authentication: session
                 .verifier
-                .map(SessionAuthentication::from_verifier)
+                .map(SessionAuthentication::adopt_verifier)
                 .transpose()?,
             key_envelope: session.key_envelope,
             failed_authentications: session.failed_authentications,
@@ -609,7 +609,7 @@ pub(super) fn adopt_handover(
             shared_state: session.shared_state,
             authentication: session
                 .verifier
-                .map(SessionAuthentication::from_verifier)
+                .map(SessionAuthentication::adopt_verifier)
                 .transpose()?,
             key_envelope: session.key_envelope,
             failed_authentications: session.failed_authentications,

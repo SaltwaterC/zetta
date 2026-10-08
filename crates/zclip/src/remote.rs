@@ -38,39 +38,7 @@ pub fn copy() -> Result<Option<()>> {
     let Some(mut channel) = Channel::probe()? else {
         return Ok(None);
     };
-    channel.send(Message::Copy)?;
-    channel.expect_ack(0)?;
-    let mut stdin = io::stdin().lock();
-    let mut sent = 0_u64;
-    let mut acknowledged = 0_u64;
-    let mut eof = false;
-    let mut chunk = [0; CHUNK_SIZE];
-    while !eof || acknowledged < sent {
-        while !eof && sent - acknowledged < WINDOW_SIZE as u64 {
-            let count = stdin.read(&mut chunk).context("reading standard input")?;
-            if count == 0 {
-                eof = true;
-                break;
-            }
-            channel.send(Message::Data {
-                sequence: sent,
-                bytes: chunk[..count].to_vec(),
-            })?;
-            sent += 1;
-        }
-        if acknowledged < sent {
-            match channel.receive(TRANSFER_TIMEOUT)? {
-                Message::Ack { next_sequence }
-                    if next_sequence > acknowledged && next_sequence <= sent =>
-                {
-                    acknowledged = next_sequence;
-                }
-                other => bail!("unexpected clipboard acknowledgement: {other:?}"),
-            }
-        }
-    }
-    channel.send(Message::End)?;
-    channel.expect_done()?;
+    channel.cancel_on_failure(Channel::copy)?;
     Ok(Some(()))
 }
 
@@ -78,25 +46,7 @@ pub fn paste() -> Result<Option<()>> {
     let Some(mut channel) = Channel::probe()? else {
         return Ok(None);
     };
-    channel.send(Message::Paste)?;
-    let mut spool = tempfile::tempfile().context("creating private clipboard spool")?;
-    let mut sequence = 0;
-    loop {
-        match channel.receive(TRANSFER_TIMEOUT)? {
-            Message::Data {
-                sequence: received,
-                bytes,
-            } if received == sequence => {
-                spool.write_all(&bytes).context("spooling clipboard text")?;
-                sequence += 1;
-                channel.send(Message::Ack {
-                    next_sequence: sequence,
-                })?;
-            }
-            Message::Done => break,
-            other => bail!("unexpected clipboard response: {other:?}"),
-        }
-    }
+    let mut spool = channel.cancel_on_failure(Channel::paste)?;
     spool.rewind().context("rewinding clipboard spool")?;
     let mut bytes = Vec::new();
     spool
@@ -108,6 +58,80 @@ pub fn paste() -> Result<Option<()>> {
         .write_all(&bytes)
         .context("writing clipboard text to standard output")?;
     Ok(Some(()))
+}
+
+impl Channel {
+    /// Tells the host to drop a transfer this helper is abandoning, so the
+    /// host does not hold its data until the transfer times out. A failure the
+    /// host reported has already ended the transfer on its side.
+    fn cancel_on_failure<T>(&mut self, transfer: fn(&mut Self) -> Result<T>) -> Result<T> {
+        let result = transfer(self);
+        if let Err(error) = &result
+            && !error.is::<RemoteError>()
+        {
+            let _ = self.send(Message::Error("cancelled".into()));
+        }
+        result
+    }
+
+    fn copy(channel: &mut Self) -> Result<()> {
+        channel.send(Message::Copy)?;
+        channel.expect_ack(0)?;
+        let mut stdin = io::stdin().lock();
+        let mut sent = 0_u64;
+        let mut acknowledged = 0_u64;
+        let mut eof = false;
+        let mut chunk = [0; CHUNK_SIZE];
+        while !eof || acknowledged < sent {
+            while !eof && sent - acknowledged < WINDOW_SIZE as u64 {
+                let count = stdin.read(&mut chunk).context("reading standard input")?;
+                if count == 0 {
+                    eof = true;
+                    break;
+                }
+                channel.send(Message::Data {
+                    sequence: sent,
+                    bytes: chunk[..count].to_vec(),
+                })?;
+                sent += 1;
+            }
+            if acknowledged < sent {
+                match channel.receive(TRANSFER_TIMEOUT)? {
+                    Message::Ack { next_sequence }
+                        if next_sequence > acknowledged && next_sequence <= sent =>
+                    {
+                        acknowledged = next_sequence;
+                    }
+                    other => bail!("unexpected clipboard acknowledgement: {other:?}"),
+                }
+            }
+        }
+        channel.send(Message::End)?;
+        channel.expect_done()
+    }
+
+    fn paste(channel: &mut Self) -> Result<File> {
+        channel.send(Message::Paste)?;
+        let mut spool = tempfile::tempfile().context("creating private clipboard spool")?;
+        let mut sequence = 0;
+        loop {
+            match channel.receive(TRANSFER_TIMEOUT)? {
+                Message::Data {
+                    sequence: received,
+                    bytes,
+                } if received == sequence => {
+                    spool.write_all(&bytes).context("spooling clipboard text")?;
+                    sequence += 1;
+                    channel.send(Message::Ack {
+                        next_sequence: sequence,
+                    })?;
+                }
+                Message::Done => break,
+                other => bail!("unexpected clipboard response: {other:?}"),
+            }
+        }
+        Ok(spool)
+    }
 }
 
 struct Channel {
@@ -158,7 +182,7 @@ impl Channel {
         loop {
             if let Some(message) = self.responses.pop_front() {
                 if let Message::Error(error) = message {
-                    bail!("remote clipboard: {error}");
+                    return Err(RemoteError(error).into());
                 }
                 return Ok(message);
             }
@@ -205,6 +229,18 @@ impl std::fmt::Display for ProbeTimeout {
 }
 
 impl std::error::Error for ProbeTimeout {}
+
+/// The host's own error, which ended the transfer on its side.
+#[derive(Debug)]
+struct RemoteError(String);
+
+impl std::fmt::Display for RemoteError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "remote clipboard: {}", self.0)
+    }
+}
+
+impl std::error::Error for RemoteError {}
 
 #[cfg(test)]
 #[path = "tests/remote.rs"]

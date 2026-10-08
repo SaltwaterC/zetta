@@ -256,6 +256,9 @@ semicolon_if_nothing_returned = "deny"
 
 [patch.crates-io]
 vt100 = { path = "crates/vt100" }
+# alacritty_terminal and terminal name the fork by path; this routes vt100's and
+# mosh_rs's edges to the same copy, so the build carries one bounded parser.
+vte = { path = "crates/vte" }
 tree-sitter-language = { git = "https://github.com/tree-sitter/tree-sitter", rev = "43623ec9bf0eaaf7113285c46e8a09018f181b18" }
 async-process = { git = "https://github.com/zed-industries/async-process.git", rev = "0b6d6713570af61806e1e5cb40e0f757cb93fd9d" }
 

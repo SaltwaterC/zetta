@@ -249,3 +249,77 @@ fn an_attestation_is_answerable_only_by_the_process_it_was_issued_to() {
     let next = PeerChallenge::issue(std::process::id()).expect("issuing a second challenge");
     assert!(!next.matches(&answer));
 }
+
+#[cfg(unix)]
+fn private_endpoint_directory() -> (tempfile::TempDir, PathBuf) {
+    let root = tempfile::tempdir().unwrap();
+    let directory = root.path().join("sessions");
+    create_private_dir(&directory).unwrap();
+    (root, directory)
+}
+
+#[cfg(unix)]
+fn endpoint_naming(socket_path: PathBuf) -> Endpoint {
+    Endpoint {
+        version: ENDPOINT_VERSION,
+        protocol_version: crate::messages::PROTOCOL_VERSION,
+        process_id: std::process::id(),
+        socket_path,
+        token: "token".to_owned(),
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn an_endpoint_round_trips_through_its_private_directory() {
+    let (_root, directory) = private_endpoint_directory();
+    let path = directory.join("zmux.json");
+    let endpoint = endpoint_naming(directory.join("zmux.sock"));
+    endpoint.write(&path).unwrap();
+    assert_eq!(Endpoint::read(&path).unwrap(), endpoint);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_symlinked_endpoint_is_not_read() {
+    let (root, directory) = private_endpoint_directory();
+    let planted = root.path().join("planted.json");
+    endpoint_naming(directory.join("zmux.sock"))
+        .write(&planted)
+        .unwrap();
+    let path = directory.join("zmux.json");
+    std::os::unix::fs::symlink(&planted, &path).unwrap();
+
+    assert!(Endpoint::read(&path).is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn an_endpoint_naming_a_socket_outside_its_directory_is_not_read() {
+    let (root, directory) = private_endpoint_directory();
+    let path = directory.join("zmux.json");
+    endpoint_naming(root.path().join("elsewhere.sock"))
+        .write(&path)
+        .unwrap();
+
+    let error = Endpoint::read(&path).unwrap_err();
+    assert!(
+        format!("{error:#}").contains("outside its directory"),
+        "{error:#}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn an_endpoint_in_a_directory_others_can_write_is_not_read() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let (_root, directory) = private_endpoint_directory();
+    let path = directory.join("zmux.json");
+    endpoint_naming(directory.join("zmux.sock"))
+        .write(&path)
+        .unwrap();
+    fs::set_permissions(&directory, fs::Permissions::from_mode(0o777)).unwrap();
+
+    assert!(Endpoint::read(&path).is_err());
+}

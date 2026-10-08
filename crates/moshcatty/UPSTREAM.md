@@ -101,6 +101,23 @@ frames at stock Mosh's pace (`FramePacer` in `server.rs`) using this interval
 rather than building every frame and letting the transport drop all but the
 newest.
 
+**Replay window and in-order contact** (security review finding 2.3).
+Upstream remembered the last 512 sequence numbers it had opened, in arrival
+order, and refreshed `last_recv` on every datagram it opened — so a captured
+datagram replayed once 512 newer ones had arrived authenticated again and
+counted as fresh contact. `src/replay.rs` replaces that with a high-water mark
+and a 1024-number bitmap: anything at or below the window's floor is dropped
+unopened, and a number is recorded only after its datagram authenticated.
+`recv_state_with_congestion` now delegates to `receive_with_congestion`, split
+into `open` (replay check, decrypt, record) and `accept_plaintext` (upstream's
+body, unchanged except that `last_recv` moved inside the in-order branch with
+the timestamp and RTT updates, as stock `recv_one` does with `last_heard`).
+The new public `Transport::receive` returns `Received { authenticated,
+in_order, state }`, which `zosh-server` uses to roam the peer address only on
+an in-order datagram. The `expected_receiver_seq` fields are gone: the
+window's high-water mark is the same thing. Tests are in
+`src/tests/replay.rs` and `src/tests/transport_replay.rs`.
+
 Nothing else changed, and every upstream test still passes unmodified.
 
 See `../UPSTREAM_AUDIT.md` for the fork inventory.

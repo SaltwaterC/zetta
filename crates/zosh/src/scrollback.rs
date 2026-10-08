@@ -26,6 +26,15 @@
 //! is what makes a retransmission, an out-of-order arrival and a diff
 //! recomputed from an older acknowledged state all already handled.
 //!
+//! The rows themselves are written to the real terminal byte for byte, outside
+//! the emulator, so they are the one thing the server says that reaches the
+//! terminal without being rebuilt from a parsed screen first. A row is
+//! therefore reduced to what a row can legitimately contain — printable text,
+//! SGR, cursor-forward and erase-character, which is everything
+//! `vt100`'s row formatter emits — before it is kept (`sanitize_row`). Any
+//! other control or escape, and above all a query whose reply the terminal
+//! would type back into the remote session, is dropped whole.
+//!
 //! `PROTOCOL.md` is the specification, and `zosh-server`'s
 //! `terminal_state.rs` is the writing half.
 
@@ -47,7 +56,8 @@ const MAX_PAYLOAD: usize = 6 * 1024 * 1024;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ScrollbackRow {
     /// The row's contents, formatting inline, written assuming only that the
-    /// cursor is at the start of a blank row with default attributes.
+    /// cursor is at the start of a blank row with default attributes. Already
+    /// passed through `sanitize_row`, so safe to write to the terminal as is.
     pub(crate) contents: Vec<u8>,
     /// Whether the logical line continued onto the row below, so replaying it
     /// can let the terminal wrap rather than breaking the line itself.
@@ -244,12 +254,154 @@ fn decode_rows(encoded: &[u8]) -> Option<Vec<ScrollbackRow>> {
         let length = usize::try_from(u32::from_be_bytes(header[1..].try_into().ok()?)).ok()?;
         let (contents, tail) = tail.split_at_checked(length)?;
         rows.push(ScrollbackRow {
-            contents: contents.to_vec(),
+            contents: sanitize_row(contents),
             wrapped: header[0] & FLAG_WRAPPED != 0,
         });
         rest = tail;
     }
     Some(rows)
+}
+
+/// The longest CSI a row may keep. `vt100` writes at most a handful of SGR
+/// parameters at once; anything longer is not one of its rows.
+const MAX_ROW_CSI: usize = 64;
+
+/// What `sanitize_row` is in the middle of.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RowParser {
+    Ground,
+    /// After ESC: the next byte says which kind of sequence this is.
+    Escape,
+    /// After ESC and an intermediate byte: an `nF` escape, up to its final.
+    EscapeIntermediate,
+    /// Inside a CSI, which is buffered until its final byte decides it.
+    Csi,
+    /// Inside an OSC, which BEL or ST ends.
+    Osc,
+    /// Inside a DCS, SOS, PM or APC, which only ST ends.
+    String,
+    /// Just after ESC inside a string: `\` ends it.
+    StringEscape {
+        osc: bool,
+    },
+}
+
+/// Reduce a carried row to printable text plus the three CSI sequences a
+/// formatted row is made of: SGR (`m`), cursor forward (`C`) and erase
+/// characters (`X`), with plain numeric parameters. Every other C0 or C1
+/// control, every other escape, and the whole body of every OSC, DCS, SOS, PM
+/// and APC string is dropped, as are bytes that are not UTF-8. What is kept
+/// cannot ask the terminal anything, move the cursor off the row, or change a
+/// mode, so a malicious server can make a row look like anything but cannot
+/// make it do anything.
+pub(crate) fn sanitize_row(contents: &[u8]) -> Vec<u8> {
+    let mut output = Vec::with_capacity(contents.len());
+    let mut csi = Vec::new();
+    let mut state = RowParser::Ground;
+    for chunk in contents.utf8_chunks() {
+        for character in chunk.valid().chars() {
+            state = sanitize_char(state, character, &mut csi, &mut output);
+        }
+        // Bytes that are not UTF-8 are dropped. A terminal in an 8-bit mode
+        // could read a stray 0x9B as CSI, and none is ever part of a row.
+    }
+    output
+}
+
+fn sanitize_char(
+    state: RowParser,
+    character: char,
+    csi: &mut Vec<u8>,
+    output: &mut Vec<u8>,
+) -> RowParser {
+    // CAN and SUB abandon whatever sequence is open, in a terminal too.
+    if matches!(character, '\u{18}' | '\u{1a}') {
+        return RowParser::Ground;
+    }
+    match state {
+        RowParser::Ground => sanitize_ground(character, csi, output),
+        RowParser::Escape => match character {
+            '[' => {
+                csi.clear();
+                RowParser::Csi
+            }
+            ']' => RowParser::Osc,
+            'P' | 'X' | '^' | '_' => RowParser::String,
+            '\u{1b}' => RowParser::Escape,
+            ' '..='/' => RowParser::EscapeIntermediate,
+            // Any other byte is the final of a two-byte escape, dropped.
+            _ => RowParser::Ground,
+        },
+        RowParser::EscapeIntermediate => match character {
+            ' '..='/' => RowParser::EscapeIntermediate,
+            '\u{1b}' => RowParser::Escape,
+            _ => RowParser::Ground,
+        },
+        RowParser::Csi => sanitize_csi(character, csi, output),
+        RowParser::Osc => match character {
+            '\u{7}' | '\u{9c}' => RowParser::Ground,
+            '\u{1b}' => RowParser::StringEscape { osc: true },
+            _ => RowParser::Osc,
+        },
+        RowParser::String => match character {
+            '\u{9c}' => RowParser::Ground,
+            '\u{1b}' => RowParser::StringEscape { osc: false },
+            _ => RowParser::String,
+        },
+        RowParser::StringEscape { osc } => match character {
+            '\\' => RowParser::Ground,
+            '\u{1b}' => RowParser::StringEscape { osc },
+            _ if osc => RowParser::Osc,
+            _ => RowParser::String,
+        },
+    }
+}
+
+fn sanitize_ground(character: char, csi: &mut Vec<u8>, output: &mut Vec<u8>) -> RowParser {
+    match character {
+        '\u{1b}' => RowParser::Escape,
+        '\u{9b}' => {
+            csi.clear();
+            RowParser::Csi
+        }
+        '\u{9d}' => RowParser::Osc,
+        '\u{90}' | '\u{98}' | '\u{9e}' | '\u{9f}' => RowParser::String,
+        _ if character.is_control() => RowParser::Ground,
+        _ => {
+            let mut buffer = [0; 4];
+            output.extend_from_slice(character.encode_utf8(&mut buffer).as_bytes());
+            RowParser::Ground
+        }
+    }
+}
+
+/// A CSI's parameters are buffered so that only a complete, allowed sequence
+/// is written; anything else in it — a private marker, an intermediate, a
+/// control — or any other final drops it whole.
+fn sanitize_csi(character: char, csi: &mut Vec<u8>, output: &mut Vec<u8>) -> RowParser {
+    match character {
+        '0'..='9' | ';' | ':' if csi.len() < MAX_ROW_CSI => {
+            csi.push(character as u8);
+            RowParser::Csi
+        }
+        'm' | 'C' | 'X' if csi.len() <= MAX_ROW_CSI => {
+            output.extend_from_slice(b"\x1b[");
+            output.append(csi);
+            output.push(character as u8);
+            RowParser::Ground
+        }
+        // Parameters this filter does not keep: consume the rest of the
+        // sequence, and make sure it can no longer be written.
+        '\u{30}'..='\u{3f}' | ' '..='/' => {
+            csi.clear();
+            csi.resize(MAX_ROW_CSI + 1, 0);
+            RowParser::Csi
+        }
+        '\u{1b}' => RowParser::Escape,
+        // Any final byte, allowed or not, ends the sequence; a control or
+        // anything outside the CSI alphabet abandons it.
+        _ => RowParser::Ground,
+    }
 }
 
 #[cfg(test)]

@@ -39,11 +39,14 @@ pub(crate) fn detect_worktree_metadata(path: &Path) -> Result<Option<WorktreeMet
 pub(crate) fn detect_worktree_metadata_canonical(
     directory: &Path,
 ) -> Result<Option<WorktreeMetadata>> {
-    let Some((root, commondir, branch)) = inspect_canonical_linked_worktree(directory)? else {
+    let Some(LinkedWorktree {
+        root,
+        common_gitdir,
+        branch,
+    }) = inspect_canonical_linked_worktree(directory)?
+    else {
         return Ok(None);
     };
-    let common_gitdir = read_gitdir_metadata_pointer(&commondir)?;
-    let common_gitdir = canonicalize_gitdir(&commondir, &common_gitdir)?;
     let main_root = common_gitdir
         .parent()
         .context("Git common directory has no main-worktree parent")?;
@@ -78,13 +81,20 @@ fn canonical_terminal_directory(path: &Path) -> Result<PathBuf> {
     Ok(directory)
 }
 
-fn inspect_linked_worktree(path: &Path) -> Result<Option<(PathBuf, PathBuf, String)>> {
+/// A linked worktree whose metadata has been checked against its repository.
+struct LinkedWorktree {
+    root: PathBuf,
+    /// The canonical common Git directory, which is guaranteed to contain the
+    /// worktree's own Git directory under `worktrees/`.
+    common_gitdir: PathBuf,
+    branch: String,
+}
+
+fn inspect_linked_worktree(path: &Path) -> Result<Option<LinkedWorktree>> {
     inspect_canonical_linked_worktree(&canonical_terminal_directory(path)?)
 }
 
-fn inspect_canonical_linked_worktree(
-    directory: &Path,
-) -> Result<Option<(PathBuf, PathBuf, String)>> {
+fn inspect_canonical_linked_worktree(directory: &Path) -> Result<Option<LinkedWorktree>> {
     let Some(git_marker) = find_git_marker(directory)? else {
         return Ok(None);
     };
@@ -114,6 +124,18 @@ fn inspect_canonical_linked_worktree(
         return Ok(None);
     }
 
+    // Every file read so far lives wherever the `.git` file pointed, which is
+    // anywhere its author chose. Only the repository itself can vouch for a
+    // linked worktree: `git worktree add` places the worktree's Git directory
+    // at `<common gitdir>/worktrees/<name>`, so require exactly that before
+    // the common directory's main worktree (and any project trust registered
+    // for it) is associated with this one.
+    let common_gitdir = read_gitdir_metadata_pointer(&commondir)?;
+    let common_gitdir = canonicalize_gitdir(&commondir, &common_gitdir)?;
+    if gitdir.parent() != Some(common_gitdir.join("worktrees").as_path()) {
+        return Ok(None);
+    }
+
     let head = fs::read_to_string(gitdir.join("HEAD"))
         .with_context(|| format!("reading linked worktree HEAD {}", gitdir.display()))?;
     let Some(reference) = head.trim().strip_prefix("ref: ") else {
@@ -130,14 +152,18 @@ fn inspect_canonical_linked_worktree(
         .parent()
         .context("Git marker has no worktree root")?
         .to_path_buf();
-    Ok(Some((root, commondir, branch.to_owned())))
+    Ok(Some(LinkedWorktree {
+        root,
+        common_gitdir,
+        branch: branch.to_owned(),
+    }))
 }
 
 /// Inspect a native directory for a matching linked worktree and return only
 /// its title. Project resolution uses [`detect_worktree_metadata`] when it
 /// also needs the canonical main-worktree root.
 pub(crate) fn detect_worktree_name(path: &Path) -> Result<Option<String>> {
-    Ok(inspect_linked_worktree(path)?.map(|(_, _, branch)| branch))
+    Ok(inspect_linked_worktree(path)?.map(|worktree| worktree.branch))
 }
 
 fn find_git_marker(directory: &Path) -> Result<Option<PathBuf>> {

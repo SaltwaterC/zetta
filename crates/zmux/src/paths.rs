@@ -27,8 +27,9 @@ pub fn platform_config_dir() -> PathBuf {
 }
 
 /// The directory holding session catalogs and the control endpoint. Created
-/// with `0700` by [`crate::catalog::create_private_dir`] before anything is
-/// written into it.
+/// and checked by [`crate::private_fs::create_private_dir`] before anything is
+/// written into it, and checked by [`crate::private_fs::validate_private_dir`]
+/// before anything read out of it is trusted.
 ///
 /// Binaries physically under Cargo's `target/debug` directory use a
 /// protocol-scoped directory so a development build can run beside an
@@ -181,21 +182,9 @@ pub(crate) fn windows_config_dir(app_data: Option<PathBuf>, fallback: &std::path
 }
 
 /// Where configuration lives when the platform's per-user location is unknown.
-///
-/// The current directory is not an acceptable substitute: this directory holds
-/// the process control token and the session catalogs, and a working directory
-/// can be one another user may write to. A per-user path under the system
-/// temporary directory keeps that ownership, and
-/// [`crate::catalog::create_private_dir`] restricts it once it is created.
+/// [`crate::private_fs::private_fallback_dir`] says why it is safe to use.
 pub(crate) fn private_fallback_dir() -> PathBuf {
-    #[cfg(unix)]
-    {
-        // SAFETY: geteuid only reads the calling process's effective user ID
-        // and cannot fail.
-        env::temp_dir().join(format!("zetta-{}", unsafe { libc::geteuid() }))
-    }
-    #[cfg(not(unix))]
-    env::temp_dir().join("zetta")
+    crate::private_fs::private_fallback_dir()
 }
 
 #[cfg(test)]

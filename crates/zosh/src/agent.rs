@@ -189,8 +189,23 @@ impl AgentBridge {
         }
     }
 
+    /// Act on the agent events a host state carried.
+    ///
+    /// Every agent event is ignored unless forwarding was requested and a
+    /// usable local agent was found (`enabled`): a server that announces
+    /// forwarding the client never asked for must not be able to start it,
+    /// and with no agent there is nothing it could reach anyway.
     pub(crate) fn handle_events(&mut self, events: &[HostEvent]) -> Vec<AgentClientCommand> {
         let mut commands = self.drain_results();
+        if self.enabled() {
+            commands.extend(self.process_events(events));
+        }
+        commands.extend(self.drain_results());
+        commands
+    }
+
+    fn process_events(&mut self, events: &[HostEvent]) -> Vec<AgentClientCommand> {
+        let mut commands = Vec::new();
         for event in events {
             match event {
                 HostEvent::AgentReady { supported, error } => {
@@ -246,8 +261,20 @@ impl AgentBridge {
                             self.warn("too many forwarded SSH-agent connections");
                             continue;
                         }
+                        let Some(path) = self.path.clone() else {
+                            // Unreachable while `handle_events` refuses a
+                            // bridge without an agent; a protocol error
+                            // rather than a panic if that ever changes.
+                            commands.push(AgentClientCommand::Response {
+                                connection_id: *connection_id,
+                                request_id: *id,
+                                frame: Vec::new(),
+                                closed: true,
+                            });
+                            self.warn("remote agent request arrived with no local agent");
+                            continue;
+                        };
                         let (work_tx, work_rx) = mpsc::sync_channel(WORK_QUEUE_DEPTH);
-                        let path = self.path.clone().expect("enabled bridge has agent path");
                         spawn_worker(
                             *connection_id,
                             path,
@@ -301,7 +328,6 @@ impl AgentBridge {
                 _ => {}
             }
         }
-        commands.extend(self.drain_results());
         commands
     }
 
@@ -356,12 +382,37 @@ impl AgentBridge {
         }
     }
 
+    /// Print one warning per session. The message can carry text the
+    /// server chose (`AgentReady`'s error), so it is escaped first.
     fn warn(&mut self, message: &str) {
         if !self.warned {
-            eprintln!("zosh: {message}");
+            eprintln!("zosh: {}", printable(message));
             self.warned = true;
         }
     }
+}
+
+/// `text` with every control character, and every bidirectional formatting
+/// character, written as an escape instead: safe to print to a terminal
+/// whatever the peer put in it, and not reorderable into something that reads
+/// differently from what it says.
+pub(crate) fn printable(text: &str) -> String {
+    let mut output = String::with_capacity(text.len());
+    for character in text.chars() {
+        if character.is_control() || is_bidi_control(character) {
+            output.extend(character.escape_unicode());
+        } else {
+            output.push(character);
+        }
+    }
+    output
+}
+
+fn is_bidi_control(character: char) -> bool {
+    matches!(
+        character,
+        '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'
+    )
 }
 
 fn spawn_worker(

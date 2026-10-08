@@ -136,15 +136,7 @@ impl SessionCatalogPublisher {
             .parent()
             .context("session catalog has no parent")?;
         create_private_dir(parent)?;
-        let temporary = self.path.with_extension("json.tmp");
-        write_private_file(&temporary, &contents)
-            .with_context(|| format!("writing session catalog {}", temporary.display()))?;
-        #[cfg(windows)]
-        if self.path.exists() {
-            fs::remove_file(&self.path)
-                .with_context(|| format!("replacing session catalog {}", self.path.display()))?;
-        }
-        fs::rename(&temporary, &self.path)
+        write_private_file(&self.path, &contents)
             .with_context(|| format!("publishing session catalog {}", self.path.display()))?;
         self.last_contents = Some(contents);
         Ok(())
@@ -167,38 +159,14 @@ impl Drop for SessionCatalogPublisher {
     }
 }
 
-/// Creates a directory that only the current user may traverse. The session
-/// directory holds the process control token and the session catalogs, so the
-/// umask must not be allowed to widen it.
-pub fn create_private_dir(path: &Path) -> Result<()> {
-    fs::create_dir_all(path)
-        .with_context(|| format!("creating session directory {}", path.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o700))
-            .with_context(|| format!("restricting session directory {}", path.display()))?;
-    }
-    Ok(())
-}
+/// The session directory's privacy and file handling live in
+/// [`crate::private_fs`]; these names are kept because every caller already
+/// reaches them through the catalog.
+pub use crate::private_fs::{create_private_dir, write_private_file};
 
-pub fn write_private_file(path: &Path, contents: &[u8]) -> std::io::Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
-        let mut file = fs::OpenOptions::new()
-            .create(true)
-            .truncate(true)
-            .write(true)
-            .mode(0o600)
-            .open(path)?;
-        use std::io::Write as _;
-        file.write_all(contents)?;
-        file.set_permissions(fs::Permissions::from_mode(0o600))
-    }
-    #[cfg(not(unix))]
-    fs::write(path, contents)
-}
+/// The largest catalog file a reader accepts. A catalog lists one process's
+/// sessions and panes; this is far beyond any real one.
+const MAX_CATALOG_BYTES: u64 = 16 * 1024 * 1024;
 
 fn runner_id_from_path(path: &Path) -> Option<u64> {
     path.file_stem()?.to_str()?.rsplit('-').next()?.parse().ok()
@@ -220,6 +188,13 @@ fn process_id_from_path(path: &Path) -> Option<u32> {
 }
 
 pub fn read_session_catalogs(directory: &Path) -> Result<Vec<BackgroundSessionCatalog>> {
+    // A catalog decides what `zmux reconnect` offers and which files below are
+    // reaped, so it is read only from a directory nobody else can write to.
+    match crate::private_fs::validate_private_dir(directory) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        result => result
+            .with_context(|| format!("checking the session directory {}", directory.display()))?,
+    }
     let entries = match fs::read_dir(directory) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -248,7 +223,7 @@ pub fn read_session_catalogs(directory: &Path) -> Result<Vec<BackgroundSessionCa
         // hand. The owning process comes from the file name, because the
         // contents are exactly what cannot be trusted here.
         let named_process_id = process_id_from_path(&path);
-        let Ok(contents) = fs::read(&path) else {
+        let Ok(contents) = crate::private_fs::read_private_file(&path, MAX_CATALOG_BYTES) else {
             unusable.push((path, named_process_id));
             continue;
         };

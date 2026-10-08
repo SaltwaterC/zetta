@@ -36,6 +36,14 @@ mod mux;
 #[cfg(feature = "session-persistence")]
 mod mux_identity;
 mod overlay_clipboard;
+// The session directory's privacy checks: the multiplexer's own, or the same
+// source compiled in directly when there is no multiplexer, so a no-`zmux`
+// build cannot drift from what the daemon enforces.
+#[cfg(not(feature = "zmux"))]
+#[path = "../crates/zmux/src/private_fs.rs"]
+mod private_fs;
+#[cfg(feature = "zmux")]
+use zmux::private_fs;
 mod process_control;
 mod profile_cli;
 mod profile_icon;

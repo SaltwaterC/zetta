@@ -3,7 +3,9 @@ use crate::args::Config;
 use crate::child_exit::{self, ChildExitWatch};
 #[cfg(any(unix, windows))]
 use crate::lifecycle;
-use crate::protocol::{AgentHostRecord, ServerTransport, encode_host_message_with_agent};
+use crate::protocol::{
+    AgentHostRecord, ReceiveOutcome, ServerTransport, encode_host_message_with_agent,
+};
 use crate::session_io::{LoopWait, PTY_CHUNK, PtyEvent, PtyIo, PtyWrite, UdpIo};
 use crate::sleep_guard::{self, IdleSleepGuard};
 use crate::terminal_queries::QueryResponder;
@@ -249,9 +251,10 @@ fn serve_session(cfg: Config, socket: UdpSocket, mut transport: ServerTransport)
 
         let confirmed_echo = echo.advance(Instant::now());
 
-        // Drain authenticated UDP datagrams. The peer address is deliberately
-        // updated only after Mosh crypto accepted the packet, which implements
-        // Mosh's IP/port roaming without allowing unauthenticated rebinding.
+        // Drain authenticated UDP datagrams. The peer address follows only
+        // an authenticated *in-order* datagram (`roam`), which implements
+        // Mosh's IP/port roaming without letting either a forged or a
+        // replayed packet rebind it.
         let phase = timing::begin();
         let udp_started = Instant::now();
         let mut udp_budget_exhausted = true;
@@ -265,12 +268,11 @@ fn serve_session(cfg: Config, socket: UdpSocket, mut transport: ServerTransport)
                     let outcome = transport.receive(bytes)?;
                     if outcome.authenticated {
                         timing::record("udp_authenticated", bytes.len() as u64, 0);
-                        peer = Some(addr);
                     }
+                    roam(&mut peer, &outcome, addr);
 
                     if let Some(state) = outcome.state {
                         timing::record("input_state", state.new_num, state.ack_num);
-                        peer = Some(addr);
                         terminal.acknowledge(transport.acked_by_remote());
                         if transport.take_rebase_required() {
                             dirty = true;
@@ -600,6 +602,18 @@ struct WakeSources<'a> {
     child_poll: Option<Instant>,
     /// When an owed frame may be built; consumed by the pass that builds it.
     frame_due: Option<Instant>,
+}
+
+/// Follow a roaming client to `from` if, and only if, this datagram was
+/// authenticated and in order, as stock Mosh's `recv_one` does. Neither an
+/// authenticated datagram nor a completed state is enough on its own: a
+/// captured datagram replayed from another address passes both checks once
+/// the transport has forgotten its sequence number, and would redirect the
+/// session's output there.
+fn roam(peer: &mut Option<SocketAddr>, outcome: &ReceiveOutcome, from: SocketAddr) {
+    if outcome.authenticated && outcome.in_order {
+        *peer = Some(from);
+    }
 }
 
 /// The instant the loop next has to wake for if nothing arrives first: the

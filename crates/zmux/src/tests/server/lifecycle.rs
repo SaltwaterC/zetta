@@ -196,3 +196,167 @@ fn a_command_resolved_on_this_host_is_used_as_it_was_sent() {
 
     assert_eq!(command, wrapped);
 }
+
+/// Resuming a protected disk record is checked like any other secret: inside
+/// the daemon's verification gate and refusal window, against a verifier held
+/// to the import policy.
+#[cfg(all(unix, not(target_os = "macos"), feature = "session-persistence"))]
+mod resume_authentication {
+    use std::time::Duration;
+
+    use super::*;
+    use crate::{
+        auth::verification_probe, messages::ResumeRequest,
+        server::secret_check::tests::fixtures::test_daemon,
+    };
+
+    const SECRET: &str = "resume secret";
+
+    fn resume_request(record_id: u64, verifier: &str, secret: &str) -> ResumeRequest {
+        ResumeRequest {
+            record_id,
+            summary: BackgroundSessionSummary {
+                id: record_id,
+                title: "shell".to_owned(),
+                authentication_required: true,
+                active_pane: 1,
+                layout: BackgroundPaneLayout::Pane { pane_id: 1 },
+                panes: Vec::new(),
+                held: false,
+                scoped_to: None,
+                key_envelope: None,
+            },
+            state: serde_json::Value::Null,
+            shared_state: None,
+            verifier: Some(verifier.to_owned()),
+            key_envelope: None,
+            // What a client reports for a record that has never been guessed
+            // at, whatever the daemon has seen.
+            failed_authentications: 0,
+            backoff_seconds: 0,
+            created_at: 0,
+            updated_at: 0,
+            secret: Some(secret.to_owned()),
+            snapshots: Vec::new(),
+        }
+    }
+
+    fn authenticate(daemon: &Daemon, request: &mut ResumeRequest) -> Result<Option<Response>> {
+        authenticate_resume(daemon, request, Some(std::process::id()), &mut None)
+    }
+
+    #[test]
+    fn concurrent_resumes_share_the_verification_gate() {
+        let (daemon, _directory) = test_daemon();
+        let authentication = SessionAuthentication::create(SECRET).unwrap();
+        // Held long enough that unbounded resumes would visibly overlap.
+        let probe =
+            verification_probe::watch(authentication.verifier(), Duration::from_millis(150));
+        let resumes = 2 * MAX_CONCURRENT_CHECKS + 1;
+
+        let threads: Vec<_> = (0..resumes)
+            .map(|index| {
+                let daemon = Arc::clone(&daemon);
+                let verifier = authentication.verifier().to_owned();
+                thread::spawn(move || {
+                    authenticate(
+                        &daemon,
+                        &mut resume_request(index as u64 + 1, &verifier, SECRET),
+                    )
+                })
+            })
+            .collect();
+        for thread in threads {
+            assert!(matches!(thread.join().unwrap(), Ok(None)));
+        }
+
+        assert_eq!(probe.runs(), resumes);
+        assert!(
+            probe.peak() <= MAX_CONCURRENT_CHECKS,
+            "{} resumes ran Argon2 at once, past the daemon's bound of {MAX_CONCURRENT_CHECKS}",
+            probe.peak()
+        );
+    }
+
+    #[test]
+    fn concurrent_resumes_of_one_record_are_checked_one_at_a_time() {
+        let (daemon, _directory) = test_daemon();
+        let authentication = SessionAuthentication::create(SECRET).unwrap();
+        let probe =
+            verification_probe::watch(authentication.verifier(), Duration::from_millis(150));
+
+        let threads: Vec<_> = (0..3)
+            .map(|_| {
+                let daemon = Arc::clone(&daemon);
+                let verifier = authentication.verifier().to_owned();
+                thread::spawn(move || {
+                    authenticate(&daemon, &mut resume_request(7, &verifier, SECRET))
+                })
+            })
+            .collect();
+        for thread in threads {
+            assert!(matches!(thread.join().unwrap(), Ok(None)));
+        }
+
+        assert_eq!(probe.runs(), 3);
+        assert_eq!(probe.peak(), 1);
+    }
+
+    /// The refusal window after a wrong secret is the daemon's: a request
+    /// reporting a clean record does not reopen it, and the attempt it refuses
+    /// never reaches Argon2.
+    #[test]
+    fn a_resume_refusal_window_cannot_be_reset_by_the_request() {
+        let (daemon, _directory) = test_daemon();
+        let authentication = SessionAuthentication::create(SECRET).unwrap();
+        let probe = verification_probe::watch(authentication.verifier(), Duration::ZERO);
+
+        let mut wrong = resume_request(3, authentication.verifier(), "wrong secret");
+        assert!(matches!(
+            authenticate(&daemon, &mut wrong),
+            Ok(Some(Response::AuthenticationFailed))
+        ));
+        assert_eq!(wrong.failed_authentications, 1);
+        assert!(wrong.secret.is_none());
+
+        let mut right = resume_request(3, authentication.verifier(), SECRET);
+        assert!(matches!(
+            authenticate(&daemon, &mut right),
+            Ok(Some(Response::AuthenticationFailed))
+        ));
+        assert_eq!(probe.runs(), 1, "the refused attempt must not be checked");
+
+        // Another record is not caught in this one's window.
+        let mut other = resume_request(4, authentication.verifier(), SECRET);
+        assert!(matches!(authenticate(&daemon, &mut other), Ok(None)));
+    }
+
+    /// A reported window still open is honoured: it can only make a resume
+    /// wait, and is what carries a window across a daemon restart.
+    #[test]
+    fn a_reported_refusal_window_is_still_honoured() {
+        let (daemon, _directory) = test_daemon();
+        let authentication = SessionAuthentication::create(SECRET).unwrap();
+        let mut request = resume_request(5, authentication.verifier(), SECRET);
+        request.failed_authentications = 3;
+        request.backoff_seconds = 30;
+        request.updated_at = unix_now();
+
+        assert!(matches!(
+            authenticate(&daemon, &mut request),
+            Ok(Some(Response::AuthenticationFailed))
+        ));
+    }
+
+    #[test]
+    fn a_resume_with_an_over_cost_verifier_is_refused_before_hashing() {
+        let (daemon, _directory) = test_daemon();
+        let costly = "$argon2id$v=19$m=4194304,t=64,p=1$c29tZXNhbHRzb21lc2FsdA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+        let probe = verification_probe::watch(costly, Duration::ZERO);
+
+        let error = authenticate(&daemon, &mut resume_request(6, costly, SECRET)).unwrap_err();
+
+        assert!(error.to_string().contains("exceed"), "{error:#}");
+        assert_eq!(probe.runs(), 0);
+    }
+}

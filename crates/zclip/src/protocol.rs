@@ -66,14 +66,7 @@ impl Frame {
             .or_else(|| body.strip_suffix(b"\x1b\\"))?;
         let body = std::str::from_utf8(body).ok()?;
         let mut fields = body.split(';');
-        let id_text = fields.next()?;
-        if id_text.len() != 32 {
-            return None;
-        }
-        let mut id = [0; 16];
-        for (index, byte) in id.iter_mut().enumerate() {
-            *byte = u8::from_str_radix(&id_text[index * 2..index * 2 + 2], 16).ok()?;
-        }
+        let id = parse_id(fields.next()?.as_bytes())?;
         let kind = fields.next()?;
         let message = match kind {
             "probe" => Message::Probe,
@@ -106,6 +99,29 @@ impl Frame {
             return None;
         }
         Some(Self { id, message })
+    }
+}
+
+/// Decodes the request ID byte pairs directly. The ID arrives from pane output,
+/// so it may hold any UTF-8: slicing it as a `str` every two bytes panicked when
+/// a multi-byte character straddled a pair boundary.
+fn parse_id(text: &[u8]) -> Option<[u8; 16]> {
+    if text.len() != 32 {
+        return None;
+    }
+    let mut id = [0; 16];
+    for (byte, pair) in id.iter_mut().zip(text.chunks_exact(2)) {
+        *byte = hex_digit(pair[0])? << 4 | hex_digit(pair[1])?;
+    }
+    Some(id)
+}
+
+fn hex_digit(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
     }
 }
 

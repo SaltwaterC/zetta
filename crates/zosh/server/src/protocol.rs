@@ -24,10 +24,15 @@ pub struct ReceivedState {
 
 #[derive(Debug, Clone)]
 pub struct ReceiveOutcome {
-    /// True when the underlying Mosh transport authenticated this datagram.
-    /// This is intentionally independent of whether the datagram completed an
-    /// SSP state, so authenticated fragments can move the roaming peer address.
+    /// True when the underlying Mosh transport authenticated this datagram
+    /// and it was not a replay the transport still remembers.
     pub authenticated: bool,
+    /// True when it was also newer than every datagram authenticated before
+    /// it. This, and not `authenticated`, is what may move the roaming peer
+    /// address: a captured datagram replayed from elsewhere authenticates
+    /// too. It is independent of whether the datagram completed an SSP
+    /// state, so in-order fragments still roam, as in stock Mosh.
+    pub in_order: bool,
     /// Present only when SSP accepted a complete, non-duplicate remote state.
     pub state: Option<ReceivedState>,
 }
@@ -163,12 +168,8 @@ impl ServerTransport {
         // The canonical SSP receiver owns replay, old-state, ACK and quench
         // semantics, and hands back the numbering a server needs alongside
         // the diff. Each datagram is opened and decompressed once.
-        let before = self.inner.last_recv();
-        let had_state = self.inner.has_received_authenticated();
-        let accepted = self.inner.recv_state(packet);
-        let authenticated = self.inner.last_recv() > before
-            || (!had_state && self.inner.has_received_authenticated());
-        let state = accepted.map(|state| ReceivedState {
+        let received = self.inner.receive(packet);
+        let state = received.state.map(|state| ReceivedState {
             old_num: state.old_num,
             new_num: state.new_num,
             ack_num: state.ack_num,
@@ -176,7 +177,8 @@ impl ServerTransport {
             diff: state.diff,
         });
         Ok(ReceiveOutcome {
-            authenticated,
+            authenticated: received.authenticated,
+            in_order: received.in_order,
             state,
         })
     }

@@ -18,6 +18,7 @@ pub mod logging;
 pub mod paths;
 #[cfg(feature = "session-persistence")]
 pub mod persistence;
+pub mod private_fs;
 mod process_status;
 pub mod protocol;
 pub mod reconnect;

@@ -64,13 +64,5 @@ impl Drop for ForwardedAgentTarget {
 }
 
 fn replace_file(path: &Path, contents: &str) -> io::Result<()> {
-    let mut temporary = path.as_os_str().to_owned();
-    temporary.push(format!(".{}", std::process::id()));
-    let temporary = PathBuf::from(temporary);
-    fs::write(&temporary, contents)?;
-    if let Err(error) = fs::rename(&temporary, path) {
-        let _ = fs::remove_file(&temporary);
-        return Err(error);
-    }
-    Ok(())
+    crate::private_fs::write_private_file(path, contents.as_bytes())
 }

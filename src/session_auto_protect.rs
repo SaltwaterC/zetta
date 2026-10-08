@@ -110,12 +110,28 @@ impl SessionAutoProtect {
         envelope: &str,
         passphrase: Option<SessionSecret>,
     ) -> Result<SessionSecret> {
+        zmux::auto_protect::open(envelope, &self.identities(passphrase)?)
+    }
+
+    /// [`Self::open`] for a key about to be sent to the remote multiplexer at
+    /// `target`, which is also the host that offered the envelope: refused
+    /// unless the envelope was sealed on the host `target` names. See
+    /// [`zmux::auto_protect::open_for_remote`].
+    pub(crate) fn open_for_remote(
+        &self,
+        envelope: &str,
+        passphrase: Option<SessionSecret>,
+        target: &zmux::remote::RemoteTarget,
+    ) -> Result<SessionSecret> {
+        zmux::auto_protect::open_for_remote(envelope, &self.identities(passphrase)?, target)
+    }
+
+    fn identities(&self, passphrase: Option<SessionSecret>) -> Result<IdentitySet> {
         let passphrases = vec![passphrase; self.identity_paths.len()];
         // Never the terminal: this runs on the UI thread, and `age`'s fallback
         // would block it on a `/dev/tty` read nobody can see.
-        let identities = IdentitySet::from_supplied_passphrases(&self.identity_paths, &passphrases)
-            .context("loading the identity that opens automatically protected sessions")?;
-        zmux::auto_protect::open(envelope, &identities)
+        IdentitySet::from_supplied_passphrases(&self.identity_paths, &passphrases)
+            .context("loading the identity that opens automatically protected sessions")
     }
 }
 

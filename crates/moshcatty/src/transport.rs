@@ -9,7 +9,7 @@
 //! - ack_num only advances forward
 //! - timestamp reply uses 0xFFFF as "no reply" (stock network.cc)
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
@@ -24,6 +24,7 @@ use crate::fragment::{
     MAX_INSTRUCTION_BYTES,
 };
 use crate::pb::TransportInstruction;
+use crate::replay::{Freshness, ReplayWindow};
 
 const PROTOCOL_VERSION: u32 = 2;
 /// Stock starts at the upper RTO cap until the first RTT sample arrives.
@@ -41,9 +42,6 @@ static NEXT_PACKET_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// Stock uses uint16(-1) = 0xFFFF to mean "no timestamp reply".
 const TS_NO_REPLY: u16 = 0xFFFF;
-
-/// Sliding window of recently seen crypto sequence numbers (true replay filter).
-const SEEN_SEQ_CAP: usize = 512;
 
 /// Maximum number of complete remote states retained while the peer keeps
 /// referencing an old base. Once full, reject newer branches until the peer's
@@ -67,6 +65,19 @@ pub struct ReceivedStateDiff {
     /// The highest throwaway watermark the peer has announced so far.
     pub throwaway_num: u64,
     pub diff: Vec<u8>,
+}
+
+/// What one datagram did to the receiver; see [`Transport::receive`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Received {
+    /// The datagram opened under the session key and was not a replay.
+    pub authenticated: bool,
+    /// It was authenticated *and* newer than every datagram opened before
+    /// it. Only such a datagram refreshes [`Transport::last_recv`], and only
+    /// such a datagram may move a roaming peer's address, as in stock Mosh.
+    pub in_order: bool,
+    /// The complete remote state SSP accepted, if it completed one.
+    pub state: Option<ReceivedStateDiff>,
 }
 
 #[derive(Debug, Clone)]
@@ -110,12 +121,10 @@ pub struct Transport {
     max_fragment_payload: usize,
     encrypted_blocks: u64,
     crypto_exhausted: bool,
-    /// Expected next crypto seq (for RTT bookkeeping only; reorder still accepted).
-    expected_receiver_seq: u64,
-    expected_receiver_seq_set: bool,
-    /// True replays: exact seq already successfully decrypted.
-    seen_seqs: HashSet<u64>,
-    seen_seq_order: Vec<u64>,
+    /// Crypto sequence numbers already opened, and the newest of them: the
+    /// replay filter, and what tells an in-order datagram from a reordered
+    /// one (only the former feeds RTT, `last_recv` and roaming).
+    replay: ReplayWindow,
 
     last_send: Instant,
     last_recv: Instant,
@@ -182,10 +191,7 @@ impl Transport {
             max_fragment_payload: MAX_FRAGMENT_PAYLOAD,
             encrypted_blocks: 0,
             crypto_exhausted: false,
-            expected_receiver_seq: 0,
-            expected_receiver_seq_set: false,
-            seen_seqs: HashSet::new(),
-            seen_seq_order: Vec::new(),
+            replay: ReplayWindow::new(),
             last_send: now,
             last_recv: now,
             last_remote_state: now,
@@ -709,6 +715,35 @@ impl Transport {
         wire: &[u8],
         congestion_experienced: bool,
     ) -> Option<ReceivedStateDiff> {
+        self.receive_with_congestion(wire, congestion_experienced)
+            .state
+    }
+
+    /// Process a datagram and report, besides any state SSP accepted,
+    /// whether it authenticated and whether it was in order. A server that
+    /// follows a roaming client must move the peer address only on an
+    /// in-order datagram: an authenticated one may be a captured replay.
+    pub fn receive(&mut self, wire: &[u8]) -> Received {
+        self.receive_with_congestion(wire, false)
+    }
+
+    fn receive_with_congestion(&mut self, wire: &[u8], congestion_experienced: bool) -> Received {
+        let mut received = Received {
+            authenticated: false,
+            in_order: false,
+            state: None,
+        };
+        let Some(plaintext) = self.open(wire, &mut received) else {
+            return received;
+        };
+        received.state =
+            self.accept_plaintext(&plaintext, received.in_order, congestion_experienced);
+        received
+    }
+
+    /// Decrypt `wire` if its sequence number is fresh, recording it in the
+    /// replay window and filling in `received`'s flags.
+    fn open(&mut self, wire: &[u8], received: &mut Received) -> Option<Vec<u8>> {
         if wire.len() < MIN_DATAGRAM {
             return None;
         }
@@ -719,10 +754,10 @@ impl Transport {
         }
         let seq = dir_seq & SEQ_MASK;
 
-        // True replay only: already successfully opened this exact crypto seq.
-        // Unlike mosh-go, we still accept seq < expected (UDP reorder) — matching
-        // upstream network.cc which returns payload for out-of-order packets.
-        if self.seen_seqs.contains(&seq) {
+        // Reordered datagrams inside the window are still opened, matching
+        // upstream network.cc, which returns their payload; an exact replay,
+        // or anything too old to tell from one, is dropped unopened.
+        if !self.replay.check(seq).accepted() {
             return None;
         }
 
@@ -731,22 +766,30 @@ impl Transport {
         if plaintext.len() < 4 {
             return None;
         }
+        // Record only after the datagram authenticated, so a forged header
+        // cannot move the window.
+        let freshness = self.replay.commit(seq);
+        received.authenticated = true;
+        received.in_order = freshness == Freshness::InOrder;
+        Some(plaintext)
+    }
+
+    fn accept_plaintext(
+        &mut self,
+        plaintext: &[u8],
+        in_order: bool,
+        congestion_experienced: bool,
+    ) -> Option<ReceivedStateDiff> {
         let remote_ts = u16::from_be_bytes([plaintext[0], plaintext[1]]);
         let ts_reply = u16::from_be_bytes([plaintext[2], plaintext[3]]);
         let payload = &plaintext[4..];
 
-        self.remember_seq(seq);
-        self.last_recv = Instant::now();
-
-        // RTT only from in-order-ish samples (upstream skips OOO for timestamp).
-        let in_order = !self.expected_receiver_seq_set || seq >= self.expected_receiver_seq;
+        // Timestamps, RTT and liveness only from in-order datagrams, as
+        // stock's recv_one: a reordered one is never newer contact than the
+        // in-order datagram that overtook it, and a replay outside the window
+        // never got this far.
         if in_order {
-            if self.expected_receiver_seq_set {
-                self.expected_receiver_seq = seq.saturating_add(1);
-            } else {
-                self.expected_receiver_seq = seq.saturating_add(1);
-                self.expected_receiver_seq_set = true;
-            }
+            self.last_recv = Instant::now();
             // Save peer timestamp for echo (stock holds ~1s).
             if remote_ts != TS_NO_REPLY {
                 self.last_ts = Some(if congestion_experienced {
@@ -859,20 +902,6 @@ impl Transport {
             throwaway_num: self.throwaway_num,
             diff: ti.diff,
         })
-    }
-
-    fn remember_seq(&mut self, seq: u64) {
-        if self.seen_seqs.insert(seq) {
-            self.seen_seq_order.push(seq);
-            while self.seen_seq_order.len() > SEEN_SEQ_CAP {
-                if let Some(old) = self.seen_seq_order.first().copied() {
-                    self.seen_seq_order.remove(0);
-                    self.seen_seqs.remove(&old);
-                } else {
-                    break;
-                }
-            }
-        }
     }
 
     fn encrypt_fragment(&mut self, f: &Fragment) -> Option<Vec<u8>> {
@@ -1024,6 +1053,11 @@ fn zlib_decompress(data: &[u8]) -> Option<Vec<u8>> {
 #[cfg(test)]
 #[path = "tests/transport_deadline.rs"]
 mod deadline_tests;
+
+// Zetta's own tests for the replay filter's effect on liveness, likewise.
+#[cfg(test)]
+#[path = "tests/transport_replay.rs"]
+mod replay_tests;
 
 #[cfg(test)]
 mod tests {

@@ -35,9 +35,10 @@ use windows::{
             RPC_E_CHANGED_MODE, S_OK,
         },
         Storage::FileSystem::{
-            CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_OVERLAPPED, FILE_FLAGS_AND_ATTRIBUTES,
-            FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_SHARE_MODE, FILE_SHARE_READ,
-            FILE_SHARE_WRITE, OPEN_EXISTING, PIPE_ACCESS_DUPLEX, WriteFile,
+            CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_FIRST_PIPE_INSTANCE,
+            FILE_FLAG_OVERLAPPED, FILE_FLAGS_AND_ATTRIBUTES, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
+            FILE_SHARE_MODE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING, PIPE_ACCESS_DUPLEX,
+            SECURITY_IDENTIFICATION, SECURITY_SQOS_PRESENT, WriteFile,
         },
         System::Com::{
             CLSCTX_INPROC_SERVER, CLSCTX_LOCAL_SERVER, COINIT_APARTMENTTHREADED,
@@ -50,8 +51,7 @@ use windows::{
             PIPE_TYPE_BYTE, PIPE_WAIT,
         },
         System::Threading::{
-            GetCurrentProcess, GetCurrentProcessId, GetExitCodeProcess, GetProcessId, INFINITE,
-            WaitForSingleObject,
+            GetCurrentProcess, GetExitCodeProcess, GetProcessId, INFINITE, WaitForSingleObject,
         },
         UI::Shell::{
             Common::{IObjectArray, IObjectCollection},
@@ -89,7 +89,6 @@ const DELEGATION_PATH: &str = "Console\\%%Startup";
 const DEFAULT_TERMINAL_BACKUP_PATH: &str = "Software\\Zetta\\DefaultTerminal";
 static JUMP_LIST_GENERATION: AtomicU64 = AtomicU64::new(0);
 static JUMP_LIST_UPDATE: Mutex<()> = Mutex::new(());
-static HANDOFF_PIPE_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -507,25 +506,37 @@ fn duplicate_handoff_request(
 /// Creates the duplex endpoint required by ITerminalHandoff3. The server side
 /// stays in Zetta; the overlapped client side is returned to OpenConsole and
 /// is passed to ConPTY as both its input and output handle.
+///
+/// Both ends are opened here and travel as handles, so the name is never
+/// published and nothing needs to find the pipe by it. That makes everything
+/// about the name a matter of keeping other accounts out: the pipe namespace
+/// is machine-wide, a pipe's DACL is its first creator's, and the default DACL
+/// lets other accounts read. So the name is random, the first (and only)
+/// instance refuses a name somebody already holds, the DACL admits only this
+/// account and SYSTEM, and the client end will not let the server impersonate
+/// it beyond identification should it ever be connected to the wrong server.
 fn create_handoff_pipe() -> windows_core::Result<(OwnedHandle, OwnedHandle)> {
-    let name = HSTRING::from(format!(
-        r"\\.\pipe\ZettaTerminalHandoff-{}-{}",
-        unsafe { GetCurrentProcessId() },
-        HANDOFF_PIPE_GENERATION.fetch_add(1, Ordering::Relaxed),
-    ));
+    create_handoff_pipe_named(&handoff_pipe_name()?)
+}
+
+fn create_handoff_pipe_named(name: &str) -> windows_core::Result<(OwnedHandle, OwnedHandle)> {
+    let name = HSTRING::from(name);
     let pipe_mode = NAMED_PIPE_MODE(
         PIPE_TYPE_BYTE.0 | PIPE_READMODE_BYTE.0 | PIPE_WAIT.0 | PIPE_REJECT_REMOTE_CLIENTS.0,
     );
+    let security = crate::private_fs::UserOnlySecurity::new(
+        crate::private_fs::UserOnlySecurityTarget::Object,
+    )?;
     let server = unsafe {
         CreateNamedPipeW(
             &name,
-            FILE_FLAGS_AND_ATTRIBUTES(PIPE_ACCESS_DUPLEX.0),
+            PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
             pipe_mode,
             1,
             128 * 1024,
             128 * 1024,
             0,
-            None,
+            Some(std::ptr::from_ref(security.attributes())),
         )
     };
     if server.is_invalid() {
@@ -540,13 +551,32 @@ fn create_handoff_pipe() -> windows_core::Result<(OwnedHandle, OwnedHandle)> {
             FILE_SHARE_MODE(FILE_SHARE_READ.0 | FILE_SHARE_WRITE.0),
             None,
             OPEN_EXISTING,
-            FILE_FLAGS_AND_ATTRIBUTES(FILE_ATTRIBUTE_NORMAL.0 | FILE_FLAG_OVERLAPPED.0),
+            handoff_client_flags(),
             None,
         )?
     };
     // SAFETY: CreateFileW returned a valid, newly owned handle.
     let client = unsafe { OwnedHandle::from_raw_handle(client.0) };
     Ok((server, client))
+}
+
+/// A pipe name nobody can predict: 128 random bits.
+fn handoff_pipe_name() -> windows_core::Result<String> {
+    let mut nonce = [0_u8; 16];
+    getrandom::fill(&mut nonce).map_err(|_| windows_core::Error::from(E_FAIL))?;
+    Ok(format!(
+        r"\\.\pipe\ZettaTerminalHandoff-{}",
+        nonce
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    ))
+}
+
+/// The client end's open flags: overlapped for ConPTY, and identification-only
+/// impersonation for whichever server it reaches.
+fn handoff_client_flags() -> FILE_FLAGS_AND_ATTRIBUTES {
+    FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION
 }
 
 fn duplicate_handle(handle: HANDLE) -> windows_core::Result<OwnedHandle> {

@@ -67,6 +67,12 @@ Retain these Zetta-specific behaviors when synchronizing:
   paste that has to wait takes a `PasteTicket` (`paste_order.rs`, no upstream
   counterpart): keyboard input queued before `finish_paste` is written after
   the paste. Program replies and mouse or focus reports are not held;
+- serve remote clipboard (zclip) requests off the terminal's event path:
+  `clipboard_channel.rs` (no upstream counterpart) queues each printed frame,
+  in order and boundedly, for one task that runs the zclip host on the
+  background executor and writes its answer to the pty, and stops a host
+  `zcopy`/`zpaste` helper that outlives `HELPER_TIMEOUT`. `vte` is a path
+  dependency on `crates/vte`, whose `std` OSC buffer is bounded;
 - split each reader handover into a non-blocking retirement on the terminal's
   thread and an owned, `Send` `RetiredReader` whose `finish` joins the pty loop
   or drains the byte stream elsewhere (`reader_handover.rs`, no upstream

@@ -23,8 +23,14 @@ use super::*;
 /// caller is a one-shot CLI path, so the vector costs nothing worth streaming
 /// for.
 pub(super) fn live_control_endpoints() -> Result<Vec<ControlEndpoint>> {
-    let directory = crate::background_sessions::session_catalog_dir();
-    let entries = match fs::read_dir(&directory) {
+    live_control_endpoints_in(&crate::background_sessions::session_catalog_dir())
+}
+
+pub(super) fn live_control_endpoints_in(directory: &Path) -> Result<Vec<ControlEndpoint>> {
+    if !control_directory_is_private(directory)? {
+        return Ok(Vec::new());
+    }
+    let entries = match fs::read_dir(directory) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(error) => return Err(error).context("reading Zetta process control endpoints"),
@@ -32,23 +38,20 @@ pub(super) fn live_control_endpoints() -> Result<Vec<ControlEndpoint>> {
     let mut endpoints = Vec::new();
     for entry in entries {
         let path = entry?.path();
-        if !path
+        let Some(process_id) = path
             .file_name()
             .and_then(|name| name.to_str())
-            .is_some_and(|name| name.starts_with("control-") && name.ends_with(".json"))
-        {
+            .and_then(|name| name.strip_prefix("control-"))
+            .and_then(|name| name.strip_suffix(".json"))
+            .and_then(|process_id| process_id.parse::<u32>().ok())
+        else {
             continue;
-        }
-        let endpoint = match fs::read(&path)
-            .ok()
-            .and_then(|contents| serde_json::from_slice::<ControlEndpoint>(&contents).ok())
-        {
-            Some(endpoint) if endpoint.version == CONTROL_VERSION => endpoint,
-            _ => continue,
+        };
+        let Ok(endpoint) = read_endpoint_file(&path, process_id) else {
+            continue;
         };
         if !process_is_running(endpoint.process_id) {
-            let _ = fs::remove_file(path);
-            let _ = fs::remove_file(endpoint.socket_path);
+            reap_endpoint(&path);
             continue;
         }
         endpoints.push(endpoint);
@@ -64,19 +67,16 @@ pub(super) fn live_control_endpoints() -> Result<Vec<ControlEndpoint>> {
 /// Use [`live_control_endpoint`] where absence is an ordinary outcome.
 pub(super) fn read_control_endpoint(process_id: u32) -> Result<ControlEndpoint> {
     let endpoint_path = control_endpoint_path(process_id);
-    let contents = fs::read(&endpoint_path).with_context(|| {
+    let directory = endpoint_path
+        .parent()
+        .context("control endpoint has no parent")?;
+    crate::private_fs::validate_private_dir(directory).with_context(|| {
         format!(
-            "reading Zetta process control endpoint {}",
-            endpoint_path.display()
+            "checking the Zetta process control directory {}",
+            directory.display()
         )
     })?;
-    let endpoint: ControlEndpoint =
-        serde_json::from_slice(&contents).context("parsing Zetta process control endpoint")?;
-    anyhow::ensure!(
-        endpoint.version == CONTROL_VERSION && endpoint.process_id == process_id,
-        "Zetta process control endpoint is outdated"
-    );
-    Ok(endpoint)
+    read_endpoint_file(&endpoint_path, process_id)
 }
 
 /// [`read_control_endpoint`] for callers that treat a process which is absent
@@ -84,31 +84,85 @@ pub(super) fn read_control_endpoint(process_id: u32) -> Result<ControlEndpoint> 
 /// way. An outdated `CONTROL_VERSION` is still an error: the process is there,
 /// it just cannot serve the request.
 pub(super) fn live_control_endpoint(process_id: u32) -> Result<Option<ControlEndpoint>> {
-    let endpoint_path = control_endpoint_path(process_id);
-    let contents = match fs::read(&endpoint_path) {
-        Ok(contents) => contents,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => {
-            return Err(error).with_context(|| {
-                format!(
-                    "reading Zetta process control endpoint {}",
-                    endpoint_path.display()
-                )
-            });
+    live_control_endpoint_in(
+        &crate::background_sessions::session_catalog_dir(),
+        process_id,
+    )
+}
+
+pub(super) fn live_control_endpoint_in(
+    directory: &Path,
+    process_id: u32,
+) -> Result<Option<ControlEndpoint>> {
+    if !control_directory_is_private(directory)? {
+        return Ok(None);
+    }
+    let endpoint_path = directory.join(control_endpoint_name(process_id));
+    let endpoint = match read_endpoint_file(&endpoint_path, process_id) {
+        Ok(endpoint) => endpoint,
+        Err(error)
+            if error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
+        {
+            return Ok(None);
         }
+        Err(error) => return Err(error),
     };
+    if !process_is_running(process_id) {
+        reap_endpoint(&endpoint_path);
+        return Ok(None);
+    }
+    Ok(Some(endpoint))
+}
+
+/// Whether the session directory can be trusted to hold endpoints: `false`
+/// when it does not exist yet, an error when somebody else could write to it.
+fn control_directory_is_private(directory: &Path) -> Result<bool> {
+    match crate::private_fs::validate_private_dir(directory) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error).with_context(|| {
+            format!(
+                "checking the Zetta process control directory {}",
+                directory.display()
+            )
+        }),
+    }
+}
+
+/// Reads one endpoint file, trusting it only as far as its own location
+/// vouches for it: a regular file this user owns, naming the process its file
+/// name names, and the socket beside it.
+///
+/// The socket check is what keeps an endpoint from sending a client — and the
+/// command, secret or passphrase it carries — to a socket somewhere else.
+fn read_endpoint_file(path: &Path, process_id: u32) -> Result<ControlEndpoint> {
+    let contents =
+        crate::private_fs::read_private_file(path, crate::private_fs::MAX_ENDPOINT_BYTES)
+            .with_context(|| {
+                format!("reading Zetta process control endpoint {}", path.display())
+            })?;
     let endpoint: ControlEndpoint =
         serde_json::from_slice(&contents).context("parsing Zetta process control endpoint")?;
     anyhow::ensure!(
         endpoint.version == CONTROL_VERSION && endpoint.process_id == process_id,
         "Zetta process control endpoint is outdated"
     );
-    if !process_is_running(process_id) {
-        let _ = fs::remove_file(endpoint_path);
-        let _ = fs::remove_file(endpoint.socket_path);
-        return Ok(None);
-    }
-    Ok(Some(endpoint))
+    anyhow::ensure!(
+        endpoint.socket_path == control_socket_path(path),
+        "Zetta process control endpoint {} names a socket that is not its own",
+        path.display()
+    );
+    Ok(endpoint)
+}
+
+/// Removes a dead process's endpoint and the socket beside it. The socket is
+/// found from the endpoint's own name, never from its contents, and is removed
+/// only if it is still a socket this user owns.
+fn reap_endpoint(endpoint_path: &Path) {
+    let _ = fs::remove_file(endpoint_path);
+    let _ = crate::private_fs::remove_stale_socket(&control_socket_path(endpoint_path));
 }
 
 pub(super) fn random_hex(byte_count: usize) -> Result<String> {
@@ -162,7 +216,11 @@ pub(crate) fn config_path_identity(path: &Path) -> String {
 }
 
 pub(super) fn control_endpoint_path(process_id: u32) -> PathBuf {
-    crate::background_sessions::session_catalog_dir().join(format!("control-{process_id}.json"))
+    crate::background_sessions::session_catalog_dir().join(control_endpoint_name(process_id))
+}
+
+fn control_endpoint_name(process_id: u32) -> String {
+    format!("control-{process_id}.json")
 }
 
 pub(super) fn control_socket_path(endpoint_path: &Path) -> PathBuf {
@@ -187,40 +245,23 @@ pub(super) fn restrict_socket_permissions(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Clears the way for this process's own socket. Only a socket this user owns
+/// is removed; anything else at that name is an error rather than a casualty.
 pub(super) fn remove_socket_if_present(path: &Path) -> Result<()> {
-    match fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => {
-            Err(error).with_context(|| format!("removing stale socket {}", path.display()))
-        }
-    }
+    crate::private_fs::remove_stale_socket(path)
+        .with_context(|| format!("removing stale socket {}", path.display()))
 }
 
 pub(super) fn write_endpoint(path: &Path, endpoint: &ControlEndpoint) -> Result<()> {
     let parent = path.parent().context("control endpoint has no parent")?;
-    crate::background_sessions::create_private_dir(parent)?;
-    let temporary = path.with_extension("json.tmp");
+    crate::private_fs::create_private_dir(parent)?;
     let contents = serde_json::to_vec(endpoint)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(true)
-            .write(true)
-            .mode(0o600)
-            .open(&temporary)?
-            .write_all(&contents)?;
-    }
-    #[cfg(not(unix))]
-    fs::write(&temporary, contents)?;
-    #[cfg(windows)]
-    if path.exists() {
-        fs::remove_file(path)?;
-    }
-    fs::rename(temporary, path)?;
-    Ok(())
+    crate::private_fs::write_private_file(path, &contents).with_context(|| {
+        format!(
+            "publishing Zetta process control endpoint {}",
+            path.display()
+        )
+    })
 }
 
 #[cfg(test)]

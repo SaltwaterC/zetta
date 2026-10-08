@@ -364,9 +364,7 @@ pub(crate) mod catalog {
                 .parent()
                 .context("session catalog has no parent")?;
             create_private_dir(parent)?;
-            let temporary = self.path.with_extension("json.tmp");
-            write_private_file(&temporary, &contents)?;
-            fs::rename(&temporary, &self.path)
+            write_private_file(&self.path, &contents)
                 .with_context(|| format!("publishing session catalog {}", self.path.display()))?;
             self.last_contents = Some(contents);
             Ok(())
@@ -389,35 +387,18 @@ pub(crate) mod catalog {
         }
     }
 
-    pub(crate) fn create_private_dir(path: &Path) -> Result<()> {
-        fs::create_dir_all(path)
-            .with_context(|| format!("creating session directory {}", path.display()))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
-        }
-        Ok(())
-    }
+    pub(crate) use crate::private_fs::{create_private_dir, write_private_file};
 
-    fn write_private_file(path: &Path, contents: &[u8]) -> std::io::Result<()> {
-        #[cfg(unix)]
-        {
-            use std::io::Write as _;
-            use std::os::unix::fs::OpenOptionsExt as _;
-            let mut file = fs::OpenOptions::new()
-                .create(true)
-                .truncate(true)
-                .write(true)
-                .mode(0o600)
-                .open(path)?;
-            file.write_all(contents)
-        }
-        #[cfg(not(unix))]
-        fs::write(path, contents)
-    }
+    /// As in the multiplexer's catalog: far beyond any real catalog.
+    const MAX_CATALOG_BYTES: u64 = 16 * 1024 * 1024;
 
     pub(crate) fn read_session_catalogs(directory: &Path) -> Result<Vec<BackgroundSessionCatalog>> {
+        match crate::private_fs::validate_private_dir(directory) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            result => result.with_context(|| {
+                format!("checking the session directory {}", directory.display())
+            })?,
+        }
         let entries = match fs::read_dir(directory) {
             Ok(entries) => entries,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -438,7 +419,10 @@ pub(crate) mod catalog {
             {
                 continue;
             }
-            let contents = fs::read(&path)?;
+            let Ok(contents) = crate::private_fs::read_private_file(&path, MAX_CATALOG_BYTES)
+            else {
+                continue;
+            };
             if let Ok(catalog) = serde_json::from_slice::<BackgroundSessionCatalog>(&contents)
                 && catalog.version == CATALOG_VERSION
             {
@@ -484,7 +468,14 @@ pub(crate) mod paths {
         {
             return PathBuf::from(path).join(".config/zetta");
         }
-        env::temp_dir().join("zetta")
+        // The multiplexer's per-user fallback, so that a build without it
+        // neither shares one predictable directory between every account nor
+        // disagrees with one that has it about where that directory is.
+        #[cfg(windows)]
+        let name = "Zetta";
+        #[cfg(not(windows))]
+        let name = "zetta";
+        crate::private_fs::private_fallback_dir().join(name)
     }
 
     pub(crate) fn session_catalog_dir() -> PathBuf {

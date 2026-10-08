@@ -105,6 +105,9 @@ Retain these Zetta changes when synchronizing:
   planted `cmd.exe` would otherwise win. `zmux`'s bootstrap calls
   `tty::resolve_application` and `program_search` too, so both ends share one
   policy.
+- `vte` is a path dependency on Zetta's fork in `crates/vte`, which bounds the
+  OSC buffer that crates.io vte 0.15.0 grows without limit under `std`. See
+  `crates/vte/UPSTREAM.md`.
 
 The eight Zetta commits carrying these changes are `d6aa84b`, `d7b896f`,
 `57ecffe`, `d83beb7`, `1f6b1f7`, `9de38c6`, `31c3303`, and `7ba5a85`.

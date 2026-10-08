@@ -38,7 +38,10 @@ use serde::{Serialize, de::DeserializeOwned};
 use subtle::ConstantTimeEq as _;
 use zeroize::Zeroizing;
 
-use crate::catalog::{create_private_dir, write_private_file};
+use crate::private_fs::{
+    MAX_ENDPOINT_BYTES, create_private_dir, read_private_file, validate_private_dir,
+    write_private_file,
+};
 
 /// A control message longer than this is refused rather than buffered, so a
 /// peer cannot make the daemon allocate without bound.
@@ -97,11 +100,27 @@ impl Endpoint {
         Ok(endpoint)
     }
 
+    /// Reads an endpoint only out of a private directory, only as a regular
+    /// file this user owns, and only if the socket it names sits beside it:
+    /// whoever could write an endpoint anywhere else could point a client, and
+    /// the secrets it sends, at a socket of their own.
     fn read_unchecked(path: &Path) -> Result<Self> {
-        let contents = std::fs::read(path)
+        let directory = path.parent().context("endpoint path has no parent")?;
+        validate_private_dir(directory).with_context(|| {
+            format!(
+                "checking the multiplexer endpoint directory {}",
+                directory.display()
+            )
+        })?;
+        let contents = read_private_file(path, MAX_ENDPOINT_BYTES)
             .with_context(|| format!("reading multiplexer endpoint {}", path.display()))?;
         let endpoint: Self = serde_json::from_slice(&contents)
             .with_context(|| format!("parsing multiplexer endpoint {}", path.display()))?;
+        anyhow::ensure!(
+            endpoint.socket_path.parent() == Some(directory),
+            "multiplexer endpoint {} names a socket outside its directory",
+            path.display()
+        );
         Ok(endpoint)
     }
 

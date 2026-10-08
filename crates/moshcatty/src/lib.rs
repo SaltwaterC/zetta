@@ -26,6 +26,7 @@ pub mod fragment;
 pub mod framebuffer;
 pub mod pb;
 pub mod prediction;
+pub(crate) mod replay;
 pub mod terminal;
 pub mod transport;
 

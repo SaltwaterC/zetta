@@ -74,6 +74,76 @@ fn detects_nested_worktree_names_from_subdirectories() {
     assert_eq!(metadata.main_root, fs::canonicalize(&fixture.main).unwrap());
 }
 
+/// Writes a self-contained linked-worktree lookalike in `directory` whose
+/// `commondir` names `common_gitdir`, with every other file it needs kept
+/// inside `directory` itself.
+fn plant_fake_linked_worktree(directory: &Path, common_gitdir: &Path) {
+    let gitdir = directory.join("metadata");
+    fs::create_dir_all(&gitdir).unwrap();
+    fs::write(
+        directory.join(".git"),
+        format!("gitdir: {}\n", gitdir.display()),
+    )
+    .unwrap();
+    fs::write(
+        gitdir.join("commondir"),
+        format!("{}\n", common_gitdir.display()),
+    )
+    .unwrap();
+    fs::write(
+        gitdir.join("gitdir"),
+        format!("{}\n", directory.join(".git").display()),
+    )
+    .unwrap();
+    fs::write(gitdir.join("HEAD"), "ref: refs/heads/wt/borrowed\n").unwrap();
+}
+
+#[test]
+fn a_fake_worktree_pointing_at_another_repository_is_not_detected() {
+    let fixture = Fixture::new();
+    let outsider = TempDir::new().unwrap();
+    let fake = outsider.path().join("fake");
+    plant_fake_linked_worktree(&fake, &fixture.main.join(".git"));
+
+    assert_eq!(detect_worktree_metadata(&fake).unwrap(), None);
+    assert_eq!(detect_worktree_name(&fake).unwrap(), None);
+}
+
+#[test]
+fn a_fake_worktree_gitdir_beside_the_common_worktrees_directory_is_not_detected() {
+    // The gitdir sits inside the registered repository's own `.git`, but not
+    // under `worktrees/`, so Git never created it as a linked worktree.
+    let fixture = Fixture::new();
+    let outsider = TempDir::new().unwrap();
+    let fake = outsider.path().join("fake");
+    let common_gitdir = fixture.main.join(".git");
+    plant_fake_linked_worktree(&fake, &common_gitdir);
+    let planted = common_gitdir.join("not-worktrees").join("borrowed");
+    fs::create_dir_all(planted.parent().unwrap()).unwrap();
+    fs::rename(fake.join("metadata"), &planted).unwrap();
+    fs::write(
+        fake.join(".git"),
+        format!("gitdir: {}\n", planted.display()),
+    )
+    .unwrap();
+
+    assert_eq!(detect_worktree_metadata(&fake).unwrap(), None);
+}
+
+#[test]
+fn a_worktree_added_by_git_with_a_relative_commondir_is_detected() {
+    let fixture = Fixture::new();
+    let linked = fixture.linked("wt/relative", "relative");
+    let gitdir = fs::canonicalize(fixture.main.join(".git/worktrees/relative")).unwrap();
+    // Git writes `../..`; pin that here so the containment check is exercised
+    // against Git's own relative layout, whatever this Git version wrote.
+    fs::write(gitdir.join("commondir"), "../..\n").unwrap();
+
+    let metadata = detect_worktree_metadata(&linked).unwrap().unwrap();
+    assert_eq!(metadata.name, "relative");
+    assert_eq!(metadata.main_root, fs::canonicalize(&fixture.main).unwrap());
+}
+
 #[test]
 fn ignores_the_main_worktree() {
     let fixture = Fixture::new();

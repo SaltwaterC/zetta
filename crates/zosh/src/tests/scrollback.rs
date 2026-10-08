@@ -164,3 +164,91 @@ fn the_two_markers_do_not_shadow_each_other() {
     assert_eq!(state.generation, 5);
     assert_eq!(state.evicted, 10);
 }
+
+/// `rows` framed and Base64-encoded into a rows marker, as `zosh-server`
+/// writes one.
+fn rows_marker(first: u64, rows: &[&[u8]]) -> Vec<u8> {
+    use base64::Engine as _;
+    let mut payload = Vec::new();
+    for row in rows {
+        payload.push(0);
+        payload.extend_from_slice(&u32::try_from(row.len()).unwrap().to_be_bytes());
+        payload.extend_from_slice(row);
+    }
+    let encoded = base64::engine::general_purpose::STANDARD_NO_PAD.encode(&payload);
+    format!("\x1b]777;zosh-scrollback;{first};{encoded}\x07").into_bytes()
+}
+
+/// The rows are written to the terminal raw, so a row is the one place a
+/// server could slip in a query whose answer the terminal would type back
+/// into the remote session. Every one of these must arrive as its text only.
+#[test]
+fn a_carried_row_keeps_its_text_and_loses_every_query_and_control() {
+    let hostile: &[(&[u8], &[u8])] = &[
+        (b"a\x1b]52;c;?\x07b", b"ab"),
+        (b"a\x1b]52;c;?\x1b\\b", b"ab"),
+        (b"a\xc2\x9d52;c;?\xc2\x9cb", b"ab"),
+        (b"a\x1b[6nb", b"ab"),
+        (b"a\x1b[cb", b"ab"),
+        (b"a\x1b[>0cb", b"ab"),
+        (b"a\x1b[?1049hb", b"ab"),
+        (b"a\x1b[21tb", b"ab"),
+        (b"a\x1b[2;1Hb", b"ab"),
+        (b"a\xc2\x9b6nb", b"ab"),
+        (b"a\x1bP$qm\x1b\\b", b"ab"),
+        (b"a\x1bP+q544e\x07still-in-dcs\x1b\\b", b"ab"),
+        (b"a\x1b_apc\x1b\\b", b"ab"),
+        (b"a\x1bZb", b"ab"),
+        (b"a\x1b#8b", b"ab"),
+        (b"a\x05\x07\x08\r\n\tb\x7f", b"ab"),
+        // A raw 8-bit CSI is not UTF-8: the byte goes, its tail is inert text.
+        (b"a\x9b6nb", b"a6nb"),
+        (b"a\x1b[1;31\x07mb", b"amb"),
+        (b"a\x1b]52;c;?", b"a"),
+    ];
+    for (row, expected) in hostile {
+        let mut state = ScrollbackState::default();
+        state.feed(&rows_marker(0, &[row]));
+        assert_eq!(
+            String::from_utf8_lossy(&state.rows[0].contents),
+            String::from_utf8_lossy(expected),
+            "row {:?}",
+            String::from_utf8_lossy(row)
+        );
+    }
+}
+
+/// What a row legitimately contains — text in any script, colours, attribute
+/// resets, gaps and erased runs — passes through byte for byte. A row the
+/// filter changed would also never compare equal to the same row on screen.
+#[test]
+fn every_row_vt100_formats_survives_the_filter_unchanged() {
+    let mut parser = vt100::Parser::new(4, 40, 0);
+    parser.screen_mut().set_capture_evicted_rows(true);
+    parser.process(
+        "\x1b[1;31mbold red\x1b[0m plain \x1b[38;5;208mindexed\x1b[48;2;1;2;3mtrue\x1b[m\r\n\
+         wide 漢字 and é\x1b[10Cgap\x1b[7m   \x1b[m\r\n\
+         \x1b[4;3mitalic underline\x1b[2m dim\x1b[22m \x1b[44m\x1b[5X\x1b[5Cerased\x1b[m\r\n"
+            .as_bytes(),
+    );
+    parser.process(b"\r\n\r\n\r\n\r\n");
+    let (_, rows) = parser.screen_mut().take_evicted_rows();
+    assert!(rows.len() >= 3);
+    let all: Vec<u8> = rows.iter().flat_map(|row| row.contents.clone()).collect();
+    for kept in [&b"\x1b[10C"[..], b"\x1b[5X", b"\x1b[38;5;208m"] {
+        assert!(
+            all.windows(kept.len()).any(|window| window == kept),
+            "the fixture no longer exercises {:?}: {:?}",
+            String::from_utf8_lossy(kept),
+            String::from_utf8_lossy(&all)
+        );
+    }
+    for row in rows {
+        assert_eq!(
+            sanitize_row(&row.contents),
+            row.contents,
+            "{:?}",
+            String::from_utf8_lossy(&row.contents)
+        );
+    }
+}

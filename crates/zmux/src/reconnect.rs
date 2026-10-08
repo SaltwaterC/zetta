@@ -7,7 +7,10 @@
 //! reconnect` identical, including their routing when the command is run from
 //! inside a Zetta terminal.
 
-use std::{env, fs, path::PathBuf};
+use std::{
+    env,
+    path::{Path, PathBuf},
+};
 
 use anyhow::{Context as _, Result};
 #[cfg(feature = "session-persistence")]
@@ -116,7 +119,7 @@ pub fn run_remote_attach(
             .with_context(|| {
                 format!("remote session {session_id} was not found or is not shared")
             })?;
-        let secret = remote_session_secret(&summary, identity_paths)?;
+        let secret = remote_session_secret(&summary, identity_paths, &target)?;
         let result = request_remote_attach(
             destination,
             port,
@@ -164,8 +167,8 @@ pub fn run_remote_admin(
     #[cfg(any(unix, windows))]
     {
         let target = RemoteTarget::new(destination).with_port(port);
-        let client =
-            Client::connect_remote(target).context("connecting to the remote multiplexer")?;
+        let client = Client::connect_remote(target.clone())
+            .context("connecting to the remote multiplexer")?;
         let summary = client
             .list()?
             .into_iter()
@@ -173,7 +176,7 @@ pub fn run_remote_admin(
             .with_context(|| {
                 format!("remote session {session_id} was not found or is not shared")
             })?;
-        let secret = remote_session_secret(&summary, identity_paths)?;
+        let secret = remote_session_secret(&summary, identity_paths, &target)?;
         match command {
             "kill" => client.kill_with_secret(session_id, secret.as_ref())?,
             "forget" => client.forget_with_secret(session_id, secret.as_ref())?,
@@ -190,15 +193,45 @@ pub fn run_remote_admin(
     }
 }
 
+/// The secret to send to the remote multiplexer at `target` for `summary`.
+///
+/// A sealed key is opened only if it belongs to `target` — the destination the
+/// user asked for, not anything the remote host said — because the host that
+/// offered the envelope is the one the key would be sent to. See
+/// [`crate::auto_protect::open_for_remote`].
 #[cfg(any(unix, windows))]
 fn remote_session_secret(
     summary: &crate::protocol::BackgroundSessionSummary,
     identity_paths: &[PathBuf],
+    target: &RemoteTarget,
+) -> Result<Option<SessionSecret>> {
+    #[cfg(feature = "session-persistence")]
+    {
+        remote_session_secret_with(summary, identity_paths, |envelope, identities| {
+            crate::auto_protect::open_for_remote(envelope, identities, target)
+        })
+    }
+    #[cfg(not(feature = "session-persistence"))]
+    {
+        let _ = (identity_paths, target);
+        if !summary.authentication_required {
+            return Ok(None);
+        }
+        crate::secret_prompt::prompt_for_reconnect_secret().map(Some)
+    }
+}
+
+/// [`remote_session_secret`], with how a sealed key is opened supplied by
+/// `open`.
+#[cfg(all(any(unix, windows), feature = "session-persistence"))]
+fn remote_session_secret_with(
+    summary: &crate::protocol::BackgroundSessionSummary,
+    identity_paths: &[PathBuf],
+    open: impl FnOnce(&str, &crate::persistence::IdentitySet) -> Result<SessionSecret>,
 ) -> Result<Option<SessionSecret>> {
     if !summary.authentication_required {
         return Ok(None);
     }
-    #[cfg(feature = "session-persistence")]
     if let Some(envelope) = summary.key_envelope.as_deref() {
         anyhow::ensure!(
             !identity_paths.is_empty(),
@@ -210,10 +243,8 @@ fn remote_session_secret(
             identity_paths,
             &passphrases,
         )?;
-        return crate::auto_protect::open(envelope, &identities).map(Some);
+        return open(envelope, &identities).map(Some);
     }
-    #[cfg(not(feature = "session-persistence"))]
-    let _ = identity_paths;
     crate::secret_prompt::prompt_for_reconnect_secret().map(Some)
 }
 
@@ -388,19 +419,10 @@ fn request_reconnect_session(
     attention_id: Option<u64>,
     secret: Option<SessionSecret>,
 ) -> Result<ReconnectSessionResult> {
-    let endpoint_path = control_endpoint_path(process_id);
-    let contents = fs::read(&endpoint_path).with_context(|| {
-        format!(
-            "reading Zetta process control endpoint {}",
-            endpoint_path.display()
-        )
-    })?;
-    let endpoint: ControlEndpoint =
-        serde_json::from_slice(&contents).context("parsing Zetta process control endpoint")?;
-    anyhow::ensure!(
-        endpoint.version == CONTROL_VERSION && endpoint.process_id == process_id,
-        "Zetta process control endpoint is outdated"
-    );
+    let directory = paths::session_catalog_dir();
+    crate::private_fs::validate_private_dir(&directory)
+        .with_context(|| format!("checking Zetta's session directory {}", directory.display()))?;
+    let endpoint = read_control_endpoint(&control_endpoint_path(process_id), process_id)?;
     send_reconnect_session_request(&endpoint, runner_id, session_id, attention_id, secret)
 }
 
@@ -417,29 +439,8 @@ fn request_multiplexer_reconnect(
     secret: Option<SessionSecret>,
 ) -> Result<ReconnectSessionResult> {
     let directory = paths::session_catalog_dir();
-    let entries = fs::read_dir(&directory)
+    let mut endpoints = running_control_endpoints(&directory)
         .with_context(|| format!("looking for a Zetta window in {}", directory.display()))?;
-
-    let mut endpoints = Vec::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let is_control = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name.starts_with("control-") && name.ends_with(".json"));
-        if !is_control {
-            continue;
-        }
-        let Ok(contents) = fs::read(&path) else {
-            continue;
-        };
-        let Ok(endpoint) = serde_json::from_slice::<ControlEndpoint>(&contents) else {
-            continue;
-        };
-        if endpoint.version == CONTROL_VERSION && process_is_running(endpoint.process_id) {
-            endpoints.push(endpoint);
-        }
-    }
     anyhow::ensure!(
         !endpoints.is_empty(),
         "no running Zetta window can attach a multiplexer session. Any window still running an \
@@ -512,8 +513,8 @@ pub fn try_run_resume_disk_session(identifier: &str, identity_paths: &[PathBuf])
             .then(crate::secret_prompt::prompt_for_reconnect_secret)
             .transpose()?;
 
-        let endpoint_entries = match fs::read_dir(&directory) {
-            Ok(entries) => entries,
+        let mut endpoints = match running_control_endpoints(&directory) {
+            Ok(endpoints) => endpoints,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
             Err(error) => {
                 return Err(error).with_context(|| {
@@ -521,20 +522,6 @@ pub fn try_run_resume_disk_session(identifier: &str, identity_paths: &[PathBuf])
                 });
             }
         };
-        let mut endpoints = endpoint_entries
-            .flatten()
-            .filter_map(|entry| {
-                let path = entry.path();
-                let name = path.file_name()?.to_str()?;
-                (name.starts_with("control-") && name.ends_with(".json"))
-                    .then(|| fs::read(path).ok())
-                    .flatten()
-                    .and_then(|contents| serde_json::from_slice::<ControlEndpoint>(&contents).ok())
-            })
-            .filter(|endpoint| {
-                endpoint.version == CONTROL_VERSION && process_is_running(endpoint.process_id)
-            })
-            .collect::<Vec<_>>();
         if endpoints.is_empty() {
             return Ok(false);
         }
@@ -758,22 +745,8 @@ fn request_remote_attach(
     protocol: &RemoteProtocolRequest,
 ) -> Result<ReconnectSessionResult> {
     let directory = paths::session_catalog_dir();
-    let entries = fs::read_dir(&directory)
+    let mut endpoints = running_control_endpoints(&directory)
         .with_context(|| format!("looking for a Zetta window in {}", directory.display()))?;
-    let mut endpoints = entries
-        .flatten()
-        .filter_map(|entry| {
-            let path = entry.path();
-            let name = path.file_name()?.to_str()?;
-            (name.starts_with("control-") && name.ends_with(".json"))
-                .then(|| fs::read(path).ok())
-                .flatten()
-                .and_then(|contents| serde_json::from_slice::<ControlEndpoint>(&contents).ok())
-        })
-        .filter(|endpoint| {
-            endpoint.version == CONTROL_VERSION && process_is_running(endpoint.process_id)
-        })
-        .collect::<Vec<_>>();
     anyhow::ensure!(
         !endpoints.is_empty(),
         "no running Zetta window accepted the remote session; open Zetta first"
@@ -882,6 +855,60 @@ fn write_message(stream: &mut ControlStream, message: &impl serde::Serialize) ->
 
 fn control_endpoint_path(process_id: u32) -> PathBuf {
     paths::session_catalog_dir().join(format!("control-{process_id}.json"))
+}
+
+/// The process a `control-PID.json` file name says published it.
+#[cfg(any(unix, windows))]
+fn control_endpoint_process_id(path: &Path) -> Option<u32> {
+    path.file_name()?
+        .to_str()?
+        .strip_prefix("control-")?
+        .strip_suffix(".json")?
+        .parse()
+        .ok()
+}
+
+/// Reads the control endpoint Zetta process `process_id` published at `path`.
+///
+/// The file is trusted on the same terms as the window's own reader in
+/// `process_control/endpoint.rs`: a private regular file of bounded size, from
+/// the process its name says, naming the socket beside it. A request carries a
+/// session secret, so a socket path the file's contents chose is never used.
+#[cfg(any(unix, windows))]
+fn read_control_endpoint(path: &Path, process_id: u32) -> Result<ControlEndpoint> {
+    let contents =
+        crate::private_fs::read_private_file(path, crate::private_fs::MAX_ENDPOINT_BYTES)
+            .with_context(|| {
+                format!("reading Zetta process control endpoint {}", path.display())
+            })?;
+    let endpoint: ControlEndpoint =
+        serde_json::from_slice(&contents).context("parsing Zetta process control endpoint")?;
+    anyhow::ensure!(
+        endpoint.version == CONTROL_VERSION && endpoint.process_id == process_id,
+        "Zetta process control endpoint is outdated"
+    );
+    anyhow::ensure!(
+        endpoint.socket_path == path.with_extension("sock"),
+        "Zetta process control endpoint {} names a socket that is not its own",
+        path.display()
+    );
+    Ok(endpoint)
+}
+
+/// Every control endpoint in `directory` whose process is still running,
+/// after checking that the directory itself is private.
+#[cfg(any(unix, windows))]
+fn running_control_endpoints(directory: &Path) -> std::io::Result<Vec<ControlEndpoint>> {
+    crate::private_fs::validate_private_dir(directory)?;
+    Ok(std::fs::read_dir(directory)?
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            let process_id = control_endpoint_process_id(&path)?;
+            read_control_endpoint(&path, process_id).ok()
+        })
+        .filter(|endpoint| process_is_running(endpoint.process_id))
+        .collect())
 }
 
 #[cfg(any(unix, windows))]

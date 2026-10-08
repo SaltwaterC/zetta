@@ -141,3 +141,171 @@ fn a_corrupt_envelope_is_an_error_rather_than_a_panic() {
     let truncated = &envelope(&sealed)[..envelope(&sealed).len() / 2];
     assert!(open(truncated, &identities).is_err());
 }
+
+const THIS_HOST: &str = "SHA256:bTBKZhY1f9R2YWiSdzVWcmJworfDpk06n3w9YpZPWJU";
+const ANOTHER_HOST: &str = "SHA256:2c0Q0m9v5fW9hX0p8yq8m7l6k5j4h3g2f1e0d9c8b7a";
+
+/// An identity on disk and the recipients that seal to it.
+fn sealing_pair(directory: &std::path::Path) -> (IdentitySet, RecipientSet) {
+    let (path, recipient) = identity_file(directory);
+    (
+        IdentitySet::from_paths(&[path]).unwrap(),
+        RecipientSet::parse(&[recipient]).unwrap(),
+    )
+}
+
+fn trusting(host_keys: &'static [&'static str]) -> impl FnOnce() -> Result<Vec<String>> {
+    move || Ok(host_keys.iter().map(|key| (*key).to_owned()).collect())
+}
+
+/// The substitution: a host offering an envelope that was sealed on another
+/// host — one the user's identity opens perfectly well — must not be sent the
+/// key inside it.
+#[test]
+fn a_key_sealed_on_another_host_is_not_opened_for_it() {
+    let directory = tempfile::tempdir().unwrap();
+    let (identities, recipients) = sealing_pair(directory.path());
+    let elsewhere = seal_for_host(&recipients, &[ANOTHER_HOST.to_owned()]).unwrap();
+    assert!(
+        open(envelope(&elsewhere), &identities).is_ok(),
+        "the envelope is one this identity can open"
+    );
+
+    let error = open_for_remote_with(
+        envelope(&elsewhere),
+        &identities,
+        "this-host",
+        trusting(&[THIS_HOST]),
+    )
+    .expect_err("another host's sealed key must not be released for this one");
+
+    assert!(error.to_string().contains("was not sent"), "{error:#}");
+    let key = elsewhere.secret.expose().rsplit("key=").next().unwrap();
+    assert!(!format!("{error:#}").contains(key));
+}
+
+#[test]
+fn a_key_sealed_on_the_destination_opens_for_it() {
+    let directory = tempfile::tempdir().unwrap();
+    let (identities, recipients) = sealing_pair(directory.path());
+    let sealed = seal_for_host(
+        &recipients,
+        &[ANOTHER_HOST.to_owned(), THIS_HOST.to_owned()],
+    )
+    .unwrap();
+
+    let opened = open_for_remote_with(
+        envelope(&sealed),
+        &identities,
+        "this-host",
+        trusting(&[THIS_HOST]),
+    )
+    .unwrap();
+
+    assert_eq!(opened.expose(), sealed.secret.expose());
+    assert!(sealed.authentication.verify(opened.expose()).is_some());
+}
+
+/// The binding is inside what the verifier was computed over, so it cannot be
+/// stripped off: the bare key on its own does not open the session.
+#[test]
+fn the_binding_is_part_of_the_secret() {
+    let directory = tempfile::tempdir().unwrap();
+    let (_, recipients) = sealing_pair(directory.path());
+    let sealed = seal_for_host(&recipients, &[THIS_HOST.to_owned()]).unwrap();
+
+    assert_eq!(
+        SealedKey::parse(sealed.secret.expose()).unwrap(),
+        SealedKey::Bound {
+            host_keys: vec![THIS_HOST.to_owned()]
+        }
+    );
+    let bare_key = sealed.secret.expose().rsplit("key=").next().unwrap();
+    assert_eq!(STANDARD_NO_PAD.decode(bare_key).unwrap().len(), KEY_BYTES);
+    assert!(sealed.authentication.verify(bare_key).is_none());
+}
+
+/// A version 1 envelope — the bare key — still opens for this machine's own
+/// multiplexer, but names no host, so it is never released to a remote one.
+#[test]
+fn an_unbound_envelope_opens_locally_but_not_for_a_remote_host() {
+    let directory = tempfile::tempdir().unwrap();
+    let (identities, recipients) = sealing_pair(directory.path());
+    let key = STANDARD_NO_PAD.encode([7; KEY_BYTES]);
+    let legacy = STANDARD_NO_PAD.encode(recipients.encrypt(key.as_bytes()).unwrap());
+
+    assert_eq!(open(&legacy, &identities).unwrap().expose(), key);
+
+    let mut asked = false;
+    let error = open_for_remote_with(&legacy, &identities, "this-host", || {
+        asked = true;
+        Ok(vec![THIS_HOST.to_owned()])
+    })
+    .expect_err("an unbound key must not be sent to a remote host");
+    assert!(error.to_string().contains("older Zetta"), "{error:#}");
+    assert!(!asked, "refused before the destination is even considered");
+}
+
+#[test]
+fn a_key_sealed_without_host_keys_is_only_opened_locally() {
+    let directory = tempfile::tempdir().unwrap();
+    let (identities, recipients) = sealing_pair(directory.path());
+    let sealed = seal_for_host(&recipients, &[]).unwrap();
+
+    assert!(open(envelope(&sealed), &identities).is_ok());
+    assert!(
+        open_for_remote_with(
+            envelope(&sealed),
+            &identities,
+            "this-host",
+            trusting(&[THIS_HOST])
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn a_destination_with_no_trusted_host_keys_is_sent_nothing() {
+    let directory = tempfile::tempdir().unwrap();
+    let (identities, recipients) = sealing_pair(directory.path());
+    let sealed = seal_for_host(&recipients, &[THIS_HOST.to_owned()]).unwrap();
+
+    assert!(
+        open_for_remote_with(envelope(&sealed), &identities, "this-host", trusting(&[])).is_err()
+    );
+    assert!(
+        open_for_remote_with(envelope(&sealed), &identities, "this-host", || {
+            anyhow::bail!("no ssh")
+        })
+        .is_err()
+    );
+}
+
+#[test]
+fn a_sealed_text_for_another_purpose_or_version_is_refused() {
+    let directory = tempfile::tempdir().unwrap();
+    let (identities, recipients) = sealing_pair(directory.path());
+    let seal_text =
+        |text: &str| STANDARD_NO_PAD.encode(recipients.encrypt(text.as_bytes()).unwrap());
+
+    for text in [
+        format!("{SEALED_KEY_TAG}2;purpose=disk-unlock;host={THIS_HOST};key=abc"),
+        format!("{SEALED_KEY_TAG}3;purpose=session-authentication;host={THIS_HOST};key=abc"),
+        format!("{SEALED_KEY_TAG}2;purpose=session-authentication;host={THIS_HOST};key="),
+        format!("{SEALED_KEY_TAG}2;purpose=session-authentication;key=abc"),
+        format!(
+            "{SEALED_KEY_TAG}2;purpose=session-authentication;host={ANOTHER_HOST};host={THIS_HOST};key=abc"
+        ),
+        format!(
+            "{SEALED_KEY_TAG}2;purpose=session-authentication;host={THIS_HOST};key=abc;extra=1"
+        ),
+    ] {
+        let envelope = seal_text(&text);
+        assert!(open(&envelope, &identities).is_err(), "{text}");
+        assert!(
+            open_for_remote_with(&envelope, &identities, "this-host", trusting(&[THIS_HOST]))
+                .is_err(),
+            "{text}"
+        );
+    }
+}

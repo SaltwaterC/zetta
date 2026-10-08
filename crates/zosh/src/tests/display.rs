@@ -673,3 +673,40 @@ fn dropped_rows_are_reported_where_they_would_have_been() {
     );
     assert_eq!(model.text().trim_end(), server.text().trim_end());
 }
+
+/// End to end: a server that hides a clipboard read and a cursor-position
+/// query inside a carried row gets neither to the terminal.
+#[test]
+fn a_query_inside_a_carried_row_never_reaches_the_terminal() {
+    let mut server = FakeServer::new(4, 40, true);
+    let mut terminal = ClientTerminal::new(DisplayScreen::new(4, 40));
+    server.run(&lines(0, 10));
+    let diff = server.diff();
+    // Swap the honest marker for one whose first row carries the queries.
+    let marker_end = diff
+        .iter()
+        .position(|&byte| byte == 0x07)
+        .expect("a marker");
+    let mut hostile = {
+        use base64::Engine as _;
+        let row = b"LINE0\x1b]52;c;?\x07\x1b[6n\x1b[c\x1bP$qm\x1b\\";
+        let mut payload = vec![0];
+        payload.extend_from_slice(&(row.len() as u32).to_be_bytes());
+        payload.extend_from_slice(row);
+        let encoded = base64::engine::general_purpose::STANDARD_NO_PAD.encode(&payload);
+        format!("\x1b]777;zosh-scrollback;0;{encoded}\x07").into_bytes()
+    };
+    hostile.extend_from_slice(&diff[marker_end + 1..]);
+    assert!(terminal.apply_diff(0, 1, &hostile));
+
+    let painted = terminal.render(&[], OverlayCursor::Unchanged);
+
+    let text = String::from_utf8_lossy(&painted);
+    assert!(text.contains("LINE0"), "the row's text was lost: {text:?}");
+    for query in ["\x1b]52", "\x1b[6n", "\x1b[c", "\x1bP"] {
+        assert!(
+            !text.contains(query),
+            "{query:?} reached the terminal: {text:?}"
+        );
+    }
+}

@@ -39,13 +39,9 @@ fn controlling_pty() -> (std::fs::File, std::fs::File) {
     }
 }
 
-fn run_helper(
-    name: &str,
-    input: &[u8],
-    clipboard: &str,
-    allowed: bool,
-) -> (std::process::Output, String) {
-    let (mut master, slave) = controlling_pty();
+/// Starts a helper whose controlling terminal is the returned master.
+fn spawn_helper(name: &str, input: &[u8]) -> (std::process::Child, std::fs::File) {
+    let (master, slave) = controlling_pty();
     let slave_fd = std::os::fd::AsRawFd::as_raw_fd(&slave);
     let executable = match name {
         "zcopy" => env!("CARGO_BIN_EXE_zcopy"),
@@ -76,6 +72,16 @@ fn run_helper(
     thread::spawn(move || {
         child_stdin.write_all(&input).unwrap();
     });
+    (child, master)
+}
+
+fn run_helper(
+    name: &str,
+    input: &[u8],
+    clipboard: &str,
+    allowed: bool,
+) -> (std::process::Output, String) {
+    let (child, mut master) = spawn_helper(name, input);
     let copied = Arc::new(Mutex::new(String::new()));
     let copied_by_host = Arc::clone(&copied);
     let clipboard = clipboard.to_owned();
@@ -91,15 +97,17 @@ fn run_helper(
             let mut frames = Vec::new();
             scanner.filter(&buffer[..read], |frame| frames.push(frame));
             for frame in frames {
-                let response = host.handle(
-                    frame,
-                    allowed,
-                    |text| {
-                        *copied_by_host.lock().unwrap() = text.to_owned();
-                        Ok(())
-                    },
-                    || Ok(Some(clipboard.clone())),
-                );
+                let response = host
+                    .handle(
+                        frame,
+                        allowed,
+                        |text| {
+                            *copied_by_host.lock().unwrap() = text.to_owned();
+                            Ok(())
+                        },
+                        || Ok(Some(clipboard.clone())),
+                    )
+                    .unwrap();
                 let done = matches!(response.message, Message::Done | Message::Error(_));
                 master.write_all(&response.encode()).unwrap();
                 if done {
@@ -151,4 +159,50 @@ fn empty_clipboards_and_empty_copy_are_successful() {
     let (paste, _) = run_helper("zpaste", b"", "", true);
     assert!(paste.status.success());
     assert!(paste.stdout.is_empty());
+}
+
+/// A helper that abandons a transfer tells the host, which then drops the
+/// transfer's data instead of holding it until the transfer times out.
+#[test]
+fn an_abandoned_copy_cancels_its_host_transfer() {
+    let (child, mut master) = spawn_helper("zcopy", b"abandoned");
+    let host_thread = thread::spawn(move || {
+        let mut scanner = Scanner::default();
+        let mut host = Host::default();
+        let mut buffer = [0; 8192];
+        loop {
+            let read = master.read(&mut buffer).unwrap();
+            assert_ne!(read, 0, "the helper left without cancelling");
+            let mut frames = Vec::new();
+            scanner.filter(&buffer[..read], |frame| frames.push(frame));
+            for frame in frames {
+                let cancelled = matches!(frame.message, Message::Error(_));
+                let data = matches!(frame.message, Message::Data { .. });
+                let id = frame.id;
+                let response = host.handle(frame, false, |_| Ok(()), || Ok(None));
+                if cancelled {
+                    assert!(response.is_none());
+                    return host.handle(
+                        zclip::protocol::Frame {
+                            id,
+                            message: Message::End,
+                        },
+                        false,
+                        |_| panic!("a cancelled copy reached the clipboard"),
+                        || Ok(None),
+                    );
+                }
+                let mut response = response.unwrap();
+                if data {
+                    // An acknowledgement the helper cannot accept, so it gives up.
+                    response.message = Message::Ack { next_sequence: 99 };
+                }
+                master.write_all(&response.encode()).unwrap();
+            }
+        }
+    });
+    let output = child.wait_with_output().unwrap();
+    assert!(!output.status.success());
+    let after_cancel = host_thread.join().unwrap().unwrap();
+    assert!(matches!(after_cancel.message, Message::Error(_)));
 }

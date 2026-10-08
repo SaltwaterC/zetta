@@ -2359,7 +2359,7 @@ impl TerminalBuilder {
             term_config: config,
             output_processor: Processor::<StdSyncHandler>::new(),
             output_clipboard_scanner: zclip::protocol::Scanner::default(),
-            remote_clipboard: zclip::host::Host::default(),
+            remote_clipboard: clipboard_channel::RemoteClipboard::default(),
             remote_clipboard_paste_allowed: false,
             title_override: None,
             events: VecDeque::with_capacity(10),
@@ -3217,7 +3217,7 @@ impl TerminalBuilder {
                 term_config: config,
                 output_processor,
                 output_clipboard_scanner: zclip::protocol::Scanner::default(),
-                remote_clipboard: zclip::host::Host::default(),
+                remote_clipboard: clipboard_channel::RemoteClipboard::default(),
                 remote_clipboard_paste_allowed: false,
                 title_override: terminal_title_override,
                 events: VecDeque::with_capacity(10), //Should never get this high.
@@ -3526,7 +3526,7 @@ pub struct Terminal {
     term_config: AlacrittyTermConfig,
     output_processor: Processor<StdSyncHandler>,
     output_clipboard_scanner: zclip::protocol::Scanner,
-    remote_clipboard: zclip::host::Host,
+    remote_clipboard: clipboard_channel::RemoteClipboard,
     remote_clipboard_paste_allowed: bool,
     events: VecDeque<InternalEvent>,
     /// This is only used for mouse mode cell change detection
@@ -3782,17 +3782,22 @@ impl Terminal {
         self.remote_clipboard_paste_allowed = allowed;
     }
 
-    pub fn handle_remote_clipboard_frame(&mut self, frame: zclip::protocol::Frame) {
+    /// Serves a clipboard request printed by the pane. The answer is written
+    /// later, from the background: see `clipboard_channel`.
+    pub fn handle_remote_clipboard_frame(
+        &mut self,
+        frame: zclip::protocol::Frame,
+        cx: &mut Context<Self>,
+    ) {
         if self.pty_control.is_none() {
             return;
         }
-        let response = self.remote_clipboard.handle(
-            frame,
-            self.remote_clipboard_paste_allowed,
-            clipboard_channel::copy,
-            clipboard_channel::paste,
-        );
-        self.write_to_pty(response.encode());
+        if let Some(response) =
+            self.remote_clipboard
+                .handle(frame, self.remote_clipboard_paste_allowed, cx)
+        {
+            self.write_to_pty(response.encode());
+        }
     }
 
     /// Enable UI wakeups while this terminal is visible.
@@ -3925,7 +3930,7 @@ impl Terminal {
                 self.read_selection_clipboard(format, cx)
             }
             TerminalBackendEvent::ClipboardFrame(frame) => {
-                self.handle_remote_clipboard_frame(frame);
+                self.handle_remote_clipboard_frame(frame, cx);
             }
             TerminalBackendEvent::PtyWrite(out) => self.write_to_pty(out.into_bytes()),
             TerminalBackendEvent::TextAreaSizeRequest(format) => {
@@ -4390,7 +4395,7 @@ impl Terminal {
             .output_clipboard_scanner
             .filter_cow(bytes, |frame| frames.push(frame));
         for frame in frames {
-            self.handle_remote_clipboard_frame(frame);
+            self.handle_remote_clipboard_frame(frame, cx);
         }
         let mut previous_byte_was_cr = false;
         let converted = convert_lf_to_crlf(&visible, &mut previous_byte_was_cr);

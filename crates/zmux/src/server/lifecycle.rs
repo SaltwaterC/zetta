@@ -1646,6 +1646,66 @@ pub(super) fn spawn_shared_batch(
     })
 }
 
+/// Checks a protected resume's secret, returning the response that refuses it
+/// or `None` when the resume may go ahead (including when nothing protects the
+/// record).
+///
+/// The verifier comes from the client, which decrypted the record, so it is
+/// held to the import policy before anything is hashed; and the check goes
+/// through the daemon's [`VerificationGate`] like every other, under the
+/// daemon's own refusal window — see [`check_resume_secret`]. A failure is
+/// written back to the record's authentication sidecar, so a daemon started
+/// later begins from it.
+#[cfg(feature = "session-persistence")]
+fn authenticate_resume(
+    daemon: &Daemon,
+    request: &mut crate::messages::ResumeRequest,
+    peer_process_id: Option<u32>,
+    fallback_persistence: &mut Option<PersistenceStore>,
+) -> Result<Option<Response>> {
+    let Some(verifier) = request.verifier.as_ref() else {
+        return Ok(None);
+    };
+    anyhow::ensure!(
+        peer_process_id.is_some(),
+        "protected restores require a verified peer process"
+    );
+    let authentication = SessionAuthentication::from_verifier(verifier.clone())?;
+    let reported = ReportedResumeBackoff {
+        failed_authentications: request.failed_authentications,
+        refusing: request.backoff_seconds > unix_now().saturating_sub(request.updated_at),
+    };
+    if resume_refused(daemon, request.record_id, reported) {
+        return Ok(Some(Response::AuthenticationFailed));
+    }
+    let Some(secret) = request.secret.as_deref() else {
+        return Ok(Some(Response::AuthenticationRequired));
+    };
+    let (failed_authentications, backoff_seconds) =
+        match check_resume_secret(daemon, request.record_id, &authentication, secret, reported) {
+            ResumeCheck::Verified => return Ok(None),
+            ResumeCheck::Refused => return Ok(Some(Response::AuthenticationFailed)),
+            ResumeCheck::Failed {
+                failed_authentications,
+                backoff_seconds,
+            } => (failed_authentications, backoff_seconds),
+        };
+    request.secret = None;
+    request.failed_authentications = failed_authentications;
+    request.backoff_seconds = backoff_seconds;
+    request.updated_at = unix_now();
+    let mut persistence = daemon.persistence.lock();
+    if let Some(persistence) = persistence.as_mut().or(fallback_persistence.as_mut()) {
+        persistence.update_authentication(
+            request.record_id,
+            request.updated_at,
+            request.failed_authentications,
+            request.backoff_seconds,
+        )?;
+    }
+    Ok(Some(Response::AuthenticationFailed))
+}
+
 pub(super) fn resume(
     daemon: &Arc<Daemon>,
     request: crate::messages::ResumeRequest,
@@ -1726,44 +1786,13 @@ pub(super) fn resume(
             "session {} is already being resumed",
             request.record_id
         );
-        if let Some(verifier) = request.verifier.as_ref() {
-            anyhow::ensure!(
-                peer_process_id.is_some(),
-                "protected restores require a verified peer process"
-            );
-            let authentication = SessionAuthentication::from_verifier(verifier.clone())?;
-            let elapsed = unix_now().saturating_sub(request.updated_at);
-            if request.backoff_seconds > elapsed {
-                return connection.send(&Response::AuthenticationFailed);
-            }
-            let Some(secret) = request.secret.as_deref() else {
-                return connection.send(&Response::AuthenticationRequired);
-            };
-            if authentication.verify(secret).is_none() {
-                request.secret = None;
-                request.failed_authentications = request.failed_authentications.saturating_add(1);
-                request.backoff_seconds =
-                    crate::auth::failed_authentication_delay(request.failed_authentications)
-                        .as_secs();
-                request.updated_at = unix_now();
-                let mut persistence = daemon.persistence.lock();
-                if let Some(persistence) = persistence.as_mut() {
-                    persistence.update_authentication(
-                        request.record_id,
-                        request.updated_at,
-                        request.failed_authentications,
-                        request.backoff_seconds,
-                    )?;
-                } else if let Some(persistence) = fallback_persistence.as_mut() {
-                    persistence.update_authentication(
-                        request.record_id,
-                        request.updated_at,
-                        request.failed_authentications,
-                        request.backoff_seconds,
-                    )?;
-                }
-                return connection.send(&Response::AuthenticationFailed);
-            }
+        if let Some(refusal) = authenticate_resume(
+            daemon,
+            &mut request,
+            peer_process_id,
+            &mut fallback_persistence,
+        )? {
+            return connection.send(&refusal);
         }
         // The secret is only a request credential. It must not survive in the
         // daemon's restored-session memory after the verifier has been checked.

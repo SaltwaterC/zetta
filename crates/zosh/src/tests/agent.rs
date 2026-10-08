@@ -369,3 +369,87 @@ fn windows_agent_pipe_refuses_a_name_that_already_exists() {
 
     let _ = unsafe { CloseHandle(squatter) };
 }
+
+/// What a malicious server sends to start forwarding the client never agreed
+/// to: a negotiation, then a well-formed request on a new connection.
+fn unsolicited_forwarding() -> Vec<HostEvent> {
+    vec![
+        HostEvent::AgentReady {
+            supported: true,
+            error: None,
+        },
+        HostEvent::AgentRequest {
+            id: 1,
+            connection_id: 1,
+            frame: frame(&[11]),
+        },
+        HostEvent::AgentClose {
+            id: 2,
+            connection_id: 1,
+            error: None,
+        },
+    ]
+}
+
+#[test]
+fn agent_events_are_ignored_when_forwarding_was_not_requested() {
+    let mut bridge = AgentBridge::with_agent(false, None, None);
+
+    let commands = bridge.handle_events(&unsolicited_forwarding());
+
+    assert!(commands.is_empty(), "{commands:?}");
+    assert!(
+        !bridge.negotiated,
+        "an unrequested negotiation was accepted"
+    );
+    assert!(bridge.connections.is_empty());
+}
+
+#[test]
+fn agent_events_are_ignored_when_the_requested_agent_is_unavailable() {
+    let missing = std::env::temp_dir().join(format!(
+        "zosh-no-such-agent-{}-{:?}",
+        std::process::id(),
+        Instant::now()
+    ));
+    let mut bridge = AgentBridge::with_agent(true, None, Some(missing));
+    assert!(!bridge.enabled());
+
+    let commands = bridge.handle_events(&unsolicited_forwarding());
+
+    assert!(commands.is_empty(), "{commands:?}");
+    assert!(!bridge.negotiated);
+    assert!(bridge.connections.is_empty());
+}
+
+#[test]
+fn a_request_reaching_a_bridge_without_an_agent_is_closed_not_a_panic() {
+    // The state `handle_events` refuses to reach, forced: negotiated, but no
+    // agent. The request must be refused as a protocol error.
+    let mut bridge = AgentBridge::with_agent(false, None, None);
+    bridge.negotiated = true;
+    bridge.path = None;
+    let request = [HostEvent::AgentRequest {
+        id: 1,
+        connection_id: 1,
+        frame: frame(&[11]),
+    }];
+
+    let commands = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        bridge.process_events(&request)
+    }))
+    .expect("an agent request without an agent panicked");
+
+    assert!(matches!(
+        commands.as_slice(),
+        [AgentClientCommand::Response { closed: true, .. }]
+    ));
+}
+
+#[test]
+fn printable_escapes_controls_and_bidi_overrides_but_keeps_text() {
+    assert_eq!(
+        printable("bad\x1b]52;c;?\x07 \u{202e}txt.exe\u{9b} ok é"),
+        "bad\\u{1b}]52;c;?\\u{7} \\u{202e}txt.exe\\u{9b} ok é"
+    );
+}

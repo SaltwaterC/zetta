@@ -181,6 +181,7 @@ fn short_session_ids_are_only_displayed_when_unambiguous() {
 #[test]
 fn legacy_catalogs_are_ignored_after_the_schema_bump() {
     let directory = tempfile::tempdir().unwrap();
+    create_private_dir(directory.path()).unwrap();
     let path = directory
         .path()
         .join(format!("zetta-{}-legacy.json", std::process::id()));
@@ -402,6 +403,7 @@ fn command_lines_make_argument_boundaries_visible() {
 #[test]
 fn control_endpoint_files_are_not_parsed_as_session_catalogs() {
     let directory = tempfile::tempdir().unwrap();
+    create_private_dir(directory.path()).unwrap();
     fs::write(
         directory.path().join("control-123.json"),
         r#"{"version":1,"address":"127.0.0.1:1"}"#,
@@ -421,5 +423,55 @@ fn application_name_comes_from_the_same_argv_as_the_command_line() {
     assert_eq!(
         application_from_command_line(Some(&["C:\\Tools\\vim.exe".to_owned()])),
         Some("vim.exe".to_owned())
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn publishing_a_catalog_does_not_write_through_a_planted_temporary_name() {
+    // The publisher used to write `<catalog>.json.tmp` with truncate, so a
+    // link planted at that predictable name redirected the write.
+    let directory = tempfile::tempdir().unwrap();
+    let sessions = directory.path().join("sessions");
+    create_private_dir(&sessions).unwrap();
+    let path = sessions.join(format!("zetta-{}-9.json", std::process::id()));
+    let victim = directory.path().join("victim");
+    fs::write(&victim, b"keep").unwrap();
+    std::os::unix::fs::symlink(&victim, path.with_extension("json.tmp")).unwrap();
+
+    let mut publisher = SessionCatalogPublisher::at_path(path.clone());
+    publisher
+        .publish_sessions(vec![BackgroundSessionSummary {
+            id: 1,
+            title: "shell".to_owned(),
+            authentication_required: false,
+            active_pane: 1,
+            layout: BackgroundPaneLayout::Pane { pane_id: 1 },
+            panes: Vec::new(),
+            held: false,
+            scoped_to: None,
+            key_envelope: None,
+        }])
+        .unwrap();
+
+    assert_eq!(fs::read(&victim).unwrap(), b"keep");
+    assert!(path.is_file());
+}
+
+#[cfg(unix)]
+#[test]
+fn catalogs_are_not_read_from_a_directory_others_can_write() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let directory = tempfile::tempdir().unwrap();
+    let sessions = directory.path().join("sessions");
+    create_private_dir(&sessions).unwrap();
+    fs::set_permissions(&sessions, fs::Permissions::from_mode(0o777)).unwrap();
+
+    assert!(read_session_catalogs(&sessions).is_err());
+    assert!(
+        read_session_catalogs(&directory.path().join("absent"))
+            .unwrap()
+            .is_empty()
     );
 }

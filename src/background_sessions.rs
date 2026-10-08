@@ -23,7 +23,7 @@ pub(crate) use crate::local_sessions::auth::{
 };
 #[cfg(not(feature = "zmux"))]
 pub(crate) use crate::local_sessions::catalog::{
-    application_from_command_line, create_private_dir, read_session_catalogs,
+    application_from_command_line, read_session_catalogs,
 };
 #[cfg(not(feature = "zmux"))]
 pub(crate) use crate::local_sessions::protocol::{
@@ -33,9 +33,7 @@ pub(crate) use crate::local_sessions::protocol::{
 #[cfg(feature = "zmux")]
 pub(crate) use zmux::auth::{SessionAuthentication, SessionSecret, VerifiedSession};
 #[cfg(feature = "zmux")]
-pub(crate) use zmux::catalog::{
-    application_from_command_line, create_private_dir, read_session_catalogs,
-};
+pub(crate) use zmux::catalog::{application_from_command_line, read_session_catalogs};
 #[cfg(feature = "zmux")]
 pub(crate) use zmux::protocol::{
     BackgroundPaneExit, BackgroundPaneExitReason, BackgroundPaneExitSource, BackgroundPaneLayout,

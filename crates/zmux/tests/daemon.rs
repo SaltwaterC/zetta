@@ -1616,10 +1616,12 @@ fn protected_disk_resume_preserves_failed_authentication_backoff() {
     assert_eq!(metadata["failed_authentications"], 1);
     assert_eq!(metadata["backoff_seconds"], 1);
 
-    // Expire the persisted refusal window explicitly: sleeping depends on the
-    // wall clock advancing and cannot distinguish a refused attempt from a
-    // checked wrong secret, since both return AuthenticationFailed.
+    // Expire the persisted refusal window explicitly, and wait out the
+    // daemon's own: that one is the daemon's, so no request can expire it.
+    // Both return AuthenticationFailed, so the failure count below is what
+    // tells a checked wrong secret from a refused attempt.
     update_backoff(0, 1);
+    std::thread::sleep(zmux::auth::failed_authentication_delay(1) + Duration::from_millis(100));
     let wrong = client.resume_with_secret(
         pane.session_id,
         std::slice::from_ref(&identity_path),

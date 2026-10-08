@@ -33,7 +33,7 @@ impl ProcessControlServer {
         let parent = endpoint_path
             .parent()
             .context("control endpoint has no parent")?;
-        crate::background_sessions::create_private_dir(parent)?;
+        crate::private_fs::create_private_dir(parent)?;
         let socket_path = control_socket_path(&endpoint_path);
         remove_socket_if_present(&socket_path)?;
         let listener = UnixListener::bind(&socket_path)

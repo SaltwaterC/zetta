@@ -171,6 +171,15 @@ write one anywhere. Base64 is what keeps the payload inside an OSC string, so
 that a Mosh implementation which has never heard of the extension discards it
 as an unknown OSC rather than drawing it.
 
+The client writes the rows to its terminal directly rather than through its
+emulator, so it keeps only what a row can legitimately contain: printable
+text, SGR (`CSI … m`), cursor forward (`CSI n C`) and erase characters
+(`CSI n X`), with plain numeric parameters — everything the server's row
+formatter emits. Every other C0 or C1 control, every other escape, and the
+whole of any OSC, DCS, SOS, PM or APC string is dropped, as are bytes that are
+not UTF-8. A row therefore cannot carry a terminal query, whose reply the
+terminal would otherwise type into the remote session.
+
 A marker is sent whenever the count has moved, **even with no rows attached**:
 the number is how the client learns where the screen it is about to be shown
 sits in the session's output. A count that moved further than the rows carried
@@ -470,6 +479,11 @@ decision. Its inherited `SSH_AUTH_SOCK` is removed in all cases; it is set to
 the private socket only after a successful negotiation. A stock Mosh client,
 an old Zosh server, a missing local agent, a failed socket, or a negotiation
 timeout leaves a normal terminal alive and produces at most one diagnostic.
+A client that was not asked to forward, or found no usable local agent,
+ignores every agent record a server sends, so a server cannot start
+forwarding the client did not offer. Error text a server puts in a ready
+record is printed with its control and bidirectional formatting
+characters escaped.
 
 The agent extension uses user field 23 and host field 21. User field 23
 contains either a versioned hello or one response; host field 21 contains a

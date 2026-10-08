@@ -1207,17 +1207,9 @@ fn write_saved_recipients(directory: &Path, recipients: &[String]) -> Result<()>
 }
 
 fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
-    let temporary = path.with_extension(format!("tmp-{}", std::process::id()));
-    catalog::write_private_file(&temporary, bytes)
-        .with_context(|| format!("writing private file {}", temporary.display()))?;
-    #[cfg(windows)]
-    if path.exists() {
-        fs::remove_file(path)
-            .with_context(|| format!("replacing private file {}", path.display()))?;
-    }
-    fs::rename(&temporary, path)
-        .with_context(|| format!("committing private file {}", path.display()))?;
-    Ok(())
+    // Already atomic: it writes a fresh, randomly named file and renames it.
+    catalog::write_private_file(path, bytes)
+        .with_context(|| format!("writing private file {}", path.display()))
 }
 
 fn unix_now() -> u64 {

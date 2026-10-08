@@ -260,6 +260,48 @@ be decided before the record is decrypted.
 The multiplexer is unchanged by any of this. It stores the same verifier, checks
 the same way, and never receives an identity.
 
+#### Opening a sealed key for a remote host
+
+A sealed key is opened on the machine you attach from, and the key is then sent
+to the multiplexer holding the session. For a remote session that multiplexer is
+also the one that listed the envelope, so a host holding some other session's
+envelope — one sealed to the same recipients — could offer it as its own and be
+sent that session's key. The sealed text therefore records which host it belongs
+to, and the key is only sent to that host:
+
+- The host is named by its **SSH host keys**. Zetta reads the sealing machine's
+  public host keys (`ssh_host_{ed25519,ecdsa,rsa}_key.pub` in `/etc/ssh` or
+  `/usr/local/etc/ssh`; `%ProgramData%\ssh` on Windows) and seals their
+  fingerprints with the key. The attaching machine asks its own OpenSSH which
+  host keys it trusts for the destination you chose (`ssh -G`, then
+  `ssh-keygen -F` against the `known_hosts` files it reports — the same entries
+  that SSH connection is verified against), and sends the key only if one
+  matches. Aliases, IP addresses, `ProxyJump` and forwarded ports all work,
+  because they all end at the same host key.
+- A mismatch is reported and **nothing is sent**: by the CLI (`zmux attach`,
+  `zmux kill`/`forget`/`share`/`unshare` with `-H`) and by the remote-session
+  dialog alike.
+- What cannot be matched is refused rather than guessed at: a session sealed on
+  a machine whose host keys were not readable at those paths, a destination
+  trusted only through `@cert-authority` or a `KnownHostsCommand`, and a
+  `known_hosts` with no entry for the destination (for example
+  `UserKnownHostsFile /dev/null`).
+- **Sealed keys from before this binding** carry no host. They still open for
+  the machine's own multiplexer (`zmux reconnect`, the local picker, disk
+  resume), but are never sent to a remote one. Reattach such a session on its
+  own host; sessions protected after updating carry the binding. There is no
+  prompt to override this, because nothing would distinguish a legitimate old
+  envelope from a substituted one.
+- The binding is to a host, not a session. Session IDs are not known when a key
+  is sealed, and a session's verifier lives in the multiplexer on its host, so a
+  key swapped between two sessions on the bound host only ever reaches the
+  process already holding both. Two machines cloned from one image share host
+  keys and are one host to this check, as they are to SSH.
+
+The bound text, not just the 256-bit key inside it, is the session's secret, so
+the binding cannot be stripped off and the bare key used instead, and a Zetta
+from before this change still opens new envelopes.
+
 ### SSH identity cipher compatibility
 
 Some OpenSSH versions encrypt private keys with
@@ -841,6 +883,30 @@ session, so guessing at one session neither locks you out of another nor
 accumulates into shared state. Attempts also serialize through the control
 socket, making this a global bound on the guessing rate rather than a
 per-connection one.
+
+Each check costs at most one ordinary verification. A verifier is supplied by
+whoever protects a session (and by `zmux resume`, from the record it decrypted),
+and Argon2 takes its costs from the verifier, so the multiplexer only accepts
+Argon2id version 19 with a 16–64 byte salt, a 32-byte hash, and costs no higher
+than the ones Zetta writes: 19 MiB, two passes, one lane. Anything else is
+refused before it is hashed. Every verifier Zetta has written, including those
+in disk records and those handed over by `zmux --upgrade`, uses exactly those
+values. A handed-over session whose verifier exceeds them — possible only if an
+older multiplexer accepted one — stays protected but cannot be opened with a
+secret, rather than failing the upgrade. At most four checks run at once across
+every session and disk record, and one at a time per session, so verification
+holds at most four times 19 MiB.
+
+Resuming a protected disk record goes through the same checks and the same
+escalating backoff. The backoff is the multiplexer's own: a resume request also
+reports the failure count and window stored in the record, which can lengthen
+the wait but never shorten it. After a wrong secret the new count is written
+back into the record, so a restarted multiplexer starts from it — though, since
+that count reaches it through the client that decrypted the record, the
+multiplexer's own memory of failures is lost with it. This is an online limit
+only. The verifier is inside the record, so anyone holding an identity that
+decrypts the record can guess against it offline, at their own speed; a typed
+secret on a disk record is only as strong as the secret itself.
 
 ### The prerequisite: process memory must be protected
 

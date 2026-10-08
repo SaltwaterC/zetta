@@ -830,3 +830,97 @@ fn a_frame_after_an_unacknowledged_one_builds_on_it() {
         "the second frame builds on the unacknowledged first"
     );
 }
+
+/// `datagram` re-sealed under `seq`, as a peer holding the key would have
+/// sent it: the shape of a captured datagram once the sequence numbers
+/// around it have moved on.
+fn resealed(key: &[u8; 16], datagram: &[u8], seq: u64) -> Vec<u8> {
+    let ocb = Ocb::new(key).unwrap();
+    let (dir_seq, plaintext) = ocb.open_datagram(datagram).unwrap();
+    ocb.seal_datagram((dir_seq & !moshcatty::crypto::SEQ_MASK) | seq, &plaintext)
+}
+
+#[test]
+fn a_replayed_datagram_older_than_the_window_neither_roams_nor_refreshes_liveness() {
+    let key = [0x23; 16];
+    let mut server = ServerTransport::new(Ocb::new(&key).unwrap());
+    let mut client = moshcatty::transport::Transport::new_client(Ocb::new(&key).unwrap());
+    client.set_pending(b"x".to_vec());
+    let captured = client.tick().remove(0);
+    let home: SocketAddr = "192.0.2.1:60001".parse().unwrap();
+    let attacker: SocketAddr = "198.51.100.7:4444".parse().unwrap();
+    let mut peer = None;
+
+    let first = server.receive(&captured).unwrap();
+    roam(&mut peer, &first, home);
+    assert_eq!(peer, Some(home));
+    // The client goes on talking from home long enough for the captured
+    // datagram's sequence number to leave any replay memory.
+    let captured_seq =
+        u64::from_be_bytes(captured[..8].try_into().unwrap()) & moshcatty::crypto::SEQ_MASK;
+    for seq in captured_seq + 1..=captured_seq + 1100 {
+        let outcome = server.receive(&resealed(&key, &captured, seq)).unwrap();
+        assert!(outcome.authenticated && outcome.in_order);
+        roam(&mut peer, &outcome, home);
+    }
+    let heard = server.last_recv();
+    std::thread::sleep(Duration::from_millis(5));
+
+    let replay = server.receive(&captured).unwrap();
+    roam(&mut peer, &replay, attacker);
+
+    assert!(!replay.in_order, "a replay must never count as in order");
+    assert_eq!(peer, Some(home), "a replayed datagram moved the peer");
+    assert_eq!(server.last_recv(), heard, "a replay refreshed liveness");
+}
+
+#[test]
+fn a_reordered_datagram_is_accepted_but_neither_roams_nor_refreshes_liveness() {
+    let key = [0x24; 16];
+    let mut server = ServerTransport::new(Ocb::new(&key).unwrap());
+    let mut client = moshcatty::transport::Transport::new_client(Ocb::new(&key).unwrap());
+    client.set_pending(b"x".to_vec());
+    let datagram = client.tick().remove(0);
+    let home: SocketAddr = "192.0.2.1:60001".parse().unwrap();
+    let elsewhere: SocketAddr = "198.51.100.7:4444".parse().unwrap();
+    let mut peer = None;
+
+    // Sequence 10 overtakes sequence 5.
+    let newer = server.receive(&resealed(&key, &datagram, 10)).unwrap();
+    roam(&mut peer, &newer, home);
+    assert!(newer.state.is_some());
+    let heard = server.last_recv();
+    std::thread::sleep(Duration::from_millis(5));
+
+    let older = server.receive(&resealed(&key, &datagram, 5)).unwrap();
+    roam(&mut peer, &older, elsewhere);
+
+    assert!(older.authenticated, "legitimate reordering is still opened");
+    assert!(!older.in_order);
+    assert_eq!(peer, Some(home));
+    assert_eq!(server.last_recv(), heard);
+}
+
+#[test]
+fn an_in_order_datagram_from_a_new_address_roams() {
+    let key = [0x25; 16];
+    let mut server = ServerTransport::new(Ocb::new(&key).unwrap());
+    let mut client = moshcatty::transport::Transport::new_client(Ocb::new(&key).unwrap());
+    client.set_pending(b"x".to_vec());
+    let datagram = client.tick().remove(0);
+    let home: SocketAddr = "192.0.2.1:60001".parse().unwrap();
+    let roamed: SocketAddr = "203.0.113.9:60001".parse().unwrap();
+    let mut peer = None;
+
+    roam(
+        &mut peer,
+        &server.receive(&resealed(&key, &datagram, 1)).unwrap(),
+        home,
+    );
+    // A datagram that completes no new state still roams, as in stock.
+    let next = server.receive(&resealed(&key, &datagram, 2)).unwrap();
+    assert!(next.state.is_none());
+    roam(&mut peer, &next, roamed);
+
+    assert_eq!(peer, Some(roamed));
+}
