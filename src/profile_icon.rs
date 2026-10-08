@@ -138,7 +138,7 @@ impl ProfileIcon {
         match self {
             Self::Zetta => embedded_icon("icons/profile/zetta.svg", size),
             Self::Tux => embedded_icon("icons/profile/tux.png", size),
-            Self::Bash => embedded_icon("icons/profile/bash.svg", size),
+            Self::Bash => embedded_icon("icons/profile/bash.png", size),
             Self::Zsh => embedded_icon("icons/profile/zsh.svg", size),
             Self::Fish => embedded_icon("icons/profile/fish.svg", size),
             Self::Executable(_executable) => {

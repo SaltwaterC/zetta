@@ -33,12 +33,13 @@ fn bundled_light_and_dark_terminal_themes_map_to_win32_palettes() {
 
 #[test]
 fn bundled_profile_icons_load_from_embedded_assets() {
-    for icon in ["zetta", "bash", "zsh", "fish"] {
-        let path = format!("icons/profile/{icon}.svg");
-        assert!(ZettaAssets.load(&path).unwrap().is_some(), "missing {path}");
+    for path in [
+        "icons/profile/zetta.svg",
+        "icons/profile/tux.png",
+        "icons/profile/bash.png",
+        "icons/profile/zsh.svg",
+        "icons/profile/fish.svg",
+    ] {
+        assert!(ZettaAssets.load(path).unwrap().is_some(), "missing {path}");
     }
-    assert!(
-        ZettaAssets.load("icons/profile/tux.png").unwrap().is_some(),
-        "missing icons/profile/tux.png"
-    );
 }

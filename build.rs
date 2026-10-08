@@ -33,7 +33,7 @@ fn main() {
         "assets/icons/profile/zetta.ico",
         "assets/icons/profile/tux.png",
         "assets/icons/profile/tux.ico",
-        "assets/icons/profile/bash.svg",
+        "assets/icons/profile/bash.png",
         "assets/icons/profile/bash.ico",
         "assets/icons/profile/zsh.svg",
         "assets/icons/profile/zsh.ico",

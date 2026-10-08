@@ -518,5 +518,10 @@ Apache-2.0 components where marked, matching Zed's licensing model:
 Copyright 2026 Ștefan Rusu. Portions derived from Zed are copyright
 2022–2025 Zed Industries, Inc.
 
+The bundled Bash and Zsh profile icons are the projects' official logos,
+distributed under the Free Art License 1.3 and CC BY-SA 4.0 respectively; see
+[`assets/icons/profile/README.md`](assets/icons/profile/README.md) for
+attribution and why Fish keeps original artwork.
+
 Zetta is an independent project and is not affiliated with Zed Industries,
 Inc.
