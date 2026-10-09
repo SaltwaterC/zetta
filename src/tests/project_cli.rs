@@ -57,6 +57,7 @@ fn project_parser_rejects_ambiguous_or_unknown_arguments() {
 fn project_help_documents_registry_and_preserved_configuration() {
     assert!(project_help(None).contains("zetta project <COMMAND>"));
     assert!(project_help(Some("add")).contains(".zetta/config.json"));
+    assert!(project_help(Some("add")).contains("Review and trust"));
     assert!(project_help(Some("remove")).contains("never deleted"));
     assert!(project_help(Some("open")).contains("new active tab"));
 }

@@ -4,7 +4,7 @@ use crate::project::{
     resolve_registered_project,
 };
 use crate::project_form::{
-    self, PROJECT_INHERIT_LABEL, ProjectCommandForm, ProjectEnvironmentForm, ProjectForm,
+    PROJECT_INHERIT_LABEL, ProjectCommandForm, ProjectEnvironmentForm, ProjectForm,
     ProjectProfileForm, ProjectTabIcon, ProjectTextField,
 };
 
@@ -21,6 +21,9 @@ pub(crate) struct ProjectEditor {
     /// return focus to the row it was opened from.
     pub(crate) index: usize,
     pub(crate) form: ProjectForm,
+    /// Snapshot at editor opening, so only command edits made here approve
+    /// commands; saving a theme cannot approve commands imported from disk.
+    pub(crate) original_commands_fingerprint: String,
     pub(crate) dirty: bool,
     pub(crate) save_in_progress: bool,
 }
@@ -431,7 +434,11 @@ impl Zetta {
         window
             .spawn(cx, async move |cx| {
                 let loaded = executor
-                    .spawn(async move { ProjectForm::load(&load_root, &base) })
+                    .spawn(async move {
+                        let form = ProjectForm::load(&load_root, &base)?;
+                        let fingerprint = form.command_fingerprint()?;
+                        Ok::<_, anyhow::Error>((form, fingerprint))
+                    })
                     .await;
                 this.update_in(cx, |this, window, cx| {
                     let Some(editor) = this.settings_editor.as_mut() else {
@@ -439,12 +446,13 @@ impl Zetta {
                     };
                     editor.project_loading = false;
                     match loaded {
-                        Ok(form) => {
+                        Ok((form, original_commands_fingerprint)) => {
                             editor.project = Some(ProjectEditor {
                                 root,
                                 config_root,
                                 index,
                                 form,
+                                original_commands_fingerprint,
                                 dirty: false,
                                 save_in_progress: false,
                             });
@@ -530,6 +538,7 @@ impl Zetta {
             return;
         }
         let form = project.form.clone();
+        let original_commands_fingerprint = project.original_commands_fingerprint.clone();
         let config_root = project.config_root.clone();
         if let Some(editor) = self.settings_editor.as_mut() {
             if let Some(project) = editor.project.as_mut() {
@@ -541,19 +550,25 @@ impl Zetta {
         let executor = cx.background_executor().clone();
         let this = cx.entity().downgrade();
         let save_root = config_root.clone();
+        let registry_path = self.projects.registry.path().to_path_buf();
         window
             .spawn(cx, async move |cx| {
                 let result = executor
                     .spawn(async move {
                         let text = form.to_json()?;
-                        let path = project_form::save(&save_root, &base, &text)?;
-                        let config = ProjectConfig::load(&save_root, &base)?;
-                        Ok::<_, anyhow::Error>((path, config))
+                        crate::project_trust::save_from_editor(
+                            &save_root,
+                            &base,
+                            &text,
+                            registry_path,
+                            &original_commands_fingerprint,
+                        )
                     })
                     .await;
                 this.update_in(cx, |this, window, cx| {
                     match result {
-                        Ok((path, config)) => {
+                        Ok((path, registry, config)) => {
+                            this.projects.registry = registry;
                             this.projects.insert_config(config);
                             this.projects.invalidate_active_context();
                             if let Some(editor) = this.settings_editor.as_mut() {

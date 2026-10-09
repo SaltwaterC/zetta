@@ -29,6 +29,7 @@ fn project_builder(config: &Config) -> SettingsEditor {
         root: PathBuf::from("/projects/demo"),
         config_root: PathBuf::from("/projects/demo"),
         index: 0,
+        original_commands_fingerprint: crate::project_trust::command_approval("{}").unwrap().fingerprint,
         form: ProjectForm::parse(
             r#"{
                 "pane_split_templates": {

@@ -9,6 +9,7 @@ fn available_for(surfaces: &[FocusSurface]) -> FocusSurfaceAvailability {
     let mut available = FocusSurfaceAvailability::default();
     for surface in surfaces {
         match surface {
+            FocusSurface::ProjectTrust => available.project_trust = true,
             FocusSurface::CloseConfirmation => available.close_confirmation = true,
             FocusSurface::SessionAuthentication => available.session_authentication = true,
             FocusSurface::RemoteSession => available.remote_session = true,
@@ -29,6 +30,7 @@ fn available_for(surfaces: &[FocusSurface]) -> FocusSurfaceAvailability {
 #[test]
 fn focus_router_covers_every_surface_in_paint_order() {
     let ordered = [
+        FocusSurface::ProjectTrust,
         FocusSurface::CloseConfirmation,
         FocusSurface::SessionAuthentication,
         FocusSurface::RemoteSession,

@@ -1,3 +1,6 @@
+//! Project configuration parsing, registry persistence, and project-root resolution.
+//! Registered commands are checked by `project_trust` before a loaded configuration is used.
+
 use std::{
     collections::HashMap,
     fs::{self, OpenOptions},
@@ -19,10 +22,11 @@ use crate::worktree_detection::{
 
 pub(crate) const PROJECT_CONFIG_DIRECTORY: &str = ".zetta";
 pub(crate) const PROJECT_CONFIG_FILE: &str = "config.json";
-const PROJECT_REGISTRY_VERSION: u32 = 1;
+const PROJECT_REGISTRY_VERSION: u32 = 2;
 
 #[derive(Clone, Debug)]
 pub(crate) struct ProjectConfig {
+    pub(crate) pending_approval: Option<crate::project_trust::ProjectApproval>,
     pub(crate) root: PathBuf,
     pub(crate) effective: Config,
     /// The fields explicitly present in the project file. `effective` also
@@ -45,7 +49,18 @@ impl ProjectConfig {
         let path = Self::path_for(root);
         let source = fs::read_to_string(&path)
             .with_context(|| format!("reading project configuration {}", path.display()))?;
-        Self::parse(&source, root, base)
+        Self::parse_registered(&source, root, base, &ProjectRegistry::load()?)
+    }
+
+    pub(crate) fn load_in_registry(
+        root: &Path,
+        base: &Config,
+        registry: &ProjectRegistry,
+    ) -> Result<Self> {
+        let path = Self::path_for(root);
+        let source = fs::read_to_string(&path)
+            .with_context(|| format!("reading project configuration {}", path.display()))?;
+        Self::parse_registered(&source, root, base, registry)
     }
 
     pub(crate) fn parse(source: &str, root: &Path, base: &Config) -> Result<Self> {
@@ -117,6 +132,7 @@ impl ProjectConfig {
         }
 
         Ok(Self {
+            pending_approval: None,
             root,
             effective,
             theme,
@@ -218,6 +234,7 @@ fn resolve_project_working_directory(root: &Path, value: &Value) -> Result<PathB
 pub(crate) struct ProjectRegistry {
     path: PathBuf,
     roots: Vec<PathBuf>,
+    approvals: Vec<crate::project_trust::ProjectApprovalRecord>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -240,6 +257,8 @@ pub(crate) struct ProjectRootResolution {
 struct ProjectRegistryFile {
     version: u32,
     projects: Vec<PathBuf>,
+    #[serde(default)]
+    approvals: Vec<crate::project_trust::ProjectApprovalRecord>,
 }
 
 impl ProjectRegistry {
@@ -247,6 +266,7 @@ impl ProjectRegistry {
         Self {
             path: platform_config_dir().join("projects.json"),
             roots: Vec::new(),
+            approvals: Vec::new(),
         }
     }
 
@@ -261,6 +281,7 @@ impl ProjectRegistry {
                 return Ok(Self {
                     path,
                     roots: Vec::new(),
+                    approvals: Vec::new(),
                 });
             }
             Err(error) => {
@@ -271,7 +292,7 @@ impl ProjectRegistry {
         let file: ProjectRegistryFile = serde_json::from_str(&source)
             .with_context(|| format!("parsing project registry {}", path.display()))?;
         anyhow::ensure!(
-            file.version == PROJECT_REGISTRY_VERSION,
+            matches!(file.version, 1 | PROJECT_REGISTRY_VERSION),
             "unsupported project registry version {}; expected {PROJECT_REGISTRY_VERSION}",
             file.version
         );
@@ -286,7 +307,15 @@ impl ProjectRegistry {
             }
         }
         roots.sort_by_key(|root| path_identity(root));
-        Ok(Self { path, roots })
+        Ok(Self {
+            path,
+            roots,
+            approvals: if file.version == 1 {
+                Vec::new()
+            } else {
+                file.approvals
+            },
+        })
     }
 
     pub(crate) fn path(&self) -> &Path {
@@ -337,7 +366,48 @@ impl ProjectRegistry {
             .filter(|(_, root)| path_is_within(root_or_child, root))
             .max_by_key(|(_, root)| root.components().count())
             .map(|(index, _)| index)?;
-        Some(self.roots.remove(index))
+        let removed = self.roots.remove(index);
+        // A worktree approval belongs to the main registration, even if a
+        // stale duplicate registration also lists the worktree itself.
+        self.approvals
+            .retain(|approval| !paths_equal(&approval.project, &removed));
+        Some(removed)
+    }
+
+    pub(crate) fn is_approved(&self, root: &Path, fingerprint: &str) -> bool {
+        let resolution = resolve_registered_project_canonical(root, self);
+        resolution.root.is_some_and(|project| {
+            self.approvals.iter().any(|approval| {
+                paths_equal(&approval.project, &project)
+                    && paths_equal(&approval.root, root)
+                    && approval.fingerprint == fingerprint
+            })
+        })
+    }
+
+    /// Records only the snapshot the user reviewed, never the file's current contents.
+    pub(crate) fn approve(&mut self, root: &Path, fingerprint: &str) -> Result<()> {
+        let root = canonical_project_root(root)?;
+        let resolution = resolve_registered_project_canonical(&root, self);
+        anyhow::ensure!(
+            resolution
+                .config_root
+                .as_ref()
+                .is_some_and(|resolved| paths_equal(resolved, &root)),
+            "project configuration is no longer registered"
+        );
+        let project = resolution
+            .root
+            .context("project registration was removed")?;
+        self.approvals
+            .retain(|approval| !paths_equal(&approval.root, &root));
+        self.approvals
+            .push(crate::project_trust::ProjectApprovalRecord {
+                project,
+                root,
+                fingerprint: fingerprint.to_owned(),
+            });
+        Ok(())
     }
 
     pub(crate) fn save(&self) -> Result<()> {
@@ -350,6 +420,7 @@ impl ProjectRegistry {
         let file = ProjectRegistryFile {
             version: PROJECT_REGISTRY_VERSION,
             projects: self.roots.clone(),
+            approvals: self.approvals.clone(),
         };
         write_json_atomically(&self.path, &file)
     }

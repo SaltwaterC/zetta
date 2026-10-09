@@ -809,6 +809,7 @@ impl Zetta {
             self.remote_session_key_envelope = None;
         }
         self.close_tab_confirmation = None;
+        self.projects.trust_prompt = None;
         self.tab_search = None;
         cx.notify();
     }

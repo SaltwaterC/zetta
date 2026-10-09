@@ -51,6 +51,8 @@ mod project;
 mod project_cli;
 mod project_commands;
 mod project_form;
+mod project_trust;
+mod project_trust_ui;
 mod run_command;
 mod searchable_dropdown;
 #[cfg(feature = "serial-console")]

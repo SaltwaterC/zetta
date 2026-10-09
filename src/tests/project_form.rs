@@ -412,3 +412,16 @@ fn saving_replaces_the_file_only_with_text_the_loader_accepts() {
         "{\"working_directory\": \"work\"}\n"
     );
 }
+
+#[test]
+fn command_snapshot_does_not_prevent_opening_other_settings_for_repair() {
+    let config = Config::defaults(None, None);
+    let form = ProjectForm::parse(
+        r#"{"initial_split":"missing-template","commands":{"build":"cargo build"}}"#,
+        Path::new("project/.zetta/config.json"),
+        &config,
+    )
+    .unwrap();
+    assert!(form.to_json().is_err());
+    assert!(form.command_fingerprint().is_ok());
+}

@@ -87,10 +87,41 @@ background task and offers to register the project. This discovery does not
 block startup or terminal input. WSL directories are not scanned; register a
 WSL project explicitly and its reported UNC path is matched lexically.
 
-Registration is a trust boundary. A project pane template can launch commands,
-both as a pane's own program and as stacked commands seeded beside it, and a
-registered project command can execute arbitrary shell code. Add only
-repositories whose `.zetta/config.json` you trust.
+Registration records a project location. Approval applies only to the project's
+`commands` section, including each command's own `env`. When commands loaded
+from disk do not match the approved version, Zetta shows a **Review and trust**
+banner and withholds those commands. The review dialog displays the file and
+command definitions being approved. **Trust commands** permits that
+version; **Continue without** leaves those commands disabled and keeps the
+banner available for later review. Tab chooses an action, Enter activates it,
+and Escape continues without approval. The default keyboard choice is
+**Continue without**.
+
+Changing commands through the Settings **Projects** configuration builder
+approves the submitted command definitions as part of Save. It does not
+require a second confirmation. The fingerprint comes from the submitted form,
+so another process replacing the file during the save cannot acquire approval
+for its replacement commands. Changes made through an external editor, Git,
+or other filesystem writes require renewed approval when loaded. Saving an
+unrelated field in the builder does not approve unchanged commands imported
+from disk.
+
+A SHA-256 fingerprint of `commands` is stored locally in the project registry
+for each canonical configuration root and owning registration. JSON whitespace
+and object key order do not affect it. Changes to profiles, project-wide `env`,
+working directories, pane templates, `initial_split`, or appearance do not
+require command approval and continue to apply while commands await approval.
+`zetta cmd` refuses an unapproved command section and explains how to approve
+it in the GUI.
+
+Existing registrations without fingerprints need approval before their commands
+loaded from disk can be used. A worktree's own command definitions need their
+own approval; falling back to the main repository's file uses that file's
+approval. Removing a registration revokes its associated approvals.
+
+Approval permits execution; it does not audit the commands or fingerprint the
+contents of scripts or executables they reference. Trust only command
+definitions you have reviewed.
 
 The Settings **Projects** tab can add, open, edit, and unregister projects.
 **Edit config** opens a typed builder for every supported field, including the

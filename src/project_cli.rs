@@ -223,7 +223,7 @@ pub(crate) fn project_help(operation: Option<&str>) -> String {
     match operation {
         Some("add") => {
             format!(
-                "Register a Zetta project\n\nUsage: zetta project add [PATH]\n       zetta project add --path PATH\n\nCreates PATH/.zetta/config.json with an empty object when it does not exist, validates it, and records the canonical project root. Without PATH, the nearest native Git repository root is used, falling back to the current directory. WSL uses the exact current directory and is never scanned. Register only trusted projects: pane templates and registered commands may execute arbitrary shell code.\n\nOptions:\n{}",
+                "Register a Zetta project\n\nUsage: zetta project add [PATH]\n       zetta project add --path PATH\n\nCreates PATH/.zetta/config.json with an empty object when it does not exist, validates it, and records the canonical project root. Without PATH, the nearest native Git repository root is used, falling back to the current directory. WSL uses the exact current directory and is never scanned. Registration records the location. Before project commands loaded from disk can be used, open the project and choose Review and trust in Zetta. Pane templates and registered commands may execute arbitrary shell code.\n\nOptions:\n{}",
                 format_help_table([
                     ("-p, --path PATH", "Project root"),
                     ("-h, --help", "Print help"),

@@ -191,6 +191,10 @@ pub(super) fn run_registered_project_command(invocation: &ProjectCommandInvocati
     let (base, _) = load_startup_config(None, None);
     let project = crate::project_cli::current_project_config(&base)?
         .context("the current directory is not inside a registered Zetta project")?;
+    anyhow::ensure!(
+        project.pending_approval.is_none(),
+        "project commands loaded from disk need approval; open the project in Zetta and choose Review and trust"
+    );
     match invocation {
         ProjectCommandInvocation::List => {
             for name in project.commands.keys() {

@@ -10851,6 +10851,7 @@ dependencies = [
  "serde_json_lenient",
  "serde_path_to_error",
  "serialport",
+ "sha2 0.10.9",
  "smallvec",
  "strum",
  "subtle",

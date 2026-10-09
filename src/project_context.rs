@@ -21,6 +21,7 @@ struct ProjectDetectionState {
 #[derive(Clone, Debug)]
 pub(crate) struct ProjectState {
     pub(crate) registry: ProjectRegistry,
+    pub(crate) trust_prompt: Option<crate::project_trust_ui::ProjectTrustPrompt>,
     pub(crate) configs: HashMap<PathBuf, Arc<ProjectConfig>>,
     pub(crate) pane_roots: HashMap<u64, PathBuf>,
     /// How each detected pane root maps onto the directories its shell
@@ -44,6 +45,7 @@ impl ProjectState {
     pub(crate) fn new(registry: ProjectRegistry) -> Self {
         Self {
             registry,
+            trust_prompt: None,
             configs: HashMap::new(),
             pane_roots: HashMap::new(),
             pane_anchors: HashMap::new(),
@@ -372,7 +374,7 @@ fn detect_project_for_directory(
         let config = (!loaded_roots
             .iter()
             .any(|loaded| paths_equal(loaded, &config_root)))
-        .then(|| ProjectConfig::load(&config_root, base));
+        .then(|| ProjectConfig::load_in_registry(&config_root, base, registry));
         let anchor = canonical
             .as_deref()
             .map(|canonical| match resolution.managed_worktree {

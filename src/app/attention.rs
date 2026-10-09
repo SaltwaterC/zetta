@@ -9,6 +9,7 @@ use super::*;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum FocusSurface {
+    ProjectTrust,
     CloseConfirmation,
     SessionAuthentication,
     RemoteSession,
@@ -25,6 +26,7 @@ pub(crate) enum FocusSurface {
 
 #[derive(Clone, Copy, Debug, Default)]
 struct FocusSurfaceAvailability {
+    project_trust: bool,
     close_confirmation: bool,
     session_authentication: bool,
     remote_session: bool,
@@ -40,7 +42,9 @@ struct FocusSurfaceAvailability {
 }
 
 fn focus_surface(available: FocusSurfaceAvailability) -> Option<FocusSurface> {
-    if available.close_confirmation {
+    if available.project_trust {
+        Some(FocusSurface::ProjectTrust)
+    } else if available.close_confirmation {
         Some(FocusSurface::CloseConfirmation)
     } else if available.session_authentication {
         Some(FocusSurface::SessionAuthentication)
@@ -72,6 +76,7 @@ fn focus_surface(available: FocusSurfaceAvailability) -> Option<FocusSurface> {
 impl Zetta {
     fn active_focus_surface(&self) -> Option<FocusSurface> {
         focus_surface(FocusSurfaceAvailability {
+            project_trust: self.projects.trust_prompt.is_some(),
             close_confirmation: self.close_tab_confirmation.is_some(),
             session_authentication: self.session_authentication.is_some(),
             remote_session: self.remote_session_picker.is_some(),
@@ -97,6 +102,11 @@ impl Zetta {
             return false;
         };
         match surface {
+            FocusSurface::ProjectTrust => {
+                if let Some(prompt) = &self.projects.trust_prompt {
+                    prompt.focus.focus(window, cx);
+                }
+            }
             FocusSurface::CloseConfirmation => self.close_confirmation_focus.focus(window, cx),
             FocusSurface::SessionAuthentication => {
                 self.session_authentication_focus.focus(window, cx);

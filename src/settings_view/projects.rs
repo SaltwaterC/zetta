@@ -95,8 +95,8 @@ fn render_project_list(
             colors,
         ))
         .child(div().mb_2().text_xs().text_color(colors.text_muted).child(
-            "Edit config opens a builder for everything a project can override. Register \
-                 only projects you trust: their templates and commands can run any shell code.",
+            "Edit config opens a builder for everything a project can override. Commands edited outside Zetta require \
+                 approval through Review and trust. Commands saved here are approved when you save.",
         ))
         .children(rows)
         .when(editor.project_roots.is_empty(), |page| {

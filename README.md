@@ -351,8 +351,11 @@ zetta cmd build -- --release
 ```
 
 Command strings may contain shell syntax and command environments are scoped to
-the invocation. Treat project configuration as executable code and register
-only repositories you trust.
+the invocation. Changes to the project's `commands` section loaded from disk
+require approval through Zetta's **Review and trust** dialog. Commands changed
+and saved through the Settings project editor are approved as part of Save. Other project
+settings apply without this approval step. Approval covers command definitions,
+not the contents of referenced scripts or executables.
 
 Zetta-managed `wt/*` linked worktrees keep their already-registered main
 repository as the project identity, but use the worktree's own

@@ -181,6 +181,9 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.project_trust_key_down(event, window, cx) {
+            return;
+        }
         if self.close_confirmation_key_down(event, window, cx) {
             return;
         }

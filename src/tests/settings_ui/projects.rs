@@ -96,6 +96,9 @@ fn test_project(config: &Config, source: &str) -> ProjectEditor {
         root: PathBuf::from("/projects/demo"),
         config_root: PathBuf::from("/projects/demo"),
         index: 0,
+        original_commands_fingerprint: crate::project_trust::command_approval(source)
+            .unwrap()
+            .fingerprint,
         form: ProjectForm::parse(
             source,
             Path::new("/projects/demo/.zetta/config.json"),

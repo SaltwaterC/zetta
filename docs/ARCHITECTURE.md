@@ -241,6 +241,10 @@ keyboard and the mouse came to do different things; do not add one.
   `crates/zetta_profiles`, because the daemon resolves the same names
 - `project.rs`: `ProjectConfig`, `ProjectRegistry`, and project field
   validation
+- `project_trust.rs`: project command fingerprints and the
+  approval gate shared by every runtime project load
+- `project_trust_ui.rs`: the project command review dialog and acceptance of
+  the exact configuration fingerprint it displays
 - `file_replace.rs`: replacing a user's file atomically — staged beside the
   target, symlinks followed, permissions kept — for the configuration, the
   keymap, project files, the registry and the desktop-entry edits

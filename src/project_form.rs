@@ -411,6 +411,22 @@ impl ProjectForm {
         self.pane_templates.validate()
     }
 
+    fn command_entries(&self) -> Map<String, Value> {
+        let mut entries = self.commands.iter().collect::<Vec<_>>();
+        entries.sort_by_key(|command| command.name.text.trim().to_owned());
+        entries
+            .into_iter()
+            .map(|command| (command.name.text.trim().to_owned(), command_value(command)))
+            .collect()
+    }
+
+    /// The editor's command snapshot, independently of validation of other
+    /// fields: opening a configuration to repair it must remain possible.
+    pub(crate) fn command_fingerprint(&self) -> Result<String> {
+        let source = serde_json::to_string(&json!({"commands": self.command_entries()}))?;
+        Ok(crate::project_trust::command_approval(&source)?.fingerprint)
+    }
+
     pub(crate) fn to_json(&self) -> Result<String> {
         self.validate()?;
         let mut root = Map::new();
@@ -454,13 +470,7 @@ impl ProjectForm {
             );
         }
         if !self.commands.is_empty() {
-            let mut command_entries = self.commands.iter().collect::<Vec<_>>();
-            command_entries.sort_by_key(|command| command.name.text.trim().to_owned());
-            let commands = command_entries
-                .into_iter()
-                .map(|command| (command.name.text.trim().to_owned(), command_value(command)))
-                .collect::<Map<String, Value>>();
-            root.insert("commands".into(), Value::Object(commands));
+            root.insert("commands".into(), Value::Object(self.command_entries()));
         }
         if let Some(name) = self.resolved_initial_split() {
             root.insert("initial_split".into(), json!(name));

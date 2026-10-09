@@ -42,6 +42,7 @@ struct ZettaOverlays {
     remote_session: Option<AnyElement>,
     session_authentication: Option<AnyElement>,
     close_confirmation: Option<AnyElement>,
+    project_trust: Option<AnyElement>,
 }
 
 impl Zetta {
@@ -169,6 +170,7 @@ impl Zetta {
             remote_session,
             session_authentication: modal_overlay(self.render_session_authentication_overlay(cx)),
             close_confirmation: modal_overlay(self.render_tab_close_confirmation_overlay(cx)),
+            project_trust: modal_overlay(self.render_project_trust_overlay(cx)),
         }
     }
 
@@ -395,6 +397,18 @@ impl Zetta {
     ) -> gpui::Div {
         let dismiss_configuration_handle = handle.clone();
         let content = content
+            .when(self.project_needing_approval().is_some(), |content| {
+                let review_handle = handle.clone();
+                content.child(feedback_row(
+                    colors,
+                    Banner::new().severity(Severity::Warning).wrap_content(true)
+                        .child(Label::new("Project commands loaded from disk need approval before they can be run.").size(LabelSize::Small))
+                        .action_slot(DialogButton::new("review-project-trust", "Review and trust", ButtonRole::Secondary)
+                            .render(colors, move |_, window, cx| {
+                                review_handle.update(cx, |this, cx| this.open_project_trust_prompt(window, cx)).ok();
+                            })),
+                ))
+            })
             .when_some(self.projects.offer.clone(), |content, offer| {
                 let add_handle = handle.clone();
                 let dismiss_handle = handle.clone();
@@ -585,6 +599,7 @@ impl Zetta {
             overlays.remote_session,
             overlays.session_authentication,
             overlays.close_confirmation,
+            overlays.project_trust,
         ]
         .into_iter()
         .flatten()

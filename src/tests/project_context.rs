@@ -59,7 +59,11 @@ fn registered_main_projects_resolve_managed_worktree_aliases_and_local_configs()
         &["-c", "commit.gpgsign=false", "commit", "-qm", "initial"],
     );
     fs::create_dir_all(main.join(PROJECT_CONFIG_DIRECTORY)).unwrap();
-    fs::write(ProjectConfig::path_for(&main), "{\"theme\":\"One Dark\"}\n").unwrap();
+    fs::write(
+        ProjectConfig::path_for(&main),
+        r#"{"theme":"One Dark","commands":{"main":"echo main"}}"#,
+    )
+    .unwrap();
     fs::create_dir_all(linked.parent().unwrap()).unwrap();
     git(
         &main,
@@ -78,6 +82,10 @@ fn registered_main_projects_resolve_managed_worktree_aliases_and_local_configs()
     let registry_path = temporary.path().join("registry.json");
     let mut registry = ProjectRegistry::load_from(registry_path).unwrap();
     registry.add(&main).unwrap();
+    let main_config = ProjectConfig::load_in_registry(&main, &base_config(), &registry).unwrap();
+    registry
+        .approve(&main, &main_config.pending_approval.unwrap().fingerprint)
+        .unwrap();
     // A stale duplicate registration must not win over the main project.
     registry.add(&linked).unwrap();
     let main = fs::canonicalize(main).unwrap();
@@ -127,10 +135,26 @@ fn registered_main_projects_resolve_managed_worktree_aliases_and_local_configs()
     assert!(resolution.managed_worktree.is_some());
 
     let detection = detect_project_for_directory(&child, &registry, &base_config(), &[]);
-    assert_eq!(detection.registered_root, Some(main));
+    assert_eq!(detection.registered_root, Some(main.clone()));
     let project = detection.config.unwrap().unwrap();
     assert_eq!(project.root, linked);
-    assert_eq!(project.commands["worktree"].command, "echo local");
+    assert!(project.pending_approval.is_some());
+    assert!(project.commands.is_empty());
+    let fingerprint = project.pending_approval.unwrap().fingerprint;
+    registry.approve(&linked, &fingerprint).unwrap();
+    let approved = detect_project_for_directory(&child, &registry, &base_config(), &[])
+        .config
+        .unwrap()
+        .unwrap();
+    assert!(approved.pending_approval.is_none());
+    assert_eq!(approved.commands["worktree"].command, "echo local");
+    registry.remove(&main).unwrap();
+    registry.add(&main).unwrap();
+    let revoked = detect_project_for_directory(&child, &registry, &base_config(), &[])
+        .config
+        .unwrap()
+        .unwrap();
+    assert!(revoked.pending_approval.is_some());
     assert!(detection.offer_root.is_none());
 }
 
@@ -463,6 +487,7 @@ fn icon_test_project(icon: Option<IconName>) -> ProjectConfig {
     let mut effective = Config::defaults(None, None);
     effective.default_tab_icon = icon;
     ProjectConfig {
+        pending_approval: None,
         root: PathBuf::from("/project"),
         effective,
         theme: None,
@@ -753,6 +778,7 @@ fn active_project_theme_overrides_a_profile_theme_it_never_mentioned(
         effective.theme = Some("Solarized Dark".to_owned());
         effective.dark_theme = Some("Gruvbox Dark".to_owned());
         let project = ProjectConfig {
+            pending_approval: None,
             root: PathBuf::from("/project"),
             effective,
             theme: Some("Solarized Dark".to_owned()),
@@ -816,6 +842,7 @@ fn active_project_theme_overrides_a_profile_theme_it_never_mentioned(
 
         // A project that sets no theme of its own falls back to the profile.
         let project_without_theme = ProjectConfig {
+            pending_approval: None,
             root: PathBuf::from("/project"),
             effective: Config::defaults(None, None),
             theme: None,
