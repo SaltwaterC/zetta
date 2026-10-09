@@ -290,13 +290,13 @@ impl CompactRows<Cell> {
         });
         // A row narrower than its columns ends in default cells, which never wrap.
         let wraps = columns == kept && last_flags.contains(Flags::WRAPLINE);
-        if let Some((attributes, c)) = fill {
-            if wraps || c != ' ' || has_zerowidth(attributes) {
-                if !attributes.flags.intersects(SPACERS) {
-                    text.push_repeated(c, kept - explicit, Point::new(line, Column(explicit)));
-                }
-                occupied_end = text.len();
+        if let Some((attributes, c)) = fill
+            && (wraps || c != ' ' || has_zerowidth(attributes))
+        {
+            if !attributes.flags.intersects(SPACERS) {
+                text.push_repeated(c, kept - explicit, Point::new(line, Column(explicit)));
             }
+            occupied_end = text.len();
         }
         if wraps {
             occupied_end = text.len();

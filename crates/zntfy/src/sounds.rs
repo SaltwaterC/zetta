@@ -289,7 +289,9 @@ fn render_gong(sample_rate: u32) -> Vec<f32> {
         return Vec::new();
     }
     let decoded = GONG_PCM
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|bytes| i16::from_le_bytes([bytes[0], bytes[1]]) as f32 / 32_768.0)
         .collect::<Vec<_>>();
     let sample_count = (sample_rate as u64 * GONG_DURATION_MS as u64 / 1_000) as usize;

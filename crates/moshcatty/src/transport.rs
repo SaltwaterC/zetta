@@ -913,7 +913,7 @@ impl Transport {
         }
         self.encrypted_blocks += plaintext_blocks;
         let sequence = NEXT_PACKET_SEQUENCE
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
                 value.checked_add(1)
             })
             .ok()?;

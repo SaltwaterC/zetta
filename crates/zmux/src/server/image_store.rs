@@ -12,7 +12,7 @@
 
 use std::{collections::HashSet, fs};
 
-use anyhow::{Context as _, Result};
+use anyhow::Result;
 
 use crate::{
     catalog::{create_private_dir, write_private_file},

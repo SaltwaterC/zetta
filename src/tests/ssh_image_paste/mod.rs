@@ -628,7 +628,9 @@ fn powershell_commands_are_utf16le_base64_encoded() {
     let encoded = command.rsplit_once(' ').unwrap().1;
     let bytes = BASE64.decode(encoded).unwrap();
     let words = bytes
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|word| u16::from_le_bytes([word[0], word[1]]))
         .collect::<Vec<_>>();
 

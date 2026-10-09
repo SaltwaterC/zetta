@@ -9,8 +9,17 @@ is still upstream `master`, so that fork has no upstream to catch up with.
 
 ## Fork inventory
 
+All local forks, including routing-only forks, declare `rust-version = "1.99"`
+to match the repository's pinned toolchain. Preserve this manifest adjustment
+when synchronizing from upstream.
+
+Rust 1.99 also renames atomic `fetch_update` to `try_update`; the GPUI,
+terminal and MoshCatty forks use the new spelling without changing their
+ordering or update callbacks.
+
 | Local fork | Upstream/base | Current retained change |
 | --- | --- | --- |
+| `crates/proc-macro-error2` | crates.io `proc-macro-error2@2.0.1` | Public `extern crate proc_macro` declaration so its existing macro re-export remains valid under Rust 1.99; see `proc-macro-error2/UPSTREAM.md`. |
 | `crates/vt100` | crates.io `vt100@0.16.2` | CSI b (REP) support, with preceding-character state retained across Mosh screen clones; rows shared between screens behind `Arc` with copy-on-write and a diff that skips shared rows; and `Parser::from_screen`/`into_screen`; see `vt100/UPSTREAM.md`. |
 | `crates/vte` | crates.io `vte@0.15.0` | `std` OSC accumulation bounded at `MAX_OSC_RAW_STD` (8 MiB), with a longer OSC discarded through its terminator and the buffer's retained capacity shrunk after a large one; see `vte/UPSTREAM.md`. |
 | `crates/alacritty_terminal` | `zed-industries/alacritty@4c129667` | Hybrid bounded-memory scrollback, allocator/performance fixes, Windows ConPTY read and hangup handling, shell integration, resize behavior, and attached PTYs whose child belongs to the multiplexer. |

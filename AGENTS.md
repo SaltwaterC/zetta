@@ -12,7 +12,7 @@ GPUI, and Zed's terminal engine. The root package is the application. Local
 forks and platform support live under `crates/`; `zed/` is an upstream Git
 submodule used for dependencies.
 
-Use the Rust toolchain pinned in `rust-toolchain.toml` (Rust 1.95.0 with
+Use the Rust toolchain pinned in `rust-toolchain.toml` (Rust 1.99.0 with
 `rustfmt` and `clippy`). Initialize the submodule before the first build:
 
 ```sh

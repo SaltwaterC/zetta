@@ -793,14 +793,18 @@ fn wsl_profiles_from_output(program: &str, output: &[u8]) -> Vec<ProfileDefiniti
 fn parse_wsl_distribution_names(output: &[u8]) -> Vec<String> {
     let decoded = if let Some(bytes) = output.strip_prefix(&[0xfe, 0xff]) {
         let code_units = bytes
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|pair| u16::from_be_bytes([pair[0], pair[1]]))
             .collect::<Vec<_>>();
         String::from_utf16_lossy(&code_units)
     } else if output.starts_with(&[0xff, 0xfe]) || output.contains(&0) {
         let bytes = output.strip_prefix(&[0xff, 0xfe]).unwrap_or(output);
         let code_units = bytes
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
             .collect::<Vec<_>>();
         String::from_utf16_lossy(&code_units)

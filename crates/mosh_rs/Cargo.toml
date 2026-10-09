@@ -2,7 +2,7 @@
 name = "mosh-rs"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.95"
+rust-version = "1.99"
 license = "GPL-3.0-or-later"
 description = "A wire-compatible Rust client for mosh's State Synchronization Protocol, interoperating with the stock mosh-server"
 publish = false

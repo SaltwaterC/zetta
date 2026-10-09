@@ -255,6 +255,7 @@ redundant_closure = "deny"
 semicolon_if_nothing_returned = "deny"
 
 [patch.crates-io]
+proc-macro-error2 = { path = "crates/proc-macro-error2" }
 vt100 = { path = "crates/vt100" }
 # alacritty_terminal and terminal name the fork by path; this routes vt100's and
 # mosh_rs's edges to the same copy, so the build carries one bounded parser.

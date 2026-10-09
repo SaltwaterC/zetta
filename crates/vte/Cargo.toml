@@ -12,7 +12,7 @@ version = "0.15.0"
 publish = false
 name = "vte"
 edition = "2021"
-rust-version = "1.62.1"
+rust-version = "1.99"
 
 [features]
 ansi = ["log", "cursor-icon", "bitflags"]

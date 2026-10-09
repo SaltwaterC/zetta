@@ -242,7 +242,7 @@ fn server_loop(
             continue;
         }
         if active_transfers
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
                 (count < MAX_CONCURRENT_TRANSFERS).then_some(count + 1)
             })
             .is_err()
@@ -346,7 +346,7 @@ fn parse_request(packet: &[u8]) -> std::result::Result<Request, String> {
         .map_err(|_| "transfer mode is not UTF-8")?
         .to_ascii_lowercase();
     let mut options = Vec::new();
-    for pair in fields[2..].chunks_exact(2) {
+    for pair in fields[2..].as_chunks::<2>().0 {
         let name = String::from_utf8(pair[0].to_vec())
             .map_err(|_| "option name is not UTF-8")?
             .to_ascii_lowercase();

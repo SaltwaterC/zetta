@@ -140,7 +140,9 @@ fn the_windows_query_only_reads_the_remote_login_variable() {
         .decode(encoded)
         .unwrap();
     let utf16 = bytes
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
         .collect::<Vec<_>>();
     assert_eq!(

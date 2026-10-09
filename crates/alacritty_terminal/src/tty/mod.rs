@@ -140,7 +140,7 @@ impl ConsolePalette {
             *byte = u8::from_str_radix(&payload[index * 2..index * 2 + 2], 16).ok()?;
         }
         let mut colors = [[0_u8; 3]; 16];
-        for (color, channels) in colors.iter_mut().zip(bytes[..48].chunks_exact(3)) {
+        for (color, channels) in colors.iter_mut().zip(bytes[..48].as_chunks::<3>().0) {
             color.copy_from_slice(channels);
         }
         let foreground_index = bytes[48];

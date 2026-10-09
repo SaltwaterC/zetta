@@ -34,7 +34,9 @@ fn windows_command_passes_server_arguments_without_shell_interpolation() {
     let encoded = remote.rsplit_once(' ').unwrap().1;
     let bytes = STANDARD.decode(encoded).unwrap();
     let units = bytes
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
         .collect::<Vec<_>>();
     assert_eq!(String::from_utf16(&units).unwrap(), script);

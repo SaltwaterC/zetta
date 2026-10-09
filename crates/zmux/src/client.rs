@@ -2923,7 +2923,7 @@ impl SupersededMultiplexer {
             }
             state.superseded = true;
             state.protocol_version = protocol_version;
-            state.watchers.drain(..).collect::<Vec<_>>()
+            std::mem::take(&mut state.watchers)
         };
         for watcher in watchers {
             let _ = watcher.try_send(protocol_version);

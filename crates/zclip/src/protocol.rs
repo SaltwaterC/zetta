@@ -110,7 +110,7 @@ fn parse_id(text: &[u8]) -> Option<[u8; 16]> {
         return None;
     }
     let mut id = [0; 16];
-    for (byte, pair) in id.iter_mut().zip(text.chunks_exact(2)) {
+    for (byte, pair) in id.iter_mut().zip(text.as_chunks::<2>().0) {
         *byte = hex_digit(pair[0])? << 4 | hex_digit(pair[1])?;
     }
     Some(id)

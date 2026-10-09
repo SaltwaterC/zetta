@@ -80,3 +80,6 @@ windows = { version = "0.61", features = [
 
 [dev-dependencies]
 zmux = { path = ".", features = ["test-support"] }
+
+[patch.crates-io]
+proc-macro-error2 = { path = "../proc-macro-error2" }

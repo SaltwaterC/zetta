@@ -172,7 +172,7 @@ fn parsed_block_size(packet: &[u8]) -> Option<usize> {
         return None;
     }
     let fields = zero_terminated_fields(packet.get(2..)?).ok()?;
-    for pair in fields.chunks_exact(2) {
+    for pair in fields.as_chunks::<2>().0 {
         if pair[0].eq_ignore_ascii_case(b"blksize") {
             let value = std::str::from_utf8(pair[1]).ok()?.parse().ok()?;
             return (MIN_BLOCK_SIZE..=MAX_BLOCK_SIZE)

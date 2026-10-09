@@ -5,6 +5,10 @@ That revision remains the current upstream `master` as of 2026-08-29.
 
 Retain these Zetta changes when synchronizing:
 
+- Rust 1.99 manifest and lint compatibility: let chains, `is_multiple_of`,
+  and fixed-size slice chunks. `ShellUser::from_env` retains its matches with
+  a documented `question_mark` expectation because Clippy's suggested rewrite
+  moves the passwd result before later environment fallbacks can borrow it.
 - `src/snapshot.rs`, a Zetta-authored module with no upstream counterpart:
   serializing a `Term`'s grid back into the escape sequences that would
   reproduce it. It lives here rather than in `crates/terminal` because both

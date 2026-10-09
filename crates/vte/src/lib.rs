@@ -1004,13 +1004,13 @@ pub const fn control_bits(bytes: &[u8]) -> u64 {
 /// Whether `byte` is ASCII that ground dispatch hands to [`Perform::print`].
 #[inline(always)]
 fn is_printable_ascii(byte: u8) -> bool {
-    (0x20..0x7f).contains(&byte)
+    (0x20..0x7F).contains(&byte)
 }
 
 /// Stands for U+FFFD in a run handed to [`Perform::print_ascii`].
 ///
 /// DEL is the one ASCII byte a run of printable text cannot otherwise contain.
-pub const ASCII_REPLACEMENT: u8 = 0x7f;
+pub const ASCII_REPLACEMENT: u8 = 0x7F;
 
 /// The character a byte of a [`Perform::print_ascii`] run stands for.
 #[inline(always)]

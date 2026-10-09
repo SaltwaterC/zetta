@@ -516,11 +516,11 @@ where
                                 }
                             }
 
-                            if event.writable {
-                                if let Err(err) = self.pty_write(&mut state) {
-                                    error!("Error writing to PTY in event loop: {err}");
-                                    break 'event_loop;
-                                }
+                            if event.writable
+                                && let Err(err) = self.pty_write(&mut state)
+                            {
+                                error!("Error writing to PTY in event loop: {err}");
+                                break 'event_loop;
                             }
                         },
                         _ => (),

@@ -2,7 +2,7 @@
 name = "moshcatty"
 version = "0.1.8"
 edition = "2021"
-rust-version = "1.95"
+rust-version = "1.99"
 description = "MoshCatty — pure Rust Mosh client, wire-compatible with stock mosh-server"
 license = "GPL-3.0-or-later"
 publish = false

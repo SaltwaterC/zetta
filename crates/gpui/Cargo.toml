@@ -2,6 +2,7 @@
 name = "gpui"
 version = "0.2.2"
 edition = "2024"
+rust-version = "1.99"
 authors = ["Nathan Sobo <nathan@zed.dev>"]
 description = "Zed's GPU-accelerated UI framework"
 repository = "https://github.com/zed-industries/zed"

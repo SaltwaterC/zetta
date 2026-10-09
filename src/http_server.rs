@@ -169,7 +169,7 @@ fn server_loop(
             break;
         }
         if request_count
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
                 (count < MAX_CONCURRENT_REQUESTS).then_some(count + 1)
             })
             .is_err()
