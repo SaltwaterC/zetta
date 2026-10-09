@@ -152,7 +152,7 @@ fn supported_shells_generate_completion_and_tftp_shortcut() {
         ShellIntegration::PowerShell,
         ShellIntegration::Zsh,
     ] {
-        let script = shell.script();
+        let script = shell.eager_script();
         assert!(script.contains("ztftp"));
         assert!(script.contains("tftp"));
         assert!(script.contains("serial"));
@@ -209,7 +209,7 @@ fn generated_shell_integrations_omit_the_zmux_cli_surface() {
         ShellIntegration::PowerShell,
         ShellIntegration::Zsh,
     ] {
-        let script = shell.script();
+        let script = shell.eager_script();
         assert!(!script.contains("--no-mux"));
         assert!(!script.contains("zetta mux"));
         match shell {
@@ -235,7 +235,7 @@ fn bash_pane_wait_completion_labels_then_delegates_to_the_wrapped_command() {
         return;
     }
 
-    let script = ShellIntegration::Bash.script();
+    let script = ShellIntegration::Bash.eager_script();
     let driver = format!(
         "{script}\nprintf '\\n'\nzetta() {{ if [[ $1 == pane && $2 == --list ]]; then printf '%s\\n' api db deploy; fi; }}\nCOMP_WORDS=(zetta pane wait '')\nCOMP_CWORD=3\n_zetta_complete\nprintf 'first:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zetta pane wait api,)\nCOMP_CWORD=3\n_zetta_complete\nprintf 'second:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zetta pane wait api -- tru)\nCOMP_CWORD=5\n_zetta_complete\nprintf 'after-delimiter-command:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zetta pane wait api -- git Carg)\nCOMP_CWORD=6\n_zetta_complete\nprintf 'after-delimiter-arg:%s\\n' \"${{COMPREPLY[@]}}\"\n"
     );
@@ -302,7 +302,7 @@ fn bash_pane_wait_completion_labels_then_delegates_to_the_wrapped_command() {
 // in this file (for example `vi_integration_is_conditional_and_has_cli_completion`).
 #[test]
 fn zsh_pane_wait_completion_shifts_words_and_delegates_past_the_delimiter() {
-    let zsh = ShellIntegration::Zsh.script();
+    let zsh = ShellIntegration::Zsh.eager_script();
     assert!(zsh.contains("if (( wait_delimiter )); then"));
     let wait_block = zsh
         .split("if [[ $pane_operation == wait ]]; then")
@@ -326,7 +326,7 @@ fn fish_pane_wait_completion_labels_then_delegates_to_the_wrapped_command() {
         return;
     }
 
-    let script = ShellIntegration::Fish.script();
+    let script = ShellIntegration::Fish.eager_script();
     let script_file = tempfile::NamedTempFile::new().unwrap();
     fs::write(script_file.path(), &script).unwrap();
 
@@ -386,7 +386,7 @@ fn bash_project_command_completion_is_dynamic_and_stops_at_delimiter() {
         return;
     }
 
-    let script = ShellIntegration::Bash.script();
+    let script = ShellIntegration::Bash.eager_script();
     let driver = format!(
         "{script}\nzetta() {{ if [[ $1 == cmd && $2 == --list ]]; then printf '%s\\n' build check test:unit; fi; }}\nCOMP_WORDS=(zetta cmd '')\nCOMP_CWORD=2\n_zetta_complete\nprintf 'names:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zetta cmd t)\nCOMP_CWORD=2\n_zetta_complete\nprintf 'prefix:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zetta cmd build '')\nCOMP_CWORD=3\n_zetta_complete\nprintf 'after-name:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zetta cmd build -- '')\nCOMP_CWORD=4\n_zetta_complete\nprintf 'after-delimiter:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zetta cmd --list '')\nCOMP_CWORD=3\n_zetta_complete\nprintf 'after-list:%s\\n' \"${{COMPREPLY[@]}}\"\n"
     );
@@ -448,7 +448,7 @@ fn zsh_project_command_completion_offers_long_options_at_each_option_prompt() {
         return;
     }
 
-    let script = ShellIntegration::Zsh.script();
+    let script = ShellIntegration::Zsh.eager_script();
     let driver = format!(
         "{script}\nfunction zetta {{ if [[ $1 == cmd && $2 == --list ]]; then print -r -- build check; fi; }}\nfunction compadd {{ print -r -- \"${{stage}}:candidates:$*\"; }}\nfunction _zetta_options {{ print -r -- \"${{stage}}:options:$*\"; }}\nstage=empty\nwords=(zetta cmd '')\nCURRENT=3\n_zetta\nstage=name\nwords=(zetta cmd build '')\nCURRENT=4\n_zetta\nstage=list\nwords=(zetta cmd --list '')\nCURRENT=4\n_zetta\n"
     );
@@ -500,7 +500,7 @@ fn generated_shell_scripts_omit_worktree_integration_when_disabled() {
         ShellIntegration::PowerShell,
         ShellIntegration::Zsh,
     ] {
-        let script = shell.script();
+        let script = shell.eager_script();
         assert!(!script.contains("zwt"), "{shell:?} emitted zwt integration");
         assert!(
             !script.contains("ZETTA_WORKTREE"),
@@ -515,29 +515,29 @@ fn generated_shell_scripts_omit_worktree_integration_when_disabled() {
 fn shell_integration_reports_the_shell_cwd_while_children_run() {
     assert!(
         ShellIntegration::Bash
-            .script()
+            .eager_script()
             .contains("__zetta_report_cwd")
     );
     assert!(
         ShellIntegration::Fish
-            .script()
+            .eager_script()
             .contains("--on-event fish_prompt")
     );
     assert!(
         ShellIntegration::PowerShell
-            .script()
+            .eager_script()
             .contains("zetta-cwd:$zettaDirectory")
     );
     assert!(
         ShellIntegration::Zsh
-            .script()
+            .eager_script()
             .contains("add-zsh-hook precmd __zetta_report_cwd")
     );
 }
 
 #[test]
 fn zsh_lifecycle_tracker_does_not_assign_to_read_only_status() {
-    let zsh = ShellIntegration::Zsh.script();
+    let zsh = ShellIntegration::Zsh.eager_script();
 
     assert!(zsh.contains("local zetta_status=$?"));
     assert!(!zsh.contains("local status=$?"));
@@ -546,7 +546,7 @@ fn zsh_lifecycle_tracker_does_not_assign_to_read_only_status() {
 
 #[test]
 fn zsh_integration_filters_zetta_startup_history() {
-    let zsh = ShellIntegration::Zsh.script();
+    let zsh = ShellIntegration::Zsh.eager_script();
 
     assert!(zsh.contains("function __zetta_filter_startup_history()"));
     assert!(zsh.contains("__zed_init_command_history_"));
@@ -556,7 +556,7 @@ fn zsh_integration_filters_zetta_startup_history() {
 
 #[test]
 fn fish_integration_filters_zetta_startup_history() {
-    let fish = ShellIntegration::Fish.script();
+    let fish = ShellIntegration::Fish.eager_script();
 
     assert!(fish.contains("function __zetta_capture_startup_history"));
     assert!(fish.contains("--on-event fish_postexec"));
@@ -572,7 +572,7 @@ fn zsh_reload_replaces_an_already_installed_broken_tracker() {
     use std::io::Write as _;
     use std::process::Stdio;
 
-    let script = ShellIntegration::Zsh.script();
+    let script = ShellIntegration::Zsh.eager_script();
     let driver = format!(
         "{prelude}\n{script}\n__ZETTA_COMMAND_STARTED=1\nfalse\n__zetta_report_cwd\nexit 0\n",
         prelude = r#"function __zetta_report_cwd() {
@@ -617,7 +617,7 @@ typeset -g __ZETTA_LIFECYCLE_TRACKING_VERSION=2"#,
 
 #[test]
 fn powershell_cwd_tracker_uses_the_shared_idempotence_guard() {
-    let script = ShellIntegration::PowerShell.script();
+    let script = ShellIntegration::PowerShell.eager_script();
 
     assert!(script.contains("Get-Variable -Name __ZettaCwdTrackerInstalled -Scope Global"));
     assert!(script.contains("$global:__ZettaCwdTrackerInstalled = $true"));
@@ -635,7 +635,10 @@ fn powershell_cwd_trackers_reset_before_the_saved_prompt() {
     const RESET_WRITE: &str = r#"[Console]::Write("$([char]27)[0m")"#;
 
     for (name, script) in [
-        ("shell integration", ShellIntegration::PowerShell.script()),
+        (
+            "shell integration",
+            ShellIntegration::PowerShell.eager_script(),
+        ),
         ("terminal tracker", TERMINAL_TRACKER.to_owned()),
     ] {
         let marker = script
@@ -676,7 +679,7 @@ fn powershell_cwd_trackers_reset_before_the_saved_prompt() {
 
 #[test]
 fn vi_integration_is_conditional_and_has_cli_completion() {
-    let bash = ShellIntegration::Bash.script();
+    let bash = ShellIntegration::Bash.eager_script();
     assert!(bash.contains("if ! type -t vi >/dev/null 2>&1"));
     assert!(bash.contains("eval 'vi() { zetta vi \"$@\"; }'"));
     assert!(bash.contains("zvi() { zetta vi \"$@\"; }"));
@@ -684,7 +687,7 @@ fn vi_integration_is_conditional_and_has_cli_completion() {
     assert!(bash.contains("complete -F _zetta_complete zvi"));
     assert!(bash.contains("vi)\n            if [[ $current == -* ]]; then"));
 
-    let fish = ShellIntegration::Fish.script();
+    let fish = ShellIntegration::Fish.eager_script();
     assert!(fish.contains("if not type -q vi"));
     assert!(fish.contains("complete -c vi -F"));
     assert!(fish.contains("function zvi --wraps 'zetta vi'"));
@@ -692,15 +695,15 @@ fn vi_integration_is_conditional_and_has_cli_completion() {
     assert!(fish.contains("function __zetta_option_unused"));
     assert!(fish.contains("ZETTA_HOST_EXECUTABLE"));
 
-    let powershell = ShellIntegration::PowerShell.script();
+    let powershell = ShellIntegration::PowerShell.eager_script();
     assert!(powershell.contains("$zettaViMissing = -not (Get-Command vi"));
     assert!(powershell.contains("if ($zettaViMissing)"));
     assert!(powershell.contains("function zvi { & zetta vi @args }"));
     assert!(powershell.contains("Register-ArgumentCompleter -CommandName zvi"));
     assert!(powershell.contains("Get-ChildItem -Name -Path \"$wordToComplete*\""));
-    assert!(powershell.contains("$_ -notin $words"));
+    assert!(powershell.contains("$candidate -in $words"));
 
-    let zsh = ShellIntegration::Zsh.script();
+    let zsh = ShellIntegration::Zsh.eager_script();
     assert!(zsh.contains("$+commands[vi]"));
     assert!(zsh.contains("compdef _zetta vi"));
     assert!(zsh.contains("function zvi { zetta vi \"$@\"; }"));
@@ -718,27 +721,27 @@ fn vi_integration_is_conditional_and_has_cli_completion() {
 
 #[test]
 fn mosh_integration_is_conditional_and_has_full_client_completion() {
-    let bash = ShellIntegration::Bash.script();
+    let bash = ShellIntegration::Bash.eager_script();
     assert!(bash.contains("if ! type -t mosh >/dev/null 2>&1"));
     assert!(bash.contains("mosh() { zetta mosh \"$@\"; }"));
     assert!(bash.contains("complete -F _zosh_complete zosh"));
     assert!(bash.contains("complete -F _zosh_complete mosh"));
     assert!(bash.contains("_zetta_complete_ssh_targets"));
 
-    let fish = ShellIntegration::Fish.script();
+    let fish = ShellIntegration::Fish.eager_script();
     assert!(fish.contains("if not type -q mosh"));
     assert!(fish.contains("function mosh --wraps 'zetta mosh'"));
     assert!(fish.contains("-l client"));
     assert!(fish.contains("-a '(__zetta_ssh_targets)'"));
     assert!(fish.contains("(__zetta_ssh_targets)"));
 
-    let powershell = ShellIntegration::PowerShell.script();
+    let powershell = ShellIntegration::PowerShell.eager_script();
     assert!(powershell.contains("Get-Command mosh -ErrorAction SilentlyContinue"));
     assert!(powershell.contains("function global:mosh { & zetta mosh @args }"));
     assert!(powershell.contains("Register-ArgumentCompleter -Native -CommandName zosh"));
     assert!(powershell.contains("$zettaSshTargets"));
 
-    let zsh = ShellIntegration::Zsh.script();
+    let zsh = ShellIntegration::Zsh.eager_script();
     assert!(zsh.contains("$+commands[mosh]"));
     assert!(zsh.contains("function mosh { zetta mosh \"$@\"; }"));
     assert!(zsh.contains("compdef _zosh zosh"));
@@ -756,14 +759,14 @@ fn mosh_integration_is_conditional_and_has_full_client_completion() {
 // values.
 #[test]
 fn mosh_completion_covers_every_option_the_zosh_launcher_accepts() {
-    let bash = ShellIntegration::Bash.script();
+    let bash = ShellIntegration::Bash.eager_script();
     assert!(bash.contains("--no-predict-overwrite"));
     assert!(bash.contains("-k --keep-alive --scrollback --no-scrollback"));
     assert!(bash.contains("-p --port --bind-server"));
     assert!(bash.contains("-h --help -V --version --"));
     assert_eq!(bash.matches("--no-predict-overwrite").count(), 3); // mosh x2 (option/empty current) + zosh
 
-    let fish = ShellIntegration::Fish.script();
+    let fish = ShellIntegration::Fish.eager_script();
     assert!(fish.contains("-l no-predict-overwrite"));
     assert!(fish.contains("-l keep-alive"));
     assert!(fish.contains("-l scrollback"));
@@ -775,7 +778,7 @@ fn mosh_completion_covers_every_option_the_zosh_launcher_accepts() {
     assert!(fish.contains("-s V -d 'Print version'"));
     assert!(fish.contains("function __zetta_mosh_host_given"));
 
-    let powershell = ShellIntegration::PowerShell.script();
+    let powershell = ShellIntegration::PowerShell.eager_script();
     assert!(powershell.contains(
         "'--no-predict-overwrite', '-k', '--keep-alive', '--scrollback', \
          '--no-scrollback', '-4'"
@@ -784,7 +787,7 @@ fn mosh_completion_covers_every_option_the_zosh_launcher_accepts() {
     assert!(powershell.contains("'-h', '--help', '-V', '--version', '--'"));
     assert!(powershell.contains("elseif ($previous -eq '--bind-server') { 'ssh', 'any' }"));
 
-    let zsh = ShellIntegration::Zsh.script();
+    let zsh = ShellIntegration::Zsh.eager_script();
     assert!(zsh.contains("--no-predict-overwrite"));
     assert!(zsh.contains("-k --keep-alive --scrollback --no-scrollback"));
     assert!(zsh.contains("-h --help -V --version --"));
@@ -800,7 +803,7 @@ fn mosh_completion_covers_every_option_the_zosh_launcher_accepts() {
 // `_zosh_complete` see nothing to complete.
 #[test]
 fn bash_template_has_no_literal_escaped_expansions() {
-    let bash = ShellIntegration::Bash.script();
+    let bash = ShellIntegration::Bash.eager_script();
     assert!(bash.contains("if [[ ${__ZETTA_MOSH_WRAPPER:-0} == 1 ]]; then"));
     assert!(bash.contains("local current=${COMP_WORDS[COMP_CWORD]}"));
     assert!(
@@ -821,7 +824,7 @@ fn ssh_target_helpers_use_an_awk_portable_loop_variable() {
         ShellIntegration::Fish,
         ShellIntegration::Zsh,
     ] {
-        let script = shell.script();
+        let script = shell.eager_script();
         assert!(
             script.contains("for (field = 2; field <= NF; field++)"),
             "{shell:?} SSH-target helper must use a portable awk loop variable"
@@ -858,7 +861,7 @@ fn zsh_mosh_completion_offers_ssh_targets_and_options_for_wrapper_and_zetta_mosh
     )
     .unwrap();
 
-    let script = ShellIntegration::Zsh.script();
+    let script = ShellIntegration::Zsh.eager_script();
     let driver = format!(
         "{script}\nfunction zetta {{ :; }}\nfunction compadd {{ print -r -- \"${{stage}}:candidates:$*\"; }}\nfunction _zetta_options {{ print -r -- \"${{stage}}:options:$*\"; }}\nstage=wrapper-host\nwords=(mosh '')\nCURRENT=2\n_zetta\nstage=wrapper-option\nwords=(mosh '--')\nCURRENT=2\n_zetta\nstage=zetta-host\nwords=(zetta mosh '')\nCURRENT=3\n_zetta\nstage=zetta-option\nwords=(zetta mosh '--')\nCURRENT=3\n_zetta\nstage=wrapper-after-host\nwords=(mosh 'web01' '')\nCURRENT=3\n_zetta\nstage=zetta-after-host\nwords=(zetta mosh 'web01' '')\nCURRENT=4\n_zetta\nstage=wrapper-after-flags\nwords=(mosh '--predict' 'always' '')\nCURRENT=4\n_zetta\nstage=zosh-host\nwords=(zosh '')\nCURRENT=2\n_zosh\nstage=zosh-after-host\nwords=(zosh 'web01' '')\nCURRENT=3\n_zosh\nstage=wrapper-bind\nwords=(mosh '--bind-server' '')\nCURRENT=3\n_zetta\nstage=zetta-bind\nwords=(zetta mosh '--bind-server' '')\nCURRENT=4\n_zetta\n"
     );
@@ -961,7 +964,7 @@ fn bash_ssh_target_completion_reads_the_ssh_config() {
     )
     .unwrap();
 
-    let script = ShellIntegration::Bash.script();
+    let script = ShellIntegration::Bash.eager_script();
     let driver = format!(
         "{script}\nCOMP_WORDS=(zetta mosh '')\nCOMP_CWORD=2\n_zetta_complete\nprintf 'zetta-mosh:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(mosh '')\nCOMP_CWORD=1\n_zosh_complete\nprintf 'wrapper:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zosh '')\nCOMP_CWORD=1\n_zosh_complete\nprintf 'zosh:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zosh 'web01' '')\nCOMP_CWORD=2\n_zosh_complete\nprintf 'zosh-after-host:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zetta mosh 'web01' '')\nCOMP_CWORD=3\n_zetta_complete\nprintf 'zetta-after-host:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zosh '--')\nCOMP_CWORD=1\n_zosh_complete\nprintf 'no-options:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zosh '--bind-server' '')\nCOMP_CWORD=2\n_zosh_complete\nprintf 'bind:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zetta mosh '--bind-server' '')\nCOMP_CWORD=3\n_zetta_complete\nprintf 'zetta-bind:%s\\n' \"${{COMPREPLY[@]}}\"\n"
     );
@@ -1041,7 +1044,7 @@ fn fish_mosh_and_zosh_completion_offer_ssh_targets() {
     )
     .unwrap();
 
-    let script = ShellIntegration::Fish.script();
+    let script = ShellIntegration::Fish.eager_script();
     let script_file = tempfile::NamedTempFile::new().unwrap();
     fs::write(script_file.path(), script).unwrap();
     for line in ["zetta mosh ", "zosh "] {
@@ -1200,7 +1203,7 @@ printf '%s:%s\n' '{label}' "$*" >> "$ZETTA_TEST_LOG"
             .map(|(_, command)| *command)
             .collect::<Vec<_>>()
             .join("\n");
-        let script = ShellIntegration::parse(shell).unwrap().script();
+        let script = ShellIntegration::parse(shell).unwrap().eager_script();
         let prefix = if shell == "zsh" {
             "function compdef { :; }\n"
         } else {
@@ -1296,7 +1299,7 @@ fn bash_does_not_repeat_options_and_completes_vi_files() {
         return;
     }
 
-    let script = ShellIntegration::Bash.script();
+    let script = ShellIntegration::Bash.eager_script();
     let driver = format!(
         "{script}\nCOMP_WORDS=(zetta vi --)\nCOMP_CWORD=2\n_zetta_complete\nprintf 'option:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zetta vi --help '')\nCOMP_CWORD=3\n_zetta_complete\nprintf 'file:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zetta vi Carg)\nCOMP_CWORD=2\n_zetta_complete\nprintf 'file:%s\\n' \"${{COMPREPLY[@]}}\"\n"
     );
@@ -1313,7 +1316,7 @@ fn bash_color_completion_offers_named_presets_for_long_and_short_flags() {
         return;
     }
 
-    let script = ShellIntegration::Bash.script();
+    let script = ShellIntegration::Bash.eager_script();
     let driver = format!(
         "{script}\nCOMP_WORDS=(zetta overlay --color '')\nCOMP_CWORD=3\n_zetta_complete\nprintf 'long:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zetta overlay -c '')\nCOMP_CWORD=3\n_zetta_complete\nprintf 'short:%s\\n' \"${{COMPREPLY[@]}}\"\n"
     );
@@ -1339,7 +1342,7 @@ fn bash_worktree_completion_offers_operations_and_long_worktree_options() {
         return;
     }
 
-    let script = ShellIntegration::Bash.script();
+    let script = ShellIntegration::Bash.eager_script();
     let driver = format!(
         "{script}\ngit() {{ case \"$1 $2\" in branch\\ --show-current) printf '%s\\n' wt/feature ;; config\\ --local) printf '%s\\n' main ;; merge-base*) printf '%s\\n' split ;; rev-list*) printf '%s\\n' commit-one commit-two ;; esac; }}\nCOMP_WORDS=(zetta wt '')\nCOMP_CWORD=2\n_zetta_complete\nprintf 'operation:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zetta wt new --)\nCOMP_CWORD=3\n_zetta_complete\nprintf 'option:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zetta wt new --copy Carg)\nCOMP_CWORD=4\n_zetta_complete\nprintf 'copy-path:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zetta wt new -c Carg)\nCOMP_CWORD=4\n_zetta_complete\nprintf 'short-copy-path:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zetta wt sync '')\nCOMP_CWORD=3\n_zetta_complete\nprintf 'sync-commit:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zwt '')\nCOMP_CWORD=1\n_zetta_complete_zwt\nprintf 'wrapper:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zwt sync '')\nCOMP_CWORD=2\n_zetta_complete_zwt\nprintf 'wrapper-sync-commit:%s\\n' \"${{COMPREPLY[@]}}\"\n"
     );
@@ -1391,7 +1394,7 @@ fn bash_zmux_completes_the_same_as_zetta_mux() {
         return;
     }
 
-    let script = ShellIntegration::Bash.script();
+    let script = ShellIntegration::Bash.eager_script();
     let driver = "\
 zetta() { if [[ $1 == mux && $2 == list ]]; then printf '%s\\n' '  reconnect id: 12345:7:42 (short: 42)'; fi; }\n\
 zmux() { if [[ $1 == list ]]; then printf '%s\\n' '  reconnect id: 12345:7:42 (short: 42)'; fi; }\n\
@@ -1479,12 +1482,12 @@ COMP_WORDS=(zetta mux share '')\nCOMP_CWORD=3\n_zetta_complete\nprintf 'no-mux-s
 #[cfg(feature = "zmux")]
 #[test]
 fn zsh_and_powershell_wire_up_zmux_completion() {
-    let zsh = ShellIntegration::Zsh.script();
+    let zsh = ShellIntegration::Zsh.eager_script();
     assert!(zsh.contains("_zmux()"));
     assert!(zsh.contains("words=(zetta mux \"${words[@]:1}\")"));
     assert!(zsh.contains("compdef _zmux zmux"));
 
-    let powershell = ShellIntegration::PowerShell.script();
+    let powershell = ShellIntegration::PowerShell.eager_script();
     assert!(powershell.contains("Register-ArgumentCompleter -Native -CommandName zmux"));
     assert!(powershell.contains("if ($commandName -eq 'zmux')"));
 }
@@ -1520,7 +1523,7 @@ fn bash_zwt_changes_directory_for_nested_paths_with_spaces() {
     paths.insert(0, temporary.path().to_owned());
     path = std::env::join_paths(paths).unwrap();
 
-    let script = ShellIntegration::Bash.script();
+    let script = ShellIntegration::Bash.eager_script();
     let driver = format!(
         "{script}\ncd '{}'\nzwt new --path-only 'feature/api'\nprintf 'new:%s\\n' \"$PWD\"\nzwt done --path-only\nprintf 'done:%s\\n' \"$PWD\"\nzwt abort\nprintf 'abort:%s\\n' \"$PWD\"\n",
         start.display()
@@ -1571,19 +1574,19 @@ fn bash_zwt_changes_directory_for_nested_paths_with_spaces() {
 #[cfg(feature = "worktree")]
 #[test]
 fn worktree_wrappers_pass_help_through_without_capturing_it_as_a_path() {
-    let bash = ShellIntegration::Bash.script();
+    let bash = ShellIntegration::Bash.eager_script();
     assert!(bash.contains("$path_only_arg == --help || $path_only_arg == -h"));
     assert!(bash.contains("command zwt abort --path-only"));
 
-    let zsh = ShellIntegration::Zsh.script();
+    let zsh = ShellIntegration::Zsh.eager_script();
     assert!(zsh.contains("$path_only_arg == --help || $path_only_arg == -h"));
     assert!(zsh.contains("command zwt abort --path-only"));
 
-    let fish = ShellIntegration::Fish.script();
+    let fish = ShellIntegration::Fish.eager_script();
     assert!(fish.contains("contains -- --help $operation_args; or contains -- -h $operation_args"));
     assert!(fish.contains("command zwt abort --path-only"));
 
-    let powershell = ShellIntegration::PowerShell.script();
+    let powershell = ShellIntegration::PowerShell.eager_script();
     assert!(
         powershell.contains("$operationArgs -contains '--help' -or $operationArgs -contains '-h'")
     );
@@ -1629,7 +1632,7 @@ fn posix_zwt_help_does_not_change_directory_or_inject_path_only() {
             continue;
         }
 
-        let script = ShellIntegration::parse(shell).unwrap().script();
+        let script = ShellIntegration::parse(shell).unwrap().eager_script();
         let prefix = if shell == "zsh" {
             "compdef() { :; }\n"
         } else {
@@ -1726,7 +1729,7 @@ fn posix_zwt_sync_and_config_pass_through_without_changing_directory() {
             continue;
         }
 
-        let script = ShellIntegration::parse(shell).unwrap().script();
+        let script = ShellIntegration::parse(shell).unwrap().eager_script();
         let prefix = if shell == "zsh" {
             "compdef() { :; }\n"
         } else {
@@ -1801,7 +1804,7 @@ fn supported_shells_generate_notify_completion_and_zntfy_shortcut() {
         ShellIntegration::PowerShell,
         ShellIntegration::Zsh,
     ] {
-        let script = shell.script();
+        let script = shell.eager_script();
         assert!(script.contains("zntfy"));
         assert!(script.contains("notify"));
         if shell == ShellIntegration::Fish {
@@ -1826,7 +1829,7 @@ fn supported_shells_generate_notify_cleanup_completion() {
         ShellIntegration::PowerShell,
         ShellIntegration::Zsh,
     ] {
-        let script = shell.script();
+        let script = shell.eager_script();
         assert!(script.contains("notify") && script.contains("cleanup"));
         if shell == ShellIntegration::Fish {
             assert!(script.contains("-l dry-run"));
@@ -1844,7 +1847,7 @@ fn supported_shells_generate_attention_completion() {
         ShellIntegration::PowerShell,
         ShellIntegration::Zsh,
     ] {
-        let script = shell.script();
+        let script = shell.eager_script();
         assert!(script.contains("attention"));
         if shell == ShellIntegration::Fish {
             assert!(script.contains("-l notify"));
@@ -1865,7 +1868,7 @@ fn supported_shells_generate_copy_paste_completion_and_shortcuts() {
         ShellIntegration::PowerShell,
         ShellIntegration::Zsh,
     ] {
-        let script = shell.script();
+        let script = shell.eager_script();
         assert!(script.contains("zcopy"));
         assert!(script.contains("zpaste"));
         assert!(!script.contains("zcopy() { zetta copy"));
@@ -1889,28 +1892,28 @@ fn supported_shells_generate_copy_paste_completion_and_shortcuts() {
 #[cfg(feature = "clipboard")]
 #[test]
 fn pbcopy_and_pbpaste_are_gated_to_non_macos_platforms() {
-    let bash = ShellIntegration::Bash.script();
+    let bash = ShellIntegration::Bash.eager_script();
     assert!(bash.contains("pbcopy"));
     assert!(bash.contains("pbpaste"));
     assert!(bash.contains("unalias pbcopy pbpaste"));
     assert!(bash.contains("pbcopy() { command zcopy"));
     assert!(bash.contains("darwin*) ;;"));
 
-    let zsh = ShellIntegration::Zsh.script();
+    let zsh = ShellIntegration::Zsh.eager_script();
     assert!(zsh.contains("pbcopy"));
     assert!(zsh.contains("pbpaste"));
     assert!(zsh.contains("unalias pbcopy pbpaste"));
     assert!(zsh.contains("function pbcopy { command zcopy"));
     assert!(zsh.contains("darwin*) ;;"));
 
-    let fish = ShellIntegration::Fish.script();
+    let fish = ShellIntegration::Fish.eager_script();
     assert!(fish.contains("pbcopy"));
     assert!(fish.contains("pbpaste"));
     assert!(fish.contains("functions -e pbcopy pbpaste"));
     assert!(fish.contains("command zcopy $argv"));
     assert!(fish.contains("case Darwin\n    case '*'"));
 
-    let powershell = ShellIntegration::PowerShell.script();
+    let powershell = ShellIntegration::PowerShell.eager_script();
     assert!(powershell.contains("pbcopy"));
     assert!(powershell.contains("pbpaste"));
     assert!(powershell.contains("if (-not $IsMacOS) {"));
@@ -1929,7 +1932,7 @@ fn pbcopy_and_pbpaste_are_gated_to_non_macos_platforms() {
 #[cfg(feature = "clipboard")]
 #[test]
 fn zsh_accepts_the_generated_integration_with_a_preexisting_pbcopy_alias() {
-    let script = ShellIntegration::Zsh.script();
+    let script = ShellIntegration::Zsh.eager_script();
     let combined = format!(
         "alias pbcopy='xclip -selection clipboard'\nalias pbpaste='xclip -selection clipboard -o'\n{script}"
     );
@@ -1960,14 +1963,14 @@ fn zsh_accepts_the_generated_integration_with_a_preexisting_pbcopy_alias() {
 
 #[test]
 fn sound_completion_calls_a_shared_helper_from_every_call_site() {
-    let bash = ShellIntegration::Bash.script();
+    let bash = ShellIntegration::Bash.eager_script();
     assert!(bash.contains("--sound)\n            _zetta_complete_sound_names"));
     assert!(bash.contains("--sound|-s)\n            _zetta_complete_sound_names"));
     assert!(bash.contains(
         "elif [[ $command == notify || $command == attention ]]; then\n                _zetta_complete_sound_names"
     ));
 
-    let zsh = ShellIntegration::Zsh.script();
+    let zsh = ShellIntegration::Zsh.eager_script();
     assert!(zsh.contains("--sound)\n            _zetta_sound_names"));
     assert!(zsh.contains("--sound|-s)\n            _zetta_sound_names"));
     assert!(
@@ -1976,10 +1979,10 @@ fn sound_completion_calls_a_shared_helper_from_every_call_site() {
         )
     );
 
-    let fish = ShellIntegration::Fish.script();
+    let fish = ShellIntegration::Fish.eager_script();
     assert!(fish.contains("-l sound -r -a '(__zetta_sound_names)'"));
 
-    let powershell = ShellIntegration::PowerShell.script();
+    let powershell = ShellIntegration::PowerShell.eager_script();
     assert!(powershell.contains("elseif ($previous -in '--sound', '-s') { $zettaSoundNames }"));
     assert!(powershell.contains("elseif ($previous -eq '--sound') {\n        $zettaSoundNames"));
     assert!(
@@ -1999,21 +2002,21 @@ fn sound_completion_is_scoped_to_the_detected_platform() {
     let macos_only = ["Basso", "Glass", "Sosumi"];
     let windows_only = ["IM", "Reminder", "SMS"];
 
-    let bash = ShellIntegration::Bash.script();
+    let bash = ShellIntegration::Bash.eager_script();
     assert!(bash.contains("case \"$OSTYPE\" in"));
     assert!(bash.contains("darwin*)"));
     assert!(bash.contains("msys*|cygwin*|win32*)"));
 
-    let zsh = ShellIntegration::Zsh.script();
+    let zsh = ShellIntegration::Zsh.eager_script();
     assert!(zsh.contains("case \"$OSTYPE\" in"));
     assert!(zsh.contains("darwin*)"));
     assert!(zsh.contains("msys*|cygwin*|win32*)"));
 
-    let fish = ShellIntegration::Fish.script();
-    assert!(fish.contains("switch (uname)"));
+    let fish = ShellIntegration::Fish.eager_script();
+    assert!(fish.contains("switch $__zetta_platform"));
     assert!(fish.contains("case Darwin"));
 
-    let powershell = ShellIntegration::PowerShell.script();
+    let powershell = ShellIntegration::PowerShell.eager_script();
     assert!(powershell.contains("if ($IsMacOS) {"));
     assert!(powershell.contains("} elseif ($IsLinux) {"));
 
@@ -2055,20 +2058,20 @@ fn sound_completion_is_scoped_to_the_detected_platform() {
 // benchmark output's repeated/unique values.
 #[test]
 fn notify_timeout_completion_does_not_leak_into_other_short_t_flags() {
-    let bash = ShellIntegration::Bash.script();
+    let bash = ShellIntegration::Bash.eager_script();
     assert!(bash.contains("elif [[ $command == theme && ${COMP_WORDS[2]} == pane ]]; then"));
     assert!(bash.contains("elif [[ $command == theme && ${COMP_WORDS[2]} == tab ]]; then"));
     assert!(bash.contains("elif [[ $command == benchmark && ${COMP_WORDS[2]} == output ]]; then"));
     assert!(bash.contains("_zetta_compgen 'repeated unique'"));
 
-    let zsh = ShellIntegration::Zsh.script();
+    let zsh = ShellIntegration::Zsh.eager_script();
     assert!(zsh.contains(
         "elif [[ $words[2] == theme && ($words[3] == pane || $words[3] == tab) ]]; then"
     ));
     assert!(zsh.contains("elif [[ $words[2] == benchmark && $words[3] == output ]]; then"));
     assert!(zsh.contains("compadd -- repeated unique"));
 
-    let powershell = ShellIntegration::PowerShell.script();
+    let powershell = ShellIntegration::PowerShell.eager_script();
     assert!(powershell.contains(
         "elseif ($subcommand -eq 'theme' -and $words.Count -gt 2 -and $words[2] -in 'pane', 'tab') { & $zettaThemes $words[2] }"
     ));
@@ -2088,7 +2091,7 @@ fn profile_and_theme_root_flags_keep_completing_each_other_in_bash() {
         return;
     }
 
-    let script = ShellIntegration::Bash.script();
+    let script = ShellIntegration::Bash.eager_script();
     let driver = format!(
         "{script}\nCOMP_WORDS=(zetta --profile System '')\nCOMP_CWORD=3\n_zetta_complete\nprintf 'after-profile:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zetta --theme Dracula '')\nCOMP_CWORD=3\n_zetta_complete\nprintf 'after-theme:%s\\n' \"${{COMPREPLY[@]}}\"\n"
     );
@@ -2133,7 +2136,7 @@ fn bash_root_split_completion_handles_long_short_and_combined_launch_options() {
         return;
     }
 
-    let script = ShellIntegration::Bash.script();
+    let script = ShellIntegration::Bash.eager_script();
     let driver = format!(
         "zetta() {{\n    if [[ $1 == splits ]]; then\n        printf '%s\\n' custom-layout quarters four-vertical three-left three-right\n    elif [[ $1 == profile && $2 == list ]]; then\n        if [[ $3 == --config && $4 == profiles.json ]]; then\n            printf '%s\\n' 'Configured Shell'\n        else\n            printf '%s\\n' 'System' 'WSL: Ubuntu'\n        fi\n    fi\n}}\n{script}\nCOMP_WORDS=(zetta --split '')\nCOMP_CWORD=2\n_zetta_complete\nprintf 'long:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zetta -s '')\nCOMP_CWORD=2\n_zetta_complete\nprintf 'short:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zetta --profile System '')\nCOMP_CWORD=3\n_zetta_complete\nprintf 'profile:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zetta --split quarters --profile '')\nCOMP_CWORD=4\n_zetta_complete\nprintf 'combined:%s\\n' \"${{COMPREPLY[@]}}\"\nCOMP_WORDS=(zetta -c profiles.json profile disable '')\nCOMP_CWORD=5\n_zetta_complete\nprintf 'profile-config:%s\\n' \"${{COMPREPLY[@]}}\"\n"
     );
@@ -2175,7 +2178,7 @@ fn bash_pane_completion_offers_directions_and_live_labels() {
         return;
     }
 
-    let script = ShellIntegration::Bash.script();
+    let script = ShellIntegration::Bash.eager_script();
     let driver = format!(
         "zetta() {{
     if [[ $1 == pane && $2 == --list ]]; then
@@ -2245,10 +2248,10 @@ printf 'labels:%s\\n' \"${{COMPREPLY[@]}}\"
 #[test]
 fn serial_completion_enumerates_devices_when_completion_is_requested() {
     let scripts = [
-        ShellIntegration::Bash.script(),
-        ShellIntegration::Fish.script(),
-        ShellIntegration::PowerShell.script(),
-        ShellIntegration::Zsh.script(),
+        ShellIntegration::Bash.eager_script(),
+        ShellIntegration::Fish.eager_script(),
+        ShellIntegration::PowerShell.eager_script(),
+        ShellIntegration::Zsh.eager_script(),
     ];
 
     for script in scripts {
@@ -2259,7 +2262,7 @@ fn serial_completion_enumerates_devices_when_completion_is_requested() {
 
 #[test]
 fn service_completion_uses_command_local_short_options() {
-    let bash = ShellIntegration::Bash.script();
+    let bash = ShellIntegration::Bash.eager_script();
     assert!(bash.contains("--device)\n            _zetta_complete_serial_devices"));
     assert!(bash.contains("--data-bits|-D)"));
     assert!(bash.contains(
@@ -2269,19 +2272,19 @@ fn service_completion_uses_command_local_short_options() {
         "if [[ $command == http || ( $command == tftp && ${COMP_WORDS[2]} == server ) ]]; then"
     ));
 
-    let fish = ShellIntegration::Fish.script();
+    let fish = ShellIntegration::Fish.eager_script();
     assert!(fish.contains("-l device"));
     assert!(fish.contains("-l data-bits"));
     assert!(fish.contains("-l parity"));
     assert!(fish.contains("__zetta_tftp_server' -l config"));
 
-    let powershell = ShellIntegration::PowerShell.script();
+    let powershell = ShellIntegration::PowerShell.eager_script();
     assert!(powershell.contains("'--device', '-d'"));
     assert!(powershell.contains("'--data-bits', '-D'"));
     assert!(powershell.contains("$previous -eq '-p' -and $subcommand -eq 'serial'"));
     assert!(powershell.contains("{ '--root', '--port', '--config', '--help' }"));
 
-    let zsh = ShellIntegration::Zsh.script();
+    let zsh = ShellIntegration::Zsh.eager_script();
     assert!(zsh.contains("--data-bits|-D)"));
     assert!(zsh.contains("$words[2] == serial"));
     assert!(zsh.contains("_zetta_options --root --port --config --help"));
@@ -2295,7 +2298,7 @@ fn service_completion_uses_command_local_short_options() {
 // tftp.rs parsing) but must not be offered as completion candidates.
 #[test]
 fn service_subcommand_completions_only_offer_long_form_flags() {
-    let bash = ShellIntegration::Bash.script();
+    let bash = ShellIntegration::Bash.eager_script();
     assert!(!bash.contains("'-d --device"));
     assert!(!bash.contains("'-r --root -p --port -c --config -h --help'"));
     assert!(!bash.contains("'-p --port -h --help'"));
@@ -2306,7 +2309,7 @@ fn service_subcommand_completions_only_offer_long_form_flags() {
     );
     assert!(bash.contains("'--root --port --config --help'"));
 
-    let zsh = ShellIntegration::Zsh.script();
+    let zsh = ShellIntegration::Zsh.eager_script();
     assert!(!zsh.contains("-d --device -b --baud-rate"));
     assert!(!zsh.contains("compadd -- -r --root -p --port -c --config -h --help"));
     assert!(!zsh.contains("compadd -- -p --port -h --help"));
@@ -2315,7 +2318,7 @@ fn service_subcommand_completions_only_offer_long_form_flags() {
     ));
     assert!(zsh.contains("_zetta_options --root --port --config --help"));
 
-    let powershell = ShellIntegration::PowerShell.script();
+    let powershell = ShellIntegration::PowerShell.eager_script();
     assert!(!powershell.contains("'-d', '--device', '-b', '--baud-rate'"));
     assert!(
         !powershell.contains("'-r', '--root', '-p', '--port', '-c', '--config', '-h', '--help'")
@@ -2326,7 +2329,7 @@ fn service_subcommand_completions_only_offer_long_form_flags() {
     ));
     assert!(powershell.contains("'--root', '--port', '--config', '--help'"));
 
-    let fish = ShellIntegration::Fish.script();
+    let fish = ShellIntegration::Fish.eager_script();
     assert!(!fish.contains("-s d -l device"));
     assert!(!fish.contains("-s r -l root"));
     assert!(!fish.contains("-s p -l port"));
@@ -2347,10 +2350,10 @@ fn service_subcommand_completions_only_offer_long_form_flags() {
 #[test]
 fn profile_completion_uses_line_oriented_dynamic_endpoints() {
     let scripts = [
-        ShellIntegration::Bash.script(),
-        ShellIntegration::Fish.script(),
-        ShellIntegration::PowerShell.script(),
-        ShellIntegration::Zsh.script(),
+        ShellIntegration::Bash.eager_script(),
+        ShellIntegration::Fish.eager_script(),
+        ShellIntegration::PowerShell.eager_script(),
+        ShellIntegration::Zsh.eager_script(),
     ];
     for script in scripts {
         assert!(!script.contains("ZETTA_PROFILES"));
@@ -2366,7 +2369,7 @@ fn profile_completion_uses_line_oriented_dynamic_endpoints() {
 // rejects it with "only one theme may be specified".
 #[test]
 fn powershell_quotes_spaced_completion_values() {
-    let powershell = ShellIntegration::PowerShell.script();
+    let powershell = ShellIntegration::PowerShell.eager_script();
 
     assert!(powershell.contains(r#"$value -match '\s'"#));
     assert!(powershell.contains(r#""'" + $value.Replace("'", "''")"#));
@@ -2378,7 +2381,7 @@ fn powershell_quotes_spaced_completion_values() {
 #[cfg(windows)]
 #[test]
 fn powershell_accepts_the_generated_integration_syntax() {
-    let script = ShellIntegration::PowerShell.script();
+    let script = ShellIntegration::PowerShell.eager_script();
 
     for executable in ["powershell.exe", "pwsh.exe"] {
         let mut child = match Command::new(executable)
@@ -2710,13 +2713,17 @@ fn configuring_fish_creates_its_startup_directory_and_preserves_existing_content
 fn generated_shell_syntax_uses_the_native_powershell_completer_signature() {
     assert!(
         ShellIntegration::PowerShell
-            .script()
+            .eager_script()
             .contains("param($wordToComplete, $commandAst, $cursorPosition)")
     );
-    assert!(ShellIntegration::Zsh.script().contains("terminal-size)"));
     assert!(
         ShellIntegration::Zsh
-            .script()
+            .eager_script()
+            .contains("terminal-size)")
+    );
+    assert!(
+        ShellIntegration::Zsh
+            .eager_script()
             .contains("compadd -S ' ' -- benchmark")
     );
 }
@@ -2729,7 +2736,7 @@ fn terminal_size_completions_include_pane_resize_options() {
         ShellIntegration::PowerShell,
         ShellIntegration::Zsh,
     ] {
-        let script = shell.script();
+        let script = shell.eager_script();
         match shell {
             ShellIntegration::Fish => {
                 assert!(script.contains("-l resize"));
@@ -2757,7 +2764,7 @@ fn edit_completions_offer_managed_cleanup_by_its_long_name() {
         ShellIntegration::PowerShell,
         ShellIntegration::Zsh,
     ] {
-        let script = shell.script();
+        let script = shell.eager_script();
         assert!(script.contains("--delete-after"));
         assert!(!script.contains("-d --delete-after"));
     }
@@ -2771,7 +2778,7 @@ fn generated_scripts_include_root_flags_and_configured_profiles() {
         ShellIntegration::PowerShell,
         ShellIntegration::Zsh,
     ] {
-        let script = shell.script();
+        let script = shell.eager_script();
         assert!(script.contains("profile"));
         assert!(script.contains("config"));
         assert!(!script.contains("WSL: Ubuntu"));
@@ -2796,7 +2803,7 @@ fn generated_scripts_offer_the_shared_overlay_colour_catalogue() {
         ShellIntegration::PowerShell,
         ShellIntegration::Zsh,
     ] {
-        let script = shell.script();
+        let script = shell.eager_script();
         assert!(!script.contains("ZETTA_OVERLAY_COLORS"));
         for preset in OVERLAY_COLOR_PRESETS {
             assert!(
@@ -2817,7 +2824,7 @@ fn generated_scripts_only_offer_long_form_flags() {
         ShellIntegration::PowerShell,
         ShellIntegration::Zsh,
     ] {
-        let script = shell.script();
+        let script = shell.eager_script();
         match shell {
             ShellIntegration::Bash => {
                 assert!(script.contains(
@@ -2864,7 +2871,7 @@ fn generated_scripts_only_offer_long_form_flags() {
 #[cfg(feature = "zmux")]
 #[test]
 fn fish_script_emits_long_option_candidates_for_every_command_context() {
-    let script = ShellIntegration::Fish.script();
+    let script = ShellIntegration::Fish.eager_script();
 
     for context in [
         "root",
@@ -2918,7 +2925,7 @@ fn fish_displays_long_option_candidates_and_supports_short_option_values() {
         return;
     }
 
-    let script = ShellIntegration::Fish.script();
+    let script = ShellIntegration::Fish.eager_script();
     let script_file = tempfile::NamedTempFile::new().unwrap();
     fs::write(script_file.path(), script).unwrap();
     let overlay_color_names = OVERLAY_COLOR_PRESETS
@@ -3249,7 +3256,7 @@ fn fish_omits_daemon_only_mux_candidates_in_no_mux_shells() {
         return;
     }
 
-    let script = ShellIntegration::Fish.script();
+    let script = ShellIntegration::Fish.eager_script();
     let script_file = tempfile::NamedTempFile::new().unwrap();
     fs::write(script_file.path(), script).unwrap();
     for line in ["zetta mux ", "zmux "] {
@@ -3320,7 +3327,7 @@ fn profile_and_theme_root_flags_keep_completing_each_other() {
         return;
     }
 
-    let script = ShellIntegration::Fish.script();
+    let script = ShellIntegration::Fish.eager_script();
     let script_file = tempfile::NamedTempFile::new().unwrap();
     fs::write(script_file.path(), script).unwrap();
 
@@ -3382,7 +3389,7 @@ fn fish_does_not_repeat_options_and_completes_vi_files() {
         return;
     }
 
-    let script = ShellIntegration::Fish.script();
+    let script = ShellIntegration::Fish.eager_script();
     let script_file = tempfile::NamedTempFile::new().unwrap();
     fs::write(script_file.path(), script).unwrap();
 
@@ -3447,16 +3454,24 @@ fn fish_does_not_repeat_options_and_completes_vi_files() {
 fn tftp_completion_uses_only_the_upload_local_file_argument_position() {
     assert!(
         ShellIntegration::Bash
-            .script()
+            .eager_script()
             .contains("(( positional == 1 )) && COMPREPLY=( $(compgen -f")
     );
     assert!(
         ShellIntegration::Zsh
-            .script()
+            .eager_script()
             .contains("(( position == 1 )) && _files")
     );
-    assert!(!ShellIntegration::Bash.script().contains("positional >= 2"));
-    assert!(!ShellIntegration::Zsh.script().contains("position >= 2"));
+    assert!(
+        !ShellIntegration::Bash
+            .eager_script()
+            .contains("positional >= 2")
+    );
+    assert!(
+        !ShellIntegration::Zsh
+            .eager_script()
+            .contains("position >= 2")
+    );
 }
 
 #[test]
@@ -3481,10 +3496,367 @@ fn generated_integrations_omit_clipboard_shortcuts() {
         ShellIntegration::PowerShell,
         ShellIntegration::Zsh,
     ] {
-        let script = shell.script();
+        let script = shell.eager_script();
         assert!(!script.contains("ZETTA_CLIPBOARD_INTEGRATION"));
         assert!(!script.contains("pbcopy"));
         assert!(!script.contains("zcopy"));
         assert!(!script.contains("zpaste"));
     }
+}
+
+#[test]
+fn lazy_startup_payloads_fit_budget_and_keep_completion_separate() {
+    for shell in [
+        ShellIntegration::Bash,
+        ShellIntegration::Fish,
+        ShellIntegration::PowerShell,
+        ShellIntegration::Zsh,
+    ] {
+        let startup = shell.script();
+        assert!(
+            startup.len() <= 16 * 1024,
+            "{shell:?}: {} bytes",
+            startup.len()
+        );
+        assert!(startup.contains("--completions"));
+        assert!(!startup.contains("ZETTA_OVERLAY_COLORS"));
+        let completions = shell.completion_script();
+        assert!(!completions.contains("zetta-event:tracking-ready"));
+        assert!(completions.contains("--completions") || completions.contains("-l completions"));
+    }
+}
+
+#[test]
+fn bash_lazy_completion_replays_retries_and_loads_once() {
+    if !bash_available() {
+        return;
+    }
+    let _guard = lock_bash_tests();
+    let temp = tempfile::tempdir().unwrap();
+    let startup = temp.path().join("startup.sh");
+    let completion = temp.path().join("completion.sh");
+    std::fs::write(&startup, ShellIntegration::Bash.script()).unwrap();
+    std::fs::write(&completion, ShellIntegration::Bash.completion_script()).unwrap();
+    let driver = r#"
+source "$STARTUP"
+source "$STARTUP"
+count=0
+zetta() {
+    (( count++ ))
+    printf '%s\n' "$count" >> "$COUNT"
+    case $(wc -l < "$COUNT") in
+        1) return 1 ;;
+        2) return 0 ;;
+        *) cat "$COMPLETION" ;;
+    esac
+}
+COMP_WORDS=(zetta init --comp); COMP_CWORD=2
+__zetta_lazy_complete
+[[ ${__ZETTA_COMPLETIONS_LOADED:-0} == 0 ]] || exit 10
+__zetta_lazy_complete
+[[ ${__ZETTA_COMPLETIONS_LOADED:-0} == 0 ]] || exit 11
+__zetta_lazy_complete
+[[ ${COMPREPLY[*]} == --completions ]] || exit 12
+_zetta_complete
+[[ ${COMPREPLY[*]} == --completions ]] || exit 13
+source "$STARTUP"
+[[ $(complete -p zetta) == *'-F _zetta_complete '* ]] || exit 14
+[[ $(wc -l < "$COUNT") == 3 ]] || exit 15
+"#;
+    let output = bash_command()
+        .arg("--noprofile")
+        .arg("--norc")
+        .arg("-c")
+        .arg(driver)
+        .env("STARTUP", startup)
+        .env("COMPLETION", completion)
+        .env("COUNT", temp.path().join("count"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn fish_lazy_completion_replays_retries_and_loads_once() {
+    if !std::process::Command::new("fish")
+        .arg("--version")
+        .output()
+        .is_ok_and(|out| out.status.success())
+    {
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(temp.path().join("startup"), ShellIntegration::Fish.script()).unwrap();
+    std::fs::write(
+        temp.path().join("completion"),
+        ShellIntegration::Fish.completion_script(),
+    )
+    .unwrap();
+    let driver = r#"
+source "$STARTUP"
+source "$STARTUP"
+function zetta
+    echo load >> "$COUNT"
+    switch (count (cat "$COUNT"))
+        case 1
+            return 1
+        case 2
+            return 0
+        case '*'
+            cat "$COMPLETION"
+    end
+end
+complete -C 'zetta init --comp' >/dev/null
+set -q __zetta_completions_loaded; and exit 10
+complete -C 'zetta init --comp' >/dev/null
+set -q __zetta_completions_loaded; and exit 11
+set -l first (complete -C 'zetta init --comp')
+string match -q -- '--completions*' $first; or exit 12
+set -l second (complete -C 'zetta init --comp')
+string match -q -- '--completions*' $second; or exit 13
+source "$STARTUP"
+test (count (cat "$COUNT")) = 3; or exit 14
+"#;
+    let output = clean_shell_command("fish")
+        .arg("--no-config")
+        .arg("-c")
+        .arg(driver)
+        .env("STARTUP", temp.path().join("startup"))
+        .env("COMPLETION", temp.path().join("completion"))
+        .env("COUNT", temp.path().join("count"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "status {:?}: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[cfg(not(windows))]
+#[test]
+fn zsh_lazy_widgets_complete_interactively_before_and_after_compinit() {
+    if !std::process::Command::new("zsh")
+        .arg("--version")
+        .output()
+        .is_ok_and(|out| out.status.success())
+    {
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(temp.path().join("startup"), ShellIntegration::Zsh.script()).unwrap();
+    std::fs::write(
+        temp.path().join("completion"),
+        ShellIntegration::Zsh.completion_script(),
+    )
+    .unwrap();
+    for phase in ["before", "after", "later"] {
+        let driver = r#"
+if [[ $PHASE == after ]]; then autoload -Uz compinit; compinit; fi
+source "$STARTUP"
+source "$STARTUP"
+if [[ $PHASE != after ]]; then (( ! $+functions[compdef] )) || exit 21; fi
+if [[ $PHASE == later ]]; then
+    autoload -Uz compinit; compinit
+    function custom_complete { zle .expand-or-complete }
+    zle -N menu-complete custom_complete
+    __zetta_completion_prompt_hook
+    [[ $widgets[menu-complete] == user:custom_complete ]] || exit 22
+fi
+function zetta {
+    if [[ $3 == --completions ]]; then
+        print load >> "$COUNT"
+        cat "$COMPLETION"
+    else
+        print "PROBE:$2"
+    fi
+}
+PS1='READY> '
+"#;
+        std::fs::write(temp.path().join("driver"), driver).unwrap();
+        let parent = r#"
+zmodload zsh/zpty
+zpty -b probe zsh -dfi
+zpty -w probe 'source "$DRIVER"'
+# Read boundedly: an assertion failure in the child must not hang the suite.
+function read_until {
+    local chunk all='' i
+    for (( i=0; i<300; i++ )); do
+        while zpty -r -t probe chunk; do
+            all+=$chunk
+            if [[ $all == *$1* ]]; then return 0; fi
+        done
+        sleep 0.02
+    done
+    print -u2 -- "$all"
+    return 1
+}
+read_until 'READY> ' || { zpty -d probe; exit 30; }
+zpty -w -n probe $'zetta init zs\t\n'
+read_until 'PROBE:zsh' || { zpty -d probe; exit 31; }
+zpty -w -n probe $'zetta init zs\t\n'
+read_until 'PROBE:zsh' || { zpty -d probe; exit 32; }
+zpty -d probe
+[[ $(wc -l < "$COUNT") == 1 ]] || exit 33
+"#;
+        let count = temp.path().join(format!("count-{phase}"));
+        let output = clean_shell_command("zsh")
+            .arg("-df")
+            .arg("-c")
+            .arg(parent)
+            .env("STARTUP", temp.path().join("startup"))
+            .env("COMPLETION", temp.path().join("completion"))
+            .env("DRIVER", temp.path().join("driver"))
+            .env("COUNT", count)
+            .env("PHASE", phase)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{phase}: {:?}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+#[test]
+fn powershell_lazy_completion_replays_retries_and_retains_closure() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        temp.path().join("startup.ps1"),
+        ShellIntegration::PowerShell.script(),
+    )
+    .unwrap();
+    std::fs::write(
+        temp.path().join("completion.ps1"),
+        ShellIntegration::PowerShell.completion_script(),
+    )
+    .unwrap();
+    let driver = r#"
+$ErrorActionPreference = 'Stop'
+. (Join-Path $env:FIXTURE 'startup.ps1')
+. (Join-Path $env:FIXTURE 'startup.ps1')
+$global:Loads = 0
+function global:zetta {
+    if ($args[0] -eq 'profile') { 'Project Shell'; return }
+    $global:Loads++
+    $global:LASTEXITCODE = 0
+    if ($global:Loads -eq 1) { $global:LASTEXITCODE = 1; return }
+    if ($global:Loads -eq 2) { return }
+    Get-Content -Raw (Join-Path $env:FIXTURE 'completion.ps1')
+}
+function Probe {
+    [System.Management.Automation.CommandCompletion]::CompleteInput('zetta init --comp', 17, $null)
+}
+Probe | Out-Null
+if ($null -ne $global:__ZettaCompletionState.Handler) { throw 'failure marked loaded' }
+Probe | Out-Null
+if ($null -ne $global:__ZettaCompletionState.Handler) { throw 'empty output marked loaded' }
+$result = Probe
+if ($result.CompletionMatches.CompletionText -notcontains '--completions') { throw 'first result missing' }
+$result = Probe
+if ($result.CompletionMatches.CompletionText -notcontains '--completions') { throw 'subsequent result missing' }
+. (Join-Path $env:FIXTURE 'startup.ps1')
+$result = Probe
+if ($result.CompletionMatches.CompletionText -notcontains '--completions') { throw 'reinit lost result' }
+$result = [System.Management.Automation.CommandCompletion]::CompleteInput('zetta --profile Pro', 19, $null)
+if ($result.CompletionMatches.CompletionText -notcontains "'Project Shell'") { throw 'closure lost profile catalog' }
+$result = [System.Management.Automation.CommandCompletion]::CompleteInput('zetta -p Pro', 12, $null)
+if ($result.CompletionMatches.CompletionText -notcontains "'Project Shell'") { throw 'short option lost catalog' }
+foreach ($line in @('zetta -p ', 'zetta --profile ""', "zetta --profile 'Pro'")) {
+    $result = [System.Management.Automation.CommandCompletion]::CompleteInput($line, $line.Length, $null)
+    if ($result.CompletionMatches.CompletionText -notcontains "'Project Shell'") { throw "empty profile value lost: $line" }
+}
+foreach ($line in @('zetta pane --direction l', 'zetta pane -d l')) {
+    $result = [System.Management.Automation.CommandCompletion]::CompleteInput($line, $line.Length, $null)
+    if ($result.CompletionMatches.CompletionText -notcontains 'left') { throw "direction value lost: $line" }
+}
+$result = [System.Management.Automation.CommandCompletion]::CompleteInput('zetta init -c zs', 16, $null)
+if ($result.CompletionMatches.CompletionText -notcontains 'zsh') { throw 'init short boolean took a value' }
+if ($global:Loads -ne 3) { throw "generated $global:Loads times" }
+"#;
+    for executable in ["powershell.exe", "pwsh.exe", "pwsh"] {
+        let output = clean_shell_command(executable)
+            .args([
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                driver,
+            ])
+            .env("FIXTURE", temp.path())
+            .output();
+        match output {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => panic!("{executable}: {error}"),
+            Ok(output) => assert!(
+                output.status.success(),
+                "{executable}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ),
+        }
+    }
+}
+
+#[test]
+fn zsh_lazy_completion_retries_failure_and_empty_output() {
+    if !std::process::Command::new("zsh")
+        .arg("--version")
+        .output()
+        .is_ok_and(|out| out.status.success())
+    {
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(temp.path().join("startup"), ShellIntegration::Zsh.script()).unwrap();
+    std::fs::write(
+        temp.path().join("completion"),
+        ShellIntegration::Zsh.completion_script(),
+    )
+    .unwrap();
+    let driver = r#"
+autoload -Uz compinit; compinit
+source "$STARTUP"
+function zetta {
+    print load >> "$COUNT"
+    case $(wc -l < "$COUNT") in
+        1) return 1 ;;
+        2) return 0 ;;
+        *) cat "$COMPLETION" ;;
+    esac
+}
+function compadd { reply=("$@") }
+words=(zetta init --comp); CURRENT=3
+__zetta_lazy_complete
+(( ${__zetta_completions_loaded:-0} == 0 )) || exit 11
+__zetta_lazy_complete
+(( ${__zetta_completions_loaded:-0} == 0 )) || exit 12
+__zetta_lazy_complete
+[[ ${reply[*]} == *--completions* ]] || exit 13
+__zetta_lazy_complete
+source "$STARTUP"
+[[ $_comps[zetta] == _zetta ]] || exit 14
+[[ $(wc -l < "$COUNT") == 3 ]] || exit 15
+"#;
+    let output = clean_shell_command("zsh")
+        .arg("-df")
+        .arg("-c")
+        .arg(driver)
+        .env("STARTUP", temp.path().join("startup"))
+        .env("COMPLETION", temp.path().join("completion"))
+        .env("COUNT", temp.path().join("count"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{:?}: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
 }

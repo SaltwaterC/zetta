@@ -1,0 +1,1070 @@
+_zetta_option_unused() {
+    local option=$1 index
+    ZETTA_WORKTREE_ZSH_COPY_OPTION && return 0
+    for (( index = 2; index < CURRENT; index++ )); do
+        [[ ${words[index]} == "$option" ]] && return 1
+    done
+    return 0
+}
+
+_zetta_options() {
+    local -a candidates=()
+    local candidate
+    for candidate in "$@"; do
+        if [[ $candidate != -* ]] || _zetta_option_unused "$candidate"; then
+            candidates+=("$candidate")
+        fi
+    done
+    builtin compadd -- "${candidates[@]}"
+}
+
+_zetta_profiles() {
+    local -a config_args=("$@")
+    compadd -- "${(@f)$(zetta profile list "${config_args[@]}" 2>/dev/null)}"
+}
+
+_zetta_profile_themes() {
+    local -a config_args=("$@")
+    compadd -- "${(@f)$(zetta profile themes "${config_args[@]}" 2>/dev/null)}"
+}
+
+_zetta_split_names() {
+    compadd -- "${(@f)$(zetta splits 2>/dev/null)}"
+}
+
+_zetta_projects() {
+    compadd -- "${(@f)$(zetta project list 2>/dev/null)}"
+}
+
+_zetta_project_commands() {
+    compadd -- "${(@f)$(zetta cmd --list 2>/dev/null)}"
+}
+
+_zetta_pane_labels() {
+    compadd -- "${(@f)$(zetta pane --list 2>/dev/null)}"
+}
+
+_zetta_run_pane_labels() {
+    local value=${words[CURRENT]} prefix='' partial=$value label selected_label duplicate
+    local -a selected=() labels=("${(@f)$(zetta pane --list 2>/dev/null)}")
+    if [[ $value == *,* ]]; then
+        prefix="${value%,*},"
+        partial=${value##*,}
+        selected=("${(@s/,/)${value%,*}}")
+    fi
+    for label in "${labels[@]}"; do
+        [[ $label == "$partial"* ]] || continue
+        duplicate=0
+        for selected_label in "${selected[@]}"; do
+            if [[ $selected_label == "$label" ]]; then
+                duplicate=1
+                break
+            fi
+        done
+        (( duplicate )) || compadd -- "$prefix$label"
+    done
+}
+
+# ZETTA_ZMUX_INTEGRATION_BEGIN
+_zmux_session_ids() {
+    local -a mux_list_command=(zetta mux list)
+    [[ ${_zetta_mux_completion_command:-} == zmux ]] && mux_list_command=(zmux list)
+    compadd -- "${(@f)$(${mux_list_command[@]} 2>/dev/null | awk '$1 == "reconnect" && $2 == "id:" && $3 ~ /^[0-9]+:[0-9]+:[0-9]+$/ { print $3 }')}"
+}
+
+_zmux_remote_session_ids() {
+    local target=$1 port=$2
+    local -a ssh_command=(ssh -T -o BatchMode=yes -o ConnectTimeout=3)
+    [[ -n $port ]] && ssh_command+=(-p "$port")
+    compadd -- "${(@f)$(${ssh_command[@]} "$target" zmux list --ids-only 2>/dev/null | awk -v prefix="$PREFIX" '$0 ~ /^[0-9]+$/ && index($0, prefix) == 1 { print }')}"
+}
+
+_zmux_attach_arguments() {
+    local target='' port='' token
+    local index
+    case $words[CURRENT-1] in
+        --ssh-target|-H)
+            _zmux_ssh_targets
+            return
+            ;;
+        --port|-p)
+            return
+            ;;
+        --identity|-i)
+            _files
+            return
+            ;;
+    esac
+    for (( index = 4; index < CURRENT; index++ )); do
+        token=$words[index]
+        case $token in
+            --ssh-target|-H)
+                (( index++ < CURRENT )) && target=$words[index]
+                ;;
+            --ssh-target=*) target=${token#*=} ;;
+            --port|-p)
+                (( index++ < CURRENT )) && port=$words[index]
+                ;;
+            --port=*) port=${token#*=} ;;
+            --identity|-i) (( index++ )) ;;
+            --identity=*) ;;
+            --*) ;;
+            *) [[ -n $target ]] || target=$token ;;
+        esac
+    done
+    if [[ -n $target ]]; then
+        _zmux_remote_session_ids "$target" "$port"
+    else
+        _zmux_ssh_targets
+    fi
+}
+
+_zmux_restorable_ids() {
+    local -a mux_list_command=(zetta mux list)
+    [[ ${_zetta_mux_completion_command:-} == zmux ]] && mux_list_command=(zmux list)
+    compadd -- "${(@f)$(${mux_list_command[@]} 2>/dev/null | awk '$1 == "resume" && $2 == "id:" && $3 ~ /^[0-9]+$/ { print $3 }')}"
+}
+# ZETTA_ZMUX_INTEGRATION_END
+
+_zmux_ssh_targets() {
+    local config="${HOME:-}/.ssh/config"
+    [[ -r $config ]] || return
+    compadd -- "${(@f)$(awk '
+        /^[[:space:]]*[Hh][Oo][Ss][Tt][[:space:]]+/ {
+            for (field = 2; field <= NF; field++)
+                if ($field !~ /^!/ && $field !~ /[*?]/)
+                    print $field
+        }
+    ' "$config" 2>/dev/null)}"
+}
+
+# The Mosh completers offer the SSH hosts first and the option surface after
+# them, in one unsorted group: a sorted group would list every `--option`
+# before the hosts because `-` sorts ahead of letters. `_zetta_option_unused`
+# drops options the command line already carries; the host scan lives in the
+# callers and stops all completion once a host positional is present.
+_zmux_mosh_candidates() {
+    local host_line option
+    local -a candidates=()
+    local config="${HOME:-}/.ssh/config"
+    if [[ -r $config ]]; then
+        while IFS= read -r host_line; do
+            candidates+=("$host_line")
+        done < <(awk '
+            /^[[:space:]]*[Hh][Oo][Ss][Tt][[:space:]]+/ {
+                for (field = 2; field <= NF; field++)
+                    if ($field !~ /^!/ && $field !~ /[*?]/)
+                        print $field
+            }
+        ' "$config" 2>/dev/null)
+    fi
+    for option in --client --server --predict -a -n -o --predict-overwrite --no-predict-overwrite -k --keep-alive --scrollback --no-scrollback -s --forward-agent --no-forward-agent -4 -6 --family -p --port --bind-server --ssh --ssh-pty --no-ssh-pty --init --no-init --local --experimental-remote-ip -h --help -V --version --; do
+        if [[ $option != -* ]] || _zetta_option_unused "$option"; then
+            candidates+=("$option")
+        fi
+    done
+    compadd -V mosh-candidates -- "${candidates[@]}"
+}
+
+_zetta_tab_icons() {
+    compadd -- "${(@f)$(zetta tabicon --list 2>/dev/null)}"
+}
+
+_zetta_themes() {
+    local scope=$1
+    compadd -- "${(@f)$(zetta theme "$scope" --list 2>/dev/null)}"
+}
+
+# zetta-default/zetta-ok/zetta-alarm/zetta-gong are bundled tones Zetta plays itself, so
+# they always work; the rest are the current platform's own system sound
+# names, which only work on that platform, so only that platform's names are
+# offered.
+_zetta_sound_names() {
+    case "$OSTYPE" in
+        darwin*)
+            compadd -- zetta-default zetta-ok zetta-alarm zetta-gong \
+                Basso Blow Bottle Frog Funk Glass Hero Morse Ping Pop Purr Sosumi Submarine Tink
+            ;;
+        msys*|cygwin*|win32*)
+            compadd -- zetta-default zetta-ok zetta-alarm zetta-gong Default IM Mail Reminder SMS
+            ;;
+        *)
+            compadd -- zetta-default zetta-ok zetta-alarm zetta-gong bell complete message \
+                message-new-instant dialog-information dialog-warning dialog-error trash-empty
+            ;;
+    esac
+}
+
+_zetta() {
+    local previous=${words[CURRENT-1]} pane_operation='' profile_operation='' profile_command_index=-1 command_option_index=-1
+    local index
+    local -a config_args=()
+
+    if [[ ${words[2]} == pane && ${words[3]} == wait ]]; then
+        pane_operation=wait
+    fi
+
+    for (( index = 2; index < CURRENT; index++ )); do
+        case ${words[index]} in
+            --config|-c)
+                if (( index + 1 < CURRENT )); then
+                    config_args+=(--config "${words[index+1]}")
+                    (( index++ ))
+                fi
+                ;;
+            --keymap|-k|--profile|-p|--split|-s|--theme|-t|--geometry|-g)
+                (( index++ ))
+                ;;
+            --command|-e)
+                command_option_index=$index
+                break
+                ;;
+            profile)
+                profile_command_index=$index
+                break
+                ;;
+        esac
+    done
+    if [[ ${words[2]} == cmd && CURRENT > 2 ]]; then
+        local cmd_delimiter=0
+        for (( index = 3; index < CURRENT; index++ )); do
+            if [[ ${words[index]} == -- ]]; then
+                cmd_delimiter=1
+                break
+            fi
+        done
+        if (( cmd_delimiter )); then
+            return
+        elif [[ ${words[3]} == --list || ${words[3]} == --help ]]; then
+            return
+        elif (( CURRENT == 3 )); then
+            if [[ ${words[CURRENT]} == -* ]]; then
+                _zetta_options --help --list --
+            else
+                _zetta_project_commands
+                _zetta_options --help --list --
+            fi
+        elif [[ ${words[CURRENT]} == -* ]]; then
+            _zetta_options --help --
+        else
+            _zetta_options --help --
+        fi
+        return
+    fi
+    if (( profile_command_index >= 0 )); then
+        index=$((profile_command_index + 1))
+        while (( index < CURRENT )); do
+            case ${words[index]} in
+                --config|-c)
+                    (( index += 2 ))
+                    ;;
+                --help|-h)
+                    (( index++ ))
+                    ;;
+                -*)
+                    break
+                    ;;
+                *)
+                    profile_operation=${words[index]}
+                    break
+                    ;;
+            esac
+        done
+    fi
+    if (( command_option_index >= 0 )); then
+        return
+    fi
+
+    if [[ $words[1] == edit ]]; then
+        if [[ $words[CURRENT] == -* ]]; then
+            _zetta_options --delete-after --help
+        else
+            _files
+        fi
+        return
+    fi
+
+    if [[ $words[1] == vi || $words[1] == zvi ]]; then
+        if [[ $words[CURRENT] == -* ]]; then
+            _zetta_options --help
+        else
+            _files
+        fi
+        return
+    fi
+
+    if [[ $words[1] == mosh || ${words[2]} == mosh ]]; then
+        local mosh_host_index=2 candidate host_given=0 delimiter=0
+        [[ ${words[2]} == mosh ]] && mosh_host_index=3
+        for (( index = mosh_host_index; index < CURRENT; index++ )); do
+            candidate=${words[index]}
+            if [[ $candidate == -- ]]; then
+                delimiter=1
+                continue
+            fi
+            [[ $candidate == -* ]] && continue
+            case ${words[index-1]} in
+                --predict|--family|--experimental-remote-ip|--bind-server|--client|--server|--ssh|--port|-p) continue ;;
+            esac
+            host_given=1
+            break
+        done
+        if (( host_given )); then
+            return
+        fi
+        case $words[CURRENT-1] in
+            --predict) compadd -- adaptive always never experimental ;;
+            --family) compadd -- prefer-inet prefer-inet6 inet inet6 auto all ;;
+            --experimental-remote-ip) compadd -- local remote proxy ;;
+            --bind-server) compadd -- ssh any ;;
+            --client|--server) _files ;;
+            --ssh|--port|-p) return ;;
+            *)
+                if (( delimiter )); then
+                    _zmux_ssh_targets
+                elif [[ $words[CURRENT] == -* ]]; then
+                    _zetta_options --client --server --predict -a -n -o --predict-overwrite --no-predict-overwrite -k --keep-alive --scrollback --no-scrollback -s --forward-agent --no-forward-agent -4 -6 --family -p --port --bind-server --ssh --ssh-pty --no-ssh-pty --init --no-init --local --experimental-remote-ip -h --help -V --version --
+                else
+                    _zmux_mosh_candidates
+                fi
+                ;;
+        esac
+        return
+    fi
+
+    if (( CURRENT == 2 )); then
+        compadd -S ' ' -- benchmark terminal-size ZETTA_MUX_ROOT_COMMAND profile project cmd edit vi init mosh serial http tftp notify attention copy paste splits pane tabicon theme overlay ZETTA_WORKTREE_ROOT_COMMAND
+        _zetta_options --help --version --config --keymap --profile --split --replace-pane --theme --geometry ZETTA_NO_MUX_OPTION --new-window --command
+        return
+    fi
+
+    if (( profile_command_index >= 0 && CURRENT == profile_command_index + 1 )); then
+        compadd -S ' ' -- list themes disable enable theme icon default add remove
+        _zetta_options --config --help
+        return
+    fi
+
+    if [[ $pane_operation == wait ]]; then
+        local wait_delimiter=0 wait_dependency=0 wait_delimiter_index=-1 argument
+        for (( index = 4; index < CURRENT; index++ )); do
+            argument=${words[index]}
+            if [[ $argument == -- ]]; then
+                wait_delimiter=1
+                wait_delimiter_index=$index
+                break
+            elif [[ $argument != --allow-failure && $argument != -a ]]; then
+                wait_dependency=1
+            fi
+        done
+        if (( wait_delimiter )); then
+            # Everything after the delimiter is the wrapped command's own
+            # argv, so shift it into position and let zsh's own dispatcher
+            # complete it exactly as if `zetta pane wait ... --` were absent.
+            local wait_offset=$(( wait_delimiter_index + 1 ))
+            words=( "${words[@]:$((wait_offset - 1))}" )
+            (( CURRENT -= wait_offset - 1 ))
+            _normal
+            return
+        elif [[ ${words[CURRENT]} == -* ]]; then
+            _zetta_options --allow-failure --help --
+        elif [[ $previous == wait || $previous == --allow-failure || $previous == -a || ${words[CURRENT]} == *,* || $wait_dependency == 0 ]]; then
+            _zetta_run_pane_labels
+        else
+            _zetta_options --allow-failure --help --
+        fi
+        return
+    fi
+
+    case $previous in
+        --command|-e|--geometry|-g)
+            return
+            ;;
+# ZETTA_WORKTREE_INTEGRATION_BEGIN
+        --copy|-c)
+            if [[ $words[2] == wt && $words[3] == new ]]; then
+                _files
+            fi
+            return
+            ;;
+# ZETTA_WORKTREE_INTEGRATION_END
+        --profile)
+            _zetta_profiles
+            return
+            ;;
+        --ssh-target|-H)
+            _zmux_ssh_targets
+            return
+            ;;
+        --pane)
+            if [[ $words[2] == pane ]]; then
+                _zetta_pane_labels
+            fi
+            return
+            ;;
+        -p)
+            if [[ $words[2] == mux && $words[3] == attach ]]; then
+                return
+            elif [[ $words[2] == pane ]]; then
+                _zetta_pane_labels
+            elif [[ $words[2] == profile && $profile_operation == add ]]; then
+                return
+            elif [[ $words[2] == serial ]]; then
+                compadd -- none odd even
+            elif [[ $words[2] != http && $words[2] != tftp && $words[2] != notify && $words[2] != attention ]]; then
+                _zetta_profiles
+            fi
+            return
+            ;;
+        --config|--keymap|-k|--profile-report)
+            _files
+            return
+            ;;
+        --program|--arg)
+            return
+            ;;
+        --root)
+            _files -/
+            return
+            ;;
+        --device)
+            compadd -- "${(@f)$(zetta serial list 2>/dev/null)}"
+            return
+            ;;
+        --direction)
+            if [[ $words[2] == pane ]]; then
+                compadd -- left right up down
+            fi
+            return
+            ;;
+        --overlay-size|-S)
+            if [[ $words[2] == pane ]]; then
+                compadd -- sm base lg xl 2xl 3xl
+            fi
+            return
+            ;;
+        --overlay-opacity|-O|--overlay)
+            return
+            ;;
+        -d)
+            if [[ $words[2] == pane ]]; then
+                compadd -- left right up down
+            elif [[ $words[2] == serial ]]; then
+                compadd -- "${(@f)$(zetta serial list 2>/dev/null)}"
+            fi
+            return
+            ;;
+        --data-bits|-D)
+            if [[ $words[2] == serial ]]; then
+                compadd -- 5 6 7 8
+            fi
+            return
+            ;;
+        --parity)
+            compadd -- none odd even
+            return
+            ;;
+        --split)
+            _zetta_split_names
+            return
+            ;;
+        --replace-pane)
+            if [[ $words[CURRENT] == -* || -z $words[CURRENT] ]]; then
+                _zetta_options --help --version --config --keymap --profile --split --theme --geometry ZETTA_NO_MUX_OPTION --new-window --command
+            fi
+            return
+            ;;
+        --stop-bits|--size)
+            if [[ $words[2] == serial ]]; then
+                compadd -- 1 2
+            elif [[ $words[2] == notify || $words[2] == attention ]]; then
+                _zetta_sound_names
+            elif [[ $words[2] == overlay ]]; then
+                compadd -- sm base lg xl 2xl 3xl
+            fi
+            return
+            ;;
+        -s)
+            if [[ $words[2] == -* || -z $words[2] ]]; then
+                _zetta_split_names
+            elif [[ $words[2] == serial ]]; then
+                compadd -- 1 2
+            elif [[ $words[2] == notify || $words[2] == attention ]]; then
+                _zetta_sound_names
+            elif [[ $words[2] == overlay ]]; then
+                compadd -- sm base lg xl 2xl 3xl
+            fi
+            return
+            ;;
+        --flow-control|-f)
+            compadd -- none software hardware
+            return
+            ;;
+        --pboard|-pboard)
+            compadd -- general ruler find font
+            return
+            ;;
+        --prefer|-prefer|--Prefer|-Prefer)
+            compadd -- txt rtf ps
+            return
+            ;;
+        --app-name|-a)
+            return
+            ;;
+        --icon|-i)
+            if [[ $words[2] == tabicon ]]; then
+                if [[ $words[(I)--reset] -gt 0 || $words[(I)-r] -gt 0 ]]; then
+                    return
+                else
+                    _zetta_tab_icons
+                fi
+            elif [[ $words[2] == profile && ($profile_operation == add || $profile_operation == icon) ]]; then
+                compadd -- auto zetta bash zsh fish
+            else
+                _files
+            fi
+            return
+            ;;
+        --sound)
+            _zetta_sound_names
+            return
+            ;;
+        --timeout)
+            compadd -- default never
+            return
+            ;;
+        --opacity|-o)
+            return
+            ;;
+        -c)
+            if [[ $words[2] == init ]]; then
+                compadd -- bash fish powershell pwsh zsh --completions --help
+                return
+            elif [[ $words[2] == overlay || $words[2] == pane ]]; then
+                compadd -- ZETTA_OVERLAY_COLORS
+                return
+            elif [[ $words[2] == terminal-size ]]; then
+                return
+            fi
+            _files
+            return
+            ;;
+        --color|--overlay-color)
+            if [[ $words[2] == overlay || $words[2] == pane ]]; then
+                compadd -- ZETTA_OVERLAY_COLORS
+            fi
+            return
+            ;;
+        -r)
+            if [[ $words[2] == tabicon ]]; then
+                return
+            elif [[ $words[2] == http || ( $words[2] == tftp && $words[3] == server ) ]]; then
+                _files -/
+                return
+            fi
+            if [[ $words[2] == terminal-size || $words[2] == profile || $words[2] == -* || -z $words[2] ]]; then
+                if [[ $words[2] == -* && ($words[CURRENT] == -* || -z $words[CURRENT]) ]]; then
+                    _zetta_options --help --version --config --keymap --profile --split --theme --geometry ZETTA_NO_MUX_OPTION --new-window --command
+                fi
+                return
+            fi
+            _files
+            return
+            ;;
+        --output-type|-t|--theme|--text)
+            if [[ $words[2] == profile || $words[2] == -* ]]; then
+                _zetta_profile_themes "${config_args[@]}"
+            elif [[ $words[2] == theme && ($words[3] == pane || $words[3] == tab) ]]; then
+                _zetta_themes "$words[3]"
+            elif [[ $words[2] == benchmark && $words[3] == output ]]; then
+                compadd -- repeated unique
+            elif [[ $words[2] == notify && $words[3] != cleanup ]]; then
+                compadd -- default never
+            elif [[ $words[2] == overlay ]]; then
+                return
+            else
+                compadd -- repeated unique
+            fi
+            return
+            ;;
+        --port|-p|--baud-rate|-b|--profile-duration|--columns|--rows|-R)
+            return
+            ;;
+    esac
+
+    if [[ -n $profile_operation ]]; then
+        case $profile_operation in
+            list|themes)
+                _zetta_options --config --help
+                ;;
+            disable|enable|default|remove)
+                if [[ $previous == "$profile_operation" ]]; then
+                    _zetta_profiles "${config_args[@]}"
+                else
+                    _zetta_options --config --help
+                fi
+                ;;
+            theme)
+                if [[ $words[CURRENT] == -* ]]; then
+                    _zetta_options --reset --config --help
+                elif [[ $previous == theme ]]; then
+                    _zetta_profiles "${config_args[@]}"
+                elif [[ $previous == --reset || $previous == -r ]]; then
+                    _zetta_options --config --help
+                else
+                    _zetta_profile_themes "${config_args[@]}"
+                fi
+                ;;
+            icon)
+                if [[ $words[CURRENT] == -* ]]; then
+                    _zetta_options --reset --config --help
+                elif [[ $previous == icon ]]; then
+                    _zetta_profiles "${config_args[@]}"
+                elif [[ $previous == --reset || $previous == -r ]]; then
+                    _zetta_options --config --help
+                else
+                    compadd -- auto zetta bash zsh fish
+                fi
+                ;;
+            add)
+                _zetta_options --program --arg --theme --icon --config --help
+                ;;
+            *)
+                _zetta_options list themes disable enable theme icon default add remove --config --help
+                ;;
+        esac
+        return
+    fi
+
+    # A leading flag rules out a subcommand for the rest of the command line
+    # (subcommands are only recognized as the first argument), so keep
+    # offering the remaining top-level flags instead of falling through to
+    # the subcommand-specific cases below, which would offer nothing.
+    if [[ $words[2] == -* ]]; then
+        _zetta_options --help --version --config --keymap --profile --split --replace-pane --theme --geometry ZETTA_NO_MUX_OPTION --new-window --command
+        return
+    fi
+
+    case $words[2] in
+        benchmark)
+            if (( CURRENT == 3 )); then
+                compadd -S ' ' -- output
+            fi
+            if [[ $words[3] == output ]]; then
+                _zetta_options --size --output-type --help
+            else
+                _zetta_options --profile-report --profile-duration \
+                    --profile-pane-stress --profile-background-stress --profile-sparse-updates \
+                    --profile-alt-screen-scroll --profile-external-terminal --help
+            fi
+            ;;
+        terminal-size)
+            _zetta_options --json --resize --columns --rows --help
+            ;;
+        edit)
+            if [[ $words[CURRENT] == -* ]]; then
+                _zetta_options --delete-after --help
+            else
+                _files
+            fi
+            ;;
+        vi)
+            if [[ $words[CURRENT] == -* ]]; then
+                _zetta_options --help
+            else
+                _files
+            fi
+            ;;
+# ZETTA_ZMUX_INTEGRATION_BEGIN
+        mux)
+            if (( CURRENT == 3 )); then
+                if [[ ${ZETTA_NO_MUX:-0} == 1 ]]; then
+                    compadd -S ' ' -- list reconnect attach
+                    _zetta_options --json --ids-only --ssh-target --port --help --version
+                else
+                    compadd -S ' ' -- list profiles create stop reconnect attach resume share unshare kill forget
+                    _zetta_options --json --ids-only --ssh-target --port --upgrade --identity --secret-stdin --layout --profile --title --working-directory --env --retention --help --version
+                fi
+            elif [[ ${ZETTA_NO_MUX:-0} == 1 && ${words[3]} != reconnect && ${words[3]} != list && ${words[3]} != attach ]]; then
+                return
+            elif [[ ${words[3]} == stop ]]; then
+                _zetta_options --force --help
+            elif [[ ${words[3]} == profiles ]]; then
+                _zetta_options --json --ssh-target --port --help --version
+            elif [[ ${words[3]} == create ]]; then
+                _zetta_options --json --secret-stdin --layout --profile --title --working-directory --env --retention --ssh-target --port --help --version
+            elif [[ ${words[3]} == reconnect && $words[CURRENT] != -* ]]; then
+                if [[ $words[CURRENT-1] == --identity ]]; then
+                    _files
+                else
+                    _zmux_session_ids
+                fi
+            elif [[ ${words[3]} == reconnect ]]; then
+                _zetta_options --identity --help
+            elif [[ ${words[3]} == attach ]]; then
+                if [[ $words[CURRENT] == -* ]]; then
+                    _zetta_options --ssh-target --port --protocol --keep-alive --identity --help
+                else
+                    _zmux_attach_arguments
+                fi
+            elif [[ ${words[3]} == resume && $words[CURRENT] != -* ]]; then
+                if [[ $words[CURRENT-1] == --identity ]]; then
+                    _files
+                else
+                    _zmux_restorable_ids
+                fi
+            elif [[ ${words[3]} == resume ]]; then
+                _zetta_options --identity --help
+            elif [[ ${ZETTA_NO_MUX:-0} != 1 && ( ${words[3]} == share || ${words[3]} == unshare || ${words[3]} == kill || ${words[3]} == forget ) ]]; then
+                _zmux_session_ids
+            else
+                _zetta_options --json --ids-only --ssh-target --port --identity --help
+            fi
+            ;;
+# ZETTA_ZMUX_INTEGRATION_END
+        init)
+            compadd -- bash fish powershell pwsh zsh --completions --help
+            ;;
+        serial)
+            if (( CURRENT == 3 )); then
+                compadd -S ' ' -- console list
+                _zetta_options --help
+            elif [[ $words[3] == console ]]; then
+                _zetta_options --device --baud-rate --data-bits --parity --stop-bits --flow-control --help
+            fi
+            ;;
+        http)
+            if (( CURRENT == 3 )); then
+                compadd -S ' ' -- server
+                _zetta_options --help
+            else
+                _zetta_options --root --port --config --help
+            fi
+            ;;
+        tftp)
+            _zetta_tftp
+            ;;
+        notify)
+            if (( CURRENT == 3 )); then
+                compadd -S ' ' -- cleanup
+            fi
+            if [[ $words[3] == cleanup ]]; then
+                _zetta_options --dry-run --help
+            else
+                _zetta_options --app-name --icon --sound --timeout --help
+            fi
+            ;;
+        attention)
+            _zetta_options --notify --app-name --icon --sound --timeout --help
+            ;;
+        copy)
+            _zetta_options --pboard --help
+            ;;
+        paste)
+            _zetta_options --pboard --prefer --help
+            ;;
+        splits)
+            _zetta_options --help
+            ;;
+        project)
+            if (( CURRENT == 3 )); then
+                compadd -S ' ' -- add list remove open
+                _zetta_options --help
+            else
+                case $words[3] in
+                    add)
+                        if [[ $words[CURRENT] == -* ]]; then
+                            _zetta_options --path --help
+                        else
+                            _directories
+                        fi
+                        ;;
+                    open|remove)
+                        if [[ $words[CURRENT] == -* ]]; then
+                            _zetta_options --path --help
+                        else
+                            _zetta_projects
+                        fi
+                        ;;
+                    list) _zetta_options --help ;;
+                esac
+            fi
+            ;;
+        cmd)
+            if [[ $words[3] == --list || $words[3] == --help ]]; then
+                return
+            elif (( CURRENT == 3 )); then
+                if [[ $words[CURRENT] == -* ]]; then
+                    _zetta_options --help --list --
+                else
+                    _zetta_project_commands
+                    _zetta_options --help --list --
+                fi
+            elif [[ $words[CURRENT] == -* ]]; then
+                _zetta_options --help --
+            else
+                _zetta_options --help --
+            fi
+            ;;
+        pane)
+            if (( CURRENT == 3 )); then
+                compadd -S ' ' -- wait
+            fi
+            _zetta_options --direction --label --pane --overlay --overlay-size --overlay-opacity --overlay-color --stack --list --help
+            ;;
+        tabicon)
+            if [[ $words[(I)--reset] -gt 0 || $words[(I)-r] -gt 0 ]]; then
+                if [[ $words[CURRENT] == -* ]]; then
+                    _zetta_options --queue --help
+                fi
+                return
+            elif [[ $words[CURRENT] == -* ]]; then
+                _zetta_options --icon --reset --queue --list --help
+            else
+                _zetta_tab_icons
+            fi
+            ;;
+        theme)
+            if (( CURRENT == 3 )); then
+                compadd -S ' ' -- pane tab
+                _zetta_options --help
+            elif [[ $words[3] == pane || $words[3] == tab ]]; then
+                if [[ $words[CURRENT] == -* ]]; then
+                    _zetta_options --theme --reset --list --help
+                else
+                    _zetta_themes "$words[3]"
+                fi
+            fi
+            ;;
+        overlay)
+            _zetta_options --text --size --opacity --color --reset --help
+            ;;
+# ZETTA_WORKTREE_INTEGRATION_BEGIN
+        wt)
+            if (( CURRENT == 3 )); then
+                compadd -S ' ' -- new done abort status sync config
+                _zetta_options --help
+            elif [[ $words[3] == new || $words[3] == done || $words[3] == abort ]]; then
+                if [[ $words[3] == new ]]; then
+                    _zetta_options --copy --path-only --help
+                else
+                    _zetta_options --path-only --help
+                fi
+            elif [[ $words[3] == sync ]]; then
+                if (( CURRENT == 4 )); then
+                    if [[ $words[CURRENT] == -* ]]; then
+                        _zetta_options --help
+                    else
+                        _zetta_worktree_commits
+                    fi
+                elif [[ $words[CURRENT] == -* ]]; then
+                    _zetta_options --help
+                fi
+            else
+                _zetta_options --help
+            fi
+            ;;
+# ZETTA_WORKTREE_INTEGRATION_END
+    esac
+}
+
+_zetta_tftp() {
+    local operation_index operation position=0 index argument skip_port=0
+    local current=${words[CURRENT]}
+
+    if [[ $words[1] == ztftp ]]; then
+        operation_index=2
+    else
+        operation_index=3
+    fi
+
+    if (( CURRENT == operation_index )); then
+        compadd -S ' ' -- get put server
+        _zetta_options --help
+        return
+    fi
+
+    operation=${words[operation_index]}
+    if [[ $operation == server ]]; then
+        if [[ $current == -* || -z $current ]]; then
+            _zetta_options --root --port --config --writable --help
+        fi
+        return
+    fi
+
+    if [[ $current == -* ]]; then
+        _zetta_options --port --help
+        return
+    fi
+    if [[ $words[CURRENT-1] == --port || $words[CURRENT-1] == -p ]]; then
+        return
+    fi
+
+    for (( index = operation_index + 1; index < CURRENT; index++ )); do
+        argument=${words[index]}
+        if (( skip_port )); then
+            skip_port=0
+        elif [[ $argument == --port || $argument == -p ]]; then
+            skip_port=1
+        elif [[ $argument != -* ]]; then
+            (( position++ ))
+        fi
+    done
+
+    case $operation in
+        put)
+            (( position == 1 )) && _files
+            ;;
+    esac
+}
+
+_ztftp() {
+    _zetta_tftp
+}
+
+_zntfy() {
+    local previous=${words[CURRENT-1]}
+
+    case $previous in
+        --app-name|-a)
+            return
+            ;;
+        --icon|-i)
+            _files
+            return
+            ;;
+        --sound|-s)
+            _zetta_sound_names
+            return
+            ;;
+        --timeout|-t)
+            compadd -- default never
+            return
+            ;;
+    esac
+    _zetta_options --app-name --icon --sound --timeout --help
+}
+
+# ZETTA_CLIPBOARD_INTEGRATION_BEGIN
+_zcopy() {
+    local previous=${words[CURRENT-1]}
+    case $previous in
+        --pboard|-pboard)
+            compadd -- general ruler find font
+            return
+            ;;
+    esac
+    _zetta_options --pboard --help
+}
+
+_zpaste() {
+    local previous=${words[CURRENT-1]}
+    case $previous in
+        --pboard|-pboard)
+            compadd -- general ruler find font
+            return
+            ;;
+        --prefer|-prefer|--Prefer|-Prefer)
+            compadd -- txt rtf ps
+            return
+            ;;
+    esac
+    _zetta_options --pboard --prefer --help
+}
+
+# ZETTA_CLIPBOARD_INTEGRATION_END
+compdef _zetta zetta
+if (( _zetta_mosh_missing )); then
+    compdef _zetta mosh
+fi
+_zosh() {
+    local index candidate host_given=0 delimiter=0
+    for (( index = 2; index < CURRENT; index++ )); do
+        candidate=${words[index]}
+        if [[ $candidate == -- ]]; then
+            delimiter=1
+            continue
+        fi
+        [[ $candidate == -* ]] && continue
+        case ${words[index-1]} in
+            --predict|--family|--experimental-remote-ip|--bind-server|--client|--server|--ssh|--port|-p) continue ;;
+        esac
+        host_given=1
+        break
+    done
+    if (( host_given )); then
+        return
+    fi
+    case $words[CURRENT-1] in
+        --predict) compadd -- adaptive always never experimental ;;
+        --family) compadd -- prefer-inet prefer-inet6 inet inet6 auto all ;;
+        --experimental-remote-ip) compadd -- local remote proxy ;;
+        --bind-server) compadd -- ssh any ;;
+        --client|--server) _files ;;
+        --ssh|--port|-p) return ;;
+        *)
+            if (( delimiter )); then
+                _zmux_ssh_targets
+            elif [[ $words[CURRENT] == -* ]]; then
+                _zetta_options --client --server --predict -a -n -o --predict-overwrite --no-predict-overwrite -k --keep-alive --scrollback --no-scrollback -s --forward-agent --no-forward-agent -4 -6 --family -p --port --bind-server --ssh --ssh-pty --no-ssh-pty --init --no-init --local --experimental-remote-ip -h --help -V --version --
+            else
+                _zmux_mosh_candidates
+            fi
+            ;;
+    esac
+}
+compdef _zosh zosh
+# ZETTA_WORKTREE_INTEGRATION_BEGIN
+_zetta_worktree_commits() {
+    local current_branch source_branch split_point
+    current_branch=$(git branch --show-current 2>/dev/null) || return
+    [[ -n $current_branch ]] || return
+    source_branch=$(git config --local --get "wtbranch.${current_branch}.base" 2>/dev/null) || return
+    [[ -n $source_branch ]] || return
+    split_point=$(git merge-base "refs/heads/${current_branch}" "refs/heads/${source_branch}" 2>/dev/null) || return
+    [[ -n $split_point ]] || return
+    compadd -- "${(@f)$(git rev-list --reverse "${split_point}..refs/heads/${source_branch}" 2>/dev/null)}"
+}
+
+_zwt() {
+    local -a saved_words=("${words[@]}")
+    local saved_current=$CURRENT
+    words=(zetta wt "${words[@]:1}")
+    (( CURRENT++ ))
+    _zetta
+    words=("${saved_words[@]}")
+    CURRENT=$saved_current
+}
+compdef _zwt zwt
+# ZETTA_WORKTREE_INTEGRATION_END
+# ZETTA_ZMUX_INTEGRATION_BEGIN
+_zmux() {
+    local _zetta_mux_completion_command=zmux
+    local -a saved_words=("${words[@]}")
+    local saved_current=$CURRENT
+    words=(zetta mux "${words[@]:1}")
+    (( CURRENT++ ))
+    _zetta
+    words=("${saved_words[@]}")
+    CURRENT=$saved_current
+}
+compdef _zmux zmux
+# ZETTA_ZMUX_INTEGRATION_END
+compdef _ztftp ztftp
+compdef _zntfy zntfy
+# ZETTA_CLIPBOARD_INTEGRATION_BEGIN
+compdef _zcopy zcopy
+compdef _zpaste zpaste
+# ZETTA_CLIPBOARD_INTEGRATION_END
+compdef _zetta zvi
+if (( _zetta_vi_missing )); then
+    compdef _zetta vi
+fi
+# ZETTA_CLIPBOARD_INTEGRATION_BEGIN
+case "$OSTYPE" in
+    darwin*) ;;
+    *)
+        compdef _zcopy pbcopy
+        compdef _zpaste pbpaste
+        ;;
+esac
+# ZETTA_CLIPBOARD_INTEGRATION_END

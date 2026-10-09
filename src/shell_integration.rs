@@ -1,3 +1,5 @@
+//! Shell startup configuration and rendering of startup and completion payloads.
+
 use super::*;
 use crate::startup::format_help_table;
 use std::ffi::OsStr;
@@ -29,14 +31,42 @@ impl ShellIntegration {
     }
 
     pub(crate) fn script(self) -> String {
-        let template = match self {
-            Self::Bash => BASH_INTEGRATION,
-            Self::Fish => FISH_INTEGRATION,
-            Self::PowerShell => POWERSHELL_INTEGRATION,
-            Self::Zsh => ZSH_INTEGRATION,
+        self.render_script(false)
+    }
+
+    pub(crate) fn completion_script(self) -> String {
+        self.render_script(true)
+    }
+
+    #[cfg(test)]
+    fn eager_script(self) -> String {
+        // Existing regression drivers exercise the implementation directly.
+        let initialize = if self == Self::Zsh {
+            "if ! (( $+functions[compdef] )); then autoload -Uz compinit; compinit; fi\n"
+        } else {
+            ""
         };
-        let template = template.replace("ZETTA_OVERLAY_COLORS", &render_overlay_color_names(self));
-        render_clipboard_integration(&render_worktree_integration(&template))
+        format!(
+            "{}\n{initialize}{}",
+            self.script(),
+            self.completion_script()
+        )
+    }
+
+    fn render_script(self, completions: bool) -> String {
+        let template = match (self, completions) {
+            (Self::Bash, false) => BASH_INTEGRATION,
+            (Self::Fish, false) => FISH_INTEGRATION,
+            (Self::PowerShell, false) => POWERSHELL_INTEGRATION,
+            (Self::Zsh, false) => ZSH_INTEGRATION,
+            (Self::Bash, true) => include_str!("shell_integration/bash_completions.sh"),
+            (Self::Fish, true) => include_str!("shell_integration/fish_completions.fish"),
+            (Self::PowerShell, true) => {
+                include_str!("shell_integration/powershell_completions.ps1")
+            }
+            (Self::Zsh, true) => include_str!("shell_integration/zsh_completions.zsh"),
+        };
+        render_integration(template, self)
     }
 
     fn startup_file(self, home: &Path) -> PathBuf {
@@ -149,30 +179,7 @@ impl ShellIntegration {
     }
 }
 
-fn render_clipboard_integration(template: &str) -> String {
-    let mut rendered = String::with_capacity(template.len());
-    let mut in_clipboard_section = false;
-    for line in template.split_inclusive('\n') {
-        if line.contains("ZETTA_CLIPBOARD_INTEGRATION_BEGIN") {
-            in_clipboard_section = true;
-        } else if line.contains("ZETTA_CLIPBOARD_INTEGRATION_END") {
-            in_clipboard_section = false;
-        } else if !in_clipboard_section || cfg!(feature = "clipboard") {
-            rendered.push_str(line);
-        }
-    }
-    if !cfg!(feature = "clipboard")
-        && let (Some(start), Some(end)) = (
-            rendered.find("    } elseif ($commandName -in 'zcopy'"),
-            rendered.find("    } elseif ($subcommand -eq 'mosh')"),
-        )
-    {
-        rendered.replace_range(start..end, "");
-    }
-    rendered
-}
-
-fn render_worktree_integration(template: &str) -> String {
+fn render_integration(template: &str, shell: ShellIntegration) -> String {
     const BEGIN: &str = "ZETTA_WORKTREE_INTEGRATION_BEGIN";
     const END: &str = "ZETTA_WORKTREE_INTEGRATION_END";
     const ZMUX_BEGIN: &str = "ZETTA_ZMUX_INTEGRATION_BEGIN";
@@ -182,8 +189,125 @@ fn render_worktree_integration(template: &str) -> String {
     let mut rendered = String::with_capacity(template.len());
     let mut in_optional_section = false;
     let mut in_zmux_section = false;
+    let mut in_clipboard_section = false;
+    let colors = render_overlay_color_names(shell);
 
+    let substitutions = [
+        ("ZETTA_OVERLAY_COLORS", colors.as_str()),
+        (
+            "ZETTA_MUX_ROOT_COMMAND_PS",
+            if zmux_enabled { "'mux'," } else { "" },
+        ),
+        (
+            "ZETTA_NO_MUX_OPTION_PS",
+            if zmux_enabled { "'--no-mux'," } else { "" },
+        ),
+        (
+            "ZETTA_MUX_ROOT_COMMAND",
+            if zmux_enabled { "mux" } else { "" },
+        ),
+        (
+            "ZETTA_NO_MUX_OPTION",
+            if zmux_enabled { "--no-mux" } else { "" },
+        ),
+        (
+            "ZETTA_WORKTREE_ROOT_COMMANDS",
+            if worktree_enabled { ", 'wt'" } else { "" },
+        ),
+        (
+            "ZETTA_WORKTREE_ROOT_COMMAND",
+            if worktree_enabled { "wt" } else { "" },
+        ),
+        (
+            "ZETTA_WORKTREE_BASH_COPY_CONDITION",
+            if worktree_enabled {
+                "[[ $command == wt && ${COMP_WORDS[2]} == new ]]"
+            } else {
+                "false"
+            },
+        ),
+        (
+            "ZETTA_WORKTREE_BASH_REPEATABLE_COPY",
+            if worktree_enabled {
+                "[[ $repeatable == 1 && $candidate == --copy ]]"
+            } else {
+                "false"
+            },
+        ),
+        (
+            "ZETTA_WORKTREE_ZSH_COPY_OPTION",
+            if worktree_enabled {
+                "[[ $option == --copy ]]"
+            } else {
+                "false"
+            },
+        ),
+        (
+            "ZETTA_WORKTREE_FISH_COPY_OPTION",
+            if worktree_enabled {
+                "test \"$argv[1]\" = --copy"
+            } else {
+                "false"
+            },
+        ),
+        (
+            "ZETTA_WORKTREE_POWERSHELL_COPY_COMPLETION_CHECK",
+            if worktree_enabled {
+                "($worktreeCommand -and $worktreeOperation -eq 'new' -and $previous -in '--copy', '-c')"
+            } else {
+                "($false)"
+            },
+        ),
+        (
+            "ZETTA_WORKTREE_POWERSHELL_REPEATABLE_COPY",
+            if worktree_enabled {
+                "$candidate -eq '--copy'"
+            } else {
+                "$false"
+            },
+        ),
+        (
+            "ZETTA_WORKTREE_COMPLETION_CHECK",
+            if worktree_enabled {
+                "($worktreeCommand)"
+            } else {
+                "($false)"
+            },
+        ),
+        (
+            "ZETTA_WORKTREE_STANDALONE_CHECK",
+            if worktree_enabled {
+                "($commandName -eq 'zwt')"
+            } else {
+                "($false)"
+            },
+        ),
+        (
+            "ZETTA_WORKTREE_ROOT_CHECK",
+            if worktree_enabled {
+                "($subcommand -eq 'wt')"
+            } else {
+                "($false)"
+            },
+        ),
+        (
+            "ZETTA_WORKTREE_SWITCH_CASE",
+            if worktree_enabled {
+                "'wt'"
+            } else {
+                "'__zetta_worktree_disabled__'"
+            },
+        ),
+    ];
     for line in template.split_inclusive('\n') {
+        if line.contains("ZETTA_CLIPBOARD_INTEGRATION_BEGIN") {
+            in_clipboard_section = true;
+            continue;
+        }
+        if line.contains("ZETTA_CLIPBOARD_INTEGRATION_END") {
+            in_clipboard_section = false;
+            continue;
+        }
         if line.contains(BEGIN) {
             in_optional_section = true;
             continue;
@@ -200,116 +324,30 @@ fn render_worktree_integration(template: &str) -> String {
             in_zmux_section = false;
             continue;
         }
-        if (!in_optional_section || worktree_enabled) && (!in_zmux_section || zmux_enabled) {
-            rendered.push_str(line);
+        if (!in_optional_section || worktree_enabled)
+            && (!in_zmux_section || zmux_enabled)
+            && (!in_clipboard_section || cfg!(feature = "clipboard"))
+        {
+            // Render only the selected payload, filtering and substituting each line once.
+            let mut rest = line;
+            while let Some(index) = rest.find("ZETTA_") {
+                rendered.push_str(&rest[..index]);
+                rest = &rest[index..];
+                if let Some((token, value)) = substitutions
+                    .iter()
+                    .find(|(token, _)| rest.starts_with(token))
+                {
+                    rendered.push_str(value);
+                    rest = &rest[token.len()..];
+                } else {
+                    rendered.push_str("ZETTA_");
+                    rest = &rest[6..];
+                }
+            }
+            rendered.push_str(rest);
         }
     }
-
     rendered
-        .replace(
-            "ZETTA_MUX_ROOT_COMMAND_PS",
-            if zmux_enabled { "'mux'," } else { "" },
-        )
-        .replace(
-            "ZETTA_NO_MUX_OPTION_PS",
-            if zmux_enabled { "'--no-mux'," } else { "" },
-        )
-        .replace(
-            "ZETTA_MUX_ROOT_COMMAND",
-            if zmux_enabled { "mux" } else { "" },
-        )
-        .replace(
-            "ZETTA_NO_MUX_OPTION",
-            if zmux_enabled { "--no-mux" } else { "" },
-        )
-        .replace(
-            "ZETTA_WORKTREE_ROOT_COMMANDS",
-            if worktree_enabled { ", 'wt'" } else { "" },
-        )
-        .replace(
-            "ZETTA_WORKTREE_ROOT_COMMAND",
-            if worktree_enabled { "wt" } else { "" },
-        )
-        .replace(
-            "ZETTA_WORKTREE_BASH_COPY_CONDITION",
-            if worktree_enabled {
-                "[[ $command == wt && ${COMP_WORDS[2]} == new ]]"
-            } else {
-                "false"
-            },
-        )
-        .replace(
-            "ZETTA_WORKTREE_BASH_REPEATABLE_COPY",
-            if worktree_enabled {
-                "[[ $repeatable == 1 && $candidate == --copy ]]"
-            } else {
-                "false"
-            },
-        )
-        .replace(
-            "ZETTA_WORKTREE_ZSH_COPY_OPTION",
-            if worktree_enabled {
-                "[[ $option == --copy ]]"
-            } else {
-                "false"
-            },
-        )
-        .replace(
-            "ZETTA_WORKTREE_FISH_COPY_OPTION",
-            if worktree_enabled {
-                "test \"$argv[1]\" = --copy"
-            } else {
-                "false"
-            },
-        )
-        .replace(
-            "ZETTA_WORKTREE_POWERSHELL_COPY_COMPLETION_CHECK",
-            if worktree_enabled {
-                "($worktreeCommand -and $worktreeOperation -eq 'new' -and $previous -in '--copy', '-c')"
-            } else {
-                "($false)"
-            },
-        )
-        .replace(
-            "ZETTA_WORKTREE_POWERSHELL_REPEATABLE_COPY",
-            if worktree_enabled {
-                "$_ -eq '--copy'"
-            } else {
-                "$false"
-            },
-        )
-        .replace(
-            "ZETTA_WORKTREE_COMPLETION_CHECK",
-            if worktree_enabled {
-                "($worktreeCommand)"
-            } else {
-                "($false)"
-            },
-        )
-        .replace(
-            "ZETTA_WORKTREE_STANDALONE_CHECK",
-            if worktree_enabled {
-                "($commandName -eq 'zwt')"
-            } else {
-                "($false)"
-            },
-        )
-        .replace(
-            "ZETTA_WORKTREE_ROOT_CHECK",
-            if worktree_enabled {
-                "($subcommand -eq 'wt')"
-            } else {
-                "($false)"
-            },
-        )
-        .replace(
-            "ZETTA_WORKTREE_SWITCH_CASE",
-            if worktree_enabled {
-                "'wt'"
-            } else {
-                "'__zetta_worktree_disabled__'"
-            },
-        )
 }
 
 fn active_shell_path() -> Option<PathBuf> {
@@ -741,8 +779,15 @@ pub(crate) fn shell_integration_help() -> String {
         ("powershell", "PowerShell (also accepted as pwsh)"),
         ("zsh", "Z shell"),
     ]);
+    let options = format_help_table([
+        (
+            "-c, --completions",
+            "Emit completion implementation (requires SHELL)",
+        ),
+        ("-h, --help", "Print help"),
+    ]);
     let help = format!(
-        "Configure or generate shell integration\n\nUsage: zetta init [SHELL]\n\nWithout SHELL, detects the active supported shell process (falling back to SHELL when process inspection cannot identify it) and adds the integration command to its startup file. On Windows, Unix-style HOME paths from MSYS2 and Cygwin are resolved with cygpath; when neither an active shell nor SHELL identifies a POSIX shell, Zetta detects the launching PowerShell and writes to its $PROFILE. Running it again leaves an existing integration unchanged. With SHELL, prints the integration script for use in a shell startup file.\n\nSupported shells:\n{supported_shells}\n\nThe generated script adds completion, including dynamic profile and theme values from `zetta profile list` and `zetta profile themes`, registered project command names from `zetta cmd --list`, live serial-device, tab-icon (including `zetta tabicon --reset`), pane-split, pane-label, run-dependency-label, and --replace-pane completion, the root --new-window and --command options (which pass their launch behavior or remaining command arguments respectively), the attention command's notification options, the zvi shortcut for the built-in vi editor, the ztftp shortcut when the TFTP client is enabled, and the zntfy shortcut when desktop notifications are enabled, and zcopy/zpaste completions when clipboard access is enabled. `zetta pane --direction` completes left, right, up, and down, while `zetta pane --pane` fetches labels from the active process, and new-pane overlay sizes and colors are offered as fixed values. Past the `--` in `zetta pane wait ... -- COMMAND`, completion hands off to COMMAND's own shell completion exactly as if `zetta pane wait ... --` were not on the command line. zcopy/zpaste are also available as pbcopy/pbpaste on platforms other than macOS, taking priority over any existing pbcopy/pbpaste alias so pbcopy/pbpaste muscle memory keeps working there too. Project commands are raw shell code and should only be used from trusted project configurations."
+        "Configure or generate shell integration\n\nUsage: zetta init [SHELL] [OPTIONS]\n\nWithout SHELL, detects the active supported shell process (falling back to SHELL when process inspection cannot identify it) and adds the integration command to its startup file. On Windows, Unix-style HOME paths from MSYS2 and Cygwin are resolved with cygpath; when neither an active shell nor SHELL identifies a POSIX shell, Zetta detects the launching PowerShell and writes to its $PROFILE. Running it again leaves an existing integration unchanged. With SHELL, prints the integration script for use in a shell startup file.\n\nOptions:\n{options}\n\nCompletion code loads once on the first request. That request includes generation and evaluation cost; later requests reuse the code while refreshing dynamic values. Zsh also defers automatic compinit until completion.\n\nSupported shells:\n{supported_shells}\n\nThe generated script adds completion, including dynamic profile and theme values from `zetta profile list` and `zetta profile themes`, registered project command names from `zetta cmd --list`, live serial-device, tab-icon (including `zetta tabicon --reset`), pane-split, pane-label, run-dependency-label, and --replace-pane completion, the root --new-window and --command options (which pass their launch behavior or remaining command arguments respectively), the attention command's notification options, the zvi shortcut for the built-in vi editor, the ztftp shortcut when the TFTP client is enabled, and the zntfy shortcut when desktop notifications are enabled, and zcopy/zpaste completions when clipboard access is enabled. `zetta pane --direction` completes left, right, up, and down, while `zetta pane --pane` fetches labels from the active process, and new-pane overlay sizes and colors are offered as fixed values. Past the `--` in `zetta pane wait ... -- COMMAND`, completion hands off to COMMAND's own shell completion exactly as if `zetta pane wait ... --` were not on the command line. zcopy/zpaste are also available as pbcopy/pbpaste on platforms other than macOS, taking priority over any existing pbcopy/pbpaste alias so pbcopy/pbpaste muscle memory keeps working there too. Project commands are raw shell code and should only be used from trusted project configurations."
     );
     let worktree_help = if cfg!(feature = "worktree") {
         "\n\nThe generated integration also provides the zwt wrapper for the standalone Git worktree command; it changes directory only after successful new, done, or abort operations. Worktree completion includes new, done, abort, status, sync, and config operations, dynamic source-branch commit targets for sync, the repeatable --copy path option, and filesystem path arguments."

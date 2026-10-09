@@ -42,7 +42,7 @@ pub(crate) enum StartupMode {
     #[cfg(cli_services)]
     CliService(CliServiceCommand),
     Profile(ProfileCommand),
-    PrintShellIntegration(ShellIntegration),
+    PrintShellIntegration(ShellIntegration, bool),
     ConfigureCurrentShellIntegration,
     OutputBenchmark {
         size_mib: usize,

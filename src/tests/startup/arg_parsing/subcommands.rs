@@ -1273,8 +1273,20 @@ fn init_subcommand_configures_the_current_shell_or_prints_an_explicit_integratio
 
     assert_eq!(
         args.mode,
-        StartupMode::PrintShellIntegration(ShellIntegration::Zsh)
+        StartupMode::PrintShellIntegration(ShellIntegration::Zsh, false)
     );
     assert!(!should_handoff_to_existing_process(&args));
     assert!(parse_args_from([OsString::from("init"), OsString::from("sh")]).is_err());
+}
+
+#[test]
+fn init_completions_requires_shell_and_accepts_both_spellings() {
+    for flag in ["--completions", "-c"] {
+        let arguments = [OsString::from("bash"), OsString::from(flag)];
+        assert!(matches!(
+            parse_shell_integration_subcommand(&arguments).unwrap().mode,
+            StartupMode::PrintShellIntegration(ShellIntegration::Bash, true)
+        ));
+        assert!(parse_shell_integration_subcommand(&[OsString::from(flag)]).is_err());
+    }
 }

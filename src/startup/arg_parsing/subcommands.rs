@@ -477,18 +477,29 @@ pub(super) fn parse_shell_integration_subcommand(arguments: &[OsString]) -> Resu
         println!("{}", shell_integration_help());
         std::process::exit(0);
     }
-    anyhow::ensure!(
-        arguments.len() <= 1,
-        "usage: zetta init [SHELL]; run `zetta init --help` for supported shells"
-    );
-    let Some(shell) = arguments.first() else {
+    let mut shell = None;
+    let mut completions = false;
+    for argument in arguments {
+        let argument = argument.to_str().context("SHELL must be valid UTF-8")?;
+        match argument {
+            "--completions" | "-c" => completions = true,
+            value if !value.starts_with('-') && shell.is_none() => {
+                shell = Some(ShellIntegration::parse(value)?);
+            }
+            _ => anyhow::bail!(
+                "usage: zetta init [SHELL] [--completions]; run `zetta init --help` for supported shells"
+            ),
+        }
+    }
+    let Some(shell) = shell else {
+        anyhow::ensure!(!completions, "--completions requires an explicit SHELL");
         return Ok(StartupArgs::for_mode(
             StartupMode::ConfigureCurrentShellIntegration,
         ));
     };
-    let shell = shell.to_str().context("SHELL must be valid UTF-8")?;
     Ok(StartupArgs::for_mode(StartupMode::PrintShellIntegration(
-        ShellIntegration::parse(shell)?,
+        shell,
+        completions,
     )))
 }
 

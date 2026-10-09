@@ -256,6 +256,13 @@ Shell integration completes the current serial-device, tab-icon, pane/tab-theme,
 and command-pane label lists dynamically. See [Serial and network tools](docs/tools.md)
 for flags and safety notes.
 
+Shell integration loads completion code once on the first completion request.
+Existing `zetta init SHELL` startup commands continue to work;
+`zetta init SHELL --completions` (`-c`) emits just the completion implementation.
+The first request includes generation and evaluation, plus automatic `compinit`
+for Zsh when needed. Later requests reuse the code and refresh dynamic catalogs.
+See [shell integration](docs/shell-integration.md) for details.
+
 Use `zetta --replace-pane --split NAME` or
 `zetta --replace-pane --profile PROFILE` to replace the active pane in a
 running process; the command falls back to the normal new-window launch when

@@ -155,7 +155,7 @@ pub(crate) fn help_text(profiles: &[Profile]) -> String {
         "zetta profile <COMMAND>",
         "zetta project <COMMAND>",
         "zetta attention [OPTIONS] [SUMMARY] [BODY]",
-        "zetta init [SHELL]",
+        "zetta init [SHELL] [--completions]",
         #[cfg(feature = "zosh-client")]
         "zetta mosh [OPTIONS] [--] [user@]HOST [COMMAND ...]",
     ];

@@ -200,8 +200,15 @@ fn dispatch_startup_mode(args: &StartupArgs) -> Option<Result<()>> {
         StartupMode::PrintTerminalSize { json, resize } => {
             cli_modes::run_terminal_size_command(*json, *resize)
         }
-        StartupMode::PrintShellIntegration(shell) => {
-            print!("{}", shell.script());
+        StartupMode::PrintShellIntegration(shell, completions) => {
+            print!(
+                "{}",
+                if *completions {
+                    shell.completion_script()
+                } else {
+                    shell.script()
+                }
+            );
             Ok(())
         }
         StartupMode::ConfigureCurrentShellIntegration => cli_modes::configure_shell_integration(),

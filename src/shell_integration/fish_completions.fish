@@ -1,0 +1,1256 @@
+function __zetta_config_args
+    set -l words (commandline -opc)
+    set -l args
+    set -l index 2
+    while test $index -le (count $words)
+        switch $words[$index]
+            case --config -c
+                if test $index -lt (count $words)
+                    set index (math $index + 1)
+                    set args $args --config $words[$index]
+                end
+            case --command -e
+                break
+        end
+        set index (math $index + 1)
+    end
+    printf '%s\n' $args
+end
+
+function __zetta_profiles
+    set -l config_args (__zetta_config_args)
+    zetta profile list $config_args 2>/dev/null
+end
+
+function __zetta_profile_themes
+    set -l config_args (__zetta_config_args)
+    zetta profile themes $config_args 2>/dev/null
+end
+
+function __zetta_serial_devices
+    zetta serial list 2>/dev/null
+end
+
+function __zetta_tab_icons
+    zetta tabicon --list 2>/dev/null
+end
+
+function __zetta_themes
+    zetta theme $argv[1] --list 2>/dev/null
+end
+
+function __zetta_pane_splits
+    zetta splits 2>/dev/null
+end
+
+function __zetta_projects
+    zetta project list 2>/dev/null
+end
+
+function __zetta_project_commands
+    zetta cmd --list 2>/dev/null
+end
+
+function __zetta_cmd
+    set -l words (commandline -opc)
+    test (count $words) -ge 2
+    and test "$words[2]" = cmd
+end
+
+function __zetta_cmd_needs_name
+    set -l words (commandline -opc)
+    test (count $words) -eq 2
+    and test "$words[2]" = cmd
+end
+
+function __zetta_cmd_needs_delimiter
+    set -l words (commandline -opc)
+    test (count $words) -ge 3
+    and test "$words[2]" = cmd
+    and not contains -- -- $words[3..-1]
+    and not contains -- "$words[3]" --list --help
+end
+
+function __zetta_cmd_has_name
+    set -l words (commandline -opc)
+    test (count $words) -ge 3
+    and test "$words[2]" = cmd
+    and not contains -- -- $words[3..-1]
+    and not contains -- "$words[3]" --list --help
+end
+
+function __zetta_project_is
+    set -l words (commandline -opc)
+    test (count $words) -ge 3
+    and test "$words[2]" = project
+    and contains -- "$words[3]" $argv
+end
+
+function __zetta_pane_labels
+    zetta pane --list 2>/dev/null
+end
+
+function __zetta_pane_wait
+    set -l words (commandline -opc)
+    test (count $words) -ge 3
+    and test "$words[2]" = pane
+    and test "$words[3]" = wait
+end
+
+# `__fish_seen_argument --` cannot be used for this: its `argparse` call
+# treats a literal `--` in its own arguments as an end-of-options marker and
+# silently drops it, so it can never report a bare `--` as seen.
+function __zetta_pane_wait_after_delimiter
+    set -l words (commandline -opc)
+    test (count $words) -ge 4
+    and test "$words[2]" = pane
+    and test "$words[3]" = wait
+    and contains -- -- $words[4..-1]
+end
+
+function __zetta_run_pane_labels
+    set -l current (commandline -ct)
+    set -l prefix ''
+    set -l partial $current
+    set -l selected
+    if string match -q '*,*' -- "$current"
+        set prefix (string replace -r '[^,]*$' '' -- "$current")
+        set partial (string replace -r '^.*,' '' -- "$current")
+        set selected (string split ',' -- (string replace -r ',[^,]*$' '' -- "$current"))
+    end
+    for label in (__zetta_pane_labels)
+        string match -q -- "$partial*" "$label"; or continue
+        contains -- "$label" $selected; and continue
+        printf '%s%s\n' "$prefix" "$label"
+    end
+end
+
+# Everything after `--` is the wrapped command's own argv, so reconstruct it
+# and hand completion off to fish's normal dispatcher for that command rather
+# than offering nothing.
+function __zetta_pane_wait_remaining_args
+    set -l tokens (commandline -opc) (commandline -ct)
+    set -l delimiter_index 0
+    for i in (seq (count $tokens))
+        if test "$tokens[$i]" = --
+            set delimiter_index $i
+            break
+        end
+    end
+    test $delimiter_index -gt 0
+    or return 1
+    set -e tokens[1..$delimiter_index]
+    string join0 -- $tokens
+end
+
+function __zetta_complete_pane_wait_subcommand
+    set -l args (__zetta_pane_wait_remaining_args | string split0)
+    __fish_complete_subcommand --commandline $args
+end
+
+# zetta-default/zetta-ok/zetta-alarm/zetta-gong are bundled tones Zetta plays itself, so
+# they always work; the rest are the current platform's own system sound
+# names, which only work on that platform, so only that platform's names are
+# offered.
+function __zetta_sound_names
+    switch $__zetta_platform
+        case Darwin
+            printf '%s\n' zetta-default zetta-ok zetta-alarm zetta-gong \
+                Basso Blow Bottle Frog Funk Glass Hero Morse Ping Pop Purr Sosumi Submarine Tink
+        case '*'
+            printf '%s\n' zetta-default zetta-ok zetta-alarm zetta-gong bell complete message \
+                message-new-instant dialog-information dialog-warning dialog-error trash-empty
+    end
+end
+
+# Fish completion registrations normally expose every short option as a
+# candidate. Keep the short forms out of the candidate list while retaining
+# their argument completion by activating these registrations only after the
+# user has already entered the short option.
+function __zetta_short_option
+    set -l words (commandline -opc)
+    test (count $words) -gt 0
+    and test "$words[-1]" = "$argv[1]"
+end
+
+function __zetta_tabicon_has_reset
+    set -l words (commandline -opc)
+    for word in $words[3..-1]
+        if test "$word" = --reset; or test "$word" = -r
+            return 0
+        end
+    end
+    return 1
+end
+
+function __zetta_at_subcommand
+    set -l words (commandline -opc)
+    test (count $words) -eq 2
+    and test "$words[2]" = "$argv[1]"
+end
+
+function __zetta_benchmark_output
+    set -l words (commandline -opc)
+    test (count $words) -ge 3
+    and test "$words[2]" = benchmark
+    and test "$words[3]" = output
+end
+
+function __zetta_notify_cleanup
+    set -l words (commandline -opc)
+    test (count $words) -ge 3
+    and test "$words[2]" = notify
+    and test "$words[3]" = cleanup
+end
+
+function __zetta_notify_root
+    set -l words (commandline -opc)
+    test (count $words) -ge 2
+    and test "$words[2]" = notify
+    and not __zetta_notify_cleanup
+end
+
+function __zetta_theme_pane
+    set -l words (commandline -opc)
+    test (count $words) -ge 3
+    and test "$words[2]" = theme
+    and test "$words[3]" = pane
+end
+
+function __zetta_theme_tab
+    set -l words (commandline -opc)
+    test (count $words) -ge 3
+    and test "$words[2]" = theme
+    and test "$words[3]" = tab
+end
+
+function __zetta_profile_operation
+    set -l words (commandline -opc)
+    set -l seen 0
+    set -l skip 0
+    for word in $words[2..-1]
+        if test $skip -eq 1
+            set skip 0
+            continue
+        end
+        if test $seen -eq 0
+            switch $word
+                case --config -c --keymap -k --profile -p --split -s --theme -t --geometry -g
+                    set skip 1
+                case --command -e
+                    return 1
+                case profile
+                    set seen 1
+            end
+            continue
+        end
+        if test $seen -eq 1
+            switch $word
+                case --config -c
+                    set skip 1
+                case --icon -i
+                    set skip 1
+                case '-*'
+                case '*'
+                    printf '%s\n' $word
+                    return 0
+            end
+        end
+    end
+    return 1
+end
+
+function __zetta_has_profile_subcommand
+    set -l words (commandline -opc)
+    set -l skip 0
+    for word in $words[2..-1]
+        if test $skip -eq 1
+            set skip 0
+            continue
+        end
+        switch $word
+            case --config -c --keymap -k --profile -p --split -s --theme -t --geometry -g
+                set skip 1
+            case --command -e
+                return 1
+            case profile
+                return 0
+        end
+    end
+    return 1
+end
+
+function __zetta_at_profile_command
+    __zetta_has_profile_subcommand; or return 1
+    set -l operation (__zetta_profile_operation)
+    test (count $operation) -eq 0
+end
+
+function __zetta_profile_argument_count
+    set -l words (commandline -opc)
+    set -l operation (__zetta_profile_operation)
+    set -l seen 0
+    set -l skip 0
+    set -l count 0
+    for word in $words[2..-1]
+        if test $skip -eq 1
+            set skip 0
+            continue
+        end
+        if test $seen -eq 0
+            switch $word
+                case --config -c --keymap -k --profile -p --split -s --theme -t --geometry -g
+                    set skip 1
+                case --command -e
+                    return 1
+                case profile
+                    set seen 1
+            end
+            continue
+        end
+        if test "$word" = "$operation"
+        else
+            switch $word
+                case --config -c
+                    set skip 1
+                case '-*'
+                case '*'
+                    set count (math $count + 1)
+            end
+        end
+    end
+    printf '%s\n' $count
+end
+
+function __zetta_profile_is
+    test (__zetta_profile_operation) = "$argv[1]"
+end
+
+function __zetta_profile_needs_profile
+    test (__zetta_profile_argument_count) -eq 0
+end
+
+function __zetta_profile_needs_theme
+    test (__zetta_profile_argument_count) -eq 1
+end
+
+function __zetta_profile_needs_icon
+    test (__zetta_profile_argument_count) -eq 1
+end
+
+# A subcommand is only recognized as the very first argument, unlike root
+# flags (--profile, --theme, --config, --keymap), which may combine and
+# appear in any order. Subcommand-name candidates use this instead of
+# __zetta_use_subcommand so they stop appearing once a root flag is typed.
+function __zetta_at_root
+    test (count (commandline -opc)) -eq 1
+end
+
+# Fish's own __fish_use_subcommand treats any non-flag token as a subcommand,
+# so it stops offering root flags after a value-taking one (e.g. --profile
+# NAME) even though no subcommand was actually given. Skip known root option
+# arguments before applying that same rule, so --profile and --theme keep
+# completing each other despite --theme requiring --profile.
+function __zetta_use_subcommand
+    set -l words (commandline -opc)
+    set -e words[1]
+    set -l skip_next 0
+    for word in $words
+        if test $skip_next -eq 1
+            set skip_next 0
+            continue
+        end
+        switch $word
+            case --config -c --keymap -k --profile -p --split -s --theme -t --geometry -g
+                set skip_next 1
+                continue
+            case --command -e
+                return 1
+            case '-*'
+                continue
+        end
+        return 1
+    end
+    return 0
+end
+
+function __zetta_tftp_client
+    set -l words (commandline -opc)
+    test (count $words) -ge 3
+    and test "$words[2]" = tftp
+    and contains -- "$words[3]" get put
+end
+
+function __zetta_tftp_server
+    set -l words (commandline -opc)
+    test (count $words) -ge 3
+    and test "$words[2]" = tftp
+    and test "$words[3]" = server
+end
+
+# ZETTA_ZMUX_INTEGRATION_BEGIN
+function __zetta_mux_session_ids
+    set -l command_name zetta
+    set -l command_arguments mux list
+    set -l words (commandline -opc)
+    if test "$words[1]" = zmux
+        set command_name zmux
+        set command_arguments list
+    end
+    $command_name $command_arguments 2>/dev/null | awk '$1 == "reconnect" && $2 == "id:" && $3 ~ /^[0-9]+:[0-9]+:[0-9]+$/ { print $3 }'
+end
+
+function __zetta_mux_restorable_ids
+    set -l command_name zetta
+    set -l command_arguments mux list
+    set -l words (commandline -opc)
+    if test "$words[1]" = zmux
+        set command_name zmux
+        set command_arguments list
+    end
+    $command_name $command_arguments 2>/dev/null | awk '$1 == "resume" && $2 == "id:" && $3 ~ /^[0-9]+$/ { print $3 }'
+end
+# ZETTA_ZMUX_INTEGRATION_END
+
+function __zetta_ssh_targets
+    set -l config "$HOME/.ssh/config"
+    test -r "$config"; or return
+    awk '
+        /^[[:space:]]*[Hh][Oo][Ss][Tt][[:space:]]+/ {
+            for (field = 2; field <= NF; field++)
+                if ($field !~ /^!/ && $field !~ /[*?]/)
+                    print $field
+        }
+    ' "$config" 2>/dev/null
+end
+
+# Whether a Mosh host positional has already been given. Everything after the
+# host is sent to the Mosh server, so no further candidates may be offered
+# once it is on the command line.
+function __zetta_mosh_host_given
+    set -l words (commandline -opc)
+    set -l start 2
+    if test "$words[1]" = zetta
+        set start 3
+    end
+    set -l count (count $words)
+    if test $start -gt $count
+        return 1
+    end
+    set -l index $start
+    while test $index -le $count
+        set -l token $words[$index]
+        if test "$token" != '--'
+            and not string match -q -- '-*' "$token"
+            switch $words[(math $index - 1)]
+                case --predict --family --experimental-remote-ip --bind-server --client --server --ssh --port -p
+                case '*'
+                    return 0
+            end
+        end
+        set index (math $index + 1)
+    end
+    return 1
+end
+
+# ZETTA_ZMUX_INTEGRATION_BEGIN
+function __zetta_mux_attach_arguments
+    set -l words (commandline -opc)
+    set -l command_index 3
+    if test "$words[1]" = zmux
+        set command_index 2
+    end
+    set -l target ''
+    set -l port ''
+    set -l start (math $command_index + 1)
+    set -l count (count $words)
+    set -l index $start
+    while test $index -le $count
+        set -l token $words[$index]
+        switch $token
+            case --ssh-target -H
+                set index (math $index + 1)
+                test $index -le $count; and set target $words[$index]
+            case '--ssh-target=*'
+                set target (string replace -- '--ssh-target=' '' $token)
+            case --port -p
+                set index (math $index + 1)
+                test $index -le $count; and set port $words[$index]
+            case '--port=*'
+                set port (string replace -- '--port=' '' $token)
+            case --identity -i
+                set index (math $index + 1)
+            case '--identity=*'
+            case '-*'
+            case '*'
+                test -n "$target"; or set target $token
+        end
+        set index (math $index + 1)
+    end
+
+    set -l previous ''
+    test $count -gt 0; and set previous $words[$count]
+    if contains -- $previous --port -p --identity -i
+        return
+    end
+    if contains -- $previous --ssh-target -H
+        __zetta_ssh_targets
+        return
+    end
+    if test -n "$target"
+        set -l ssh_command ssh -T -o BatchMode=yes -o ConnectTimeout=3
+        test -n "$port"; and set ssh_command $ssh_command -p $port
+        set -l prefix (commandline -ct)
+        command $ssh_command $target zmux list --ids-only 2>/dev/null \
+            | string match -r '^[0-9]+$' \
+            | string match -- "$prefix*"
+    else
+        __zetta_ssh_targets
+    end
+end
+
+function __zetta_mux_daemon_commands
+    test "$ZETTA_NO_MUX" != 1
+end
+# ZETTA_ZMUX_INTEGRATION_END
+
+# Fish only considers options registered with `-l` after the user has typed a
+# dash. Emit the same long options as ordinary completion candidates too, so
+# they appear alongside subcommands at every valid argument position.
+function __zetta_option_unused
+    set -l words (commandline -opc)
+    ZETTA_WORKTREE_FISH_COPY_OPTION; and return 0
+    not contains -- $argv[1] $words[2..-1]
+end
+
+function __zetta_filter_long_options
+    while read -l line
+        set -l option (string split \t -- $line)[1]
+        if __zetta_option_unused $option
+            printf '%s\n' "$line"
+        end
+    end
+end
+
+function __zetta_long_options
+    begin
+        switch $argv[1]
+        case root
+            printf '%s\t%s\n' \
+                --help 'Print help' \
+                --version 'Print version' \
+                --config 'Use a configuration file' \
+                --keymap 'Use a keymap file' \
+                --profile 'Select a profile' \
+                --split 'Apply a configured pane split template' \
+                --replace-pane 'Replace the active pane in a running process' \
+                --theme 'Non-persistently override the profile theme' \
+                --geometry 'Open the first pane at COLUMNSxROWS' \
+# ZETTA_ZMUX_INTEGRATION_BEGIN
+                --no-mux 'Keep background sessions in this process for this launch' \
+# ZETTA_ZMUX_INTEGRATION_END
+                --new-window 'Open a fresh OS window without resuming a dormant session' \
+                --command 'Open a tab and run COMMAND; remaining arguments go to the child'
+        case mosh
+            printf '%s\t%s\n' \
+                --client 'Use a specific local Mosh client' \
+                --server 'Use a specific remote Mosh server' \
+                --predict 'Prediction mode' \
+                -o 'Allow predictive overwrites' \
+                --predict-overwrite 'Allow predictive overwrites' \
+                --no-predict-overwrite 'Do not overwrite predictions' \
+                --keep-alive 'Send a keep-alive packet every 500 ms' \
+                --forward-agent 'Forward SSH-agent connections to Zosh hosts' \
+                --no-forward-agent 'Disable SSH-agent forwarding' \
+                --scrollback 'Keep the output that scrolls off the screen (default)' \
+                --no-scrollback 'Keep only what is on the screen, as stock Mosh does' \
+                --family 'Address family' \
+                --port 'Mosh server port or range' \
+                --bind-server 'Mosh server bind address' \
+                --ssh 'SSH command' \
+                --ssh-pty 'Request an SSH PTY' \
+                --no-ssh-pty 'Do not request an SSH PTY' \
+                --init 'Initialize the terminal' \
+                --no-init 'Preserve the terminal' \
+                --local 'Use locally discovered addressing' \
+                --experimental-remote-ip 'Address discovery mode' \
+                --help 'Print help' \
+                --version 'Print version'
+        case profile
+            printf '%s\t%s\n' \
+                list 'List all resolved profiles' \
+                themes 'List available profile themes' \
+                disable 'Hide a profile' \
+                enable 'Show a profile' \
+                theme 'Set or reset a profile theme' \
+                dark-theme 'Set or reset a profile dark theme' \
+                icon 'Set or reset a profile icon' \
+                default 'Set the default profile' \
+                add 'Add a custom profile' \
+                remove 'Remove a custom profile' \
+                --config 'Use a configuration file' \
+                --help 'Print help'
+        case init serial http tftp splits
+            printf '%s\t%s\n' --help 'Print help'
+        case pane
+            printf '%s\t%s\n' \
+                wait 'Wait for pane commands before running a command' \
+                --direction 'Direction for a new split' \
+                --label 'Label for a new split pane' \
+                --pane 'Target pane label' \
+                --overlay 'Overlay text for a new split pane' \
+                --overlay-size 'Overlay font size' \
+                --overlay-opacity 'Overlay opacity percentage' \
+                --overlay-color 'Overlay text color' \
+                --stack 'Run in a stacked task pane' \
+                --list 'List pane labels' \
+                --help 'Print help'
+        case pane_wait
+            printf '%s\t%s\n' \
+                --allow-failure 'Continue after a dependency fails' \
+                -- 'Execute the remaining values as exact argv' \
+                --help 'Print help'
+        case cmd
+            printf '%s\t%s\n' \
+                --list 'List registered project command names' \
+                --help 'Print help' \
+                -- 'Pass the remaining values as shell-quoted arguments'
+        case theme
+            printf '%s\t%s\n' \
+                pane 'Change the active pane theme' \
+                tab 'Change the active tab theme' \
+                --help 'Print help'
+        case theme_pane theme_tab
+            printf '%s\t%s\n' \
+                --theme 'Set the theme' \
+                --reset 'Restore the configured theme' \
+                --list 'Print the registered theme names' \
+                --help 'Print help'
+        case tabicon
+            printf '%s\t%s\n' \
+                --icon 'Set the tab icon' \
+                --reset 'Restore the configured project or application icon' \
+                --list 'Print built-in icon names' \
+                --help 'Print help'
+        case overlay
+            printf '%s\t%s\n' \
+                --text 'Set the overlay text' \
+                --size 'Set the font size' \
+                --opacity 'Set the opacity percentage (0-100)' \
+                --color 'Set the text color (name or hex)' \
+                --reset 'Clear the overlay' \
+                --help 'Print help'
+# ZETTA_WORKTREE_INTEGRATION_BEGIN
+        case wt
+            printf '%s\t%s\n' \
+                new 'Create a worktree' \
+                done 'Integrate and remove the current worktree' \
+                abort 'Discard and remove the current worktree' \
+                status 'Show worktree state' \
+                sync 'Rebase the current worktree onto the source branch' \
+                config 'Install the recommended global Git configuration' \
+                --help 'Print help'
+# ZETTA_WORKTREE_INTEGRATION_END
+        case terminal-size
+            printf '%s\t%s\n' \
+                --json 'Print machine-readable JSON' \
+                --resize 'Resize the current pane' \
+                --columns 'Set pane width in columns' \
+                --rows 'Set pane height in rows' \
+                --help 'Print help'
+        case edit
+            printf '%s\t%s\n' --delete-after 'Delete a managed buffer after editing' --help 'Print help'
+        case vi
+            printf '%s\t%s\n' --help 'Print help'
+# ZETTA_ZMUX_INTEGRATION_BEGIN
+        case mux
+            if test "$ZETTA_NO_MUX" = 1
+                printf '%s\t%s\n' --json 'Print machine-readable JSON' --ids-only 'Print one numeric session ID per line' --ssh-target 'OpenSSH destination' --port 'SSH port' --help 'Print help' --version 'Print version'
+            else
+                printf '%s\t%s\n' --json 'Print machine-readable JSON' --ids-only 'Print one numeric session ID per line' --ssh-target 'OpenSSH destination' --port 'SSH port' --force 'Stop even while sessions are running' --upgrade 'Replace the multiplexer, keeping its sessions' --identity 'Age identity file for resume and reconnect' --secret-stdin 'Read an optional create secret from standard input' --layout 'Create from a headless layout JSON file' --profile 'Create one pane using a host profile' --title 'Title for a newly created headless session' --working-directory 'Starting directory for a single-pane create' --env 'Environment override for a single-pane create' --retention 'Retention mode for a local daemon' --help 'Print help' --version 'Print version'
+            end
+# ZETTA_ZMUX_INTEGRATION_END
+        case benchmark_output
+            printf '%s\t%s\n' \
+                --size 'Set the output size in MiB' \
+                --output-type 'Select repeated or unique lines' \
+                --help 'Print help'
+        case benchmark
+            printf '%s\n' \
+                --profile-report \
+                --profile-duration \
+                --profile-pane-stress \
+                --profile-background-stress \
+                --profile-sparse-updates \
+                --profile-alt-screen-scroll \
+                --profile-external-terminal \
+                --help
+        case serial-console
+            printf '%s\t%s\n' \
+                --device 'Serial device' \
+                --baud-rate 'Baud rate' \
+                --data-bits 'Data bits' \
+                --parity 'Parity' \
+                --stop-bits 'Stop bits' \
+                --flow-control 'Flow control' \
+                --help 'Print help'
+        case http-server
+            printf '%s\t%s\n' \
+                --root 'Directory to serve' \
+                --port 'Server port' \
+                --config 'Configuration file' \
+                --help 'Print help'
+        case tftp-server
+            printf '%s\t%s\n' \
+                --root 'Directory to serve' \
+                --port 'Server port' \
+                --config 'Configuration file' \
+                --writable 'Accept uploads into the served directory' \
+                --help 'Print help'
+        case tftp-client ztftp
+            printf '%s\t%s\n' --port 'Server port' --help 'Print help'
+        case notify zntfy
+            printf '%s\t%s\n' \
+                --app-name 'Application name' \
+                --icon 'Image to show with the notification' \
+                --sound 'Sound name' \
+                --timeout 'Timeout' \
+                --help 'Print help'
+        case notify_cleanup
+            printf '%s\t%s\n' \
+                --dry-run 'List stale workers without terminating them' \
+                --help 'Print help'
+        case attention
+            printf '%s\t%s\n' \
+                --notify 'Also show a desktop notification' \
+                --app-name 'Application name' \
+                --icon 'Image to show with the notification' \
+                --sound 'Sound name' \
+                --timeout 'Timeout' \
+                --help 'Print help'
+# ZETTA_CLIPBOARD_INTEGRATION_BEGIN
+        case copy zcopy pbcopy
+            printf '%s\t%s\n' --pboard 'Pasteboard to use' --help 'Print help'
+        case paste zpaste pbpaste
+            printf '%s\t%s\n' \
+                --pboard 'Pasteboard to use' \
+                --prefer 'Preferred clipboard format' \
+                --help 'Print help'
+# ZETTA_CLIPBOARD_INTEGRATION_END
+        end
+    end | __zetta_filter_long_options
+end
+
+complete -c zetta -f
+complete -c zetta -n '__zetta_at_root' -a benchmark -d 'Profile terminal rendering'
+complete -c zetta -n '__zetta_at_root' -a terminal-size -d 'Print the current terminal size'
+# ZETTA_ZMUX_INTEGRATION_BEGIN
+complete -c zetta -n '__zetta_at_root' -a mux -d 'Control the session multiplexer'
+# ZETTA_ZMUX_INTEGRATION_END
+complete -c zetta -n '__zetta_at_root' -a profile -d 'List and manage profiles'
+complete -c zetta -n '__zetta_at_root' -a project -d 'List and manage projects'
+complete -c zetta -n '__zetta_at_root' -a cmd -d 'Run a registered project command in the active pane'
+complete -c zetta -n '__zetta_at_root' -a edit -d 'Edit files with EDITOR or Zetta vi'
+complete -c zetta -n '__zetta_at_root' -a vi -d "Edit files with Zetta's built-in vi"
+complete -c zetta -n '__zetta_at_root' -a init -d 'Generate shell integration'
+complete -c zetta -n '__zetta_at_root' -a mosh -d 'Run an interactive Mosh session'
+complete -c zetta -n '__zetta_at_root' -a serial -d 'List or connect to serial devices'
+complete -c zetta -n '__zetta_at_root' -a http -d 'Serve static files over HTTP'
+complete -c zetta -n '__zetta_at_root' -a tftp -d 'Transfer a file with TFTP'
+complete -c zetta -n '__zetta_at_root' -a notify -d 'Show a desktop notification'
+complete -c zetta -n '__zetta_at_root' -a attention -d 'Mark the originating tab as needing attention'
+# ZETTA_CLIPBOARD_INTEGRATION_BEGIN
+complete -c zetta -n '__zetta_at_root' -a copy -d 'Copy standard input to the clipboard'
+complete -c zetta -n '__zetta_at_root' -a paste -d "Print the clipboard's contents"
+# ZETTA_CLIPBOARD_INTEGRATION_END
+complete -c zetta -n '__zetta_at_root' -a tabicon -d 'Set the active tab icon'
+complete -c zetta -n '__zetta_at_root' -a theme -d "Non-persistently change the active pane or tab's theme"
+complete -c zetta -n '__zetta_at_root' -a splits -d 'List configured pane split templates'
+complete -c zetta -n '__zetta_at_root' -a pane -d 'Run a command in a pane'
+complete -c zetta -n '__zetta_at_root' -a overlay -d 'Non-persistently show text over the active pane'
+# ZETTA_WORKTREE_INTEGRATION_BEGIN
+complete -c zetta -n '__zetta_at_root' -a wt -d 'Create, integrate, synchronize, configure, or abort Git worktrees'
+# ZETTA_WORKTREE_INTEGRATION_END
+complete -c zetta -n '__zetta_at_subcommand benchmark' -a output -d 'Write and time a text payload'
+complete -c zetta -n '__zetta_at_subcommand notify' -a cleanup -d 'Reap stale desktop notification worker processes'
+complete -c zetta -n '__zetta_at_subcommand theme' -a 'pane tab' -d 'Choose the theme scope'
+complete -c zetta -n '__zetta_use_subcommand' -l help -d 'Print help'
+complete -c zetta -n '__zetta_use_subcommand' -l version -d 'Print version'
+complete -c zetta -n '__zetta_use_subcommand' -l config -r -d 'Use a configuration file'
+complete -c zetta -n '__zetta_use_subcommand' -l keymap -r -d 'Use a keymap file'
+complete -c zetta -n '__zetta_use_subcommand' -l profile -r -a '(__zetta_profiles)' -d 'Select a profile'
+complete -c zetta -n '__zetta_use_subcommand' -l split -r -a '(__zetta_pane_splits)' -d 'Apply a configured pane split template'
+complete -c zetta -n '__zetta_use_subcommand' -l replace-pane -d 'Replace the active pane in a running process'
+complete -c zetta -n '__zetta_use_subcommand' -l theme -r -a '(__zetta_profile_themes)' -d 'Non-persistently override the profile theme'
+complete -c zetta -n '__zetta_use_subcommand' -l geometry -x -d 'Open the first pane at COLUMNSxROWS'
+# ZETTA_ZMUX_INTEGRATION_BEGIN
+complete -c zetta -n '__zetta_use_subcommand' -l no-mux -d 'Keep background sessions in this process for this launch'
+# ZETTA_ZMUX_INTEGRATION_END
+complete -c zetta -n '__zetta_use_subcommand' -l command -r -d 'Open a tab and run COMMAND'
+complete -c zetta -n '__zetta_use_subcommand' -a '(__zetta_long_options root)'
+complete -c zetta -s c -r -n '__zetta_use_subcommand; and __zetta_short_option -c'
+complete -c zetta -s k -r -n '__zetta_use_subcommand; and __zetta_short_option -k'
+complete -c zetta -s p -r -a '(__zetta_profiles)' -n '__zetta_use_subcommand; and __zetta_short_option -p'
+complete -c zetta -s s -r -a '(__zetta_pane_splits)' -n '__zetta_use_subcommand; and __zetta_short_option -s'
+complete -c zetta -s r -n '__zetta_use_subcommand; and __zetta_short_option -r'
+complete -c zetta -s t -r -a '(__zetta_profile_themes)' -n '__zetta_use_subcommand; and __zetta_short_option -t'
+complete -c zetta -n '__zetta_at_profile_command' -a '(__zetta_long_options profile)'
+complete -c zetta -n '__zetta_has_profile_subcommand' -l config -r -d 'Use a configuration file'
+complete -c zetta -s c -r -n '__zetta_has_profile_subcommand; and __zetta_short_option -c'
+complete -c zetta -n '__zetta_has_profile_subcommand' -l help -d 'Print help'
+complete -c zetta -n '__zetta_has_profile_subcommand; and __zetta_profile_is disable; and __zetta_profile_needs_profile' -a '(__zetta_profiles)' -d 'Profile to hide'
+complete -c zetta -n '__zetta_has_profile_subcommand; and __zetta_profile_is enable; and __zetta_profile_needs_profile' -a '(__zetta_profiles)' -d 'Profile to show'
+complete -c zetta -n '__zetta_has_profile_subcommand; and __zetta_profile_is default; and __zetta_profile_needs_profile' -a '(__zetta_profiles)' -d 'Default profile'
+complete -c zetta -n '__zetta_has_profile_subcommand; and __zetta_profile_is remove; and __zetta_profile_needs_profile' -a '(__zetta_profiles)' -d 'Profile to remove'
+complete -c zetta -n '__zetta_has_profile_subcommand; and __zetta_profile_is theme; and __zetta_profile_needs_profile' -a '(__zetta_profiles)' -d 'Profile to theme'
+complete -c zetta -n '__zetta_has_profile_subcommand; and __zetta_profile_is theme; and __zetta_profile_needs_theme' -a '(__zetta_profile_themes)' -d 'Profile theme'
+complete -c zetta -n '__zetta_has_profile_subcommand; and __zetta_profile_is theme' -l reset -d 'Remove the profile theme override'
+complete -c zetta -n '__zetta_has_profile_subcommand; and __zetta_profile_is dark-theme; and __zetta_profile_needs_profile' -a '(__zetta_profiles)' -d 'Profile to theme'
+complete -c zetta -n '__zetta_has_profile_subcommand; and __zetta_profile_is dark-theme; and __zetta_profile_needs_theme' -a '(__zetta_profile_themes)' -d 'Profile dark theme'
+complete -c zetta -n '__zetta_has_profile_subcommand; and __zetta_profile_is dark-theme' -l reset -d 'Remove the profile dark theme override'
+complete -c zetta -n '__zetta_has_profile_subcommand; and __zetta_profile_is icon; and __zetta_profile_needs_profile' -a '(__zetta_profiles)' -d 'Profile to set an icon for'
+complete -c zetta -n '__zetta_has_profile_subcommand; and __zetta_profile_is icon; and __zetta_profile_needs_icon' -a 'auto zetta bash zsh fish' -d 'Profile icon'
+complete -c zetta -n '__zetta_has_profile_subcommand; and __zetta_profile_is icon' -l reset -d 'Restore automatic profile icon inference'
+complete -c zetta -n '__zetta_has_profile_subcommand; and __zetta_profile_is add' -l program -r -d 'Program to launch'
+complete -c zetta -n '__zetta_has_profile_subcommand; and __zetta_profile_is add' -l arg -r -d 'Program argument'
+complete -c zetta -n '__zetta_has_profile_subcommand; and __zetta_profile_is add' -l theme -r -a '(__zetta_profile_themes)' -d 'Profile theme'
+complete -c zetta -n '__zetta_has_profile_subcommand; and __zetta_profile_is add' -l dark-theme -r -a '(__zetta_profile_themes)' -d 'Profile dark theme'
+complete -c zetta -n '__zetta_has_profile_subcommand; and __zetta_profile_is add' -l icon -r -a 'auto zetta bash zsh fish' -d 'Profile icon override'
+complete -c zetta -s p -r -n '__zetta_has_profile_subcommand; and __zetta_profile_is add; and __zetta_short_option -p'
+complete -c zetta -s a -r -n '__zetta_has_profile_subcommand; and __zetta_profile_is add; and __zetta_short_option -a'
+complete -c zetta -s t -r -a '(__zetta_profile_themes)' -n '__zetta_has_profile_subcommand; and __zetta_profile_is add; and __zetta_short_option -t'
+complete -c zetta -s d -r -a '(__zetta_profile_themes)' -n '__zetta_has_profile_subcommand; and __zetta_profile_is add; and __zetta_short_option -d'
+complete -c zetta -s r -n '__zetta_has_profile_subcommand; and __zetta_profile_is theme; and __zetta_short_option -r'
+complete -c zetta -s i -r -a 'auto zetta bash zsh fish' -n '__zetta_has_profile_subcommand; and __zetta_profile_is add; and __zetta_short_option -i'
+complete -c zetta -s r -n '__zetta_has_profile_subcommand; and __zetta_profile_is icon; and __zetta_short_option -r'
+complete -c zetta -n '__zetta_at_subcommand init' -a 'bash fish powershell pwsh zsh'
+complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_given' -l client -r -d 'Use a specific local Mosh client'
+complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_given' -l server -r -d 'Use a specific remote Mosh server'
+complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_given' -l predict -r -a 'adaptive always never experimental'
+complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_given' -s o -d 'Allow predictive overwrites'
+complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_given' -l predict-overwrite -d 'Allow predictive overwrites'
+complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_given' -l no-predict-overwrite -d 'Do not overwrite predictions'
+complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_given' -s k -d 'Send a keep-alive packet every 500 ms'
+complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_given' -l keep-alive -d 'Send a keep-alive packet every 500 ms'
+complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_given' -l forward-agent -d 'Forward SSH-agent connections to Zosh hosts'
+complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_given' -l no-forward-agent -d 'Disable SSH-agent forwarding'
+complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_given' -l scrollback -d 'Keep the output that scrolls off the screen (default)'
+complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_given' -s s -d 'Keep the output that scrolls off the screen (default)'
+complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_given' -l no-scrollback -d 'Keep only what is on the screen, as stock Mosh does'
+complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_given' -s a -d 'Always predict'
+complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_given' -s n -d 'Never predict'
+complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_given' -s 4 -d 'Force IPv4'
+complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_given' -s 6 -d 'Force IPv6'
+complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_given' -l family -r -a 'prefer-inet prefer-inet6 inet inet6 auto all'
+complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_given' -s p -r -d 'Server UDP port or range'
+complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_given' -l port -r -d 'Server UDP port or range'
+complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_given' -l bind-server -r -a 'ssh any' -d 'Ask the server to reply from an address'
+complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_given' -l ssh -r
+complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_given' -l ssh-pty -d 'Request an SSH PTY'
+complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_given' -l no-ssh-pty -d 'Do not request an SSH PTY'
+complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_given' -l init -d 'Initialize the terminal'
+complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_given' -l no-init -d 'Preserve the terminal'
+complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_given' -l local -d 'Use locally discovered addressing'
+complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_given' -l experimental-remote-ip -r -a 'local remote proxy'
+complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_given' -l help -d 'Print help'
+complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_given' -s h -d 'Print help'
+complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_given' -l version -d 'Print version'
+complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_given' -s V -d 'Print version'
+complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_given' -a '--'
+complete -c zetta -n '__zetta_at_subcommand mosh; and not __zetta_mosh_host_given' -a '(__zetta_ssh_targets)'
+complete -c zetta -n '__fish_seen_subcommand_from init' -l help -d 'Print help'
+complete -c zetta -n '__fish_seen_subcommand_from init' -a '(__zetta_long_options init)'
+complete -c zetta -n '__zetta_at_subcommand serial' -a 'console list'
+complete -c zetta -n '__fish_seen_subcommand_from serial' -l help -d 'Print help'
+complete -c zetta -n '__fish_seen_subcommand_from serial' -a '(__zetta_long_options serial)'
+complete -c zetta -n '__zetta_at_subcommand http' -a server
+complete -c zetta -n '__fish_seen_subcommand_from http' -l help -d 'Print help'
+complete -c zetta -n '__fish_seen_subcommand_from http' -a '(__zetta_long_options http)'
+complete -c zetta -n '__fish_seen_subcommand_from terminal-size' -l json -d 'Print machine-readable JSON'
+
+complete -c zosh -f
+complete -c zosh -n 'not __zetta_mosh_host_given' -l client -r -d 'Mosh client on the local machine'
+complete -c zosh -n 'not __zetta_mosh_host_given' -l server -r -d 'Mosh server on the remote machine'
+complete -c zosh -n 'not __zetta_mosh_host_given' -l predict -r -a 'adaptive always never experimental'
+complete -c zosh -n 'not __zetta_mosh_host_given' -s o -d 'Allow predictive overwrites'
+complete -c zosh -n 'not __zetta_mosh_host_given' -l predict-overwrite -d 'Allow predictive overwrites'
+complete -c zosh -n 'not __zetta_mosh_host_given' -l no-predict-overwrite -d 'Do not overwrite predictions'
+complete -c zosh -n 'not __zetta_mosh_host_given' -s k -d 'Send a keep-alive packet every 500 ms'
+complete -c zosh -n 'not __zetta_mosh_host_given' -l keep-alive -d 'Send a keep-alive packet every 500 ms'
+complete -c zosh -n 'not __zetta_mosh_host_given' -l forward-agent -d 'Forward SSH-agent connections to Zosh hosts'
+complete -c zosh -n 'not __zetta_mosh_host_given' -l no-forward-agent -d 'Disable SSH-agent forwarding'
+complete -c zosh -n 'not __zetta_mosh_host_given' -l scrollback -d 'Keep the output that scrolls off the screen (default)'
+complete -c zosh -n 'not __zetta_mosh_host_given' -s s -d 'Keep the output that scrolls off the screen (default)'
+complete -c zosh -n 'not __zetta_mosh_host_given' -l no-scrollback -d 'Keep only what is on the screen, as stock Mosh does'
+complete -c zosh -n 'not __zetta_mosh_host_given' -s a -d 'Always predict'
+complete -c zosh -n 'not __zetta_mosh_host_given' -s n -d 'Never predict'
+complete -c zosh -n 'not __zetta_mosh_host_given' -s 4 -d 'Force IPv4'
+complete -c zosh -n 'not __zetta_mosh_host_given' -s 6 -d 'Force IPv6'
+complete -c zosh -n 'not __zetta_mosh_host_given' -l family -r -a 'prefer-inet prefer-inet6 inet inet6 auto all'
+complete -c zosh -n 'not __zetta_mosh_host_given' -s p -r -d 'Server UDP port or range'
+complete -c zosh -n 'not __zetta_mosh_host_given' -l port -r -d 'Server UDP port or range'
+complete -c zosh -n 'not __zetta_mosh_host_given' -l bind-server -r -a 'ssh any' -d 'Ask the server to reply from an address'
+complete -c zosh -n 'not __zetta_mosh_host_given' -l ssh -r
+complete -c zosh -n 'not __zetta_mosh_host_given' -l ssh-pty
+complete -c zosh -n 'not __zetta_mosh_host_given' -l no-ssh-pty
+complete -c zosh -n 'not __zetta_mosh_host_given' -l init
+complete -c zosh -n 'not __zetta_mosh_host_given' -l no-init
+complete -c zosh -n 'not __zetta_mosh_host_given' -l local
+complete -c zosh -n 'not __zetta_mosh_host_given' -l experimental-remote-ip -r -a 'local remote proxy'
+complete -c zosh -n 'not __zetta_mosh_host_given' -s h -d 'Print help'
+complete -c zosh -n 'not __zetta_mosh_host_given' -l help -d 'Print help'
+complete -c zosh -n 'not __zetta_mosh_host_given' -s V -d 'Print version'
+complete -c zosh -n 'not __zetta_mosh_host_given' -l version -d 'Print version'
+complete -c zosh -n 'not __zetta_mosh_host_given' -a '--'
+complete -c zosh -n 'not __zetta_mosh_host_given' -a '(__zetta_ssh_targets)'
+if set -q __ZETTA_MOSH_WRAPPER
+    complete -c mosh -f
+    complete -c mosh -n 'not __zetta_mosh_host_given' -l client -r
+    complete -c mosh -n 'not __zetta_mosh_host_given' -l server -r
+    complete -c mosh -n 'not __zetta_mosh_host_given' -l predict -r -a 'adaptive always never experimental'
+    complete -c mosh -n 'not __zetta_mosh_host_given' -s o -d 'Allow predictive overwrites'
+    complete -c mosh -n 'not __zetta_mosh_host_given' -l predict-overwrite
+    complete -c mosh -n 'not __zetta_mosh_host_given' -l no-predict-overwrite
+    complete -c mosh -n 'not __zetta_mosh_host_given' -s k
+    complete -c mosh -n 'not __zetta_mosh_host_given' -l keep-alive
+    complete -c mosh -n 'not __zetta_mosh_host_given' -l forward-agent
+    complete -c mosh -n 'not __zetta_mosh_host_given' -l no-forward-agent
+    complete -c mosh -n 'not __zetta_mosh_host_given' -s s
+    complete -c mosh -n 'not __zetta_mosh_host_given' -l scrollback
+    complete -c mosh -n 'not __zetta_mosh_host_given' -l no-scrollback
+    complete -c mosh -n 'not __zetta_mosh_host_given' -s a
+    complete -c mosh -n 'not __zetta_mosh_host_given' -s n
+    complete -c mosh -n 'not __zetta_mosh_host_given' -s 4
+    complete -c mosh -n 'not __zetta_mosh_host_given' -s 6
+    complete -c mosh -n 'not __zetta_mosh_host_given' -l family -r -a 'prefer-inet prefer-inet6 inet inet6 auto all'
+    complete -c mosh -n 'not __zetta_mosh_host_given' -s p -r
+    complete -c mosh -n 'not __zetta_mosh_host_given' -l port -r
+    complete -c mosh -n 'not __zetta_mosh_host_given' -l bind-server -r -a 'ssh any'
+    complete -c mosh -n 'not __zetta_mosh_host_given' -l ssh -r
+    complete -c mosh -n 'not __zetta_mosh_host_given' -l ssh-pty
+    complete -c mosh -n 'not __zetta_mosh_host_given' -l no-ssh-pty
+    complete -c mosh -n 'not __zetta_mosh_host_given' -l init
+    complete -c mosh -n 'not __zetta_mosh_host_given' -l no-init
+    complete -c mosh -n 'not __zetta_mosh_host_given' -l local
+    complete -c mosh -n 'not __zetta_mosh_host_given' -l experimental-remote-ip -r -a 'local remote proxy'
+    complete -c mosh -n 'not __zetta_mosh_host_given' -l help
+    complete -c mosh -n 'not __zetta_mosh_host_given' -s h
+    complete -c mosh -n 'not __zetta_mosh_host_given' -l version
+    complete -c mosh -n 'not __zetta_mosh_host_given' -s V
+    complete -c mosh -n 'not __zetta_mosh_host_given' -a '--'
+    complete -c mosh -n 'not __zetta_mosh_host_given' -a '(__zetta_ssh_targets)'
+end
+# ZETTA_ZMUX_INTEGRATION_BEGIN
+complete -c zetta -n '__zetta_at_subcommand mux' -a list -d 'List the sessions the multiplexer is holding'
+complete -c zetta -n '__zetta_at_subcommand mux; and __zetta_mux_daemon_commands' -a profiles -d 'List profiles available on the local or remote host'
+complete -c zetta -n '__zetta_at_subcommand mux; and __zetta_mux_daemon_commands' -a create -d 'Create a headless shared session'
+complete -c zetta -n '__zetta_at_subcommand mux; and __zetta_mux_daemon_commands' -a stop -d 'Stop the multiplexer'
+complete -c zetta -n '__zetta_at_subcommand mux' -a reconnect -d 'Open a session in a Zetta window'
+complete -c zetta -n '__zetta_at_subcommand mux' -a attach -d 'Open a shared remote session through OpenSSH'
+complete -c zetta -n '__zetta_at_subcommand mux; and __zetta_mux_daemon_commands' -a resume -d 'Restore an encrypted disk session with fresh shells'
+complete -c zetta -n '__zetta_at_subcommand mux; and __zetta_mux_daemon_commands' -a share -d 'Let every Zetta process attach a backgrounded session'
+complete -c zetta -n '__zetta_at_subcommand mux; and __zetta_mux_daemon_commands' -a unshare -d 'Scope a session back to the window that held it'
+complete -c zetta -n '__zetta_at_subcommand mux; and __zetta_mux_daemon_commands' -a kill -d 'End a session and everything running in it'
+complete -c zetta -n '__zetta_at_subcommand mux; and __zetta_mux_daemon_commands' -a forget -d 'Remove a session from the catalog without killing it'
+complete -c zetta -n '__fish_seen_subcommand_from mux; and __fish_seen_subcommand_from reconnect' -a '(__zetta_mux_session_ids)' -d 'Multiplexer session ID'
+complete -c zetta -n '__fish_seen_subcommand_from mux; and __fish_seen_subcommand_from resume; and __zetta_mux_daemon_commands' -a '(__zetta_mux_restorable_ids)' -d 'Encrypted disk session ID'
+complete -c zetta -n '__fish_seen_subcommand_from mux; and __fish_seen_subcommand_from share unshare kill forget; and __zetta_mux_daemon_commands' -a '(__zetta_mux_session_ids)' -d 'Multiplexer session ID'
+complete -c zetta -n '__fish_seen_subcommand_from mux; and __zetta_mux_daemon_commands' -l force -d 'Stop even while sessions are running'
+complete -c zetta -n '__fish_seen_subcommand_from mux; and __zetta_mux_daemon_commands' -l upgrade -d 'Replace the multiplexer, keeping its sessions'
+complete -c zetta -n '__fish_seen_subcommand_from mux' -l json -d 'Print machine-readable JSON'
+complete -c zetta -n '__fish_seen_subcommand_from mux' -l ids-only -d 'Print one numeric session ID per line'
+complete -c zetta -n '__fish_seen_subcommand_from mux' -l ssh-target -r -a '(__zetta_ssh_targets)' -d 'OpenSSH destination'
+complete -c zetta -n '__fish_seen_subcommand_from mux' -l port -r -d 'SSH port'
+complete -c zetta -n '__fish_seen_subcommand_from mux; and __zetta_mux_daemon_commands; and __fish_seen_subcommand_from profiles' -l json -d 'Print machine-readable JSON'
+complete -c zetta -n '__fish_seen_subcommand_from mux; and __zetta_mux_daemon_commands; and __fish_seen_subcommand_from create' -l secret-stdin -d 'Read an optional secret from the first line of standard input'
+complete -c zetta -s S -n '__fish_seen_subcommand_from mux; and __zetta_mux_daemon_commands; and __fish_seen_subcommand_from create; and __zetta_short_option -S' -d 'Read an optional secret from standard input'
+complete -c zetta -n '__fish_seen_subcommand_from mux; and __zetta_mux_daemon_commands; and __fish_seen_subcommand_from create' -l layout -r -F -d 'Headless layout JSON file, or - for standard input'
+complete -c zetta -n '__fish_seen_subcommand_from mux; and __zetta_mux_daemon_commands; and __fish_seen_subcommand_from create' -l profile -r -a '(__zetta_profiles)' -d 'Create one pane using a host profile'
+complete -c zetta -n '__fish_seen_subcommand_from mux; and __zetta_mux_daemon_commands; and __fish_seen_subcommand_from create' -l title -r -d 'Title for a newly created headless session'
+complete -c zetta -n '__fish_seen_subcommand_from mux; and __zetta_mux_daemon_commands; and __fish_seen_subcommand_from create' -l working-directory -r -F -d 'Starting directory for a single-pane create'
+complete -c zetta -n '__fish_seen_subcommand_from mux; and __zetta_mux_daemon_commands; and __fish_seen_subcommand_from create' -l env -r -d 'Environment override for a single-pane create'
+complete -c zetta -n '__fish_seen_subcommand_from mux; and __zetta_mux_daemon_commands; and __fish_seen_subcommand_from create' -l retention -r -a 'none memory disk' -d 'Retention mode for a local daemon'
+complete -c zetta -s H -r -a '(__zetta_ssh_targets)' -n '__fish_seen_subcommand_from mux; and __zetta_short_option -H' -d 'OpenSSH destination'
+complete -c zetta -s p -r -n '__fish_seen_subcommand_from mux; and __zetta_short_option -p' -d 'SSH port'
+complete -c zetta -n '__fish_seen_subcommand_from mux; and __fish_seen_subcommand_from attach' -l protocol -r -a 'ssh zosh' -d 'What carries the attached session\'s panes'
+complete -c zetta -n '__fish_seen_subcommand_from mux; and __fish_seen_subcommand_from attach' -l keep-alive -d 'Hold each Zosh pane\'s link open'
+complete -c zetta -n '__fish_seen_subcommand_from mux; and __zetta_mux_daemon_commands' -l identity -r -F -d 'Age identity file for resume and reconnect'
+complete -c zetta -n '__fish_seen_subcommand_from mux' -l help -d 'Print help'
+complete -c zetta -n '__fish_seen_subcommand_from mux' -a '(__zetta_long_options mux)'
+# ZETTA_ZMUX_INTEGRATION_END
+complete -c zetta -n '__fish_seen_subcommand_from terminal-size' -l resize -d 'Resize the current pane'
+complete -c zetta -n '__fish_seen_subcommand_from terminal-size' -l columns -r -d 'Set pane width in columns'
+complete -c zetta -n '__fish_seen_subcommand_from terminal-size' -l rows -r -d 'Set pane height in rows'
+complete -c zetta -n '__fish_seen_subcommand_from terminal-size' -l help -d 'Print help'
+complete -c zetta -n '__fish_seen_subcommand_from terminal-size' -a '(__zetta_long_options terminal-size)'
+complete -c zetta -s c -r -n '__fish_seen_subcommand_from terminal-size; and __zetta_short_option -c'
+complete -c zetta -s R -r -n '__fish_seen_subcommand_from terminal-size; and __zetta_short_option -R'
+complete -c zetta -n '__fish_seen_subcommand_from splits' -l help -d 'Print help'
+complete -c zetta -n '__fish_seen_subcommand_from splits' -a '(__zetta_long_options splits)'
+complete -c zetta -n '__zetta_at_subcommand project' -a 'add list remove open'
+complete -c zetta -n '__fish_seen_subcommand_from project' -l help -d 'Print help'
+complete -c zetta -n '__zetta_project_is add remove open' -l path -r -d 'Project root'
+complete -c zetta -n '__zetta_project_is add' -a '(__fish_complete_directories)'
+complete -c zetta -n '__zetta_project_is open remove' -a '(__zetta_projects)'
+complete -c zetta -n '__zetta_cmd_needs_name' -a '(__zetta_project_commands)' -d 'Registered project command'
+complete -c zetta -n '__zetta_cmd_needs_delimiter' -a '--' -d 'Pass arguments to the command'
+complete -c zetta -n '__zetta_cmd_needs_delimiter' -a '--help' -d 'Print help'
+complete -c zetta -n '__zetta_cmd_needs_delimiter' -l help -d 'Print help'
+complete -c zetta -n '__zetta_cmd_needs_name' -l list -d 'List registered project command names'
+complete -c zetta -n '__zetta_cmd_needs_name' -l help -d 'Print help'
+complete -c zetta -n '__zetta_cmd_needs_name' -a '(__zetta_long_options cmd)'
+complete -c zetta -n '__zetta_cmd_has_name' -l help -d 'Print help'
+complete -c zetta -n '__zetta_cmd_has_name' -a '--' -d 'Pass arguments to the command'
+complete -c zetta -n '__fish_seen_subcommand_from pane; and not __zetta_pane_wait' -a wait -d 'Wait for pane commands before running a command'
+complete -c zetta -n '__fish_seen_subcommand_from pane; and not __zetta_pane_wait' -l direction -r -a 'left right up down' -d 'Direction for a new split'
+complete -c zetta -n '__fish_seen_subcommand_from pane; and not __zetta_pane_wait' -l label -r -d 'Label for a new split pane'
+complete -c zetta -n '__fish_seen_subcommand_from pane; and not __zetta_pane_wait' -l pane -r -a '(__zetta_pane_labels)' -d 'Target pane label'
+complete -c zetta -n '__fish_seen_subcommand_from pane; and not __zetta_pane_wait' -l overlay -r -d 'Overlay text for a new split pane'
+complete -c zetta -n '__fish_seen_subcommand_from pane; and not __zetta_pane_wait' -l overlay-size -r -a 'sm base lg xl 2xl 3xl' -d 'Overlay font size'
+complete -c zetta -n '__fish_seen_subcommand_from pane; and not __zetta_pane_wait' -l overlay-opacity -r -d 'Overlay opacity percentage'
+complete -c zetta -n '__fish_seen_subcommand_from pane; and not __zetta_pane_wait' -l overlay-color -r -a 'ZETTA_OVERLAY_COLORS' -d 'Overlay text color'
+complete -c zetta -n '__fish_seen_subcommand_from pane; and not __zetta_pane_wait' -l stack -d 'Run in a stacked task pane'
+complete -c zetta -n '__fish_seen_subcommand_from pane; and not __zetta_pane_wait' -l list -d 'List pane labels'
+complete -c zetta -n '__fish_seen_subcommand_from pane; and not __zetta_pane_wait' -l help -d 'Print help'
+complete -c zetta -n '__fish_seen_subcommand_from pane; and not __zetta_pane_wait' -a '(__zetta_long_options pane)'
+complete -c zetta -s d -r -a 'left right up down' -n '__fish_seen_subcommand_from pane; and not __zetta_pane_wait; and __zetta_short_option -d'
+complete -c zetta -s l -r -n '__fish_seen_subcommand_from pane; and not __zetta_pane_wait; and __zetta_short_option -l'
+complete -c zetta -s p -r -a '(__zetta_pane_labels)' -n '__fish_seen_subcommand_from pane; and not __zetta_pane_wait; and __zetta_short_option -p'
+complete -c zetta -s o -r -n '__fish_seen_subcommand_from pane; and not __zetta_pane_wait; and __zetta_short_option -o'
+complete -c zetta -s S -r -a 'sm base lg xl 2xl 3xl' -n '__fish_seen_subcommand_from pane; and not __zetta_pane_wait; and __zetta_short_option -S'
+complete -c zetta -s O -r -n '__fish_seen_subcommand_from pane; and not __zetta_pane_wait; and __zetta_short_option -O'
+complete -c zetta -s c -r -a 'ZETTA_OVERLAY_COLORS' -n '__fish_seen_subcommand_from pane; and not __zetta_pane_wait; and __zetta_short_option -c'
+complete -c zetta -n '__zetta_pane_wait; and not __zetta_pane_wait_after_delimiter' -r -a '(__zetta_run_pane_labels)' -d 'Wait for comma-separated pane labels'
+complete -c zetta -n '__zetta_pane_wait; and not __zetta_pane_wait_after_delimiter' -l allow-failure -d 'Continue after a dependency fails'
+complete -c zetta -n '__zetta_pane_wait; and not __zetta_pane_wait_after_delimiter' -l help -d 'Print help'
+complete -c zetta -n '__zetta_pane_wait; and not __zetta_pane_wait_after_delimiter' -a '(__zetta_long_options pane_wait)'
+complete -c zetta -s a -n '__zetta_pane_wait; and not __zetta_pane_wait_after_delimiter; and __zetta_short_option -a'
+complete -c zetta -n '__zetta_pane_wait; and __zetta_pane_wait_after_delimiter' -a '(__zetta_complete_pane_wait_subcommand)'
+complete -c zetta -n '__fish_seen_subcommand_from edit' -l delete-after -d 'Delete a managed buffer after editing'
+complete -c zetta -n '__fish_seen_subcommand_from edit' -l help -d 'Print help'
+complete -c zetta -n '__fish_seen_subcommand_from edit' -a '(__zetta_long_options edit)'
+complete -c zetta -n '__fish_seen_subcommand_from edit' -F
+complete -c zetta -s d -n '__fish_seen_subcommand_from edit; and __zetta_short_option -d'
+complete -c zetta -n '__fish_seen_subcommand_from vi' -l help -d 'Print help'
+complete -c zetta -n '__fish_seen_subcommand_from vi' -a '(__zetta_long_options vi)'
+complete -c zetta -n '__fish_seen_subcommand_from vi' -F
+complete -c zetta -n '__zetta_benchmark_output' -l size -r -d 'Set the output size in MiB'
+complete -c zetta -n '__zetta_benchmark_output' -l output-type -r -a 'repeated unique'
+complete -c zetta -n '__zetta_benchmark_output' -l help -d 'Print help'
+complete -c zetta -n '__zetta_benchmark_output' -a '(__zetta_long_options benchmark_output)'
+complete -c zetta -s s -r -n '__zetta_benchmark_output; and __zetta_short_option -s'
+complete -c zetta -s t -r -a 'repeated unique' -n '__zetta_benchmark_output; and __zetta_short_option -t'
+complete -c zetta -n '__fish_seen_subcommand_from benchmark; and not __zetta_benchmark_output' -l profile-report -r
+complete -c zetta -n '__fish_seen_subcommand_from benchmark; and not __zetta_benchmark_output' -l profile-duration -r
+complete -c zetta -n '__fish_seen_subcommand_from benchmark; and not __zetta_benchmark_output' -l profile-pane-stress
+complete -c zetta -n '__fish_seen_subcommand_from benchmark; and not __zetta_benchmark_output' -l profile-background-stress
+complete -c zetta -n '__fish_seen_subcommand_from benchmark; and not __zetta_benchmark_output' -l profile-sparse-updates
+complete -c zetta -n '__fish_seen_subcommand_from benchmark; and not __zetta_benchmark_output' -l profile-alt-screen-scroll
+complete -c zetta -n '__fish_seen_subcommand_from benchmark; and not __zetta_benchmark_output' -l profile-external-terminal
+complete -c zetta -n '__fish_seen_subcommand_from benchmark; and not __zetta_benchmark_output' -l help -d 'Print help'
+complete -c zetta -n '__fish_seen_subcommand_from benchmark; and not __zetta_benchmark_output' -a '(__zetta_long_options benchmark)'
+complete -c zetta -s r -r -n '__fish_seen_subcommand_from benchmark; and __zetta_short_option -r'
+complete -c zetta -s d -r -n '__fish_seen_subcommand_from benchmark; and __zetta_short_option -d'
+complete -c zetta -n '__fish_seen_subcommand_from serial; and __fish_seen_subcommand_from console' -l device -r -a '(__zetta_serial_devices)' -d 'Serial device'
+complete -c zetta -n '__fish_seen_subcommand_from serial; and __fish_seen_subcommand_from console' -l baud-rate -r -d 'Baud rate'
+complete -c zetta -n '__fish_seen_subcommand_from serial; and __fish_seen_subcommand_from console' -l data-bits -r -a '5 6 7 8'
+complete -c zetta -n '__fish_seen_subcommand_from serial; and __fish_seen_subcommand_from console' -l parity -r -a 'none odd even'
+complete -c zetta -n '__fish_seen_subcommand_from serial; and __fish_seen_subcommand_from console' -l stop-bits -r -a '1 2'
+complete -c zetta -n '__fish_seen_subcommand_from serial; and __fish_seen_subcommand_from console' -l flow-control -r -a 'none software hardware'
+complete -c zetta -n '__fish_seen_subcommand_from serial; and __fish_seen_subcommand_from console' -a '(__zetta_long_options serial-console)'
+complete -c zetta -s d -r -a '(__zetta_serial_devices)' -n '__fish_seen_subcommand_from serial; and __fish_seen_subcommand_from console; and __zetta_short_option -d'
+complete -c zetta -s b -r -n '__fish_seen_subcommand_from serial; and __fish_seen_subcommand_from console; and __zetta_short_option -b'
+complete -c zetta -s D -r -a '5 6 7 8' -n '__fish_seen_subcommand_from serial; and __fish_seen_subcommand_from console; and __zetta_short_option -D'
+complete -c zetta -s p -r -a 'none odd even' -n '__fish_seen_subcommand_from serial; and __fish_seen_subcommand_from console; and __zetta_short_option -p'
+complete -c zetta -s s -r -a '1 2' -n '__fish_seen_subcommand_from serial; and __fish_seen_subcommand_from console; and __zetta_short_option -s'
+complete -c zetta -s f -r -a 'none software hardware' -n '__fish_seen_subcommand_from serial; and __zetta_short_option -f'
+complete -c zetta -n '__fish_seen_subcommand_from http; and __fish_seen_subcommand_from server' -l root -r -a '(__fish_complete_directories)' -d 'Directory to serve'
+complete -c zetta -n '__fish_seen_subcommand_from http; and __fish_seen_subcommand_from server' -l port -r -d 'TCP port'
+complete -c zetta -n '__fish_seen_subcommand_from http; and __fish_seen_subcommand_from server' -l config -r -d 'Configuration file'
+complete -c zetta -n '__fish_seen_subcommand_from http; and __fish_seen_subcommand_from server' -a '(__zetta_long_options http-server)'
+complete -c zetta -s r -r -a '(__fish_complete_directories)' -n '__fish_seen_subcommand_from http; and __fish_seen_subcommand_from server; and __zetta_short_option -r'
+complete -c zetta -s p -r -n '__fish_seen_subcommand_from http; and __fish_seen_subcommand_from server; and __zetta_short_option -p'
+complete -c zetta -s c -r -n '__fish_seen_subcommand_from http; and __fish_seen_subcommand_from server; and __zetta_short_option -c'
+complete -c zetta -n '__zetta_at_subcommand tftp' -a 'get put server'
+complete -c zetta -n '__zetta_tftp_client' -l port -r -d 'Server port'
+complete -c zetta -n '__zetta_tftp_server' -l root -r -a '(__fish_complete_directories)' -d 'Directory to serve'
+complete -c zetta -n '__zetta_tftp_server' -l config -r -d 'Configuration file'
+complete -c zetta -n '__zetta_tftp_server' -l writable -d 'Accept uploads into the served directory'
+complete -c zetta -n '__fish_seen_subcommand_from tftp' -l help -d 'Print help'
+complete -c zetta -n '__zetta_at_subcommand tftp' -a '(__zetta_long_options tftp)'
+complete -c zetta -n '__zetta_tftp_client' -a '(__zetta_long_options tftp-client)'
+complete -c zetta -n '__zetta_tftp_server' -a '(__zetta_long_options tftp-server)'
+complete -c zetta -s p -r -n '__zetta_tftp_client; and __zetta_short_option -p'
+complete -c zetta -s r -r -a '(__fish_complete_directories)' -n '__zetta_tftp_server; and __zetta_short_option -r'
+complete -c zetta -s p -r -n '__zetta_tftp_server; and __zetta_short_option -p'
+complete -c zetta -s c -r -n '__zetta_tftp_server; and __zetta_short_option -c'
+complete -c zetta -n '__zetta_notify_root' -l app-name -r -d 'Application name'
+complete -c zetta -n '__zetta_notify_root' -l icon -r -d 'Image to show with the notification'
+complete -c zetta -n '__fish_seen_subcommand_from tabicon; and not __zetta_tabicon_has_reset' -l icon -r -a '(__zetta_tab_icons)' -d 'Set the tab icon'
+complete -c zetta -s i -r -a '(__zetta_tab_icons)' -n '__fish_seen_subcommand_from tabicon; and not __zetta_tabicon_has_reset; and __zetta_short_option -i'
+complete -c zetta -n '__zetta_notify_root' -l sound -r -a '(__zetta_sound_names)' -d 'Sound name'
+complete -c zetta -n '__zetta_notify_root' -l timeout -r -a 'default never' -d 'Timeout'
+complete -c zetta -n '__zetta_notify_root' -l help -d 'Print help'
+complete -c zetta -n '__zetta_notify_root' -a '(__zetta_long_options notify)'
+complete -c zetta -s a -r -n '__zetta_notify_root; and __zetta_short_option -a'
+complete -c zetta -s i -r -n '__zetta_notify_root; and __zetta_short_option -i'
+complete -c zetta -s s -r -a '(__zetta_sound_names)' -n '__zetta_notify_root; and __zetta_short_option -s'
+complete -c zetta -s t -r -a 'default never' -n '__zetta_notify_root; and __zetta_short_option -t'
+complete -c zetta -n '__zetta_notify_cleanup' -l dry-run -d 'List stale workers without terminating them'
+complete -c zetta -n '__zetta_notify_cleanup' -l help -d 'Print help'
+complete -c zetta -n '__zetta_notify_cleanup' -a '(__zetta_long_options notify_cleanup)'
+complete -c zetta -s n -n '__zetta_notify_cleanup; and __zetta_short_option -n'
+complete -c zetta -n '__fish_seen_subcommand_from attention' -l notify -d 'Also show a desktop notification'
+complete -c zetta -n '__fish_seen_subcommand_from attention' -l app-name -r -d 'Application name'
+complete -c zetta -n '__fish_seen_subcommand_from attention' -l icon -r -d 'Image to show with the notification'
+complete -c zetta -n '__fish_seen_subcommand_from attention' -l sound -r -a '(__zetta_sound_names)' -d 'Sound name'
+complete -c zetta -n '__fish_seen_subcommand_from attention' -l timeout -r -a 'default never' -d 'Timeout'
+complete -c zetta -n '__fish_seen_subcommand_from attention' -l help -d 'Print help'
+complete -c zetta -n '__fish_seen_subcommand_from attention' -a '(__zetta_long_options attention)'
+complete -c zetta -s n -n '__fish_seen_subcommand_from attention; and __zetta_short_option -n'
+complete -c zetta -s a -r -n '__fish_seen_subcommand_from attention; and __zetta_short_option -a'
+complete -c zetta -s i -r -n '__fish_seen_subcommand_from attention; and __zetta_short_option -i'
+complete -c zetta -s s -r -a '(__zetta_sound_names)' -n '__fish_seen_subcommand_from attention; and __zetta_short_option -s'
+complete -c zetta -s t -r -a 'default never' -n '__fish_seen_subcommand_from attention; and __zetta_short_option -t'
+complete -c zetta -n '__fish_seen_subcommand_from copy' -l pboard -r -a 'general ruler find font'
+complete -c zetta -n '__fish_seen_subcommand_from copy' -l help -d 'Print help'
+complete -c zetta -n '__fish_seen_subcommand_from copy' -a '(__zetta_long_options copy)'
+complete -c zetta -n '__fish_seen_subcommand_from copy; and __zetta_short_option -pboard' -a 'general ruler find font'
+complete -c zetta -n '__fish_seen_subcommand_from paste' -l pboard -r -a 'general ruler find font'
+complete -c zetta -n '__fish_seen_subcommand_from paste' -l prefer -r -a 'txt rtf ps'
+complete -c zetta -n '__fish_seen_subcommand_from paste' -l help -d 'Print help'
+complete -c zetta -n '__fish_seen_subcommand_from paste' -a '(__zetta_long_options paste)'
+complete -c zetta -n '__fish_seen_subcommand_from paste; and __zetta_short_option -pboard' -a 'general ruler find font'
+complete -c zetta -n '__fish_seen_subcommand_from paste; and __zetta_short_option -prefer' -a 'txt rtf ps'
+complete -c zetta -n '__fish_seen_subcommand_from tabicon' -l reset -d 'Restore the configured project or application icon'
+complete -c zetta -s r -n '__fish_seen_subcommand_from tabicon; and __zetta_short_option -r'
+complete -c zetta -n '__fish_seen_subcommand_from tabicon' -l queue -d 'Return when the icon change is queued'
+complete -c zetta -s q -n '__fish_seen_subcommand_from tabicon; and __zetta_short_option -q'
+complete -c zetta -n '__fish_seen_subcommand_from tabicon' -l list -d 'Print built-in icon names'
+complete -c zetta -n '__fish_seen_subcommand_from tabicon' -l help -d 'Print help'
+complete -c zetta -n '__fish_seen_subcommand_from tabicon' -a '(__zetta_long_options tabicon)'
+complete -c zetta -n '__fish_seen_subcommand_from tabicon; and not __zetta_tabicon_has_reset' -a '(__zetta_tab_icons)'
+complete -c zetta -n '__zetta_theme_pane' -l theme -r -a '(__zetta_themes pane)' -d 'Set the pane theme'
+complete -c zetta -s t -r -a '(__zetta_themes pane)' -n '__zetta_theme_pane; and __zetta_short_option -t'
+complete -c zetta -n '__zetta_theme_pane' -l reset -d 'Restore the tab or configured theme'
+complete -c zetta -n '__zetta_theme_pane' -l list -d 'Print the registered theme names'
+complete -c zetta -n '__zetta_theme_pane' -l help -d 'Print help'
+complete -c zetta -n '__zetta_theme_pane' -a '(__zetta_long_options theme_pane)'
+complete -c zetta -n '__zetta_theme_pane' -a '(__zetta_themes pane)'
+complete -c zetta -n '__zetta_theme_tab' -l theme -r -a '(__zetta_themes tab)' -d 'Set the tab theme'
+complete -c zetta -s t -r -a '(__zetta_themes tab)' -n '__zetta_theme_tab; and __zetta_short_option -t'
+complete -c zetta -n '__zetta_theme_tab' -l reset -d 'Restore the configured theme'
+complete -c zetta -n '__zetta_theme_tab' -l list -d 'Print the registered theme names'
+complete -c zetta -n '__zetta_theme_tab' -l help -d 'Print help'
+complete -c zetta -n '__zetta_theme_tab' -a '(__zetta_long_options theme_tab)'
+complete -c zetta -n '__zetta_theme_tab' -a '(__zetta_themes tab)'
+complete -c zetta -n '__fish_seen_subcommand_from overlay' -l text -r -d 'Set the overlay text'
+complete -c zetta -s t -r -n '__fish_seen_subcommand_from overlay; and __zetta_short_option -t'
+complete -c zetta -n '__fish_seen_subcommand_from overlay' -l size -r -a 'sm base lg xl 2xl 3xl' -d 'Set the font size'
+complete -c zetta -s s -r -a 'sm base lg xl 2xl 3xl' -n '__fish_seen_subcommand_from overlay; and __zetta_short_option -s'
+complete -c zetta -n '__fish_seen_subcommand_from overlay' -l opacity -r -d 'Set the opacity percentage (0-100)'
+complete -c zetta -s o -r -n '__fish_seen_subcommand_from overlay; and __zetta_short_option -o'
+complete -c zetta -n '__fish_seen_subcommand_from overlay' -l color -r -a 'ZETTA_OVERLAY_COLORS' -d 'Set the text color (name or hex)'
+complete -c zetta -s c -r -a 'ZETTA_OVERLAY_COLORS' -n '__fish_seen_subcommand_from overlay; and __zetta_short_option -c'
+complete -c zetta -n '__fish_seen_subcommand_from overlay' -l reset -d 'Clear the overlay'
+complete -c zetta -n '__fish_seen_subcommand_from overlay' -l help -d 'Print help'
+complete -c zetta -n '__fish_seen_subcommand_from overlay' -a '(__zetta_long_options overlay)'
+# ZETTA_WORKTREE_INTEGRATION_BEGIN
+complete -c zetta -n '__zetta_at_subcommand wt' -a 'new done abort status sync config'
+complete -c zetta -n '__fish_seen_subcommand_from wt' -l help -d 'Print help'
+complete -c zetta -n '__fish_seen_subcommand_from wt' -a '(__zetta_long_options wt)'
+complete -c zetta -n '__fish_seen_subcommand_from wt; and __fish_seen_subcommand_from new done abort' -l path-only -d 'Print only the resulting path'
+complete -c zetta -n '__fish_seen_subcommand_from wt; and __fish_seen_subcommand_from new' -l copy -r -F -d 'Copy a source-worktree path (repeatable)'
+complete -c zetta -s c -r -F -n '__fish_seen_subcommand_from wt; and __fish_seen_subcommand_from new; and __zetta_short_option -c'
+complete -c zetta -n '__zetta_worktree_sync_target' -a '(__zetta_worktree_commits)' -d 'Source-branch commit'
+# ZETTA_WORKTREE_INTEGRATION_END
+# ZETTA_WORKTREE_INTEGRATION_BEGIN
+complete -c zwt -f
+complete -c zwt -n '__fish_use_subcommand' -a 'new done abort status sync config'
+complete -c zwt -n '__fish_seen_subcommand_from new done abort' -l path-only -d 'Print only the resulting path'
+complete -c zwt -n '__fish_seen_subcommand_from new' -l copy -r -F -d 'Copy a source-worktree path (repeatable)'
+complete -c zwt -s c -r -F -n '__fish_seen_subcommand_from new; and __zetta_short_option -c'
+complete -c zwt -n '__fish_seen_subcommand_from new done abort status sync config' -l help -d 'Print help'
+complete -c zwt -n '__zetta_worktree_sync_target' -a '(__zetta_worktree_commits)' -d 'Source-branch commit'
+# ZETTA_WORKTREE_INTEGRATION_END
+# ZETTA_ZMUX_INTEGRATION_BEGIN
+complete -c zmux -f
+complete -c zmux -n '__fish_use_subcommand' -a list -d 'List the sessions the multiplexer is holding'
+complete -c zmux -n '__fish_use_subcommand' -a profiles -d 'List profiles available on the local or remote host'
+complete -c zmux -n '__fish_use_subcommand' -a create -d 'Create a headless shared session'
+complete -c zmux -n '__fish_use_subcommand; and __zetta_mux_daemon_commands' -a stop -d 'Stop the multiplexer'
+complete -c zmux -n '__fish_use_subcommand' -a reconnect -d 'Open a session in a Zetta window'
+complete -c zmux -n '__fish_use_subcommand' -a attach -d 'Open a shared remote session through OpenSSH'
+complete -c zmux -n '__fish_use_subcommand; and __zetta_mux_daemon_commands' -a resume -d 'Restore an encrypted disk session with fresh shells'
+complete -c zmux -n '__fish_use_subcommand; and __zetta_mux_daemon_commands' -a share -d 'Let every Zetta process attach a backgrounded session'
+complete -c zmux -n '__fish_use_subcommand; and __zetta_mux_daemon_commands' -a unshare -d 'Scope a session back to the window that held it'
+complete -c zmux -n '__fish_use_subcommand; and __zetta_mux_daemon_commands' -a kill -d 'End a session and everything running in it'
+complete -c zmux -n '__fish_use_subcommand; and __zetta_mux_daemon_commands' -a forget -d 'Remove a session from the catalog without killing it'
+complete -c zmux -n '__fish_seen_subcommand_from reconnect' -a '(__zetta_mux_session_ids)' -d 'Multiplexer session ID'
+complete -c zmux -n '__fish_seen_subcommand_from resume; and __zetta_mux_daemon_commands' -a '(__zetta_mux_restorable_ids)' -d 'Encrypted disk session ID'
+complete -c zmux -n '__fish_seen_subcommand_from share unshare kill forget; and __zetta_mux_daemon_commands' -a '(__zetta_mux_session_ids)' -d 'Multiplexer session ID'
+complete -c zmux -n '__zetta_mux_daemon_commands' -l force -d 'Stop even while sessions are running'
+complete -c zmux -n '__zetta_mux_daemon_commands' -l upgrade -d 'Replace the multiplexer, keeping its sessions'
+complete -c zmux -l json -d 'Print machine-readable JSON'
+complete -c zmux -l ids-only -d 'Print one numeric session ID per line'
+complete -c zmux -l ssh-target -r -a '(__zetta_ssh_targets)' -d 'OpenSSH destination'
+complete -c zmux -l port -r -d 'SSH port'
+complete -c zmux -n '__fish_seen_subcommand_from profiles' -l json -d 'Print machine-readable JSON'
+complete -c zmux -n '__fish_seen_subcommand_from create' -l secret-stdin -d 'Read an optional secret from the first line of standard input'
+complete -c zmux -s S -n '__fish_seen_subcommand_from create; and __zetta_short_option -S' -d 'Read an optional secret from standard input'
+complete -c zmux -n '__fish_seen_subcommand_from create' -l layout -r -F -d 'Headless layout JSON file, or - for standard input'
+complete -c zmux -n '__fish_seen_subcommand_from create' -l profile -r -a '(__zetta_profiles)' -d 'Create one pane using a host profile'
+complete -c zmux -n '__fish_seen_subcommand_from create' -l title -r -d 'Title for a newly created headless session'
+complete -c zmux -n '__fish_seen_subcommand_from create' -l working-directory -r -F -d 'Starting directory for a single-pane create'
+complete -c zmux -n '__fish_seen_subcommand_from create' -l env -r -d 'Environment override for a single-pane create'
+complete -c zmux -n '__fish_seen_subcommand_from create' -l retention -r -a 'none memory disk' -d 'Retention mode for a local daemon'
+complete -c zmux -s H -r -a '(__zetta_ssh_targets)' -n '__fish_seen_subcommand_from attach; and __zetta_short_option -H' -d 'OpenSSH destination'
+complete -c zmux -s p -r -n '__fish_seen_subcommand_from attach; and __zetta_short_option -p' -d 'SSH port'
+complete -c zmux -n '__fish_seen_subcommand_from attach' -l protocol -r -a 'ssh zosh' -d 'What carries the attached session\'s panes'
+complete -c zmux -n '__fish_seen_subcommand_from attach' -l keep-alive -d 'Hold each Zosh pane\'s link open'
+complete -c zmux -l identity -r -F -d 'Age identity file for resume and reconnect'
+complete -c zmux -l help -d 'Print help'
+complete -c zmux -l version -d 'Print version'
+complete -c zmux -a '(__zetta_long_options mux)'
+# ZETTA_ZMUX_INTEGRATION_END
+complete -c ztftp -f -a 'get put'
+complete -c ztftp -l port -r -d 'Server port'
+complete -c ztftp -l help -d 'Print help'
+complete -c ztftp -a '(__zetta_long_options ztftp)'
+complete -c ztftp -s p -r -n '__zetta_short_option -p'
+complete -c zntfy -f -l app-name -r
+complete -c zntfy -l icon -r
+complete -c zntfy -l sound -r -a '(__zetta_sound_names)'
+complete -c zntfy -l timeout -r -a 'default never'
+complete -c zntfy -l help -d 'Print help'
+complete -c zntfy -a '(__zetta_long_options zntfy)'
+complete -c zntfy -s a -r -n '__zetta_short_option -a'
+complete -c zntfy -s i -r -n '__zetta_short_option -i'
+complete -c zntfy -s s -r -a '(__zetta_sound_names)' -n '__zetta_short_option -s'
+complete -c zntfy -s t -r -a 'default never' -n '__zetta_short_option -t'
+# ZETTA_CLIPBOARD_INTEGRATION_BEGIN
+complete -c zcopy -f -l pboard -r -a 'general ruler find font'
+complete -c zcopy -l help -d 'Print help'
+complete -c zcopy -a '(__zetta_long_options zcopy)'
+complete -c zcopy -n '__zetta_short_option -pboard' -a 'general ruler find font'
+complete -c zpaste -f -l pboard -r -a 'general ruler find font'
+complete -c zpaste -l prefer -r -a 'txt rtf ps'
+complete -c zpaste -l help -d 'Print help'
+complete -c zpaste -a '(__zetta_long_options zpaste)'
+complete -c zpaste -n '__zetta_short_option -pboard' -a 'general ruler find font'
+complete -c zpaste -n '__zetta_short_option -prefer' -a 'txt rtf ps'
+if test $__zetta_platform != Darwin
+    complete -c pbcopy -f -l pboard -r -a 'general ruler find font'
+    complete -c pbcopy -l help -d 'Print help'
+    complete -c pbcopy -a '(__zetta_long_options pbcopy)'
+    complete -c pbcopy -n '__zetta_short_option -pboard' -a 'general ruler find font'
+    complete -c pbpaste -f -l pboard -r -a 'general ruler find font'
+    complete -c pbpaste -l prefer -r -a 'txt rtf ps'
+    complete -c pbpaste -l help -d 'Print help'
+    complete -c pbpaste -a '(__zetta_long_options pbpaste)'
+    complete -c pbpaste -n '__zetta_short_option -pboard' -a 'general ruler find font'
+    complete -c pbpaste -n '__zetta_short_option -prefer' -a 'txt rtf ps'
+end
+# ZETTA_CLIPBOARD_INTEGRATION_END
+
+complete -c zetta -n '__zetta_at_subcommand init' -l completions -d 'Emit completion implementation'

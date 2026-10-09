@@ -214,6 +214,7 @@ function Invoke-MeasuredProcess($Case, [string]$Temperature, [int]$Iteration) {
             case = $Case.Name
             temperature = $Temperature
             iteration = $Iteration
+            stdout_bytes = [Text.Encoding]::UTF8.GetByteCount($stdout)
             wall_time_ms = [Math]::Round($timer.Elapsed.TotalMilliseconds, 3)
             cpu_time_ms = [Math]::Round($metrics.CpuMilliseconds, 3)
             read_bytes = [uint64]$metrics.ReadBytes
@@ -238,6 +239,17 @@ foreach ($shell in @("bash", "fish", "powershell", "zsh")) {
         Name = "zetta-init-$shell"
         FileName = $zetta
         Arguments = @("init", $shell)
+        Environment = $emptyEnvironment
+        StandardInput = $null
+        RequiresMarker = $false
+    })
+}
+
+foreach ($shell in @("bash", "fish", "powershell", "zsh")) {
+    $cases.Add([pscustomobject]@{
+        Name = "zetta-completions-$shell"
+        FileName = $zetta
+        Arguments = @("init", $shell, "--completions")
         Environment = $emptyEnvironment
         StandardInput = $null
         RequiresMarker = $false

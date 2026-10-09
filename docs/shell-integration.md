@@ -13,6 +13,25 @@ It adds completions for the standalone `zcopy` and `zpaste` clipboard tools.
 The top-level `attention` command completes its long notification options
 while retaining all short aliases.
 
+Initialization loads a small startup payload. Completion implementations load
+once, on the first completion request, and serve that same request immediately.
+The first request pays for generation and evaluation; Zsh also runs `compinit`
+then if completion has not already been initialized. Subsequent requests reuse
+the implementation while profiles, themes, panes, and sessions refresh as needed.
+Failed generation and empty output can retry on the next request. Repeated
+initialization preserves the installed lifecycle hooks and loaded completions.
+
+`zetta init SHELL --completions` (short alias `-c`) emits only completion code
+and requires an explicit shell. Existing startup-file commands stay the same.
+
+Measure optimized builds with `python3 scripts/benchmark-shell-integration.py
+--binary target/release/zetta --output artifacts/shell-integration-performance.json`.
+The portable benchmark records startup and completion sizes, generation,
+evaluation, first completion, subsequent completion, and initialization plus
+first completion separately. Its programmatic fixed `init` completion probe excludes
+interactive display latency. The Windows process-accounting benchmark remains
+available in `scripts/benchmark-shell-startup.ps1`.
+
 When no real command, alias, function, or builtin named mosh exists, the
 integration defines a mosh function that runs zetta mosh. Existing Mosh
 installations are left unchanged. The wrapper completes Mosh options and
