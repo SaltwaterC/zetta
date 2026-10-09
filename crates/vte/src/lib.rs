@@ -629,6 +629,12 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
     /// The ground state is handled separately since it can only be left using
     /// the escape character (`\x1b`). This allows more efficient parsing by
     /// using SIMD search with [`memchr`].
+    ///
+    /// Zetta patch: text that is not valid UTF-8 is decoded in one pass up to
+    /// the escape found by the single `memchr` above. Upstream returned after
+    /// each invalid sequence, so every one of them searched for the escape and
+    /// validated the rest of the text again, and binary output paid for the
+    /// bytes between two escapes once per invalid sequence among them.
     #[inline]
     fn advance_ground<P: Perform>(&mut self, performer: &mut P, bytes: &[u8]) -> usize {
         // Find the next escape character.
@@ -642,63 +648,132 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
             return 1;
         }
 
-        match str::from_utf8(&bytes[..plain_chars]) {
+        let text = &bytes[..plain_chars];
+        let complete = match str::from_utf8(text) {
             Ok(parsed) => {
                 Self::ground_dispatch(performer, parsed);
-                let mut processed = plain_chars;
-
-                // If there's another character, it must be escape so process it directly.
-                if processed < num_bytes {
-                    self.state = State::Escape;
-                    self.reset_params();
-                    processed += 1;
-                }
-
-                processed
+                plain_chars
             },
             // Handle invalid and partial utf8.
             Err(err) => {
                 // Dispatch all the valid bytes.
                 let valid_bytes = err.valid_up_to();
-                let parsed = unsafe { str::from_utf8_unchecked(&bytes[..valid_bytes]) };
+                let parsed = unsafe { str::from_utf8_unchecked(&text[..valid_bytes]) };
                 Self::ground_dispatch(performer, parsed);
-
-                match err.error_len() {
-                    Some(len) => {
-                        // Execute C1 escapes or emit replacement character.
-                        if len == 1 && bytes[valid_bytes] <= 0x9F {
-                            performer.execute(bytes[valid_bytes]);
-                        } else {
-                            performer.print('�');
-                        }
-
-                        // Restart processing after the invalid bytes.
-                        //
-                        // While we could theoretically try to just re-parse
-                        // `bytes[valid_bytes + len..plain_chars]`, it's easier
-                        // to just skip it and invalid utf8 is pretty rare anyway.
-                        valid_bytes + len
-                    },
-                    None => {
-                        if plain_chars < num_bytes {
-                            // Process bytes cut off by escape.
-                            performer.print('�');
-                            self.state = State::Escape;
-                            self.reset_params();
-                            plain_chars + 1
-                        } else {
-                            // Process bytes cut off by the buffer end.
-                            let extra_bytes = num_bytes - valid_bytes;
-                            let partial_len = self.partial_utf8_len + extra_bytes;
-                            self.partial_utf8[self.partial_utf8_len..partial_len]
-                                .copy_from_slice(&bytes[valid_bytes..valid_bytes + extra_bytes]);
-                            self.partial_utf8_len = partial_len;
-                            num_bytes
-                        }
-                    },
-                }
+                valid_bytes + Self::ground_dispatch_lossy(performer, &text[valid_bytes..])
             },
+        };
+
+        if complete == plain_chars {
+            // If there's another character, it must be escape so process it directly.
+            if plain_chars < num_bytes {
+                self.state = State::Escape;
+                self.reset_params();
+                return plain_chars + 1;
+            }
+            return plain_chars;
         }
+
+        if plain_chars < num_bytes {
+            // Process bytes cut off by escape.
+            performer.print('�');
+            self.state = State::Escape;
+            self.reset_params();
+            return plain_chars + 1;
+        }
+
+        // Process bytes cut off by the buffer end.
+        let extra_bytes = num_bytes - complete;
+        let partial_len = self.partial_utf8_len + extra_bytes;
+        self.partial_utf8[self.partial_utf8_len..partial_len]
+            .copy_from_slice(&bytes[complete..complete + extra_bytes]);
+        self.partial_utf8_len = partial_len;
+        num_bytes
+    }
+
+    /// Dispatch text that may not be valid UTF-8.
+    ///
+    /// An invalid sequence executes as a C1 control when it is a single byte up
+    /// to `0x9f`, and otherwise prints one replacement character, consuming the
+    /// same bytes `Utf8Error::error_len` reports. Returns how much of `bytes`
+    /// was consumed, which falls short of its length only by an incomplete
+    /// character at the end.
+    ///
+    /// Printable ASCII and replacement characters are gathered into runs for
+    /// [`Perform::print_ascii`], the replacements marked by [`ASCII_REPLACEMENT`].
+    /// Binary output is mostly those two, and a call per replacement character
+    /// left the runs between them a byte or two long.
+    fn ground_dispatch_lossy<P: Perform>(performer: &mut P, bytes: &[u8]) -> usize {
+        // Takes the run by value so that its length can stay in a register;
+        // a `&mut` to it put a store and a reload on every byte.
+        #[inline(always)]
+        fn flush<P: Perform>(performer: &mut P, run: &[u8]) -> usize {
+            if !run.is_empty() {
+                performer.print_ascii(run);
+            }
+            0
+        }
+
+        let mut run = [0u8; LOSSY_RUN_CAPACITY];
+        let mut run_len = 0;
+
+        let mut i = 0;
+        while i < bytes.len() {
+            if run_len == LOSSY_RUN_CAPACITY {
+                run_len = flush(performer, &run[..run_len]);
+            }
+
+            let byte = bytes[i];
+            let invalid_len = match byte {
+                0x20..=0x7E => {
+                    run[run_len] = byte;
+                    run_len += 1;
+                    i += 1;
+                    continue;
+                },
+                // Bytes that never start a character: one byte each.
+                0xA0..=0xC1 | 0xF5..=0xFF => 1,
+                0xC2..=0xF4 => match decode_utf8(&bytes[i..]) {
+                    Utf8::Invalid(len) => len,
+                    Utf8::Char(c, len) => {
+                        run_len = flush(performer, &run[..run_len]);
+                        match c {
+                            '\u{80}'..='\u{9f}' => performer.execute(c as u8),
+                            _ => performer.print(c),
+                        }
+                        i += len;
+                        continue;
+                    },
+                    Utf8::Incomplete => {
+                        flush(performer, &run[..run_len]);
+                        return i;
+                    },
+                },
+                // C0 and C1 controls, and DEL.
+                _ => {
+                    // Binary output carries a control every few bytes, almost
+                    // all of them ones the performer ignores. Ending the run at
+                    // each left runs of about four characters.
+                    if byte != 0x7F && performer.ignores_execute(byte) {
+                        i += 1;
+                        continue;
+                    }
+                    run_len = flush(performer, &run[..run_len]);
+                    if byte == 0x7F {
+                        performer.print('\x7f');
+                    } else {
+                        performer.execute(byte);
+                    }
+                    i += 1;
+                    continue;
+                },
+            };
+            run[run_len] = ASCII_REPLACEMENT;
+            run_len += 1;
+            i += invalid_len;
+        }
+        flush(performer, &run[..run_len]);
+        bytes.len()
     }
 
     /// Advance the parser while processing a partial utf8 codepoint.
@@ -754,16 +829,105 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
     }
 
     /// Handle ground dispatch of print/execute for all characters in a string.
+    ///
+    /// Zetta patch: runs of printable ASCII go to [`Perform::print_ascii`] in
+    /// one call, so a performer can write a line of plain text without a call
+    /// per character.
     #[inline]
     fn ground_dispatch<P: Perform>(performer: &mut P, text: &str) {
-        for c in text.chars() {
+        let bytes = text.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            let run_end = bytes[i..]
+                .iter()
+                .position(|&byte| !is_printable_ascii(byte))
+                .map_or(bytes.len(), |run| i + run);
+            if run_end > i {
+                performer.print_ascii(&bytes[i..run_end]);
+                i = run_end;
+                if i == bytes.len() {
+                    break;
+                }
+            }
+
+            // SAFETY: `i` is on a character boundary: every byte before it was
+            // ASCII or part of a character consumed whole, and `i < len`.
+            let c = unsafe { text.get_unchecked(i..).chars().next().unwrap_unchecked() };
             match c {
                 '\x00'..='\x1f' | '\u{80}'..='\u{9f}' => performer.execute(c as u8),
                 _ => performer.print(c),
             }
+            i += c.len_utf8();
         }
     }
 }
+
+/// The first character of some bytes, judged as [`str::from_utf8`] judges it.
+enum Utf8 {
+    /// A valid character and its length.
+    Char(char, usize),
+    /// An invalid sequence, with the length `Utf8Error::error_len` gives it.
+    Invalid(usize),
+    /// A valid start of a character that the bytes end before finishing.
+    Incomplete,
+}
+
+/// Decode the first character of `bytes`, which must not be empty.
+///
+/// This follows the standard library's validation, including which bytes an
+/// invalid sequence spans, so replacement characters come out the same whether
+/// text is decoded here or by [`str::from_utf8`].
+#[inline(always)]
+fn decode_utf8(bytes: &[u8]) -> Utf8 {
+    let first = bytes[0];
+    let (width, second) = match first {
+        0x00..=0x7F => return Utf8::Char(char::from(first), 1),
+        0xC2..=0xDF => (2, 0x80..=0xBF),
+        0xE0 => (3, 0xA0..=0xBF),
+        0xE1..=0xEC | 0xEE..=0xEF => (3, 0x80..=0xBF),
+        0xED => (3, 0x80..=0x9F),
+        0xF0 => (4, 0x90..=0xBF),
+        0xF1..=0xF3 => (4, 0x80..=0xBF),
+        0xF4 => (4, 0x80..=0x8F),
+        _ => return Utf8::Invalid(1),
+    };
+    for index in 1..width {
+        let Some(&byte) = bytes.get(index) else {
+            return Utf8::Incomplete;
+        };
+        let valid = if index == 1 { second.contains(&byte) } else { (0x80..=0xBF).contains(&byte) };
+        if !valid {
+            return Utf8::Invalid(index);
+        }
+    }
+    // SAFETY: the bytes up to `width` were validated above.
+    let c = unsafe { str::from_utf8_unchecked(&bytes[..width]).chars().next().unwrap_unchecked() };
+    Utf8::Char(c, width)
+}
+
+/// Whether `byte` is ASCII that ground dispatch hands to [`Perform::print`].
+#[inline(always)]
+fn is_printable_ascii(byte: u8) -> bool {
+    (0x20..0x7f).contains(&byte)
+}
+
+/// Stands for U+FFFD in a run handed to [`Perform::print_ascii`].
+///
+/// DEL is the one ASCII byte a run of printable text cannot otherwise contain.
+pub const ASCII_REPLACEMENT: u8 = 0x7f;
+
+/// The character a byte of a [`Perform::print_ascii`] run stands for.
+#[inline(always)]
+pub fn ascii_run_char(byte: u8) -> char {
+    if byte == ASCII_REPLACEMENT {
+        '\u{FFFD}'
+    } else {
+        char::from(byte)
+    }
+}
+
+/// How many characters ground dispatch gathers before handing a run over.
+const LOSSY_RUN_CAPACITY: usize = 256;
 
 #[derive(PartialEq, Eq, Debug, Default, Copy, Clone)]
 enum State {
@@ -797,6 +961,30 @@ enum State {
 pub trait Perform {
     /// Draw a character to the screen and update states.
     fn print(&mut self, _c: char) {}
+
+    /// Whether [`Perform::execute`] does nothing at all for `byte`, a C0 or C1
+    /// control.
+    ///
+    /// Zetta patch: ground dispatch may skip the call for such a byte, rather
+    /// than ending the run of text it is gathering for [`Perform::print_ascii`]
+    /// to execute it. The default ignores nothing.
+    #[inline]
+    fn ignores_execute(&self, _byte: u8) -> bool {
+        false
+    }
+
+    /// Draw a run of printable ASCII (`0x20..=0x7e`), exactly as a call to
+    /// [`Perform::print`] per character would. [`ASCII_REPLACEMENT`] in the
+    /// run stands for U+FFFD; [`ascii_run_char`] decodes a byte.
+    ///
+    /// Zetta patch: the default does just that. A performer that can write a
+    /// run faster than a character at a time overrides it.
+    #[inline]
+    fn print_ascii(&mut self, run: &[u8]) {
+        for &byte in run {
+            self.print(ascii_run_char(byte));
+        }
+    }
 
     /// Execute a C0 or C1 control function.
     fn execute(&mut self, _byte: u8) {}
@@ -1582,6 +1770,78 @@ mod tests {
 
         assert_eq!(dispatcher.dispatched[0], Sequence::Print('俙'));
         assert_eq!(dispatcher.dispatched[1], Sequence::Print('�'));
+    }
+
+    /// What upstream's ground state dispatched for escape-free text: validate with
+    /// `str::from_utf8`, and restart after each invalid sequence.
+    fn upstream_ground_dispatch(mut bytes: &[u8]) -> Vec<Sequence> {
+        let mut dispatcher = Dispatcher::default();
+        let dispatch = |dispatcher: &mut Dispatcher, text: &str| {
+            for c in text.chars() {
+                match c {
+                    '\x00'..='\x1f' | '\u{80}'..='\u{9f}' => dispatcher.execute(c as u8),
+                    _ => dispatcher.print(c),
+                }
+            }
+        };
+        loop {
+            match str::from_utf8(bytes) {
+                Ok(text) => {
+                    dispatch(&mut dispatcher, text);
+                    return dispatcher.dispatched;
+                },
+                Err(err) => {
+                    let valid = err.valid_up_to();
+                    dispatch(&mut dispatcher, str::from_utf8(&bytes[..valid]).unwrap());
+                    let Some(len) = err.error_len() else {
+                        return dispatcher.dispatched;
+                    };
+                    if len == 1 && bytes[valid] <= 0x9F {
+                        dispatcher.execute(bytes[valid]);
+                    } else {
+                        dispatcher.print('�');
+                    }
+                    bytes = &bytes[valid + len..];
+                },
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_utf8_dispatches_as_upstream_did() {
+        let mut cases: Vec<Vec<u8>> = [
+            &b"\xC2\x80\xC2\x9F\xC2\xA0\x7F"[..],
+            b"\xE0\x80\xE0\xA0\x80\xED\x9F\xBF\xED\xA0\x80",
+            b"\xF0\x8F\xBF\xBF\xF0\x90\x80\x80\xF4\x8F\xBF\xBF\xF4\x90\x80\x80",
+            b"\xF5\xFF\xC0\xC1\x80\xBF",
+            b"a\xF0\x9F\x98\x80b\xF0\x9F\x98c\xF0\x9Fd\xF0e",
+            b"text\x00\x07\x08\x0a\x0d\x85\x9f more text \xE6\x97\xA5\xE6\x97",
+        ]
+        .iter()
+        .map(|case| case.to_vec())
+        .collect();
+
+        // Seeded binary noise: mostly invalid sequences, with the odd valid one.
+        let mut state = 0x5117_u64;
+        for _ in 0..64 {
+            let bytes = (0..1024)
+                .map(|_| {
+                    state =
+                        state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                    match (state >> 56) as u8 {
+                        0x1B => b'x',
+                        byte => byte,
+                    }
+                })
+                .collect();
+            cases.push(bytes);
+        }
+
+        for bytes in cases {
+            let mut dispatcher = Dispatcher::default();
+            Parser::new().advance(&mut dispatcher, &bytes);
+            assert_eq!(dispatcher.dispatched, upstream_ground_dispatch(&bytes), "{bytes:x?}");
+        }
     }
 
     #[test]

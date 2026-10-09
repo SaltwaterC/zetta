@@ -30,7 +30,7 @@ use log::debug;
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
-use crate::{Params, ParamsIter};
+use crate::{ascii_run_char, Params, ParamsIter};
 
 /// Maximum time before a synchronized update is aborted.
 const SYNC_UPDATE_TIMEOUT: Duration = Duration::from_millis(150);
@@ -504,6 +504,19 @@ pub trait Handler {
 
     /// A character to be displayed.
     fn input(&mut self, _c: char) {}
+
+    /// A run of printable ASCII (`0x20..=0x7e`) to be displayed, exactly as a
+    /// call to [`Handler::input`] per character would. [`crate::ASCII_REPLACEMENT`]
+    /// in the run stands for U+FFFD; [`ascii_run_char`] decodes a byte.
+    ///
+    /// Zetta patch: the default does just that. A handler that can write a run
+    /// faster than a character at a time overrides it.
+    #[inline]
+    fn input_ascii(&mut self, run: &[u8]) {
+        for &byte in run {
+            self.input(ascii_run_char(byte));
+        }
+    }
 
     /// Set cursor to position.
     fn goto(&mut self, _line: i32, _col: usize) {}
@@ -1290,6 +1303,31 @@ where
     fn print(&mut self, c: char) {
         self.handler.input(c);
         self.state.preceding_char = Some(c);
+    }
+
+    #[inline]
+    fn print_ascii(&mut self, run: &[u8]) {
+        self.handler.input_ascii(run);
+        self.state.preceding_char = run.last().map(|&byte| ascii_run_char(byte));
+    }
+
+    /// Every byte `execute` matches below. Ground dispatch skips the rest, so
+    /// they go unlogged when they arrive inside text.
+    #[inline]
+    fn ignores_execute(&self, byte: u8) -> bool {
+        !matches!(
+            byte,
+            C0::HT
+                | C0::BS
+                | C0::CR
+                | C0::LF
+                | C0::VT
+                | C0::FF
+                | C0::BEL
+                | C0::SUB
+                | C0::SI
+                | C0::SO
+        )
     }
 
     #[inline]
@@ -2089,6 +2127,55 @@ mod tests {
                 color: None,
                 reset_colors: Vec::new(),
             }
+        }
+    }
+
+    /// Ground dispatch skips `execute` for every control `ignores_execute` names, so the two
+    /// must agree on every C0 and C1 byte.
+    #[test]
+    fn ignored_controls_are_exactly_the_ones_execute_does_nothing_for() {
+        #[derive(Default)]
+        struct Touched(bool);
+
+        impl Handler for Touched {
+            fn put_tab(&mut self, _: u16) {
+                self.0 = true;
+            }
+
+            fn backspace(&mut self) {
+                self.0 = true;
+            }
+
+            fn carriage_return(&mut self) {
+                self.0 = true;
+            }
+
+            fn linefeed(&mut self) {
+                self.0 = true;
+            }
+
+            fn bell(&mut self) {
+                self.0 = true;
+            }
+
+            fn substitute(&mut self) {
+                self.0 = true;
+            }
+
+            fn set_active_charset(&mut self, _: CharsetIndex) {
+                self.0 = true;
+            }
+        }
+
+        use crate::Perform as _;
+
+        for byte in (0x00..=0x1F).chain(0x80..=0x9F) {
+            let mut state = ProcessorState::<StdSyncHandler>::default();
+            let mut handler = Touched::default();
+            let mut performer = Performer::new(&mut state, &mut handler);
+            let ignored = performer.ignores_execute(byte);
+            performer.execute(byte);
+            assert_eq!(ignored, !handler.0, "{byte:#04x}");
         }
     }
 

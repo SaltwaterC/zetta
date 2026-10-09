@@ -449,10 +449,14 @@ impl<T: Clone> Storage<T> {
     }
 
     /// Remove the oldest lines from the buffer.
+    ///
+    /// The rows removed whole become spare allocations for the next lines scrolled in, as far as
+    /// `recycled` has room. Clearing history and a full reset both come here, and the history
+    /// that output then scrolls back in had allocated every row afresh.
     pub fn shrink_lines(&mut self, mut shrinkage: usize) {
         self.release_decoded();
         let pending = shrinkage.min(self.pending.len());
-        self.pending.truncate(self.pending.len() - pending);
+        self.recycled.extend(self.pending.drain(self.pending.len() - pending..));
         shrinkage -= pending;
 
         while shrinkage != 0 {
@@ -470,10 +474,10 @@ impl<T: Clone> Storage<T> {
         }
 
         let head = shrinkage.min(self.archive_head.len());
-        self.archive_head.truncate(self.archive_head.len() - head);
+        self.recycled.extend(self.archive_head.drain(self.archive_head.len() - head..));
         shrinkage -= head;
 
-        self.live.truncate(self.live.len() - shrinkage);
+        self.recycled.extend(self.live.drain(self.live.len() - shrinkage..));
     }
 
     /// Detach all history rows without destroying their cell allocations.
@@ -1048,6 +1052,21 @@ mod tests {
             let line = Line(-(back as i32));
             assert_eq!(text(&storage[line]), distinct_row(lines, back, 3), "{line:?}");
         }
+    }
+
+    /// A full reset clears history once per `ESC c`, which binary output carries every 64 KiB
+    /// or so; the history scrolled back in must not allocate every row afresh.
+    #[test]
+    fn cleared_history_hands_its_rows_to_the_next_scrolled_lines() {
+        let mut storage = distinct_history(100, 3);
+        assert!(storage.recycled.0.is_empty());
+
+        storage.shrink_lines(100);
+
+        assert_eq!(storage.len(), 1);
+        assert_eq!(storage.recycled.0.len(), 100);
+        storage.scroll_up(1, 1, 3);
+        assert_eq!(storage.recycled.0.len(), 99);
     }
 
     #[test]

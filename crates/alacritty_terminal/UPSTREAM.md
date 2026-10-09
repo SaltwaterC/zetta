@@ -105,6 +105,15 @@ Retain these Zetta changes when synchronizing:
   planted `cmd.exe` would otherwise win. `zmux`'s bootstrap calls
   `tty::resolve_application` and `program_search` too, so both ends share one
   policy.
+- `Term` implements `Handler::input_ascii` (see `crates/vte/UPSTREAM.md`),
+  writing a run of text a row segment at a time. Insert mode, a line-drawing
+  charset, disabled autowrap, and overwriting half of a wide character take
+  upstream's per-character path; `input_ascii_matches_input_per_character`
+  pins the result against it. `binary_output_throughput_benchmark` is the
+  matching manual benchmark.
+- `Storage::shrink_lines` hands the rows it removes to the recycled-row pool.
+  A full reset (`ESC c`) clears history through it, and binary output carries
+  one every 64 KiB or so, after which every scrolled line had allocated a row.
 - `vte` is a path dependency on Zetta's fork in `crates/vte`, which bounds the
   OSC buffer that crates.io vte 0.15.0 grows without limit under `std`. See
   `crates/vte/UPSTREAM.md`.

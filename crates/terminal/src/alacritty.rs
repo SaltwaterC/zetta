@@ -66,20 +66,43 @@ pub(super) use alacritty_terminal::event_loop::ReplayBarrier;
 
 const HIDDEN_TERMINAL_READ_PAUSE: Duration = Duration::from_millis(8);
 
+/// What the PTY reader lets through to the UI: wakeups only while the terminal is visible, and
+/// one bell at a time.
 #[derive(Clone)]
-pub(super) struct WakeupGate(Arc<AtomicBool>);
+pub(super) struct WakeupGate(Arc<GateState>);
+
+struct GateState {
+    enabled: AtomicBool,
+    /// A bell is on its way to the UI. Binary output rings one every 256 bytes or so, and the UI
+    /// rings them as one anyway; sending each cost the reader an allocation and a wakeup.
+    bell_pending: AtomicBool,
+}
 
 impl WakeupGate {
     pub(super) fn new() -> Self {
-        Self(Arc::new(AtomicBool::new(true)))
+        Self(Arc::new(GateState {
+            enabled: AtomicBool::new(true),
+            bell_pending: AtomicBool::new(false),
+        }))
     }
 
     pub(super) fn set_enabled(&self, enabled: bool) -> bool {
-        self.0.swap(enabled, Ordering::AcqRel)
+        self.0.enabled.swap(enabled, Ordering::AcqRel)
     }
 
     pub(super) fn is_enabled(&self) -> bool {
-        self.0.load(Ordering::Acquire)
+        self.0.enabled.load(Ordering::Acquire)
+    }
+
+    /// Claims the bell for the reader, returning `false` while an earlier one is still on its
+    /// way.
+    pub(super) fn begin_bell(&self) -> bool {
+        !self.0.bell_pending.swap(true, Ordering::AcqRel)
+    }
+
+    /// Called as the UI rings a bell, so the next one is sent.
+    pub(super) fn end_bell(&self) {
+        self.0.bell_pending.store(false, Ordering::Release);
     }
 }
 
@@ -453,6 +476,9 @@ impl EventListener for ZedListener {
             // a benchmark-producing background tab can monopolize a CPU core and the allocator
             // even though none of its redraws reach the UI.
             thread::sleep(HIDDEN_TERMINAL_READ_PAUSE);
+            return;
+        }
+        if matches!(event, AlacTermEvent::Bell) && !self.wakeup_gate.begin_bell() {
             return;
         }
         self.events_tx
@@ -1245,6 +1271,30 @@ mod tests {
             Ok(PtyEvent::Event(TerminalBackendEvent::Bell))
         ));
         assert!(events_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn a_bell_on_its_way_to_the_ui_absorbs_the_next_ones() {
+        let (events_tx, mut events_rx) = futures::channel::mpsc::unbounded();
+        let wakeup_gate = WakeupGate::new();
+        let listener = ZedListener::new(events_tx, wakeup_gate.clone());
+
+        for _ in 0..3 {
+            listener.send_event(AlacTermEvent::Bell);
+        }
+        assert!(matches!(
+            events_rx.try_recv(),
+            Ok(PtyEvent::Event(TerminalBackendEvent::Bell))
+        ));
+        assert!(events_rx.try_recv().is_err());
+
+        // Once the UI has rung it, the next bell is sent again.
+        wakeup_gate.end_bell();
+        listener.send_event(AlacTermEvent::Bell);
+        assert!(matches!(
+            events_rx.try_recv(),
+            Ok(PtyEvent::Event(TerminalBackendEvent::Bell))
+        ));
     }
 
     #[test]

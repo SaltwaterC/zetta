@@ -90,3 +90,40 @@ fn any_write_resets_the_stall_clock() {
         start + RELAY_STALL_TIMEOUT + Duration::from_secs(1)
     ));
 }
+
+/// A viewer can leave by its relay failing to write before its own disconnect
+/// is noticed, and that disconnect then finds it already gone. The drain only
+/// knows to settle the departure — and grow the pane back to the viewers that
+/// remain — if relaying says it dropped someone.
+#[cfg(unix)]
+#[test]
+fn relaying_reports_a_viewer_it_drops() {
+    let (staying, _staying_peer) = viewer();
+    let (mut leaving, leaving_peer) = viewer();
+    leaving.attachment = 2;
+    let mut attachment = Attachment::Shared(vec![staying, leaving]);
+    let frame: Arc<[u8]> = Arc::from(&b"output"[..]);
+
+    assert!(!queue_for_shared_clients(&mut attachment, 0, &frame));
+
+    drop(leaving_peer);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !queue_for_shared_clients(&mut attachment, 0, &frame) {
+        assert!(
+            Instant::now() < deadline,
+            "the relay never gave up on a closed viewer"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+
+    let Attachment::Shared(clients) = &attachment else {
+        panic!("the remaining viewer must keep the pane shared");
+    };
+    assert_eq!(
+        clients
+            .iter()
+            .map(|client| client.attachment)
+            .collect::<Vec<_>>(),
+        vec![1]
+    );
+}

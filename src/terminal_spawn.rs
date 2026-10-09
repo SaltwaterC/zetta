@@ -1072,20 +1072,16 @@ impl Zetta {
                         this.focus_active(window, cx);
                     }
                     TerminalEvent::ResizeRequested { rows, columns } => {
-                        this.resize_pane_to(
-                            tab_id,
-                            pane_id,
-                            Some(*columns),
-                            Some(*rows),
-                            window,
-                            cx,
-                        );
+                        this.request_pane_grid(tab_id, pane_id, *columns, *rows, window, cx);
                     }
                     // The title bar reports the active pane's grid size, and
                     // it renders inside a cached boundary that only a notify
                     // on `Zetta` busts. Terminal output must not reach here;
                     // only an actual change of the grid's dimensions does.
-                    TerminalEvent::GridSizeChanged => cx.notify(),
+                    TerminalEvent::GridSizeChanged => {
+                        this.continue_pane_grid_request(tab_id, pane_id, window, cx);
+                        cx.notify();
+                    }
                     event if terminal_event_requires_worktree_detection(event) => {
                         // A program can change the terminal's ordinary OSC
                         // title without changing its process metadata. Treat it

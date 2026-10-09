@@ -37,3 +37,32 @@ holding megabytes. `shrink_to` is a comparison when the buffer is smaller.
 Regression tests are inline in `src/lib.rs`:
 `osc_beyond_std_limit_is_discarded_through_its_terminator`,
 `unterminated_osc_is_bounded` and `osc_at_std_limit_is_dispatched`.
+
+## Zetta patch: ground-state text in runs
+
+Upstream dispatches ground-state text with one `Perform::print` call per
+character, and handles invalid UTF-8 by returning after each invalid sequence,
+so the next call searches for the escape and validates the rest of the text
+again. Output throughput spent most of its time there: a line of plain text
+cost a call per character, and binary output, which has an invalid sequence
+every couple of bytes, paid for the bytes between two escapes once per invalid
+sequence among them.
+
+- `Perform::print_ascii` and `ansi::Handler::input_ascii` take a run of
+  printable ASCII in one call. `ASCII_REPLACEMENT` (DEL, which a printable run
+  cannot otherwise contain) stands for U+FFFD in a run, and `ascii_run_char`
+  decodes a byte. Both default to a call per character, so a performer that
+  does not override them behaves exactly as upstream.
+- `advance_ground` validates text with `str::from_utf8` once; on an error it
+  decodes the rest in a single pass (`ground_dispatch_lossy`, `decode_utf8`),
+  consuming exactly the bytes `Utf8Error::error_len` reports, so replacement
+  characters and C1 executes come out as upstream produced them.
+- `Perform::ignores_execute` lets that pass skip a control the performer does
+  nothing for instead of ending the run at it. `ansi::Performer` answers it
+  from the same list `execute` matches; those bytes then go unlogged at debug
+  level when they arrive inside invalid text.
+
+Regression tests: `invalid_utf8_dispatches_as_upstream_did` in `src/lib.rs`
+compares the parser against upstream's algorithm on seeded binary noise, and
+`ignored_controls_are_exactly_the_ones_execute_does_nothing_for` in
+`src/ansi.rs` pins the two control lists together.

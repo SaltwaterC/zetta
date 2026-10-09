@@ -85,6 +85,11 @@ Retain these Zetta-specific behaviors when synchronizing:
   carrying it reach `foreground_process_command_line_now`, which image paste
   turns into an SSH command. Unauthenticated `zetta-cmd:` markers still set
   the title. Attached terminals have no nonce and trust no marker.
+- deliver bells one at a time: the listener sends a bell only when none is on
+  its way (`WakeupGate::begin_bell`), and the event drain collapses queued
+  bells the way it collapses wakeups. Binary output rings one every 256 bytes
+  or so, and each was a channel allocation on the reader and a system bell on
+  the UI.
 
 `Content::selection_text` was removed after auditing the local public API
 consumers. Zed's agent UI and full terminal view use the upstream field, but

@@ -519,6 +519,9 @@ pub(crate) struct Zetta {
     pub(crate) mux_recovery_task: Option<Task<()>>,
     pub(crate) no_mux: bool,
     pub(crate) mux_panes: MuxPanes,
+    /// Grid sizes programs asked their panes for that a layout has not produced
+    /// yet, by tab and pane id.
+    pub(crate) pending_grid_requests: HashMap<(u64, u64), crate::pane_resize::PendingGridRequest>,
     /// The panes this window shows in shared mode, keyed by pane id. A shared
     /// pane's terminal reads a relayed byte stream rather than the pty, so the
     /// shared connection and the sizes that arrive on it live here.
@@ -986,6 +989,7 @@ impl Zetta {
             transient_notice: TransientNotice::default(),
             key_passthrough: None,
             tabs: Vec::new(),
+            pending_grid_requests: HashMap::new(),
             remote_clipboard_paste_tabs: HashSet::new(),
             background_sessions: BackgroundSessionRunner::default(),
             #[cfg(feature = "zmux")]

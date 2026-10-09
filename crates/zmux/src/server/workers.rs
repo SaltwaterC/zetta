@@ -224,6 +224,12 @@ pub(super) fn drain_loop(daemon: Arc<Daemon>, mut wait: DrainWait) {
             let mut sessions = daemon.sessions.lock().unwrap();
             for session in sessions.iter_mut() {
                 let session_id = session.id;
+                let revision = session
+                    .shared_state
+                    .as_ref()
+                    .map_or(crate::messages::SessionRevision::INITIAL, |state| {
+                        state.revision
+                    });
                 for pane in session.panes.iter_mut() {
                     if !drain_reads(&pane.attachment) {
                         continue;
@@ -256,7 +262,11 @@ pub(super) fn drain_loop(daemon: Arc<Daemon>, mut wait: DrainWait) {
                                         &daemon, session_id, pane.id, &visible,
                                     );
                                     record_handover_output(pane, &visible);
-                                    relay_output(pane, &visible);
+                                    if relay_output(pane, &visible) {
+                                        settle_shared_departure(
+                                            &daemon, session_id, revision, pane, true,
+                                        );
+                                    }
                                 }
                             }
                         }
@@ -268,9 +278,10 @@ pub(super) fn drain_loop(daemon: Arc<Daemon>, mut wait: DrainWait) {
                     // millisecond — fine grained next to the threshold.
                     let held_off = relay_backpressure(pane, &mut evicted);
                     if evicted {
-                        // A viewer dropped for not reading can leave one behind,
-                        // and that is a departure like any other.
-                        offer_exclusive_if_alone(&daemon, session_id, pane);
+                        // A viewer dropped for not reading is a departure like
+                        // any other: the rest may want a bigger pane, and may be
+                        // down to one.
+                        settle_shared_departure(&daemon, session_id, revision, pane, true);
                         evicted = false;
                     }
                     // The same for the encrypted store: a slow disk holds the
@@ -308,7 +319,9 @@ pub(super) fn drain_loop(daemon: Arc<Daemon>, mut wait: DrainWait) {
                         record_persistence_output(&daemon, session_id, pane.id, &visible);
                         record_handover_output(pane, &visible);
                         idle = false;
-                        relay_output(pane, &visible);
+                        if relay_output(pane, &visible) {
+                            settle_shared_departure(&daemon, session_id, revision, pane, true);
+                        }
                     }
                 }
             }
@@ -624,9 +637,13 @@ pub(super) enum InputFlush {
 /// Sends a pane's output to every shared client, dropping clients whose
 /// socket can no longer be written. A pane whose shared set empties stops
 /// being shared.
-pub(super) fn relay_output(pane: &mut Pane, bytes: &[u8]) {
+///
+/// Returns whether that dropped a viewer. The caller must settle the departure
+/// (`settle_shared_departure`): the viewer's own disconnect, arriving later,
+/// finds it already gone, so nothing else re-arbitrates the pane's size.
+pub(super) fn relay_output(pane: &mut Pane, bytes: &[u8]) -> bool {
     if !matches!(pane.attachment, Attachment::Shared(_)) {
-        return;
+        return false;
     }
     // One frame, shared between the viewers by reference: the fan-out costs a
     // refcount each rather than a copy of the pane's output per viewer.
@@ -640,10 +657,10 @@ pub(super) fn relay_output(pane: &mut Pane, bytes: &[u8]) {
         }
         Err(error) => {
             log::warn!("could not frame a pane's output: {error:#}");
-            return;
+            return false;
         }
     };
-    queue_for_shared_clients(&mut pane.attachment, pane.handover_waiters, &frame);
+    queue_for_shared_clients(&mut pane.attachment, pane.handover_waiters, &frame)
 }
 
 /// Consume private clipboard requests before retention or fan-out. A request

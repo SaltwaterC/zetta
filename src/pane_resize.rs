@@ -10,6 +10,67 @@ const PANE_RESIZE_REPEAT_INTERVAL: Duration = Duration::from_millis(75);
 
 const PANE_SPLIT_SEPARATOR_SIZE: Pixels = px(1.);
 
+/// How many times a program's grid request is re-applied before it is given up
+/// on.
+const GRID_REQUEST_ATTEMPTS: u8 = 4;
+
+/// How long a program's grid request outlives the layout that first reached it.
+const GRID_REQUEST_SETTLE: Duration = Duration::from_millis(500);
+
+/// A program's request for a pane grid, kept while the window settles.
+///
+/// A program asking for a grid has to notice when it did not get it and ask
+/// again, and one that polls sleeps between asks, so every miss cost it a whole
+/// poll interval. Two things made misses common. A request that arrived before
+/// the pane's first layout was applied to placeholder bounds. And the
+/// compositor can put a newly mapped window back to its original size a few
+/// milliseconds after a resize, by which time the layout had already reported
+/// the requested grid. The request is therefore applied at the first real
+/// layout, and re-applied after every layout that reports a different grid
+/// until it has settled or the attempts run out.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PendingGridRequest {
+    columns: usize,
+    rows: usize,
+    attempts: u8,
+    settles_at: Instant,
+}
+
+/// What a layout that reported `grid` means for a pending grid request.
+#[derive(Debug, PartialEq, Eq)]
+enum GridRequestStep {
+    /// The request has settled or run out of attempts.
+    Expired,
+    /// The layout produced the requested grid; keep watching until it settles.
+    Reached,
+    /// Resize towards the requested grid again.
+    Resize { columns: usize, rows: usize },
+}
+
+impl PendingGridRequest {
+    fn after_layout(&mut self, grid: (usize, usize), now: Instant) -> GridRequestStep {
+        if self.attempts >= GRID_REQUEST_ATTEMPTS || now >= self.settles_at {
+            return GridRequestStep::Expired;
+        }
+        if grid == (self.columns, self.rows) {
+            return GridRequestStep::Reached;
+        }
+        self.attempts += 1;
+        GridRequestStep::Resize {
+            columns: self.columns,
+            rows: self.rows,
+        }
+    }
+}
+
+/// The pixels a pane `current_pixels` long has to grow by, along one axis, to
+/// hold `requested_cells` of `cell_size`. It aims at the middle of the last
+/// cell rather than its edge, so that a few pixels of chrome that do not
+/// resize in step with the window cannot cost a cell.
+fn pane_axis_delta(requested_cells: usize, cell_size: f32, current_pixels: f32) -> f32 {
+    (requested_cells as f32 + 0.5) * cell_size - current_pixels
+}
+
 fn resize_cell_count(current: usize, delta: isize, minimum: usize) -> usize {
     if delta.is_negative() {
         current.saturating_sub(delta.unsigned_abs()).max(minimum)
@@ -636,6 +697,81 @@ impl Zetta {
         self.resize_pane_to(tab_id, pane_id, Some(columns), Some(rows), window, cx);
     }
 
+    /// Applies a program's request for a pane grid (`CSI 8 ; rows ; columns t`)
+    /// and keeps it until a layout reports that grid. See
+    /// [`PendingGridRequest`].
+    pub(crate) fn request_pane_grid(
+        &mut self,
+        tab_id: u64,
+        pane_id: u64,
+        columns: usize,
+        rows: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let request = PendingGridRequest {
+            columns: columns.max(MINIMUM_PANE_COLUMNS),
+            rows: rows.max(MINIMUM_PANE_ROWS),
+            attempts: 0,
+            settles_at: Instant::now() + GRID_REQUEST_SETTLE,
+        };
+        self.pending_grid_requests
+            .insert((tab_id, pane_id), request);
+        self.continue_pane_grid_request(tab_id, pane_id, window, cx);
+    }
+
+    /// Re-applies a pending grid request after the pane was laid out at a
+    /// different grid, until the request settles or runs out of attempts.
+    pub(crate) fn continue_pane_grid_request(
+        &mut self,
+        tab_id: u64,
+        pane_id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let key = (tab_id, pane_id);
+        let Some(request) = self.pending_grid_requests.get_mut(&key) else {
+            return;
+        };
+        let Some(terminal) = self
+            .tabs
+            .iter()
+            .find(|tab| tab.id == tab_id)
+            .and_then(|tab| tab.pane(pane_id))
+            .and_then(TerminalPane::selected_terminal)
+        else {
+            self.pending_grid_requests.remove(&key);
+            return;
+        };
+        let terminal = terminal.read(cx);
+        // Before its first layout a pane has placeholder bounds, which predict
+        // nothing about the window. That layout reports the real grid, and the
+        // request is applied then.
+        if !terminal.is_size_initialized() {
+            return;
+        }
+        let bounds = terminal.last_content().terminal_bounds;
+        let grid = (bounds.num_columns(), bounds.num_lines());
+        let (columns, rows) = match request.after_layout(grid, Instant::now()) {
+            GridRequestStep::Expired => {
+                self.pending_grid_requests.remove(&key);
+                return;
+            }
+            GridRequestStep::Reached => return,
+            GridRequestStep::Resize { columns, rows } => (columns, rows),
+        };
+        // A resize that changes nothing produces no layout to continue from.
+        if !self.resize_pane_to(tab_id, pane_id, Some(columns), Some(rows), window, cx) {
+            self.pending_grid_requests.remove(&key);
+        }
+    }
+
+    /// Resizes a pane, and the window where the layout cannot absorb it, to
+    /// a grid. Returns whether anything was resized.
+    ///
+    /// The window delta is predicted from the pane's current geometry, so the
+    /// grid a layout then produces can be a row or a column off; see
+    /// [`PendingGridRequest`].
     pub(crate) fn resize_pane_to(
         &mut self,
         tab_id: u64,
@@ -644,16 +780,16 @@ impl Zetta {
         rows: Option<usize>,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         let Some(tab_index) = self.tabs.iter().position(|tab| tab.id == tab_id) else {
-            return;
+            return false;
         };
         let Some(bounds) = self.tabs[tab_index]
             .pane(pane_id)
             .and_then(TerminalPane::selected_terminal)
             .map(|terminal| terminal.read(cx).last_content().terminal_bounds)
         else {
-            return;
+            return false;
         };
 
         let mut changed = false;
@@ -664,8 +800,7 @@ impl Zetta {
                 pane_id,
                 SplitAxis::Vertical,
                 columns.max(MINIMUM_PANE_COLUMNS),
-                bounds.num_columns(),
-                bounds.cell_width(),
+                bounds,
                 cx,
             );
             changed |= layout_changed;
@@ -677,8 +812,7 @@ impl Zetta {
                 pane_id,
                 SplitAxis::Horizontal,
                 rows.max(MINIMUM_PANE_ROWS),
-                bounds.num_lines(),
-                bounds.line_height(),
+                bounds,
                 cx,
             );
             changed |= layout_changed;
@@ -696,28 +830,36 @@ impl Zetta {
             self.sync_shared_tab_state(tab_id, cx);
             cx.notify();
         }
+        changed
     }
 
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "six independent measurements the resize is computed from, plus \
-                  the GPUI context"
-    )]
+    /// Resizes a pane along one axis to `requested_cells`, moving the split
+    /// boundary as far as the layout allows. Returns whether the layout
+    /// changed and the window delta that is still needed.
+    ///
+    /// The resize aims at the middle of the requested cell rather than its
+    /// edge, measured from the pixels the pane actually has. The chrome around
+    /// a pane does not resize in exact step with the window, and a resize aimed
+    /// at the edge lost a row to a few pixels of that.
     fn resize_pane_axis(
         &mut self,
         tab_index: usize,
         pane_id: u64,
         axis: SplitAxis,
         requested_cells: usize,
-        current_cells: usize,
-        cell_size: Pixels,
+        bounds: terminal::TerminalBounds,
         cx: &mut Context<Self>,
     ) -> (bool, f32) {
+        let (current_cells, cell_size, current_pixels) = match axis {
+            SplitAxis::Vertical => (bounds.num_columns(), bounds.cell_width(), bounds.width()),
+            SplitAxis::Horizontal => (bounds.num_lines(), bounds.line_height(), bounds.height()),
+        };
         if requested_cells == current_cells {
             return (false, 0.);
         }
+        let current_pixels = f32::from(current_pixels);
         let requested_delta =
-            (requested_cells as isize - current_cells as isize) as f32 * f32::from(cell_size);
+            pane_axis_delta(requested_cells, f32::from(cell_size), current_pixels);
         let (active_region, boundary, can_adjust_layout) = {
             let tab = &self.tabs[tab_index];
             let Some(layout) = tab.visible_layout() else {
@@ -744,7 +886,6 @@ impl Zetta {
             return (false, 0.);
         }
 
-        let current_pixels = current_cells as f32 * f32::from(cell_size);
         let root_pixels = current_pixels / active_region;
         let mut remaining_delta = requested_delta;
         let mut changed = false;

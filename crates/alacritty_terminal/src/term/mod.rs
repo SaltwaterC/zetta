@@ -25,6 +25,7 @@ use crate::vte::ansi::{
     KeyboardModesApplyBehavior, NamedColor, NamedMode, NamedPrivateMode, PrivateMode, Processor,
     Rgb, StandardCharset, StdSyncHandler,
 };
+use crate::vte::ascii_run_char;
 
 pub mod cell;
 pub mod color;
@@ -1210,6 +1211,40 @@ impl<T> Term<T> {
         cursor_cell.extra = extra;
     }
 
+    /// Write a run of printable ASCII, as `Handler::input_ascii` takes it, to
+    /// the cells from the cursor on, exactly as `write_at_cursor` would a
+    /// character at a time, without moving the cursor. `text` must fit in the
+    /// rest of the cursor's row.
+    #[inline]
+    fn write_ascii_at_cursor(&mut self, text: &[u8]) {
+        let point = self.grid.cursor.point;
+        let start = point.column;
+        let end = Column(start.0 + text.len());
+
+        // Overwriting part of a wide character also clears its other half, which
+        // can lie outside the run. That is rare; leave it to the per-cell path.
+        let wide = Flags::WIDE_CHAR | Flags::WIDE_CHAR_SPACER;
+        if self.grid[point.line][start..end].iter().any(|cell| cell.flags.intersects(wide)) {
+            for (offset, &byte) in text.iter().enumerate() {
+                self.grid.cursor.point.column = start + offset;
+                self.write_at_cursor(ascii_run_char(byte));
+            }
+            self.grid.cursor.point.column = start;
+            return;
+        }
+
+        let template = &self.grid.cursor.template;
+        let (fg, bg, flags, extra) =
+            (template.fg, template.bg, template.flags, template.extra.clone());
+        for (cell, &byte) in self.grid[point.line][start..end].iter_mut().zip(text) {
+            cell.c = ascii_run_char(byte);
+            cell.fg = fg;
+            cell.bg = bg;
+            cell.flags = flags;
+            cell.extra.clone_from(&extra);
+        }
+    }
+
     #[inline]
     fn damage_cursor(&mut self) {
         // The normal cursor coordinates are always in viewport.
@@ -1327,6 +1362,48 @@ impl<T: EventListener> Handler for Term<T> {
             self.grid.cursor.point.column += 1;
         } else {
             self.grid.cursor.input_needs_wrap = true;
+        }
+    }
+
+    /// Zetta patch: a run of plain text is written a row segment at a time.
+    /// Upstream called `input` per character, which made it the largest cost of
+    /// reading ordinary output, and of binary output the replacement characters
+    /// the parser now folds into these runs.
+    #[inline]
+    fn input_ascii(&mut self, run: &[u8]) {
+        // Insert mode shifts the row per character, a line-drawing charset maps
+        // each one, and without autowrap every character past the margin lands
+        // on the last column. All three are rare; take the per-character path.
+        if self.mode.contains(TermMode::INSERT)
+            || !self.mode.contains(TermMode::LINE_WRAP)
+            || self.grid.cursor.charsets[self.active_charset] != StandardCharset::Ascii
+        {
+            for &byte in run {
+                self.input(ascii_run_char(byte));
+            }
+            return;
+        }
+
+        // Every character of a run, U+FFFD included, is one cell wide.
+        let columns = self.columns();
+        let mut bytes = run;
+        while !bytes.is_empty() {
+            if self.grid.cursor.input_needs_wrap {
+                self.wrapline();
+            }
+
+            let column = self.grid.cursor.point.column.0;
+            let count = bytes.len().min(columns - column);
+            let (segment, rest) = bytes.split_at(count);
+            self.write_ascii_at_cursor(segment);
+            bytes = rest;
+
+            if column + count < columns {
+                self.grid.cursor.point.column = Column(column + count);
+            } else {
+                self.grid.cursor.point.column = Column(columns - 1);
+                self.grid.cursor.input_needs_wrap = true;
+            }
         }
     }
 
@@ -2725,8 +2802,17 @@ mod tests {
     /// Parse `payload` into a terminal with unlimited history, as Zetta configures it by default,
     /// and report the throughput.
     fn output_throughput(payload: &[u8], columns: usize, lines: usize) -> Term<VoidListener> {
+        output_throughput_with_history(payload, columns, lines, i32::MAX as usize)
+    }
+
+    fn output_throughput_with_history(
+        payload: &[u8],
+        columns: usize,
+        lines: usize,
+        history: usize,
+    ) -> Term<VoidListener> {
         let size = TermSize::new(columns, lines);
-        let config = Config { scrolling_history: i32::MAX as usize, ..Config::default() };
+        let config = Config { scrolling_history: history, ..Config::default() };
         let mut term = Term::new(config, &size, VoidListener);
         let mut processor = Processor::<StdSyncHandler>::new();
 
@@ -2823,6 +2909,25 @@ mod tests {
         payload.truncate(BYTES);
         let term = output_throughput(&payload, 94, 51);
         assert!(term.history_size() > 1_200_000);
+    }
+
+    /// Seeded random bytes, as `cat` of a binary file delivers them: mostly invalid UTF-8, with
+    /// control characters and the odd escape sequence throughout. The 80x24 grid and 500 lines
+    /// of history match the throughput comparison against other terminals.
+    #[test]
+    #[ignore = "manual optimized-build throughput check"]
+    fn binary_output_throughput_benchmark() {
+        const BYTES: usize = 32 * 1024 * 1024;
+
+        let mut state = 0x5117_u64;
+        let payload = (0..BYTES)
+            .map(|_| {
+                state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                (state >> 56) as u8
+            })
+            .collect::<Vec<_>>();
+        let term = output_throughput_with_history(&payload, 80, 24, 500);
+        assert!(term.history_size() <= 500);
     }
 
     #[test]
@@ -3116,6 +3221,57 @@ mod tests {
         term.input('a');
 
         assert_eq!(term.grid()[cursor].c, '▒');
+    }
+
+    /// `input_ascii` must leave the terminal exactly as `input` per character does, from every
+    /// state its fast path either handles or hands back to `input`.
+    #[test]
+    fn input_ascii_matches_input_per_character() {
+        // `\x7f` in a run stands for U+FFFD.
+        let cases: &[(&str, &[u8], &str)] = &[
+            ("wraps across rows", b"", "abcdefghijklmnopqrstuvwxyz0123456789"),
+            ("fills a row exactly", b"", "0123456789"),
+            ("resumes a pending wrap", b"0123456789", "abc"),
+            ("starts mid row", b"\x1b[2;4H", "abcdefghijklm"),
+            ("overwrites a wide character", "漢字漢字漢\r".as_bytes(), "ab"),
+            ("overwrites a wide spacer", "漢字漢字漢\x1b[1;2H".as_bytes(), "abc"),
+            ("overwrites a leading spacer", "abcdefghi漢\x1b[1;10H".as_bytes(), "xy"),
+            ("insert mode", b"hello\r\x1b[4h", "abc"),
+            ("line drawing", b"\x1b(0", "lqqkx"),
+            ("without autowrap", b"\x1b[?7l", "abcdefghijklmnopqrstuvwxyz"),
+            ("without autowrap mid row", b"\x1b[?7l\x1b[1;8H", "abcdef"),
+            ("template attributes", b"\x1b[1;31;44m", "styled text that wraps"),
+            ("underline colour", b"\x1b[4;58;2;1;2;3m", "decorated"),
+            ("scrolls the bottom row", b"\x1b[5;1H", "abcdefghijklmnopqrstuvwxyz"),
+            ("scroll region", b"\x1b[2;3r\x1b[3;1H", "abcdefghijklmnopqrstuvwxyz"),
+            ("replacement characters", b"", "a\x7f\x7fbcdefghij\x7fklmnop\x7f"),
+            ("replacement over a wide character", "漢字漢字漢\x1b[1;2H".as_bytes(), "\x7fb\x7f"),
+            ("replacement in insert mode", b"hello\r\x1b[4h", "a\x7fb"),
+            ("replacement in line drawing", b"\x1b(0", "q\x7fq"),
+        ];
+
+        for (name, setup, text) in cases {
+            let size = TermSize::new(10, 5);
+            let start = || {
+                let mut term = Term::new(Config::default(), &size, VoidListener);
+                Processor::<StdSyncHandler>::new().advance(&mut term, setup);
+                term
+            };
+            let mut per_character = start();
+            let mut bulk = start();
+
+            for &byte in text.as_bytes() {
+                per_character.input(ascii_run_char(byte));
+            }
+            bulk.input_ascii(text.as_bytes());
+
+            assert!(bulk.grid == per_character.grid, "{name}: grids differ");
+            assert_eq!(bulk.grid.cursor.point, per_character.grid.cursor.point, "{name}: cursor");
+            assert_eq!(
+                bulk.grid.cursor.input_needs_wrap, per_character.grid.cursor.input_needs_wrap,
+                "{name}: pending wrap",
+            );
+        }
     }
 
     #[test]

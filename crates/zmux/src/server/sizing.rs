@@ -196,7 +196,9 @@ pub(super) fn broadcast_size(
     // Queued alongside the pane's output rather than written past it, so a
     // viewer applies the new size at the point in the stream where it happened.
     match crate::transport::encode_message(&event) {
-        Ok(frame) => queue_for_shared_clients(attachment, handover_waiters, &Arc::from(frame)),
+        Ok(frame) => {
+            queue_for_shared_clients(attachment, handover_waiters, &Arc::from(frame));
+        }
         Err(error) => log::warn!("could not frame a pane's new size: {error:#}"),
     }
 }
@@ -206,14 +208,15 @@ pub(super) fn broadcast_size(
 ///
 /// `try_send` never blocks: a full queue means this viewer is not keeping up, and
 /// making the pane wait for it would stall every other viewer and the drain with
-/// it. Collapses the attachment when that leaves nobody.
+/// it. Collapses the attachment when that leaves nobody. Returns whether any
+/// viewer was dropped.
 pub(super) fn queue_for_shared_clients(
     attachment: &mut Attachment,
     handover_waiters: usize,
     frame: &Arc<[u8]>,
-) {
+) -> bool {
     let Attachment::Shared(clients) = attachment else {
-        return;
+        return false;
     };
     let mut failed = Vec::new();
     for client in clients.iter() {
@@ -238,7 +241,7 @@ pub(super) fn queue_for_shared_clients(
         }
     }
     if failed.is_empty() {
-        return;
+        return false;
     }
     log::warn!(
         "dropped {} shared client(s) that stopped keeping up",
@@ -246,6 +249,7 @@ pub(super) fn queue_for_shared_clients(
     );
     clients.retain(|client| !failed.contains(&client.attachment));
     collapse_empty_shared(attachment, handover_waiters);
+    true
 }
 
 /// The exclusive attachment a client process id maps to. A client that does

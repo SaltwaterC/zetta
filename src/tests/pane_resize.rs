@@ -103,3 +103,68 @@ fn opposite_held_pane_resize_arrows_cancel_each_other() {
     assert!(keys.press(PaneResizeDirection::Down));
     assert_eq!(keys.delta(), (0, 1));
 }
+
+fn grid_request(columns: usize, rows: usize, now: Instant) -> PendingGridRequest {
+    PendingGridRequest {
+        columns,
+        rows,
+        attempts: 0,
+        settles_at: now + GRID_REQUEST_SETTLE,
+    }
+}
+
+#[test]
+fn a_grid_request_outlives_the_layout_that_reached_it() {
+    let now = Instant::now();
+    let mut request = grid_request(80, 24, now);
+
+    assert_eq!(
+        request.after_layout((148, 40), now),
+        GridRequestStep::Resize {
+            columns: 80,
+            rows: 24
+        }
+    );
+    assert_eq!(
+        request.after_layout((80, 24), now),
+        GridRequestStep::Reached
+    );
+    // The compositor puts a newly mapped window back to its original size.
+    assert_eq!(
+        request.after_layout((148, 40), now),
+        GridRequestStep::Resize {
+            columns: 80,
+            rows: 24
+        }
+    );
+    assert_eq!(
+        request.after_layout((148, 40), now + GRID_REQUEST_SETTLE),
+        GridRequestStep::Expired
+    );
+}
+
+#[test]
+fn a_grid_request_that_keeps_missing_gives_up() {
+    let now = Instant::now();
+    let mut request = grid_request(80, 24, now);
+    for _ in 0..GRID_REQUEST_ATTEMPTS {
+        assert!(matches!(
+            request.after_layout((80, 23), now),
+            GridRequestStep::Resize { .. }
+        ));
+    }
+    assert_eq!(
+        request.after_layout((80, 23), now),
+        GridRequestStep::Expired
+    );
+}
+
+#[test]
+fn a_pane_resize_aims_at_the_middle_of_the_last_cell() {
+    // 40 rows of 15.6px with nothing left over, asked for 24: the pane ends
+    // half a row past the 24th, so losing a few pixels still leaves 24 rows.
+    let delta = pane_axis_delta(24, 15.6, 624.);
+    let pane = 624. + delta;
+    assert!(((pane - 6.4) / 15.6).floor() as usize == 24, "{pane}");
+    assert!(((pane + 6.4) / 15.6).floor() as usize == 24, "{pane}");
+}

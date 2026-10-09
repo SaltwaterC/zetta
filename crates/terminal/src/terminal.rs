@@ -3391,11 +3391,17 @@ impl TerminalBuilder {
             while let Some(event) = self.events_rx.next().await {
                 replay::after_replay(&terminal, cx, |terminal, cx| {
                     terminal.process_pty_event(event, cx);
-                }).await?;
+                })
+                .await?;
 
                 'drain: loop {
                     let mut events = Vec::new();
                     let mut wakeup = false;
+                    // Bells collapse like wakeups. Binary output rings one every
+                    // 256 bytes or so, and delivering each one separately had
+                    // the UI ring the system bell hundreds of thousands of times
+                    // while the output was still arriving.
+                    let mut bell = false;
                     #[cfg(any(test, feature = "test-support"))]
                     let mut timer = cx.background_executor().simulate_random_delay().fuse();
                     #[cfg(not(any(test, feature = "test-support")))]
@@ -3409,11 +3415,12 @@ impl TerminalBuilder {
                             _ = timer => break,
                             event = self.events_rx.next() => {
                                 if let Some(event) = event {
-                                    if matches!(event, PtyEvent::Event(TerminalBackendEvent::Wakeup))
-                                    {
-                                        wakeup = true;
-                                    } else {
-                                        events.push(event);
+                                    match event {
+                                        PtyEvent::Event(TerminalBackendEvent::Wakeup) => {
+                                            wakeup = true;
+                                        }
+                                        PtyEvent::Event(TerminalBackendEvent::Bell) => bell = true,
+                                        event => events.push(event),
                                     }
 
                                     if events.len() >= MAX_TERMINAL_EVENTS_PER_BATCH {
@@ -3426,7 +3433,7 @@ impl TerminalBuilder {
                         }
                     }
 
-                    if events.is_empty() && !wakeup {
+                    if events.is_empty() && !wakeup && !bell {
                         yield_now().await;
                         break 'drain;
                     }
@@ -3435,11 +3442,15 @@ impl TerminalBuilder {
                         if wakeup {
                             this.process_event(TerminalBackendEvent::Wakeup, cx);
                         }
+                        if bell {
+                            this.process_event(TerminalBackendEvent::Bell, cx);
+                        }
 
                         for event in events {
                             this.process_pty_event(event, cx);
                         }
-                    }).await?;
+                    })
+                    .await?;
                     yield_now().await;
                 }
             }
@@ -3945,6 +3956,7 @@ impl Terminal {
                 cx.emit(Event::BlinkChanged(blinking));
             }
             TerminalBackendEvent::Bell => {
+                self.wakeup_gate.end_bell();
                 cx.emit(Event::Bell);
             }
             TerminalBackendEvent::Exit => {
@@ -7988,6 +8000,53 @@ mod tests {
         assert_eq!(
             terminal.read_with(cx, |terminal, _| terminal.working_directory()),
             Some(PathBuf::from(live))
+        );
+    }
+
+    #[gpui::test]
+    fn queued_bells_ring_once_per_batch(cx: &mut TestAppContext) {
+        const QUEUED: usize = 1000;
+
+        let builder = cx.update(|cx| {
+            TerminalBuilder::new_display_only(
+                SettingsCursorShape::Block,
+                AlternateScroll::On,
+                None,
+                0,
+                cx.background_executor(),
+                PathStyle::local(),
+            )
+        });
+        let events_tx = builder.terminal.events_tx.clone();
+        let terminal = cx.new(|cx| builder.subscribe(cx));
+        let bells = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        cx.update(|cx| {
+            let bells = bells.clone();
+            cx.subscribe(&terminal, move |_, event: &Event, _| {
+                if matches!(event, Event::Bell) {
+                    bells.fetch_add(1, Ordering::Relaxed);
+                }
+            })
+        })
+        .detach();
+
+        // Binary output rings far faster than anyone can hear: as many bells as
+        // a few hundred kilobytes of random bytes carry, all queued at once.
+        for _ in 0..QUEUED {
+            events_tx
+                .unbounded_send(PtyEvent::Event(TerminalBackendEvent::Bell))
+                .unwrap();
+        }
+        cx.run_until_parked();
+
+        // The test scheduler ends a batch after a random number of yields, often
+        // none, so batches here are far smaller than the drain interval makes
+        // them in a running app. Without coalescing every bell rings.
+        let rung = bells.load(Ordering::Relaxed);
+        assert!(rung >= 1, "a queued bell must still ring");
+        assert!(
+            rung < QUEUED / 2,
+            "{rung} of {QUEUED} queued bells rang separately"
         );
     }
 
