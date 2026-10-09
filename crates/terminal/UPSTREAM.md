@@ -90,6 +90,13 @@ Retain these Zetta-specific behaviors when synchronizing:
   bells the way it collapses wakeups. Binary output rings one every 256 bytes
   or so, and each was a channel allocation on the reader and a system bell on
   the UI.
+- start a terminal at a real size before its first layout. The placeholder
+  bounds hold 80x24 rather than upstream's 100x6, which a program that asked
+  early took for its terminal, and `new_with_console_palette(_for_restore)`
+  take `initial_bounds` for a pane whose grid is known in advance (Zetta's
+  `--geometry`): the `Term`, a local pty, and a provider's
+  `PtySpawnRequest::initial_size` all start there. Pinned by
+  `the_placeholder_grid_is_the_conventional_terminal_size`.
 
 `Content::selection_text` was removed after auditing the local public API
 consumers. Zed's agent UI and full terminal view use the upstream field, but

@@ -522,6 +522,10 @@ pub(crate) struct Zetta {
     /// Grid sizes programs asked their panes for that a layout has not produced
     /// yet, by tab and pane id.
     pub(crate) pending_grid_requests: HashMap<(u64, u64), crate::pane_resize::PendingGridRequest>,
+    /// The launch's `--geometry`, held while [`Zetta::new`] opens the first
+    /// tab, whose terminal spawn takes it: the grid has to be known when the
+    /// pty is opened, which is before that pane exists to be asked for it.
+    pub(crate) launch_grid: Option<crate::startup::TerminalGrid>,
     /// The panes this window shows in shared mode, keyed by pane id. A shared
     /// pane's terminal reads a relayed byte stream rather than the pty, so the
     /// shared connection and the sizes that arrive on it live here.
@@ -676,6 +680,9 @@ pub(crate) struct ZettaLaunchOptions {
     pub(crate) initial_command: Option<Vec<String>>,
     pub(crate) initial_working_directory: Option<PathBuf>,
     pub(crate) initial_launch: Option<TerminalLaunch>,
+    /// The grid the first tab's active pane is resized to as soon as it is
+    /// laid out, which happens before the window is first shown.
+    pub(crate) initial_grid: Option<crate::startup::TerminalGrid>,
 }
 
 impl Default for ZettaLaunchOptions {
@@ -688,6 +695,7 @@ impl Default for ZettaLaunchOptions {
             initial_command: None,
             initial_working_directory: None,
             initial_launch: None,
+            initial_grid: None,
         }
     }
 }
@@ -855,6 +863,7 @@ impl Zetta {
             initial_command,
             initial_working_directory,
             initial_launch,
+            initial_grid,
         } = launch_options;
         let button_layout = system_window_button_layout(cx);
         let projects = match ProjectState::load() {
@@ -900,6 +909,7 @@ impl Zetta {
             this.refresh_auto_protect(cx);
         }
         let mut initial_launch = Some(initial_launch.unwrap_or(TerminalLaunch::Spawn));
+        this.launch_grid = initial_grid;
         if let Some(project) = initial_project {
             let project = this.projects.insert_config(project);
             let profile = initial_profile.or_else(|| {
@@ -954,6 +964,9 @@ impl Zetta {
                 );
             }
         }
+        // A launch that spawned nothing (a Windows console handoff) leaves the
+        // grid to no one, rather than to whichever tab opens next.
+        this.launch_grid = None;
         this
     }
 
@@ -990,6 +1003,7 @@ impl Zetta {
             key_passthrough: None,
             tabs: Vec::new(),
             pending_grid_requests: HashMap::new(),
+            launch_grid: None,
             remote_clipboard_paste_tabs: HashSet::new(),
             background_sessions: BackgroundSessionRunner::default(),
             #[cfg(feature = "zmux")]

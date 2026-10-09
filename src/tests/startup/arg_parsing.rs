@@ -76,6 +76,8 @@ fn ordinary_and_explicit_new_window_launches_are_handoff_eligible() {
     let mux = parse_args_from([OsString::from("mux")]).unwrap();
     let no_mux = parse_args_from([OsString::from("--no-mux")]).unwrap();
     let short_no_mux = parse_args_from([OsString::from("-n")]).unwrap();
+    let geometry =
+        parse_args_from([OsString::from("--geometry"), OsString::from("80x24")]).unwrap();
 
     assert!(should_handoff_to_existing_process(&plain));
     assert_eq!(new_window, short_new_window);
@@ -88,6 +90,8 @@ fn ordinary_and_explicit_new_window_launches_are_handoff_eligible() {
     assert!(should_handoff_to_existing_process(&profile_new_window));
     assert!(!should_handoff_to_existing_process(&profile));
     assert!(!should_handoff_to_existing_process(&split));
+    // A running process would raise a window rather than open one this size.
+    assert!(!should_handoff_to_existing_process(&geometry));
     assert!(!should_handoff_to_existing_process(&mux));
     assert!(no_mux.no_mux);
     assert_eq!(no_mux, short_no_mux);
@@ -196,6 +200,57 @@ fn command_launch_consumes_the_remaining_arguments() {
     #[cfg(not(feature = "zmux"))]
     assert!(!should_handoff_to_existing_process(&short));
     assert!(parse_args_from([OsString::from("-e")]).is_err());
+}
+
+fn launch(arguments: &[&str]) -> Result<StartupArgs> {
+    parse_args_from(arguments.iter().map(OsString::from))
+}
+
+#[test]
+fn geometry_accepts_long_and_short_forms_beside_a_profile_or_command() {
+    let grid = |columns, rows| Some(TerminalGrid { columns, rows });
+    assert_eq!(
+        launch(&["--geometry", "80x24"]).unwrap().geometry,
+        grid(80, 24)
+    );
+    assert_eq!(launch(&["-g", "132X43"]).unwrap().geometry, grid(132, 43));
+    assert_eq!(launch(&[]).unwrap().geometry, None);
+
+    let with_profile = launch(&["-g", "80x24", "--profile", "System"]).unwrap();
+    assert_eq!(with_profile.geometry, grid(80, 24));
+    assert_eq!(with_profile.profile.as_deref(), Some("System"));
+
+    // `-e` takes the rest of the line, so the size has to come before it, and
+    // a `-g` after it belongs to the command.
+    let command = launch(&["--geometry", "100x30", "-e", "cat", "-g", "1x1"]).unwrap();
+    assert_eq!(command.geometry, grid(100, 30));
+    assert_eq!(
+        command.mode,
+        StartupMode::Command(vec!["cat".into(), "-g".into(), "1x1".into()])
+    );
+}
+
+#[test]
+fn geometry_rejects_malformed_sizes_and_launches_that_open_no_window_of_their_own() {
+    for size in [
+        "",
+        "80",
+        "80x",
+        "x24",
+        "0x24",
+        "80x0",
+        "80x24x2",
+        "-80x24",
+        "65536x24",
+        "eightyx24",
+    ] {
+        assert!(launch(&["--geometry", size]).is_err(), "{size:?}");
+    }
+    assert!(launch(&["--geometry"]).is_err());
+    assert!(launch(&["-g", "80x24", "--geometry", "80x24"]).is_err());
+    assert!(launch(&["-g", "80x24", "--new-window"]).is_err());
+    assert!(launch(&["-g", "80x24", "--split", "quarters"]).is_err());
+    assert!(launch(&["-g", "80x24", "--replace-pane", "--profile", "System"]).is_err());
 }
 
 #[test]

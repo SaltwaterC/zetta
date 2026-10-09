@@ -30,7 +30,7 @@ use log::debug;
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
-use crate::{ascii_run_char, Params, ParamsIter};
+use crate::{ascii_run_char, control_bits, Params, ParamsIter};
 
 /// Maximum time before a synchronized update is aborted.
 const SYNC_UPDATE_TIMEOUT: Duration = Duration::from_millis(150);
@@ -1311,24 +1311,20 @@ where
         self.state.preceding_char = run.last().map(|&byte| ascii_run_char(byte));
     }
 
-    /// Every byte `execute` matches below. Ground dispatch skips the rest, so
-    /// they go unlogged when they arrive inside text.
-    #[inline]
-    fn ignores_execute(&self, byte: u8) -> bool {
-        !matches!(
-            byte,
-            C0::HT
-                | C0::BS
-                | C0::CR
-                | C0::LF
-                | C0::VT
-                | C0::FF
-                | C0::BEL
-                | C0::SUB
-                | C0::SI
-                | C0::SO
-        )
-    }
+    /// Every control but the ones `execute` matches below. Ground dispatch
+    /// skips the rest, so they go unlogged when they arrive inside text.
+    const IGNORED_EXECUTES: u64 = !control_bits(&[
+        C0::HT,
+        C0::BS,
+        C0::CR,
+        C0::LF,
+        C0::VT,
+        C0::FF,
+        C0::BEL,
+        C0::SUB,
+        C0::SI,
+        C0::SO,
+    ]);
 
     #[inline]
     fn execute(&mut self, byte: u8) {
@@ -2130,7 +2126,7 @@ mod tests {
         }
     }
 
-    /// Ground dispatch skips `execute` for every control `ignores_execute` names, so the two
+    /// Ground dispatch skips `execute` for every control `IGNORED_EXECUTES` names, so the two
     /// must agree on every C0 and C1 byte.
     #[test]
     fn ignored_controls_are_exactly_the_ones_execute_does_nothing_for() {
@@ -2172,8 +2168,10 @@ mod tests {
         for byte in (0x00..=0x1F).chain(0x80..=0x9F) {
             let mut state = ProcessorState::<StdSyncHandler>::default();
             let mut handler = Touched::default();
+            let ignored = control_bits(&[byte])
+                & Performer::<'_, Touched, StdSyncHandler>::IGNORED_EXECUTES
+                != 0;
             let mut performer = Performer::new(&mut state, &mut handler);
-            let ignored = performer.ignores_execute(byte);
             performer.execute(byte);
             assert_eq!(ignored, !handler.0, "{byte:#04x}");
         }

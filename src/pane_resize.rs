@@ -1,3 +1,5 @@
+use std::{cell::Cell, rc::Rc};
+
 use super::*;
 
 const MINIMUM_PANE_COLUMNS: usize = 2;
@@ -28,12 +30,19 @@ const GRID_REQUEST_SETTLE: Duration = Duration::from_millis(500);
 /// the requested grid. The request is therefore applied at the first real
 /// layout, and re-applied after every layout that reports a different grid
 /// until it has settled or the attempts run out.
-#[derive(Clone, Copy, Debug)]
+///
+/// A request made before the pane has a terminal at all — `--geometry` — can do
+/// better: the pane's placeholder records the space it was laid out in, and
+/// [`Zetta::fit_window_to_pending_grid`] sizes the window from that before the
+/// window is first shown, so there is no resize for a compositor to put back.
+#[derive(Clone, Debug)]
 pub(crate) struct PendingGridRequest {
     columns: usize,
     rows: usize,
     attempts: u8,
     settles_at: Instant,
+    /// Where the pane's placeholder was last laid out, while it has one.
+    placeholder: Rc<Cell<Option<Bounds<Pixels>>>>,
 }
 
 /// What a layout that reported `grid` means for a pending grid request.
@@ -714,10 +723,52 @@ impl Zetta {
             rows: rows.max(MINIMUM_PANE_ROWS),
             attempts: 0,
             settles_at: Instant::now() + GRID_REQUEST_SETTLE,
+            placeholder: Rc::default(),
         };
         self.pending_grid_requests
             .insert((tab_id, pane_id), request);
         self.continue_pane_grid_request(tab_id, pane_id, window, cx);
+    }
+
+    /// Where a pane waiting for a requested grid should report the bounds its
+    /// placeholder is laid out in, if one is waiting.
+    pub(crate) fn pending_grid_placeholder(
+        &self,
+        tab_id: u64,
+        pane_id: u64,
+    ) -> Option<Rc<Cell<Option<Bounds<Pixels>>>>> {
+        self.pending_grid_requests
+            .get(&(tab_id, pane_id))
+            .map(|request| request.placeholder.clone())
+    }
+
+    /// Sizes the window for a grid requested before its pane had a terminal,
+    /// from the space the pane's placeholder was laid out in. Returns whether
+    /// it resized.
+    ///
+    /// Meant for the moment between `open_window`'s first layout and the
+    /// platform showing the window. A resize there is the size the window
+    /// first appears at; one after it has appeared is a resize the compositor
+    /// may put back, which is what made a launch's grid flap.
+    pub(crate) fn fit_window_to_pending_grid(&mut self, window: &mut Window, cx: &App) -> bool {
+        let Some((placeholder, columns, rows)) = self
+            .pending_grid_requests
+            .values()
+            .find_map(|request| Some((request.placeholder.get()?, request.columns, request.rows)))
+        else {
+            return false;
+        };
+        let metrics = terminal_view::TerminalCellMetrics::standalone(cx);
+        let target =
+            terminal_view::element_size_for_grid(columns, rows, metrics, window.scale_factor());
+        resize_window(
+            window,
+            WindowResize {
+                width_delta: f32::from(target.width - placeholder.size.width),
+                height_delta: f32::from(target.height - placeholder.size.height),
+            },
+            cx,
+        )
     }
 
     /// Re-applies a pending grid request after the pane was laid out at a
@@ -733,14 +784,18 @@ impl Zetta {
         let Some(request) = self.pending_grid_requests.get_mut(&key) else {
             return;
         };
-        let Some(terminal) = self
+        let Some(pane) = self
             .tabs
             .iter()
             .find(|tab| tab.id == tab_id)
             .and_then(|tab| tab.pane(pane_id))
-            .and_then(TerminalPane::selected_terminal)
         else {
             self.pending_grid_requests.remove(&key);
+            return;
+        };
+        // A launch asks before its pane's terminal has been spawned; the
+        // terminal's first layout continues the request.
+        let Some(terminal) = pane.selected_terminal() else {
             return;
         };
         let terminal = terminal.read(cx);

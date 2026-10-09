@@ -703,6 +703,12 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
     /// [`Perform::print_ascii`], the replacements marked by [`ASCII_REPLACEMENT`].
     /// Binary output is mostly those two, and a call per replacement character
     /// left the runs between them a byte or two long.
+    ///
+    /// Random bytes defeat branch prediction byte by byte, so the common cases
+    /// go through [`LossyByte`]'s table without a branch on the byte: printable
+    /// text, a byte that cannot start a character, an ignored control, and a
+    /// lead byte whose successor already rules out a character. Only the rest
+    /// take the per-byte path below.
     fn ground_dispatch_lossy<P: Perform>(performer: &mut P, bytes: &[u8]) -> usize {
         // Takes the run by value so that its length can stay in a register;
         // a `&mut` to it put a store and a reload on every byte.
@@ -714,11 +720,26 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
             0
         }
 
+        let table = const { &LossyByte::table(P::IGNORED_EXECUTES) };
         let mut run = [0u8; LOSSY_RUN_CAPACITY];
         let mut run_len = 0;
 
         let mut i = 0;
         while i < bytes.len() {
+            // Every byte but the last has a successor to decide a lead byte by.
+            if let Some(&next) = bytes.get(i + 1) {
+                let entry = table[usize::from(bytes[i])];
+                if !entry.needs_decoding(next) {
+                    run[run_len] = entry.output;
+                    run_len += usize::from(entry.output != LossyByte::SKIP);
+                    i += 1;
+                    if run_len == LOSSY_RUN_CAPACITY {
+                        run_len = flush(performer, &run[..run_len]);
+                    }
+                    continue;
+                }
+            }
+
             if run_len == LOSSY_RUN_CAPACITY {
                 run_len = flush(performer, &run[..run_len]);
             }
@@ -754,7 +775,7 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
                     // Binary output carries a control every few bytes, almost
                     // all of them ones the performer ignores. Ending the run at
                     // each left runs of about four characters.
-                    if byte != 0x7F && performer.ignores_execute(byte) {
+                    if byte != 0x7F && control_bits(&[byte]) & P::IGNORED_EXECUTES != 0 {
                         i += 1;
                         continue;
                     }
@@ -905,6 +926,81 @@ fn decode_utf8(bytes: &[u8]) -> Utf8 {
     Utf8::Char(c, width)
 }
 
+/// What lossy ground dispatch does with one byte, looked up rather than
+/// branched on.
+#[derive(Clone, Copy)]
+struct LossyByte {
+    /// The byte the run gets, or [`LossyByte::SKIP`] for none.
+    output: u8,
+    /// The successors that leave the byte to the per-byte path: `span` bytes
+    /// from `first`. A lead byte's are the second bytes that may continue a
+    /// character; every other successor makes the lead byte one replacement
+    /// character on its own.
+    first: u8,
+    span: u16,
+}
+
+impl LossyByte {
+    /// Output of a control the performer ignores.
+    const SKIP: u8 = 0;
+
+    const fn new(output: u8) -> Self {
+        Self { output, first: 0, span: 0 }
+    }
+
+    /// A byte the per-byte path always handles.
+    const SLOW: Self = Self { output: Self::SKIP, first: 0, span: 0x100 };
+
+    const fn lead(first: u8, last: u8) -> Self {
+        Self { output: ASCII_REPLACEMENT, first, span: (last - first) as u16 + 1 }
+    }
+
+    #[inline(always)]
+    fn needs_decoding(self, next: u8) -> bool {
+        u16::from(next).wrapping_sub(u16::from(self.first)) < self.span
+    }
+
+    /// The second-byte ranges are [`decode_utf8`]'s.
+    const fn table(ignored_executes: u64) -> [Self; 256] {
+        let mut table = [Self::SLOW; 256];
+        let mut index = 0;
+        while index < table.len() {
+            let byte = index as u8;
+            table[index] = match byte {
+                0x20..=0x7E => Self::new(byte),
+                0xA0..=0xC1 | 0xF5..=0xFF => Self::new(ASCII_REPLACEMENT),
+                0xC2..=0xDF | 0xE1..=0xEC | 0xEE..=0xEF | 0xF1..=0xF3 => Self::lead(0x80, 0xBF),
+                0xE0 => Self::lead(0xA0, 0xBF),
+                0xED => Self::lead(0x80, 0x9F),
+                0xF0 => Self::lead(0x90, 0xBF),
+                0xF4 => Self::lead(0x80, 0x8F),
+                0x7F => Self::SLOW,
+                _ if control_bits(&[byte]) & ignored_executes != 0 => Self::new(Self::SKIP),
+                _ => Self::SLOW,
+            };
+            index += 1;
+        }
+        table
+    }
+}
+
+/// A set of C0 and C1 controls as [`Perform::IGNORED_EXECUTES`] spells it: bit
+/// `n` for C0 byte `n`, and bit `32 + n` for C1 byte `0x80 + n`. Other bytes
+/// contribute nothing.
+pub const fn control_bits(bytes: &[u8]) -> u64 {
+    let mut bits = 0;
+    let mut index = 0;
+    while index < bytes.len() {
+        bits |= match bytes[index] {
+            byte @ 0x00..=0x1F => 1 << byte,
+            byte @ 0x80..=0x9F => 1 << (byte - 0x60),
+            _ => 0,
+        };
+        index += 1;
+    }
+    bits
+}
+
 /// Whether `byte` is ASCII that ground dispatch hands to [`Perform::print`].
 #[inline(always)]
 fn is_printable_ascii(byte: u8) -> bool {
@@ -962,16 +1058,14 @@ pub trait Perform {
     /// Draw a character to the screen and update states.
     fn print(&mut self, _c: char) {}
 
-    /// Whether [`Perform::execute`] does nothing at all for `byte`, a C0 or C1
-    /// control.
+    /// The C0 and C1 controls [`Perform::execute`] does nothing at all for, as
+    /// [`control_bits`] of them.
     ///
     /// Zetta patch: ground dispatch may skip the call for such a byte, rather
     /// than ending the run of text it is gathering for [`Perform::print_ascii`]
-    /// to execute it. The default ignores nothing.
-    #[inline]
-    fn ignores_execute(&self, _byte: u8) -> bool {
-        false
-    }
+    /// to execute it. A constant rather than a method so that dispatch can
+    /// build its byte table at compile time. The default ignores nothing.
+    const IGNORED_EXECUTES: u64 = 0;
 
     /// Draw a run of printable ASCII (`0x20..=0x7e`), exactly as a call to
     /// [`Perform::print`] per character would. [`ASCII_REPLACEMENT`] in the
@@ -1840,7 +1934,39 @@ mod tests {
         for bytes in cases {
             let mut dispatcher = Dispatcher::default();
             Parser::new().advance(&mut dispatcher, &bytes);
-            assert_eq!(dispatcher.dispatched, upstream_ground_dispatch(&bytes), "{bytes:x?}");
+            let upstream = upstream_ground_dispatch(&bytes);
+            assert_eq!(dispatcher.dispatched, upstream, "{bytes:x?}");
+
+            // A performer that ignores controls sees the same, apart from which of
+            // those controls it is still handed; skipping them is allowed, not owed.
+            let unignored = |sequences: Vec<Sequence>| {
+                sequences
+                    .into_iter()
+                    .filter(|sequence| {
+                        !matches!(sequence, Sequence::Execute(byte)
+                            if control_bits(&[*byte]) & IgnoringDispatcher::IGNORED_EXECUTES != 0)
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let mut ignoring = IgnoringDispatcher::default();
+            Parser::new().advance(&mut ignoring, &bytes);
+            assert_eq!(unignored(ignoring.0.dispatched), unignored(upstream), "{bytes:x?}");
+        }
+    }
+
+    /// Ignores every control but the few the ansi performer acts on in text.
+    #[derive(Default)]
+    struct IgnoringDispatcher(Dispatcher);
+
+    impl Perform for IgnoringDispatcher {
+        const IGNORED_EXECUTES: u64 = !control_bits(&[0x07, 0x08, 0x0A, 0x0D, 0x85]);
+
+        fn print(&mut self, c: char) {
+            self.0.print(c);
+        }
+
+        fn execute(&mut self, byte: u8) {
+            self.0.execute(byte);
         }
     }
 

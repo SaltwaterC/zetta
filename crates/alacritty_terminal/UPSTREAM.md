@@ -96,6 +96,22 @@ Retain these Zetta changes when synchronizing:
   drain. Zetta releases an exited PTY as soon as it receives that report, so
   reporting first could abort the drain and discard the child process's final
   output.
+- The event loop only does I/O; `src/pty_parser.rs`, a Zetta-authored module,
+  parses on a thread of its own. Linux copies pty output out through a small
+  stack buffer, and plain-text floods spent two fifths of the single reader
+  thread in that copy with the parser idle. The loop reads into 64 KiB chunks
+  from a pool of 16 (the old `READ_BUFFER_SIZE` bound) and blocks once all are
+  queued; the parser thread takes the lease and lock per batch, sends
+  `Wakeup`, and owns the synchronized-update timeout that the poll timeout
+  used to carry, so `PeekableReceiver::peek` is gone. The resize-request and
+  clipboard-frame scanners stay on the reading thread. Every exit, and the end
+  of the loop, joins the parser first, so the final drain above still lands on
+  the grid before the exit is reported and before `PtyIo::join` returns.
+  `EventLoop::spawn` therefore needs a `Clone` listener. Regression test:
+  `the_last_output_is_on_the_grid_when_the_exit_is_reported`; manual
+  benchmarks `ascii_through_the_event_loop_throughput_benchmark` and
+  `random_through_the_event_loop_throughput_benchmark` run `cat` through a
+  real pty into an 80x24 grid.
 - Windows: `src/tty/program_search.rs`, a Zetta-authored module (tests in
   `src/tests/tty/program_search.rs`), resolves a pane's program the way
   `CreateProcessW` would but never from the current directory or a relative

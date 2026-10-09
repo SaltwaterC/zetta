@@ -331,7 +331,7 @@ fn a_viewer_reports_no_size_until_its_pane_is_initialized() {
 
     // The placeholder a `TerminalContent` starts with is not a measurement until
     // the terminal says its layout was initialized.
-    assert_eq!(TerminalBounds::default().num_lines(), 6);
+    assert_eq!(TerminalBounds::default().num_lines(), 24);
     assert_eq!(
         shared_size_to_report(false, TerminalBounds::default()),
         None
@@ -349,11 +349,11 @@ fn a_viewer_reports_no_size_until_its_pane_is_initialized() {
         },
     );
     assert_eq!(shared_size_to_report(true, laid_out), Some((98, 51)));
-    // 100x6 is also a valid initialized terminal size; only the semantic flag
-    // distinguishes it from the pre-layout placeholder.
+    // 80x24 is also a valid initialized terminal size, and a common one; only
+    // the semantic flag distinguishes it from the pre-layout placeholder.
     assert_eq!(
         shared_size_to_report(true, TerminalBounds::default()),
-        Some((100, 6))
+        Some((80, 24))
     );
 }
 
@@ -401,16 +401,17 @@ fn an_arbitrated_size_is_only_applied_when_it_differs() {
 
     // Before the first layout a terminal reports the placeholder a
     // `TerminalContent` starts with. Treating that as the window's real size is
-    // what imposed the wrong shared viewport: the placeholder is 100x6, so
-    // 98x51 looked like a large change.
+    // what imposed the wrong shared viewport: the placeholder was 100x6 then,
+    // so 98x51 looked like a large change. It is 80x24 now, which would look
+    // like a match for an 80x24 viewer it has never been laid out for.
     assert_eq!(
         TerminalBounds::default().num_columns(),
-        100,
+        80,
         "the placeholder this guards against"
     );
-    assert_eq!(TerminalBounds::default().num_lines(), 6);
+    assert_eq!(TerminalBounds::default().num_lines(), 24);
     assert_eq!(
-        shared_size_action(false, Some(TerminalBounds::default()), None, 98, 51),
+        shared_size_action(false, Some(TerminalBounds::default()), None, 80, 24),
         SharedSizeAction::WaitForLayout
     );
     // No terminal yet is the same answer: wait, and stay pending.

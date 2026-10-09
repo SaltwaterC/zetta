@@ -106,6 +106,8 @@ struct SpawnedTerminal {
 }
 
 struct LocalTerminalLaunch {
+    /// The grid the terminal starts at before its first layout, if known.
+    initial_bounds: Option<terminal::TerminalBounds>,
     tab_id: u64,
     pane_id: u64,
     attention_id: u64,
@@ -1210,6 +1212,13 @@ impl Zetta {
             tracked_multi_command_launch,
             restore: restore_options,
         } = request;
+        // The launch's `--geometry`: the window is sized for it before it is
+        // shown (see `fit_window_to_pending_grid`), and the terminal starts at
+        // it so that a program asking before the first layout already sees it.
+        let launch_grid = self.launch_grid.take();
+        if let Some(grid) = launch_grid {
+            self.request_pane_grid(tab_id, pane_id, grid.columns, grid.rows, window, cx);
+        }
         let Some(shell) = self.resolve_spawn_shell(
             &profile,
             shell,
@@ -1357,6 +1366,10 @@ impl Zetta {
         }
         self.spawn_prepared_local_terminal(
             LocalTerminalLaunch {
+                initial_bounds: launch_grid.map(|grid| {
+                    terminal_view::TerminalCellMetrics::standalone(cx)
+                        .bounds_for_grid(grid.columns, grid.rows)
+                }),
                 tab_id,
                 pane_id,
                 attention_id,
@@ -1386,6 +1399,7 @@ impl Zetta {
         cx: &mut Context<Self>,
     ) {
         let LocalTerminalLaunch {
+            initial_bounds,
             tab_id,
             pane_id,
             attention_id,
@@ -1440,6 +1454,7 @@ impl Zetta {
                 .clone()
                 .map(|provider| provider as Arc<dyn terminal::PtyProvider>),
             initial_console_palette,
+            initial_bounds,
         );
         let this = cx.entity().downgrade();
         let spawned = SpawnedTerminal {
@@ -2790,6 +2805,7 @@ impl Zetta {
                 .clone()
                 .map(|provider| provider as Arc<dyn terminal::PtyProvider>),
             initial_console_palette,
+            None,
         );
 
         let this = cx.entity().downgrade();

@@ -267,6 +267,10 @@ pub(crate) fn help_text(profiles: &[Profile]) -> String {
             "Non-persistently override --profile's theme for this launch",
         ),
         (
+            "-g, --geometry COLUMNSxROWS",
+            "Open the window sized so its first pane has this grid, such as 80x24",
+        ),
+        (
             "-w, --new-window",
             "Open a fresh OS window without resuming a dormant session",
         ),

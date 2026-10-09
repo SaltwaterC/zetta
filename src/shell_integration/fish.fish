@@ -112,7 +112,7 @@ function __zetta_should_use_owner
     while test $index -le (count $argv)
         set -l argument $argv[$index]
         switch $argument
-            case --config -c --keymap -k --profile -p --split -s --theme -t --zetta-profile-actions-generation
+            case --config -c --keymap -k --profile -p --split -s --theme -t --geometry -g --zetta-profile-actions-generation
                 set index (math $index + 2)
             case --new-window --command --replace-pane
                 return 0
@@ -597,7 +597,7 @@ function __zetta_profile_operation
         end
         if test $seen -eq 0
             switch $word
-                case --config -c --keymap -k --profile -p --split -s --theme -t
+                case --config -c --keymap -k --profile -p --split -s --theme -t --geometry -g
                     set skip 1
                 case --command -e
                     return 1
@@ -631,7 +631,7 @@ function __zetta_has_profile_subcommand
             continue
         end
         switch $word
-            case --config -c --keymap -k --profile -p --split -s --theme -t
+            case --config -c --keymap -k --profile -p --split -s --theme -t --geometry -g
                 set skip 1
             case --command -e
                 return 1
@@ -661,7 +661,7 @@ function __zetta_profile_argument_count
         end
         if test $seen -eq 0
             switch $word
-                case --config -c --keymap -k --profile -p --split -s --theme -t
+                case --config -c --keymap -k --profile -p --split -s --theme -t --geometry -g
                     set skip 1
                 case --command -e
                     return 1
@@ -723,7 +723,7 @@ function __zetta_use_subcommand
             continue
         end
         switch $word
-            case --config -c --keymap -k --profile -p --split -s --theme -t
+            case --config -c --keymap -k --profile -p --split -s --theme -t --geometry -g
                 set skip_next 1
                 continue
             case --command -e
@@ -907,6 +907,7 @@ function __zetta_long_options
                 --split 'Apply a configured pane split template' \
                 --replace-pane 'Replace the active pane in a running process' \
                 --theme 'Non-persistently override the profile theme' \
+                --geometry 'Open the first pane at COLUMNSxROWS' \
 # ZETTA_ZMUX_INTEGRATION_BEGIN
                 --no-mux 'Keep background sessions in this process for this launch' \
 # ZETTA_ZMUX_INTEGRATION_END
@@ -1143,6 +1144,7 @@ complete -c zetta -n '__zetta_use_subcommand' -l profile -r -a '(__zetta_profile
 complete -c zetta -n '__zetta_use_subcommand' -l split -r -a '(__zetta_pane_splits)' -d 'Apply a configured pane split template'
 complete -c zetta -n '__zetta_use_subcommand' -l replace-pane -d 'Replace the active pane in a running process'
 complete -c zetta -n '__zetta_use_subcommand' -l theme -r -a '(__zetta_profile_themes)' -d 'Non-persistently override the profile theme'
+complete -c zetta -n '__zetta_use_subcommand' -l geometry -x -d 'Open the first pane at COLUMNSxROWS'
 # ZETTA_ZMUX_INTEGRATION_BEGIN
 complete -c zetta -n '__zetta_use_subcommand' -l no-mux -d 'Keep background sessions in this process for this launch'
 # ZETTA_ZMUX_INTEGRATION_END

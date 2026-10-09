@@ -1,9 +1,11 @@
 mod blink_manager;
 mod clipboard;
+mod grid_fit;
 mod scrollback_temp;
 mod terminal_element;
 mod terminal_scrollbar;
 
+pub use grid_fit::{TerminalCellMetrics, element_size_for_grid, grid_for_element_size};
 pub use scrollback_temp::{
     claim_for_editor as claim_scrollback_for_editor, remove_managed as remove_scrollback_file,
     start_cleanup_monitor as start_scrollback_cleanup_monitor,

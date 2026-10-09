@@ -171,6 +171,7 @@ fn parse_benchmark_args(arguments: &[OsString]) -> Result<StartupArgs> {
         split: None,
         replace_pane: false,
         theme_override: None,
+        geometry: None,
         no_mux: false,
         mode,
         profile_report,

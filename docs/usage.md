@@ -120,6 +120,24 @@ entries can override those templates or add new ones. `--split` can be
 combined with `--profile` and `--theme`; it applies only to the initial
 window.
 
+Open the first pane at an exact grid with either form:
+
+```sh
+zetta --geometry 80x24
+zetta -g 132x43 --profile "PROFILE"
+```
+
+The window is sized for the grid before it is first shown, and the first
+pane's terminal starts at that grid, so a program started in it sees the
+requested size from its first query and is never resized under it; a
+compositor has no resize to undo either. Without `--geometry`, a program that
+asks before the pane's first layout sees 80x24 until the pane's real size
+arrives a few milliseconds later. A font whose line height
+is not a whole number of device pixels cannot draw every row count; the window
+then opens at the next larger one. The size applies to this launch only, which
+therefore always opens its own window instead of handing off to a running
+Zetta, and it cannot be combined with `--split` or `--replace-pane`.
+
 Replace the active pane in an already running Zetta process with either a
 configured layout or a different profile:
 

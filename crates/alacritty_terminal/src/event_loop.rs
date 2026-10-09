@@ -15,6 +15,7 @@ use log::error;
 use polling::{Event as PollingEvent, Events, PollMode, Poller};
 
 use crate::event::{self, Event, EventListener, WindowSize};
+use crate::pty_parser::ParserThread;
 use crate::sync::FairMutex;
 use crate::term::Term;
 use crate::{thread, tty};
@@ -22,9 +23,6 @@ use vte::ansi;
 
 /// Max bytes to read from the PTY before forced terminal synchronization.
 pub(crate) const READ_BUFFER_SIZE: usize = 0x10_0000;
-
-/// Max bytes to read from the PTY while the terminal is locked.
-const MAX_LOCKED_READ: usize = u16::MAX as usize;
 
 /// How long a foreign child's PTY may stay hung up before the loop stops
 /// waiting for an exit report that is not coming.
@@ -202,7 +200,7 @@ pub struct EventLoop<T: tty::EventedPty, U: EventListener> {
 impl<T, U> EventLoop<T, U>
 where
     T: tty::EventedPty + event::OnResize + Send + 'static,
-    U: EventListener + Send + 'static,
+    U: EventListener + Clone + Send + 'static,
 {
     /// Create a new event loop.
     pub fn new(
@@ -251,11 +249,12 @@ where
     }
 
     #[inline]
+    /// Reads what the PTY has ready, up to one chunk, and queues it for the parser thread.
     fn pty_read<X>(
         &mut self,
         state: &mut State,
-        buf: &mut [u8],
-        mut writer: Option<&mut X>,
+        parser: &mut ParserThread,
+        writer: Option<&mut X>,
     ) -> io::Result<()>
     where
         X: Write,
@@ -267,101 +266,61 @@ where
         {
             state.profile.read_batches += 1;
         }
-        let mut unprocessed = 0;
-        let mut processed = 0;
 
-        // Reserve the next terminal lock for PTY reading.
-        let terminal_lease = Some(self.terminal.lease());
-        let mut terminal = None;
-
-        loop {
-            // Read from the PTY.
+        let mut chunk = parser.take_chunk()?;
+        let result = loop {
+            if chunk.unfilled().is_empty() {
+                break Ok(());
+            }
             #[cfg(windows)]
             {
                 state.profile.read_calls += 1;
             }
-            match self.pty.reader().read(&mut buf[unprocessed..]) {
+            match self.pty.reader().read(chunk.unfilled()) {
                 // This is received on Windows/macOS when no more data is readable from the PTY.
-                Ok(0) if unprocessed == 0 => break,
+                Ok(0) => break Ok(()),
                 Ok(got) => {
                     #[cfg(windows)]
                     {
                         state.profile.bytes += got as u64;
                     }
-                    unprocessed += got;
+                    chunk.advance(got);
                 },
                 Err(err) => match err.kind() {
-                    ErrorKind::Interrupted | ErrorKind::WouldBlock => {
-                        // Go back to mio if we're caught up on parsing and the PTY would block.
-                        if unprocessed == 0 {
-                            break;
-                        }
-                    },
-                    _ => return Err(err),
+                    ErrorKind::Interrupted => continue,
+                    // Go back to mio once the PTY would block.
+                    ErrorKind::WouldBlock => break Ok(()),
+                    _ => break Err(err),
                 },
             }
+        };
 
-            // Attempt to lock the terminal.
-            let terminal_guard = match &mut terminal {
-                Some(terminal) => terminal,
-                None => terminal.insert(match self.terminal.try_lock_unfair() {
-                    // Force block if we are at the buffer size limit.
-                    None if unprocessed >= READ_BUFFER_SIZE => self.terminal.lock_unfair(),
-                    None => continue,
-                    Some(terminal) => terminal,
-                }),
-            };
+        // Bytes read before an error were still produced by the child, so they are parsed
+        // whatever the error means for the next read.
+        let read = chunk.filled();
 
-            // Write a copy of the bytes to the ref test file.
-            if let Some(writer) = &mut writer {
-                writer.write_all(&buf[..unprocessed]).unwrap();
-            }
-
-            // Detect the one window-manipulation escape sequence Zetta
-            // supports before the generic parser discards unsupported xterm
-            // window operations. Keeping this scanner in the PTY reader makes
-            // it work identically for Unix PTYs and Windows ConPTY.
-            state.resize_requests.advance(&buf[..unprocessed], |rows, columns| {
-                self.event_proxy.send_event(Event::ResizeRequest { rows, columns });
-            });
-
-            // A private OSC carries requests from interactive SSH children.
-            // The parser ignores it for display; this scanner reports each
-            // complete frame to the owning terminal instead.
-            state.clipboard_frames.observe(&buf[..unprocessed], |frame| {
-                self.event_proxy.send_event(Event::ClipboardFrame(frame));
-            });
-
-            // Parse the incoming bytes.
-            #[cfg(windows)]
-            let parse_started = Instant::now();
-            state.parser.advance(&mut **terminal_guard, &buf[..unprocessed]);
-            #[cfg(windows)]
-            {
-                state.profile.parse_ns += parse_started.elapsed().as_nanos();
-                state.profile.parse_calls += 1;
-            }
-
-            processed += unprocessed;
-            unprocessed = 0;
-
-            // Assure we're not blocking the terminal too long unnecessarily.
-            if processed >= MAX_LOCKED_READ {
-                break;
-            }
+        // Write a copy of the bytes to the ref test file.
+        if let Some(writer) = writer {
+            writer.write_all(read).unwrap();
         }
 
-        // Release the terminal before notifying the UI. Event listeners are permitted to apply
-        // backpressure to hidden terminals, which must never extend the live grid lock duration.
-        drop(terminal);
-        drop(terminal_lease);
+        // Detect the one window-manipulation escape sequence Zetta
+        // supports before the generic parser discards unsupported xterm
+        // window operations. Keeping this scanner in the PTY reader makes
+        // it work identically for Unix PTYs and Windows ConPTY.
+        state.resize_requests.advance(read, |rows, columns| {
+            self.event_proxy.send_event(Event::ResizeRequest { rows, columns });
+        });
 
-        // Queue terminal redraw unless all processed bytes were synchronized.
-        if state.parser.sync_bytes_count() < processed && processed > 0 {
-            self.event_proxy.send_event(Event::Wakeup);
-        }
+        // A private OSC carries requests from interactive SSH children.
+        // The parser ignores it for display; this scanner reports each
+        // complete frame to the owning terminal instead.
+        state.clipboard_frames.observe(read, |frame| {
+            self.event_proxy.send_event(Event::ClipboardFrame(frame));
+        });
 
-        Ok(())
+        parser.parse(chunk)?;
+        result
     }
 
     #[inline]
@@ -399,7 +358,6 @@ where
     pub fn spawn(mut self) -> JoinHandle<(Self, State)> {
         thread::spawn_named("PTY reader", move || {
             let mut state = State::default();
-            let mut buf = [0u8; READ_BUFFER_SIZE];
             // A normal child exit and an explicit shutdown both leave the
             // loop intentionally. Any other exit is an infrastructure
             // failure and must be visible to the owning terminal.
@@ -433,14 +391,19 @@ where
                 None
             };
 
-            'event_loop: loop {
-                // Wakeup the event loop when a synchronized update timeout was reached.
-                let handler = state.parser.sync_timeout();
-                let timeout =
-                    handler.sync_timeout().map(|st| st.saturating_duration_since(Instant::now()));
+            // Parsing, and with it the synchronized update timeout, happens on its own thread;
+            // this one only does the I/O. Every exit below finishes the parser before it reports
+            // anything, so the grid holds all the child's output by the time its exit is seen.
+            let mut parser = ParserThread::spawn(
+                self.terminal.clone(),
+                self.event_proxy.clone(),
+                self.replay_barrier.clone(),
+                std::mem::take(&mut state.parser),
+            );
 
+            'event_loop: loop {
                 events.clear();
-                if let Err(err) = self.poll.wait(&mut events, timeout) {
+                if let Err(err) = self.poll.wait(&mut events, None) {
                     match err.kind() {
                         ErrorKind::Interrupted => continue,
                         _ => {
@@ -448,13 +411,6 @@ where
                             break 'event_loop;
                         },
                     }
-                }
-
-                // Handle synchronized update timeout.
-                if events.is_empty() && self.rx.peek().is_none() {
-                    state.parser.stop_sync(&mut *self.terminal.lock());
-                    self.event_proxy.send_event(Event::Wakeup);
-                    continue;
                 }
 
                 // Handle channel events, if there are any.
@@ -468,8 +424,9 @@ where
                         tty::PTY_CHILD_EVENT_TOKEN => {
                             if let Some(child_event) = self.pty.next_child_event() {
                                 if self.drain_on_exit {
-                                    let _ = self.pty_read(&mut state, &mut buf, pipe.as_mut());
+                                    let _ = self.pty_read(&mut state, &mut parser, pipe.as_mut());
                                 }
+                                state.finish_parsing(&mut parser);
 
                                 // Report an exit only after the configured final drain. Its
                                 // consumer can release the PTY resources as soon as it sees the
@@ -510,6 +467,7 @@ where
                             if event.is_interrupt() {
                                 // Don't try to do I/O on a dead PTY.
                                 if hungup_too_long(&self.pty, &mut hangup_since) {
+                                    state.finish_parsing(&mut parser);
                                     self.event_proxy.send_event(Event::ChildExitStatusUnavailable);
                                     self.terminal.lock().exit();
                                     self.event_proxy.send_event(Event::Wakeup);
@@ -520,7 +478,8 @@ where
                             }
 
                             if event.readable {
-                                if let Err(err) = self.pty_read(&mut state, &mut buf, pipe.as_mut())
+                                if let Err(err) =
+                                    self.pty_read(&mut state, &mut parser, pipe.as_mut())
                                 {
                                     // On Linux, a `read` on the master side of a PTY can fail
                                     // with `EIO` if the client side hangs up.  In that case,
@@ -530,6 +489,7 @@ where
                                     #[cfg(target_os = "linux")]
                                     if err.raw_os_error() == Some(libc::EIO) {
                                         if hungup_too_long(&self.pty, &mut hangup_since) {
+                                            state.finish_parsing(&mut parser);
                                             self.event_proxy
                                                 .send_event(Event::ChildExitStatusUnavailable);
                                             self.terminal.lock().exit();
@@ -579,6 +539,10 @@ where
                     }
                 }
             }
+
+            // Whatever was read is parsed before the loop is seen to end: a reader taking over the
+            // terminal waits for this thread, and its bytes are newer than these.
+            state.finish_parsing(&mut parser);
 
             // The evented instances are not dropped here so deregister them explicitly.
             let _ = self.pty.deregister(&self.poll);
@@ -836,6 +800,19 @@ struct PtyProfile {
 }
 
 impl State {
+    /// Waits for everything read so far to be parsed, and takes the parser back.
+    fn finish_parsing(&mut self, parser: &mut ParserThread) {
+        let Some(outcome) = parser.finish() else {
+            return;
+        };
+        self.parser = outcome.parser;
+        #[cfg(windows)]
+        {
+            self.profile.parse_calls += outcome.parse_calls;
+            self.profile.parse_ns += outcome.parse_time.as_nanos();
+        }
+    }
+
     #[inline]
     fn ensure_next(&mut self) {
         if self.writing.is_none() {
@@ -894,14 +871,6 @@ struct PeekableReceiver<T> {
 impl<T> PeekableReceiver<T> {
     fn new(rx: Receiver<T>) -> Self {
         Self { rx, peeked: None }
-    }
-
-    fn peek(&mut self) -> Option<&T> {
-        if self.peeked.is_none() {
-            self.peeked = self.rx.try_recv().ok();
-        }
-
-        self.peeked.as_ref()
     }
 
     fn recv(&mut self) -> Option<T> {
@@ -1080,5 +1049,180 @@ mod tests {
         // impossible to close after its multiplexer stopped reporting.
         let mut elapsed = Some(Instant::now() - FOREIGN_CHILD_HANGUP_GRACE);
         assert!(hungup_too_long(&StubPty(true), &mut elapsed));
+    }
+
+    /// Output from a real child through a real pty, into an `EventLoop` exactly as the
+    /// application spawns one.
+    #[cfg(unix)]
+    mod through_a_pty {
+        use std::time::Duration;
+
+        use super::*;
+        use crate::grid::Dimensions;
+        use crate::index::Column;
+        use crate::term::Config;
+        use crate::term::test::TermSize;
+
+        /// What the grid showed at the moment the child's exit was reported.
+        struct Exit {
+            at: Instant,
+            cursor_line: String,
+        }
+
+        /// Records the child's exit report, reading the grid as it arrives: the application acts
+        /// on the report itself, not on whatever the grid shows a moment later.
+        #[derive(Clone, Default)]
+        struct ExitListener(Arc<ExitState>);
+
+        #[derive(Default)]
+        struct ExitState {
+            terminal: std::sync::OnceLock<std::sync::Weak<FairMutex<Term<ExitListener>>>>,
+            exit: Mutex<Option<Exit>>,
+            changed: Condvar,
+        }
+
+        impl EventListener for ExitListener {
+            fn send_event(&self, event: Event) {
+                if matches!(event, Event::ChildExit(_) | Event::ChildExitStatusUnavailable) {
+                    let at = Instant::now();
+                    let terminal = self.0.terminal.get().and_then(std::sync::Weak::upgrade);
+                    let cursor_line = terminal
+                        .map(|terminal| cursor_line_text(&terminal.lock()))
+                        .unwrap_or_default();
+                    *self.0.exit.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                        Some(Exit { at, cursor_line });
+                    self.0.changed.notify_all();
+                }
+            }
+        }
+
+        impl ExitListener {
+            fn wait(&self) -> Exit {
+                let exit = self.0.exit.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                let (mut exit, timeout) = self
+                    .0
+                    .changed
+                    .wait_timeout_while(exit, Duration::from_secs(120), |exit| exit.is_none())
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                assert!(!timeout.timed_out(), "the child's exit was never reported");
+                exit.take().unwrap()
+            }
+        }
+
+        /// Runs `sh -c script` in a `columns`x`lines` terminal, keeping the terminal locked for
+        /// `held` after the event loop starts so that its parser falls behind. Returns the line
+        /// the cursor was on when the exit was reported, and how long the report took from
+        /// spawning the child.
+        fn run(
+            script: &str,
+            columns: usize,
+            lines: usize,
+            history: usize,
+            held: Duration,
+        ) -> (String, Duration) {
+            let listener = ExitListener::default();
+            let config = Config { scrolling_history: history, ..Config::default() };
+            let terminal = Arc::new(FairMutex::new(Term::new(
+                config,
+                &TermSize::new(columns, lines),
+                listener.clone(),
+            )));
+            listener.0.terminal.set(Arc::downgrade(&terminal)).unwrap();
+            let options = tty::Options {
+                shell: Some(tty::Shell::new("sh".into(), vec!["-c".into(), script.into()])),
+                drain_on_exit: true,
+                ..tty::Options::default()
+            };
+            let window_size = WindowSize {
+                num_lines: lines as u16,
+                num_cols: columns as u16,
+                cell_width: 8,
+                cell_height: 16,
+            };
+            let started = Instant::now();
+            let pty = tty::new(&options, window_size, 0).unwrap();
+            let event_loop = EventLoop::new(
+                terminal.clone(),
+                listener.clone(),
+                pty,
+                true,
+                false,
+                ReplayBarrier::open(),
+            )
+            .unwrap();
+            let held_terminal = terminal.lock();
+            let join = event_loop.spawn();
+            std::thread::sleep(held);
+            drop(held_terminal);
+            let exit = listener.wait();
+            join.join().unwrap();
+            (exit.cursor_line, exit.at - started)
+        }
+
+        fn cursor_line_text(term: &Term<ExitListener>) -> String {
+            let line = term.grid().cursor.point.line;
+            (0..term.columns()).map(|column| term.grid()[line][Column(column)].c).collect()
+        }
+
+        fn payload_file(name: &str, bytes: &[u8]) -> std::path::PathBuf {
+            let path = std::env::temp_dir()
+                .join(format!("alacritty-event-loop-{}-{name}", std::process::id()));
+            std::fs::write(&path, bytes).unwrap();
+            path
+        }
+
+        /// Seeded random bytes, as `cat` of a binary file delivers them.
+        fn random_bytes(len: usize) -> Vec<u8> {
+            let mut state = 0x5117_u64;
+            (0..len)
+                .map(|_| {
+                    state =
+                        state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                    (state >> 56) as u8
+                })
+                .collect()
+        }
+
+        /// The application closes a pane on the exit report, so the child's last output has to
+        /// be on the grid by then, however far the parser had fallen behind the reads. Holding
+        /// the terminal while the child runs puts the whole output in the parser's queue, which
+        /// still fits it, so the child has exited before the parser starts.
+        #[test]
+        fn the_last_output_is_on_the_grid_when_the_exit_is_reported() {
+            let line = [b'x'; 79].iter().copied().chain(*b"\n").collect::<Vec<_>>();
+            let path = payload_file("tail", &line.repeat(768 * 1024 / line.len()));
+            let script = format!("cat '{}'; printf 'the end'", path.display());
+            let (text, _) = run(&script, 80, 24, 500, Duration::from_millis(300));
+            std::fs::remove_file(&path).unwrap();
+            assert_eq!(text.trim_end(), "the end");
+        }
+
+        fn throughput(name: &str, payload: &[u8]) {
+            let path = payload_file(name, payload);
+            let script = format!("cat '{}'", path.display());
+            let (_, elapsed) = run(&script, 80, 24, 500, Duration::ZERO);
+            std::fs::remove_file(&path).unwrap();
+            let mib = payload.len() as f64 / (1024.0 * 1024.0);
+            eprintln!(
+                "{name}: {mib:.0} MiB in {elapsed:.2?}, {:.0} MiB/s",
+                mib / elapsed.as_secs_f64()
+            );
+        }
+
+        /// The ASCII half of the comparison against other terminals: `cat` of one repeated
+        /// 80-column line into an 80x24 grid with 500 lines of history.
+        #[test]
+        #[ignore = "manual optimized-build throughput check"]
+        fn ascii_through_the_event_loop_throughput_benchmark() {
+            let line = (0..80u8).map(|index| b' ' + index % 95).chain(*b"\n").collect::<Vec<_>>();
+            throughput("ascii", &line.repeat(256 * 1024 * 1024 / line.len()));
+        }
+
+        /// The random half of the same comparison.
+        #[test]
+        #[ignore = "manual optimized-build throughput check"]
+        fn random_through_the_event_loop_throughput_benchmark() {
+            throughput("random", &random_bytes(32 * 1024 * 1024));
+        }
     }
 }

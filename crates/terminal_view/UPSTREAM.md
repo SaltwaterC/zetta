@@ -19,6 +19,15 @@ events it rebroadcasts behind it.
 A hovered word is matched by id rather than by value, because the terminal
 shifts a carried match's lines as output scrolls and comparing whole words made
 the link blink out for the frames in which the two disagreed.
+`src/grid_fit.rs`, a Zetta-authored module (tests in `src/tests/grid_fit.rs`),
+owns how a standalone element turns its space into a grid and back: the
+terminal font as settings resolve it, the snap of the height to whole rows of
+the device-rounded line height, and the element size that lays out a given
+grid. The element's prepaint calls `TerminalFont::from_settings` and
+`snap_to_rows` instead of resolving them inline, so sizing a window for a
+grid before it has a terminal (Zetta's `--geometry`) cannot drift from what
+the element then lays out; `default_terminal_font_features` and
+`resolve_cell_width` are `pub(crate)` for it.
 Zed editor, workspace, project, database,
 language, panel, and persistence integrations are out of scope unless Zetta
 independently adopts the corresponding feature.

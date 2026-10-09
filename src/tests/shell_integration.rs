@@ -2821,7 +2821,7 @@ fn generated_scripts_only_offer_long_form_flags() {
         match shell {
             ShellIntegration::Bash => {
                 assert!(script.contains(
-                    "terminal-size mux pane profile project cmd edit vi init mosh serial http tftp notify attention copy paste splits tabicon theme overlay wt --help --version --config --keymap --profile --split --replace-pane --theme --no-mux --new-window --command'"
+                    "terminal-size mux pane profile project cmd edit vi init mosh serial http tftp notify attention copy paste splits tabicon theme overlay wt --help --version --config --keymap --profile --split --replace-pane --theme --geometry --no-mux --new-window --command'"
                 ));
                 assert!(script.contains("auto zetta bash zsh fish"));
                 assert!(script.contains("_zetta_complete_project_commands"));
@@ -2842,7 +2842,7 @@ fn generated_scripts_only_offer_long_form_flags() {
             }
             ShellIntegration::PowerShell => {
                 assert!(script.contains(
-                    "'--help', '--version', '--config', '--keymap', '--profile', '--split', '--replace-pane', '--theme', '--no-mux', '--new-window', '--command'"
+                    "'--help', '--version', '--config', '--keymap', '--profile', '--split', '--replace-pane', '--theme', '--geometry', '--no-mux', '--new-window', '--command'"
                 ));
                 assert!(script.contains("'overlay', 'wt', '--help'"));
                 assert!(script.contains("'auto', 'zetta', 'bash', 'zsh', 'fish'"));

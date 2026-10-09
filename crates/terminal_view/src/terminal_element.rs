@@ -24,6 +24,7 @@ use util::ResultExt;
 use std::mem;
 use std::{cell::RefCell, fmt::Debug, rc::Rc, sync::Arc, sync::OnceLock};
 
+use crate::grid_fit::{TerminalFont, snap_to_rows};
 use crate::{BlockContext, BlockProperties, ContentMode, TerminalMode, TerminalView};
 
 #[derive(Clone, Copy)]
@@ -1438,7 +1439,7 @@ impl TerminalElement {
 /// sets `terminal.font_features`, so this is what every pane resolves to. Built
 /// once: the value is an `Arc` internally, so callers clone a refcount rather
 /// than a `String`, a `Vec` and an `Arc` per prepaint.
-fn default_terminal_font_features() -> FontFeatures {
+pub(crate) fn default_terminal_font_features() -> FontFeatures {
     static DEFAULT: OnceLock<FontFeatures> = OnceLock::new();
     DEFAULT.get_or_init(FontFeatures::disable_ligatures).clone()
 }
@@ -1454,7 +1455,7 @@ fn default_terminal_font_features() -> FontFeatures {
 /// contract: a changed font is simply a different key, so there is no event that
 /// has to remember to clear it. One entry, because panes overwhelmingly share a
 /// font and a miss costs what this replaced.
-fn resolve_cell_width(font: &Font, font_size: Pixels, cx: &App) -> Pixels {
+pub(crate) fn resolve_cell_width(font: &Font, font_size: Pixels, cx: &App) -> Pixels {
     thread_local! {
         static MEMO: RefCell<Option<(Font, Pixels, Pixels)>> = const { RefCell::new(None) };
     }
@@ -1553,51 +1554,24 @@ impl Element for TerminalElement {
             cx,
             |_, _, hitbox, window, cx| {
                 let hitbox = hitbox.unwrap();
-                // Borrowed, not cloned: this runs for every pane on every frame
-                // and only three fields are read, while `ThemeSettings` carries
-                // a dozen fonts and shared strings.
-                let settings = ThemeSettings::get_global(cx);
-                let buffer_font = settings.buffer_font.clone();
-                let buffer_font_size = settings.buffer_font_size(cx);
+                let minimum_contrast = TerminalSettings::get_global(cx).minimum_contrast;
 
-                let terminal_settings = TerminalSettings::get_global(cx);
-                let minimum_contrast = terminal_settings.minimum_contrast;
-
-                let font_family = terminal_settings.font_family.as_ref().map_or_else(
-                    || buffer_font.family.clone(),
-                    |font_family| font_family.0.clone().into(),
-                );
-
-                let font_fallbacks = terminal_settings
-                    .font_fallbacks
-                    .as_ref()
-                    .or(buffer_font.fallbacks.as_ref())
-                    .cloned();
-
-                // Zetta does not set `font_features`, so this fallback is the
-                // default path rather than the rare one, and building it means
-                // a `String`, a `Vec` and an `Arc` for every pane on every
-                // frame. Built once and cloned as an `Arc` bump instead.
-                let font_features = terminal_settings
-                    .font_features
-                    .clone()
-                    .unwrap_or_else(default_terminal_font_features);
-
-                let font_weight = terminal_settings.font_weight.unwrap_or_default();
-
-                let line_height = terminal_settings.line_height.value();
+                // Shared with sizing a window for a grid before it has a
+                // terminal; see `grid_fit`.
+                let TerminalFont {
+                    family: font_family,
+                    fallbacks: font_fallbacks,
+                    features: font_features,
+                    weight: font_weight,
+                    line_height,
+                    standalone_size,
+                } = TerminalFont::from_settings(cx);
 
                 let font_size = match &self.mode {
                     TerminalMode::Embedded { .. } => {
                         window.text_style().font_size.to_pixels(window.rem_size())
                     }
-                    TerminalMode::Standalone => self.font_size_override.unwrap_or_else(|| {
-                        terminal_settings
-                            .font_size
-                            .map_or(buffer_font_size, |size| {
-                                theme_settings::adjusted_font_size(size, cx)
-                            })
-                    }),
+                    TerminalMode::Standalone => self.font_size_override.unwrap_or(standalone_size),
                 };
 
                 let theme = self.theme.clone().unwrap_or_else(|| cx.theme().clone());
@@ -1661,25 +1635,8 @@ impl Element for TerminalElement {
                             content.mode.contains(Modes::ALT_SCREEN)
                                 || (content.scrolled_to_bottom && content.bottom_row_occupied)
                         };
-                        let scale_factor = window.scale_factor();
-                        let line_height_pixels = px(line_height);
-                        let line_height_device_px = (f32::from(line_height_pixels) * scale_factor)
-                            .round()
-                            .max(1.0) as i32;
-                        let available_height_device_px =
-                            (f32::from(available_height) * scale_factor)
-                                .floor()
-                                .max(0.0) as i32;
-
-                        let rows =
-                            ((available_height_device_px / line_height_device_px) as usize).max(1);
-                        let snapped_height_device_px = (rows as i32) * line_height_device_px;
-                        let padding_device_px =
-                            (available_height_device_px - snapped_height_device_px).max(0);
-
-                        let snapped_height =
-                            px(snapped_height_device_px as f32 / scale_factor.max(1.0));
-                        let padding = px(padding_device_px as f32 / scale_factor.max(1.0));
+                        let (snapped_height, padding) =
+                            snap_to_rows(available_height, px(line_height), window.scale_factor());
 
                         size.height = snapped_height;
                         if should_anchor_to_bottom {

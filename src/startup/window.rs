@@ -66,6 +66,11 @@ pub(crate) fn open_zetta_window(
             zetta
         })
         .context("opening Zetta window")?;
+    // `open_window` has laid the window out once but the platform has not shown
+    // it yet, which is the one moment a resize is simply the size it opens at.
+    window_handle.update(cx, |zetta, window, cx| {
+        zetta.fit_window_to_pending_grid(window, cx)
+    })?;
     if let Some(activation_token) = activation_token {
         window_handle.update(cx, |_, window, _| {
             gpui_platform::activate_window_with_token(window, &activation_token);

@@ -110,6 +110,7 @@ fn grid_request(columns: usize, rows: usize, now: Instant) -> PendingGridRequest
         rows,
         attempts: 0,
         settles_at: now + GRID_REQUEST_SETTLE,
+        placeholder: Rc::default(),
     }
 }
 

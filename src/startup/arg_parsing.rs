@@ -97,6 +97,13 @@ pub(crate) struct AttentionCommand {
     pub(crate) notification: NotificationRequest,
 }
 
+/// The grid `--geometry` opens the first pane at.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct TerminalGrid {
+    pub(crate) columns: usize,
+    pub(crate) rows: usize,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct TerminalResize {
     pub(crate) columns: Option<usize>,
@@ -112,6 +119,8 @@ pub(crate) struct StartupArgs {
     pub(crate) replace_pane: bool,
     /// Non-persistently overrides `profile`'s configured theme for this launch only.
     pub(crate) theme_override: Option<String>,
+    /// Sizes the window this launch opens so its first pane has this grid.
+    pub(crate) geometry: Option<TerminalGrid>,
     /// Explicitly retain the legacy in-process session owner instead of
     /// requiring the daemon-backed multiplexer.
     pub(crate) no_mux: bool,
@@ -145,6 +154,7 @@ impl StartupArgs {
             split: None,
             replace_pane: false,
             theme_override: None,
+            geometry: None,
             no_mux: !cfg!(feature = "zmux"),
             mode,
             profile_report: None,
@@ -272,6 +282,7 @@ fn parse_application_args(arguments: Vec<OsString>) -> Result<StartupArgs> {
     let mut split = None;
     let mut replace_pane = false;
     let mut theme_override = None;
+    let mut geometry = None;
     #[cfg(feature = "zmux")]
     let mut no_mux = false;
     #[cfg(not(feature = "zmux"))]
@@ -329,6 +340,12 @@ fn parse_application_args(arguments: Vec<OsString>) -> Result<StartupArgs> {
                         .to_string_lossy()
                         .into_owned(),
                 );
+            }
+            "--geometry" | "-g" => {
+                anyhow::ensure!(geometry.is_none(), "--geometry may only be specified once");
+                geometry = Some(parse_geometry(
+                    &args.next().context("--geometry requires COLUMNSxROWS")?,
+                )?);
             }
             #[cfg(feature = "zmux")]
             "--no-mux" | "-n" => {
@@ -417,6 +434,19 @@ fn parse_application_args(arguments: Vec<OsString>) -> Result<StartupArgs> {
         "--replace-pane cannot be combined with another startup mode"
     );
     anyhow::ensure!(
+        geometry.is_none() || matches!(mode, StartupMode::Application | StartupMode::Command(_)),
+        "--geometry cannot be combined with another startup mode"
+    );
+    anyhow::ensure!(
+        geometry.is_none() || !replace_pane,
+        "--geometry cannot be combined with --replace-pane"
+    );
+    // The window is sized for one pane filling it, before it is first shown.
+    anyhow::ensure!(
+        geometry.is_none() || split.is_none(),
+        "--geometry cannot be combined with --split"
+    );
+    anyhow::ensure!(
         !replace_pane || split.is_some() || profile.is_some(),
         "--replace-pane requires --split or --profile"
     );
@@ -461,6 +491,7 @@ fn parse_application_args(arguments: Vec<OsString>) -> Result<StartupArgs> {
         split,
         replace_pane,
         theme_override,
+        geometry,
         no_mux,
         mode,
         profile_report: None,
@@ -579,7 +610,8 @@ fn parse_profile_root_config(arguments: &[OsString]) -> Result<Option<PathBuf>> 
 pub(crate) fn should_handoff_to_existing_process(args: &StartupArgs) -> bool {
     // Plain `--profile` launches intentionally remain independent processes;
     // only the explicit fresh-window mode can carry a profile to an existing
-    // process.
+    // process. A `--geometry` launch sizes the window it opens, which a
+    // running process would not open.
     matches!(
         args.mode,
         StartupMode::Application | StartupMode::NewWindow | StartupMode::Command(_)
@@ -589,6 +621,19 @@ pub(crate) fn should_handoff_to_existing_process(args: &StartupArgs) -> bool {
         && !args.no_mux
         && (args.profile.is_none() || args.mode == StartupMode::NewWindow)
         && args.split.is_none()
+        && args.geometry.is_none()
+}
+
+/// `COLUMNSxROWS`, each a positive whole number a pty can carry.
+fn parse_geometry(argument: &OsString) -> Result<TerminalGrid> {
+    let text = argument.to_string_lossy();
+    let (columns, rows) = text
+        .split_once(['x', 'X'])
+        .with_context(|| format!("--geometry must be COLUMNSxROWS, not {text:?}"))?;
+    Ok(TerminalGrid {
+        columns: parse_terminal_resize_dimension(&columns.into(), "--geometry columns")?,
+        rows: parse_terminal_resize_dimension(&rows.into(), "--geometry rows")?,
+    })
 }
 
 pub(crate) fn should_replace_pane_in_existing_process(args: &StartupArgs) -> bool {

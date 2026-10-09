@@ -788,10 +788,16 @@ actions!(
     ]
 );
 
-const DEBUG_TERMINAL_WIDTH: Pixels = px(500.);
-const DEBUG_TERMINAL_HEIGHT: Pixels = px(30.);
 const DEBUG_CELL_WIDTH: Pixels = px(5.);
 const DEBUG_LINE_HEIGHT: Pixels = px(5.);
+/// The grid a terminal reports before its first layout gives it a real one.
+/// Upstream's placeholder was 100x6, which a program that looked early took for
+/// its terminal; this is the conventional size the multiplexer also starts a
+/// pane at.
+const PLACEHOLDER_COLUMNS: f32 = 80.;
+const PLACEHOLDER_LINES: f32 = 24.;
+const DEBUG_TERMINAL_WIDTH: Pixels = px(5. * PLACEHOLDER_COLUMNS);
+const DEBUG_TERMINAL_HEIGHT: Pixels = px(5. * PLACEHOLDER_LINES);
 
 /// Inserts Zetta-specific environment variables for terminal sessions.
 ///
@@ -2117,6 +2123,8 @@ struct ProvidedPtyRequest<'a> {
     output_processor: &'a mut Processor<StdSyncHandler>,
     console_palette: ConsolePalette,
     defer_replay: bool,
+    /// The grid the child should start at, when the caller knows it.
+    initial_size: Option<(u16, u16)>,
 }
 
 /// Asks `provider` for a PTY and turns it into one this process can drive.
@@ -2137,6 +2145,7 @@ fn open_provided_pty(request: ProvidedPtyRequest) -> Result<OpenedProvidedPty> {
         output_processor,
         console_palette,
         defer_replay: _defer_replay,
+        initial_size,
     } = request;
     let _ = pty_options;
     let (program, args) = match shell {
@@ -2149,6 +2158,7 @@ fn open_provided_pty(request: ProvidedPtyRequest) -> Result<OpenedProvidedPty> {
         env,
         working_directory,
         console_palette,
+        initial_size,
     })?;
     let (pty, child_events) =
         alacritty_terminal::tty::attach(handover.descriptor, handover.child_pid)?;
@@ -2173,6 +2183,7 @@ fn open_provided_pty(request: ProvidedPtyRequest) -> Result<OpenedProvidedPty> {
         output_processor,
         console_palette,
         defer_replay,
+        initial_size,
     } = request;
     let _ = pty_options;
     let (program, args) = match shell {
@@ -2185,6 +2196,7 @@ fn open_provided_pty(request: ProvidedPtyRequest) -> Result<OpenedProvidedPty> {
         env,
         working_directory,
         console_palette,
+        initial_size,
     })?;
     let (pty, child_events) =
         alacritty_terminal::tty::attach(handover.conout, handover.conin, handover.child_pid)?;
@@ -2249,6 +2261,9 @@ pub struct PtySpawnRequest {
     pub env: HashMap<String, String>,
     pub working_directory: Option<PathBuf>,
     pub console_palette: ConsolePalette,
+    /// The columns and lines the child should start at, when the pane's grid
+    /// is known before its first layout; otherwise the provider's own default.
+    pub initial_size: Option<(u16, u16)>,
 }
 
 /// A PTY opened elsewhere, handed to this process to read and write.
@@ -2416,7 +2431,7 @@ impl TerminalBuilder {
             replay_barrier: ReplayBarrier::open(),
             redraw_attached_on_first_layout: false,
             // Explicit bounds are an initialized display-only layout even when
-            // they happen to equal the default 100x6 dimensions. The no-bounds
+            // they happen to equal the default 80x24 dimensions. The no-bounds
             // constructor resets this after calling us above.
             terminal_size_initialized: true,
             size_initialization_queued: false,
@@ -2758,6 +2773,7 @@ impl TerminalBuilder {
             path_style,
             pty_provider,
             None,
+            None,
         )
     }
 
@@ -2780,6 +2796,7 @@ impl TerminalBuilder {
         path_style: PathStyle,
         pty_provider: Option<Arc<dyn PtyProvider>>,
         initial_console_palette: Option<ConsolePalette>,
+        initial_bounds: Option<TerminalBounds>,
     ) -> Task<Result<TerminalBuilder>> {
         Self::new_with_console_palette_and_options(
             working_directory,
@@ -2799,6 +2816,7 @@ impl TerminalBuilder {
             path_style,
             pty_provider,
             initial_console_palette,
+            initial_bounds,
             false,
         )
     }
@@ -2825,6 +2843,7 @@ impl TerminalBuilder {
         path_style: PathStyle,
         pty_provider: Option<Arc<dyn PtyProvider>>,
         initial_console_palette: Option<ConsolePalette>,
+        initial_bounds: Option<TerminalBounds>,
     ) -> Task<Result<TerminalBuilder>> {
         Self::new_with_console_palette_and_options(
             working_directory,
@@ -2844,6 +2863,7 @@ impl TerminalBuilder {
             path_style,
             pty_provider,
             initial_console_palette,
+            initial_bounds,
             true,
         )
     }
@@ -2867,6 +2887,7 @@ impl TerminalBuilder {
         path_style: PathStyle,
         pty_provider: Option<Arc<dyn PtyProvider>>,
         initial_console_palette: Option<ConsolePalette>,
+        initial_bounds: Option<TerminalBounds>,
         require_pty_provider: bool,
     ) -> Task<Result<TerminalBuilder>> {
         let version = release_channel::AppVersion::global(cx);
@@ -3013,13 +3034,12 @@ impl TerminalBuilder {
             // A provider may return retained bytes. The event loop is started
             // below, so decide whether its reader must wait before spawning it.
             let replay_barrier = ReplayBarrier::open();
+            // A pane whose grid is known before its first layout starts there,
+            // so a child that asks early sees that grid rather than the
+            // placeholder; the first layout then changes nothing.
+            let start_bounds = initial_bounds.unwrap_or_default();
             //Set up the terminal...
-            let term = new_term(
-                &config,
-                TerminalBounds::default(),
-                listener.clone(),
-                alternate_scroll,
-            );
+            let term = new_term(&config, start_bounds, listener.clone(), alternate_scroll);
 
             // When `no_pty` is set (headless hosts), run the task as a plain
             // subprocess and pump its piped output into the same emulator the
@@ -3116,8 +3136,10 @@ impl TerminalBuilder {
                         output_processor: &mut output_processor,
                         console_palette,
                         defer_replay: require_pty_provider,
+                        initial_size: initial_bounds
+                            .map(|bounds| (bounds.num_columns() as u16, bounds.num_lines() as u16)),
                     }),
-                    None => open_pty(&pty_options, TerminalBounds::default(), window_id)
+                    None => open_pty(&pty_options, start_bounds, window_id)
                         .map(|pty| (pty, None, Vec::new(), None))
                         .map_err(anyhow::Error::from),
                 };
@@ -3131,7 +3153,7 @@ impl TerminalBuilder {
                          instead: {error:#}"
                     );
                     multiplexer_error = Some(format!("{error:#}"));
-                    opened = open_pty(&pty_options, TerminalBounds::default(), window_id)
+                    opened = open_pty(&pty_options, start_bounds, window_id)
                         .map(|pty| (pty, None, Vec::new(), None))
                         .map_err(anyhow::Error::from);
                 }
@@ -3195,7 +3217,7 @@ impl TerminalBuilder {
             };
 
             let no_task = task.is_none();
-            let local_terminal_bounds = normalize_terminal_bounds(TerminalBounds::default());
+            let local_terminal_bounds = normalize_terminal_bounds(start_bounds);
             let terminal = Terminal {
                 task,
                 terminal_type,
@@ -7739,6 +7761,17 @@ mod tests {
         .terminal;
         assert!(explicit.is_size_initialized());
         assert!(!make_display_only_terminal(cx).is_size_initialized());
+    }
+
+    /// A program that asks for its size before the pane's first layout gets
+    /// the placeholder, so it has to be a size a terminal really has.
+    #[gpui::test]
+    fn the_placeholder_grid_is_the_conventional_terminal_size(cx: &mut TestAppContext) {
+        let bounds = TerminalBounds::default();
+        assert_eq!((bounds.num_columns(), bounds.num_lines()), (80, 24));
+        let terminal = make_display_only_terminal(cx);
+        let term = terminal.term.lock();
+        assert_eq!((term.columns(), term.screen_lines()), (80, 24));
     }
 
     #[gpui::test]
@@ -12461,7 +12494,7 @@ mod tests {
             })
             .detach();
 
-        // The first real layout can have the same 100x6 dimensions as the
+        // The first real layout can have the same 80x24 dimensions as the
         // display-only placeholder. It still has to initialize the semantic
         // size state and notify shared-session observers.
         window.update_window_entity(&terminal, |terminal, window, cx| {

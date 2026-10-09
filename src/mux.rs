@@ -583,14 +583,18 @@ impl PtyProvider for MuxPtyProvider {
             env: request.env.into_iter().collect(),
             working_directory: request.working_directory,
             // The real size is applied by the first resize, which happens as
-            // soon as the pane is laid out. Starting from a conventional
-            // terminal size rather than zero keeps a program that inspects it
-            // before then from seeing something impossible.
-            size: TerminalSize {
-                columns: 80,
-                lines: 24,
-                cell_width: 0,
-                cell_height: 0,
+            // soon as the pane is laid out, unless the pane's grid was known
+            // before that. Otherwise starting from a conventional terminal size
+            // rather than zero keeps a program that inspects it before then
+            // from seeing something impossible.
+            size: {
+                let (columns, lines) = request.initial_size.unwrap_or((80, 24));
+                TerminalSize {
+                    columns,
+                    lines,
+                    cell_width: 0,
+                    cell_height: 0,
+                }
             },
             console_palette: request.console_palette,
         })?;

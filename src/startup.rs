@@ -64,7 +64,7 @@ use arg_parsing::{
     validate_launch_split,
 };
 pub(crate) use arg_parsing::{
-    StartupMode, load_startup_config, native_terminal_environment, parse_args,
+    StartupMode, TerminalGrid, load_startup_config, native_terminal_environment, parse_args,
 };
 #[cfg(not(feature = "tftp-client"))]
 pub(crate) use cli_help::{TftpCommand, parse_tftp_args, tftp_help};
@@ -414,6 +414,7 @@ struct ApplicationLaunch {
     profile_pane_stress: bool,
     initial_command: Option<Vec<String>>,
     initial_working_directory: Option<PathBuf>,
+    geometry: Option<TerminalGrid>,
 }
 
 fn launch_gui(
@@ -544,6 +545,7 @@ fn resolve_application_launch(
         profile_pane_stress: args.profile_pane_stress,
         initial_command,
         initial_working_directory,
+        geometry: args.geometry,
     })
 }
 
@@ -778,6 +780,7 @@ fn open_launch_window(launch: ApplicationLaunch, cx: &mut App) {
                 initial_command: launch.initial_command,
                 initial_working_directory: launch.initial_working_directory,
                 initial_launch: None,
+                initial_grid: launch.geometry,
             },
             WindowLaunchOptions {
                 launch_split: launch.launch_split,

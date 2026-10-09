@@ -659,6 +659,27 @@ impl Zetta {
                 .child(format!("Starting {selected_profile_name}..."))
                 .into_any_element(),
         };
+        // The placeholder fills the space the terminal will, so a grid
+        // requested before the terminal exists can size the window from it.
+        let content = match self
+            .pending_grid_placeholder(tab.id, pane_id)
+            .filter(|_| selected_view.is_none())
+        {
+            Some(placeholder) => div()
+                .relative()
+                .size_full()
+                .child(content)
+                .child(
+                    canvas(
+                        move |bounds, _, _| placeholder.set(Some(bounds)),
+                        |_, _, _, _| {},
+                    )
+                    .absolute()
+                    .size_full(),
+                )
+                .into_any_element(),
+            None => content,
+        };
         let content = if selected_view.is_none() && tab.active_pane == pane_id {
             terminal_focus_placeholder(&self.terminal_placeholder_focus, content).into_any_element()
         } else {

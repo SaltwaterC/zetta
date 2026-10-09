@@ -57,12 +57,19 @@ sequence among them.
   decodes the rest in a single pass (`ground_dispatch_lossy`, `decode_utf8`),
   consuming exactly the bytes `Utf8Error::error_len` reports, so replacement
   characters and C1 executes come out as upstream produced them.
-- `Perform::ignores_execute` lets that pass skip a control the performer does
-  nothing for instead of ending the run at it. `ansi::Performer` answers it
-  from the same list `execute` matches; those bytes then go unlogged at debug
-  level when they arrive inside invalid text.
+- `Perform::IGNORED_EXECUTES` (a `control_bits` set) lets that pass skip a
+  control the performer does nothing for instead of ending the run at it.
+  `ansi::Performer` names every control but the ones `execute` matches; those
+  bytes then go unlogged at debug level when they arrive inside invalid text.
+  It is an associated constant so the pass can build its 256-entry `LossyByte`
+  table at compile time: random bytes defeated branch prediction on every byte,
+  so printable text, bytes that never start a character, ignored controls and
+  lead bytes whose successor rules out a character are table lookups without a
+  branch on the byte. Only the rest reach `decode_utf8`. That doubled binary
+  output parsing.
 
 Regression tests: `invalid_utf8_dispatches_as_upstream_did` in `src/lib.rs`
-compares the parser against upstream's algorithm on seeded binary noise, and
+compares the parser against upstream's algorithm on seeded binary noise, for a
+performer that ignores no controls and one that ignores most, and
 `ignored_controls_are_exactly_the_ones_execute_does_nothing_for` in
 `src/ansi.rs` pins the two control lists together.

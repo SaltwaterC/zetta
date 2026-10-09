@@ -212,7 +212,8 @@ enum SharedSizeAction {
 /// known yet.
 ///
 /// `None` before the terminal's first real layout. The bounds themselves are not
-/// a reliable sentinel: a valid initialized terminal can really be 100x6.
+/// a reliable sentinel: the placeholder is 80x24, which a laid-out terminal
+/// can equally be.
 #[cfg(feature = "zmux")]
 fn shared_size_to_report(
     size_initialized: bool,
@@ -230,9 +231,10 @@ fn shared_size_to_report(
 ///
 /// The semantic initialization check is the other half of the same bug. A
 /// terminal exposes the placeholder bounds a `TerminalContent` starts with
-/// until its pane has been laid out and synced once, and those are 100x6 — so a
-/// pane that was *already* the arbitrated 98x51 looked like a two-column,
-/// forty-five-row difference. Applying that placeholder before first paint also
+/// until its pane has been laid out and synced once. Those were 100x6, so a pane
+/// that was *already* the arbitrated 98x51 looked like a two-column,
+/// forty-five-row difference; they are 80x24 now, which an 80x24 arbitration
+/// would take for a match. Applying the placeholder before first paint also
 /// prevented the real capacity from correcting it.
 #[cfg(feature = "zmux")]
 fn shared_size_action(
