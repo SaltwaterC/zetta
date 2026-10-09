@@ -1221,6 +1221,23 @@ impl<T> Term<T> {
         let start = point.column;
         let end = Column(start.0 + text.len());
 
+        // Past the row's occupied bound every cell is blank, which is where a line of output
+        // lands once its row has scrolled in: no wide character to split, and an `extra` that is
+        // already the template's when the template has none, so the cells are written without
+        // reading them first.
+        let template = &self.grid.cursor.template;
+        if start.0 >= self.grid[point.line].occ && template.extra.is_none() {
+            let (fg, bg, flags) = (template.fg, template.bg, template.flags);
+            for (cell, &byte) in self.grid[point.line][start..end].iter_mut().zip(text) {
+                debug_assert!(cell.extra.is_none() && !cell.flags.intersects(Flags::WIDE_CHAR));
+                cell.c = ascii_run_char(byte);
+                cell.fg = fg;
+                cell.bg = bg;
+                cell.flags = flags;
+            }
+            return;
+        }
+
         // Overwriting part of a wide character also clears its other half, which
         // can lie outside the run. That is rare; leave it to the per-cell path.
         let wide = Flags::WIDE_CHAR | Flags::WIDE_CHAR_SPACER;
@@ -2930,6 +2947,18 @@ mod tests {
         assert!(term.history_size() <= 500);
     }
 
+    /// The ASCII half of the same comparison, parsed without a pty, which caps it below what the
+    /// parser can do: one repeated 80-column line, every row of a full 500-line history recycled
+    /// as it scrolls in.
+    #[test]
+    #[ignore = "manual optimized-build throughput check"]
+    fn ascii_output_throughput_benchmark() {
+        let line = (0..80u8).map(|index| b' ' + index % 95).chain(*b"\r\n").collect::<Vec<_>>();
+        let payload = line.repeat(256 * 1024 * 1024 / line.len());
+        let term = output_throughput_with_history(&payload, 80, 24, 500);
+        assert_eq!(term.history_size(), 500);
+    }
+
     #[test]
     fn scroll_display_page_up() {
         let size = TermSize::new(5, 10);
@@ -3233,6 +3262,8 @@ mod tests {
             ("fills a row exactly", b"", "0123456789"),
             ("resumes a pending wrap", b"0123456789", "abc"),
             ("starts mid row", b"\x1b[2;4H", "abcdefghijklm"),
+            ("starts past the occupied cells", b"ab\x1b[1;6H", "cdefghijkl"),
+            ("starts within the occupied cells", b"abcdefg\x1b[1;3H", "xyz"),
             ("overwrites a wide character", "漢字漢字漢\r".as_bytes(), "ab"),
             ("overwrites a wide spacer", "漢字漢字漢\x1b[1;2H".as_bytes(), "abc"),
             ("overwrites a leading spacer", "abcdefghi漢\x1b[1;10H".as_bytes(), "xy"),
@@ -3271,6 +3302,31 @@ mod tests {
                 bulk.grid.cursor.input_needs_wrap, per_character.grid.cursor.input_needs_wrap,
                 "{name}: pending wrap",
             );
+        }
+    }
+
+    /// Once history is full, every line scrolled in reuses the oldest row, which still holds what
+    /// it held a history ago. Text written onto it has to come out as it would on a new row,
+    /// whatever that row held: wide characters, hyperlinks, colours.
+    #[test]
+    fn input_ascii_onto_recycled_rows_matches_a_fresh_terminal() {
+        let config = Config { scrolling_history: 2, ..Config::default() };
+        let size = TermSize::new(10, 3);
+        let mut processor = Processor::<StdSyncHandler>::new();
+        let mut recycled = Term::new(config.clone(), &size, VoidListener);
+        let old = "\x1b]8;;https://example.com\x1b\\漢字漢字漢\x1b]8;;\x1b\\\r\n\x1b[4;58;2;1;2;3mxyz\r\n";
+        processor.advance(&mut recycled, old.repeat(8).as_bytes());
+        processor.advance(&mut recycled, b"\x1b[m\x1b[2J\x1b[H");
+
+        let mut fresh = Term::new(config, &size, VoidListener);
+        let new = "\x1b[1;31;44mstyled\r\n\x1b[mplain text that wraps\r\n\x1b[42m\r\nend";
+        for term in [&mut recycled, &mut fresh] {
+            processor.advance(term, new.as_bytes());
+        }
+
+        for line in 0..3 {
+            let line = Line(line);
+            assert!(recycled.grid[line] == fresh.grid[line], "{line:?} differs");
         }
     }
 

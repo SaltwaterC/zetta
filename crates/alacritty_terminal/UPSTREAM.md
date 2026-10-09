@@ -127,6 +127,17 @@ Retain these Zetta changes when synchronizing:
   upstream's per-character path; `input_ascii_matches_input_per_character`
   pins the result against it. `binary_output_throughput_benchmark` is the
   matching manual benchmark.
+- Writing a line onto a row that has just scrolled in costs no more than
+  writing it. A segment that starts at or past the row's `occ`, which upstream
+  already keeps as the bound past which every cell is blank, is written field
+  by field without reading the cells first: no wide-character scan, no `extra`
+  to drop. And `GridCell` gains a provided `reset_all`, which `Row::reset`
+  calls; `Cell` overrides it to copy one blank cell whole, two wide stores in
+  place of five narrow ones. Both loops were store-bound, not waiting on the
+  recycled row's memory; prefetching that row measured slower.
+  `ascii_output_throughput_benchmark` (parse only) went from about 390 to
+  610 MiB/s; `input_ascii_onto_recycled_rows_matches_a_fresh_terminal` and
+  `resetting_cells_together_matches_resetting_each` pin the results.
 - `Storage::shrink_lines` hands the rows it removes to the recycled-row pool.
   A full reset (`ESC c`) clears history through it, and binary output carries
   one every 64 KiB or so, after which every scrolled line had allocated a row.

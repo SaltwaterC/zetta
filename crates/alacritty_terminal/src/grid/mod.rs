@@ -44,6 +44,15 @@ pub trait GridCell: Sized + Clone {
     /// Perform an opinionated cell reset based on a template cell.
     fn reset(&mut self, template: &Self);
 
+    /// Zetta patch: [`Self::reset`] every cell of `cells`, which a cell type can do faster than
+    /// one cell at a time.
+    #[inline]
+    fn reset_all(cells: &mut [Self], template: &Self) {
+        for cell in cells {
+            cell.reset(template);
+        }
+    }
+
     fn flags(&self) -> &Flags;
     fn flags_mut(&mut self) -> &mut Flags;
 

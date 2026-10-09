@@ -253,6 +253,18 @@ impl GridCell for Cell {
         *self = Cell { bg: template.bg, ..Cell::default() };
     }
 
+    /// Every scrolled-in line resets a whole row, and storing a cell field by field made that a
+    /// fifth of the time spent on plain text. Copying one blank cell whole is two wide stores.
+    #[inline]
+    fn reset_all(cells: &mut [Self], template: &Self) {
+        let blank = Cell { bg: template.bg, ..Cell::default() };
+        for cell in cells {
+            cell.extra = None;
+            // SAFETY: `extra` is the only field that owns anything, and it was just dropped.
+            unsafe { std::ptr::copy_nonoverlapping(&blank, cell, 1) };
+        }
+    }
+
     #[inline]
     fn archive_char(&self) -> Option<char> {
         Some(self.c)
@@ -344,5 +356,31 @@ mod tests {
         row[Column(9)].flags.insert(super::Flags::WRAPLINE);
 
         assert_eq!(row.line_length(), Column(10));
+    }
+
+    #[test]
+    fn resetting_cells_together_matches_resetting_each() {
+        let mut cells = vec![Cell::default(); 6];
+        cells[0].c = 'a';
+        cells[1].fg = Color::Named(NamedColor::Red);
+        cells[1].bg = Color::Indexed(4);
+        cells[2].flags = Flags::WIDE_CHAR | Flags::BOLD;
+        cells[3].flags = Flags::WIDE_CHAR_SPACER;
+        cells[4].push_zerowidth('\u{301}');
+        cells[5].set_underline_color(Some(Color::Spec(crate::vte::ansi::Rgb { r: 1, g: 2, b: 3 })));
+        let shared = cells[5].extra.clone().unwrap();
+        let template = Cell { bg: Color::Named(NamedColor::Green), ..Cell::default() };
+
+        let mut each = cells.clone();
+        for cell in &mut each {
+            cell.reset(&template);
+        }
+        let mut together = cells;
+        Cell::reset_all(&mut together, &template);
+
+        assert_eq!(together, each);
+        assert!(together.iter().all(|cell| *cell == Cell { bg: template.bg, ..Cell::default() }));
+        // Both resets dropped their reference to the shared extra.
+        assert_eq!(Arc::strong_count(&shared), 1);
     }
 }
