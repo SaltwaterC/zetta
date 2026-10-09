@@ -48,6 +48,8 @@ fn control_server_delivers_a_token_authenticated_open_request() {
     let endpoint: ControlEndpoint =
         serde_json::from_slice(&fs::read(endpoint_path).unwrap()).unwrap();
     assert_eq!(endpoint.version, CONTROL_VERSION);
+    #[cfg(feature = "zmux")]
+    assert_eq!(endpoint.version, zmux::protocol::CONTROL_VERSION);
 
     let client = thread::spawn(move || send_open_window_request(&endpoint).unwrap());
     let command = futures::executor::block_on(received.next()).unwrap();

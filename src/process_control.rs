@@ -124,6 +124,11 @@ pub(crate) use server::ProcessControlServer;
 /// the configured default.
 /// 7 lets tab-icon set and reset requests address their originating tab by
 /// attention ID, so background shell hooks cannot change another active tab.
+#[cfg(feature = "zmux")]
+pub(crate) const CONTROL_VERSION: u32 = zmux::protocol::CONTROL_VERSION;
+// Without multiplexer support there is no standalone reconnect client to
+// synchronize with, and the optional zmux dependency is unavailable.
+#[cfg(not(feature = "zmux"))]
 pub(crate) const CONTROL_VERSION: u32 = 7;
 // A 64 KiB argv payload can expand substantially when it contains many
 // one-character arguments and each value is represented as JSON. Keep enough

@@ -129,8 +129,12 @@ mod control_endpoints {
     /// Publishes an endpoint for this test process, which is running, naming
     /// `socket_path`.
     fn publish(path: &Path, socket_path: &Path) {
+        publish_version(path, socket_path, CONTROL_VERSION);
+    }
+
+    fn publish_version(path: &Path, socket_path: &Path, version: u32) {
         let endpoint = serde_json::json!({
-            "version": CONTROL_VERSION,
+            "version": version,
             "process_id": std::process::id(),
             "socket_path": socket_path,
             "token": "token",
@@ -151,6 +155,21 @@ mod control_endpoints {
         let endpoints = running_control_endpoints(&directory).unwrap();
         assert_eq!(endpoints.len(), 1);
         assert_eq!(endpoints[0].socket_path, path.with_extension("sock"));
+    }
+
+    #[test]
+    fn reconnect_discovers_a_window_with_tab_targeted_icon_support() {
+        let (_root, directory) = private_session_directory();
+        let path = own_endpoint_path(&directory);
+        // Version 7 added tab-targeted icons without changing reconnect.
+        // The standalone client previously still required version 6 and
+        // silently discarded every endpoint published by the upgraded GUI.
+        publish_version(&path, &path.with_extension("sock"), 7);
+
+        assert_eq!(running_control_endpoints(&directory).unwrap().len(), 1);
+
+        publish_version(&path, &path.with_extension("sock"), 6);
+        assert!(running_control_endpoints(&directory).unwrap().is_empty());
     }
 
     #[test]
