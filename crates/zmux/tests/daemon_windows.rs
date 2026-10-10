@@ -365,6 +365,84 @@ fn assert_shell_starts_quickly(client: &Client, request: SpawnRequest, marker: &
 }
 
 #[test]
+fn conpty_ctrl_c_cancels_a_command_without_ending_the_shell() {
+    let daemon = TestDaemon::start();
+    let client = daemon.client();
+
+    for program in ["powershell.exe", "pwsh.exe"] {
+        if Command::new(program)
+            .args(["-NoLogo", "-NoProfile", "-Command", "exit"])
+            .output()
+            .is_err()
+        {
+            continue;
+        }
+        let mut request = output_request();
+        request.program = Some(program.to_owned());
+        request.args = vec![
+            "-NoLogo".to_owned(),
+            "-NoProfile".to_owned(),
+            "-NoExit".to_owned(),
+            "-Command".to_owned(),
+            "function global:prompt { 'ZETTA_READY> ' }".to_owned(),
+        ];
+        let pane = client
+            .spawn(request)
+            .expect("starting an interactive shell");
+        let session_id = pane.session_id;
+        let mut output = std::fs::File::from(pane.conout);
+        let mut input = std::fs::File::from(pane.conin);
+        let ready = read_until(
+            &mut output,
+            &mut input,
+            b"ZETTA_READY>",
+            Duration::from_secs(10),
+        );
+        assert!(ready.windows(12).any(|bytes| bytes == b"ZETTA_READY>"));
+
+        for _ in 0..2 {
+            // Split the marker so echoed input cannot satisfy the assertion.
+            input
+                .write_all(
+                    b"Write-Output ('ZETTA_' + 'RUNNING'); ping.exe 127.0.0.1 -n 60 > $null\r",
+                )
+                .unwrap();
+            let running = read_until(
+                &mut output,
+                &mut input,
+                b"ZETTA_RUNNING",
+                Duration::from_secs(10),
+            );
+            assert!(running.windows(13).any(|bytes| bytes == b"ZETTA_RUNNING"));
+            // The native job must have started before ConPTY generates Ctrl+C.
+            std::thread::sleep(Duration::from_millis(300));
+            input.write_all(b"\x03").unwrap();
+            let returned = read_until(
+                &mut output,
+                &mut input,
+                b"ZETTA_READY>",
+                Duration::from_secs(5),
+            );
+            assert!(
+                returned.windows(12).any(|bytes| bytes == b"ZETTA_READY>"),
+                "{program} did not return to its prompt after Ctrl+C: {:?}",
+                String::from_utf8_lossy(&returned)
+            );
+            assert!(
+                process_is_alive(pane.child_pid),
+                "the bootstrap exited after Ctrl+C"
+            );
+        }
+        input.write_all(b"exit\r").unwrap();
+        drop(output);
+        drop(input);
+        let _ = client.kill(session_id);
+    }
+
+    let _ = client.shutdown();
+}
+
+#[test]
 fn palette_initialization_does_not_block_native_shell_startup() {
     let daemon = TestDaemon::start();
     let client = daemon.client();
@@ -567,6 +645,46 @@ fn conpty_palette_attributes_survive_default_color_resets() {
 }
 
 #[test]
+fn palette_viewer_subprocess() {
+    let Some(payload) = std::env::var_os("ZETTA_TEST_PALETTE_VIEWER") else {
+        return;
+    };
+    let request: PaletteViewerRequest = serde_json::from_str(&payload.to_string_lossy()).unwrap();
+    let client = Client::connect_ready_at(&request.directory)
+        .expect("connecting the second viewer")
+        .expect("the test daemon must be running");
+    let pane = match client
+        .attach_as(
+            request.session_id,
+            request.pane_id,
+            std::process::id(),
+            None,
+        )
+        .expect("attaching the second viewer from its own process")
+    {
+        AttachOutcome::SharedAttached { pane, .. } => pane,
+        _ => panic!("the second viewer must attach in shared mode"),
+    };
+    client
+        .set_console_palette(request.session_id, request.pane_id, request.palette)
+        .expect("applying the second viewer's palette");
+    std::fs::write(&request.ready, b"ready").unwrap();
+    // The parent closes stdin once it has checked the subsequent palette.
+    let mut release = String::new();
+    std::io::stdin().read_line(&mut release).unwrap();
+    drop(pane);
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PaletteViewerRequest {
+    directory: PathBuf,
+    session_id: u64,
+    pane_id: u64,
+    palette: ConsolePalette,
+    ready: PathBuf,
+}
+
+#[test]
 fn shared_conpty_accepts_palette_updates_in_viewer_order() {
     let daemon = TestDaemon::start();
     let client = daemon.client();
@@ -628,25 +746,40 @@ fn shared_conpty_accepts_palette_updates_in_viewer_order() {
         }
     });
 
-    let mut second_process = Command::new("cmd.exe")
-        .args(["/D", "/C", "ping 127.0.0.1 -n 60 >NUL"])
-        .spawn()
-        .expect("starting the second viewer stand-in");
-    let second_process_id = second_process.id();
-    let second = match client
-        .attach_as(session_id, pane_id, second_process_id, None)
-        .expect("joining the pane as a second viewer")
-    {
-        AttachOutcome::SharedAttached { pane, .. } => pane,
-        _ => panic!("the second viewer must attach in shared mode"),
-    };
-    let holder = holder.join().expect("the holder handover failed");
-
     let mut second_palette = initial;
     second_palette.colors[6] = [0x11, 0x22, 0x33];
-    client
-        .set_console_palette_for_process(session_id, pane_id, second_palette, second_process_id)
-        .expect("applying the second viewer's palette");
+    let ready = daemon.config.join("palette-viewer-ready");
+    let request = PaletteViewerRequest {
+        directory: daemon.sessions_dir(),
+        session_id,
+        pane_id,
+        palette: second_palette,
+        ready: ready.clone(),
+    };
+    let mut second_process = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "palette_viewer_subprocess", "--nocapture"])
+        .env(
+            "ZETTA_TEST_PALETTE_VIEWER",
+            serde_json::to_string(&request).unwrap(),
+        )
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .spawn()
+        .expect("starting the second viewer");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !ready.is_file() {
+        assert!(
+            second_process.try_wait().unwrap().is_none(),
+            "the second viewer exited before applying its palette"
+        );
+        assert!(
+            Instant::now() < deadline,
+            "the second viewer did not become ready"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let holder = holder.join().expect("the holder handover failed");
+
     let mut latest = second_palette;
     latest.colors[6] = [0xaa, 0xbb, 0xcc];
     latest.foreground_index = 5;
@@ -683,10 +816,12 @@ fn shared_conpty_accepts_palette_updates_in_viewer_order() {
         String::from_utf8_lossy(&second_output)
     );
 
-    drop(second);
     drop(holder);
-    let _ = second_process.kill();
-    let _ = second_process.wait();
+    drop(second_process.stdin.take());
+    assert!(
+        second_process.wait().unwrap().success(),
+        "the second viewer failed"
+    );
     let _ = client.kill(session_id);
     let _ = client.shutdown();
 }

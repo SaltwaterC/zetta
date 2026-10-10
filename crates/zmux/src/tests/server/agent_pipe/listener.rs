@@ -48,11 +48,11 @@ fn a_served_name_stays_held_across_connections() {
     assert!(!is_free(&name));
 
     for _ in 0..20 {
-        let client = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&name)
-            .expect("connecting");
+        // The next instance is created asynchronously. A rapid reconnect may
+        // see ERROR_PIPE_BUSY even though the name is still held; use the
+        // same bounded wait as an agent client rather than requiring it to
+        // be immediately available.
+        let client = connect_upstream(&name).expect("connecting");
         drop(client);
         assert!(!is_free(&name), "the name was left without an instance");
     }

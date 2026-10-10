@@ -314,7 +314,7 @@ fn extract_executable_icon(executable: &Path) -> Result<PathBuf> {
         anyhow::ensure!(!pixels.is_empty(), "drawing the executable icon");
 
         let mut rgba = pixels;
-        for pixel in rgba.chunks_exact_mut(4) {
+        for pixel in rgba.as_chunks_mut::<4>().0 {
             pixel.swap(0, 2);
         }
         RgbaImage::from_raw(SIZE as u32, SIZE as u32, rgba)

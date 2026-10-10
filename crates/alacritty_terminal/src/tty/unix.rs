@@ -784,6 +784,7 @@ impl OnResize for Pty {
 mod tests {
     use std::io::Write;
     use std::mem::MaybeUninit;
+    use std::os::fd::AsRawFd;
     use std::os::unix::process::ExitStatusExt;
     use std::ptr;
     use std::sync::mpsc;
@@ -867,6 +868,76 @@ mod tests {
             .expect("PTY child did not exit after Ctrl-C");
 
         assert_eq!(status.signal(), Some(libc::SIGINT));
+    }
+
+    #[test]
+    fn ctrl_c_cancels_zsh_job_without_ending_the_integrated_shell() {
+        let integration = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../src/shell_integration/zsh.zsh");
+        let options = Options {
+            shell: Some(Shell::new(
+                "zsh".to_owned(),
+                vec!["-d".to_owned(), "-f".to_owned(), "-i".to_owned()],
+            )),
+            env: std::collections::HashMap::from([
+                ("ZETTA_PANE_ID".to_owned(), "1".to_owned()),
+                ("ZETTA_TEST_INTEGRATION".to_owned(), integration.to_string_lossy().into_owned()),
+            ]),
+            ..Options::default()
+        };
+        let mut pty = match super::new(&options, window_size(), 0) {
+            Ok(pty) => pty,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                eprintln!("zsh is not installed; skipping interactive cancellation test");
+                return;
+            },
+            Err(error) => panic!("failed to start zsh: {error}"),
+        };
+        pty.file
+            .write_all(b"source \"$ZETTA_TEST_INTEGRATION\"; PROMPT='ZETTA_READY> '\n")
+            .unwrap();
+        read_until_marker(&mut pty, b"zetta-event:tracking-ready");
+        for _ in 0..2 {
+            pty.file.write_all(b"sleep 60\n").unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            // Wait for job-control handoff, rather than guessing when sleep starts.
+            while unsafe { libc::tcgetpgrp(pty.file.as_raw_fd()) } == pty.child_pid() as i32 {
+                assert!(Instant::now() < deadline, "zsh did not foreground the command");
+                thread::sleep(Duration::from_millis(10));
+            }
+            pty.file.write_all(b"\x03").unwrap();
+            read_until_marker(&mut pty, b"zetta-event:command-finished:130");
+            assert!(pty.try_wait().unwrap().is_none(), "Ctrl+C ended zsh");
+            // A following command must execute; input echo cannot match this marker.
+            pty.file.write_all(b"printf '%s%s\\n' ZETTA_ ALIVE\n").unwrap();
+            read_until_marker(&mut pty, b"ZETTA_ALIVE");
+        }
+        pty.file.write_all(b"exit\n").unwrap();
+        assert!(wait_for_child_exit(&mut pty, Duration::from_secs(5)).is_some());
+    }
+
+    fn read_until_marker(pty: &mut super::Pty, marker: &[u8]) {
+        use std::io::Read as _;
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut output = Vec::new();
+        let mut buffer = [0; 4096];
+        while Instant::now() < deadline {
+            match pty.file.read(&mut buffer) {
+                Ok(length) => output.extend_from_slice(&buffer[..length]),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {},
+                Err(error) => panic!("reading zsh output: {error}"),
+            }
+            if output.windows(marker.len()).any(|bytes| bytes == marker) {
+                return;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        panic!(
+            "missing marker {:?} in {:?}",
+            String::from_utf8_lossy(marker),
+            String::from_utf8_lossy(&output)
+        );
     }
 
     #[test]

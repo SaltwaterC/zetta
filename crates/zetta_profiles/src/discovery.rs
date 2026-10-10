@@ -568,8 +568,10 @@ fn cygwin_registered_installation_roots() -> Vec<PathBuf> {
         }
 
         let units = value[..byte_len as usize]
-            .chunks_exact(2)
-            .map(|bytes| u16::from_le_bytes([bytes[0], bytes[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|bytes| u16::from_le_bytes(*bytes))
             .take_while(|unit| *unit != 0)
             .collect::<Vec<_>>();
         String::from_utf16(&units).ok()

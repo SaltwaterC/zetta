@@ -65,6 +65,15 @@ const PALETTE_PROBE_ENV: &str = "ZETTA_INTERNAL_CONSOLE_PALETTE_PROBE_V1";
 const PALETTE_BOOTSTRAP_ENV: &str = "ZETTA_INTERNAL_CONSOLE_PALETTE_BOOTSTRAP_V1";
 const PALETTE_BOOTSTRAP_TIMEOUT_MS: u32 = 1_000;
 
+/// Console interrupts also reach the bootstrap supervising the shell. Claim
+/// them here so only the shell handles cancellation. A real handler is not
+/// inherited by the child, unlike `SetConsoleCtrlHandler(None, true)`.
+unsafe extern "system" fn bootstrap_console_control(event: u32) -> windows::core::BOOL {
+    use windows::Win32::System::Console::{CTRL_BREAK_EVENT, CTRL_C_EVENT};
+
+    (event == CTRL_C_EVENT || event == CTRL_BREAK_EVENT).into()
+}
+
 fn validated_bootstrap_command(command_line: &OsStr) -> Option<Vec<u16>> {
     let command_line: Vec<_> = command_line.encode_wide().collect();
     (!command_line.is_empty() && command_line.len() < 32_767)
@@ -125,6 +134,17 @@ pub fn run_palette_bootstrap_from_env() -> Option<i32> {
 
     let command_line = std::env::var_os(PALETTE_BOOTSTRAP_ENV)?;
     unsafe { std::env::remove_var(PALETTE_BOOTSTRAP_ENV) };
+    // Install before spawning: cancellation during startup must not end the
+    // supervisor either. Leave close/logoff/shutdown to the default handler.
+    if let Err(error) = unsafe {
+        windows::Win32::System::Console::SetConsoleCtrlHandler(
+            Some(bootstrap_console_control),
+            true,
+        )
+    } {
+        eprintln!("zmux-pty: could not install console interrupt handler: {error}");
+        return Some(1);
+    }
     let Some(mut validated) = validated_bootstrap_command(&command_line) else {
         return Some(2);
     };
