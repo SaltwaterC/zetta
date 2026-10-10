@@ -702,7 +702,7 @@ fn the_wsl_tracker_marks_commands_with_a_nonce_its_children_do_not_inherit() {
         .env(terminal::COMMAND_MARKER_NONCE_ENV, "0123abcd")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
         .spawn()
         .unwrap();
     // A non-interactive login shell does not run PROMPT_COMMAND by itself.
@@ -717,6 +717,10 @@ fn the_wsl_tracker_marks_commands_with_a_nonce_its_children_do_not_inherit() {
         .unwrap();
     let output = child.wait_with_output().unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(output.status.success(), "{:?}: {stderr}", output.status);
+    assert!(stderr.is_empty(), "{stderr}");
 
     assert!(
         stdout.contains("\x1b]2;zetta-cmd;0123abcd:bash\x1b\\"),

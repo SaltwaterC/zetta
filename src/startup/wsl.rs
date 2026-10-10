@@ -936,7 +936,10 @@ export ZETTA_SHELL_NAME="${shell##*/}"
 
 case "${shell##*/}" in
     bash)
-        zetta_full_prompt_command="$(cat <<'ZETTA_BASH_PROMPT'
+        # Bash 3.2 misparses case patterns in a heredoc inside $(...).
+        # Define the producer first so the substitution only parses its call.
+        zetta_bash_prompt() {
+            cat <<'ZETTA_BASH_PROMPT'
 __zetta_marker_nonce=${__ZETTA_COMMAND_MARKER_NONCE-}
 unset __ZETTA_COMMAND_MARKER_NONCE
 __zetta_preexec() {
@@ -974,7 +977,8 @@ PROMPT_COMMAND="__zetta_precmd${ZETTA_ORIGINAL_PROMPT_COMMAND:+;${ZETTA_ORIGINAL
 printf '\033]2;zetta-event:tracking-ready\033\\'
 __zetta_precmd
 ZETTA_BASH_PROMPT
-)"
+        }
+        zetta_full_prompt_command="$(zetta_bash_prompt)"
         export ZETTA_ORIGINAL_PROMPT_COMMAND="$PROMPT_COMMAND"
         PROMPT_COMMAND="$zetta_full_prompt_command"
         export PROMPT_COMMAND

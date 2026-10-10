@@ -3544,7 +3544,7 @@ count=0
 zetta() {
     (( count++ ))
     printf '%s\n' "$count" >> "$COUNT"
-    case $(wc -l < "$COUNT") in
+    case $(( $(wc -l < "$COUNT") )) in
         1) return 1 ;;
         2) return 0 ;;
         *) cat "$COMPLETION" ;;
@@ -3561,7 +3561,7 @@ _zetta_complete
 [[ ${COMPREPLY[*]} == --completions ]] || exit 13
 source "$STARTUP"
 [[ $(complete -p zetta) == *'-F _zetta_complete '* ]] || exit 14
-[[ $(wc -l < "$COUNT") == 3 ]] || exit 15
+(( $(wc -l < "$COUNT") == 3 )) || exit 15
 "#;
     let output = bash_command()
         .arg("--noprofile")
@@ -3575,7 +3575,8 @@ source "$STARTUP"
         .unwrap();
     assert!(
         output.status.success(),
-        "{}",
+        "{:?}: {}",
+        output.status,
         String::from_utf8_lossy(&output.stderr)
     );
 }
@@ -3702,7 +3703,7 @@ read_until 'PROBE:zsh' || { zpty -d probe; exit 31; }
 zpty -w -n probe $'zetta init zs\t\n'
 read_until 'PROBE:zsh' || { zpty -d probe; exit 32; }
 zpty -d probe
-[[ $(wc -l < "$COUNT") == 1 ]] || exit 33
+(( $(wc -l < "$COUNT") == 1 )) || exit 33
 "#;
         let count = temp.path().join(format!("count-{phase}"));
         let output = clean_shell_command("zsh")
@@ -3825,7 +3826,7 @@ autoload -Uz compinit; compinit
 source "$STARTUP"
 function zetta {
     print load >> "$COUNT"
-    case $(wc -l < "$COUNT") in
+    case $(( $(wc -l < "$COUNT") )) in
         1) return 1 ;;
         2) return 0 ;;
         *) cat "$COMPLETION" ;;
@@ -3842,7 +3843,7 @@ __zetta_lazy_complete
 __zetta_lazy_complete
 source "$STARTUP"
 [[ $_comps[zetta] == _zetta ]] || exit 14
-[[ $(wc -l < "$COUNT") == 3 ]] || exit 15
+(( $(wc -l < "$COUNT") == 3 )) || exit 15
 "#;
     let output = clean_shell_command("zsh")
         .arg("-df")
