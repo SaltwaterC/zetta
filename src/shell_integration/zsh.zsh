@@ -112,7 +112,7 @@ function __zetta_should_use_owner {
     while (( index <= $# )); do
         argument=$argv[index]
         case $argument in
-            --config|-c|--keymap|-k|--profile|-p|--split|-s|--theme|-t|--geometry|-g|--zetta-profile-actions-generation)
+            --config|-c|--keymap|-k|--profile|-p|--split|-s|--theme|-t|--geometry|-g|--cell-size|-C|--zetta-profile-actions-generation)
                 (( index += 2 ))
                 ;;
             --new-window|-w|--command|-e|--replace-pane|-r)

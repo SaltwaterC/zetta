@@ -758,7 +758,7 @@ impl Zetta {
         else {
             return false;
         };
-        let metrics = terminal_view::TerminalCellMetrics::standalone(cx);
+        let metrics = terminal_view::TerminalCellMetrics::standalone(cx, window.scale_factor());
         let target =
             terminal_view::element_size_for_grid(columns, rows, metrics, window.scale_factor());
         resize_window(

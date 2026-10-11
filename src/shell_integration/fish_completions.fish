@@ -235,7 +235,7 @@ function __zetta_profile_operation
         end
         if test $seen -eq 0
             switch $word
-                case --config -c --keymap -k --profile -p --split -s --theme -t --geometry -g
+                case --config -c --keymap -k --profile -p --split -s --theme -t --geometry -g --cell-size -C
                     set skip 1
                 case --command -e
                     return 1
@@ -269,7 +269,7 @@ function __zetta_has_profile_subcommand
             continue
         end
         switch $word
-            case --config -c --keymap -k --profile -p --split -s --theme -t --geometry -g
+            case --config -c --keymap -k --profile -p --split -s --theme -t --geometry -g --cell-size -C
                 set skip 1
             case --command -e
                 return 1
@@ -299,7 +299,7 @@ function __zetta_profile_argument_count
         end
         if test $seen -eq 0
             switch $word
-                case --config -c --keymap -k --profile -p --split -s --theme -t --geometry -g
+                case --config -c --keymap -k --profile -p --split -s --theme -t --geometry -g --cell-size -C
                     set skip 1
                 case --command -e
                     return 1
@@ -361,7 +361,7 @@ function __zetta_use_subcommand
             continue
         end
         switch $word
-            case --config -c --keymap -k --profile -p --split -s --theme -t --geometry -g
+            case --config -c --keymap -k --profile -p --split -s --theme -t --geometry -g --cell-size -C
                 set skip_next 1
                 continue
             case --command -e
@@ -546,6 +546,7 @@ function __zetta_long_options
                 --replace-pane 'Replace the active pane in a running process' \
                 --theme 'Non-persistently override the profile theme' \
                 --geometry 'Open the first pane at COLUMNSxROWS' \
+                --cell-size 'Set cell WIDTHxHEIGHT in backing pixels' \
 # ZETTA_ZMUX_INTEGRATION_BEGIN
                 --no-mux 'Keep background sessions in this process for this launch' \
 # ZETTA_ZMUX_INTEGRATION_END
@@ -783,6 +784,7 @@ complete -c zetta -n '__zetta_use_subcommand' -l split -r -a '(__zetta_pane_spli
 complete -c zetta -n '__zetta_use_subcommand' -l replace-pane -d 'Replace the active pane in a running process'
 complete -c zetta -n '__zetta_use_subcommand' -l theme -r -a '(__zetta_profile_themes)' -d 'Non-persistently override the profile theme'
 complete -c zetta -n '__zetta_use_subcommand' -l geometry -x -d 'Open the first pane at COLUMNSxROWS'
+complete -c zetta -n '__zetta_use_subcommand' -l cell-size -x -d 'Set cell WIDTHxHEIGHT in backing pixels'
 # ZETTA_ZMUX_INTEGRATION_BEGIN
 complete -c zetta -n '__zetta_use_subcommand' -l no-mux -d 'Keep background sessions in this process for this launch'
 # ZETTA_ZMUX_INTEGRATION_END

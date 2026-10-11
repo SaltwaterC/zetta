@@ -212,7 +212,7 @@ _zetta() {
                     (( index++ ))
                 fi
                 ;;
-            --keymap|-k|--profile|-p|--split|-s|--theme|-t|--geometry|-g)
+            --keymap|-k|--profile|-p|--split|-s|--theme|-t|--geometry|-g|--cell-size|-C)
                 (( index++ ))
                 ;;
             --command|-e)
@@ -334,7 +334,7 @@ _zetta() {
 
     if (( CURRENT == 2 )); then
         compadd -S ' ' -- benchmark terminal-size ZETTA_MUX_ROOT_COMMAND profile project cmd edit vi init mosh serial http tftp notify attention copy paste splits pane tabicon theme overlay ZETTA_WORKTREE_ROOT_COMMAND
-        _zetta_options --help --version --config --keymap --profile --split --replace-pane --theme --geometry ZETTA_NO_MUX_OPTION --new-window --command
+        _zetta_options --help --version --config --keymap --profile --split --replace-pane --theme --geometry --cell-size ZETTA_NO_MUX_OPTION --new-window --command
         return
     fi
 
@@ -376,7 +376,7 @@ _zetta() {
     fi
 
     case $previous in
-        --command|-e|--geometry|-g)
+        --command|-e|--geometry|-g|--cell-size|-C)
             return
             ;;
 # ZETTA_WORKTREE_INTEGRATION_BEGIN
@@ -469,7 +469,7 @@ _zetta() {
             ;;
         --replace-pane)
             if [[ $words[CURRENT] == -* || -z $words[CURRENT] ]]; then
-                _zetta_options --help --version --config --keymap --profile --split --theme --geometry ZETTA_NO_MUX_OPTION --new-window --command
+                _zetta_options --help --version --config --keymap --profile --split --theme --geometry --cell-size ZETTA_NO_MUX_OPTION --new-window --command
             fi
             return
             ;;
@@ -563,7 +563,7 @@ _zetta() {
             fi
             if [[ $words[2] == terminal-size || $words[2] == profile || $words[2] == -* || -z $words[2] ]]; then
                 if [[ $words[2] == -* && ($words[CURRENT] == -* || -z $words[CURRENT]) ]]; then
-                    _zetta_options --help --version --config --keymap --profile --split --theme --geometry ZETTA_NO_MUX_OPTION --new-window --command
+                    _zetta_options --help --version --config --keymap --profile --split --theme --geometry --cell-size ZETTA_NO_MUX_OPTION --new-window --command
                 fi
                 return
             fi
@@ -640,7 +640,7 @@ _zetta() {
     # offering the remaining top-level flags instead of falling through to
     # the subcommand-specific cases below, which would offer nothing.
     if [[ $words[2] == -* ]]; then
-        _zetta_options --help --version --config --keymap --profile --split --replace-pane --theme --geometry ZETTA_NO_MUX_OPTION --new-window --command
+        _zetta_options --help --version --config --keymap --profile --split --replace-pane --theme --geometry --cell-size ZETTA_NO_MUX_OPTION --new-window --command
         return
     fi
 

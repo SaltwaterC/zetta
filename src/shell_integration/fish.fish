@@ -115,7 +115,7 @@ function __zetta_should_use_owner
     while test $index -le (count $argv)
         set -l argument $argv[$index]
         switch $argument
-            case --config -c --keymap -k --profile -p --split -s --theme -t --geometry -g --zetta-profile-actions-generation
+            case --config -c --keymap -k --profile -p --split -s --theme -t --geometry -g --cell-size -C --zetta-profile-actions-generation
                 set index (math $index + 2)
             case --new-window --command --replace-pane
                 return 0

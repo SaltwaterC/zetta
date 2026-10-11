@@ -236,7 +236,7 @@ _zetta_complete() {
     profile_operation=''
     for (( index = 1; index < COMP_CWORD; index++ )); do
         case ${COMP_WORDS[index]} in
-            --config|-c|--keymap|-k|--profile|-p|--split|-s|--theme|-t|--geometry|-g)
+            --config|-c|--keymap|-k|--profile|-p|--split|-s|--theme|-t|--geometry|-g|--cell-size|-C)
                 (( index++ ))
                 ;;
             --command|-e)
@@ -396,7 +396,7 @@ _zetta_complete() {
     fi
 
     case "$previous" in
-        --command|-e|--geometry|-g)
+        --command|-e|--geometry|-g|--cell-size|-C)
             COMPREPLY=()
             return
             ;;
@@ -508,7 +508,7 @@ _zetta_complete() {
             ;;
         --replace-pane)
             if [[ $current == -* || -z $current ]]; then
-                _zetta_compgen '--help --version --config --keymap --profile --split --theme --geometry ZETTA_NO_MUX_OPTION --new-window --command'
+                _zetta_compgen '--help --version --config --keymap --profile --split --theme --geometry --cell-size ZETTA_NO_MUX_OPTION --new-window --command'
             else
                 COMPREPLY=()
             fi
@@ -615,7 +615,7 @@ _zetta_complete() {
                 COMPREPLY=()
             elif [[ $command == -* || -z $command ]]; then
                 if [[ $current == -* || -z $current ]]; then
-                    _zetta_compgen '--help --version --config --keymap --profile --split --theme --geometry ZETTA_NO_MUX_OPTION --new-window --command'
+                    _zetta_compgen '--help --version --config --keymap --profile --split --theme --geometry --cell-size ZETTA_NO_MUX_OPTION --new-window --command'
                 else
                     COMPREPLY=()
                 fi
@@ -651,7 +651,7 @@ _zetta_complete() {
     esac
 
     if (( COMP_CWORD == 1 )); then
-        _zetta_compgen 'benchmark terminal-size ZETTA_MUX_ROOT_COMMAND pane profile project cmd edit vi init mosh serial http tftp notify attention copy paste splits tabicon theme overlay ZETTA_WORKTREE_ROOT_COMMAND --help --version --config --keymap --profile --split --replace-pane --theme --geometry ZETTA_NO_MUX_OPTION --new-window --command'
+        _zetta_compgen 'benchmark terminal-size ZETTA_MUX_ROOT_COMMAND pane profile project cmd edit vi init mosh serial http tftp notify attention copy paste splits tabicon theme overlay ZETTA_WORKTREE_ROOT_COMMAND --help --version --config --keymap --profile --split --replace-pane --theme --geometry --cell-size ZETTA_NO_MUX_OPTION --new-window --command'
         return
     fi
 
@@ -660,7 +660,7 @@ _zetta_complete() {
     # offering the remaining top-level flags instead of falling through to
     # the subcommand-specific cases below, which would offer nothing.
     if [[ $command == -* ]]; then
-        _zetta_compgen '--help --version --config --keymap --profile --split --replace-pane --theme --geometry ZETTA_NO_MUX_OPTION --new-window --command'
+        _zetta_compgen '--help --version --config --keymap --profile --split --replace-pane --theme --geometry --cell-size ZETTA_NO_MUX_OPTION --new-window --command'
         return
     fi
 

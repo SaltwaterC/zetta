@@ -1099,8 +1099,8 @@ impl ToWinsize for WindowSize {
         let ws_row = self.num_lines as libc::c_ushort;
         let ws_col = self.num_cols as libc::c_ushort;
 
-        let ws_xpixel = ws_col * self.cell_width as libc::c_ushort;
-        let ws_ypixel = ws_row * self.cell_height as libc::c_ushort;
+        let ws_xpixel = ws_col.saturating_mul(self.cell_width as libc::c_ushort);
+        let ws_ypixel = ws_row.saturating_mul(self.cell_height as libc::c_ushort);
         Winsize { ws_row, ws_col, ws_xpixel, ws_ypixel }
     }
 }
@@ -1311,4 +1311,13 @@ mod attached_tests {
         assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
         assert_eq!(Error::last_os_error().raw_os_error(), Some(libc::ESRCH));
     }
+}
+
+#[test]
+fn pixel_dimensions_saturate_at_the_kernel_winsize_limit() {
+    let size =
+        WindowSize { num_cols: 80, num_lines: 24, cell_width: u16::MAX, cell_height: u16::MAX }
+            .to_winsize();
+    assert_eq!((size.ws_col, size.ws_row), (80, 24));
+    assert_eq!((size.ws_xpixel, size.ws_ypixel), (u16::MAX, u16::MAX));
 }

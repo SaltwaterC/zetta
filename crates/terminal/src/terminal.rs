@@ -1353,7 +1353,7 @@ enum InternalEvent {
 
 type ClipboardFormatter = Arc<dyn Fn(&str) -> String + Sync + Send + 'static>;
 type ColorFormatter = Arc<dyn Fn(Rgb) -> String + Sync + Send + 'static>;
-type TextAreaSizeFormatter = Arc<dyn Fn(TerminalBounds) -> String + Sync + Send + 'static>;
+type TextAreaSizeFormatter = Arc<dyn Fn(TerminalBounds, f32) -> String + Sync + Send + 'static>;
 
 /// The action a terminal should take after an image-paste handler has inspected
 /// the clipboard and, when necessary, transferred the image.
@@ -1714,6 +1714,13 @@ impl fmt::Debug for TerminalBackendEvent {
 
 enum PtyEvent {
     Event(TerminalBackendEvent),
+}
+
+/// Geometry known before the child starts, in logical units plus the display scale.
+#[derive(Clone, Copy, Debug)]
+pub struct InitialTerminalSize {
+    pub bounds: TerminalBounds,
+    pub scale_factor: f32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -2389,6 +2396,7 @@ impl TerminalBuilder {
             content_revision: 0,
             reflow_on_next_resize: true,
 
+            display_scale_factor: 1.0,
             local_terminal_bounds: terminal_bounds,
             local_grid_size: (terminal_bounds.num_columns(), terminal_bounds.num_lines()),
             shared_viewport: None,
@@ -2796,7 +2804,7 @@ impl TerminalBuilder {
         path_style: PathStyle,
         pty_provider: Option<Arc<dyn PtyProvider>>,
         initial_console_palette: Option<ConsolePalette>,
-        initial_bounds: Option<TerminalBounds>,
+        initial_bounds: Option<InitialTerminalSize>,
     ) -> Task<Result<TerminalBuilder>> {
         Self::new_with_console_palette_and_options(
             working_directory,
@@ -2843,7 +2851,7 @@ impl TerminalBuilder {
         path_style: PathStyle,
         pty_provider: Option<Arc<dyn PtyProvider>>,
         initial_console_palette: Option<ConsolePalette>,
-        initial_bounds: Option<TerminalBounds>,
+        initial_bounds: Option<InitialTerminalSize>,
     ) -> Task<Result<TerminalBuilder>> {
         Self::new_with_console_palette_and_options(
             working_directory,
@@ -2887,9 +2895,11 @@ impl TerminalBuilder {
         path_style: PathStyle,
         pty_provider: Option<Arc<dyn PtyProvider>>,
         initial_console_palette: Option<ConsolePalette>,
-        initial_bounds: Option<TerminalBounds>,
+        initial_bounds: Option<InitialTerminalSize>,
         require_pty_provider: bool,
     ) -> Task<Result<TerminalBuilder>> {
+        let display_scale_factor = initial_bounds.map_or(1.0, |size| size.scale_factor);
+        let initial_bounds = initial_bounds.map(|size| size.bounds);
         let version = release_channel::AppVersion::global(cx);
         let background_executor = cx.background_executor().clone();
         #[cfg(windows)]
@@ -3139,7 +3149,7 @@ impl TerminalBuilder {
                         initial_size: initial_bounds
                             .map(|bounds| (bounds.num_columns() as u16, bounds.num_lines() as u16)),
                     }),
-                    None => open_pty(&pty_options, start_bounds, window_id)
+                    None => open_pty(&pty_options, start_bounds, display_scale_factor, window_id)
                         .map(|pty| (pty, None, Vec::new(), None))
                         .map_err(anyhow::Error::from),
                 };
@@ -3153,7 +3163,7 @@ impl TerminalBuilder {
                          instead: {error:#}"
                     );
                     multiplexer_error = Some(format!("{error:#}"));
-                    opened = open_pty(&pty_options, start_bounds, window_id)
+                    opened = open_pty(&pty_options, start_bounds, display_scale_factor, window_id)
                         .map(|pty| (pty, None, Vec::new(), None))
                         .map_err(anyhow::Error::from);
                 }
@@ -3251,6 +3261,7 @@ impl TerminalBuilder {
                 content_revision: 0,
                 reflow_on_next_resize: true,
 
+                display_scale_factor,
                 local_terminal_bounds,
                 local_grid_size: (
                     local_terminal_bounds.num_columns(),
@@ -3572,6 +3583,8 @@ pub struct Terminal {
     content_dirty: bool,
     content_revision: u64,
     reflow_on_next_resize: bool,
+    /// Converts logical layout units to protocol backing pixels.
+    display_scale_factor: f32,
     /// The pane size measured in this window. A shared pane reports this to
     /// the daemon even when its effective grid is smaller than the pane.
     local_terminal_bounds: TerminalBounds,
@@ -3966,9 +3979,9 @@ impl Terminal {
                 self.handle_remote_clipboard_frame(frame, cx);
             }
             TerminalBackendEvent::PtyWrite(out) => self.write_to_pty(out.into_bytes()),
-            TerminalBackendEvent::TextAreaSizeRequest(format) => {
-                self.write_to_pty(format(self.last_content.terminal_bounds).into_bytes())
-            }
+            TerminalBackendEvent::TextAreaSizeRequest(format) => self.write_to_pty(
+                format(self.last_content.terminal_bounds, self.display_scale_factor).into_bytes(),
+            ),
             TerminalBackendEvent::ResizeRequest { rows, columns } => {
                 cx.emit(Event::ResizeRequested { rows, columns });
             }
@@ -4113,7 +4126,7 @@ impl Terminal {
                                 new_bounds.num_lines() as u16,
                             );
                         } else if let Some(pty_tx) = pty_tx {
-                            pty_tx.resize(new_bounds);
+                            pty_tx.resize(new_bounds, self.display_scale_factor);
                         }
                     }
                     #[cfg(not(windows))]
@@ -4122,7 +4135,7 @@ impl Terminal {
                         ..
                     } = &self.terminal_type
                     {
-                        pty_tx.resize(new_bounds);
+                        pty_tx.resize(new_bounds, self.display_scale_factor);
                     }
 
                     let reflow = reflow
@@ -4576,6 +4589,25 @@ impl Terminal {
 
     pub fn scrolled_to_bottom(&self) -> bool {
         self.last_content.scrolled_to_bottom
+    }
+
+    /// Keep protocol pixel reports in backing pixels while layout uses logical units.
+    /// A scale-only display move updates a local PTY without reflowing its grid.
+    pub fn set_display_scale_factor(&mut self, scale_factor: f32) {
+        if !scale_factor.is_finite()
+            || scale_factor <= 0.0
+            || self.display_scale_factor == scale_factor
+        {
+            return;
+        }
+        self.display_scale_factor = scale_factor;
+        if let TerminalType::Pty {
+            pty_tx: Some(pty_tx),
+            ..
+        } = &self.terminal_type
+        {
+            pty_tx.resize(self.last_content.terminal_bounds, scale_factor);
+        }
     }
 
     ///Resize the terminal and the PTY.

@@ -494,3 +494,34 @@ fn invalid_startup_config_falls_back_and_reports_the_error() {
     assert!(error.contains("parsing"));
     assert!(error.contains("line 1 column"));
 }
+
+#[test]
+fn cell_size_launch_override_uses_backing_pixels_and_its_own_process() {
+    for flag in ["--cell-size", "-C"] {
+        let args = launch(&[flag, "14x28", "--geometry", "80x24"]).unwrap();
+        assert_eq!(
+            args.cell_size,
+            Some(terminal_view::PhysicalCellSize {
+                width: 14,
+                height: 28
+            })
+        );
+        assert!(!should_handoff_to_existing_process(&args));
+    }
+    let args = launch(&["-C", "7X14", "-e", "cat", "--cell-size", "1x1"]).unwrap();
+    assert_eq!(args.cell_size.unwrap().width, 7);
+    assert_eq!(launch(&[]).unwrap().cell_size, None);
+}
+
+#[test]
+fn cell_size_rejects_invalid_dimensions_and_handoff_modes() {
+    for size in [
+        "", "14", "0x28", "14x0", "-1x28", "+1x28", "14.5x28", "14x28x2", "65536x28", "14x65536",
+    ] {
+        assert!(launch(&["--cell-size", size]).is_err(), "{size}");
+    }
+    assert!(launch(&["--cell-size"]).is_err());
+    assert!(launch(&["-C", "14x28", "--cell-size", "14x28"]).is_err());
+    assert!(launch(&["-C", "14x28", "--new-window"]).is_err());
+    assert!(launch(&["-C", "14x28", "--profile", "shell", "--replace-pane"]).is_err());
+}

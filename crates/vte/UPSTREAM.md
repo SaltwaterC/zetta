@@ -73,3 +73,7 @@ compares the parser against upstream's algorithm on seeded binary noise, for a
 performer that ignores no controls and one that ignores most, and
 `ignored_controls_are_exactly_the_ones_execute_does_nothing_for` in
 `src/ansi.rs` pins the two control lists together.
+
+## Zetta patch: physical cell geometry
+
+CSI 16 t dispatches to the default no-op `Handler::character_cell_size_pixels`, allowing the emulator to report physical cell dimensions.

@@ -147,11 +147,14 @@ impl PtySender {
         self.notifier.notify(input);
     }
 
-    pub(super) fn resize(&self, bounds: TerminalBounds) {
+    pub(super) fn resize(&self, bounds: TerminalBounds, scale_factor: f32) {
         if let Err(error) = self
             .notifier
             .0
-            .send(Msg::Resize(window_size_from_terminal_bounds(bounds)))
+            .send(Msg::Resize(window_size_from_terminal_bounds(
+                bounds,
+                scale_factor,
+            )))
         {
             log::error!("failed to resize alacritty pty: {error}");
         }
@@ -215,12 +218,16 @@ impl PtyIo {
     }
 }
 
-fn window_size_from_terminal_bounds(bounds: TerminalBounds) -> WindowSize {
+fn window_size_from_terminal_bounds(bounds: TerminalBounds, scale_factor: f32) -> WindowSize {
     WindowSize {
         num_lines: bounds.num_lines() as u16,
         num_cols: bounds.num_columns() as u16,
-        cell_width: f32::from(bounds.cell_width()) as u16,
-        cell_height: f32::from(bounds.line_height()) as u16,
+        cell_width: (f32::from(bounds.cell_width()) * scale_factor)
+            .round()
+            .max(1.0) as u16,
+        cell_height: (f32::from(bounds.line_height()) * scale_factor)
+            .round()
+            .max(1.0) as u16,
     }
 }
 
@@ -300,9 +307,14 @@ pub(super) fn pty_options(
 pub(super) fn open_pty(
     options: &tty::Options,
     bounds: TerminalBounds,
+    scale_factor: f32,
     window_id: u64,
 ) -> io::Result<AlacrittyPty> {
-    tty::new(options, window_size_from_terminal_bounds(bounds), window_id)
+    tty::new(
+        options,
+        window_size_from_terminal_bounds(bounds, scale_factor),
+        window_id,
+    )
 }
 
 pub(super) fn new_term(
@@ -449,8 +461,8 @@ impl From<AlacTermEvent> for TerminalBackendEvent {
             AlacTermEvent::ColorRequest(index, format) => Self::ColorRequest(index, format),
             AlacTermEvent::PtyWrite(output) => Self::PtyWrite(output),
             AlacTermEvent::TextAreaSizeRequest(format) => {
-                Self::TextAreaSizeRequest(Arc::new(move |bounds| {
-                    format(window_size_from_terminal_bounds(bounds))
+                Self::TextAreaSizeRequest(Arc::new(move |bounds, scale_factor| {
+                    format(window_size_from_terminal_bounds(bounds, scale_factor))
                 }))
             }
             AlacTermEvent::ResizeRequest { rows, columns } => Self::ResizeRequest {
@@ -1251,6 +1263,88 @@ pub(super) unsafe fn append_text_to_term(term: &mut Term<ZedListener>, text_line
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn geometry_queries_report_backing_pixels_end_to_end() {
+        use super::*;
+        use std::sync::Mutex;
+        use vte::ansi::{Processor, StdSyncHandler};
+        struct Listener(Arc<Mutex<Vec<AlacTermEvent>>>);
+        impl EventListener for Listener {
+            fn send_event(&self, event: AlacTermEvent) {
+                self.0
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .push(event);
+            }
+        }
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let bounds = TerminalBounds::new(
+            gpui::px(14.0),
+            gpui::px(7.0),
+            gpui::Bounds {
+                origin: Default::default(),
+                size: gpui::size(gpui::px(560.0), gpui::px(336.0)),
+            },
+        );
+        let mut term = Term::new(
+            AlacrittyTermConfig::default(),
+            &bounds,
+            Listener(events.clone()),
+        );
+        Processor::<StdSyncHandler>::new().advance(&mut term, b"\x1b[16t\x1b[14t\x1b[18t");
+        let replies = events
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .drain(..)
+            .map(|event| match TerminalBackendEvent::from(event) {
+                TerminalBackendEvent::TextAreaSizeRequest(format) => format(bounds, 2.0),
+                TerminalBackendEvent::PtyWrite(reply) => reply,
+                event => panic!("unexpected event {event:?}"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            replies,
+            ["\x1b[6;28;14t", "\x1b[4;672;1120t", "\x1b[8;24;80t"]
+        );
+        // The CSI report can carry a larger area than the kernel's u16 winsize.
+        let huge = TerminalBounds::new(
+            gpui::px(65535.0),
+            gpui::px(65535.0),
+            gpui::Bounds {
+                origin: Default::default(),
+                size: gpui::size(gpui::px(65535.0 * 80.0), gpui::px(65535.0 * 24.0)),
+            },
+        );
+        term.text_area_size_pixels();
+        let event = events
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .pop()
+            .unwrap();
+        let TerminalBackendEvent::TextAreaSizeRequest(format) = event.into() else {
+            panic!("expected size request");
+        };
+        assert_eq!(format(huge, 1.0), "\x1b[4;1572840;5242800t");
+    }
+
+    #[test]
+    fn pixel_size_reports_scale_and_round_cells_without_changing_the_grid() {
+        use super::*;
+        let bounds = TerminalBounds::new(
+            gpui::px(14.0),
+            gpui::px(7.0),
+            gpui::Bounds {
+                origin: Default::default(),
+                size: gpui::size(gpui::px(560.0), gpui::px(336.0)),
+            },
+        );
+        for (scale, width, height) in [(1.0, 7, 14), (1.25, 9, 18), (2.0, 14, 28)] {
+            let size = window_size_from_terminal_bounds(bounds, scale);
+            assert_eq!((size.num_cols, size.num_lines), (80, 24));
+            assert_eq!((size.cell_width, size.cell_height), (width, height));
+        }
+    }
+
     use gpui::px;
     use std::sync::Arc;
 

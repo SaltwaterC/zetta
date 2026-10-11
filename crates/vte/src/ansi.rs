@@ -707,6 +707,9 @@ pub trait Handler {
     /// Report text area size in pixels.
     fn text_area_size_pixels(&mut self) {}
 
+    /// Report the character cell size in pixels (CSI 16 t).
+    fn character_cell_size_pixels(&mut self) {}
+
     /// Report text area size in characters.
     fn text_area_size_chars(&mut self) {}
 
@@ -1772,6 +1775,7 @@ where
             ('T', []) => handler.scroll_down(next_param_or(1) as usize),
             ('t', []) => match next_param_or(1) as usize {
                 14 => handler.text_area_size_pixels(),
+                16 => handler.character_cell_size_pixels(),
                 18 => handler.text_area_size_chars(),
                 22 => handler.push_title(),
                 23 => handler.pop_title(),
@@ -2050,6 +2054,20 @@ pub mod C0 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn character_cell_pixel_query_is_dispatched() {
+        #[derive(Default)]
+        struct CellQuery(usize);
+        impl Handler for CellQuery {
+            fn character_cell_size_pixels(&mut self) {
+                self.0 += 1;
+            }
+        }
+        let mut handler = CellQuery::default();
+        Processor::<StdSyncHandler>::new().advance(&mut handler, b"\x1b[16t");
+        assert_eq!(handler.0, 1);
+    }
 
     #[derive(Default)]
     pub struct TestSyncHandler {

@@ -156,3 +156,7 @@ Retain these Zetta changes when synchronizing:
 
 The eight Zetta commits carrying these changes are `d6aa84b`, `d7b896f`,
 `57ecffe`, `d83beb7`, `1f6b1f7`, `9de38c6`, `31c3303`, and `7ba5a85`.
+
+## Zetta patch: physical cell geometry
+
+CSI 16 t uses the existing size-request event to report character cell height and width (CSI 6;HEIGHT;WIDTH t).

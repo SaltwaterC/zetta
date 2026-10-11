@@ -88,3 +88,20 @@ fn bounds_for_a_grid_hold_exactly_that_grid_in_the_laid_out_cell() {
         );
     }
 }
+
+#[test]
+fn backing_pixel_cells_keep_exact_grids_at_every_display_scale() {
+    for scale in [1.0, 1.25, 1.5, 2.0, 3.0] {
+        let metrics = PhysicalCellSize {
+            width: 14,
+            height: 28,
+        }
+        .logical(scale);
+        assert!((f32::from(metrics.cell_width) * scale - 14.0).abs() < 0.0001);
+        assert!((f32::from(metrics.line_height) * scale - 28.0).abs() < 0.0001);
+        for (columns, rows) in [(80, 24), (132, 43), (2, 1)] {
+            let size = element_size_for_grid(columns, rows, metrics, scale);
+            assert_eq!(grid_for_element_size(size, metrics, scale), (columns, rows));
+        }
+    }
+}

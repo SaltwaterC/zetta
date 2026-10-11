@@ -664,3 +664,37 @@ async fn a_hover_tooltip_shows_format_characters_escaped(cx: &mut gpui::TestAppC
     });
     assert_eq!(tooltip.as_deref(), Some("/tmp/\\u{202E}gpj.sh"));
 }
+
+#[gpui::test]
+fn explicit_backing_cells_reach_the_rendered_terminal(cx: &mut gpui::TestAppContext) {
+    cx.update(|cx| {
+        theme_settings::init(theme::LoadThemes::JustBase, cx);
+        TerminalSettings::init(cx);
+        cx.set_global(PhysicalCellSize {
+            width: 14,
+            height: 28,
+        });
+    });
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        let terminal = cx.new(|cx| {
+            terminal::TerminalBuilder::new_display_only(
+                terminal::terminal_settings::CursorShape::Block,
+                terminal::terminal_settings::AlternateScroll::On,
+                None,
+                0,
+                cx.background_executor(),
+                PathStyle::local(),
+            )
+            .subscribe(cx)
+        });
+        TerminalView::new(terminal, window, cx)
+    });
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        let bounds = view.read(cx).terminal.read(cx).local_terminal_bounds();
+        assert_eq!(f32::from(bounds.cell_width) * window.scale_factor(), 14.0);
+        assert_eq!(f32::from(bounds.line_height) * window.scale_factor(), 28.0);
+        assert!(bounds.num_columns() > 2);
+        assert!(bounds.num_lines() > 1);
+    });
+}

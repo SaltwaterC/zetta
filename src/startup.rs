@@ -422,6 +422,7 @@ struct ApplicationLaunch {
     initial_command: Option<Vec<String>>,
     initial_working_directory: Option<PathBuf>,
     geometry: Option<TerminalGrid>,
+    cell_size: Option<terminal_view::PhysicalCellSize>,
 }
 
 fn launch_gui(
@@ -553,6 +554,7 @@ fn resolve_application_launch(
         initial_command,
         initial_working_directory,
         geometry: args.geometry,
+        cell_size: args.cell_size,
     })
 }
 
@@ -607,6 +609,9 @@ fn initialize_zetta_settings(launch: &ApplicationLaunch, cx: &mut App) {
     zed_actions::init();
     release_channel::init(semver::Version::new(0, 1, 0), cx);
     TerminalSettings::init(cx);
+    if let Some(cell_size) = launch.cell_size {
+        cx.set_global(cell_size);
+    }
     theme_settings::init(theme::LoadThemes::All(Box::new(ZettaAssets)), cx);
     load_user_themes(cx).log_err();
     ZettaAssets.load_fonts(cx).log_err();

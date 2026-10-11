@@ -902,6 +902,7 @@ fn attention_subcommand_defaults_to_a_badge_without_notification() {
         replace_pane: false,
         theme_override: None,
         geometry: None,
+        cell_size: None,
         no_mux: false,
         mode: StartupMode::Attention(command),
         profile_report: None,

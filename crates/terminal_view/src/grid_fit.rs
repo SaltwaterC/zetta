@@ -13,8 +13,8 @@
 //! Zetta-authored, with no upstream counterpart.
 
 use gpui::{
-    App, Bounds, Font, FontFallbacks, FontFeatures, FontStyle, FontWeight, Pixels, SharedString,
-    Size, px,
+    App, Bounds, Font, FontFallbacks, FontFeatures, FontStyle, FontWeight, Global, Pixels,
+    SharedString, Size, px,
 };
 use terminal::{TerminalBounds, terminal_settings::TerminalSettings};
 use theme_settings::ThemeSettings;
@@ -77,6 +77,27 @@ impl TerminalFont {
     }
 }
 
+/// A process-local override for comparable terminal workloads on any display.
+/// Dimensions are backing pixels, independent of the window's logical scale.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PhysicalCellSize {
+    pub width: u16,
+    pub height: u16,
+}
+
+impl Global for PhysicalCellSize {}
+
+impl PhysicalCellSize {
+    /// Convert backing pixels using the owning window's display scale.
+    pub fn logical(self, scale_factor: f32) -> TerminalCellMetrics {
+        let scale = scale_factor.max(f32::EPSILON);
+        TerminalCellMetrics {
+            cell_width: px(f32::from(self.width) / scale),
+            line_height: px(f32::from(self.height) / scale),
+        }
+    }
+}
+
 /// The cell a standalone terminal lays its grid out in.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TerminalCellMetrics {
@@ -85,6 +106,20 @@ pub struct TerminalCellMetrics {
 }
 
 impl TerminalCellMetrics {
+    /// Fit the configured font inside an explicit cell, preserving its aspect ratio.
+    pub(crate) fn fit_font(
+        self,
+        font: &Font,
+        font_size: Pixels,
+        line_height: f32,
+        cx: &App,
+    ) -> Pixels {
+        let natural_width = resolve_cell_width(font, font_size, cx);
+        let fit = (self.cell_width / natural_width)
+            .min(f32::from(self.line_height) / (f32::from(font_size) * line_height));
+        font_size * fit
+    }
+
     /// Terminal bounds holding exactly `columns` by `rows` of these cells, for
     /// a terminal that has to start at a grid before it is laid out.
     pub fn bounds_for_grid(self, columns: usize, rows: usize) -> TerminalBounds {
@@ -102,7 +137,10 @@ impl TerminalCellMetrics {
     }
 
     /// What a new standalone terminal view, one nothing has zoomed, uses.
-    pub fn standalone(cx: &App) -> Self {
+    pub fn standalone(cx: &App, scale_factor: f32) -> Self {
+        if let Some(size) = cx.try_global::<PhysicalCellSize>() {
+            return size.logical(scale_factor);
+        }
         let font = TerminalFont::from_settings(cx);
         Self {
             cell_width: resolve_cell_width(&font.font(), font.standalone_size, cx),

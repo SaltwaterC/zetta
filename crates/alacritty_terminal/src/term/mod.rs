@@ -2553,9 +2553,16 @@ impl<T: EventListener> Handler for Term<T> {
     #[inline]
     fn text_area_size_pixels(&mut self) {
         self.event_proxy.send_event(Event::TextAreaSizeRequest(Arc::new(move |window_size| {
-            let height = window_size.num_lines * window_size.cell_height;
-            let width = window_size.num_cols * window_size.cell_width;
+            let height = u32::from(window_size.num_lines) * u32::from(window_size.cell_height);
+            let width = u32::from(window_size.num_cols) * u32::from(window_size.cell_width);
             format!("\x1b[4;{height};{width}t")
+        })));
+    }
+
+    #[inline]
+    fn character_cell_size_pixels(&mut self) {
+        self.event_proxy.send_event(Event::TextAreaSizeRequest(Arc::new(move |window_size| {
+            format!("\x1b[6;{};{}t", window_size.cell_height, window_size.cell_width)
         })));
     }
 

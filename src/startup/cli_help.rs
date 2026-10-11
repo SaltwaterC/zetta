@@ -267,6 +267,10 @@ pub(crate) fn help_text(profiles: &[Profile]) -> String {
             "Non-persistently override --profile's theme for this launch",
         ),
         (
+            "-C, --cell-size WIDTHxHEIGHT",
+            "Set exact cell dimensions in backing pixels for this launch, such as 14x28",
+        ),
+        (
             "-g, --geometry COLUMNSxROWS",
             "Open the window sized so its first pane has this grid, such as 80x24",
         ),

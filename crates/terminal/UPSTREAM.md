@@ -107,3 +107,7 @@ The current local fork also contains the application-facing changes from
 Zetta's file-path and scrollback-editing work on 2026-08-03.
 
 See `../UPSTREAM_AUDIT.md` for the reviewed upstream commit list.
+
+## Zetta patch: physical cell geometry
+
+Terminal geometry replies and local PTY pixel dimensions use the viewing display scale and round to backing pixels. Scale changes update local PTY metadata without grid reflow.

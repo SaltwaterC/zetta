@@ -209,7 +209,7 @@ $zettaCompletions = {
     $profileOperationIndex = -1
     $profileIndex = -1
     for ($index = 1; $index -lt $words.Count; $index++) {
-        if ($words[$index] -in '--config', '-c', '--keymap', '-k', '--profile', '-p', '--split', '-s', '--theme', '-t', '--geometry', '-g') {
+        if ($words[$index] -in '--config', '-c', '--keymap', '-k', '--profile', '-p', '--split', '-s', '--theme', '-t', '--geometry', '-g', '--cell-size', '-C') {
             $index++
         } elseif ($words[$index] -eq 'profile') {
             $profileIndex = $index
@@ -326,7 +326,7 @@ $zettaCompletions = {
         } else {
             @()
         }
-    } elseif ($previous -eq '--geometry' -or ($previous -eq '-g' -and $null -eq $subcommand)) {
+    } elseif ($previous -in '--geometry', '--cell-size' -or ($previous -in '-g', '-C' -and $null -eq $subcommand)) {
         @()
     } elseif (
         $previous -eq '--split' -or $last -eq '--split' -or
@@ -335,7 +335,7 @@ $zettaCompletions = {
         & $zettaSplits
     } elseif ($previous -eq '--replace-pane' -or ($previous -eq '-r' -and $null -eq $subcommand)) {
         if ($wordToComplete -like '-*' -or [string]::IsNullOrEmpty($wordToComplete)) {
-            '--help', '--version', '--config', '--keymap', '--profile', '--split', '--theme', '--geometry', ZETTA_NO_MUX_OPTION_PS '--new-window', '--command'
+            '--help', '--version', '--config', '--keymap', '--profile', '--split', '--theme', '--geometry', '--cell-size', ZETTA_NO_MUX_OPTION_PS '--new-window', '--command'
         } else {
             @()
         }
@@ -472,7 +472,7 @@ $zettaCompletions = {
         }
 # ZETTA_WORKTREE_INTEGRATION_END
     } elseif ($null -eq $subcommand) {
-        'benchmark', 'terminal-size', ZETTA_MUX_ROOT_COMMAND_PS 'profile', 'project', 'cmd', 'splits', 'pane', 'edit', 'vi', 'init', 'mosh', 'serial', 'http', 'tftp', 'notify', 'attention', 'copy', 'paste', 'tabicon', 'theme', 'overlay'ZETTA_WORKTREE_ROOT_COMMANDS, '--help', '--version', '--config', '--keymap', '--profile', '--split', '--replace-pane', '--theme', '--geometry', ZETTA_NO_MUX_OPTION_PS '--new-window', '--command'
+        'benchmark', 'terminal-size', ZETTA_MUX_ROOT_COMMAND_PS 'profile', 'project', 'cmd', 'splits', 'pane', 'edit', 'vi', 'init', 'mosh', 'serial', 'http', 'tftp', 'notify', 'attention', 'copy', 'paste', 'tabicon', 'theme', 'overlay'ZETTA_WORKTREE_ROOT_COMMANDS, '--help', '--version', '--config', '--keymap', '--profile', '--split', '--replace-pane', '--theme', '--geometry', '--cell-size', ZETTA_NO_MUX_OPTION_PS '--new-window', '--command'
     } else {
         switch ($subcommand) {
             'benchmark' {

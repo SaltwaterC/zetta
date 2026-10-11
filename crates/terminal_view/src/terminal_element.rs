@@ -24,7 +24,7 @@ use util::ResultExt;
 use std::mem;
 use std::{cell::RefCell, fmt::Debug, rc::Rc, sync::Arc, sync::OnceLock};
 
-use crate::grid_fit::{TerminalFont, snap_to_rows};
+use crate::grid_fit::{PhysicalCellSize, TerminalFont, snap_to_rows};
 use crate::{BlockContext, BlockProperties, ContentMode, TerminalMode, TerminalView};
 
 #[derive(Clone, Copy)]
@@ -1567,7 +1567,7 @@ impl Element for TerminalElement {
                     standalone_size,
                 } = TerminalFont::from_settings(cx);
 
-                let font_size = match &self.mode {
+                let mut font_size = match &self.mode {
                     TerminalMode::Embedded { .. } => {
                         window.text_style().font_size.to_pixels(window.rem_size())
                     }
@@ -1590,6 +1590,21 @@ impl Element for TerminalElement {
                     fade_out: None,
                 };
 
+                let cell_override = matches!(self.mode, TerminalMode::Standalone)
+                    .then(|| cx.try_global::<PhysicalCellSize>().copied())
+                    .flatten()
+                    .map(|size| size.logical(window.scale_factor()));
+                if let Some(metrics) = cell_override {
+                    let font = gpui::Font {
+                        family: font_family.clone(),
+                        features: font_features.clone(),
+                        weight: font_weight,
+                        fallbacks: font_fallbacks.clone(),
+                        style: FontStyle::Normal,
+                    };
+                    font_size = metrics.fit_font(&font, font_size, line_height, cx);
+                }
+
                 let text_style = TextStyle {
                     font_family,
                     font_features,
@@ -1611,8 +1626,14 @@ impl Element for TerminalElement {
                 let (dimensions, line_height_px) = {
                     let rem_size = window.rem_size();
                     let font_pixels = text_style.font_size.to_pixels(rem_size);
-                    let line_height = f32::from(font_pixels) * line_height;
-                    let cell_width = resolve_cell_width(&text_style.font(), font_pixels, cx);
+                    let line_height = cell_override
+                        .map_or(f32::from(font_pixels) * line_height, |metrics| {
+                            f32::from(metrics.line_height)
+                        });
+                    let cell_width = cell_override.map_or_else(
+                        || resolve_cell_width(&text_style.font(), font_pixels, cx),
+                        |metrics| metrics.cell_width,
+                    );
                     gutter = cell_width;
 
                     let mut size = bounds.size;
@@ -1665,6 +1686,7 @@ impl Element for TerminalElement {
                 let background_color = theme.colors().terminal_background;
 
                 let (hover_tooltip, hover_match) = self.terminal.update(cx, |terminal, cx| {
+                    terminal.set_display_scale_factor(window.scale_factor());
                     terminal.set_size(dimensions);
                     terminal.sync(window, cx);
 

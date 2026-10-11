@@ -107,7 +107,7 @@ struct SpawnedTerminal {
 
 struct LocalTerminalLaunch {
     /// The grid the terminal starts at before its first layout, if known.
-    initial_bounds: Option<terminal::TerminalBounds>,
+    initial_bounds: Option<terminal::InitialTerminalSize>,
     tab_id: u64,
     pane_id: u64,
     attention_id: u64,
@@ -1366,9 +1366,13 @@ impl Zetta {
         }
         self.spawn_prepared_local_terminal(
             LocalTerminalLaunch {
-                initial_bounds: launch_grid.map(|grid| {
-                    terminal_view::TerminalCellMetrics::standalone(cx)
-                        .bounds_for_grid(grid.columns, grid.rows)
+                initial_bounds: launch_grid.map(|grid| terminal::InitialTerminalSize {
+                    bounds: terminal_view::TerminalCellMetrics::standalone(
+                        cx,
+                        window.scale_factor(),
+                    )
+                    .bounds_for_grid(grid.columns, grid.rows),
+                    scale_factor: window.scale_factor(),
                 }),
                 tab_id,
                 pane_id,

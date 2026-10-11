@@ -121,6 +121,8 @@ pub(crate) struct StartupArgs {
     pub(crate) theme_override: Option<String>,
     /// Sizes the window this launch opens so its first pane has this grid.
     pub(crate) geometry: Option<TerminalGrid>,
+    /// Explicit cell dimensions in backing pixels for this process.
+    pub(crate) cell_size: Option<terminal_view::PhysicalCellSize>,
     /// Explicitly retain the legacy in-process session owner instead of
     /// requiring the daemon-backed multiplexer.
     pub(crate) no_mux: bool,
@@ -155,6 +157,7 @@ impl StartupArgs {
             replace_pane: false,
             theme_override: None,
             geometry: None,
+            cell_size: None,
             no_mux: !cfg!(feature = "zmux"),
             mode,
             profile_report: None,
@@ -283,6 +286,7 @@ fn parse_application_args(arguments: Vec<OsString>) -> Result<StartupArgs> {
     let mut replace_pane = false;
     let mut theme_override = None;
     let mut geometry = None;
+    let mut cell_size = None;
     #[cfg(feature = "zmux")]
     let mut no_mux = false;
     #[cfg(not(feature = "zmux"))]
@@ -340,6 +344,16 @@ fn parse_application_args(arguments: Vec<OsString>) -> Result<StartupArgs> {
                         .to_string_lossy()
                         .into_owned(),
                 );
+            }
+            "--cell-size" | "-C" => {
+                anyhow::ensure!(
+                    cell_size.is_none(),
+                    "--cell-size may only be specified once"
+                );
+                cell_size =
+                    Some(parse_cell_size(&args.next().context(
+                        "--cell-size requires WIDTHxHEIGHT in backing pixels",
+                    )?)?);
             }
             "--geometry" | "-g" => {
                 anyhow::ensure!(geometry.is_none(), "--geometry may only be specified once");
@@ -434,12 +448,13 @@ fn parse_application_args(arguments: Vec<OsString>) -> Result<StartupArgs> {
         "--replace-pane cannot be combined with another startup mode"
     );
     anyhow::ensure!(
-        geometry.is_none() || matches!(mode, StartupMode::Application | StartupMode::Command(_)),
-        "--geometry cannot be combined with another startup mode"
+        (geometry.is_none() && cell_size.is_none())
+            || matches!(mode, StartupMode::Application | StartupMode::Command(_)),
+        "--geometry and --cell-size cannot be combined with another startup mode"
     );
     anyhow::ensure!(
-        geometry.is_none() || !replace_pane,
-        "--geometry cannot be combined with --replace-pane"
+        (geometry.is_none() && cell_size.is_none()) || !replace_pane,
+        "--geometry and --cell-size cannot be combined with --replace-pane"
     );
     // The window is sized for one pane filling it, before it is first shown.
     anyhow::ensure!(
@@ -492,6 +507,7 @@ fn parse_application_args(arguments: Vec<OsString>) -> Result<StartupArgs> {
         replace_pane,
         theme_override,
         geometry,
+        cell_size,
         no_mux,
         mode,
         profile_report: None,
@@ -622,6 +638,30 @@ pub(crate) fn should_handoff_to_existing_process(args: &StartupArgs) -> bool {
         && (args.profile.is_none() || args.mode == StartupMode::NewWindow)
         && args.split.is_none()
         && args.geometry.is_none()
+        && args.cell_size.is_none()
+}
+
+/// `WIDTHxHEIGHT` in backing pixels; independent of the display scale.
+fn parse_cell_size(argument: &OsString) -> Result<terminal_view::PhysicalCellSize> {
+    let text = argument.to_string_lossy();
+    let (width, height) = text
+        .split_once(['x', 'X'])
+        .with_context(|| format!("--cell-size must be WIDTHxHEIGHT, not {text:?}"))?;
+    let dimension = |value: &str| -> Result<u16> {
+        anyhow::ensure!(
+            !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()),
+            "--cell-size dimensions must be positive integers in backing pixels"
+        );
+        let value: u16 = value
+            .parse()
+            .context("--cell-size dimension exceeds 65535")?;
+        anyhow::ensure!(value > 0, "--cell-size dimensions must be positive");
+        Ok(value)
+    };
+    Ok(terminal_view::PhysicalCellSize {
+        width: dimension(width)?,
+        height: dimension(height)?,
+    })
 }
 
 /// `COLUMNSxROWS`, each a positive whole number a pty can carry.

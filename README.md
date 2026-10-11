@@ -535,3 +535,20 @@ attribution and why Fish keeps original artwork.
 
 Zetta is an independent project and is not affiliated with Zed Industries,
 Inc.
+
+### Matching benchmark geometry
+
+Use `zetta --geometry 80x24 --cell-size 14x28 -e COMMAND [ARGS...]` to
+match a benchmark's grid and physical cell dimensions. `-g` and `-C` are the
+short forms. Cell width and height are positive integers in **backing pixels**:
+on a Retina display at scale 2, `14x28` gives a `7x14` logical-point cell;
+on Linux and Windows the current window scale is applied in the same way.
+The override lasts for this process, opens its own window, and does not change
+saved configuration. The selected font is sized to fit the explicit cell.
+
+Tools can verify the grid with CSI 18 t, the backing-pixel cell dimensions
+with CSI 16 t (reply CSI 6;HEIGHT;WIDTH t), and the grid's backing-pixel area
+with CSI 14 t (reply CSI 4;HEIGHT;WIDTH t). These reports exclude pane chrome
+and the terminal gutter. Prefer these replies over PTY pixel metadata for
+cross-platform comparisons: Windows consoles only expose the row/column grid.
+Keep benchmark windows visible throughout each run.

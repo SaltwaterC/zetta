@@ -35,3 +35,7 @@ independently adopts the corresponding feature.
 Files belonging only to Zed's uncompiled workspace view are reference material,
 not a source of automatic imports. See `../UPSTREAM_AUDIT.md` for decisions on
 such changes.
+
+## Zetta patch: physical cell geometry
+
+The process-local `PhysicalCellSize` override specifies backing-pixel cells, converted using each window scale for both initial grid sizing and rendering. Glyph font size fits inside that cell. Normal font-derived layout remains the default.
