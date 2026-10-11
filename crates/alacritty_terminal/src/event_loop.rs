@@ -456,6 +456,9 @@ where
                         if event.is_interrupt() {
                             // Don't try to do I/O on a dead PTY.
                             if hungup_too_long(&self.pty, &mut hangup_since) {
+                                if self.drain_on_exit {
+                                    let _ = self.pty_read(state, parser, pipe.as_deref_mut());
+                                }
                                 state.finish_parsing(parser);
                                 self.event_proxy.send_event(Event::ChildExitStatusUnavailable);
                                 self.terminal.lock().exit();
@@ -474,6 +477,13 @@ where
                                     // A hung-up slave can precede the child's exit notification.
                                     if self.pty.is_hangup_error(&err) {
                                         if hungup_too_long(&self.pty, &mut hangup_since) {
+                                            if self.drain_on_exit {
+                                                let _ = self.pty_read(
+                                                    state,
+                                                    parser,
+                                                    pipe.as_deref_mut(),
+                                                );
+                                            }
                                             state.finish_parsing(parser);
                                             self.event_proxy
                                                 .send_event(Event::ChildExitStatusUnavailable);
@@ -510,6 +520,9 @@ where
                             // Await its exit report just as for a master read after hangup.
                             if self.pty.is_hangup_error(&err) {
                                 if hungup_too_long(&self.pty, &mut hangup_since) {
+                                    if self.drain_on_exit {
+                                        let _ = self.pty_read(state, parser, pipe.as_deref_mut());
+                                    }
                                     state.finish_parsing(parser);
                                     self.event_proxy.send_event(Event::ChildExitStatusUnavailable);
                                     self.terminal.lock().exit();
