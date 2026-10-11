@@ -113,6 +113,7 @@ $installedPtyVersion = Join-Path $installDirectory "zmux-pty.version"
 
 $oldAppData = $env:APPDATA
 $oldLocalAppData = $env:LOCALAPPDATA
+$sourceRevision = (Get-Content (Join-Path (Split-Path $PSScriptRoot -Parent) "resources\windows\zmux-pty.version") -Raw).Trim()
 $oldUserPath = [Environment]::GetEnvironmentVariable("Path", "User")
 $unrelatedUserPathEntries = @(
     (Join-Path $testRoot "unrelated-first"),
@@ -141,11 +142,11 @@ try {
     Assert-FileContents (Join-Path $installDirectory "zcopy.exe") "zcopy-first" "zcopy was not installed"
     Assert-FileContents (Join-Path $installDirectory "zpaste.exe") "zpaste-first" "zpaste was not installed"
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $installDirectory "mosh-server.exe"))) "initial install left legacy mosh-server"
-    Assert-FileContents $installedPtyVersion "1" "initial helper marker is wrong"
+    Assert-FileContents $installedPtyVersion $sourceRevision "initial helper marker is wrong"
     Assert-UserPathEntries ($unrelatedUserPathEntries + $installDirectory) "initial install disturbed or omitted user PATH entries"
     Assert-UserPathContainsOnce $installDirectory "initial install did not add its executable directory to the user PATH"
 
-    # A rebuilt helper with the same host protocol is compatible even when its
+    # A rebuilt helper with the same install revision is compatible even when its
     # bytes differ. Its current image and every generation must remain intact.
     Set-SourceGeneration "different-helper"
     $initialHelper = Read-TestFile $installedPty
@@ -153,55 +154,23 @@ try {
     Assert-FileContents $installedPty $initialHelper "same-marker install replaced the helper"
     Assert-UserPathEntries ($unrelatedUserPathEntries + $installDirectory) "same-marker install changed user PATH entries"
 
-    # An old installation has no sidecar yet. Version 1 is the known legacy
-    # value, so the marker is backfilled without replacing its helper.
+    # An unmarked installation is legacy revision 1 and must receive the fix.
     Remove-Item -LiteralPath $installedPtyVersion -Force
     Set-SourceGeneration "migration-helper"
     Assert-InstallerSucceeded (Invoke-Installer) "marker migration failed"
-    Assert-FileContents $installedPty $initialHelper "marker migration replaced the helper"
-    Assert-FileContents $installedPtyVersion "1" "marker migration did not backfill the marker"
+    Assert-FileContents $installedPty "pty-migration-helper" "marker migration retained the legacy helper"
+    Assert-FileContents $installedPtyVersion $sourceRevision "marker migration did not backfill the marker"
 
     # A marker mismatch is the deliberate replacement path.
     Set-Content -LiteralPath $installedPtyVersion -Value "0" -NoNewline -Encoding ASCII
     Set-SourceGeneration "replacement"
     Assert-InstallerSucceeded (Invoke-Installer) "marker-change install failed"
     Assert-FileContents $installedPty "pty-replacement" "marker-change install kept the old helper"
-    Assert-FileContents $installedPtyVersion "1" "marker-change install wrote the wrong marker"
-
-    # A live host must be detected before staging or changing any installed
-    # file. The test process is the endpoint's live process, which makes this
-    # independent of a real pseudoconsole host.
-    $hostDirectory = Join-Path $appData "Zetta\sessions"
-    New-Item -ItemType Directory -Force -Path $hostDirectory | Out-Null
-    $hostEndpoint = Join-Path $hostDirectory "zmux-host.json"
-    $endpoint = [ordered]@{
-        version = 1
-        protocol_version = 1
-        process_id = $PID
-        socket_path = Join-Path $hostDirectory "zmux-host.sock"
-        token = "installer-test"
-    }
-    Set-Content -LiteralPath $hostEndpoint -Value ($endpoint | ConvertTo-Json -Compress) -Encoding ASCII
-
-    $beforeRefusal = @{
-        pty = Read-TestFile $installedPty
-        marker = Read-TestFile $installedPtyVersion
-        zetta = Read-TestFile (Join-Path $installDirectory "zetta.exe")
-    }
-    Set-Content -LiteralPath $installedPtyVersion -Value "0" -NoNewline -Encoding ASCII
-    Set-SourceGeneration "live-host"
-    $refused = Invoke-Installer
-    Assert-True ($refused.ExitCode -ne 0) "live-host install unexpectedly succeeded"
-    Assert-True (($refused.Output -join [Environment]::NewLine) -match "pseudoconsole host") "live-host refusal was not actionable"
-    Assert-FileContents $installedPty $beforeRefusal.pty "live-host refusal changed the helper"
-    Assert-FileContents $installedPtyVersion "0" "live-host refusal changed the marker"
-    Assert-FileContents (Join-Path $installDirectory "zetta.exe") $beforeRefusal.zetta "live-host refusal changed an application file"
-    Assert-True (-not (Test-Path -LiteralPath (Join-Path $installDirectory "zmux-pty.new.exe"))) "live-host refusal left a staged helper"
-    Remove-Item -LiteralPath $hostEndpoint -Force
+    Assert-FileContents $installedPtyVersion $sourceRevision "marker-change install wrote the wrong marker"
 
     # A locked stale helper generation must not be touched by an ordinary
     # install while the active helper's marker remains compatible.
-    Set-Content -LiteralPath $installedPtyVersion -Value "1" -NoNewline -Encoding ASCII
+    Set-Content -LiteralPath $installedPtyVersion -Value $sourceRevision -NoNewline -Encoding ASCII
     Set-SourceGeneration "locked-generation"
     $staleOld = Join-Path $installDirectory "zmux-pty.old.exe"
     $staleNew = Join-Path $installDirectory "zmux-pty.new.exe"

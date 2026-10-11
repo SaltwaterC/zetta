@@ -45,6 +45,11 @@ use crate::{
 /// to be able to speak to the host that was already running.
 pub const HOST_PROTOCOL_VERSION: u32 = 1;
 
+/// Installer revision, independent of the additive wire protocol. Bump when
+/// existing installations need new host behavior. Revision 2 protects the
+/// shell's bootstrap from console interrupts.
+pub const HOST_INSTALL_REVISION: u32 = 2;
+
 /// The oldest host this daemon can drive. An upgrade is refused rather than
 /// attempted when the running host is older than this, because the alternative
 /// is a new daemon that cannot reach the sessions it just inherited.
@@ -737,8 +742,19 @@ fn open_console(host: &Arc<Host>, request: OpenConsoleRequest) -> Result<HostRes
         target_process_id,
     } = request;
     let escape_args = escape_windows_shell_args(program.as_deref());
-    let console_palette_helper = (!is_wsl_program(program.as_deref()))
-        .then(|| std::env::current_exe().unwrap_or_else(|_| PathBuf::from("zmux-pty.exe")));
+    // The installer can archive this running image while keeping its consoles
+    // alive. New bootstraps must use the active helper beside it, not an
+    // archived image's filename.
+    let console_palette_helper = (!is_wsl_program(program.as_deref())).then(|| {
+        std::env::current_exe()
+            .ok()
+            .and_then(|image| {
+                image
+                    .parent()
+                    .map(|directory| directory.join("zmux-pty.exe"))
+            })
+            .unwrap_or_else(|| PathBuf::from("zmux-pty.exe"))
+    });
     let options = tty::Options {
         shell: program.map(|program| tty::Shell::new(program, args)),
         working_directory,

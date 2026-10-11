@@ -57,9 +57,9 @@ fn the_host_protocol_is_additive_only() {
 }
 
 #[test]
-fn the_windows_installer_marker_matches_the_host_protocol() {
+fn the_windows_installer_marker_matches_the_host_install_revision() {
     let marker = include_str!("../../../../resources/windows/zmux-pty.version").trim();
-    assert_eq!(marker, HOST_PROTOCOL_VERSION.to_string());
+    assert_eq!(marker, HOST_INSTALL_REVISION.to_string());
 }
 
 #[test]

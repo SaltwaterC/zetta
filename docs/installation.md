@@ -254,11 +254,17 @@ install of those hash-checked application files removes it before activating
 the new one.
 
 The Windows `zmux-pty.exe` helper is tracked by the installed
-`zmux-pty.version` host-protocol marker rather than by its build bytes. A
-rebuild with the same host protocol preserves the helper and its locked
+`zmux-pty.version` install-revision marker rather than by its build bytes. A
+rebuild with the same install revision preserves the helper and its locked
 generations, so it does not block an ordinary install. Bump the marker only
-for a deliberate host-protocol change; the installer then replaces the helper
-only after confirming that no live pseudoconsole host is using it.
+when a host behavior fix or protocol change needs deployment; the installer
+then activates the new helper and retains any running previous image.
+
+Revision 2 deploys the Ctrl+C bootstrap fix. Upgrading a revision-1 installation
+works while Zetta and its multiplexer sessions are running. Existing hosts keep
+their consoles and their old image; future pane bootstraps use the active helper.
+An already-running pane keeps its original bootstrap until that pane is closed.
+The wire protocol remains compatible.
 
 The shortcut exposes available profiles in its Windows Jump List, including
 when Zetta appears in Start Menu search. Zetta refreshes the entries after

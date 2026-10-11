@@ -114,11 +114,10 @@ $sourceDirectory = Split-Path -Parent $SourceBinary
 $pathMarker = Join-Path $InstallDirectory ".zetta-path-managed"
 $sourcePtyVersionMarker = Join-Path $repositoryRoot "resources\windows\zmux-pty.version"
 $installedPtyVersionMarker = Join-Path $InstallDirectory "zmux-pty.version"
-$ptyHostEndpoint = Join-Path $env:APPDATA "Zetta\sessions\zmux-host.json"
-# An installation made before the marker existed contains the version-1 host.
+# An installation made before the marker existed contains the revision-1 host.
 # Keep this explicit: an unmarked helper must not be treated as compatible after
-# the host protocol marker is deliberately bumped.
-$legacyPtyProtocolVersion = "1"
+# the host install revision is deliberately bumped.
+$legacyPtyInstallRevision = "1"
 
 function Get-VersionedPath([string]$Path, [string]$Version) {
     $directory = Split-Path -Parent $Path
@@ -332,7 +331,7 @@ function Remove-LegacyMoshServerFiles {
     }
 }
 
-function Get-PtyProtocolVersion([string]$Path) {
+function Get-PtyInstallRevision([string]$Path) {
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
         throw "Required Windows file not found at $Path. Run 'make build' first."
     }
@@ -353,7 +352,7 @@ function Test-PtyInstallCurrent([string]$SourceVersion) {
             (Get-Content -LiteralPath $installedPtyVersionMarker -Raw -ErrorAction Stop).Trim()
         )
     } else {
-        $installedVersion = $legacyPtyProtocolVersion
+        $installedVersion = $legacyPtyInstallRevision
     }
     return $installedVersion -eq $SourceVersion
 }
@@ -363,31 +362,7 @@ function Ensure-PtyVersionMarker([string]$SourceVersion) {
         return
     }
     Set-Content -LiteralPath $installedPtyVersionMarker -Value $SourceVersion -NoNewline -Encoding ASCII
-    Write-Host "Recorded the Windows pseudoconsole host protocol version at $installedPtyVersionMarker"
-}
-
-function Test-LivePtyHost {
-    if (-not (Test-Path -LiteralPath $ptyHostEndpoint -PathType Leaf)) {
-        return $false
-    }
-
-    try {
-        $endpoint = Get-Content -LiteralPath $ptyHostEndpoint -Raw -ErrorAction Stop | ConvertFrom-Json
-        $processId = [uint32]$endpoint.process_id
-    } catch {
-        throw "Could not safely inspect the Windows pseudoconsole host endpoint at $ptyHostEndpoint. Stop Zetta and remove the stale endpoint only after confirming that no sessions are running: $_"
-    }
-    if ($processId -eq 0) {
-        throw "The Windows pseudoconsole host endpoint at $ptyHostEndpoint has no usable process ID. Stop Zetta and remove the stale endpoint only after confirming that no sessions are running."
-    }
-
-    return $null -ne (Get-Process -Id ([int]$processId) -ErrorAction SilentlyContinue)
-}
-
-function Assert-PtyHostStopped {
-    if (Test-LivePtyHost) {
-        throw "Cannot replace zmux-pty.exe while a Windows pseudoconsole host is running (reported by $ptyHostEndpoint). Stop Zetta and its multiplexer sessions, then run make install again."
-    }
+    Write-Host "Recorded the Windows pseudoconsole host install revision at $installedPtyVersionMarker"
 }
 
 function Test-InstallFilesCurrent($InstallFiles) {
@@ -468,13 +443,8 @@ function Install-Binary {
     $sourcePtyVersion = $null
     $replacePty = $false
     if ($muxEnabled) {
-        $sourcePtyVersion = Get-PtyProtocolVersion $sourcePtyVersionMarker
+        $sourcePtyVersion = Get-PtyInstallRevision $sourcePtyVersionMarker
         $replacePty = -not (Test-PtyInstallCurrent $sourcePtyVersion)
-    }
-    if ($replacePty) {
-        # This check must happen before Remove-DisabledWorktreeFiles, creating
-        # the install directory, or touching any staged/rollback generation.
-        Assert-PtyHostStopped
     }
     Remove-DisabledWorktreeFiles
     Remove-DisabledNotifyFiles

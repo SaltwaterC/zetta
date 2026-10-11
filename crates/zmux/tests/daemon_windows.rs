@@ -31,6 +31,10 @@ struct TestDaemon {
 
 impl TestDaemon {
     fn start() -> Self {
+        Self::start_binary(&daemon_binary())
+    }
+
+    fn start_binary(binary: &Path) -> Self {
         // uds_windows has a short socket-name limit. Keeping the temporary
         // directory beside this checkout also makes the test work on machines
         // whose system temporary directory has a long user profile path.
@@ -39,7 +43,7 @@ impl TestDaemon {
             .tempdir_in(env!("CARGO_MANIFEST_DIR"))
             .expect("creating a short Windows test directory");
         let config = directory.path().to_path_buf();
-        let process = Command::new(daemon_binary())
+        let process = Command::new(binary)
             .arg("--daemon")
             .env("APPDATA", &config)
             .stdin(Stdio::null())
@@ -368,7 +372,11 @@ fn assert_shell_starts_quickly(client: &Client, request: SpawnRequest, marker: &
 fn conpty_ctrl_c_cancels_a_command_without_ending_the_shell() {
     let daemon = TestDaemon::start();
     let client = daemon.client();
+    assert_ctrl_c_returns_to_prompt(&client);
+    let _ = client.shutdown();
+}
 
+fn assert_ctrl_c_returns_to_prompt(client: &Client) {
     for program in ["powershell.exe", "pwsh.exe"] {
         if Command::new(program)
             .args(["-NoLogo", "-NoProfile", "-Command", "exit"])
@@ -438,8 +446,6 @@ fn conpty_ctrl_c_cancels_a_command_without_ending_the_shell() {
         drop(input);
         let _ = client.kill(session_id);
     }
-
-    let _ = client.shutdown();
 }
 
 #[test]
@@ -1697,4 +1703,62 @@ fn a_panes_agent_pipe_is_unpredictable_and_stays_held_across_an_upgrade() {
 
     let _ = replacement.kill(session_id);
     let _ = replacement.shutdown();
+}
+
+#[test]
+fn replacing_a_running_host_image_keeps_panes_and_uses_the_active_bootstrap() {
+    let built_daemon = daemon_binary();
+    let built_directory = built_daemon.parent().unwrap();
+    let binaries = tempfile::Builder::new()
+        .prefix("host-upgrade-")
+        .tempdir_in(built_directory)
+        .unwrap();
+    for name in ["zmux.exe", "zmux-pty.exe", "conpty.dll", "OpenConsole.exe"] {
+        let source = built_directory.join(name);
+        if source.is_file() {
+            std::fs::copy(source, binaries.path().join(name)).unwrap();
+        }
+    }
+    let installed_daemon = binaries.path().join("zmux.exe");
+    let installed_host = binaries.path().join("zmux-pty.exe");
+    let daemon = TestDaemon::start_binary(&installed_daemon);
+    let client = daemon.client();
+    let pane = client.spawn(spawn_request()).unwrap();
+    let host_endpoint = zmux::transport::Endpoint::read_host(&zmux::pty_host::endpoint_path(
+        &daemon.sessions_dir(),
+    ))
+    .unwrap();
+
+    // Archive the image while the host owns a live HPCON, just as installation
+    // does. New bootstraps must come from the active installed path.
+    let archive = binaries.path().join("zmux-pty.old.exe");
+    std::fs::rename(&installed_host, &archive).unwrap();
+    std::fs::copy(built_directory.join("zmux-pty.exe"), &installed_host).unwrap();
+    assert!(process_is_alive(host_endpoint.process_id));
+    assert!(process_is_alive(pane.child_pid));
+
+    let upgrade = Command::new(&installed_daemon)
+        .arg("--upgrade")
+        .env("APPDATA", &daemon.config)
+        .output()
+        .unwrap();
+    assert!(
+        upgrade.status.success(),
+        "{}",
+        String::from_utf8_lossy(&upgrade.stderr)
+    );
+    let replacement = daemon.client();
+    assert_ne!(replacement.process_id(), client.process_id());
+    replacement
+        .resize(pane.session_id, pane.pane_id, 100, 30)
+        .unwrap();
+    assert!(process_is_alive(pane.child_pid));
+    assert_ctrl_c_returns_to_prompt(&replacement);
+    let after = zmux::transport::Endpoint::read_host(&zmux::pty_host::endpoint_path(
+        &daemon.sessions_dir(),
+    ))
+    .unwrap();
+    assert_eq!(after.process_id, host_endpoint.process_id);
+    replacement.kill(pane.session_id).unwrap();
+    replacement.shutdown().unwrap();
 }

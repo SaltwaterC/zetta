@@ -433,13 +433,15 @@ no more privileged than any other upgrade.
 On Windows the small `zmux-pty.exe` host is deliberately not replaced during
 this operation. It is a versioned, additive protocol boundary: a newly built
 daemon must continue to drive the host that created the existing consoles.
-The Windows installer records that boundary in `resources/windows/zmux-pty.version`
-and compares the installed marker instead of comparing helper bytes. Rebuilt
-helpers with the same marker are left in place, including any `.old` or `.new`
-generation that Windows still has locked. Bump the marker only for a deliberate
-change to the host protocol, alongside `HOST_PROTOCOL_VERSION`; that is when an
-installer must replace the helper, and it will refuse to do so while a live host
-is reported.
+The Windows installer records the helper install revision in
+`resources/windows/zmux-pty.version` and compares the installed marker instead of
+comparing helper bytes. Rebuilt helpers with the same marker are left in place.
+Bump the marker alongside `HOST_INSTALL_REVISION` when a host behavior fix or
+protocol change needs deployment. The wire protocol has its own compatibility
+version. Installation archives a running helper image and activates the new one
+without stopping its host or panes. Future pane bootstraps use the active helper;
+already-running pane bootstraps continue until those panes close. Locked archived
+images are retained across repeated upgrades.
 
 ### How much output is kept
 
