@@ -256,6 +256,7 @@ redundant_closure = "deny"
 semicolon_if_nothing_returned = "deny"
 
 [patch.crates-io]
+block = { path = "crates/block" }
 proc-macro-error2 = { path = "crates/proc-macro-error2" }
 vt100 = { path = "crates/vt100" }
 # alacritty_terminal and terminal name the fork by path; this routes vt100's and

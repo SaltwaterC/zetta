@@ -22,3 +22,13 @@ mechanical adjustments the move requires:
 If this crate ever stops sitting between Zetta and `gpui` — because Zetta drops
 the dependency, or because upstream drops its own `gpui` dependency — delete the
 fork rather than keeping it in step.
+
+## Cargo package identity
+
+Keep the local package version distinct from upstream (`0.1.0-zetta` rather
+than `0.1.0`). Cargo reads upstream GPUI manifests through transitive
+dev-dependencies while reconstructing path packages from the lockfile. With
+identical names and versions, it can attach the lock entry to the upstream
+copy, leaving the local fork's patched `block` dependency unlocked and
+refreshing the crates.io index on every invocation. Preserve this version
+distinction when synchronizing, and regenerate the affected lockfiles.

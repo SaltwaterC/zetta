@@ -782,7 +782,7 @@ impl OnResize for Pty {
 
 #[cfg(test)]
 mod tests {
-    use std::io::Write;
+    use std::io::{Read, Write};
     use std::mem::MaybeUninit;
     use std::os::fd::AsRawFd;
     use std::os::unix::process::ExitStatusExt;
@@ -846,6 +846,8 @@ mod tests {
     ) -> Option<std::process::ExitStatus> {
         let deadline = Instant::now() + timeout;
         loop {
+            // macOS can hold a child in terminal output drain until the master is read.
+            super::discard_pending_output(&pty.file);
             if let Some(status) = pty.try_wait().expect("failed to poll PTY child") {
                 return Some(status);
             }
@@ -899,12 +901,7 @@ mod tests {
         read_until_marker(&mut pty, b"zetta-event:tracking-ready");
         for _ in 0..2 {
             pty.file.write_all(b"sleep 60\n").unwrap();
-            let deadline = Instant::now() + Duration::from_secs(5);
-            // Wait for job-control handoff, rather than guessing when sleep starts.
-            while unsafe { libc::tcgetpgrp(pty.file.as_raw_fd()) } == pty.child_pid() as i32 {
-                assert!(Instant::now() < deadline, "zsh did not foreground the command");
-                thread::sleep(Duration::from_millis(10));
-            }
+            wait_for_foreground_job(&mut pty);
             pty.file.write_all(b"\x03").unwrap();
             read_until_marker(&mut pty, b"zetta-event:command-finished:130");
             assert!(pty.try_wait().unwrap().is_none(), "Ctrl+C ended zsh");
@@ -916,9 +913,37 @@ mod tests {
         assert!(wait_for_child_exit(&mut pty, Duration::from_secs(5)).is_some());
     }
 
-    fn read_until_marker(pty: &mut super::Pty, marker: &[u8]) {
-        use std::io::Read as _;
+    fn wait_for_foreground_job(pty: &mut super::Pty) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut output = Vec::new();
+        let mut buffer = [0; 4096];
+        loop {
+            let foreground = unsafe { libc::tcgetpgrp(pty.file.as_raw_fd()) };
+            assert!(
+                foreground > 0,
+                "reading foreground process group: {}",
+                std::io::Error::last_os_error()
+            );
+            if foreground != pty.child_pid() as i32 {
+                return;
+            }
+            // Keep acting as a terminal while zsh prepares the job. On macOS,
+            // unread prompt/preexec output can keep it from handing off the PTY.
+            match pty.file.read(&mut buffer) {
+                Ok(length) => output.extend_from_slice(&buffer[..length]),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {},
+                Err(error) => panic!("reading zsh output: {error}"),
+            }
+            assert!(
+                Instant::now() < deadline,
+                "zsh did not foreground the command: {:?}",
+                String::from_utf8_lossy(&output)
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
 
+    fn read_until_marker(pty: &mut super::Pty, marker: &[u8]) {
         let deadline = Instant::now() + Duration::from_secs(5);
         let mut output = Vec::new();
         let mut buffer = [0; 4096];

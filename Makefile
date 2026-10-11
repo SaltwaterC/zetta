@@ -59,6 +59,7 @@ BUILD_TARGET_DIR := target/$(BUILD_PROFILE)
 # change under crates/ cannot silently skip formatting or tests.
 ZETTA_CRATE_DIRS := \
 	crates/alacritty_terminal \
+	crates/block \
 	crates/proc-macro-error2 \
 	crates/gpui_linux \
 	crates/gpui_macos \
@@ -89,6 +90,12 @@ ZETTA_TEST_CRATE_DIRS := \
 	crates/zmux \
 	crates/zosh \
 	crates/zosh/server
+
+# The block fork links Apple's native Blocks runtime in its tests. Other
+# hosts need a separately installed libBlocksRuntime to run that suite.
+ifeq ($(UNAME_S),Darwin)
+ZETTA_TEST_CRATE_DIRS += crates/block
+endif
 
 ifeq ($(OS),Windows_NT)
 CARGO_BUILD_JOBS ?= $(shell powershell.exe -NoProfile -Command "[Environment]::ProcessorCount")

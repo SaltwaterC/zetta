@@ -5,6 +5,11 @@ That revision remains the current upstream `master` as of 2026-08-29.
 
 Retain these Zetta changes when synchronizing:
 
+- the inline Unix PTY tests continue reading output while waiting for a zsh
+  foreground job or child exit. macOS can wait for terminal output to drain
+  at either point, so polling only the process group or exit status deadlocks
+  the test instead of exercising Ctrl-C handling.
+
 - Rust 1.99 manifest and lint compatibility: let chains, `is_multiple_of`,
   and fixed-size slice chunks. `ShellUser::from_env` retains its matches with
   a documented `question_mark` expectation because Clippy's suggested rewrite

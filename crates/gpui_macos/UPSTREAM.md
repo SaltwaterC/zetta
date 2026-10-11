@@ -27,3 +27,13 @@ depends on `zed/crates/gpui_apple` instead. Do not reintroduce local copies —
 renderer changes belong upstream.
 
 The fork was introduced by Zetta commit `38b9185`.
+
+## Cargo package identity
+
+Keep the local package version distinct from upstream (`0.1.0-zetta` rather
+than `0.1.0`). Cargo reads upstream GPUI manifests through transitive
+dev-dependencies while reconstructing path packages from the lockfile. With
+identical names and versions, it can attach the lock entry to the upstream
+copy, leaving the local fork's patched `block` dependency unlocked and
+refreshing the crates.io index on every invocation. Preserve this version
+distinction when synchronizing, and regenerate the affected lockfiles.
