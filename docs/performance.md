@@ -357,6 +357,44 @@ every-cell-is-its-own-quad shape of the checkerboard. Reports record
 
 ## Linux and Wayland diagnostics
 
+### WSLg graphics backend
+
+Check which adapter Zetta actually selects before investigating WSLg throughput:
+
+```sh
+ZETTA_LOG=info zetta benchmark \
+  --profile-report artifacts/wslg-default.json \
+  --profile-duration 10
+```
+
+The `Selected GPU adapter` log line identifies the device and backend.
+`llvmpipe` means rendering runs on the CPU. This can consume several cores
+alongside PTY reading and parsing, even when Windows has a working GPU.
+`glxinfo -B` and `vulkaninfo --summary`, when installed, also show which
+devices Mesa exposes; check both because their device lists can differ.
+
+If the default adapter is `llvmpipe`, test Mesa's WSL D3D12 driver with an
+override scoped to one process:
+
+```sh
+GALLIUM_DRIVER=d3d12 ZETTA_LOG=info zetta benchmark \
+  --profile-report artifacts/wslg-d3d12.json \
+  --profile-duration 10
+```
+
+Confirm the log names a hardware device such as `D3D12 (AMD Radeon PRO
+Graphics)` with the `Gl` backend. The override needs a working Mesa D3D12
+driver and WSL GPU access; a successful launch alone does not establish that
+hardware rendering was selected. Compare process CPU usage as well as frame
+timings. Keep software and hardware results labelled by their selected
+adapter, and use the same window size, workload, and visibility for both.
+
+When comparing output throughput, apply the override to the terminal process
+being launched (or its comparison script). Setting it in a shell inside an
+already running terminal does not change that terminal's renderer.
+
+### Stall diagnostics
+
 Linux/Wayland release builds emit a `Zetta diagnostic:` line when a UI task,
 terminal grid lock, or terminal snapshot construction stalls abnormally. The
 watchdog is silent during normal operation and writes to standard error. After
