@@ -3611,6 +3611,17 @@ function zetta
             cat "$COMPLETION"
     end
 end
+function zetta_test_wrapper --wraps zetta_test_target
+end
+complete -c zetta_test_target -a inherited
+complete -c zetta_test_wrapper -a retained
+complete -c zetta_test_wrapper -a '(__zetta_lazy_complete)'
+set -l cleanup_output (__zetta_remove_lazy_registration zetta_test_wrapper)
+test (count $cleanup_output) = 0; or exit 15
+set -l preserved (complete -C 'zetta_test_wrapper ')
+contains -- retained $preserved; or exit 16
+contains -- inherited $preserved; or exit 17
+string match -q '*__zetta_lazy_complete*' (complete -c zetta_test_wrapper); and exit 18
 complete -C 'zetta init --comp' >/dev/null
 set -q __zetta_completions_loaded; and exit 10
 complete -C 'zetta init --comp' >/dev/null

@@ -10751,6 +10751,28 @@ mod tests {
         });
     }
 
+    /// PTY tests exercise commands and job control, not the user's startup files.
+    /// Keep the shell interactive so Ctrl-C still targets a foreground job.
+    fn test_shell() -> Shell {
+        #[cfg(unix)]
+        {
+            Shell::Program("/bin/sh".to_owned())
+        }
+        #[cfg(not(unix))]
+        {
+            Shell::System
+        }
+    }
+
+    fn test_shell_environment() -> HashMap<String, String> {
+        [
+            ("ENV".to_owned(), String::new()),
+            ("BASH_ENV".to_owned(), String::new()),
+        ]
+        .into_iter()
+        .collect()
+    }
+
     /// Helper to build a test terminal running a shell command.
     /// Returns the terminal entity and a receiver for the completion signal.
     async fn build_test_terminal(
@@ -10760,7 +10782,7 @@ mod tests {
     ) -> (Entity<Terminal>, Receiver<Option<ExitStatus>>) {
         let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
         let (program, args) =
-            ShellBuilder::new(&Shell::System, false).build(Some(command.to_owned()), &args);
+            ShellBuilder::new(&test_shell(), false).build(Some(command.to_owned()), &args);
         build_test_terminal_with_arguments(cx, program, args).await
     }
 
@@ -10780,7 +10802,7 @@ mod tests {
                         args,
                         title_override: None,
                     },
-                    HashMap::default(),
+                    test_shell_environment(),
                     SettingsCursorShape::default(),
                     AlternateScroll::On,
                     None,
@@ -10827,7 +10849,7 @@ mod tests {
                         args,
                         title_override: None,
                     },
-                    HashMap::default(),
+                    test_shell_environment(),
                     SettingsCursorShape::default(),
                     AlternateScroll::On,
                     None,
@@ -10853,9 +10875,11 @@ mod tests {
     async fn task_pty_forwards_ctrl_c_to_the_foreground_command(cx: &mut TestAppContext) {
         cx.executor().allow_parking();
 
-        let command = "sleep 30".to_owned();
+        // POSIX interactive shells may return to a prompt after interrupting
+        // a command supplied with `-c`. End the task when that signal arrives.
+        let command = "trap 'exit 130' INT; sleep 30".to_owned();
         let (program, args) =
-            ShellBuilder::new(&Shell::System, false).build(Some(command.clone()), &[]);
+            ShellBuilder::new(&test_shell(), false).build(Some(command.clone()), &[]);
         let (terminal, completion_rx) = build_test_task_terminal(cx, program, args, command).await;
 
         // The PTY line discipline turns `^C` into a signal for whatever process
@@ -11814,8 +11838,8 @@ mod tests {
                 TerminalBuilder::new(
                     None,
                     None,
-                    task::Shell::System,
-                    HashMap::default(),
+                    test_shell(),
+                    test_shell_environment(),
                     SettingsCursorShape::default(),
                     AlternateScroll::On,
                     None,
@@ -11883,8 +11907,8 @@ mod tests {
                 TerminalBuilder::new(
                     None,
                     None,
-                    task::Shell::System,
-                    HashMap::default(),
+                    test_shell(),
+                    test_shell_environment(),
                     SettingsCursorShape::default(),
                     AlternateScroll::On,
                     None,
@@ -11939,7 +11963,7 @@ mod tests {
         cx.executor().allow_parking();
 
         let (completion_tx, completion_rx) = async_channel::unbounded();
-        let (program, args) = ShellBuilder::new(&Shell::System, false)
+        let (program, args) = ShellBuilder::new(&test_shell(), false)
             .build(Some("asdasdasdasd".to_owned()), &["@@@@@".to_owned()]);
         let builder = cx
             .update(|cx| {
@@ -11951,7 +11975,7 @@ mod tests {
                         args,
                         title_override: None,
                     },
-                    HashMap::default(),
+                    test_shell_environment(),
                     SettingsCursorShape::default(),
                     AlternateScroll::On,
                     None,
@@ -13858,7 +13882,7 @@ mod tests {
 
         let command = "printf 'test_output_before_kill\\n'; sleep 60".to_owned();
         let (program, args) =
-            ShellBuilder::new(&Shell::System, false).build(Some(command.clone()), &[]);
+            ShellBuilder::new(&test_shell(), false).build(Some(command.clone()), &[]);
         let (terminal, completion_rx) = build_test_task_terminal(cx, program, args, command).await;
 
         assert_content_eventually(&terminal, "test_output_before_kill", cx).await;
@@ -13936,7 +13960,7 @@ mod tests {
 
         let command = "exit 0".to_owned();
         let (program, args) =
-            ShellBuilder::new(&Shell::System, false).build(Some(command.clone()), &[]);
+            ShellBuilder::new(&test_shell(), false).build(Some(command.clone()), &[]);
         let (terminal, completion_rx) = build_test_task_terminal(cx, program, args, command).await;
 
         // Wait for the command to complete naturally

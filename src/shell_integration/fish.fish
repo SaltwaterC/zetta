@@ -369,7 +369,9 @@ function __zetta_remove_lazy_registration
     set -l registrations (complete -c $argv[1] | string match -v '*__zetta_lazy_complete*')
     complete -c $argv[1] -e
     for registration in $registrations
-        eval $registration
+        # Wrapped functions can include a bare `complete COMMAND` entry.
+        # Replaying it lists registrations; keep that output out of candidates.
+        eval $registration >/dev/null
     end
 end
 function __zetta_lazy_complete
