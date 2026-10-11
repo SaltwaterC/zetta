@@ -52,7 +52,11 @@ sequence among them.
   printable ASCII in one call. `ASCII_REPLACEMENT` (DEL, which a printable run
   cannot otherwise contain) stands for U+FFFD in a run, and `ascii_run_char`
   decodes a byte. Both default to a call per character, so a performer that
-  does not override them behaves exactly as upstream.
+  does not override them behaves exactly as upstream. Printable ASCII boundaries
+  are found a machine word at a time, then byte by byte within the first word
+  carrying a control, DEL or high byte; the arithmetic is endian-independent.
+  `ascii_word_scan_matches_byte_scan_at_every_boundary` checks all byte values,
+  alignments and tails against the scalar scan.
 - `advance_ground` validates text with `str::from_utf8` once; on an error it
   decodes the rest in a single pass (`ground_dispatch_lossy`, `decode_utf8`),
   consuming exactly the bytes `Utf8Error::error_len` reports, so replacement

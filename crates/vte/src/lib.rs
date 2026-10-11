@@ -859,10 +859,7 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
         let bytes = text.as_bytes();
         let mut i = 0;
         while i < bytes.len() {
-            let run_end = bytes[i..]
-                .iter()
-                .position(|&byte| !is_printable_ascii(byte))
-                .map_or(bytes.len(), |run| i + run);
+            let run_end = i + printable_ascii_len(&bytes[i..]);
             if run_end > i {
                 performer.print_ascii(&bytes[i..run_end]);
                 i = run_end;
@@ -999,6 +996,30 @@ pub const fn control_bits(bytes: &[u8]) -> u64 {
         index += 1;
     }
     bits
+}
+
+/// Skip printable ASCII a machine word at a time. Subtraction detects bytes below space;
+/// addition detects DEL and high bytes. Carries may mark an adjacent byte too, so a word with
+/// any candidate is searched byte by byte to find the exact first boundary.
+#[inline]
+fn printable_ascii_len(bytes: &[u8]) -> usize {
+    const WIDTH: usize = core::mem::size_of::<usize>();
+    const ONES: usize = usize::MAX / 255;
+    const SPACES: usize = ONES * 0x20;
+    const HIGH_BITS: usize = ONES * 0x80;
+    let mut offset = 0;
+    while bytes.len() - offset >= WIDTH {
+        let word = usize::from_ne_bytes(bytes[offset..offset + WIDTH].try_into().unwrap());
+        if (word.wrapping_sub(SPACES) | word.wrapping_add(ONES)) & HIGH_BITS != 0 {
+            break;
+        }
+        offset += WIDTH;
+    }
+    offset
+        + bytes[offset..]
+            .iter()
+            .position(|&byte| !is_printable_ascii(byte))
+            .unwrap_or(bytes.len() - offset)
 }
 
 /// Whether `byte` is ASCII that ground dispatch hands to [`Perform::print`].
@@ -1152,6 +1173,40 @@ mod tests {
     use std::vec::Vec;
 
     use super::*;
+
+    #[test]
+    fn ascii_word_scan_matches_byte_scan_at_every_boundary() {
+        let mut bytes = [b' '; 64];
+        for padding in 0..core::mem::size_of::<usize>() {
+            for len in 0..=bytes.len() - padding {
+                let input = &bytes[padding..padding + len];
+                assert_eq!(printable_ascii_len(input), len);
+                for boundary in 0..len {
+                    for byte in 0..=u8::MAX {
+                        bytes[padding + boundary] = byte;
+                        let input = &bytes[padding..padding + len];
+                        let expected =
+                            input.iter().position(|&b| !is_printable_ascii(b)).unwrap_or(len);
+                        assert_eq!(
+                            printable_ascii_len(input),
+                            expected,
+                            "{padding} {len} {boundary} {byte}"
+                        );
+                    }
+                    bytes[padding + boundary] = b' ';
+                }
+            }
+        }
+        // Adjacent high bytes exercise carries across bytes in both arithmetic operations.
+        for first in 0..=u8::MAX {
+            for second in 0..=u8::MAX {
+                bytes[..2].copy_from_slice(&[first, second]);
+                let expected =
+                    bytes.iter().position(|&b| !is_printable_ascii(b)).unwrap_or(bytes.len());
+                assert_eq!(printable_ascii_len(&bytes), expected);
+            }
+        }
+    }
 
     const OSC_BYTES: &[u8] = &[
         0x1B, 0x5D, // Begin OSC

@@ -655,6 +655,11 @@ impl EventedReadWrite for Pty {
 }
 
 impl EventedPty for Pty {
+    fn is_hangup_error(&self, error: &Error) -> bool {
+        // A closed slave can make either master read or write return EIO before SIGCHLD arrives.
+        error.raw_os_error() == Some(libc::EIO)
+    }
+
     #[inline]
     fn child_is_foreign(&self) -> bool {
         // A reclaimed child is still this process's own — `execv` does not

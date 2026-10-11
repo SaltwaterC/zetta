@@ -10,6 +10,7 @@ default = ["backend"]
 backend = ["dep:arboard"]
 
 [dependencies]
+memchr = "2.8"
 anyhow = "1"
 arboard = { version = "3", default-features = false, features = ["wayland-data-control"], optional = true }
 base64 = "0.22"

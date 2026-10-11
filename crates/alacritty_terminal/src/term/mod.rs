@@ -1228,6 +1228,15 @@ impl<T> Term<T> {
         let template = &self.grid.cursor.template;
         if start.0 >= self.grid[point.line].occ && template.extra.is_none() {
             let (fg, bg, flags) = (template.fg, template.bg, template.flags);
+            // The unoccupied suffix is uniform. If its attributes already match, writing
+            // characters alone is enough; otherwise set the attributes for the whole segment.
+            let blank = &self.grid[point.line][start];
+            if blank.fg == fg && blank.bg == bg && blank.flags == flags {
+                for (cell, &byte) in self.grid[point.line][start..end].iter_mut().zip(text) {
+                    cell.c = ascii_run_char(byte);
+                }
+                return;
+            }
             for (cell, &byte) in self.grid[point.line][start..end].iter_mut().zip(text) {
                 debug_assert!(cell.extra.is_none() && !cell.flags.intersects(Flags::WIDE_CHAR));
                 cell.c = ascii_run_char(byte);
@@ -3279,6 +3288,8 @@ mod tests {
             ("without autowrap", b"\x1b[?7l", "abcdefghijklmnopqrstuvwxyz"),
             ("without autowrap mid row", b"\x1b[?7l\x1b[1;8H", "abcdef"),
             ("template attributes", b"\x1b[1;31;44m", "styled text that wraps"),
+            ("blank background already matches", b"\x1b[44m\x1b[2J", "same background"),
+            ("attributes change on a blank row", b"\x1b[44m\x1b[2J\x1b[1;31m", "new attributes"),
             ("underline colour", b"\x1b[4;58;2;1;2;3m", "decorated"),
             ("scrolls the bottom row", b"\x1b[5;1H", "abcdefghijklmnopqrstuvwxyz"),
             ("scroll region", b"\x1b[2;3r\x1b[3;1H", "abcdefghijklmnopqrstuvwxyz"),

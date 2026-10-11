@@ -105,6 +105,17 @@ Retain these Zetta changes when synchronizing:
   drain. Zetta releases an exited PTY as soon as it receives that report, so
   reporting first could abort the drain and discard the child process's final
   output.
+- Unix PTY master reads and writes treat `EIO` as a slave hangup awaiting the
+  child exit notification. A queued terminal reply can reach the master after
+  the child closes its slave, before `SIGCHLD` is handled; reporting a backend
+  failure then left comparison windows open on an error pane. The read and write
+  paths retain the existing bounded wait for a foreign child's exit report.
+  Only nonempty output clears that deadline: repeated EOF must not restart it.
+  `eof_does_not_restart_a_foreign_childs_missing_exit_deadline` covers a hung-up
+  slave whose watcher never reports the exit.
+  `a_terminal_reply_after_slave_hangup_waits_for_the_child_exit` forces that
+  ordering with real readiness and child notifications, and fails without the
+  write-side handling.
 - The event loop only does I/O; `src/pty_parser.rs`, a Zetta-authored module,
   parses on a thread of its own. Linux copies pty output out through a small
   stack buffer, and plain-text floods spent two fifths of the single reader
@@ -121,6 +132,18 @@ Retain these Zetta changes when synchronizing:
   benchmarks `ascii_through_the_event_loop_throughput_benchmark` and
   `random_through_the_event_loop_throughput_benchmark` run `cat` through a
   real pty into an 80x24 grid.
+- macOS: `src/pty_read/macos.rs` bridges the kernel's roughly 1 KiB PTY refill
+  gaps with bounded nonblocking retries. Small bursts get sixteen retries;
+  continuous bulk output gets up to 256, classified across chunks until a 1 ms
+  quiet gap. A 3 ms per-batch deadline is checked every sixteen failed reads,
+  without restarting it on refills. Empty reads, EOF and errors end immediately.
+  Four 256 KiB gather buffers retain the 1 MiB read-ahead limit; the parser splits
+  them into the existing 65,535-byte lock budget before recycling them. One-shot
+  kqueue readiness is rearmed after each poll, removing per-write filter work
+  while gathering. Other platforms retain their original gather size, pool and
+  level-triggered readiness via `src/pty_read/direct.rs`. Escape scanners use
+  `memchr`'s SIMD search. Tests cover burst classification, retry/deadline bounds,
+  rearming after idle, final-output drain and parse boundaries.
 - Windows: `src/tty/program_search.rs`, a Zetta-authored module (tests in
   `src/tests/tty/program_search.rs`), resolves a pane's program the way
   `CreateProcessW` would but never from the current directory or a relative
@@ -140,7 +163,9 @@ Retain these Zetta changes when synchronizing:
   writing it. A segment that starts at or past the row's `occ`, which upstream
   already keeps as the bound past which every cell is blank, is written field
   by field without reading the cells first: no wide-character scan, no `extra`
-  to drop. And `GridCell` gains a provided `reset_all`, which `Row::reset`
+  to drop. If the uniform blank suffix already has the cursor's attributes,
+  writing only its characters avoids redundant attribute stores. `GridCell`
+  gains a provided `reset_all`, which `Row::reset`
   calls; `Cell` overrides it to copy one blank cell whole, two wide stores in
   place of five narrow ones. Both loops were store-bound, not waiting on the
   recycled row's memory; prefetching that row measured slower.

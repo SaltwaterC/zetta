@@ -45,6 +45,7 @@ dependencies = [
  "home",
  "libc",
  "log",
+ "memchr",
  "miow",
  "parking_lot",
  "piper",
@@ -5324,6 +5325,7 @@ dependencies = [
  "base64",
  "getrandom 0.3.4",
  "libc",
+ "memchr",
  "tempfile",
  "windows 0.61.3",
 ]

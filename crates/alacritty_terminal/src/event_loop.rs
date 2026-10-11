@@ -12,7 +12,7 @@ use std::thread::JoinHandle;
 use std::time::Instant;
 
 use log::error;
-use polling::{Event as PollingEvent, Events, PollMode, Poller};
+use polling::{Event as PollingEvent, Events, Poller};
 
 use crate::event::{self, Event, EventListener, WindowSize};
 use crate::pty_parser::ParserThread;
@@ -21,8 +21,18 @@ use crate::term::Term;
 use crate::{thread, tty};
 use vte::ansi;
 
+#[cfg(target_os = "macos")]
+#[path = "pty_read/macos.rs"]
+mod pty_read;
+#[cfg(not(target_os = "macos"))]
+#[path = "pty_read/direct.rs"]
+mod pty_read;
+
 /// Max bytes to read from the PTY before forced terminal synchronization.
 pub(crate) const READ_BUFFER_SIZE: usize = 0x10_0000;
+
+/// Gather capacity, independent of the terminal's per-lock parsing budget.
+pub(crate) const READ_CHUNK_SIZE: usize = pty_read::CHUNK_SIZE;
 
 /// How long a foreign child's PTY may stay hung up before the loop stops
 /// waiting for an exit report that is not coming.
@@ -249,18 +259,18 @@ where
     }
 
     #[inline]
-    /// Reads what the PTY has ready, up to one chunk, and queues it for the parser thread.
+    /// Reads what the PTY has ready, up to one chunk, returning the bytes queued for parsing.
     fn pty_read<X>(
         &mut self,
         state: &mut State,
         parser: &mut ParserThread,
         writer: Option<&mut X>,
-    ) -> io::Result<()>
+    ) -> io::Result<usize>
     where
         X: Write,
     {
         if !self.replay_barrier.wait() {
-            return Ok(());
+            return Ok(0);
         }
         #[cfg(windows)]
         {
@@ -268,6 +278,8 @@ where
         }
 
         let mut chunk = parser.take_chunk()?;
+        let retry = &mut state.read_retry;
+        retry.begin_batch();
         let result = loop {
             if chunk.unfilled().is_empty() {
                 break Ok(());
@@ -285,10 +297,16 @@ where
                         state.profile.bytes += got as u64;
                     }
                     chunk.advance(got);
+                    retry.on_read(got);
                 },
                 Err(err) => match err.kind() {
                     ErrorKind::Interrupted => continue,
-                    // Go back to mio once the PTY would block.
+                    // macOS briefly drains its small output queue before a bulk producer
+                    // refills it. Retry within a bounded budget before publishing a tiny
+                    // chunk and putting both the reader and parser to sleep.
+                    ErrorKind::WouldBlock if retry.should_retry(chunk.filled().len()) => {
+                        continue;
+                    },
                     ErrorKind::WouldBlock => break Ok(()),
                     _ => break Err(err),
                 },
@@ -298,6 +316,8 @@ where
         // Bytes read before an error were still produced by the child, so they are parsed
         // whatever the error means for the next read.
         let read = chunk.filled();
+        let bytes_read = read.len();
+        retry.finish_batch(read.len());
 
         // Write a copy of the bytes to the ref test file.
         if let Some(writer) = writer {
@@ -320,7 +340,7 @@ where
         });
 
         parser.parse(chunk)?;
-        result
+        result.map(|()| bytes_read)
     }
 
     #[inline]
@@ -355,26 +375,187 @@ where
         Ok(())
     }
 
+    /// Runs a registered PTY until shutdown or failure. The caller drains the parser before
+    /// reporting an infrastructure failure (`true`); child exits drain before their own report.
+    fn run_event_loop(
+        &mut self,
+        state: &mut State,
+        parser: &mut ParserThread,
+        mut pipe: Option<&mut File>,
+        mut interest: PollingEvent,
+    ) -> bool {
+        let mut backend_shutdown = true;
+        let poll_opts = pty_read::POLL_MODE;
+        let mut events = Events::with_capacity(NonZeroUsize::new(1024).unwrap());
+        // When the master first reported a hangup that produced no child
+        // event, so a foreign child's missing exit report can time out
+        // instead of being waited on forever.
+        let mut hangup_since: Option<Instant> = None;
+
+        'event_loop: loop {
+            events.clear();
+            if let Err(err) = self.poll.wait(&mut events, None) {
+                match err.kind() {
+                    ErrorKind::Interrupted => continue,
+                    _ => {
+                        error!("Event loop polling error: {err}");
+                        break 'event_loop;
+                    },
+                }
+            }
+
+            // Handle channel events, if there are any.
+            if !self.drain_recv_channel(state) {
+                backend_shutdown = false;
+                break;
+            }
+
+            for event in events.iter() {
+                match event.key {
+                    tty::PTY_CHILD_EVENT_TOKEN => {
+                        if let Some(child_event) = self.pty.next_child_event() {
+                            if self.drain_on_exit {
+                                let _ = self.pty_read(state, parser, pipe.as_deref_mut());
+                            }
+                            state.finish_parsing(parser);
+
+                            // Report an exit only after the configured final drain. Its
+                            // consumer can release the PTY resources as soon as it sees the
+                            // event, so reporting first could abort the drain and discard the
+                            // child's last output.
+                            //
+                            // `Term::exit` sends `Event::Exit`, which the owning terminal
+                            // reads as "the child ended with no usable status". That is true
+                            // of the two exit events and false of a watcher disconnect, where
+                            // the child's fate is simply unknown — so a disconnect must not
+                            // send it, or it would overrule whatever the consumer decided a
+                            // disconnect means.
+                            let child_ended =
+                                !matches!(&child_event, tty::ChildEvent::WatcherDisconnected);
+                            match child_event {
+                                tty::ChildEvent::Exited(status) => {
+                                    self.event_proxy.send_event(Event::ChildExit(status));
+                                },
+                                tty::ChildEvent::ExitStatusUnavailable => {
+                                    self.event_proxy.send_event(Event::ChildExitStatusUnavailable);
+                                },
+                                tty::ChildEvent::WatcherDisconnected => {
+                                    self.event_proxy.send_event(Event::ChildWatcherDisconnected);
+                                },
+                            }
+                            if child_ended {
+                                self.terminal.lock().exit();
+                            }
+                            self.event_proxy.send_event(Event::Wakeup);
+                            backend_shutdown = false;
+                            break 'event_loop;
+                        }
+                    },
+
+                    tty::PTY_READ_WRITE_TOKEN => {
+                        if event.is_interrupt() {
+                            // Don't try to do I/O on a dead PTY.
+                            if hungup_too_long(&self.pty, &mut hangup_since) {
+                                state.finish_parsing(parser);
+                                self.event_proxy.send_event(Event::ChildExitStatusUnavailable);
+                                self.terminal.lock().exit();
+                                self.event_proxy.send_event(Event::Wakeup);
+                                backend_shutdown = false;
+                                break 'event_loop;
+                            }
+                            continue;
+                        }
+
+                        if event.readable {
+                            let bytes_read = match self.pty_read(state, parser, pipe.as_deref_mut())
+                            {
+                                Ok(bytes_read) => bytes_read,
+                                Err(err) => {
+                                    // A hung-up slave can precede the child's exit notification.
+                                    if self.pty.is_hangup_error(&err) {
+                                        if hungup_too_long(&self.pty, &mut hangup_since) {
+                                            state.finish_parsing(parser);
+                                            self.event_proxy
+                                                .send_event(Event::ChildExitStatusUnavailable);
+                                            self.terminal.lock().exit();
+                                            self.event_proxy.send_event(Event::Wakeup);
+                                            backend_shutdown = false;
+                                            break 'event_loop;
+                                        }
+                                        continue;
+                                    }
+
+                                    error!("Error reading from PTY in event loop: {err}");
+                                    break 'event_loop;
+                                },
+                            };
+                            // Only actual output proves the slave became usable again. EOF must
+                            // not restart a foreign child's timeout while its exit report is lost.
+                            if bytes_read != 0 {
+                                hangup_since = None;
+                            }
+
+                            // Adaptors backed by an in-memory pipe must explicitly register
+                            // the next wake after this deliberately bounded read batch.
+                            if let Err(err) = self.pty.rearm_read() {
+                                error!("Error re-arming PTY read interest: {err}");
+                                break 'event_loop;
+                            }
+                        }
+
+                        if event.writable
+                            && let Err(err) = self.pty_write(state)
+                        {
+                            // A queued terminal reply can race with the child closing its PTY.
+                            // Await its exit report just as for a master read after hangup.
+                            if self.pty.is_hangup_error(&err) {
+                                if hungup_too_long(&self.pty, &mut hangup_since) {
+                                    state.finish_parsing(parser);
+                                    self.event_proxy.send_event(Event::ChildExitStatusUnavailable);
+                                    self.terminal.lock().exit();
+                                    self.event_proxy.send_event(Event::Wakeup);
+                                    backend_shutdown = false;
+                                    break 'event_loop;
+                                }
+                                continue;
+                            }
+                            error!("Error writing to PTY in event loop: {err}");
+                            break 'event_loop;
+                        }
+                    },
+                    _ => (),
+                }
+            }
+
+            // One-shot PTYs must be rearmed after every poll; their readiness filter is
+            // absent while gathering output, avoiding per-write kqueue notifications.
+            // Level-triggered PTYs only need changes to write interest.
+            let needs_write = state.needs_write();
+            if needs_write != interest.writable || pty_read::REARM_READ {
+                interest.writable = needs_write;
+
+                // Re-register with new interest.
+                if let Err(err) = self.pty.reregister(&self.poll, interest, poll_opts) {
+                    error!("Event loop reregistration error: {err}");
+                    break 'event_loop;
+                }
+            }
+        }
+
+        backend_shutdown
+    }
+
     pub fn spawn(mut self) -> JoinHandle<(Self, State)> {
         thread::spawn_named("PTY reader", move || {
             let mut state = State::default();
-            // A normal child exit and an explicit shutdown both leave the
-            // loop intentionally. Any other exit is an infrastructure
-            // failure and must be visible to the owning terminal.
-            let mut backend_shutdown = true;
             if !self.replay_barrier.wait() {
                 // A terminal can be dropped before its first layout. The
                 // barrier's abort is the intentional shutdown in that case,
                 // not a backend failure to report to the terminal.
                 return (self, state);
             }
-            // When the master first reported a hangup that produced no child
-            // event, so a foreign child's missing exit report can time out
-            // instead of being waited on forever.
-            let mut hangup_since: Option<Instant> = None;
-
-            let poll_opts = PollMode::Level;
-            let mut interest = PollingEvent::readable(0);
+            let poll_opts = pty_read::POLL_MODE;
+            let interest = PollingEvent::readable(0);
 
             // Register TTY through EventedRW interface.
             if let Err(err) = unsafe { self.pty.register(&self.poll, interest, poll_opts) } {
@@ -382,8 +563,6 @@ where
                 self.event_proxy.send_event(Event::BackendShutdown);
                 return (self, state);
             }
-
-            let mut events = Events::with_capacity(NonZeroUsize::new(1024).unwrap());
 
             let mut pipe = if self.ref_test {
                 Some(File::create("./alacritty.recording").expect("create alacritty recording"))
@@ -401,144 +580,8 @@ where
                 std::mem::take(&mut state.parser),
             );
 
-            'event_loop: loop {
-                events.clear();
-                if let Err(err) = self.poll.wait(&mut events, None) {
-                    match err.kind() {
-                        ErrorKind::Interrupted => continue,
-                        _ => {
-                            error!("Event loop polling error: {err}");
-                            break 'event_loop;
-                        },
-                    }
-                }
-
-                // Handle channel events, if there are any.
-                if !self.drain_recv_channel(&mut state) {
-                    backend_shutdown = false;
-                    break;
-                }
-
-                for event in events.iter() {
-                    match event.key {
-                        tty::PTY_CHILD_EVENT_TOKEN => {
-                            if let Some(child_event) = self.pty.next_child_event() {
-                                if self.drain_on_exit {
-                                    let _ = self.pty_read(&mut state, &mut parser, pipe.as_mut());
-                                }
-                                state.finish_parsing(&mut parser);
-
-                                // Report an exit only after the configured final drain. Its
-                                // consumer can release the PTY resources as soon as it sees the
-                                // event, so reporting first could abort the drain and discard the
-                                // child's last output.
-                                //
-                                // `Term::exit` sends `Event::Exit`, which the owning terminal
-                                // reads as "the child ended with no usable status". That is true
-                                // of the two exit events and false of a watcher disconnect, where
-                                // the child's fate is simply unknown — so a disconnect must not
-                                // send it, or it would overrule whatever the consumer decided a
-                                // disconnect means.
-                                let child_ended =
-                                    !matches!(&child_event, tty::ChildEvent::WatcherDisconnected);
-                                match child_event {
-                                    tty::ChildEvent::Exited(status) => {
-                                        self.event_proxy.send_event(Event::ChildExit(status));
-                                    },
-                                    tty::ChildEvent::ExitStatusUnavailable => {
-                                        self.event_proxy
-                                            .send_event(Event::ChildExitStatusUnavailable);
-                                    },
-                                    tty::ChildEvent::WatcherDisconnected => {
-                                        self.event_proxy
-                                            .send_event(Event::ChildWatcherDisconnected);
-                                    },
-                                }
-                                if child_ended {
-                                    self.terminal.lock().exit();
-                                }
-                                self.event_proxy.send_event(Event::Wakeup);
-                                backend_shutdown = false;
-                                break 'event_loop;
-                            }
-                        },
-
-                        tty::PTY_READ_WRITE_TOKEN => {
-                            if event.is_interrupt() {
-                                // Don't try to do I/O on a dead PTY.
-                                if hungup_too_long(&self.pty, &mut hangup_since) {
-                                    state.finish_parsing(&mut parser);
-                                    self.event_proxy.send_event(Event::ChildExitStatusUnavailable);
-                                    self.terminal.lock().exit();
-                                    self.event_proxy.send_event(Event::Wakeup);
-                                    backend_shutdown = false;
-                                    break 'event_loop;
-                                }
-                                continue;
-                            }
-
-                            if event.readable {
-                                if let Err(err) =
-                                    self.pty_read(&mut state, &mut parser, pipe.as_mut())
-                                {
-                                    // On Linux, a `read` on the master side of a PTY can fail
-                                    // with `EIO` if the client side hangs up.  In that case,
-                                    // just loop back round for the inevitable `Exited` event.
-                                    // This sucks, but checking the process is either racy or
-                                    // blocking.
-                                    #[cfg(target_os = "linux")]
-                                    if err.raw_os_error() == Some(libc::EIO) {
-                                        if hungup_too_long(&self.pty, &mut hangup_since) {
-                                            state.finish_parsing(&mut parser);
-                                            self.event_proxy
-                                                .send_event(Event::ChildExitStatusUnavailable);
-                                            self.terminal.lock().exit();
-                                            self.event_proxy.send_event(Event::Wakeup);
-                                            backend_shutdown = false;
-                                            break 'event_loop;
-                                        }
-                                        continue;
-                                    }
-
-                                    error!("Error reading from PTY in event loop: {err}");
-                                    break 'event_loop;
-                                }
-                                // The master produced bytes, so it is not hung up after
-                                // all and any earlier hangup must not count towards the
-                                // grace period.
-                                hangup_since = None;
-
-                                // Adaptors backed by an in-memory pipe must explicitly register
-                                // the next wake after this deliberately bounded read batch.
-                                if let Err(err) = self.pty.rearm_read() {
-                                    error!("Error re-arming PTY read interest: {err}");
-                                    break 'event_loop;
-                                }
-                            }
-
-                            if event.writable
-                                && let Err(err) = self.pty_write(&mut state)
-                            {
-                                error!("Error writing to PTY in event loop: {err}");
-                                break 'event_loop;
-                            }
-                        },
-                        _ => (),
-                    }
-                }
-
-                // Register write interest if necessary.
-                let needs_write = state.needs_write();
-                if needs_write != interest.writable {
-                    interest.writable = needs_write;
-
-                    // Re-register with new interest.
-                    if let Err(err) = self.pty.reregister(&self.poll, interest, poll_opts) {
-                        error!("Event loop reregistration error: {err}");
-                        break 'event_loop;
-                    }
-                }
-            }
+            let backend_shutdown =
+                self.run_event_loop(&mut state, &mut parser, pipe.as_mut(), interest);
 
             // Whatever was read is parsed before the loop is seen to end: a reader taking over the
             // terminal waits for this thread, and its bytes are newer than these.
@@ -648,6 +691,7 @@ pub struct State {
     write_list: VecDeque<Cow<'static, [u8]>>,
     writing: Option<Writing>,
     parser: ansi::Processor,
+    read_retry: pty_read::ReadRetry,
     resize_requests: ResizeRequestParser,
     clipboard_frames: zclip::protocol::Scanner,
     #[cfg(windows)]
@@ -678,16 +722,6 @@ enum ResizeRequestParserState {
     },
 }
 
-/// The first ESC in `bytes`. `contains` rules out escape-free text a word at a time, where
-/// `position` alone tests every byte of it.
-#[inline]
-fn find_escape(bytes: &[u8]) -> Option<usize> {
-    if !bytes.contains(&0x1b) {
-        return None;
-    }
-    bytes.iter().position(|byte| *byte == 0x1b)
-}
-
 impl ResizeRequestParser {
     fn advance(&mut self, mut bytes: &[u8], mut on_request: impl FnMut(u16, u16)) {
         // Ordinary output carries no escapes, so `Ground` skips ahead to the
@@ -701,7 +735,7 @@ impl ResizeRequestParser {
         // pty produces, in addition to the vte parser.
         while !bytes.is_empty() {
             if matches!(self.state, ResizeRequestParserState::Ground) {
-                let Some(escape) = find_escape(bytes) else {
+                let Some(escape) = memchr::memchr(0x1b, bytes) else {
                     return;
                 };
                 self.state = ResizeRequestParserState::Escape;
@@ -888,6 +922,7 @@ impl<T> PeekableReceiver<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use polling::PollMode;
 
     #[test]
     fn replay_barrier_releases_waiters_in_order() {
@@ -1077,12 +1112,17 @@ mod tests {
         #[derive(Default)]
         struct ExitState {
             terminal: std::sync::OnceLock<std::sync::Weak<FairMutex<Term<ExitListener>>>>,
-            exit: Mutex<Option<Exit>>,
+            exit: Mutex<Option<Result<Exit, ()>>>,
             changed: Condvar,
         }
 
         impl EventListener for ExitListener {
             fn send_event(&self, event: Event) {
+                if matches!(event, Event::BackendShutdown) {
+                    *self.0.exit.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                        Some(Err(()));
+                    self.0.changed.notify_all();
+                }
                 if matches!(event, Event::ChildExit(_) | Event::ChildExitStatusUnavailable) {
                     let at = Instant::now();
                     let terminal = self.0.terminal.get().and_then(std::sync::Weak::upgrade);
@@ -1090,7 +1130,7 @@ mod tests {
                         .map(|terminal| cursor_line_text(&terminal.lock()))
                         .unwrap_or_default();
                     *self.0.exit.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) =
-                        Some(Exit { at, cursor_line });
+                        Some(Ok(Exit { at, cursor_line }));
                     self.0.changed.notify_all();
                 }
             }
@@ -1098,14 +1138,20 @@ mod tests {
 
         impl ExitListener {
             fn wait(&self) -> Exit {
+                self.wait_for(Duration::from_secs(120))
+            }
+
+            fn wait_for(&self, timeout: Duration) -> Exit {
                 let exit = self.0.exit.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
                 let (mut exit, timeout) = self
                     .0
                     .changed
-                    .wait_timeout_while(exit, Duration::from_secs(120), |exit| exit.is_none())
+                    .wait_timeout_while(exit, timeout, |exit| exit.is_none())
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
                 assert!(!timeout.timed_out(), "the child's exit was never reported");
-                exit.take().unwrap()
+                exit.take()
+                    .unwrap()
+                    .unwrap_or_else(|()| panic!("the PTY backend failed before the child exit"))
             }
         }
 
@@ -1207,6 +1253,139 @@ mod tests {
                 "{name}: {mib:.0} MiB in {elapsed:.2?}, {:.0} MiB/s",
                 mib / elapsed.as_secs_f64()
             );
+        }
+
+        #[test]
+        fn output_after_an_idle_gap_rearms_the_reader() {
+            let (text, _) =
+                run("printf first; sleep 0.05; printf second", 80, 24, 500, Duration::ZERO);
+            assert_eq!(text.trim_end(), "firstsecond");
+        }
+
+        struct HungupWriter;
+
+        impl Write for HungupWriter {
+            fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+                Err(io::Error::from_raw_os_error(libc::EIO))
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        /// Keep real PTY readiness and child notifications, forcing the write-side hangup to
+        /// arrive first instead of relying on the race between an exiting cat and a parser reply.
+        struct WriteHangupPty {
+            pty: tty::Pty,
+            writer: HungupWriter,
+            foreign: bool,
+        }
+
+        impl tty::EventedReadWrite for WriteHangupPty {
+            type Reader = File;
+            type Writer = HungupWriter;
+
+            unsafe fn register(
+                &mut self,
+                poll: &Arc<Poller>,
+                interest: PollingEvent,
+                mode: PollMode,
+            ) -> io::Result<()> {
+                unsafe { self.pty.register(poll, interest, mode) }
+            }
+
+            fn reregister(
+                &mut self,
+                poll: &Arc<Poller>,
+                interest: PollingEvent,
+                mode: PollMode,
+            ) -> io::Result<()> {
+                self.pty.reregister(poll, interest, mode)
+            }
+
+            fn deregister(&mut self, poll: &Arc<Poller>) -> io::Result<()> {
+                self.pty.deregister(poll)
+            }
+
+            fn reader(&mut self) -> &mut Self::Reader {
+                self.pty.reader()
+            }
+
+            fn writer(&mut self) -> &mut Self::Writer {
+                &mut self.writer
+            }
+        }
+
+        impl tty::EventedPty for WriteHangupPty {
+            fn child_is_foreign(&self) -> bool {
+                self.foreign
+            }
+
+            fn is_hangup_error(&self, error: &io::Error) -> bool {
+                self.pty.is_hangup_error(error)
+            }
+
+            fn next_child_event(&mut self) -> Option<tty::ChildEvent> {
+                if self.foreign { None } else { self.pty.next_child_event() }
+            }
+        }
+
+        impl event::OnResize for WriteHangupPty {
+            fn on_resize(&mut self, size: WindowSize) {
+                self.pty.on_resize(size);
+            }
+        }
+
+        /// A write-side EIO precedes the real child exit; it must leave the reader alive to drain
+        /// final output and report that exit, rather than announcing a backend failure.
+        #[test]
+        fn a_terminal_reply_after_slave_hangup_waits_for_the_child_exit() {
+            let (exit, _) = run_with_write_hangup(false);
+            assert_eq!(exit.cursor_line.trim_end(), "tail");
+        }
+
+        #[test]
+        fn eof_does_not_restart_a_foreign_childs_missing_exit_deadline() {
+            let (exit, elapsed) = run_with_write_hangup(true);
+            assert_eq!(exit.cursor_line.trim_end(), "tail");
+            assert!(elapsed >= FOREIGN_CHILD_HANGUP_GRACE);
+        }
+
+        fn run_with_write_hangup(foreign: bool) -> (Exit, Duration) {
+            let listener = ExitListener::default();
+            let terminal = Arc::new(FairMutex::new(Term::new(
+                Config::default(),
+                &TermSize::new(80, 24),
+                listener.clone(),
+            )));
+            listener.0.terminal.set(Arc::downgrade(&terminal)).unwrap();
+            let options = tty::Options {
+                shell: Some(tty::Shell::new(
+                    "sh".into(),
+                    vec![
+                        "-c".into(),
+                        if foreign { "printf tail" } else { "sleep 0.1; printf tail" }.into(),
+                    ],
+                )),
+                ..tty::Options::default()
+            };
+            let size = WindowSize { num_lines: 24, num_cols: 80, cell_width: 8, cell_height: 16 };
+            let pty = WriteHangupPty {
+                pty: tty::new(&options, size, 0).unwrap(),
+                writer: HungupWriter,
+                foreign,
+            };
+            let event_loop =
+                EventLoop::new(terminal, listener.clone(), pty, true, false, ReplayBarrier::open())
+                    .unwrap();
+            let channel = event_loop.channel();
+            channel.send(Msg::Input(b"reply".to_vec().into())).unwrap();
+            let started = Instant::now();
+            let join = event_loop.spawn();
+            let exit = listener.wait_for(Duration::from_secs(10));
+            join.join().unwrap();
+            (exit, started.elapsed())
         }
 
         /// The ASCII half of the comparison against other terminals: `cat` of one repeated

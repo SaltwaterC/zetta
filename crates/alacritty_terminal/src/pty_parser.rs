@@ -24,32 +24,33 @@ use std::time::Duration;
 use vte::ansi;
 
 use crate::event::{Event, EventListener};
-use crate::event_loop::{READ_BUFFER_SIZE, ReplayBarrier};
+use crate::event_loop::{READ_BUFFER_SIZE, READ_CHUNK_SIZE, ReplayBarrier};
 use crate::sync::FairMutex;
 use crate::term::Term;
 use crate::thread;
 
-/// Bytes parsed under one terminal lock before it is released for the window to draw. Also the
-/// size of one chunk, so a chunk is never split across two locks.
+/// Bytes parsed under one terminal lock before it is released for the window to draw. Larger
+/// gather chunks are consumed in segments, releasing the terminal between them.
 pub(crate) const MAX_LOCKED_READ: usize = u16::MAX as usize;
 
 /// Chunks in flight between the reader and the parser.
-const CHUNK_COUNT: usize = READ_BUFFER_SIZE / MAX_LOCKED_READ;
+const CHUNK_COUNT: usize = READ_BUFFER_SIZE / READ_CHUNK_SIZE;
 
 /// Bytes read from the PTY, waiting to be parsed.
 pub(crate) struct Chunk {
     bytes: Box<[u8]>,
     len: usize,
+    parsed: usize,
 }
 
 impl Chunk {
     fn new() -> Self {
-        Self { bytes: vec![0; MAX_LOCKED_READ].into_boxed_slice(), len: 0 }
+        Self { bytes: vec![0; READ_CHUNK_SIZE].into_boxed_slice(), len: 0, parsed: 0 }
     }
 
-    /// What has been read into the chunk so far.
+    /// The bytes still waiting to be parsed (all read bytes while the reader owns it).
     pub(crate) fn filled(&self) -> &[u8] {
-        &self.bytes[..self.len]
+        &self.bytes[self.parsed..self.len]
     }
 
     /// Where the next read goes; empty once the chunk is full.
@@ -109,6 +110,7 @@ impl ParserThread {
                 parse_time: Duration::ZERO,
             },
             filled: filled_rx,
+            pending: None,
             free: free_tx,
             terminal,
             event_proxy,
@@ -165,6 +167,7 @@ fn parser_stopped() -> io::Error {
 struct Worker<U: EventListener> {
     outcome: ParseOutcome,
     filled: Receiver<Chunk>,
+    pending: Option<Chunk>,
     free: SyncSender<Chunk>,
     terminal: Arc<FairMutex<Term<U>>>,
     event_proxy: U,
@@ -182,6 +185,9 @@ impl<U: EventListener> Worker<U> {
     /// The next chunk to parse, ending a synchronized update whose timeout passes while waiting
     /// for it. `None` once the event loop has finished and everything it sent has been parsed.
     fn next_chunk(&mut self) -> Option<Chunk> {
+        if let Some(chunk) = self.pending.take() {
+            return Some(chunk);
+        }
         loop {
             let deadline = self.outcome.parser.sync_timeout().sync_timeout();
             let Some(deadline) = deadline else {
@@ -214,16 +220,22 @@ impl<U: EventListener> Worker<U> {
         let mut terminal = self.terminal.lock_unfair();
         let mut processed = 0;
         let mut chunk = Some(first);
-        while let Some(current) = chunk {
+        while let Some(mut current) = chunk {
+            let count = current.filled().len().min(MAX_LOCKED_READ - processed);
             #[cfg(windows)]
             let parse_started = Instant::now();
-            self.outcome.parser.advance(&mut *terminal, current.filled());
+            self.outcome.parser.advance(&mut *terminal, &current.filled()[..count]);
             #[cfg(windows)]
             {
                 self.outcome.parse_time += parse_started.elapsed();
                 self.outcome.parse_calls += 1;
             }
-            processed += current.len;
+            processed += count;
+            current.parsed += count;
+            if current.parsed < current.len {
+                self.pending = Some(current);
+                break;
+            }
             self.recycle(current);
             if processed >= MAX_LOCKED_READ {
                 break;
@@ -244,8 +256,13 @@ impl<U: EventListener> Worker<U> {
 
     fn recycle(&self, mut chunk: Chunk) {
         chunk.len = 0;
+        chunk.parsed = 0;
         // The pool holds every chunk there is, so this never blocks. It fails only once the event
         // loop has stopped taking chunks, and then nobody needs this one.
         let _ = self.free.try_send(chunk);
     }
 }
+
+#[cfg(test)]
+#[path = "tests/pty_parser.rs"]
+mod tests;
