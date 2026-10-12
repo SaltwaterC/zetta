@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use crate::content_into_gpui::IntoGpui;
 use anyhow::{Context as _, Result};
-use gpui::{App, Font, HighlightStyle, Pixels, Refineable, px};
+use gpui::{App, AssetSource, Font, HighlightStyle, Pixels, Refineable, px};
 use gpui_util::ResultExt;
 use theme::{
     AccentColors, Appearance, AppearanceContent, DEFAULT_DARK_THEME, DEFAULT_ICON_THEME_NAME,
@@ -70,6 +70,17 @@ impl ThemeSettingsProvider for ThemeSettingsProviderImpl {
 /// This is the full initialization for the application. It calls [`theme::init`]
 /// and then wires up settings observation for theme/font changes.
 pub fn init(themes_to_load: LoadThemes, cx: &mut App) {
+    init_with_bundled_themes(themes_to_load, None, cx);
+}
+
+/// Zetta patch: [`init`], taking the bundled themes already parsed by
+/// [`parse_bundled_themes`] when they are `Some`, which start-up does on another
+/// thread while the platform starts.
+pub fn init_with_bundled_themes(
+    themes_to_load: LoadThemes,
+    bundled_themes: Option<Vec<ThemeFamily>>,
+    cx: &mut App,
+) {
     // The settings store used to install this global when the setting was
     // registered with it. Nothing else does now, and everything below reads it.
     ThemeSettings::init_global(cx);
@@ -81,7 +92,10 @@ pub fn init(themes_to_load: LoadThemes, cx: &mut App) {
 
     if load_user_themes {
         let registry = ThemeRegistry::global(cx);
-        load_bundled_themes(&registry);
+        match bundled_themes {
+            Some(families) => registry.insert_theme_families(families),
+            None => load_bundled_themes(&registry),
+        }
     }
 
     let theme = configured_theme(cx);
@@ -221,28 +235,28 @@ pub fn reload_icon_theme(cx: &mut App) {
 
 /// Loads the themes bundled with the Zed binary into the registry.
 pub fn load_bundled_themes(registry: &ThemeRegistry) {
-    let theme_paths = registry
-        .assets()
+    registry.insert_theme_families(parse_bundled_themes(registry.assets()));
+}
+
+/// Zetta patch: every bundled theme, parsed and refined, in the order
+/// [`load_bundled_themes`] registers them. Touches no GPUI state, so it can run
+/// on any thread.
+pub fn parse_bundled_themes(assets: &dyn AssetSource) -> Vec<ThemeFamily> {
+    let theme_paths = assets
         .list("themes/")
         .expect("failed to list theme assets")
         .into_iter()
         .filter(|path| path.ends_with(".json"));
 
-    for path in theme_paths {
-        let Some(theme) = registry.assets().load(&path).log_err().flatten() else {
-            continue;
-        };
-
-        let Some(theme_family) = serde_json::from_slice(&theme)
-            .with_context(|| format!("failed to parse theme at path \"{path}\""))
-            .log_err()
-        else {
-            continue;
-        };
-
-        let refined = refine_theme_family(theme_family);
-        registry.insert_theme_families([refined]);
-    }
+    theme_paths
+        .filter_map(|path| {
+            let theme = assets.load(&path).log_err().flatten()?;
+            let theme_family = serde_json::from_slice(&theme)
+                .with_context(|| format!("failed to parse theme at path \"{path}\""))
+                .log_err()?;
+            Some(refine_theme_family(theme_family))
+        })
+        .collect()
 }
 
 /// Loads a user theme from the given bytes into the registry.

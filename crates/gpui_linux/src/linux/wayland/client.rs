@@ -437,6 +437,9 @@ pub(crate) struct WaylandClientState {
     globals: Globals,
     pub gpu_context: GpuContext,
     pub compositor_gpu: Option<CompositorGpuHint>,
+    /// Zetta patch: the wgpu instance being created for the first window; see
+    /// `deferred_renderer`.
+    prewarmed_instance: Option<std::thread::JoinHandle<gpui_wgpu::wgpu::Instance>>,
     wl_seat: wl_seat::WlSeat, // TODO: Multi seat support
     wl_pointer: Option<wl_pointer::WlPointer>,
     pinch_gesture: Option<zwp_pointer_gesture_pinch_v1::ZwpPointerGesturePinchV1>,
@@ -846,6 +849,8 @@ impl WaylandClient {
     pub(crate) fn new() -> Self {
         let startup_activation_token = take_startup_activation_token_from_environment();
         let conn = Connection::connect_to_env().unwrap();
+        let prewarmed_instance =
+            super::deferred_renderer::prewarm_instance(conn.backend().display_ptr().cast());
 
         let (globals, event_queue) = registry_queue_init::<WaylandClientStatePtr>(&conn).unwrap();
         let qh = event_queue.handle();
@@ -995,6 +1000,7 @@ impl WaylandClient {
             globals,
             gpu_context,
             compositor_gpu,
+            prewarmed_instance,
             wl_seat: seat,
             wl_pointer: None,
             wl_keyboard: None,
@@ -1172,12 +1178,14 @@ impl LinuxClient for WaylandClient {
 
         let appearance = state.common.appearance;
         let compositor_gpu = state.compositor_gpu.take();
+        let prewarmed_instance = state.prewarmed_instance.take();
 
         let (window, surface_id) = WaylandWindow::new(
             handle,
             state.globals.clone(),
             state.gpu_context.clone(),
             compositor_gpu,
+            prewarmed_instance,
             WaylandClientStatePtr(Rc::downgrade(&self.0)),
             params,
             appearance,

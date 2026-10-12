@@ -90,6 +90,15 @@ Retain these Zetta-specific behaviors when synchronizing:
   bells the way it collapses wakeups. Binary output rings one every 256 bytes
   or so, and each was a channel allocation on the reader and a system bell on
   the UI.
+- deliver wakeups one at a time the same way (`WakeupGate::begin_wakeup`,
+  cleared by the UI as it handles one and before it reads the grid, so output
+  parsed after that sends the next). The parser sends one after every batch,
+  about 13,000 a second under a flood, and each woke the UI's event loop through
+  the kernel: half of the UI thread's time, competing with the reader and
+  parser. Coalescing cut the UI thread's CPU on 954 MiB of ASCII from about
+  0.67 s to 0.29 s and its median wall time from 1.91 s to 1.89 s, level with a
+  build that never draws. Pinned by
+  `one_wakeup_is_in_flight_until_the_ui_handles_it`.
 - start a terminal at a real size before its first layout. The placeholder
   bounds hold 80x24 rather than upstream's 100x6, which a program that asked
   early took for its terminal, and `new_with_console_palette(_for_restore)`
@@ -97,6 +106,12 @@ Retain these Zetta-specific behaviors when synchronizing:
   `--geometry`): the `Term`, a local pty, and a provider's
   `PtySpawnRequest::initial_size` all start there. Pinned by
   `the_placeholder_grid_is_the_conventional_terminal_size`.
+- end a batch of backend events at the first one after which the backend sends
+  nothing more (`TerminalBackendEvent::ends_terminal`) rather than at the end of
+  the 4 ms `TERMINAL_EVENT_DRAIN_INTERVAL`. A flood keeps the batch window open,
+  so a window that closes when its child exits used to stay open for up to that
+  long; the exit now reaches the UI at once.
+  `only_the_events_nothing_follows_end_the_terminal` pins the classification.
 
 `Content::selection_text` was removed after auditing the local public API
 consumers. Zed's agent UI and full terminal view use the upstream field, but

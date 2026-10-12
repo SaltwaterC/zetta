@@ -43,7 +43,10 @@ layering rule: every module named here is a sibling under `src/`.
   close), `startup/watchers.rs` (the configuration/keymap and session-catalog
   pollers, which read only when a file's stamp changes),
   `startup/theming.rs` (theme loading, the baked Zetta overrides, and
-  keymap normalization/validation), `startup/workload.rs` (the deterministic
+  keymap normalization/validation), `startup/prefetch.rs` (theme parsing
+  and the GNOME button-layout query, started on threads before the
+  platform), `startup/http_client.rs` (the HTTP client, built on its first
+  request), `startup/workload.rs` (the deterministic
   producer workloads `zetta benchmark` drives the renderer with), and
   `startup/wsl.rs` (WSL/MSYS2 profile and working-directory integration)
 

@@ -48,8 +48,43 @@ pub(crate) fn system_window_button_layout(cx: &App) -> WindowButtonLayout {
     }
 }
 
+/// The launch's GNOME button-layout query, started by `startup::prefetch` so the
+/// first window does not wait for `gsettings` to run.
+#[cfg(target_os = "linux")]
+static PREFETCHED_BUTTON_LAYOUT: Mutex<
+    Option<std::thread::JoinHandle<Option<WindowButtonLayout>>>,
+> = Mutex::new(None);
+
+/// Starts the query the first window's [`read_gnome_button_layout`] takes the
+/// answer of.
+#[cfg(target_os = "linux")]
+pub(crate) fn prefetch_gnome_button_layout() {
+    let query = std::thread::Builder::new()
+        .name("button layout prefetch".to_owned())
+        .spawn(query_gnome_button_layout)
+        .map_err(|error| log::warn!("could not start the button layout prefetch: {error}"))
+        .ok();
+    *PREFETCHED_BUTTON_LAYOUT
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = query;
+}
+
+/// The prefetched answer the first time, then a fresh query: a later call
+/// follows a layout change, which the launch's answer predates.
 #[cfg(target_os = "linux")]
 pub(crate) fn read_gnome_button_layout() -> Option<WindowButtonLayout> {
+    let prefetched = PREFETCHED_BUTTON_LAYOUT
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .take();
+    match prefetched.map(std::thread::JoinHandle::join) {
+        Some(Ok(layout)) => layout,
+        Some(Err(_)) | None => query_gnome_button_layout(),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn query_gnome_button_layout() -> Option<WindowButtonLayout> {
     let output = std::process::Command::new("gsettings")
         .args(["get", "org.gnome.desktop.wm.preferences", "button-layout"])
         .output()

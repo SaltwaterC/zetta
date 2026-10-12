@@ -41,16 +41,11 @@ pub(crate) fn changed_theme_files(
     Ok(changed)
 }
 
-pub(crate) fn load_user_themes(cx: &mut App) -> Result<()> {
-    let families = prepare_user_themes()?;
-    register_user_themes(families, cx);
-    Ok(())
-}
-
 /// Reads and parses every user theme file that changed since the last call.
 ///
-/// Touches no GPUI state, so a configuration reload runs it on its worker and
-/// hands the result to [`register_user_themes`] on the GUI thread. A file that
+/// Touches no GPUI state, so start-up runs it on a thread of its own (see
+/// `prefetch`) and a configuration reload on its worker, each handing the result
+/// to [`register_user_themes`] on the GUI thread. A file that
 /// fails to read or parse is logged and skipped rather than stopping the scan:
 /// the stamp cache has already recorded it, so stopping would also leave every
 /// later changed file unloaded until it changed again.

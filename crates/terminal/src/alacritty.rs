@@ -67,7 +67,7 @@ pub(super) use alacritty_terminal::event_loop::ReplayBarrier;
 const HIDDEN_TERMINAL_READ_PAUSE: Duration = Duration::from_millis(8);
 
 /// What the PTY reader lets through to the UI: wakeups only while the terminal is visible, and
-/// one bell at a time.
+/// one wakeup and one bell at a time.
 #[derive(Clone)]
 pub(super) struct WakeupGate(Arc<GateState>);
 
@@ -76,6 +76,12 @@ struct GateState {
     /// A bell is on its way to the UI. Binary output rings one every 256 bytes or so, and the UI
     /// rings them as one anyway; sending each cost the reader an allocation and a wakeup.
     bell_pending: AtomicBool,
+    /// A wakeup is on its way to the UI. The parser sends one after every batch it parses, about
+    /// 13,000 a second under a flood, and each woke the UI's event loop through the kernel: half
+    /// of the UI thread's time was those system calls, competing with the reader and parser for
+    /// the duration of the output. One wakeup in flight carries all the output parsed before the
+    /// UI handles it, because the UI reads the grid only after clearing this.
+    wakeup_pending: AtomicBool,
 }
 
 impl WakeupGate {
@@ -83,6 +89,7 @@ impl WakeupGate {
         Self(Arc::new(GateState {
             enabled: AtomicBool::new(true),
             bell_pending: AtomicBool::new(false),
+            wakeup_pending: AtomicBool::new(false),
         }))
     }
 
@@ -103,6 +110,18 @@ impl WakeupGate {
     /// Called as the UI rings a bell, so the next one is sent.
     pub(super) fn end_bell(&self) {
         self.0.bell_pending.store(false, Ordering::Release);
+    }
+
+    /// Claims the wakeup for the reader, returning `false` while an earlier one is still on its
+    /// way.
+    pub(super) fn begin_wakeup(&self) -> bool {
+        !self.0.wakeup_pending.swap(true, Ordering::AcqRel)
+    }
+
+    /// Called as the UI handles a wakeup, before it reads the grid, so output parsed after this
+    /// sends another.
+    pub(super) fn end_wakeup(&self) {
+        self.0.wakeup_pending.store(false, Ordering::Release);
     }
 }
 
@@ -488,6 +507,9 @@ impl EventListener for ZedListener {
             // a benchmark-producing background tab can monopolize a CPU core and the allocator
             // even though none of its redraws reach the UI.
             thread::sleep(HIDDEN_TERMINAL_READ_PAUSE);
+            return;
+        }
+        if matches!(event, AlacTermEvent::Wakeup) && !self.wakeup_gate.begin_wakeup() {
             return;
         }
         if matches!(event, AlacTermEvent::Bell) && !self.wakeup_gate.begin_bell() {

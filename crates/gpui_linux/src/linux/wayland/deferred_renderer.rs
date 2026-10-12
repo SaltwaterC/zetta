@@ -13,16 +13,27 @@
 //! own. The first tile painted into it creates the renderer: GPUI lays the window out and paints it
 //! once as soon as the application has built its contents, before the compositor's first frame.
 //!
+//! The slowest part of creating the first renderer, the wgpu instance (about 28 ms, loading every
+//! Vulkan and EGL driver), needs only the display, so [`prewarm_instance`] starts it on a thread of
+//! its own when the client connects. The first window builds its GPU context from that instance,
+//! and every later window shares the context.
+//!
 //! Zetta-authored, with no upstream counterpart; `window.rs` holds one per window.
 
 use std::{
     borrow::Cow,
     cell::{OnceCell, RefCell},
+    ffi::c_void,
+    ptr::NonNull,
     sync::Arc,
+    thread::JoinHandle,
 };
 
 use gpui::{AtlasKey, AtlasTile, DevicePixels, PlatformAtlas, Size};
-use gpui_wgpu::{CompositorGpuHint, GpuContext, WgpuRenderer, WgpuSurfaceConfig};
+use gpui_wgpu::{
+    CompositorGpuHint, GpuContext, WgpuContext, WgpuRenderer, WgpuSurfaceConfig, wgpu,
+};
+use raw_window_handle as rwh;
 
 use super::window::RawWindow;
 
@@ -41,6 +52,8 @@ struct PendingRenderer {
     config: WgpuSurfaceConfig,
     compositor_gpu: Option<CompositorGpuHint>,
     subpixel_bgr: Option<bool>,
+    /// The instance [`prewarm_instance`] started, for the first window only.
+    instance: Option<JoinHandle<wgpu::Instance>>,
 }
 
 impl DeferredRenderer {
@@ -49,6 +62,7 @@ impl DeferredRenderer {
         window: RawWindow,
         config: WgpuSurfaceConfig,
         compositor_gpu: Option<CompositorGpuHint>,
+        instance: Option<JoinHandle<wgpu::Instance>>,
     ) -> Self {
         Self {
             pending: Some(Box::new(PendingRenderer {
@@ -57,6 +71,7 @@ impl DeferredRenderer {
                 config,
                 compositor_gpu,
                 subpixel_bgr: None,
+                instance,
             })),
             renderer: None,
             atlas: Arc::default(),
@@ -81,7 +96,11 @@ impl DeferredRenderer {
             config,
             compositor_gpu,
             subpixel_bgr,
+            instance,
         } = *pending;
+        if let Some(instance) = instance {
+            create_context_from(instance, &gpu_context, &window, compositor_gpu);
+        }
         let mut renderer = WgpuRenderer::new(gpu_context, &window, config, compositor_gpu)?;
         if let Some(is_bgr) = subpixel_bgr {
             renderer.set_subpixel_layout(is_bgr);
@@ -133,6 +152,70 @@ impl DeferredRenderer {
         if let Some(renderer) = &mut self.renderer {
             renderer.destroy();
         }
+    }
+}
+
+/// Starts creating the wgpu instance for the display behind `display`, a `wl_display`.
+pub(super) fn prewarm_instance(display: *mut c_void) -> Option<JoinHandle<wgpu::Instance>> {
+    let display = RawDisplay(NonNull::new(display)?);
+    std::thread::Builder::new()
+        .name("wgpu instance".to_owned())
+        .spawn(move || WgpuContext::instance(Box::new(display)))
+        .map_err(|error| log::warn!("could not start creating the wgpu instance early: {error}"))
+        .ok()
+}
+
+/// Fills the shared GPU context from a prewarmed instance, the way `WgpuRenderer::new` would
+/// from one it created itself: the adapter is chosen by configuring a surface of this window on
+/// it. That surface is dropped before the renderer creates its own. Anything that goes wrong
+/// leaves the context empty, and the renderer then creates its instance as it always did.
+fn create_context_from(
+    instance: JoinHandle<wgpu::Instance>,
+    gpu_context: &GpuContext,
+    window: &RawWindow,
+    compositor_gpu: Option<CompositorGpuHint>,
+) {
+    let Ok(instance) = instance.join() else {
+        log::error!("creating the wgpu instance early panicked");
+        return;
+    };
+    if gpu_context.borrow().is_some() {
+        return;
+    }
+    let context = (|| {
+        let handle = rwh::HasWindowHandle::window_handle(window)?;
+        // SAFETY: the surface is dropped at the end of this closure, while the window it was
+        // created for is still open.
+        let surface = unsafe {
+            instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
+                raw_display_handle: None,
+                raw_window_handle: handle.as_raw(),
+            })
+        }?;
+        WgpuContext::new(instance, &surface, compositor_gpu)
+    })();
+    match context {
+        Ok(context) => *gpu_context.borrow_mut() = Some(context),
+        Err(error) => {
+            log::warn!("could not use the early wgpu instance, creating another: {error:#}")
+        }
+    }
+}
+
+/// A `wl_display`, which outlives every thread that borrows it.
+#[derive(Debug)]
+struct RawDisplay(NonNull<c_void>);
+
+// SAFETY: libwayland's display is thread-safe, and the connection is open for the life of the
+// process; the instance only reads the pointer.
+unsafe impl Send for RawDisplay {}
+unsafe impl Sync for RawDisplay {}
+
+impl rwh::HasDisplayHandle for RawDisplay {
+    fn display_handle(&self) -> Result<rwh::DisplayHandle<'_>, rwh::HandleError> {
+        let handle = rwh::WaylandDisplayHandle::new(self.0);
+        // SAFETY: see above.
+        Ok(unsafe { rwh::DisplayHandle::borrow_raw(handle.into()) })
     }
 }
 

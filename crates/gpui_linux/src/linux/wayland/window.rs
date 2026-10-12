@@ -563,6 +563,7 @@ impl WaylandWindowState {
         globals: Globals,
         gpu_context: gpui_wgpu::GpuContext,
         compositor_gpu: Option<CompositorGpuHint>,
+        instance: Option<std::thread::JoinHandle<wgpu::Instance>>,
         options: WindowParams,
         parent: Option<WaylandWindowStatePtr>,
     ) -> anyhow::Result<Self> {
@@ -586,7 +587,7 @@ impl WaylandWindowState {
                 preferred_present_mode: Some(wgpu::PresentMode::Mailbox),
             };
             // Zetta patch: created at the first frame; see `deferred_renderer`.
-            DeferredRenderer::new(gpu_context, raw_window, config, compositor_gpu)
+            DeferredRenderer::new(gpu_context, raw_window, config, compositor_gpu, instance)
         };
 
         if let WaylandSurfaceState::Xdg(ref xdg_state) = surface_state {
@@ -808,6 +809,7 @@ impl WaylandWindow {
         globals: Globals,
         gpu_context: gpui_wgpu::GpuContext,
         compositor_gpu: Option<CompositorGpuHint>,
+        instance: Option<std::thread::JoinHandle<wgpu::Instance>>,
         client: WaylandClientStatePtr,
         params: WindowParams,
         appearance: WindowAppearance,
@@ -846,6 +848,7 @@ impl WaylandWindow {
                 globals,
                 gpu_context,
                 compositor_gpu,
+                instance,
                 params,
                 parent,
             )?)),

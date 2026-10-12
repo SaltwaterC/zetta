@@ -17,6 +17,11 @@ Retain these Zetta patches when synchronizing:
 - The settings-file writers (`set_theme`, `set_icon_theme`, `set_mode`) are
   removed. They wrote back into Zed's settings file, which Zetta does not have.
 - Value types come from `settings_content` rather than `settings`'s re-exports.
+- `parse_bundled_themes` parses and refines every bundled theme without touching
+  GPUI, and `init_with_bundled_themes` takes them already parsed;
+  `load_bundled_themes` and `init` are unchanged in effect. Parsing them is about
+  5 ms, and Zetta's start-up does it on another thread while the platform starts
+  (`src/startup/prefetch.rs`).
 
 Beyond those, synchronizing is a copy from upstream plus the mechanical
 adjustments the move out of Zed's workspace requires:

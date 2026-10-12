@@ -269,3 +269,13 @@ fn windows_snap_detection_requires_two_work_area_edges() {
     assert!(!bounds_touch_at_least_two_edges(one_edge, work_area));
     assert!(bounds_touch_at_least_two_edges(two_edges, work_area));
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn the_first_button_layout_read_takes_the_prefetched_answer() {
+    let prefetched = WindowButtonLayout::parse("close:minimize").unwrap();
+    *PREFETCHED_BUTTON_LAYOUT.lock().unwrap() = Some(std::thread::spawn(move || Some(prefetched)));
+
+    assert_eq!(read_gnome_button_layout(), Some(prefetched));
+    assert!(PREFETCHED_BUTTON_LAYOUT.lock().unwrap().is_none());
+}

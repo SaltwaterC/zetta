@@ -44,7 +44,9 @@ use std::rc::Rc;
 mod arg_parsing;
 mod cli_help;
 mod cli_modes;
+mod http_client;
 mod keybindings;
+mod prefetch;
 mod process_control_loop;
 mod theming;
 mod watchers;
@@ -399,7 +401,9 @@ struct ApplicationLaunch {
     keymap_path: PathBuf,
     profile_count: usize,
     no_mux: bool,
-    http_client: Arc<reqwest_client::ReqwestClient>,
+    http_client: Arc<http_client::LazyHttpClient>,
+    /// The themes, parsed on other threads while the platform starts.
+    prefetch: prefetch::StartupPrefetch,
     /// The terminal-rendering profiler, which supplies its own configuration
     /// and opens its window with the performance overlay on.
     profiling: bool,
@@ -431,6 +435,7 @@ fn launch_gui(
     activation_token: Option<String>,
 ) -> Result<()> {
     crate::logging::init_gui_log();
+    let prefetch = prefetch::StartupPrefetch::start();
     let profiling = args.mode == StartupMode::TerminalRenderingProfile;
     if profiling && args.profile_external_terminal {
         return workload::run_terminal_rendering_workload(
@@ -439,7 +444,8 @@ fn launch_gui(
         );
     }
     let report_status: PerformanceReportStatus = Arc::new(Mutex::new(None));
-    let launch = resolve_application_launch(args, project, activation_token, &report_status)?;
+    let launch =
+        resolve_application_launch(args, project, activation_token, &report_status, prefetch)?;
     let report_requested = launch.performance_report.is_some();
     start_application(launch);
     // `Zetta::start_performance_report` writes the outcome into `report_status`
@@ -461,6 +467,7 @@ fn resolve_application_launch(
     project: StartupProject,
     activation_token: Option<String>,
     report_status: &PerformanceReportStatus,
+    prefetch: prefetch::StartupPrefetch,
 ) -> Result<ApplicationLaunch> {
     let profiling = args.mode == StartupMode::TerminalRenderingProfile;
     let workload = args.profile_workload;
@@ -536,10 +543,11 @@ fn resolve_application_launch(
         configuration_error,
         profile_count,
         no_mux: args.no_mux,
-        http_client: Arc::new(
-            reqwest_client::ReqwestClient::user_agent(concat!("Zetta/", env!("CARGO_PKG_VERSION")))
-                .context("initializing HTTP client")?,
-        ),
+        http_client: Arc::new(http_client::LazyHttpClient::new(concat!(
+            "Zetta/",
+            env!("CARGO_PKG_VERSION")
+        ))),
+        prefetch,
         profiling,
         performance_report,
         embedding,
@@ -588,7 +596,8 @@ fn start_application(launch: ApplicationLaunch) {
                 // holding the old cached app record.
                 linux_desktop::is_managed_user_desktop_entry()
             };
-            initialize_zetta_settings(&launch, cx);
+            let mut launch = launch;
+            initialize_zetta_settings(&mut launch, cx);
             initialize_process_state(&launch, control_tx, cx);
             install_process_observers(&launch, cx);
             cx.spawn(async move |cx| process_control_loop::serve(control_rx, cx).await)
@@ -603,7 +612,7 @@ fn start_application(launch: ApplicationLaunch) {
 
 /// Brings up the settings, theme, font, and keybinding state every window
 /// reads from.
-fn initialize_zetta_settings(launch: &ApplicationLaunch, cx: &mut App) {
+fn initialize_zetta_settings(launch: &mut ApplicationLaunch, cx: &mut App) {
     cx.set_http_client(launch.http_client.clone());
     menu::init();
     zed_actions::init();
@@ -612,8 +621,16 @@ fn initialize_zetta_settings(launch: &ApplicationLaunch, cx: &mut App) {
     if let Some(cell_size) = launch.cell_size {
         cx.set_global(cell_size);
     }
-    theme_settings::init(theme::LoadThemes::All(Box::new(ZettaAssets)), cx);
-    load_user_themes(cx).log_err();
+    theme_settings::init_with_bundled_themes(
+        theme::LoadThemes::All(Box::new(ZettaAssets)),
+        launch.prefetch.bundled_themes(),
+        cx,
+    );
+    launch
+        .prefetch
+        .user_themes()
+        .map(|families| register_user_themes(families, cx))
+        .log_err();
     ZettaAssets.load_fonts(cx).log_err();
     apply_config_settings(&launch.config, cx).expect("failed to apply Zetta configuration");
     load_keybindings(&launch.keymap_path, launch.profile_count, launch.no_mux, cx);

@@ -1402,6 +1402,23 @@ pub(crate) enum TerminalBackendEvent {
     BackendShutdown,
 }
 
+impl TerminalBackendEvent {
+    /// Zetta patch: the events after which the backend sends nothing more. The
+    /// UI acts on one at once rather than at the end of the drain interval: a
+    /// window that closes when its child exits otherwise stayed open for up to
+    /// another `TERMINAL_EVENT_DRAIN_INTERVAL`.
+    fn ends_terminal(&self) -> bool {
+        matches!(
+            self,
+            Self::Exit
+                | Self::ChildExit(_)
+                | Self::ChildExitStatusUnavailable
+                | Self::ChildWatcherDisconnected
+                | Self::BackendShutdown
+        )
+    }
+}
+
 const REPORTED_WORKING_DIRECTORY_TITLE_PREFIX: &str = "zetta-cwd:";
 const REPORTED_FOREGROUND_COMMAND_TITLE_PREFIX: &str = "zetta-cmd:";
 const AUTHENTICATED_FOREGROUND_COMMAND_TITLE_PREFIX: &str = "zetta-cmd;";
@@ -3453,6 +3470,10 @@ impl TerminalBuilder {
                                             wakeup = true;
                                         }
                                         PtyEvent::Event(TerminalBackendEvent::Bell) => bell = true,
+                                        PtyEvent::Event(event) if event.ends_terminal() => {
+                                            events.push(PtyEvent::Event(event));
+                                            break;
+                                        }
                                         event => events.push(event),
                                     }
 
@@ -4001,6 +4022,7 @@ impl Terminal {
                 //NOOP, Handled in render
             }
             TerminalBackendEvent::Wakeup => {
+                self.wakeup_gate.end_wakeup();
                 self.content_dirty = true;
                 self.detect_init_command_startup_marker();
                 cx.emit(Event::Wakeup);
@@ -7655,6 +7677,31 @@ pub fn rgba_color(r: u8, g: u8, b: u8) -> Hsla {
 mod tests {
     use std::time::Duration;
 
+    /// The UI ends an event batch at these, so a window that closes on its
+    /// child's exit does not wait out the rest of the drain interval.
+    #[test]
+    fn only_the_events_nothing_follows_end_the_terminal() {
+        use super::TerminalBackendEvent as Event;
+        for event in [
+            Event::Exit,
+            Event::ChildExit(super::successful_exit()),
+            Event::ChildExitStatusUnavailable,
+            Event::ChildWatcherDisconnected,
+            Event::BackendShutdown,
+        ] {
+            assert!(event.ends_terminal());
+        }
+        for event in [
+            Event::Wakeup,
+            Event::Bell,
+            Event::MouseCursorDirty,
+            Event::ResetTitle,
+            Event::Title("title".to_owned()),
+        ] {
+            assert!(!event.ends_terminal());
+        }
+    }
+
     /// A shared pane has one pty and several viewers, and the pty echoes the
     /// bootstrap wrapper to all of them. Recognising it from the stream is what
     /// lets a viewer that did not write it hide it too.
@@ -8066,6 +8113,46 @@ mod tests {
             terminal.read_with(cx, |terminal, _| terminal.working_directory()),
             Some(PathBuf::from(live))
         );
+    }
+
+    /// The parser sends a wakeup after every batch; only one at a time reaches
+    /// the UI, and handling it lets the next one through.
+    #[gpui::test]
+    fn one_wakeup_is_in_flight_until_the_ui_handles_it(cx: &mut TestAppContext) {
+        let builder = cx.update(|cx| {
+            TerminalBuilder::new_display_only(
+                SettingsCursorShape::Block,
+                AlternateScroll::On,
+                None,
+                0,
+                cx.background_executor(),
+                PathStyle::local(),
+            )
+        });
+        let (events_tx, mut events_rx) = futures::channel::mpsc::unbounded();
+        let gate = builder.terminal.wakeup_gate.clone();
+        let listener = super::alacritty::ZedListener::new(events_tx, gate);
+        let terminal = cx.new(|cx| builder.subscribe(cx));
+        let queued = |events_rx: &mut futures::channel::mpsc::UnboundedReceiver<PtyEvent>| {
+            std::iter::from_fn(|| events_rx.try_recv().ok()).count()
+        };
+
+        for _ in 0..1000 {
+            alacritty_terminal::event::EventListener::send_event(
+                &listener,
+                alacritty_terminal::event::Event::Wakeup,
+            );
+        }
+        assert_eq!(queued(&mut events_rx), 1);
+
+        terminal.update(cx, |terminal, cx| {
+            terminal.process_event(TerminalBackendEvent::Wakeup, cx)
+        });
+        alacritty_terminal::event::EventListener::send_event(
+            &listener,
+            alacritty_terminal::event::Event::Wakeup,
+        );
+        assert_eq!(queued(&mut events_rx), 1);
     }
 
     #[gpui::test]

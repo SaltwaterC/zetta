@@ -59,8 +59,14 @@ Retain these Zetta patches when synchronizing:
   limit sets. A renderer that cannot be created closes the window at its first
   frame, where `open_window` used to return the error. The first draw now
   carries the renderer's creation, which raises the first second of
-  `zetta benchmark`'s average draw time and not the later ones. X11 still
-  creates its renderer with the window.
+  `zetta benchmark`'s average draw time and not the later ones. The wgpu
+  instance, about 28 ms of loading every Vulkan and EGL driver, needs only the
+  display, so `prewarm_instance` starts creating it on a thread when the client
+  connects. The first window builds the shared GPU context from it, choosing
+  the adapter on a surface of its own that it drops before `WgpuRenderer::new`
+  creates the renderer's, because `gpui_wgpu` cannot be patched to accept an
+  instance. That moved the first renderer from about 95 ms after launch to
+  about 80. X11 still creates its renderer with the window.
 - a client-driven resize asked for before a Wayland window's first configure
   is remembered, and that configure adopts it when it names no size
   (`first_configure_size`). A configure invalidates every queued resize, so
