@@ -30,7 +30,9 @@ use wayland_protocols::{
 use wayland_protocols_plasma::blur::client::org_kde_kwin_blur;
 use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_surface_v1;
 
-use crate::linux::wayland::{display::WaylandDisplay, serial::SerialKind};
+use crate::linux::wayland::{
+    deferred_renderer::DeferredRenderer, display::WaylandDisplay, serial::SerialKind,
+};
 use crate::linux::{
     Globals, Output, WaylandClientStatePtr, get_window, take_next_activation_token,
 };
@@ -44,7 +46,7 @@ use gpui::{
     popup::PopupOptions,
     px, size,
 };
-use gpui_wgpu::{CompositorGpuHint, WgpuRenderer, WgpuSurfaceConfig, wgpu};
+use gpui_wgpu::{CompositorGpuHint, WgpuSurfaceConfig, wgpu};
 
 #[derive(Default)]
 pub(crate) struct Callbacks {
@@ -61,7 +63,7 @@ pub(crate) struct Callbacks {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct RawWindow {
+pub(super) struct RawWindow {
     window: *mut c_void,
     display: *mut c_void,
 }
@@ -111,7 +113,7 @@ pub struct WaylandWindowState {
     outputs: HashMap<ObjectId, Output>,
     display: Option<(ObjectId, Output)>,
     globals: Globals,
-    renderer: WgpuRenderer,
+    renderer: DeferredRenderer,
     bounds: Bounds<Pixels>,
     scale: f32,
     input_handler: Option<PlatformInputHandler>,
@@ -132,6 +134,9 @@ pub struct WaylandWindowState {
     /// Invalidates deferred client-driven resizes whenever a newer resize or a
     /// compositor configure supersedes them.
     resize_generation: u64,
+    /// Zetta patch: the size a client-driven resize asked for before the first configure, which
+    /// that configure adopts when it leaves the size to the client. See `first_configure_size`.
+    initial_resize_request: Option<Size<Pixels>>,
     resize_throttle: bool,
     in_progress_window_controls: Option<WindowControls>,
     window_controls: WindowControls,
@@ -580,7 +585,8 @@ impl WaylandWindowState {
                 // Prefer Mailbox to avoid blocking. Falls back to FIFO if Mailbox is unsupported.
                 preferred_present_mode: Some(wgpu::PresentMode::Mailbox),
             };
-            WgpuRenderer::new(gpu_context, &raw_window, config, compositor_gpu)?
+            // Zetta patch: created at the first frame; see `deferred_renderer`.
+            DeferredRenderer::new(gpu_context, raw_window, config, compositor_gpu)
         };
 
         if let WaylandSurfaceState::Xdg(ref xdg_state) = surface_state {
@@ -591,13 +597,6 @@ impl WaylandWindowState {
             if let Some(app_id) = options.app_id.as_ref() {
                 xdg_state.toplevel.set_app_id(app_id.clone());
             }
-
-            // Set max window size based on the GPU's maximum texture dimension.
-            // This prevents the window from being resized larger than what the GPU can render.
-            let max_texture_size = renderer.max_texture_size() as i32;
-            xdg_state
-                .toplevel
-                .set_max_size(max_texture_size, max_texture_size);
         }
 
         Ok(Self {
@@ -624,6 +623,7 @@ impl WaylandWindowState {
             window_bounds: options.bounds,
             in_progress_configure: None,
             resize_generation: 0,
+            initial_resize_request: None,
             resize_throttle: false,
             client,
             appearance,
@@ -638,6 +638,25 @@ impl WaylandWindowState {
             client_inset: None,
             accesskit_adapter: None,
         })
+    }
+
+    /// Creates the renderer at the window's first use of it, which also bounds the window's size
+    /// to what the GPU can render.
+    fn create_renderer(&mut self) -> anyhow::Result<()> {
+        if !self.renderer.create()? {
+            return Ok(());
+        }
+        if let (WaylandSurfaceState::Xdg(xdg_state), Some(renderer)) =
+            (&self.surface_state, self.renderer.created())
+        {
+            // Set max window size based on the GPU's maximum texture dimension.
+            // This prevents the window from being resized larger than what the GPU can render.
+            let max_texture_size = renderer.max_texture_size() as i32;
+            xdg_state
+                .toplevel
+                .set_max_size(max_texture_size, max_texture_size);
+        }
+        Ok(())
     }
 
     pub fn is_transparent(&self) -> bool {
@@ -834,6 +853,20 @@ impl WaylandWindow {
             frame_loop: Rc::new(Cell::new(FrameLoop::Unconfigured)),
             frame_ping,
         });
+        let state = Rc::downgrade(&this.0.state);
+        this.0
+            .state
+            .borrow()
+            .renderer
+            .create_on_first_paint(Box::new(move || {
+                let Some(state) = state.upgrade() else {
+                    anyhow::bail!("the window was closed");
+                };
+                let mut state = state
+                    .try_borrow_mut()
+                    .map_err(|_| anyhow::anyhow!("the window is busy"))?;
+                state.create_renderer()
+            }));
 
         // Kick things off
         surface.commit();
@@ -893,6 +926,13 @@ impl WaylandWindowStatePtr {
     pub fn frame(&self) {
         self.frame_loop.set(FrameLoop::Ticking);
         let mut state = self.state.borrow_mut();
+        if let Err(error) = state.create_renderer() {
+            drop(state);
+            log::error!("closing a window whose GPU renderer could not be created: {error:#}");
+            self.frame_loop.set(FrameLoop::Parked);
+            self.close();
+            return;
+        }
         state.resize_throttle = false;
         // GPUI may throttle this tick without calling draw, so leave the request
         // latched until a draw actually reaches the renderer.
@@ -1063,6 +1103,12 @@ impl WaylandWindowStatePtr {
                         } else {
                             compute_outer_size(state.inset(), configure.size, state.tiling)
                         };
+                        if !state.acknowledged_first_configure {
+                            configure.size = first_configure_size(
+                                configure.size,
+                                state.initial_resize_request.take(),
+                            );
+                        }
                         if let Some(size) = configure.size {
                             state.window_bounds = Bounds {
                                 origin: Point::default(),
@@ -1702,6 +1748,9 @@ impl PlatformWindow for WaylandWindow {
         let generation = {
             let mut state = self.borrow_mut();
             state.resize_generation = state.resize_generation.wrapping_add(1);
+            if !state.acknowledged_first_configure {
+                state.initial_resize_request = Some(size);
+            }
             state.resize_generation
         };
         executor
@@ -1910,8 +1959,13 @@ impl PlatformWindow for WaylandWindow {
 
     fn draw(&self, scene: &Scene) {
         let mut state = self.borrow_mut();
+        let state = &mut *state;
+        // GPUI draws inside a frame, which created the renderer first.
+        let Some(renderer) = state.renderer.created() else {
+            return;
+        };
 
-        if state.renderer.device_lost() {
+        if renderer.device_lost() {
             let raw_window = RawWindow {
                 window: state.surface.id().as_ptr().cast::<std::ffi::c_void>(),
                 display: state
@@ -1922,7 +1976,7 @@ impl PlatformWindow for WaylandWindow {
                     .display_ptr()
                     .cast::<std::ffi::c_void>(),
             };
-            match state.renderer.recover(&raw_window) {
+            match renderer.recover(&raw_window) {
                 Ok(()) => {}
                 Err(err) => {
                     log::warn!("GPU recovery failed, will retry on next frame: {err}");
@@ -1939,7 +1993,7 @@ impl PlatformWindow for WaylandWindow {
             let callback = state.surface.frame(&state.globals.qh, state.surface.id());
             state.pending_frame_callback = Some(callback);
         }
-        if state.renderer.draw(scene) {
+        if renderer.draw(scene) {
             state.presentation = PresentationState::Presented;
             self.0.frame_loop.set(FrameLoop::AwaitingCallback);
         } else {
@@ -1947,7 +2001,7 @@ impl PlatformWindow for WaylandWindow {
             self.0.frame_loop.set(FrameLoop::PresentationFailed);
         }
 
-        if state.renderer.needs_redraw() {
+        if renderer.needs_redraw() {
             state.redraw_requested = true;
         }
     }
@@ -1957,8 +2011,7 @@ impl PlatformWindow for WaylandWindow {
     }
 
     fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas> {
-        let state = self.borrow();
-        state.renderer.sprite_atlas().clone()
+        self.borrow().renderer.sprite_atlas()
     }
 
     fn show_window_menu(&self, position: Point<Pixels>) {
@@ -2099,7 +2152,15 @@ impl PlatformWindow for WaylandWindow {
     }
 
     fn gpu_specs(&self) -> Option<GpuSpecs> {
-        self.borrow().renderer.gpu_specs().into()
+        let mut state = self.borrow_mut();
+        if let Err(error) = state.create_renderer() {
+            log::error!("could not create the GPU renderer for this window: {error:#}");
+            return None;
+        }
+        state
+            .renderer
+            .created()
+            .map(|renderer| renderer.gpu_specs())
     }
 
     fn play_system_bell(&self) {
@@ -2305,9 +2366,37 @@ fn programmatic_resize_is_current(
     requested_generation == current_generation && !maximized && !fullscreen
 }
 
+/// Zetta patch: the size a window's first configure leaves it at.
+///
+/// A configure invalidates every client-driven resize queued before it, and the first one arrives
+/// while the application is still building the window: a resize the application asks for then,
+/// to open at a particular size, raced it and was dropped whenever the configure was dispatched
+/// first. A first configure that names no size leaves the size to the client, so it takes the
+/// requested one; a size the compositor chose still wins.
+fn first_configure_size(
+    configured: Option<Size<Pixels>>,
+    requested: Option<Size<Pixels>>,
+) -> Option<Size<Pixels>> {
+    configured.or(requested)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::programmatic_resize_is_current;
+    use super::{first_configure_size, programmatic_resize_is_current};
+    use gpui::{px, size};
+
+    #[test]
+    fn a_first_configure_without_a_size_takes_the_requested_one() {
+        let requested = size(px(592.5), px(455.5));
+        let configured = size(px(800.), px(600.));
+
+        assert_eq!(first_configure_size(None, Some(requested)), Some(requested));
+        assert_eq!(
+            first_configure_size(Some(configured), Some(requested)),
+            Some(configured)
+        );
+        assert_eq!(first_configure_size(None, None), None);
+    }
 
     #[test]
     fn stale_or_compositor_constrained_programmatic_resizes_are_ignored() {

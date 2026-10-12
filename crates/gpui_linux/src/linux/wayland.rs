@@ -1,6 +1,7 @@
 mod client;
 mod clipboard;
 mod cursor;
+mod deferred_renderer;
 mod display;
 mod popup;
 mod serial;

@@ -43,6 +43,32 @@ Retain these Zetta patches when synchronizing:
   `src/tests/linux/x11/clipboard_capture.rs`; run the ignored
   `captured_selection_tests` with `--features test-support -- --ignored
   --test-threads=1` against an isolated X server.
+- create a Wayland window's `WgpuRenderer` when the window is first painted
+  rather than when it opens (`src/linux/wayland/deferred_renderer.rs`, a
+  Zetta-authored module with tests in
+  `src/linux/wayland/tests/deferred_renderer.rs`). Creating it is about 60 ms,
+  mostly loading the Vulkan and EGL drivers, choosing an adapter and building
+  the pipelines, and `open_window` used to spend it before the application had
+  built the window's contents. Zetta starts its first terminal's child there,
+  so the child started about 100 ms after launch instead of about 35 ms. GPUI
+  takes the sprite atlas while creating the window, so the window hands out a
+  `DeferredAtlas` that forwards to the renderer's own. The first tile inserted
+  into it creates the renderer, because GPUI paints the window once inside
+  `open_window`. Size, transparency and subpixel layout set before then are
+  applied on creation, and so is the maximum window size the GPU's texture
+  limit sets. A renderer that cannot be created closes the window at its first
+  frame, where `open_window` used to return the error. The first draw now
+  carries the renderer's creation, which raises the first second of
+  `zetta benchmark`'s average draw time and not the later ones. X11 still
+  creates its renderer with the window.
+- a client-driven resize asked for before a Wayland window's first configure
+  is remembered, and that configure adopts it when it names no size
+  (`first_configure_size`). A configure invalidates every queued resize, so
+  this kind of resize used to race the first configure. It won only because
+  creating the renderer had delayed the first commit; with the renderer
+  deferred, the configure was dispatched first, and Zetta's `--geometry`
+  windows stayed at their 1100x720 placeholder, a 153x42 grid. A size the
+  compositor chose still wins.
 
 The Wayland frame-callback lifecycle intentionally matches upstream. Do not
 request callbacks from arbitrary foreground tasks or use empty surface commits
