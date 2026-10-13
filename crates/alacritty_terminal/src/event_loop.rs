@@ -28,11 +28,22 @@ mod pty_read;
 #[path = "pty_read/direct.rs"]
 mod pty_read;
 
+#[cfg(windows)]
+#[path = "event_loop/windows.rs"]
+mod final_drain;
+#[cfg(not(windows))]
+#[path = "event_loop/direct.rs"]
+mod final_drain;
+
 /// Max bytes to read from the PTY before forced terminal synchronization.
 pub(crate) const READ_BUFFER_SIZE: usize = 0x10_0000;
 
 /// Gather capacity, independent of the terminal's per-lock parsing budget.
 pub(crate) const READ_CHUNK_SIZE: usize = pty_read::CHUNK_SIZE;
+
+#[cfg(all(test, windows))]
+#[path = "tests/event_loop_windows.rs"]
+mod windows_tests;
 
 /// How long a foreign child's PTY may stay hung up before the loop stops
 /// waiting for an exit report that is not coming.
@@ -414,8 +425,14 @@ where
                 match event.key {
                     tty::PTY_CHILD_EVENT_TOKEN => {
                         if let Some(child_event) = self.pty.next_child_event() {
+                            let child_ended =
+                                !matches!(&child_event, tty::ChildEvent::WatcherDisconnected);
                             if self.drain_on_exit {
-                                let _ = self.pty_read(state, parser, pipe.as_deref_mut());
+                                if child_ended {
+                                    self.drain_final_pty(state, parser, pipe.as_deref_mut());
+                                } else {
+                                    let _ = self.pty_read(state, parser, pipe.as_deref_mut());
+                                }
                             }
                             state.finish_parsing(parser);
 
@@ -430,8 +447,6 @@ where
                             // the child's fate is simply unknown — so a disconnect must not
                             // send it, or it would overrule whatever the consumer decided a
                             // disconnect means.
-                            let child_ended =
-                                !matches!(&child_event, tty::ChildEvent::WatcherDisconnected);
                             match child_event {
                                 tty::ChildEvent::Exited(status) => {
                                     self.event_proxy.send_event(Event::ChildExit(status));

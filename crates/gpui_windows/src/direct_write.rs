@@ -194,7 +194,10 @@ impl DirectWriteTextSystem {
             let mut result = None;
             components
                 .factory
-                .GetSystemFontCollection(false, &mut result, true)?;
+                // Use DirectWrite's cached catalog at startup. Checking for
+                // updates forces a roughly 50 ms scan on every launch; font
+                // discovery and failed lookups refresh it when needed.
+                .GetSystemFontCollection(false, &mut result, false)?;
             result.context("Failed to get system font collection")?
         };
         let custom_font_set = unsafe { components.builder.CreateFontSet()? };
@@ -229,7 +232,9 @@ impl PlatformTextSystem for DirectWriteTextSystem {
     }
 
     fn all_font_names(&self) -> Vec<String> {
-        self.state.read().all_font_names(&self.components)
+        let mut state = self.state.write();
+        state.refresh_system_font_collection(&self.components);
+        state.all_font_names(&self.components)
     }
 
     fn font_id(&self, font: &Font) -> Result<FontId> {
@@ -301,6 +306,20 @@ impl PlatformTextSystem for DirectWriteTextSystem {
 }
 
 impl DirectWriteState {
+    fn refresh_system_font_collection(&mut self, components: &DirectWriteComponents) {
+        let mut collection = None;
+        let updated = unsafe {
+            components
+                .factory
+                .GetSystemFontCollection(false, &mut collection, true)
+        }
+        .log_err()
+        .is_some();
+        if updated && let Some(collection) = collection {
+            self.system_font_collection = collection;
+        }
+    }
+
     fn select_and_cache_font(
         &mut self,
         components: &DirectWriteComponents,
@@ -329,17 +348,7 @@ impl DirectWriteState {
         let mut font_id = select_font(self, font);
         if font_id.is_none() {
             // try updating system fonts and reselect
-            let mut collection = None;
-            let font_collection_updated = unsafe {
-                components
-                    .factory
-                    .GetSystemFontCollection(false, &mut collection, true)
-            }
-            .log_err()
-            .is_some();
-            if font_collection_updated && let Some(collection) = collection {
-                self.system_font_collection = collection;
-            }
+            self.refresh_system_font_collection(components);
             font_id = select_font(self, font);
         };
         let font_id = font_id?;
@@ -1967,6 +1976,32 @@ mod tests {
         D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
     };
     use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
+
+    #[test]
+    fn font_discovery_refreshes_a_stale_catalog_without_discarding_cached_fonts() -> Result<()> {
+        let devices = DirectXDevices::new()?;
+        let text_system = DirectWriteTextSystem::new(&devices)?;
+        let font = Font {
+            family: "Consolas".into(),
+            ..Default::default()
+        };
+        let font_id = text_system.font_id(&font)?;
+        {
+            // An empty catalog models a font not yet present in the startup
+            // snapshot. Existing font records must survive a catalog refresh.
+            let mut state = text_system.state.write();
+            state.system_font_collection = state.custom_font_collection.clone();
+        }
+        assert!(
+            text_system
+                .all_font_names()
+                .iter()
+                .any(|name| name == "Consolas")
+        );
+        assert_eq!(text_system.font_id(&font)?, font_id);
+        assert!(text_system.font_metrics(font_id).units_per_em > 0);
+        Ok(())
+    }
 
     #[test]
     fn test_cluster_map() {

@@ -5,7 +5,9 @@ use std::marker::PhantomData;
 use std::os::windows::io::AsRawHandle;
 use std::sync::{Arc, Condvar, Mutex};
 use std::task::{Context, Poll, Wake, Waker};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(test)]
+use std::time::Instant;
 use std::{io, thread};
 
 use piper::{Reader, Writer, pipe};
@@ -15,13 +17,6 @@ use windows_sys::Win32::Foundation::{ERROR_NOT_FOUND, HANDLE};
 use windows_sys::Win32::System::IO::CancelIoEx;
 
 use crate::thread::spawn_named;
-
-const CONPTY_READ_BATCH_SIZE: usize = crate::event_loop::READ_BUFFER_SIZE;
-
-struct BatchState {
-    generation: Mutex<u64>,
-    ready: Condvar,
-}
 
 struct Registration {
     interest: Mutex<Option<Interest>>,
@@ -49,16 +44,15 @@ struct Interest {
 /// `ReadFile` inside it.
 struct ReaderControl {
     stop: std::sync::atomic::AtomicBool,
-    reading: std::sync::atomic::AtomicBool,
     finished: std::sync::atomic::AtomicBool,
     state: Mutex<()>,
     changed: Condvar,
     thread: Mutex<Option<thread::Thread>>,
 }
 
-/// Marks the interval in which the source is inside `ReadFile`. The control
-/// mutex makes the stop check and transition into that interval atomic with
-/// the pauser's decision to cancel or wait for completion.
+/// Stops new reads after a pause. Cancellation must also cover the interval
+/// between this check and entering `ReadFile`, so the pauser retries it until
+/// the source thread has returned.
 struct CancellableSource<R> {
     source: R,
     control: Arc<ReaderControl>,
@@ -66,18 +60,10 @@ struct CancellableSource<R> {
 
 impl<R: Read> Read for CancellableSource<R> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        let _state = self.control.state.lock().unwrap();
         if self.control.stop.load(std::sync::atomic::Ordering::Acquire) {
             return Ok(0);
         }
-        self.control.reading.store(true, std::sync::atomic::Ordering::Release);
-        self.control.changed.notify_all();
-        drop(_state);
-
-        let result = self.source.read(buf);
-        self.control.reading.store(false, std::sync::atomic::Ordering::Release);
-        self.control.changed.notify_all();
-        result
+        self.source.read(buf)
     }
 }
 
@@ -120,9 +106,6 @@ pub struct UnblockedReader<R> {
     /// The source handle remains valid while the reader thread owns `source`,
     /// and lets `pause` cancel a synchronous `ReadFile` from another thread.
     source_handle: usize,
-
-    /// Notification used to coalesce small kernel reads before parsing.
-    batch: Arc<BatchState>,
 }
 
 impl<R: Read + Send + AsRawHandle + 'static> UnblockedReader<R> {
@@ -135,7 +118,6 @@ impl<R: Read + Send + AsRawHandle + 'static> UnblockedReader<R> {
             interest: Mutex::<Option<Interest>>::new(None),
             end: PipeEnd::Reader,
         });
-        let batch = Arc::new(BatchState { generation: Mutex::new(0), ready: Condvar::new() });
 
         Self {
             interest,
@@ -146,7 +128,6 @@ impl<R: Read + Send + AsRawHandle + 'static> UnblockedReader<R> {
             reader_thread: None,
             paused: false,
             source_handle: source_handle as usize,
-            batch,
         }
     }
 
@@ -162,10 +143,8 @@ impl<R: Read + Send + AsRawHandle + 'static> UnblockedReader<R> {
         }
         let source = self.source.take().expect("reader source is present before start");
         let mut writer = self.writer.take().expect("reader writer is present before start");
-        let reader_batch = self.batch.clone();
         let control = Arc::new(ReaderControl {
             stop: std::sync::atomic::AtomicBool::new(false),
-            reading: std::sync::atomic::AtomicBool::new(false),
             finished: std::sync::atomic::AtomicBool::new(false),
             state: Mutex::new(()),
             changed: Condvar::new(),
@@ -173,7 +152,8 @@ impl<R: Read + Send + AsRawHandle + 'static> UnblockedReader<R> {
         });
         let control_for_reader = control.clone();
         let join = spawn_named("alacritty-tty-reader-thread", move || {
-            *control_for_reader.thread.lock().unwrap() = Some(thread::current());
+            *control_for_reader.thread.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                Some(thread::current());
             let waker = Waker::from(Arc::new(ThreadWaker(thread::current())));
             let mut context = Context::from_waker(&waker);
             let mut source = CancellableSource { source, control: control_for_reader.clone() };
@@ -184,12 +164,7 @@ impl<R: Read + Send + AsRawHandle + 'static> UnblockedReader<R> {
                 }
                 match writer.poll_fill(&mut context, &mut source) {
                     Poll::Ready(Ok(0)) => break (source, writer),
-                    Poll::Ready(Ok(_)) => {
-                        let mut generation = reader_batch.generation.lock().unwrap();
-                        *generation = generation.wrapping_add(1);
-                        reader_batch.ready.notify_all();
-                        continue;
-                    },
+                    Poll::Ready(Ok(_)) => continue,
                     Poll::Ready(Err(error)) if error.kind() == io::ErrorKind::Interrupted => {
                         continue;
                     },
@@ -203,6 +178,10 @@ impl<R: Read + Send + AsRawHandle + 'static> UnblockedReader<R> {
                     Poll::Pending => thread::park(),
                 }
             };
+            // Pair the finished predicate with the pauser's condvar wait. Without
+            // this lock, completion could notify between its check and wait.
+            let _state =
+                control_for_reader.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             control_for_reader.finished.store(true, std::sync::atomic::Ordering::Release);
             control_for_reader.changed.notify_all();
             (source.source, writer)
@@ -225,34 +204,40 @@ impl<R: Read + Send + AsRawHandle + 'static> UnblockedReader<R> {
         };
 
         reader_thread.control.stop.store(true, std::sync::atomic::Ordering::Release);
-        if let Some(thread) = reader_thread.control.thread.lock().unwrap().as_ref().cloned() {
+        if let Some(thread) = reader_thread
+            .control
+            .thread
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .cloned()
+        {
             thread.unpark();
         }
 
-        let mut state = reader_thread.control.state.lock().unwrap();
-        while !reader_thread.control.finished.load(std::sync::atomic::Ordering::Acquire)
-            && !reader_thread.control.reading.load(std::sync::atomic::Ordering::Acquire)
-        {
-            state = reader_thread.control.changed.wait(state).unwrap();
-        }
-        let reading = reader_thread.control.reading.load(std::sync::atomic::Ordering::Acquire);
-        drop(state);
-
+        let mut state =
+            reader_thread.control.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         // `AnonRead` uses synchronous ReadFile. CancelIoEx is explicitly
         // cross-thread and wakes that call without closing the handle, so the
         // reader can return both the source and its still-live piper writer.
-        if reading {
+        while !reader_thread.control.finished.load(std::sync::atomic::Ordering::Acquire) {
             let cancelled = unsafe { CancelIoEx(self.source_handle as HANDLE, std::ptr::null()) };
             if cancelled == 0 {
                 let error = io::Error::last_os_error();
-                // ERROR_NOT_FOUND means the synchronous read completed between
-                // the state check and CancelIoEx. The stop flag prevents a new
-                // read, so this is not a pause failure.
+                // ERROR_NOT_FOUND can also precede the native read: the source
+                // may have passed its stop check without entering ReadFile yet.
+                // Retry cancellation after releasing the completion mutex.
                 if error.raw_os_error() != Some(ERROR_NOT_FOUND as i32) {
                     log::debug!("cancelling the Windows PTY reader returned {error}");
                 }
             }
+            (state, _) = reader_thread
+                .control
+                .changed
+                .wait_timeout(state, Duration::from_millis(1))
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
         }
+        drop(state);
 
         let (source, writer) = reader_thread
             .join
@@ -282,7 +267,8 @@ impl<R: Read + Send + AsRawHandle + 'static> UnblockedReader<R> {
 
     /// Register interest in the reader.
     pub fn register(&mut self, poller: &Arc<Poller>, event: Event, mode: PollMode) {
-        let mut interest = self.interest.interest.lock().unwrap();
+        let mut interest =
+            self.interest.interest.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         *interest = Some(Interest { event, poller: poller.clone(), mode });
         drop(interest);
         self.start();
@@ -296,35 +282,17 @@ impl<R: Read + Send + AsRawHandle + 'static> UnblockedReader<R> {
 
     /// Deregister interest in the reader.
     pub fn deregister(&self) {
-        let mut interest = self.interest.interest.lock().unwrap();
+        let mut interest =
+            self.interest.interest.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         *interest = None;
     }
 
     /// Try to read from the reader.
     pub fn try_read(&mut self, buf: &mut [u8]) -> usize {
         self.start();
-        if !self.pipe.is_empty() && self.pipe.len() < CONPTY_READ_BATCH_SIZE {
-            let deadline = Instant::now() + Duration::from_millis(2);
-            let mut generation = self.batch.generation.lock().unwrap();
-            while self.pipe.len() < CONPTY_READ_BATCH_SIZE {
-                let remaining = deadline.saturating_duration_since(Instant::now());
-                if remaining.is_zero() {
-                    break;
-                }
-                let current_generation = *generation;
-                let (next_generation, timeout) = self
-                    .batch
-                    .ready
-                    .wait_timeout_while(generation, remaining, |generation| {
-                        *generation == current_generation
-                    })
-                    .unwrap();
-                generation = next_generation;
-                if timeout.timed_out() {
-                    break;
-                }
-            }
-        }
+
+        // Publish available output immediately. The source reader and parser
+        // already overlap; waiting for a refill delays both without saving I/O.
 
         let waker = Waker::from(self.interest.clone());
 
@@ -415,7 +383,8 @@ impl<W: Write + Send + 'static> UnblockedWriter<W> {
 
     /// Register interest in the writer.
     pub fn register(&self, poller: &Arc<Poller>, event: Event, mode: PollMode) {
-        let mut interest = self.interest.interest.lock().unwrap();
+        let mut interest =
+            self.interest.interest.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         *interest = Some(Interest { event, poller: poller.clone(), mode });
 
         // Send the event to start off with if we have room for data.
@@ -426,7 +395,8 @@ impl<W: Write + Send + 'static> UnblockedWriter<W> {
 
     /// Deregister interest in the writer.
     pub fn deregister(&self) {
-        let mut interest = self.interest.interest.lock().unwrap();
+        let mut interest =
+            self.interest.interest.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         *interest = None;
     }
 
@@ -470,7 +440,8 @@ impl Wake for Registration {
     }
 
     fn wake_by_ref(self: &Arc<Self>) {
-        let mut interest_lock = self.interest.lock().unwrap();
+        let mut interest_lock =
+            self.interest.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(interest) = interest_lock.as_ref() {
             // Send the event to the poller.
             let send_event = match self.end {
@@ -486,6 +457,236 @@ impl Wake for Registration {
                     *interest_lock = None;
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc;
+
+    fn buffered_reader(capacity: usize, bytes: &[u8]) -> UnblockedReader<miow::pipe::AnonRead> {
+        let (source, _output) = miow::pipe::anonymous(0).unwrap();
+        let mut reader = UnblockedReader::new(source, capacity);
+        // These tests supply the internal pipe themselves, without starting
+        // the source thread or depending on the kernel's refill timing.
+        reader.paused = true;
+        let waker = Waker::from(Arc::new(ThreadWaker(thread::current())));
+        assert!(matches!(
+            reader.writer.as_mut().unwrap().poll_fill_bytes(&mut Context::from_waker(&waker), bytes),
+            Poll::Ready(count) if count == bytes.len()
+        ));
+        reader
+    }
+
+    fn read_available(
+        reader: &mut UnblockedReader<miow::pipe::AnonRead>,
+        bytes: &mut [u8],
+    ) -> usize {
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            let count = reader.try_read(bytes);
+            if count != 0 || reader.pipe.is_empty() {
+                return count;
+            }
+            assert!(Instant::now() < deadline, "buffered bytes did not become readable");
+            // piper's cooperative yield is not an empty pipe.
+            thread::yield_now();
+        }
+    }
+
+    #[test]
+    fn available_reads_do_not_wait_for_unrequested_bytes() {
+        let mut reader = buffered_reader(crate::event_loop::READ_BUFFER_SIZE, &[b'x'; 128]);
+        let (sent, received) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            for _ in 0..128 {
+                let mut byte = [0];
+                // piper can yield cooperatively even while bytes remain.
+                while reader.try_read(&mut byte) == 0 {
+                    thread::yield_now();
+                }
+                assert_eq!(byte, [b'x']);
+            }
+            sent.send(()).unwrap();
+        });
+        // The old refill wait costs at least 256 ms across these reads. A
+        // 100 ms budget leaves ample scheduling slack for immediate reads.
+        let result = received.recv_timeout(Duration::from_millis(100));
+        worker.join().unwrap();
+        result.expect("available bytes must not incur a refill wait per read");
+    }
+
+    #[test]
+    fn short_output_and_eof_preserve_every_byte() {
+        let bytes = b"\x1b[31mfragmented\xe6\xbc\xa2\r\n";
+        let mut reader = buffered_reader(128, bytes);
+        drop(reader.writer.take());
+        let mut output = [0; 64];
+        let count = read_available(&mut reader, &mut output);
+        assert_eq!(&output[..count], bytes);
+        assert_eq!(read_available(&mut reader, &mut output), 0);
+    }
+
+    #[test]
+    fn a_small_read_leaves_the_remaining_bytes_in_order() {
+        let mut reader = buffered_reader(128, b"firstsecond");
+        let mut output = [0; 5];
+        assert_eq!(read_available(&mut reader, &mut output), 5);
+        assert_eq!(&output, b"first");
+        let mut output = [0; 6];
+        assert_eq!(read_available(&mut reader, &mut output), 6);
+        assert_eq!(&output, b"second");
+    }
+
+    #[test]
+    fn fragmented_source_reads_preserve_a_burst_larger_than_both_pipes() {
+        let (source, mut output) = miow::pipe::anonymous(128 * 1024).unwrap();
+        let payload = b"\x1b[31mfragmented\xe6\xbc\xa2\r\n".repeat(16 * 1024);
+        let expected = payload.clone();
+        let producer = thread::spawn(move || {
+            for fragment in payload.chunks(997) {
+                output.write_all(fragment).unwrap();
+            }
+        });
+        let mut reader = UnblockedReader::new(source, 64 * 1024);
+        let mut bytes = Vec::new();
+        let mut buffer = [0; 4096];
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let count = reader.try_read(&mut buffer);
+            bytes.extend_from_slice(&buffer[..count]);
+            let finished = reader
+                .reader_thread
+                .as_ref()
+                .unwrap()
+                .control
+                .finished
+                .load(std::sync::atomic::Ordering::Acquire);
+            if finished && reader.pipe.is_empty() {
+                break;
+            }
+            assert!(Instant::now() < deadline, "source reader did not reach EOF");
+            if count == 0 {
+                thread::yield_now();
+            }
+        }
+        producer.join().unwrap();
+        reader.pause().unwrap();
+        assert_eq!(bytes, expected);
+    }
+
+    #[test]
+    fn rearming_wakes_for_each_spaced_burst() {
+        let (source, mut output) = miow::pipe::anonymous(128 * 1024).unwrap();
+        let mut reader = UnblockedReader::new(source, 64 * 1024);
+        let poller = Arc::new(Poller::new().unwrap());
+        let interest = Event::readable(7);
+        reader.register(&poller, interest, PollMode::Level);
+        let mut events = polling::Events::new();
+        // Discard the registration's initial kick before testing an idle wake.
+        poller.wait(&mut events, Some(Duration::from_secs(1))).unwrap();
+        assert!(!events.is_empty());
+        for burst in [b"first".as_slice(), b"second"] {
+            let mut bytes = [0; 32];
+            assert_eq!(reader.try_read(&mut bytes), 0);
+            reader.rearm();
+            events.clear();
+            output.write_all(burst).unwrap();
+            poller.wait(&mut events, Some(Duration::from_secs(1))).unwrap();
+            assert!(events.iter().any(|event| event.key == 7 && event.readable));
+            let count = read_available(&mut reader, &mut bytes);
+            assert_eq!(&bytes[..count], burst);
+        }
+        drop(output);
+        reader.pause().unwrap();
+        reader.deregister();
+    }
+
+    #[test]
+    fn pause_cancels_a_read_that_starts_after_the_first_cancellation() {
+        struct DelayedRead {
+            source: miow::pipe::AnonRead,
+            entered: Option<mpsc::Sender<()>>,
+            release: mpsc::Receiver<()>,
+        }
+
+        impl AsRawHandle for DelayedRead {
+            fn as_raw_handle(&self) -> std::os::windows::io::RawHandle {
+                self.source.as_raw_handle()
+            }
+        }
+
+        impl Read for DelayedRead {
+            fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+                if let Some(entered) = self.entered.take() {
+                    entered.send(()).unwrap();
+                    self.release.recv().unwrap();
+                }
+                self.source.read(buffer)
+            }
+        }
+
+        let (source, mut output) = miow::pipe::anonymous(0).unwrap();
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let (paused_tx, paused_rx) = mpsc::channel();
+        let source = DelayedRead { source, entered: Some(entered_tx), release: release_rx };
+        let mut reader = UnblockedReader::new(source, 128);
+        assert_eq!(reader.try_read(&mut [0; 128]), 0);
+        entered_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        let pauser = thread::spawn(move || {
+            reader.pause().unwrap();
+            paused_tx.send(reader).unwrap();
+        });
+        // The first CancelIoEx sees no native operation while DelayedRead is
+        // waiting here. The subsequent ReadFile must still be cancelled.
+        thread::sleep(Duration::from_millis(20));
+        release_tx.send(()).unwrap();
+        let paused = paused_rx.recv_timeout(Duration::from_secs(1));
+        if paused.is_err() {
+            // Unblock the broken implementation before asserting, so the
+            // negative control fails cleanly instead of leaking a reader.
+            output.write_all(b"x").unwrap();
+            drop(paused_rx.recv_timeout(Duration::from_secs(1)).unwrap());
+        }
+        pauser.join().unwrap();
+        assert!(paused.is_ok(), "pause must not require another byte from the child");
+    }
+
+    #[test]
+    #[ignore = "manual optimized-build pipe throughput check"]
+    fn unblocked_pipe_throughput_benchmark() {
+        const BYTES: usize = 256 * 1024 * 1024;
+        for unblocked in [false, true] {
+            let (mut source, mut output) = miow::pipe::anonymous(128 * 1024).unwrap();
+            let producer = thread::spawn(move || {
+                let fragment = [b'x'; 16 * 1024];
+                for _ in 0..BYTES / fragment.len() {
+                    output.write_all(&fragment).unwrap();
+                }
+            });
+            let mut buffer = [0; crate::event_loop::READ_CHUNK_SIZE];
+            let mut received = 0;
+            let started = Instant::now();
+            if unblocked {
+                let mut reader = UnblockedReader::new(source, crate::event_loop::READ_BUFFER_SIZE);
+                while received < BYTES {
+                    received += reader.try_read(&mut buffer);
+                }
+                reader.pause().unwrap();
+            } else {
+                while received < BYTES {
+                    received += source.read(&mut buffer).unwrap();
+                }
+            }
+            producer.join().unwrap();
+            assert_eq!(received, BYTES);
+            eprintln!(
+                "unblocked={unblocked}: {:.1} MiB/s",
+                256.0 / started.elapsed().as_secs_f64()
+            );
         }
     }
 }

@@ -55,7 +55,20 @@ Retain these Zetta changes when synchronizing:
   `Storage::stored_row` and `CompactRows<Cell>::append_text`/`wraps` are in
   Zetta-authored code;
 - scrollback allocator, large-history, and benchmark fixes;
-- Windows ConPTY fragmented-read coalescing and terminal-hangup handling;
+- Windows ConPTY read-ahead and terminal-hangup handling. The output kernel
+  pipe holds 128 KiB instead of the system default, while the existing bounded
+  user-space pipe retains its capacity. `UnblockedReader` publishes available
+  bytes immediately: waiting up to 2 ms for the entire read-ahead pipe to fill
+  delayed reads that could consume only 65,535 bytes, and added a mutex and
+  condition-variable notification to every source read. The source reader's
+  pause/cancel protocol still protects exclusive-client handovers. Inline
+  reader tests cover short reads, EOF, byte ordering, and fragmented bursts;
+  `src/tests/event_loop_windows.rs` checks final output before the child-exit
+  report is consumed and provides ignored optimized-build ConPTY benchmarks.
+  `src/event_loop/windows.rs` drains the source queue across gather batches,
+  waiting for a bounded quiet period before joining the parser. A single final
+  read lost output when the child exited while parsing was blocked. The native
+  PTY policy remains in `src/event_loop/direct.rs`;
 - shell integration, resize, and sequence handling needed by Zetta's PTY
   lifecycle;
 - Unix PTY teardown reaps owned and reclaimed children, escalating from SIGHUP
@@ -172,6 +185,20 @@ Retain these Zetta changes when synchronizing:
   `ascii_output_throughput_benchmark` (parse only) went from about 390 to
   610 MiB/s; `input_ascii_onto_recycled_rows_matches_a_fresh_terminal` and
   `resetting_cells_together_matches_resetting_each` pin the results.
+- Windows source-reader cancellation is retried until the reader finishes.
+  A single `CancelIoEx` could return `ERROR_NOT_FOUND` just before the source
+  entered `ReadFile`, leaving a paused handover blocked until the child wrote
+  again. The completion condition variable is notified under its mutex;
+  normal reads need only the stop flag. A delayed native-read regression
+  reproduces the race and releases the broken implementation before failing.
+- `Row` remembers when only its characters have changed since a complete
+  reset. `write_ascii_characters` preserves that proof; every accessor that
+  exposes mutable cells invalidates it. With the same erase background,
+  `Cell::reset_characters` clears characters without rewriting unchanged
+  attributes. Partial resets of imported rows do not establish the proof,
+  and serialization omits it. Alternating optimized Windows parser runs
+  improved from 493â€“495 to 739â€“747 MiB/s. Row tests cover all mutable accessors,
+  replacement characters, changed backgrounds and imported row suffixes.
 - `Storage::shrink_lines` hands the rows it removes to the recycled-row pool.
   A full reset (`ESC c`) clears history through it, and binary output carries
   one every 64 KiB or so, after which every scrolled line had allocated a row.

@@ -4,7 +4,10 @@ use std::ffi::OsStr;
 use std::io::{Error, Result};
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::{FromRawHandle, IntoRawHandle, OwnedHandle};
-use std::{mem, ptr, time::Duration};
+use std::{
+    mem, ptr,
+    time::{Duration, Instant},
+};
 
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, S_OK, WAIT_OBJECT_0};
 use windows_sys::Win32::System::Console::{
@@ -31,6 +34,10 @@ use crate::tty::{ConsolePalette, Options};
 /// the same buffer as one created here, by construction rather than by a
 /// second constant that can drift from this one.
 pub(super) const PIPE_CAPACITY: usize = crate::event_loop::READ_BUFFER_SIZE;
+
+/// Give ConPTY room to publish a burst without blocking on every default-sized
+/// kernel pipe fragment. This is separate from the bounded user-space read-ahead.
+const KERNEL_PIPE_CAPACITY: u32 = 128 * 1024;
 
 /// Load the pseudoconsole API from conpty.dll if possible, otherwise use the
 /// standard Windows API.
@@ -120,14 +127,11 @@ pub(super) struct SpawnedPty {
 }
 
 pub(super) fn new(config: &Options, window_size: WindowSize) -> Result<SpawnedPty> {
+    let startup_started = Instant::now();
     let api = ConptyApi::new();
     let mut pty_handle: HPCON = 0;
 
-    // Passing 0 as the size parameter allows the "system default" buffer
-    // size to be used. There may be small performance and memory advantages
-    // to be gained by tuning this in the future, but it's likely a reasonable
-    // start point.
-    let (conout, conout_pty_handle) = miow::pipe::anonymous(0)?;
+    let (conout, conout_pty_handle) = miow::pipe::anonymous(KERNEL_PIPE_CAPACITY)?;
     let (conin_pty_handle, conin) = miow::pipe::anonymous(0)?;
 
     // Create the Pseudo Console, using the pipes.
@@ -142,14 +146,17 @@ pub(super) fn new(config: &Options, window_size: WindowSize) -> Result<SpawnedPt
     };
 
     assert_eq!(result, S_OK);
+    log::debug!("startup ConPTY created: {:?}", startup_started.elapsed());
 
-    // Native children are launched by the bundled bootstrap. It performs the
-    // loader-breakpoint palette synchronization after this function returns,
-    // once the caller is already servicing ConPTY's terminal queries.
+    // Native children are launched by the bundled bootstrap. It applies the
+    // palette before creating the shell, once the caller is already servicing
+    // ConPTY's terminal queries.
     let proc_info = match config.console_palette_helper.as_ref() {
         Some(helper) => spawn_palette_bootstrap(pty_handle, config, helper),
         None => spawn_attached_process(pty_handle, config),
     }?;
+
+    log::debug!("startup ConPTY child created: {:?}", startup_started.elapsed());
 
     // `ChildExitWatcher` takes ownership of the process handle. The thread
     // handle is not needed after CreateProcessW returns and must be closed

@@ -6,6 +6,14 @@ platform fixes can be carried without modifying the upstream submodule.
 
 Retain this Zetta patch when synchronizing:
 
+- DirectWrite uses its cached system font catalog at startup and refreshes it
+  when enumerating fonts or retrying a failed lookup. A native API comparison
+  measured 50–54 ms for a forced refresh versus approximately 1 ms for the
+  cached catalog, with the same 145 families. Font discovery still observes
+  updates, and refreshing retains previously selected font IDs and metrics;
+  `font_discovery_refreshes_a_stale_catalog_without_discarding_cached_fonts`
+  exercises that with a deliberately stale catalog.
+
 - `WindowsWindow::zoom` toggles between `SW_MAXIMIZE` and `SW_RESTORE` based
   on `IsZoomed`, instead of always issuing `SW_MAXIMIZE`. Upstream's version
   never restores a maximized window, unlike the Wayland, X11, and macOS

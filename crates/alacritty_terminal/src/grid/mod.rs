@@ -53,6 +53,13 @@ pub trait GridCell: Sized + Clone {
         }
     }
 
+    /// Reset cells known to differ from their last reset only in their characters.
+    /// Cell types without a cheaper operation retain the ordinary reset.
+    #[inline]
+    fn reset_characters(cells: &mut [Self], template: &Self) {
+        Self::reset_all(cells, template);
+    }
+
     fn flags(&self) -> &Flags;
     fn flags_mut(&mut self) -> &mut Flags;
 

@@ -13,7 +13,9 @@ Retain these Zetta-specific behaviors when synchronizing:
   output export, serial consoles, and tab titles;
 - preserve immediate first-event processing with bounded PTY drains and add
   resize requests, Win32 input records, shell quoting, and Zetta environment
-  identity;
+  identity. `WakeupGate` coalesces native-parser wakeups before scheduling
+  foreground work, as well as bells. A delivered wakeup clears its pending
+  flag before inspecting output, so concurrent output can queue the next one;
 - provide literal, incremental scrollback search and foreground-process
   refresh throttling. Queue only the live terminal handle on the foreground;
   capture a grid snapshot on the low-priority worker under a short grid lock,
@@ -106,6 +108,14 @@ Retain these Zetta-specific behaviors when synchronizing:
   `--geometry`): the `Term`, a local pty, and a provider's
   `PtySpawnRequest::initial_size` all start there. Pinned by
   `the_placeholder_grid_is_the_conventional_terminal_size`.
+- answer Windows ConPTY's first primary-device-attributes query directly from
+  the parser through the PTY input channel. The sender is installed before the
+  event loop starts; a shared once-only gate prevents duplicate replies. Waiting
+  for the UI to deliver this reply delayed console initialization and the native
+  palette bootstrap. Later replies and display-dependent requests keep their
+  normal route. `conpty_startup_reply_does_not_wait_for_the_ui` runs a real shell
+  without consuming foreground events and checks the later-reply route; disabling
+  the direct path changed its startup from 0.09 seconds to 3.10 seconds.
 - end a batch of backend events at the first one after which the backend sends
   nothing more (`TerminalBackendEvent::ends_terminal`) rather than at the end of
   the 4 ms `TERMINAL_EVENT_DRAIN_INTERVAL`. A flood keeps the batch window open,

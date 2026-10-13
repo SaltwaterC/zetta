@@ -3,6 +3,34 @@ $ErrorActionPreference = "Stop"
 $repositoryRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 Set-Location -LiteralPath $repositoryRoot
 
+# Keep stage timings even if the automatic runner times out and discards output.
+$hookTimer = [Diagnostics.Stopwatch]::StartNew()
+$hookLogPath = $null
+try {
+    $hookLogDirectory = Join-Path $repositoryRoot 'artifacts/agent-stop-hooks'
+    [IO.Directory]::CreateDirectory($hookLogDirectory) | Out-Null
+    $hookLogPath = Join-Path $hookLogDirectory ('{0}-{1}.log' -f [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfffZ'), $PID)
+} catch {
+    [Console]::Error.WriteLine("warning: could not create stop-hook timing log: $_")
+}
+
+function Write-HookProgress {
+    param([string] $Message)
+
+    $line = '[{0}] [{1:F1}s] {2}' -f [DateTime]::UtcNow.ToString('o'), $hookTimer.Elapsed.TotalSeconds, $Message
+    [Console]::Error.WriteLine($line)
+    if ($null -ne $hookLogPath) {
+        try {
+            [IO.File]::AppendAllText($hookLogPath, $line + [Environment]::NewLine, [Text.Encoding]::UTF8)
+        } catch {
+            $script:hookLogPath = $null
+            [Console]::Error.WriteLine("warning: could not write stop-hook timing log: $_")
+        }
+    }
+}
+
+Write-HookProgress "Started PID=$PID; session=$env:CODEX_THREAD_ID; cwd=$repositoryRoot"
+
 # Import MSVC once for the whole hook. The Makefile's Cargo wrapper provides
 # the same environment for interactive targets, while this avoids repeatedly
 # running vcvars64 for each target and standalone crate in this process.
@@ -73,7 +101,9 @@ function Import-VisualStudioEnvironment {
 }
 
 if ($env:OS -eq "Windows_NT") {
+    Write-HookProgress 'MSVC environment: starting'
     Import-VisualStudioEnvironment
+    Write-HookProgress 'MSVC environment: ready'
 }
 
 function Invoke-MakeTarget {
@@ -82,7 +112,12 @@ function Invoke-MakeTarget {
         [string] $Target
     )
 
+    Write-HookProgress "$Target`: starting"
     if ($env:OS -eq "Windows_NT") {
+        $targetLogPath = $null
+        if ($null -ne $hookLogPath) {
+            $targetLogPath = [IO.Path]::ChangeExtension($hookLogPath, "$Target.output.log")
+        }
         $makeCommand = Get-Command make -CommandType Application -ErrorAction Stop |
             Select-Object -First 1
         $processStartInfo = [Diagnostics.ProcessStartInfo]::new()
@@ -102,9 +137,17 @@ function Invoke-MakeTarget {
             }
         }
         $makeArguments += $Target
-        $processStartInfo.Arguments = '/d /c ""{0}" {1} 1>&2"' -f `
+        # Keep build output out of the runner's capture pipes. A slow reader or
+        # a background child retaining stdout must not hold up hook completion.
+        $outputRedirection = '1>&2'
+        if ($null -ne $targetLogPath) {
+            $outputRedirection = '1>"{0}" 2>&1' -f $targetLogPath
+            Write-HookProgress "$Target`: output $targetLogPath"
+        }
+        $processStartInfo.Arguments = '/d /c ""{0}" {1} {2}"' -f `
             $makeCommand.Source, `
-            ($makeArguments -join " ")
+            ($makeArguments -join " "), `
+            $outputRedirection
 
         # GNU Make uses a POSIX shell on Windows. Give it a normalized
         # environment so case-variant PATH entries cannot make its shell
@@ -118,7 +161,14 @@ function Invoke-MakeTarget {
         $processStartInfo.Environment["PATH"] = $env:PATH
 
         $process = [Diagnostics.Process]::Start($processStartInfo)
-        $process.WaitForExit()
+        Write-HookProgress "$Target`: process $($process.Id) started"
+        while (-not $process.WaitForExit(30000)) {
+            Write-HookProgress "$Target`: waiting for process $($process.Id)"
+        }
+        Write-HookProgress "$Target`: exited $($process.ExitCode)"
+        if ($process.ExitCode -ne 0 -and $null -ne $targetLogPath) {
+            Write-HookProgress "$Target`: failed; full output is in $targetLogPath"
+        }
         return $process.ExitCode
     }
 
@@ -129,6 +179,7 @@ function Invoke-MakeTarget {
     }
     $targetExitCode = $LASTEXITCODE
     $ErrorActionPreference = $previousErrorActionPreference
+    Write-HookProgress "$Target`: exited $targetExitCode"
     return $targetExitCode
 }
 
@@ -144,9 +195,11 @@ function Show-ZettaNotification {
         [string] $Body
     )
 
+    Write-HookProgress "Notification: $Summary"
     $zettaCommand = Get-Command zetta -CommandType Application -ErrorAction SilentlyContinue
     if ($null -eq $zettaCommand) {
         [Console]::Error.WriteLine("warning: could not show Zetta desktop notification")
+        Write-HookProgress 'Notification: skipped (zetta not found)'
         return
     }
 
@@ -159,6 +212,7 @@ function Show-ZettaNotification {
         [Console]::Error.WriteLine("warning: could not show Zetta desktop notification")
     }
     $ErrorActionPreference = $previousErrorActionPreference
+    Write-HookProgress "Notification: exited $LASTEXITCODE"
 }
 
 $lintExitCode = Invoke-MakeTarget lint
@@ -167,6 +221,7 @@ if ($lintExitCode -ne 0) {
         -Sound "zetta-alarm" `
         -Summary "Zetta lint failed" `
         -Body "The stop-hook lint step failed."
+    Write-HookProgress "Finished: exit $lintExitCode"
     exit $lintExitCode
 }
 
@@ -176,6 +231,7 @@ if ($testExitCode -ne 0) {
         -Sound "zetta-alarm" `
         -Summary "Zetta tests failed" `
         -Body "The stop-hook test step failed."
+    Write-HookProgress "Finished: exit $testExitCode"
     exit $testExitCode
 }
 
@@ -185,6 +241,7 @@ if ($buildExitCode -ne 0) {
         -Sound "zetta-alarm" `
         -Summary "Zetta build failed" `
         -Body "Tests passed, but the stop-hook build step failed."
+    Write-HookProgress "Finished: exit $buildExitCode"
     exit $buildExitCode
 }
 
@@ -194,4 +251,5 @@ Show-ZettaNotification `
     -Body "Tests and the development build completed successfully."
 
 [Console]::Out.WriteLine('{"continue":true}')
+Write-HookProgress 'Finished: exit 0'
 exit 0

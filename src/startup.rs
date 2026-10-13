@@ -47,6 +47,8 @@ mod cli_modes;
 mod http_client;
 mod keybindings;
 mod prefetch;
+#[cfg(windows)]
+mod preparation;
 mod process_control_loop;
 mod theming;
 mod watchers;
@@ -435,6 +437,7 @@ fn launch_gui(
     activation_token: Option<String>,
 ) -> Result<()> {
     crate::logging::init_gui_log();
+    let startup_started = Instant::now();
     let prefetch = prefetch::StartupPrefetch::start();
     let profiling = args.mode == StartupMode::TerminalRenderingProfile;
     if profiling && args.profile_external_terminal {
@@ -444,10 +447,20 @@ fn launch_gui(
         );
     }
     let report_status: PerformanceReportStatus = Arc::new(Mutex::new(None));
-    let launch =
-        resolve_application_launch(args, project, activation_token, &report_status, prefetch)?;
+    #[cfg(windows)]
+    let (application, launch) = preparation::prepare_in_parallel(
+        || resolve_application_launch(args, project, activation_token, &report_status, prefetch),
+        gpui_platform::application,
+    )?;
+    #[cfg(not(windows))]
+    let (application, launch) = {
+        let launch =
+            resolve_application_launch(args, project, activation_token, &report_status, prefetch)?;
+        (gpui_platform::application(), launch)
+    };
     let report_requested = launch.performance_report.is_some();
-    start_application(launch);
+    log::debug!("startup launch resolved: {:?}", startup_started.elapsed());
+    start_application(application, launch);
     // `Zetta::start_performance_report` writes the outcome into `report_status`
     // as the profiling window finishes, so a failed report becomes this
     // process's exit status rather than only a log line.
@@ -567,13 +580,15 @@ fn resolve_application_launch(
 }
 
 /// Runs the GPUI application loop until the last window closes.
-fn start_application(launch: ApplicationLaunch) {
+fn start_application(application: gpui::Application, launch: ApplicationLaunch) {
+    let startup_started = Instant::now();
     let (control_tx, control_rx) = futures::channel::mpsc::unbounded();
-    gpui_platform::application()
+    application
         .with_quit_mode(zetta_quit_mode())
         .with_assets(ZettaAssets)
         .with_open_url_handler(control_tx.clone())
         .run(move |cx: &mut App| {
+            log::debug!("startup platform ready: {:?}", startup_started.elapsed());
             #[cfg(windows)]
             {
                 cx.set_app_identity(ZETTA_APP_ID, "Zetta");
@@ -598,11 +613,14 @@ fn start_application(launch: ApplicationLaunch) {
             };
             let mut launch = launch;
             initialize_zetta_settings(&mut launch, cx);
+            log::debug!("startup settings ready: {:?}", startup_started.elapsed());
             initialize_process_state(&launch, control_tx, cx);
             install_process_observers(&launch, cx);
+            log::debug!("startup observers ready: {:?}", startup_started.elapsed());
             cx.spawn(async move |cx| process_control_loop::serve(control_rx, cx).await)
                 .detach();
             open_launch_window(launch, cx);
+            log::debug!("startup window opened: {:?}", startup_started.elapsed());
             #[cfg(target_os = "linux")]
             if linux_desktop_entry_managed {
                 schedule_linux_desktop_window_reassociation(cx);

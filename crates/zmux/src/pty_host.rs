@@ -46,9 +46,9 @@ use crate::{
 pub const HOST_PROTOCOL_VERSION: u32 = 1;
 
 /// Installer revision, independent of the additive wire protocol. Bump when
-/// existing installations need new host behavior. Revision 2 protects the
-/// shell's bootstrap from console interrupts.
-pub const HOST_INSTALL_REVISION: u32 = 2;
+/// existing installations need new host behavior. Revision 3 clears an inherited
+/// flag that disables Ctrl+C; revision 4 initializes colors without debugging the shell.
+pub const HOST_INSTALL_REVISION: u32 = 4;
 
 /// The oldest host this daemon can drive. An upgrade is refused rather than
 /// attempted when the running host is older than this, because the alternative
@@ -68,7 +68,6 @@ const PALETTE_HELPER_ENV: &str = "ZETTA_INTERNAL_CONSOLE_PALETTE_V1";
 const PALETTE_READY_EVENT_ENV: &str = "ZETTA_INTERNAL_CONSOLE_PALETTE_READY_EVENT_V1";
 const PALETTE_PROBE_ENV: &str = "ZETTA_INTERNAL_CONSOLE_PALETTE_PROBE_V1";
 const PALETTE_BOOTSTRAP_ENV: &str = "ZETTA_INTERNAL_CONSOLE_PALETTE_BOOTSTRAP_V1";
-const PALETTE_BOOTSTRAP_TIMEOUT_MS: u32 = 1_000;
 
 /// Console interrupts also reach the bootstrap supervising the shell. Claim
 /// them here so only the shell handles cancellation. A real handler is not
@@ -118,34 +117,28 @@ fn bootstrap_application(command_line: &OsStr) -> std::io::Result<Option<Vec<u16
     }))
 }
 
-/// Launches the requested process and applies the initial palette at its
-/// loader breakpoint. Keeping this sequencing inside the attached bootstrap
-/// process lets the caller start servicing ConPTY immediately; some native
-/// shells query the terminal before the loader breakpoint is delivered.
+/// Applies the initial console palette before launching the requested process.
+/// STARTF_USEFILLATTRIBUTE preserves its default attributes through process startup,
+/// avoiding the loader-breakpoint debugger and its cost on every native shell launch.
 pub fn run_palette_bootstrap_from_env() -> Option<i32> {
-    use windows::Win32::Foundation::{
-        CloseHandle, DBG_CONTINUE, DBG_EXCEPTION_NOT_HANDLED, EXCEPTION_BREAKPOINT, WAIT_OBJECT_0,
-    };
-    use windows::Win32::System::Diagnostics::Debug::{
-        CREATE_PROCESS_DEBUG_EVENT, ContinueDebugEvent, DEBUG_EVENT, DebugActiveProcessStop,
-        DebugSetProcessKillOnExit, EXCEPTION_DEBUG_EVENT, EXIT_PROCESS_DEBUG_EVENT,
-        LOAD_DLL_DEBUG_EVENT, WaitForDebugEvent,
-    };
+    use windows::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
     use windows::Win32::System::Threading::{
-        CreateProcessW, DEBUG_ONLY_THIS_PROCESS, GetExitCodeProcess, PROCESS_INFORMATION,
-        STARTUPINFOW, WaitForSingleObject,
+        CreateProcessW, GetExitCodeProcess, PROCESS_CREATION_FLAGS, PROCESS_INFORMATION,
+        STARTF_USEFILLATTRIBUTE, STARTUPINFOW, WaitForSingleObject,
     };
     use windows::core::{PCWSTR, PWSTR};
 
     let command_line = std::env::var_os(PALETTE_BOOTSTRAP_ENV)?;
     unsafe { std::env::remove_var(PALETTE_BOOTSTRAP_ENV) };
-    // Install before spawning: cancellation during startup must not end the
-    // supervisor either. Leave close/logoff/shutdown to the default handler.
+    // Clear the caller's inheritable ignore flag before spawning the shell;
+    // installing a real handler alone does not clear it. Protect the supervisor
+    // during startup, leaving close/logoff/shutdown to the default handler.
     if let Err(error) = unsafe {
         windows::Win32::System::Console::SetConsoleCtrlHandler(
             Some(bootstrap_console_control),
             true,
         )
+        .and_then(|()| windows::Win32::System::Console::SetConsoleCtrlHandler(None, false))
     } {
         eprintln!("zmux-pty: could not install console interrupt handler: {error}");
         return Some(1);
@@ -176,6 +169,12 @@ pub fn run_palette_bootstrap_from_env() -> Option<i32> {
 
     let startup = STARTUPINFOW {
         cb: std::mem::size_of::<STARTUPINFOW>() as u32,
+        dwFlags: if palette.is_some() {
+            STARTF_USEFILLATTRIBUTE
+        } else {
+            Default::default()
+        },
+        dwFillAttribute: palette.map_or(0, |palette| u32::from(palette.win32_attributes())),
         ..Default::default()
     };
     let mut process = PROCESS_INFORMATION::default();
@@ -188,7 +187,7 @@ pub fn run_palette_bootstrap_from_env() -> Option<i32> {
             None,
             None,
             true,
-            DEBUG_ONLY_THIS_PROCESS,
+            PROCESS_CREATION_FLAGS(0),
             None,
             None,
             &startup,
@@ -198,66 +197,6 @@ pub fn run_palette_bootstrap_from_env() -> Option<i32> {
     if let Err(error) = spawned {
         eprintln!("zmux-pty: could not start console child: {error}");
         return Some(1);
-    }
-    unsafe {
-        let _ = DebugSetProcessKillOnExit(false);
-    }
-    let mut paused = None;
-    loop {
-        let mut event = DEBUG_EVENT::default();
-        if unsafe { WaitForDebugEvent(&mut event, PALETTE_BOOTSTRAP_TIMEOUT_MS) }.is_err() {
-            break;
-        }
-        if event.dwDebugEventCode == CREATE_PROCESS_DEBUG_EVENT {
-            // Keep the process and thread handles from PROCESS_INFORMATION:
-            // they are used below to detach from and wait for the child. The
-            // debug event's file handle is independent and can be closed here.
-            let info = unsafe { event.u.CreateProcessInfo };
-            let file = info.hFile;
-            if !file.is_invalid() {
-                unsafe {
-                    let _ = CloseHandle(file);
-                }
-            }
-        } else if event.dwDebugEventCode == LOAD_DLL_DEBUG_EVENT {
-            let file = unsafe { event.u.LoadDll.hFile };
-            if !file.is_invalid() {
-                unsafe {
-                    let _ = CloseHandle(file);
-                }
-            }
-        } else if event.dwDebugEventCode == EXCEPTION_DEBUG_EVENT
-            && unsafe { event.u.Exception.ExceptionRecord.ExceptionCode } == EXCEPTION_BREAKPOINT
-        {
-            paused = Some((event.dwProcessId, event.dwThreadId));
-            break;
-        }
-        let continue_status = if event.dwDebugEventCode == EXCEPTION_DEBUG_EVENT {
-            DBG_EXCEPTION_NOT_HANDLED
-        } else {
-            DBG_CONTINUE
-        };
-        if unsafe { ContinueDebugEvent(event.dwProcessId, event.dwThreadId, continue_status) }
-            .is_err()
-            || event.dwDebugEventCode == EXIT_PROCESS_DEBUG_EVENT
-        {
-            break;
-        }
-    }
-    if let Some((process_id, thread_id)) = paused {
-        if let Some(palette) = palette
-            && let Err(error) = apply_current_console_palette(palette)
-        {
-            eprintln!("zmux-pty: could not seed console child colors: {error:#}");
-        }
-        unsafe {
-            let _ = ContinueDebugEvent(process_id, thread_id, DBG_CONTINUE);
-            let _ = DebugActiveProcessStop(process_id);
-        }
-    } else {
-        unsafe {
-            let _ = DebugActiveProcessStop(process.dwProcessId);
-        }
     }
     unsafe {
         let _ = CloseHandle(process.hThread);

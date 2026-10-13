@@ -82,6 +82,8 @@ On Windows, installs retain locked executable and runtime backups while older
 windows or background sessions still use them. Opening a new window does not
 stop those sessions. Later installs remove the backups once they are released;
 `zmux --upgrade` preserves sessions and can leave their console runtime in use.
+New Windows shells accept `Ctrl-C` even when the process that launched Zetta
+had disabled console interrupts.
 
 The build also produces `zosh`, Zetta's standalone cross-platform client,
 and the bundled Rust `zosh-server`. Run either zosh USER@HOST or zetta mosh
@@ -257,7 +259,8 @@ and command-pane label lists dynamically. See [Serial and network tools](docs/to
 for flags and safety notes.
 
 Shell integration loads completion code once on the first completion request.
-Existing `zetta init SHELL` startup commands continue to work;
+Existing `zetta init SHELL` startup commands continue to work.
+PowerShell checks optional shortcuts without importing unrelated modules.
 `zetta init SHELL --completions` (`-c`) emits just the completion implementation.
 The first request includes generation and evaluation, plus automatic `compinit`
 for Zsh when needed. Later requests reuse the code and refresh dynamic catalogs.

@@ -696,7 +696,7 @@ fn vi_integration_is_conditional_and_has_cli_completion() {
     assert!(fish.contains("ZETTA_HOST_EXECUTABLE"));
 
     let powershell = ShellIntegration::PowerShell.eager_script();
-    assert!(powershell.contains("$zettaViMissing = -not (Get-Command vi"));
+    assert!(powershell.contains("$zettaViMissing = -not (__zetta_command_available 'vi')"));
     assert!(powershell.contains("if ($zettaViMissing)"));
     assert!(powershell.contains("function zvi { & zetta vi @args }"));
     assert!(powershell.contains("Register-ArgumentCompleter -CommandName zvi"));
@@ -736,7 +736,7 @@ fn mosh_integration_is_conditional_and_has_full_client_completion() {
     assert!(fish.contains("(__zetta_ssh_targets)"));
 
     let powershell = ShellIntegration::PowerShell.eager_script();
-    assert!(powershell.contains("Get-Command mosh -ErrorAction SilentlyContinue"));
+    assert!(powershell.contains("$zettaMoshMissing = -not (__zetta_command_available 'mosh')"));
     assert!(powershell.contains("function global:mosh { & zetta mosh @args }"));
     assert!(powershell.contains("Register-ArgumentCompleter -Native -CommandName zosh"));
     assert!(powershell.contains("$zettaSshTargets"));
@@ -3734,6 +3734,43 @@ zpty -d probe
             output.status,
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn powershell_startup_preserves_commands_without_autoloading_optional_modules() {
+    let driver = include_str!("../shell_integration/tests/command_discovery.ps1");
+    for executable in ["powershell.exe", "pwsh.exe"] {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path().join("startup.ps1"),
+            ShellIntegration::PowerShell.script(),
+        )
+        .unwrap();
+        let output = clean_shell_command(executable)
+            .args([
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                driver,
+            ])
+            .env("FIXTURE", temp.path())
+            .output();
+        match output {
+            Err(error)
+                if executable == "pwsh.exe" && error.kind() == std::io::ErrorKind::NotFound =>
+            {
+                continue;
+            }
+            Err(error) => panic!("{executable}: {error}"),
+            Ok(output) => assert!(
+                output.status.success(),
+                "{executable}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ),
+        }
     }
 }
 

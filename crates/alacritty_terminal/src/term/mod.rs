@@ -1232,9 +1232,7 @@ impl<T> Term<T> {
             // characters alone is enough; otherwise set the attributes for the whole segment.
             let blank = &self.grid[point.line][start];
             if blank.fg == fg && blank.bg == bg && blank.flags == flags {
-                for (cell, &byte) in self.grid[point.line][start..end].iter_mut().zip(text) {
-                    cell.c = ascii_run_char(byte);
-                }
+                self.grid[point.line].write_ascii_characters(start, text);
                 return;
             }
             for (cell, &byte) in self.grid[point.line][start..end].iter_mut().zip(text) {

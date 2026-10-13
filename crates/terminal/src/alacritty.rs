@@ -66,8 +66,8 @@ pub(super) use alacritty_terminal::event_loop::ReplayBarrier;
 
 const HIDDEN_TERMINAL_READ_PAUSE: Duration = Duration::from_millis(8);
 
-/// What the PTY reader lets through to the UI: wakeups only while the terminal is visible, and
-/// one wakeup and one bell at a time.
+/// What the PTY reader lets through to the UI: one pending wakeup while the terminal is visible,
+/// and one bell at a time. Coalesce before scheduling foreground work, not just after delivery.
 #[derive(Clone)]
 pub(super) struct WakeupGate(Arc<GateState>);
 
@@ -129,6 +129,15 @@ impl WakeupGate {
 pub(super) struct ZedListener {
     events_tx: UnboundedSender<PtyEvent>,
     wakeup_gate: WakeupGate,
+    #[cfg(windows)]
+    startup_reply: Arc<StartupReply>,
+}
+
+#[cfg(windows)]
+#[derive(Default)]
+struct StartupReply {
+    sender: std::sync::OnceLock<PtySender>,
+    sent: AtomicBool,
 }
 
 impl ZedListener {
@@ -136,6 +145,8 @@ impl ZedListener {
         Self {
             events_tx,
             wakeup_gate,
+            #[cfg(windows)]
+            startup_reply: Arc::default(),
         }
     }
 }
@@ -358,9 +369,20 @@ pub(super) fn spawn_event_loop(
     drain_on_exit: bool,
     replay_barrier: ReplayBarrier,
 ) -> Result<(PtySender, PtyIo)> {
-    let event_loop = EventLoop::new(term, listener, pty, drain_on_exit, false, replay_barrier)
-        .context("failed to create event loop")?;
+    let event_loop = EventLoop::new(
+        term,
+        listener.clone(),
+        pty,
+        drain_on_exit,
+        false,
+        replay_barrier,
+    )
+    .context("failed to create event loop")?;
     let pty_tx = event_loop.channel();
+    #[cfg(windows)]
+    let _ = listener.startup_reply.sender.set(PtySender {
+        notifier: Notifier(pty_tx.clone()),
+    });
     let join = event_loop.spawn();
 
     Ok((
@@ -502,6 +524,18 @@ impl From<AlacTermEvent> for TerminalBackendEvent {
 
 impl EventListener for ZedListener {
     fn send_event(&self, event: AlacTermEvent) {
+        #[cfg(windows)]
+        if let AlacTermEvent::PtyWrite(reply) = &event
+            && reply == "\x1b[?6c"
+            && let Some(sender) = self.startup_reply.sender.get()
+            && !self.startup_reply.sent.swap(true, Ordering::AcqRel)
+        {
+            // ConPTY waits for its first DA1 reply before the bootstrap can start
+            // the shell. Answer from the parser without waiting for the UI to be
+            // initialized. Later replies retain normal input-worker ordering.
+            sender.notify(reply.as_bytes().to_vec());
+            return;
+        }
         if matches!(event, AlacTermEvent::Wakeup) && !self.wakeup_gate.is_enabled() {
             // Apply backpressure between read batches once a terminal is hidden. Without this,
             // a benchmark-producing background tab can monopolize a CPU core and the allocator
@@ -1372,6 +1406,92 @@ mod tests {
 
     use super::*;
 
+    #[cfg(windows)]
+    #[test]
+    fn conpty_startup_reply_does_not_wait_for_the_ui() {
+        use std::time::Instant;
+
+        let (events_tx, mut events_rx) = futures::channel::mpsc::unbounded();
+        let listener = ZedListener::new(events_tx, WakeupGate::new());
+        let bounds = TerminalBounds::new(
+            px(23.0),
+            px(11.0),
+            gpui::Bounds {
+                origin: Default::default(),
+                size: gpui::size(px(880.0), px(552.0)),
+            },
+        );
+        let term = new_term(
+            &Config::default(),
+            bounds,
+            listener.clone(),
+            AlternateScroll::On,
+        );
+        let pty = open_pty(
+            &tty::Options {
+                shell: Some(tty::Shell::new(
+                    "cmd.exe".into(),
+                    vec![
+                        "/d".into(),
+                        "/q".into(),
+                        "/c".into(),
+                        "echo ZETTA_STARTUP_READY".into(),
+                    ],
+                )),
+                escape_args: true,
+                ..tty::Options::default()
+            },
+            bounds,
+            1.0,
+            0,
+        )
+        .unwrap();
+        let (sender, io) = spawn_event_loop(
+            term.clone(),
+            listener.clone(),
+            pty,
+            true,
+            ReplayBarrier::open(),
+        )
+        .unwrap();
+
+        // No foreground event is consumed while the console and shell initialize.
+        let deadline = Instant::now() + Duration::from_secs(8);
+        let ready = loop {
+            let screen = term
+                .lock()
+                .renderable_content()
+                .display_iter
+                .map(|cell| cell.cell.c)
+                .collect::<String>();
+            if screen.contains("ZETTA_STARTUP_READY") {
+                break true;
+            }
+            if Instant::now() >= deadline {
+                break false;
+            }
+            thread::sleep(Duration::from_millis(5));
+        };
+        sender.shutdown();
+        io.join().unwrap();
+        assert!(
+            ready,
+            "the shell must initialize without servicing UI events"
+        );
+        assert!(listener.startup_reply.sent.load(Ordering::Acquire));
+        while let Ok(event) = events_rx.try_recv() {
+            assert!(!matches!(
+                event,
+                PtyEvent::Event(TerminalBackendEvent::PtyWrite(_))
+            ));
+        }
+
+        // A later query keeps the normal route instead of being duplicated or lost.
+        listener.send_event(AlacTermEvent::PtyWrite("\x1b[?6c".into()));
+        assert!(matches!(events_rx.try_recv(),
+            Ok(PtyEvent::Event(TerminalBackendEvent::PtyWrite(reply))) if reply == "\x1b[?6c"));
+    }
+
     #[test]
     fn disabled_wakeup_gate_suppresses_wakeups_without_suppressing_other_events() {
         let (events_tx, mut events_rx) = futures::channel::mpsc::unbounded();
@@ -1387,6 +1507,41 @@ mod tests {
             Ok(PtyEvent::Event(TerminalBackendEvent::Bell))
         ));
         assert!(events_rx.try_recv().is_err());
+        // A suppressed hidden wakeup must not claim the pending notification.
+        wakeup_gate.set_enabled(true);
+        listener.send_event(AlacTermEvent::Wakeup);
+        assert!(matches!(
+            events_rx.try_recv(),
+            Ok(PtyEvent::Event(TerminalBackendEvent::Wakeup))
+        ));
+    }
+
+    #[test]
+    fn a_pending_wakeup_absorbs_batches_without_suppressing_other_events() {
+        let (events_tx, mut events_rx) = futures::channel::mpsc::unbounded();
+        let gate = WakeupGate::new();
+        let listener = ZedListener::new(events_tx, gate.clone());
+        for _ in 0..128 {
+            listener.send_event(AlacTermEvent::Wakeup);
+        }
+        listener.send_event(AlacTermEvent::PtyWrite("reply".into()));
+        assert!(matches!(
+            events_rx.try_recv(),
+            Ok(PtyEvent::Event(TerminalBackendEvent::Wakeup))
+        ));
+        assert!(matches!(
+            events_rx.try_recv(),
+            Ok(PtyEvent::Event(TerminalBackendEvent::PtyWrite(reply))) if reply == "reply"
+        ));
+        assert!(events_rx.try_recv().is_err());
+
+        // A reader racing with the UI's output inspection must notify again.
+        gate.end_wakeup();
+        listener.send_event(AlacTermEvent::Wakeup);
+        assert!(matches!(
+            events_rx.try_recv(),
+            Ok(PtyEvent::Event(TerminalBackendEvent::Wakeup))
+        ));
     }
 
     #[test]

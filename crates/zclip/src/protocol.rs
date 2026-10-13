@@ -141,11 +141,12 @@ impl Scanner {
         input: &'a [u8],
         on_frame: impl FnMut(Frame),
     ) -> Cow<'a, [u8]> {
-        // The SIMD search skips ordinary text; only escape-bearing output needs the
-        // pairwise search for an OSC introducer.
+        // ConPTY emits cursor escapes even for plain text. Keep the OSC search
+        // vectorized too, rather than revisiting an entire CSI-bearing batch
+        // one pair at a time.
         if self.pending.is_empty()
             && (memchr::memchr(0x1b, input).is_none()
-                || (!input.ends_with(b"\x1b") && !input.windows(2).any(|pair| pair == b"\x1b]")))
+                || (!input.ends_with(b"\x1b") && memchr::memmem::find(input, b"\x1b]").is_none()))
         {
             return Cow::Borrowed(input);
         }

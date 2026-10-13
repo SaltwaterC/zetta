@@ -23,6 +23,12 @@ use zmux::{
     },
 };
 
+#[path = "daemon_windows/cleanup.rs"]
+mod cleanup;
+
+#[path = "daemon_windows/ctrl_c.rs"]
+mod ctrl_c;
+
 struct TestDaemon {
     process: Child,
     _directory: tempfile::TempDir,
@@ -102,6 +108,10 @@ impl TestDaemon {
 
 impl Drop for TestDaemon {
     fn drop(&mut self) {
+        // An upgrade replaces `process`. Stop the daemon at this fixture's
+        // private endpoint before removing its directory, including on panic:
+        // a surviving replacement can keep the stop hook's output pipes open.
+        let _ = zmux::stop(&self.sessions_dir(), true);
         let _ = self.process.kill();
         let _ = self.process.wait();
         let _ = zmux::pty_host::stop(&self.sessions_dir(), true);
@@ -366,86 +376,6 @@ fn assert_shell_starts_quickly(client: &Client, request: SpawnRequest, marker: &
     drop(output);
     drop(input);
     let _ = client.kill(session_id);
-}
-
-#[test]
-fn conpty_ctrl_c_cancels_a_command_without_ending_the_shell() {
-    let daemon = TestDaemon::start();
-    let client = daemon.client();
-    assert_ctrl_c_returns_to_prompt(&client);
-    let _ = client.shutdown();
-}
-
-fn assert_ctrl_c_returns_to_prompt(client: &Client) {
-    for program in ["powershell.exe", "pwsh.exe"] {
-        if Command::new(program)
-            .args(["-NoLogo", "-NoProfile", "-Command", "exit"])
-            .output()
-            .is_err()
-        {
-            continue;
-        }
-        let mut request = output_request();
-        request.program = Some(program.to_owned());
-        request.args = vec![
-            "-NoLogo".to_owned(),
-            "-NoProfile".to_owned(),
-            "-NoExit".to_owned(),
-            "-Command".to_owned(),
-            "function global:prompt { 'ZETTA_READY> ' }".to_owned(),
-        ];
-        let pane = client
-            .spawn(request)
-            .expect("starting an interactive shell");
-        let session_id = pane.session_id;
-        let mut output = std::fs::File::from(pane.conout);
-        let mut input = std::fs::File::from(pane.conin);
-        let ready = read_until(
-            &mut output,
-            &mut input,
-            b"ZETTA_READY>",
-            Duration::from_secs(10),
-        );
-        assert!(ready.windows(12).any(|bytes| bytes == b"ZETTA_READY>"));
-
-        for _ in 0..2 {
-            // Split the marker so echoed input cannot satisfy the assertion.
-            input
-                .write_all(
-                    b"Write-Output ('ZETTA_' + 'RUNNING'); ping.exe 127.0.0.1 -n 60 > $null\r",
-                )
-                .unwrap();
-            let running = read_until(
-                &mut output,
-                &mut input,
-                b"ZETTA_RUNNING",
-                Duration::from_secs(10),
-            );
-            assert!(running.windows(13).any(|bytes| bytes == b"ZETTA_RUNNING"));
-            // The native job must have started before ConPTY generates Ctrl+C.
-            std::thread::sleep(Duration::from_millis(300));
-            input.write_all(b"\x03").unwrap();
-            let returned = read_until(
-                &mut output,
-                &mut input,
-                b"ZETTA_READY>",
-                Duration::from_secs(5),
-            );
-            assert!(
-                returned.windows(12).any(|bytes| bytes == b"ZETTA_READY>"),
-                "{program} did not return to its prompt after Ctrl+C: {:?}",
-                String::from_utf8_lossy(&returned)
-            );
-            assert!(
-                process_is_alive(pane.child_pid),
-                "the bootstrap exited after Ctrl+C"
-            );
-        }
-        input.write_all(b"exit\r").unwrap();
-        drop(output);
-        drop(input);
-        let _ = client.kill(session_id);
-    }
 }
 
 #[test]
@@ -1753,7 +1683,7 @@ fn replacing_a_running_host_image_keeps_panes_and_uses_the_active_bootstrap() {
         .resize(pane.session_id, pane.pane_id, 100, 30)
         .unwrap();
     assert!(process_is_alive(pane.child_pid));
-    assert_ctrl_c_returns_to_prompt(&replacement);
+    ctrl_c::assert_returns_to_prompt(&replacement);
     let after = zmux::transport::Endpoint::read_host(&zmux::pty_host::endpoint_path(
         &daemon.sessions_dir(),
     ))

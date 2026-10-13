@@ -58,6 +58,81 @@ especially for unique lines and history archival, so compare only results that
 report the same terminal columns and rows. Use the equivalent loop syntax in
 PowerShell or Command Prompt on Windows.
 
+### Windows ConPTY throughput
+
+The native Windows comparison in Shitty's `dev/compare_windows.py` pipes `cat`
+through a byte relay that calls `WriteFile` on console stdout. ConPTY interprets
+that output before Zetta receives UTF-8. This differs from Unix, where `cat`
+delivers the original random bytes to the terminal's parser.
+
+On the Windows test host, both Zetta and Windows Terminal inherited console code
+page 850. The 100,000,000-byte random payload became 180,984,122 bytes at Zetta's
+reader, with code-page characters and generated terminal sequences. The
+standalone parser tests, which bypass ConPTY, measured about 412 MiB/s for ASCII
+and 80 MiB/s for raw random bytes on an 80x24 grid with 500 history lines. A
+separate UTF-8 console-mode experiment still measured about 14 MiB/s through
+ConPTY. Console conversion and its own terminal processing therefore remain
+part of the native random result; changing the code page does not turn it into
+the Unix parser workload.
+
+The Windows source reader previously waited up to 2 ms for its entire 1 MiB
+read-ahead pipe to fill before each read, even though the event loop requested
+at most 65,535 bytes. Publishing available bytes immediately removes that wait
+and the per-source-read refill mutex and condition-variable notification. The
+output kernel pipe is now 128 KiB; input capacity and the bounded user-space
+read-ahead are unchanged.
+
+Native-parser wakeups are also coalesced at the sender, before they schedule
+foreground work. Coalescing only after delivery still woke the Windows UI
+thread for each parser batch. The UI clears the pending flag before inspecting
+output, so a concurrent parser update can request another redraw. Other
+terminal events retain their delivery order.
+
+The 2026-10-12 graphical comparison used optimized builds, an 80x24 grid,
+500 history lines, Consolas 12 pt, and matched 11x23 backing-pixel cells at
+120 DPI. Three runs of each payload were interleaved across the original
+Zetta binary, the updated binary, and Windows Terminal; no build ran alongside
+them. Best wall times include process startup and shutdown:
+
+| Payload | Original Zetta | Updated Zetta | Windows Terminal |
+| --- | --- | --- | --- |
+| ASCII, 1,000,000,000 bytes | 7.325 s / 130.2 MiB/s | 6.390 s / 149.3 MiB/s | 5.668 s / 168.3 MiB/s |
+| Random, 100,000,000 bytes | 6.978 s / 13.7 MiB/s | 6.699 s / 14.2 MiB/s | 9.237 s / 10.3 MiB/s |
+
+This improves ASCII throughput by 15% and random throughput by 4%. Windows
+Terminal still leads ASCII by 13%; these changes narrow that gap. The complete
+run data is retained in `artifacts/windows-throughput/final-comparison.json`,
+with the console conversion probe, standalone parser measurements, and native
+ConPTY diagnostics beside it. Compare paired results on the same host rather
+than treating throughput from a different session as the baseline.
+
+Three paired ten-second runs of the standard graphical workload retained
+roughly 60 FPS. Median mean draw time was 1.395 ms before and 1.377 ms after.
+Median process CPU time was 2.047 s before and 2.156 s after, an increase of
+about 1.1% of one core across the ten-second run. The individual reports are
+`artifacts/windows-throughput/render-{before,after}-{1,2,3}.json`.
+
+A child exit also needs to drain more than one gather batch. Windows keeps
+draining queued output and allows a 20 ms quiet period for the source thread
+to publish its final bytes before joining the parser. A 4 MiB bound prevents a
+surviving descendant from extending the drain indefinitely. The regression
+test waits for the real child to exit while the grid is locked; a fixed delay
+could otherwise expire during PowerShell startup and miss the output-loss case.
+
+Run the real ConPTY benchmarks from the terminal engine's workspace, with no
+other builds or benchmarks competing for CPU:
+
+```sh
+cd crates/alacritty_terminal
+cargo test --release conpty_throughput_benchmark -- --ignored --nocapture --test-threads=1
+```
+
+These include producer startup and ConPTY processing, and report parsing time
+separately from wall time. The `ascii_output_throughput_benchmark` and
+`binary_output_throughput_benchmark` filters measure parsing without ConPTY.
+Use the full graphical comparison to assess application throughput; neither
+standalone measurement includes GPUI rendering.
+
 ### macOS PTY throughput
 
 macOS hands the PTY master roughly 1 KiB per read even with a larger buffer.

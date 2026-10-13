@@ -22,6 +22,10 @@ pub struct Row<T> {
     /// This is the upper bound on the number of elements in the row, which have been modified
     /// since the last reset. All cells after this point are guaranteed to be equal.
     pub(crate) occ: usize,
+    /// Every attribute still matches the last reset. All unrestricted mutable access
+    /// invalidates this proof; the character-only writer preserves it.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    characters_only: bool,
 }
 
 impl<T: PartialEq> PartialEq for Row<T> {
@@ -52,7 +56,7 @@ impl<T: Default> Row<T> {
             inner.set_len(columns);
         }
 
-        Row { inner, occ: 0 }
+        Row { inner, occ: 0, characters_only: false }
     }
 
     /// Increase the number of columns in the row.
@@ -63,6 +67,7 @@ impl<T: Default> Row<T> {
         }
 
         self.inner.resize_with(columns, T::default);
+        self.characters_only = false;
     }
 
     /// Reduce the number of columns in the row.
@@ -99,12 +104,22 @@ impl<T: Default> Row<T> {
         let len = self.inner.len();
         if self.inner[len - 1].discriminant() != template.discriminant() {
             self.occ = len;
+            self.characters_only = false;
         }
 
+        // A partial reset of an imported row says nothing about its untouched suffix.
+        // Establish the proof only after resetting the whole row, or retain an existing one.
+        let characters_only = self.characters_only || self.occ == len;
+
         // Reset every dirty cell in the row.
-        T::reset_all(&mut self.inner[0..self.occ], template);
+        if self.characters_only {
+            T::reset_characters(&mut self.inner[0..self.occ], template);
+        } else {
+            T::reset_all(&mut self.inner[0..self.occ], template);
+        }
 
         self.occ = 0;
+        self.characters_only = characters_only;
     }
 }
 
@@ -112,7 +127,7 @@ impl<T: Default> Row<T> {
 impl<T> Row<T> {
     #[inline]
     pub fn from_vec(vec: Vec<T>, occ: usize) -> Row<T> {
-        Row { inner: vec, occ }
+        Row { inner: vec, occ, characters_only: false }
     }
 
     #[inline]
@@ -127,6 +142,7 @@ impl<T> Row<T> {
 
     #[inline]
     pub fn last_mut(&mut self) -> Option<&mut T> {
+        self.characters_only = false;
         self.occ = self.inner.len();
         self.inner.last_mut()
     }
@@ -136,12 +152,14 @@ impl<T> Row<T> {
     where
         T: GridCell,
     {
+        self.characters_only = false;
         self.occ += vec.len();
         self.inner.append(vec);
     }
 
     #[inline]
     pub fn append_front(&mut self, mut vec: Vec<T>) {
+        self.characters_only = false;
         self.occ += vec.len();
 
         vec.append(&mut self.inner);
@@ -183,6 +201,7 @@ impl<'a, T> IntoIterator for &'a mut Row<T> {
 
     #[inline]
     fn into_iter(self) -> slice::IterMut<'a, T> {
+        self.characters_only = false;
         self.occ = self.len();
         self.inner.iter_mut()
     }
@@ -197,9 +216,22 @@ impl<T> Index<Column> for Row<T> {
     }
 }
 
+impl Row<crate::term::cell::Cell> {
+    /// Write characters without exposing attributes to a caller that could change them.
+    #[inline]
+    pub(crate) fn write_ascii_characters(&mut self, start: Column, text: &[u8]) {
+        let end = start.0 + text.len();
+        self.occ = max(self.occ, end);
+        for (cell, &byte) in self.inner[start.0..end].iter_mut().zip(text) {
+            cell.c = crate::vte::ascii_run_char(byte);
+        }
+    }
+}
+
 impl<T> IndexMut<Column> for Row<T> {
     #[inline]
     fn index_mut(&mut self, index: Column) -> &mut T {
+        self.characters_only = false;
         self.occ = max(self.occ, *index + 1);
         &mut self.inner[index.0]
     }
@@ -217,6 +249,7 @@ impl<T> Index<Range<Column>> for Row<T> {
 impl<T> IndexMut<Range<Column>> for Row<T> {
     #[inline]
     fn index_mut(&mut self, index: Range<Column>) -> &mut [T] {
+        self.characters_only = false;
         self.occ = max(self.occ, *index.end);
         &mut self.inner[(index.start.0)..(index.end.0)]
     }
@@ -234,6 +267,7 @@ impl<T> Index<RangeTo<Column>> for Row<T> {
 impl<T> IndexMut<RangeTo<Column>> for Row<T> {
     #[inline]
     fn index_mut(&mut self, index: RangeTo<Column>) -> &mut [T] {
+        self.characters_only = false;
         self.occ = max(self.occ, *index.end);
         &mut self.inner[..(index.end.0)]
     }
@@ -251,6 +285,7 @@ impl<T> Index<RangeFrom<Column>> for Row<T> {
 impl<T> IndexMut<RangeFrom<Column>> for Row<T> {
     #[inline]
     fn index_mut(&mut self, index: RangeFrom<Column>) -> &mut [T] {
+        self.characters_only = false;
         self.occ = self.len();
         &mut self.inner[(index.start.0)..]
     }
@@ -268,6 +303,7 @@ impl<T> Index<RangeFull> for Row<T> {
 impl<T> IndexMut<RangeFull> for Row<T> {
     #[inline]
     fn index_mut(&mut self, _: RangeFull) -> &mut [T] {
+        self.characters_only = false;
         self.occ = self.len();
         &mut self.inner[..]
     }
@@ -285,7 +321,71 @@ impl<T> Index<RangeToInclusive<Column>> for Row<T> {
 impl<T> IndexMut<RangeToInclusive<Column>> for Row<T> {
     #[inline]
     fn index_mut(&mut self, index: RangeToInclusive<Column>) -> &mut [T] {
+        self.characters_only = false;
         self.occ = max(self.occ, *index.end + 1);
         &mut self.inner[..=(index.end.0)]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::term::cell::{Cell, Flags};
+    use crate::vte::ansi::{Color, NamedColor};
+
+    #[test]
+    fn character_writes_preserve_reset_attributes_and_occupied_bound() {
+        let template = Cell { bg: Color::Named(NamedColor::Red), ..Cell::default() };
+        let mut row = Row::<Cell>::new(8);
+        row.reset(&template);
+        row.write_ascii_characters(Column(1), b"abc\x7f");
+        assert!(row.characters_only);
+        assert_eq!(row.occ, 5);
+        assert_eq!(row[Column(4)].c, '\u{fffd}');
+        row.reset(&template);
+        assert_eq!(row.occ, 0);
+        assert!(row[..].iter().all(|cell| cell.c == ' ' && cell.bg == template.bg));
+
+        // Changing the erase background must update every cell, including the blank suffix.
+        row.reset(&Cell::default());
+        assert!(row[..].iter().all(|cell| *cell == Cell::default()));
+    }
+
+    #[test]
+    fn unrestricted_cell_access_invalidates_character_only_reset() {
+        let edits: [fn(&mut Row<Cell>); 8] = [
+            |row| row[Column(1)].flags = Flags::BOLD,
+            |row| row[Column(1)..Column(2)][0].flags = Flags::BOLD,
+            |row| row[..Column(2)][0].flags = Flags::BOLD,
+            |row| row[Column(1)..][0].flags = Flags::BOLD,
+            |row| row[..][0].flags = Flags::BOLD,
+            |row| row[..=Column(1)][0].flags = Flags::BOLD,
+            |row| row.last_mut().unwrap().flags = Flags::BOLD,
+            |row| row.into_iter().next().unwrap().flags = Flags::BOLD,
+        ];
+        for edit in edits {
+            let mut row = Row::<Cell>::new(8);
+            row.write_ascii_characters(Column(0), b"abcdefgh");
+            row.reset(&Cell::default());
+            row.write_ascii_characters(Column(0), b"abcdefgh");
+            assert!(row.characters_only);
+            edit(&mut row);
+            assert!(!row.characters_only);
+            row.reset(&Cell::default());
+            assert!(row[..].iter().all(|cell| *cell == Cell::default()));
+        }
+    }
+
+    #[test]
+    fn partially_reset_imported_rows_do_not_claim_untouched_attributes() {
+        let styled = Cell { fg: Color::Named(NamedColor::Red), ..Cell::default() };
+        let mut row = Row::from_vec(vec![styled.clone(); 8], 4);
+        row.reset(&Cell::default());
+        assert!(!row.characters_only);
+        assert!(row[Column(4)..].iter().all(|cell| *cell == styled));
+        row.write_ascii_characters(Column(4), b"text");
+        row.reset(&Cell::default());
+        assert!(row.characters_only);
+        assert!(row[..].iter().all(|cell| *cell == Cell::default()));
     }
 }

@@ -86,14 +86,23 @@ if (-not (Test-Path Env:EDITOR)) {
     $env:EDITOR = 'zetta vi'
 }
 
-$zettaViMissing = -not (Get-Command vi -ErrorAction SilentlyContinue)
+# Get-Command on a missing name searches every available module and may load
+# one just to test for an optional shortcut. Enumerate the commands already
+# available instead, including native applications and scripts on PATH.
+function global:__zetta_command_available([string] $name) {
+    return @($ExecutionContext.InvokeCommand.GetCommands(
+        $name, [System.Management.Automation.CommandTypes]::All, $false
+    )).Count -gt 0
+}
+
+$zettaViMissing = -not (__zetta_command_available 'vi')
 if ($zettaViMissing) {
     function vi { & zetta vi @args }
 }
 
 function zvi { & zetta vi @args }
 
-$zettaMoshMissing = $null -eq (Get-Command mosh -ErrorAction SilentlyContinue)
+$zettaMoshMissing = -not (__zetta_command_available 'mosh')
 if ($zettaMoshMissing) {
     function global:mosh { & zetta mosh @args }
 }

@@ -21,6 +21,11 @@ the implementation while profiles, themes, panes, and sessions refresh as needed
 Failed generation and empty output can retry on the next request. Repeated
 initialization preserves the installed lifecycle hooks and loaded completions.
 
+PowerShell checks commands on `PATH` and commands already loaded in the shell
+before adding the optional `vi` and `mosh` shortcuts. These checks do not scan
+or import unrelated modules during startup. Import a module providing either
+command before initializing Zetta if you want that module's command instead.
+
 `zetta init SHELL --completions` (short alias `-c`) emits only completion code
 and requires an explicit shell. Existing startup-file commands stay the same.
 
@@ -181,6 +186,14 @@ so it can retain an old `ZETTA_PROCESS_ID` and give every session the same
 The installed Codex 0.159.2 CLI's `--no-daemon` option uses a server belonging
 to that CLI, even when the shared daemon is already running, so each hook
 inherits its originating tab's identity.
+
+The Windows validation stop hook writes a timing log for each run under
+`artifacts/agent-stop-hooks/`. The log records toolchain setup, lint, tests,
+build, notification, and exit status, with a progress entry every 30 seconds
+while a Make target is running. These files help locate an automatic timeout
+even when the hook runner does not show the captured output. Each target's full
+stdout and stderr go to a neighbouring `*.output.log` file; the runner receives
+progress messages and the final JSON result.
 
 Theme completion works the same way: completing `zetta theme pane` or
 `zetta theme tab` runs `zetta theme <scope> --list` at completion time against

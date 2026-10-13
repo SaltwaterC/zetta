@@ -266,6 +266,13 @@ impl GridCell for Cell {
     }
 
     #[inline]
+    fn reset_characters(cells: &mut [Self], _template: &Self) {
+        for cell in cells {
+            cell.c = ' ';
+        }
+    }
+
+    #[inline]
     fn archive_char(&self) -> Option<char> {
         Some(self.c)
     }
