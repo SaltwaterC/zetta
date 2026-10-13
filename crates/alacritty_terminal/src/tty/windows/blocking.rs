@@ -45,6 +45,9 @@ struct Interest {
 struct ReaderControl {
     stop: std::sync::atomic::AtomicBool,
     finished: std::sync::atomic::AtomicBool,
+    /// The source reached the end of its output, as opposed to being stopped.
+    /// Published before `finished`.
+    ended: std::sync::atomic::AtomicBool,
     state: Mutex<()>,
     changed: Condvar,
     thread: Mutex<Option<thread::Thread>>,
@@ -146,11 +149,13 @@ impl<R: Read + Send + AsRawHandle + 'static> UnblockedReader<R> {
         let control = Arc::new(ReaderControl {
             stop: std::sync::atomic::AtomicBool::new(false),
             finished: std::sync::atomic::AtomicBool::new(false),
+            ended: std::sync::atomic::AtomicBool::new(false),
             state: Mutex::new(()),
             changed: Condvar::new(),
             thread: Mutex::new(None),
         });
         let control_for_reader = control.clone();
+        let interest = self.interest.clone();
         let join = spawn_named("alacritty-tty-reader-thread", move || {
             *control_for_reader.thread.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) =
                 Some(thread::current());
@@ -158,12 +163,17 @@ impl<R: Read + Send + AsRawHandle + 'static> UnblockedReader<R> {
             let mut context = Context::from_waker(&waker);
             let mut source = CancellableSource { source, control: control_for_reader.clone() };
 
+            let mut ended = false;
             let (source, writer) = loop {
                 if control_for_reader.stop.load(std::sync::atomic::Ordering::Acquire) {
                     break (source, writer);
                 }
                 match writer.poll_fill(&mut context, &mut source) {
-                    Poll::Ready(Ok(0)) => break (source, writer),
+                    Poll::Ready(Ok(0)) => {
+                        // A stopped source also reads as empty.
+                        ended = !control_for_reader.stop.load(std::sync::atomic::Ordering::Acquire);
+                        break (source, writer);
+                    },
                     Poll::Ready(Ok(_)) => continue,
                     Poll::Ready(Err(error)) if error.kind() == io::ErrorKind::Interrupted => {
                         continue;
@@ -172,18 +182,32 @@ impl<R: Read + Send + AsRawHandle + 'static> UnblockedReader<R> {
                         if control_for_reader.stop.load(std::sync::atomic::Ordering::Acquire) {
                             break (source, writer);
                         }
+                        // The console closing its end is the end of its output.
+                        if error.kind() == io::ErrorKind::BrokenPipe {
+                            ended = true;
+                            break (source, writer);
+                        }
                         log::error!("error writing to pipe: {error}");
                         break (source, writer);
                     },
                     Poll::Pending => thread::park(),
                 }
             };
-            // Pair the finished predicate with the pauser's condvar wait. Without
-            // this lock, completion could notify between its check and wait.
-            let _state =
-                control_for_reader.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-            control_for_reader.finished.store(true, std::sync::atomic::Ordering::Release);
-            control_for_reader.changed.notify_all();
+            {
+                // Pair the finished predicate with the pauser's condvar wait. Without
+                // this lock, completion could notify between its check and wait.
+                let _state = control_for_reader
+                    .state
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                control_for_reader.ended.store(ended, std::sync::atomic::Ordering::Release);
+                control_for_reader.finished.store(true, std::sync::atomic::Ordering::Release);
+                control_for_reader.changed.notify_all();
+            }
+            // No byte follows to wake a drain waiting on the end of output.
+            if ended {
+                Wake::wake_by_ref(&interest);
+            }
             (source.source, writer)
         });
         self.reader_thread = Some(ReaderThread { control, join });
@@ -263,6 +287,15 @@ impl<R: Read + Send + AsRawHandle + 'static> UnblockedReader<R> {
             Poll::Pending => 0,
             Poll::Ready(n) => n,
         }
+    }
+
+    /// Whether the source reached the end of its output on its own, rather
+    /// than being paused, and every byte it read has been drained.
+    pub fn source_ended(&self) -> bool {
+        self.reader_thread
+            .as_ref()
+            .is_some_and(|thread| thread.control.ended.load(std::sync::atomic::Ordering::Acquire))
+            && self.pipe.is_empty()
     }
 
     /// Register interest in the reader.
@@ -601,6 +634,41 @@ mod tests {
         }
         drop(output);
         reader.pause().unwrap();
+        reader.deregister();
+    }
+
+    #[test]
+    fn the_end_of_the_source_wakes_an_idle_reader() {
+        let (source, mut output) = miow::pipe::anonymous(0).unwrap();
+        let mut reader = UnblockedReader::new(source, 128);
+        let poller = Arc::new(Poller::new().unwrap());
+        reader.register(&poller, Event::readable(7), PollMode::Level);
+        let mut events = polling::Events::new();
+        output.write_all(b"last").unwrap();
+        let mut bytes = [0; 32];
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let count = loop {
+            let count = reader.try_read(&mut bytes);
+            if count != 0 {
+                break count;
+            }
+            assert!(Instant::now() < deadline, "the bytes never arrived");
+            thread::yield_now();
+        };
+        assert_eq!(&bytes[..count], b"last");
+        // Consume the registration's kick and the wake for those bytes.
+        poller.wait(&mut events, Some(Duration::from_millis(100))).unwrap();
+        events.clear();
+        poller.wait(&mut events, Some(Duration::from_millis(100))).unwrap();
+        assert!(!reader.source_ended());
+        reader.rearm();
+        events.clear();
+        // No byte follows the end, so only the reader thread can wake the loop.
+        drop(output);
+        poller.wait(&mut events, Some(Duration::from_secs(1))).unwrap();
+        assert!(events.iter().any(|event| event.key == 7 && event.readable));
+        assert!(reader.source_ended());
+        assert_eq!(reader.try_read(&mut bytes), 0);
         reader.deregister();
     }
 

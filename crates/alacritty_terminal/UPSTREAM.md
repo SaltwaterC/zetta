@@ -65,10 +65,27 @@ Retain these Zetta changes when synchronizing:
   reader tests cover short reads, EOF, byte ordering, and fragmented bursts;
   `src/tests/event_loop_windows.rs` checks final output before the child-exit
   report is consumed and provides ignored optimized-build ConPTY benchmarks.
-  `src/event_loop/windows.rs` drains the source queue across gather batches,
-  waiting for a bounded quiet period before joining the parser. A single final
-  read lost output when the child exited while parsing was blocked. The native
-  PTY policy remains in `src/event_loop/direct.rs`;
+  `src/event_loop/windows.rs` drains the source queue across gather batches
+  until the output pipe ends, or else for a bounded quiet period, before
+  joining the parser. A single final read lost output when the child exited
+  while parsing was blocked. The native PTY policy remains in
+  `src/event_loop/direct.rs`;
+- a terminal's own pseudoconsole is released after its child is spawned
+  (`Conpty::release_reference`, `ReleasePseudoConsole` from conpty.dll or
+  kernel32), as Windows Terminal does, so it exits with its last client and
+  its output pipe ends. `conpty::new` closes its copies of the console's pipe
+  ends after `CreatePseudoConsole` duplicates them; upstream leaked them, which
+  alone kept the output pipe from ever ending. The source reader records an
+  end it reached by itself (`UnblockedReader::source_ended`, including a
+  `BrokenPipe`, which is no longer logged as an error) and wakes the event loop,
+  and `EventedPty::output_ended` lets the final drain stop there instead of
+  waiting out the quiet period. Exit-to-close fell from 0.18 to 0.15 seconds
+  against Windows Terminal's 0.14. A resize that reaches an exited console is
+  logged rather than asserted. The multiplexer host keeps its consoles
+  referenced. `the_end_of_the_source_wakes_an_idle_reader`,
+  `the_final_drain_stops_at_the_end_of_output_without_a_quiet_period` and
+  `a_released_console_ends_its_output_when_the_child_exits` each fail with
+  their part removed;
 - shell integration, resize, and sequence handling needed by Zetta's PTY
   lifecycle;
 - Unix PTY teardown reaps owned and reclaimed children, escalating from SIGHUP

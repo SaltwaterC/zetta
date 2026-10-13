@@ -223,6 +223,13 @@ pub trait EventedPty: EventedReadWrite {
     /// Returns `Some(event)` on success, or `None` if there are no events to retrieve.
     fn next_child_event(&mut self) -> Option<ChildEvent>;
 
+    /// Whether the output has reached its end and every byte read from it has
+    /// been consumed, so a final drain can stop without waiting for a quiet
+    /// period. Implementations that cannot tell leave this `false`.
+    fn output_ended(&self) -> bool {
+        false
+    }
+
     /// Whether the child belongs to another process, so its exit can only ever
     /// arrive as a report rather than be observed here.
     ///

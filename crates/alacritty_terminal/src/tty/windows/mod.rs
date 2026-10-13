@@ -146,9 +146,18 @@ pub fn attach(
 /// before it could be built.
 const PIPE_CAPACITY: usize = conpty::PIPE_CAPACITY;
 
+/// Whether a terminal's own console ends its output when its last client exits.
+#[cfg(test)]
+pub(crate) fn releases_consoles() -> bool {
+    conpty::releases_consoles()
+}
+
 pub fn new(config: &Options, window_size: WindowSize, _window_id: u64) -> Result<Pty> {
     let conpty::SpawnedPty { backend, conout, conin, child_watcher } =
         conpty::new(config, window_size)?;
+    // The multiplexer host keeps its consoles referenced; a terminal's own
+    // console needs to live only as long as its clients.
+    backend.release_reference();
     // Duplicated before the unblocking wrappers take ownership of the pipes:
     // the multiplexer hands these to a client when it attaches, and there is
     // nothing left to duplicate once the reader thread owns the original.
@@ -347,6 +356,10 @@ impl EventedPty for Pty {
 
     fn next_child_event(&mut self) -> Option<ChildEvent> {
         child_event_from_recv(self.child_watcher.event_rx().try_recv())
+    }
+
+    fn output_ended(&self) -> bool {
+        self.conout.source_ended()
     }
 
     fn set_console_palette(&mut self, palette: ConsolePalette) {

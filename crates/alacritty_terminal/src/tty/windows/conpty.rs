@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::io::{Error, Result};
 use std::os::windows::ffi::OsStrExt;
-use std::os::windows::io::{FromRawHandle, IntoRawHandle, OwnedHandle};
+use std::os::windows::io::{AsRawHandle, FromRawHandle, IntoRawHandle, OwnedHandle};
 use std::{
     mem, ptr,
     time::{Duration, Instant},
@@ -13,7 +13,7 @@ use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, S_OK, WAIT_OBJECT_0};
 use windows_sys::Win32::System::Console::{
     COORD, ClosePseudoConsole, CreatePseudoConsole, HPCON, ResizePseudoConsole,
 };
-use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
+use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress, LoadLibraryW};
 use windows_sys::core::{HRESULT, PWSTR};
 use windows_sys::{s, w};
 
@@ -52,11 +52,14 @@ type CreatePseudoConsoleFn =
     unsafe extern "system" fn(COORD, HANDLE, HANDLE, u32, *mut HPCON) -> HRESULT;
 type ResizePseudoConsoleFn = unsafe extern "system" fn(HPCON, COORD) -> HRESULT;
 type ClosePseudoConsoleFn = unsafe extern "system" fn(HPCON);
+type ReleasePseudoConsoleFn = unsafe extern "system" fn(HPCON) -> HRESULT;
 
 struct ConptyApi {
     create: CreatePseudoConsoleFn,
     resize: ResizePseudoConsoleFn,
     close: ClosePseudoConsoleFn,
+    /// Absent from older inbox APIs, whose console stays alive until closed.
+    release: Option<ReleasePseudoConsoleFn>,
 }
 
 impl ConptyApi {
@@ -73,8 +76,21 @@ impl ConptyApi {
                     create: CreatePseudoConsole,
                     resize: ResizePseudoConsole,
                     close: ClosePseudoConsole,
+                    release: Self::load_inbox_release(),
                 }
             },
+        }
+    }
+
+    fn load_inbox_release() -> Option<ReleasePseudoConsoleFn> {
+        type LoadedFn = unsafe extern "system" fn() -> isize;
+        unsafe {
+            let kernel32 = GetModuleHandleW(w!("kernel32.dll"));
+            if kernel32.is_null() {
+                return None;
+            }
+            GetProcAddress(kernel32, s!("ReleasePseudoConsole"))
+                .map(|release| mem::transmute::<LoadedFn, ReleasePseudoConsoleFn>(release))
         }
     }
 
@@ -89,14 +105,23 @@ impl ConptyApi {
             let create_fn = GetProcAddress(hmodule, s!("CreatePseudoConsole"))?;
             let resize_fn = GetProcAddress(hmodule, s!("ResizePseudoConsole"))?;
             let close_fn = GetProcAddress(hmodule, s!("ClosePseudoConsole"))?;
+            let release_fn = GetProcAddress(hmodule, s!("ReleasePseudoConsole"));
 
             Some(Self {
                 create: mem::transmute::<LoadedFn, CreatePseudoConsoleFn>(create_fn),
                 resize: mem::transmute::<LoadedFn, ResizePseudoConsoleFn>(resize_fn),
                 close: mem::transmute::<LoadedFn, ClosePseudoConsoleFn>(close_fn),
+                release: release_fn
+                    .map(|release| mem::transmute::<LoadedFn, ReleasePseudoConsoleFn>(release)),
             })
         }
     }
+}
+
+/// Whether this process's pseudoconsole API can release a console.
+#[cfg(test)]
+pub(super) fn releases_consoles() -> bool {
+    ConptyApi::new().release.is_some()
 }
 
 /// RAII Pseudoconsole.
@@ -138,14 +163,18 @@ pub(super) fn new(config: &Options, window_size: WindowSize) -> Result<SpawnedPt
     let result = unsafe {
         (api.create)(
             window_size.into(),
-            conin_pty_handle.into_raw_handle() as HANDLE,
-            conout_pty_handle.into_raw_handle() as HANDLE,
+            conin_pty_handle.as_raw_handle() as HANDLE,
+            conout_pty_handle.as_raw_handle() as HANDLE,
             0,
             &mut pty_handle as *mut _,
         )
     };
 
     assert_eq!(result, S_OK);
+    // The pseudoconsole holds its own duplicates. Keeping these would hold the
+    // output pipe open after the console exits, so it could never reach EOF.
+    drop(conin_pty_handle);
+    drop(conout_pty_handle);
     log::debug!("startup ConPTY created: {:?}", startup_started.elapsed());
 
     // Native children are launched by the bundled bootstrap. It applies the
@@ -428,10 +457,30 @@ fn add_windows_env_key_value_to_block(block: &mut Vec<u16>, key: &OsStr, value: 
     block.push(0);
 }
 
+impl Conpty {
+    /// Lets the pseudoconsole exit once its last client disconnects, as Windows
+    /// Terminal does, instead of staying alive until it is closed here. Its
+    /// output pipe then ends right after the child's final output, which is
+    /// what lets the final drain stop at EOF rather than after a quiet period.
+    pub(super) fn release_reference(&self) {
+        let Some(release) = self.api.release else {
+            return;
+        };
+        let result = unsafe { release(self.handle) };
+        if result != S_OK {
+            warn!("could not release the pseudoconsole reference: {result:#x}");
+        }
+    }
+}
+
 impl OnResize for Conpty {
     fn on_resize(&mut self, window_size: WindowSize) {
+        // A released pseudoconsole exits with its last client, after which a
+        // resize has nothing to reach.
         let result = unsafe { (self.api.resize)(self.handle, window_size.into()) };
-        assert_eq!(result, S_OK);
+        if result != S_OK {
+            log::debug!("resizing the pseudoconsole returned {result:#x}");
+        }
     }
 }
 

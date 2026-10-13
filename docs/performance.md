@@ -113,9 +113,22 @@ about 1.1% of one core across the ten-second run. The individual reports are
 `artifacts/windows-throughput/render-{before,after}-{1,2,3}.json`.
 
 A child exit also needs to drain more than one gather batch. Windows keeps
-draining queued output and allows a 20 ms quiet period for the source thread
-to publish its final bytes before joining the parser. A 4 MiB bound prevents a
-surviving descendant from extending the drain indefinitely. The regression
+draining queued output until the console's output pipe ends. A terminal's own
+pseudoconsole is released once its child starts, as Windows Terminal does, so
+the console exits with its last client and the pipe ends about a millisecond
+after the final output. Where that end cannot be observed, the drain allows a
+20 ms quiet period for the source thread to publish its final bytes before
+joining the parser. A 4 MiB bound prevents a surviving descendant from
+extending the drain indefinitely.
+
+With Shitty's revised comparison, which starts timing once the relay is ready
+and so excludes startup, the remaining gap to Windows Terminal was shutdown:
+0.18 seconds from an empty payload to every process exiting, against 0.14.
+Waiting out the quiet period, then closing the console, accounted for about
+30 ms of that; with the end observed it fell to 0.15 seconds. ASCII medians
+over five interleaved runs were 4.56 seconds for Zetta and 4.55 for Windows
+Terminal. The remaining 12 ms or so is the palette bootstrap's own exit after
+the shell's. The regression
 test waits for the real child to exit while the grid is locked; a fixed delay
 could otherwise expire during PowerShell startup and miss the output-loss case.
 

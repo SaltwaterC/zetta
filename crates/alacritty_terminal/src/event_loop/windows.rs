@@ -1,7 +1,9 @@
 //! Final ConPTY output draining after a child exit. The source thread can hold
 //! more than one gather batch, and an empty in-memory read is not native EOF:
-//! the source may still be publishing output. Drain the bounded read-ahead and
-//! wait briefly for refills before the parser is joined and exit is reported.
+//! the source may still be publishing output. Drain the bounded read-ahead
+//! until the console's output pipe ends, which a released pseudoconsole does
+//! right after its last client exits. Where the end cannot be observed, wait
+//! briefly for refills instead, before the parser is joined and exit is reported.
 
 use super::*;
 use std::time::Duration;
@@ -28,6 +30,7 @@ where
         let mut events = Events::new();
         loop {
             match self.pty_read(state, parser, writer.as_deref_mut()) {
+                Ok(0) if self.pty.output_ended() => break,
                 Ok(0) => {},
                 Ok(count) => {
                     drained += count;

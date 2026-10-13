@@ -3,10 +3,10 @@ use std::{env, path::Path};
 #[path = "build_support/conpty_tools.rs"]
 mod conpty_tools;
 
-const CONPTY_PACKAGE_URL: &str = "https://github.com/microsoft/terminal/releases/download/v1.24.10621.0/Microsoft.Windows.Console.ConPTY.1.24.260303001.nupkg";
-const CONPTY_PACKAGE_ID: &str = "1.24.260303001";
+const CONPTY_PACKAGE_URL: &str = "https://github.com/microsoft/terminal/releases/download/v1.24.12741.0/Microsoft.Windows.Console.ConPTY.1.24.261001001.nupkg";
+const CONPTY_PACKAGE_ID: &str = "1.24.261001001";
 const CONPTY_PACKAGE_SHA256: &str =
-    "2C57CB7DA7E19FA06C86487C8D9B5C307D65695429FA15A854BF5F3CDDCA9E1D";
+    "ECEAAFE3BDCC85E95D18666EB647E0B8E7E00AF45DBCAD7034CDC61C4A29FE74";
 
 fn main() {
     emit_cfg_aliases();

@@ -230,3 +230,114 @@ fn a_surviving_writer_cannot_extend_the_final_drain_indefinitely() {
             .contains(&state.profile.bytes)
     );
 }
+
+/// A PTY whose finite output, once read, is known to have ended.
+struct EndingPty {
+    output: io::Cursor<Vec<u8>>,
+    input: io::Sink,
+}
+
+impl event::OnResize for EndingPty {
+    fn on_resize(&mut self, _: WindowSize) {}
+}
+
+impl tty::EventedReadWrite for EndingPty {
+    type Reader = io::Cursor<Vec<u8>>;
+    type Writer = io::Sink;
+    unsafe fn register(
+        &mut self,
+        _: &Arc<Poller>,
+        _: PollingEvent,
+        _: polling::PollMode,
+    ) -> io::Result<()> {
+        Ok(())
+    }
+    fn reregister(
+        &mut self,
+        _: &Arc<Poller>,
+        _: PollingEvent,
+        _: polling::PollMode,
+    ) -> io::Result<()> {
+        Ok(())
+    }
+    fn deregister(&mut self, _: &Arc<Poller>) -> io::Result<()> {
+        Ok(())
+    }
+    fn reader(&mut self) -> &mut Self::Reader {
+        &mut self.output
+    }
+    fn writer(&mut self) -> &mut Self::Writer {
+        &mut self.input
+    }
+}
+
+impl tty::EventedPty for EndingPty {
+    fn next_child_event(&mut self) -> Option<tty::ChildEvent> {
+        None
+    }
+
+    fn output_ended(&self) -> bool {
+        self.output.position() == self.output.get_ref().len() as u64
+    }
+}
+
+#[test]
+fn the_final_drain_stops_at_the_end_of_output_without_a_quiet_period() {
+    let (sent, _) = mpsc::channel();
+    let listener = Listener(sent);
+    let terminal = Arc::new(FairMutex::new(Term::new(
+        Config::default(),
+        &TermSize::new(80, 24),
+        listener.clone(),
+    )));
+    let pty = EndingPty { output: io::Cursor::new(b"the end".to_vec()), input: io::sink() };
+    let mut event_loop =
+        EventLoop::new(terminal.clone(), listener.clone(), pty, true, false, ReplayBarrier::open())
+            .unwrap();
+    let mut parser =
+        ParserThread::spawn(terminal, listener, ReplayBarrier::open(), ansi::Processor::new());
+    let mut state = State::default();
+    let started = Instant::now();
+    event_loop.drain_final_pty(&mut state, &mut parser, None::<&mut io::Sink>);
+    let elapsed = started.elapsed();
+    state.finish_parsing(&mut parser);
+    assert_eq!(state.profile.bytes, 7);
+    // Without the end-of-output check the drain always waits out the quiet period.
+    assert!(elapsed < Duration::from_millis(20), "the drain waited {elapsed:?} after the end");
+}
+
+#[test]
+fn a_released_console_ends_its_output_when_the_child_exits() {
+    if !tty::windows::releases_consoles() {
+        eprintln!("skipped: this ConPTY cannot release its console");
+        return;
+    }
+    let options = tty::Options {
+        shell: Some(tty::Shell::new(
+            "cmd.exe".into(),
+            vec!["/d".into(), "/q".into(), "/c".into(), "echo released".into()],
+        )),
+        escape_args: true,
+        ..tty::Options::default()
+    };
+    let size = WindowSize { num_lines: 24, num_cols: 80, cell_width: 8, cell_height: 16 };
+    let mut pty = tty::new(&options, size, 0).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut output = Vec::new();
+    let mut answered = false;
+    let mut buffer = [0; 4096];
+    while !tty::EventedPty::output_ended(&pty) {
+        assert!(Instant::now() < deadline, "the console outlived its child: {output:?}");
+        let count = tty::EventedReadWrite::reader(&mut pty).read(&mut buffer).unwrap();
+        output.extend_from_slice(&buffer[..count]);
+        // ConPTY waits for the terminal's first device-attributes reply.
+        if !answered && output.windows(3).any(|window| window == b"\x1b[c") {
+            answered = true;
+            tty::EventedReadWrite::writer(&mut pty).write_all(b"\x1b[?6c").unwrap();
+        }
+        if count == 0 {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+    assert!(output.windows(8).any(|window| window == b"released"), "{output:?}");
+}
