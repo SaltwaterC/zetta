@@ -246,3 +246,69 @@ fn arbitrary_output_never_panics_the_scanner() {
         }
     }
 }
+
+#[test]
+fn observe_reports_exactly_the_frames_filter_does() {
+    const TOKENS: &[&[u8]] = &[
+        b"\x1b",
+        b"\x1b]",
+        b"\x1b[",
+        b"\x1b\x1b]",
+        b"\x1b]52;c;SGk=",
+        b"\x07",
+        b"\x1b\\",
+        b"\x18",
+        b"\x1a",
+        b"text ",
+        b"\xff\xfe",
+    ];
+    let mut state = 0x2545_f491_4f6c_dd1d_u64;
+    let mut next = move || {
+        state ^= state >> 12;
+        state ^= state << 25;
+        state ^= state >> 27;
+        state.wrapping_mul(0x9e37_79b9_7f4a_7c15)
+    };
+    let frames = [
+        Frame {
+            id: [7; 16],
+            message: Message::Probe,
+        },
+        Frame {
+            id: [8; 16],
+            message: Message::Ack { next_sequence: 3 },
+        },
+    ];
+    let mut reported = 0;
+    for _ in 0..3_000 {
+        let mut input = Vec::new();
+        for _ in 0..next() % 40 {
+            match next() % 6 {
+                0 => input.extend(frames[(next() % 2) as usize].encode()),
+                // An OSC that runs past the length limit.
+                1 if next() % 8 == 0 => {
+                    input.extend_from_slice(b"\x1b]");
+                    input.extend(std::iter::repeat_n(b'x', MAX_SEQUENCE + 4));
+                }
+                _ => input.extend_from_slice(TOKENS[(next() % TOKENS.len() as u64) as usize]),
+            }
+        }
+        let mut cuts: Vec<usize> = (0..next() % 5)
+            .map(|_| (next() % (input.len() as u64 + 1)) as usize)
+            .collect();
+        cuts.sort_unstable();
+
+        let (mut filtering, mut observing) = (Scanner::default(), Scanner::default());
+        let (mut filtered, mut observed) = (Vec::new(), Vec::new());
+        let mut start = 0;
+        for end in cuts.into_iter().chain([input.len()]) {
+            let part = &input[start..end];
+            filtering.filter(part, |frame| filtered.push(frame));
+            observing.observe(part, |frame| observed.push(frame));
+            start = end;
+        }
+        assert_eq!(observed, filtered, "input {input:?}");
+        reported += observed.len();
+    }
+    assert!(reported > 0, "the inputs must contain frames to compare");
+}

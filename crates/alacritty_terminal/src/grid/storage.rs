@@ -250,6 +250,12 @@ impl<T> RecycledRows<T> {
         self.0.extend(rows.take(room));
     }
 
+    /// Keeps every one of `rows`, past [`RECYCLED_ROWS_LIMIT`]: they are rows the storage held a
+    /// moment ago, so keeping them holds no more than it did.
+    fn keep_all(&mut self, rows: impl Iterator<Item = Row<T>>) {
+        self.0.extend(rows);
+    }
+
     fn clear(&mut self) {
         self.0 = Vec::new();
     }
@@ -450,13 +456,16 @@ impl<T: Clone> Storage<T> {
 
     /// Remove the oldest lines from the buffer.
     ///
-    /// The rows removed whole become spare allocations for the next lines scrolled in, as far as
-    /// `recycled` has room. Clearing history and a full reset both come here, and the history
-    /// that output then scrolls back in had allocated every row afresh.
+    /// Every row removed whole becomes a spare allocation for the next lines scrolled in.
+    /// Clearing history and a full reset both come here, and the history that output then scrolls
+    /// back in had allocated every row afresh: binary output carries a full reset every 64 KiB or
+    /// so, and a 500-line history allocated and freed some 250 rows each time while the pool kept
+    /// only [`RECYCLED_ROWS_LIMIT`]. All of them are kept now, so a pane holds no more rows after
+    /// clearing its history than before, and until it refills, no fewer.
     pub fn shrink_lines(&mut self, mut shrinkage: usize) {
         self.release_decoded();
         let pending = shrinkage.min(self.pending.len());
-        self.recycled.extend(self.pending.drain(self.pending.len() - pending..));
+        self.recycled.keep_all(self.pending.drain(self.pending.len() - pending..));
         shrinkage -= pending;
 
         while shrinkage != 0 {
@@ -474,10 +483,10 @@ impl<T: Clone> Storage<T> {
         }
 
         let head = shrinkage.min(self.archive_head.len());
-        self.recycled.extend(self.archive_head.drain(self.archive_head.len() - head..));
+        self.recycled.keep_all(self.archive_head.drain(self.archive_head.len() - head..));
         shrinkage -= head;
 
-        self.recycled.extend(self.live.drain(self.live.len() - shrinkage..));
+        self.recycled.keep_all(self.live.drain(self.live.len() - shrinkage..));
     }
 
     /// Detach all history rows without destroying their cell allocations.
@@ -1166,6 +1175,20 @@ mod tests {
         assert_eq!(text(&storage[oldest]), original[..2]);
         storage.resize_columns_without_reflow(5);
         assert_eq!(text(&storage[oldest]), format!("{}\0\0\0", &original[..2]));
+    }
+
+    #[test]
+    fn clearing_history_keeps_every_row_it_removes() {
+        let lines = RECYCLED_ROWS_LIMIT + 100;
+        let mut storage = distinct_history(lines, 2);
+        storage.recycled.extend((0..RECYCLED_ROWS_LIMIT).map(|_| Row::new(2)));
+        let spare = storage.recycled.0.len();
+        let history = storage.len() - storage.visible_lines;
+
+        storage.shrink_lines(history);
+
+        assert_eq!(storage.len(), storage.visible_lines);
+        assert_eq!(storage.recycled.0.len(), spare + history);
     }
 
     #[test]

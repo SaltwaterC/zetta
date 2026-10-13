@@ -199,9 +199,14 @@ Retain these Zetta changes when synchronizing:
   and serialization omits it. Alternating optimized Windows parser runs
   improved from 493â€“495 to 739â€“747 MiB/s. Row tests cover all mutable accessors,
   replacement characters, changed backgrounds and imported row suffixes.
-- `Storage::shrink_lines` hands the rows it removes to the recycled-row pool.
-  A full reset (`ESC c`) clears history through it, and binary output carries
-  one every 64 KiB or so, after which every scrolled line had allocated a row.
+- `Storage::shrink_lines` hands every row it removes to the recycled-row pool,
+  past `RECYCLED_ROWS_LIMIT` (`RecycledRows::keep_all`): they are rows the
+  storage held a moment before, so a pane never holds more rows than it did. A
+  full reset (`ESC c`) clears history through it, and binary output carries one
+  every 64 KiB or so. With the pool capped at 256 rows, a 500-line history freed
+  some 250 rows at each reset and allocated them again as output refilled it;
+  keeping them made the parse-only random benchmark about 9% faster (from about
+  169 to 185 MiB/s). Pinned by `clearing_history_keeps_every_row_it_removes`.
 - `vte` is a path dependency on Zetta's fork in `crates/vte`, which bounds the
   OSC buffer that crates.io vte 0.15.0 grows without limit under `std`. See
   `crates/vte/UPSTREAM.md`.

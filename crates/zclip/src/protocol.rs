@@ -154,8 +154,51 @@ impl Scanner {
     }
 
     /// Report frames without copying ordinary PTY output.
-    pub fn observe(&mut self, input: &[u8], on_frame: impl FnMut(Frame)) {
-        let _ = self.filter_cow(input, on_frame);
+    ///
+    /// [`Self::filter`]'s state machine, without the output it builds. A PTY reader calls this
+    /// on every chunk, and output full of escapes (binary data carries an `ESC ]` in most 64 KiB
+    /// chunks) missed `filter_cow`'s shortcut and had every byte copied into a buffer that was
+    /// then thrown away: a quarter of the reader's time on random bytes. Between sequences it
+    /// skips from escape to escape, and only an OSC is held a byte at a time.
+    pub fn observe(&mut self, mut input: &[u8], mut on_frame: impl FnMut(Frame)) {
+        if self.pending.is_empty()
+            && (memchr::memchr(0x1b, input).is_none()
+                || (!input.ends_with(b"\x1b") && memchr::memmem::find(input, b"\x1b]").is_none()))
+        {
+            return;
+        }
+        while let Some((&byte, rest)) = input.split_first() {
+            if self.pending.is_empty() {
+                let Some(escape) = memchr::memchr(0x1b, input) else {
+                    return;
+                };
+                self.pending.push(0x1b);
+                input = &input[escape + 1..];
+                continue;
+            }
+            input = rest;
+            if !self.osc {
+                // `pending` holds the escape alone.
+                self.pending.clear();
+                if byte == b']' {
+                    self.pending.extend_from_slice(b"\x1b]");
+                    self.osc = true;
+                } else if byte == 0x1b {
+                    self.pending.push(byte);
+                }
+                continue;
+            }
+            self.pending.push(byte);
+            let terminated =
+                byte == 7 || self.pending.ends_with(b"\x1b\\") || matches!(byte, 0x18 | 0x1a);
+            if terminated || self.pending.len() > MAX_SEQUENCE {
+                if let Some(frame) = Frame::parse(&self.pending) {
+                    on_frame(frame);
+                }
+                self.pending.clear();
+                self.osc = false;
+            }
+        }
     }
 
     pub fn filter(&mut self, input: &[u8], mut on_frame: impl FnMut(Frame)) -> Vec<u8> {
