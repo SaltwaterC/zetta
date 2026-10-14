@@ -12,7 +12,7 @@ fn write_infos_positions_once_and_changes_colors_only_when_they_change() {
     let mut cells = row("ab", 0x07);
     cells.extend(row("c", 0x1f));
     let mut out = String::new();
-    write_infos(&mut out, (4, 2), &cells, 0x07);
+    write_infos(&mut out, (4, 2), &cells, 0x07, 80);
     assert_eq!(out, "\x1b[3;5H\x1b[0mab\x1b[0;97;44mc");
 }
 
@@ -37,13 +37,39 @@ fn wide_cells_are_written_once_and_cut_halves_become_spaces() {
         },
     ];
     let mut out = String::new();
-    write_infos(&mut out, (0, 0), &cells, 0x07);
-    // The leading trail and the trailing lead are cut off by the edges. The
-    // lead/trail bits count as an attribute change, as in OpenConsole.
+    write_infos(&mut out, (0, 0), &cells, 0x07, 4);
+    // The leading trail and the trailing lead are cut off by the row's
+    // edges. The lead/trail bits count as an attribute change, as in
+    // OpenConsole.
     assert_eq!(out, "\x1b[1;1H\x1b[0m \x1b[0m中 ");
     let mut out = String::new();
-    write_infos(&mut out, (0, 0), &row("a\x1bb", 0x07), 0x07);
+    write_infos(&mut out, (0, 0), &row("a\x1bb", 0x07), 0x07, 80);
     assert_eq!(out, "\x1b[1;1H\x1b[0ma←b", "controls are shown, never sent");
+}
+
+#[test]
+fn a_bisected_backup_restores_whole_glyphs_as_row_write_cells_does() {
+    let half = |ch, attributes| CharInfo { ch, attributes };
+    // A trailing half first, a leading half last, as ReadConsoleOutputW
+    // returns a region that cuts two wide glyphs.
+    let cells = [
+        half(0x3044, 0x07 | TRAILING_BYTE),
+        half(u16::from(b'Z'), 0x07),
+        half(0x306b, 0x07 | LEADING_BYTE),
+    ];
+    let mut out = String::new();
+    write_infos(&mut out, (2, 0), &cells, 0x07, 16);
+    // Starts a column early for the first glyph; the last one has room.
+    assert_eq!(out, "\x1b[1;2H\x1b[0mい\x1b[0mZ\x1b[0mに");
+    // A trailing half with no leading half before it leaves its column be.
+    let cells = [
+        half(u16::from(b'a'), 0x07),
+        half(0x3044, 0x07 | TRAILING_BYTE),
+        half(u16::from(b'b'), 0x07),
+    ];
+    let mut out = String::new();
+    write_infos(&mut out, (0, 0), &cells, 0x07, 16);
+    assert_eq!(out, "\x1b[1;1H\x1b[0ma\x1b[Cb");
 }
 
 #[test]

@@ -56,6 +56,10 @@ Native regression tests require Python on PATH and cover console writes,
 ANSI/Unicode title round trips, nested clients, input, final drain, Ctrl+C,
 and timeout cleanup.
 
+`make conformance-windows` runs Microsoft's own console feature tests against
+the server and fails if one that inbox ConPTY passes does not; see
+[conformance](conformance/README.md).
+
 For reproducible historical workload comparisons:
 
 ~~~powershell

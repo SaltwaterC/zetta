@@ -10,6 +10,11 @@
 //! redraws it there (VtIo::Writer::WriteScreenInfo), and leaving it records
 //! what the grid showed so it can be redrawn later.
 //!
+//! The main buffer is kept the same way while another is on screen: its
+//! cells are read from the grid as it leaves, so it can be read and written
+//! like any other buffer, and what the terminal kept of it is redrawn when
+//! it comes back only if a cell write changed it.
+//!
 //! The active buffer's mode, cursor size and attributes live in the server's
 //! own fields, so writing to it is the plain output path; an inactive
 //! buffer keeps them in its `Saved`.
@@ -22,6 +27,8 @@ pub const MAIN: u32 = 0;
 const SAVE_CURSOR: &str = "\x1b7";
 const RESTORE_CURSOR: &str = "\x1b8";
 const ERROR_INVALID_FUNCTION: i32 = 0xc007_0001_u32 as i32;
+/// NTSTATUS_FROM_HRESULT(E_UNEXPECTED).
+const E_UNEXPECTED: i32 = 0xc007_ffff_u32 as i32;
 
 /// Per-buffer settings that belong to whichever buffer is active.
 #[derive(Clone, Copy, Debug)]
@@ -35,12 +42,42 @@ pub struct Saved {
 
 pub struct ScreenBuffer {
     size: (i16, i16),
+    /// The window's size; its origin is the buffer's.
+    window: (i16, i16),
     cells: Vec<CharInfo>,
     saved: Saved,
     /// Open handles; the buffer goes with the last one.
     handles: usize,
+    /// The main buffer was changed off screen by more than text, so it is
+    /// redrawn from `cells` when it comes back.
+    dirty: bool,
 }
 impl ScreenBuffer {
+    /// ResizeTraditional: what fits stays where it was; the rest is blank.
+    fn resize(&mut self, size: (i16, i16)) {
+        let blank = CharInfo::blank(self.saved.attributes);
+        let (width, height) = (size.0.max(0) as usize, size.1.max(0) as usize);
+        let old_width = self.size.0.max(0) as usize;
+        let mut cells = vec![blank; width * height];
+        for (y, row) in cells.chunks_mut(width.max(1)).enumerate() {
+            for (x, cell) in row.iter_mut().enumerate() {
+                if x < old_width
+                    && let Some(old) = self.cells.get(y * old_width + x)
+                    && y < self.size.1.max(0) as usize
+                {
+                    *cell = *old;
+                }
+            }
+        }
+        self.cells = cells;
+        self.size = size;
+        self.window = (self.window.0.min(size.0), self.window.1.min(size.1));
+        self.saved.cursor = (
+            self.saved.cursor.0.min(size.0 - 1).max(0),
+            self.saved.cursor.1.min(size.1 - 1).max(0),
+        );
+        self.dirty = true;
+    }
     fn index(&self, x: i32, y: i32) -> Option<usize> {
         let (width, height) = (i32::from(self.size.0), i32::from(self.size.1));
         ((0..width).contains(&x) && (0..height).contains(&y)).then(|| (y * width + x) as usize)
@@ -54,6 +91,10 @@ impl ScreenBuffer {
             return;
         }
         let auto_return = self.saved.output_mode & mode::DISABLE_NEWLINE_AUTO_RETURN == 0;
+        let wrap = self.saved.output_mode & mode::WRAP_AT_EOL_OUTPUT != 0;
+        // A VT buffer defers the wrap to the next character, as a terminal
+        // does; the legacy writer moves to the next line at once.
+        let delayed = self.saved.output_mode & mode::VIRTUAL_TERMINAL_PROCESSING != 0;
         let attributes = self.saved.attributes;
         let (mut x, mut y) = (
             i32::from(self.saved.cursor.0),
@@ -105,6 +146,12 @@ impl ScreenBuffer {
                     let index = (y * width + x) as usize;
                     self.cells[index] = CharInfo { ch, attributes };
                     x += 1;
+                    if x >= width && !wrap {
+                        x = width - 1;
+                    } else if x >= width && !delayed {
+                        x = 0;
+                        newline(&mut y, &mut self.cells);
+                    }
                 }
             }
         }
@@ -154,7 +201,7 @@ impl Server {
 
     /// CD_IO_OBJECT_TYPE_NEW_OUTPUT: a text buffer the size of the active
     /// one, blank in the current attributes.
-    pub(super) fn create_screen_buffer(&mut self) -> io::Result<usize> {
+    pub(super) fn create_screen_buffer(&mut self, access: Access) -> io::Result<usize> {
         let size = self.active_size()?;
         let id = self.next_buffer;
         self.next_buffer += 1;
@@ -163,6 +210,7 @@ impl Server {
             id,
             ScreenBuffer {
                 size,
+                window: size,
                 cells: vec![CharInfo::blank(self.attributes); area],
                 saved: Saved {
                     output_mode: mode::PROCESSED_OUTPUT
@@ -174,11 +222,15 @@ impl Server {
                     cursor: (0, 0),
                 },
                 handles: 0,
+                dirty: false,
             },
         );
-        Ok(self.object(Object::Output(id)))
+        Ok(self.object(Object::Output(id), access))
     }
     pub(super) fn output_opened(&mut self, buffer: u32) {
+        if buffer == MAIN {
+            return;
+        }
         if let Some(screen) = self.buffers.get_mut(&buffer) {
             screen.handles += 1;
         }
@@ -186,6 +238,9 @@ impl Server {
     /// The last handle to a created buffer frees it; if it was on screen the
     /// main buffer comes back first.
     pub(super) fn output_closed(&mut self, buffer: u32) -> io::Result<()> {
+        if buffer == MAIN {
+            return Ok(());
+        }
         let Some(screen) = self.buffers.get_mut(&buffer) else {
             return Ok(());
         };
@@ -222,23 +277,42 @@ impl Server {
             cursor: screen.cursor,
         };
         if self.active == MAIN {
-            self.main_saved = Some(leaving);
+            let terminal = (screen.columns, screen.rows);
+            let size = self.state.buffer_size(terminal);
+            let window = self.state.window_size(terminal);
+            let cells = self.read_screen(size)?;
+            self.buffers.insert(
+                MAIN,
+                ScreenBuffer {
+                    size,
+                    window,
+                    cells,
+                    saved: leaving,
+                    handles: 0,
+                    dirty: false,
+                },
+            );
         } else {
             // Record what the alternate screen shows, to redraw it later.
             let size = (screen.columns, screen.rows);
             let cells = self.read_screen(size)?;
             if let Some(buffer) = self.buffers.get_mut(&self.active) {
                 buffer.size = size;
+                buffer.window = size;
                 buffer.cells = cells;
                 buffer.saved = leaving;
             }
         }
         let previous = self.active;
         self.active = target;
-        let incoming = if target == MAIN {
-            self.main_saved.take()
+        let main = if target == MAIN {
+            self.buffers.remove(&MAIN)
         } else {
-            self.buffers.get(&target).map(|buffer| buffer.saved)
+            None
+        };
+        let incoming = match &main {
+            Some(main) => Some(main.saved),
+            None => self.buffers.get(&target).map(|buffer| buffer.saved),
         };
         if let Some(saved) = incoming {
             self.state.output_mode = saved.output_mode;
@@ -249,6 +323,32 @@ impl Server {
         if target == MAIN {
             // The terminal restores the main screen and its cursor itself.
             out.push_str("\x1b[?1049l");
+            if let Some(main) = &main {
+                let terminal = (screen.columns, screen.rows);
+                self.state.restore_view(terminal, main.window, main.size);
+                if main.dirty {
+                    let width = main.size.0.max(0) as usize;
+                    let defaults = self.state.palette.attributes;
+                    for (row, cells) in main.cells.chunks(width.max(1)).enumerate() {
+                        if row >= terminal.1 as usize {
+                            break;
+                        }
+                        let visible = &cells[..cells.len().min(terminal.0.max(0) as usize)];
+                        cells::write_infos(
+                            &mut out,
+                            (0, row as i16),
+                            visible,
+                            defaults,
+                            terminal.0,
+                        );
+                    }
+                    let (x, y) = main.saved.cursor;
+                    let y = y.min(terminal.1 - 1);
+                    out.push_str(&format!("\x1b[{};{}H", y + 1, x + 1));
+                    // The cells already hold what was written as text.
+                    self.deferred_main.clear();
+                }
+            }
         } else {
             if previous == MAIN {
                 out.push_str("\x1b[?1049h");
@@ -257,7 +357,7 @@ impl Server {
                 let width = buffer.size.0.max(0) as usize;
                 let defaults = self.state.palette.attributes;
                 for (row, cells) in buffer.cells.chunks(width.max(1)).enumerate() {
-                    cells::write_infos(&mut out, (0, row as i16), cells, defaults);
+                    cells::write_infos(&mut out, (0, row as i16), cells, defaults, buffer.size.0);
                 }
                 let (x, y) = buffer.saved.cursor;
                 out.push_str(&format!("\x1b[{};{}H", y + 1, x + 1));
@@ -293,33 +393,37 @@ impl Server {
 
     /// Text for a buffer that is not on screen: kept for the main buffer,
     /// drawn into a created one's cells.
+    /// The main buffer also keeps the text itself, to replay it exactly when
+    /// nothing else changed it.
     pub(super) fn write_off_screen(&mut self, buffer: u32, deferred: Deferred) {
-        if buffer == MAIN {
-            self.deferred_main.push(deferred);
-            return;
-        }
         let code_page = self.state.output_cp;
         if let Some(screen) = self.buffers.get_mut(&buffer) {
-            let text = match deferred {
+            let text = match &deferred {
                 Deferred::Bytes(bytes) => {
-                    String::from_utf16_lossy(&codepage::to_utf16(code_page, &bytes))
+                    String::from_utf16_lossy(&codepage::to_utf16(code_page, bytes))
                 }
-                Deferred::Wide(wide) => String::from_utf16_lossy(&wide),
+                Deferred::Wide(wide) => String::from_utf16_lossy(wide),
             };
             screen.write_text(&text);
+        }
+        if buffer == MAIN {
+            self.deferred_main.push(deferred);
         }
     }
 
     fn read_screen(&mut self, size: (i16, i16)) -> io::Result<Vec<CharInfo>> {
         self.flush_output()?;
         let palette = self.state.palette;
-        Ok(self
+        let area = (i32::from(size.0) * i32::from(size.1)).max(0) as usize;
+        let mut cells: Vec<CharInfo> = self
             .sink
             .read_cells(0..size.1, 0..size.0)
             .unwrap_or_default()
             .iter()
             .map(|cell| cells::char_info(cell, &palette))
-            .collect())
+            .collect();
+        cells.resize(area, CharInfo::blank(self.attributes));
+        Ok(cells)
     }
 
     /// Cells of `rect` (clamped by the caller), row by row.
@@ -365,17 +469,20 @@ impl Server {
         let width = rect.width() as usize;
         if self.is_active(buffer) {
             let defaults = self.state.palette.attributes;
+            let row_width = self.sink.size().0;
             for (row, cells) in cells_in.chunks(width).enumerate() {
                 cells::write_infos(
                     out,
                     (rect.left as i16, (rect.top + row as i32) as i16),
                     cells,
                     defaults,
+                    row_width,
                 );
             }
             return;
         }
         if let Some(screen) = self.buffers.get_mut(&buffer) {
+            screen.dirty = true;
             for (row, cells) in cells_in.chunks(width).enumerate() {
                 for (column, cell) in cells.iter().enumerate() {
                     if let Some(index) =
@@ -465,8 +572,14 @@ impl Server {
         let fill = match kind {
             3 => Fill::Attribute(element),
             1 => {
+                // FillConsoleOutputCharacterAImpl takes the first character
+                // the byte converts to; a byte that converts to none (a
+                // stateful code page's shift) fails as E_UNEXPECTED.
                 let wide = codepage::to_utf16(self.state.output_cp, &[element as u8]);
-                Fill::Character(wide.first().copied().unwrap_or(u16::from(b'?')))
+                let Some(&ch) = wide.first() else {
+                    return Ok((E_UNEXPECTED, 0));
+                };
+                Fill::Character(ch)
             }
             2 | 4 => Fill::Character(element),
             _ => return Ok((INVALID_PARAMETER, 0)),
@@ -652,7 +765,7 @@ impl Server {
             .map(|cell| CharInfo::from_bytes(cell))
             .collect();
         if !unicode {
-            self.cells_from_ansi(&mut all);
+            self.cells_from_ansi(&mut all, request.width() as usize);
         }
         if clipped.is_valid() {
             let stride = request.width() as usize;
@@ -713,28 +826,39 @@ impl Server {
         self.reply_output(handle, d, size, bytes)
     }
 
-    /// _ConvertCellsToWInplace: a DBCS lead/trail pair becomes the character
-    /// in both cells; single bytes convert on their own.
-    fn cells_from_ansi(&self, cells: &mut [CharInfo]) {
+    /// _ConvertCellsToWInplace: the caller's lead/trail flags are ignored and
+    /// worked out again from the code page. A lead byte and the cell after it
+    /// in the same row become the character in both cells; a lead byte in a
+    /// row's last column is a space; other bytes convert on their own.
+    fn cells_from_ansi(&self, cells: &mut [CharInfo], width: usize) {
+        const DBCS: u16 = legacy::LEADING_BYTE | legacy::TRAILING_BYTE;
         let code_page = self.state.output_cp;
-        let mut index = 0;
-        while index < cells.len() {
-            let lead = cells[index];
-            if lead.attributes & legacy::LEADING_BYTE != 0 && index + 1 < cells.len() {
-                let bytes = [lead.ch as u8, cells[index + 1].ch as u8];
-                let ch = codepage::to_utf16(code_page, &bytes)
-                    .first()
-                    .copied()
-                    .unwrap_or(u16::from(b'?'));
-                cells[index].ch = ch;
-                cells[index + 1].ch = ch;
-                index += 2;
-            } else {
-                cells[index].ch = codepage::to_utf16(code_page, &[lead.ch as u8])
-                    .first()
-                    .copied()
-                    .unwrap_or(u16::from(b'?'));
-                index += 1;
+        let convert = |bytes: &[u8]| {
+            codepage::to_utf16(code_page, bytes)
+                .first()
+                .copied()
+                .unwrap_or(u16::from(b' '))
+        };
+        for row in cells.chunks_mut(width.max(1)) {
+            let mut index = 0;
+            while index < row.len() {
+                row[index].attributes &= !DBCS;
+                let byte = row[index].ch as u8;
+                if !codepage::is_lead_byte(code_page, byte) {
+                    row[index].ch = convert(&[byte]);
+                    index += 1;
+                } else if index + 1 < row.len() {
+                    let ch = convert(&[byte, row[index + 1].ch as u8]);
+                    row[index].ch = ch;
+                    row[index].attributes |= legacy::LEADING_BYTE;
+                    row[index + 1].ch = ch;
+                    row[index + 1].attributes =
+                        row[index + 1].attributes & !DBCS | legacy::TRAILING_BYTE;
+                    index += 2;
+                } else {
+                    row[index].ch = u16::from(b' ');
+                    index += 1;
+                }
             }
         }
     }
@@ -887,20 +1011,16 @@ impl Server {
         let unicode = self.reply[4] != 0;
         let append = self.reply[5] != 0;
         let input = self.api_input(handle, d, size)?;
-        let mut records: Vec<[u8; 20]> = input.as_chunks::<20>().0.to_vec();
-        if !unicode {
-            let code_page = self.state.input_cp;
-            for record in &mut records {
-                if record[..2] == [1, 0] {
-                    let byte = record[14];
-                    let ch = codepage::to_utf16(code_page, &[byte])
-                        .first()
-                        .copied()
-                        .unwrap_or(u16::from(byte));
-                    record[14..16].copy_from_slice(&ch.to_le_bytes());
-                }
-            }
+        let records = input.as_chunks::<20>().0;
+        if records.is_empty() {
+            set_u32(&mut self.reply, 0, 0);
+            return Ok((0, 0));
         }
+        let records = if unicode {
+            records.to_vec()
+        } else {
+            self.widen_input_records(records)
+        };
         let Some(input_queue) = &self.input else {
             return Ok((NOT_SUPPORTED, 0));
         };
@@ -909,24 +1029,65 @@ impl Server {
         Ok((0, 0))
     }
 
+    /// WriteConsoleInputAImpl: a key's AsciiChar is in the input code page,
+    /// and a DBCS lead byte is joined with the key after it. A lead byte that
+    /// ends the call waits for the next call's first record, and a pair whose
+    /// trail is not a key is dropped.
+    fn widen_input_records(&mut self, records: &[[u8; 20]]) -> Vec<[u8; 20]> {
+        let code_page = self.state.input_cp;
+        let is_key = |record: &[u8; 20]| record[..2] == [1, 0];
+        // One record per UTF-16 unit, each a copy of the lead's.
+        let push = |out: &mut Vec<[u8; 20]>, lead: &[u8; 20], narrow: &[u8]| {
+            for unit in codepage::to_utf16(code_page, narrow) {
+                let mut record = *lead;
+                record[14..16].copy_from_slice(&unit.to_le_bytes());
+                out.push(record);
+            }
+        };
+        let mut out = Vec::with_capacity(records.len());
+        let mut records = records.iter();
+        if let Some(lead) = self.input_lead.take()
+            && let Some(trail) = records.as_slice().first().filter(|trail| is_key(trail))
+        {
+            push(&mut out, &lead, &[lead[14], trail[14]]);
+            records.next();
+        }
+        while let Some(record) = records.next() {
+            if !is_key(record) {
+                out.push(*record);
+                continue;
+            }
+            let byte = record[14];
+            if !codepage::is_lead_byte(code_page, byte) {
+                push(&mut out, record, &[byte]);
+                continue;
+            }
+            match records.next() {
+                None => self.input_lead = Some(*record),
+                Some(trail) if is_key(trail) => push(&mut out, record, &[byte, trail[14]]),
+                Some(_) => {}
+            }
+        }
+        out
+    }
+
     // Screen-buffer state of a buffer that is not on screen.
 
     pub(super) fn off_screen_info(&mut self, buffer: u32) -> (i32, usize) {
-        let (size, cursor, attributes) = match self.buffers.get(&buffer) {
-            Some(screen) => (screen.size, screen.saved.cursor, screen.saved.attributes),
+        let (size, window, cursor, attributes) = match self.buffers.get(&buffer) {
+            Some(screen) => (
+                screen.size,
+                screen.window,
+                screen.saved.cursor,
+                screen.saved.attributes,
+            ),
             None => {
-                let saved = self.main_saved.unwrap_or(Saved {
-                    output_mode: 0,
-                    cursor_size: 25,
-                    attributes: self.attributes,
-                    cursor_visible: true,
-                    cursor: (0, 0),
-                });
-                (self.sink.size(), saved.cursor, saved.attributes)
+                let size = self.sink.size();
+                (size, size, (0, 0), self.attributes)
             }
         };
         self.reply.fill(0);
-        for (offset, (x, y)) in [(0, size), (4, cursor), (14, size), (18, size)] {
+        for (offset, (x, y)) in [(0, size), (4, cursor), (14, window), (18, size)] {
             set_i16(&mut self.reply, offset, x);
             set_i16(&mut self.reply, offset + 2, y);
         }
@@ -938,13 +1099,9 @@ impl Server {
         (0, 0)
     }
     fn saved_mut(&mut self, buffer: u32) -> Option<&mut Saved> {
-        if buffer == MAIN {
-            self.main_saved.as_mut()
-        } else {
-            self.buffers
-                .get_mut(&buffer)
-                .map(|screen| &mut screen.saved)
-        }
+        self.buffers
+            .get_mut(&buffer)
+            .map(|screen| &mut screen.saved)
     }
     pub(super) fn off_screen_mode(&mut self, buffer: u32) -> u32 {
         self.saved_mut(buffer).map_or(0, |saved| saved.output_mode)
@@ -962,6 +1119,7 @@ impl Server {
         match self.buffers.get_mut(&buffer) {
             Some(screen) if x >= 0 && y >= 0 && x < screen.size.0 && y < screen.size.1 => {
                 screen.saved.cursor = (x, y);
+                screen.dirty = true;
                 0
             }
             Some(_) => INVALID_PARAMETER,
@@ -970,6 +1128,52 @@ impl Server {
                 0
             }),
         }
+    }
+    /// SetConsoleWindowInfoImpl in VtIo mode on a buffer not on screen: the
+    /// buffer becomes the window's size.
+    pub(super) fn set_off_screen_window(
+        &mut self,
+        buffer: u32,
+        window: Rect,
+        absolute: bool,
+    ) -> i32 {
+        let Some(screen) = self.buffers.get_mut(&buffer) else {
+            return 0;
+        };
+        let window = if absolute {
+            window
+        } else {
+            Rect {
+                left: window.left,
+                top: window.top,
+                right: window.right + i32::from(screen.window.0) - 1,
+                bottom: window.bottom + i32::from(screen.window.1) - 1,
+            }
+        };
+        if !window.is_valid() {
+            return INVALID_PARAMETER;
+        }
+        let size = (window.width() as i16, window.height() as i16);
+        screen.resize(size);
+        screen.window = size;
+        0
+    }
+    /// SetConsoleScreenBufferSizeImpl on a buffer not on screen.
+    pub(super) fn set_off_screen_size(&mut self, buffer: u32, size: (i16, i16)) -> i32 {
+        let Some(screen) = self.buffers.get_mut(&buffer) else {
+            return 0;
+        };
+        if size.0 < screen.window.0
+            || size.1 < screen.window.1
+            || size.0 == i16::MAX
+            || size.1 == i16::MAX
+        {
+            return INVALID_PARAMETER;
+        }
+        if size != screen.size {
+            screen.resize(size);
+        }
+        0
     }
     pub(super) fn set_off_screen_attributes(&mut self, buffer: u32, attributes: u16) {
         if let Some(saved) = self.saved_mut(buffer) {

@@ -11,6 +11,7 @@ fn state() -> State {
         clients: Default::default(),
         handles: Default::default(),
         alert: Controls::default(),
+        cached_ansi: VecDeque::new(),
     }
 }
 /// Characters of the queued key-down records.
@@ -104,16 +105,27 @@ fn ansi_input_records_carry_one_code_page_byte_each() {
         record(65, 30, u16::from(b'a'), 1, 0, 1),
         record(0, 0, 0x3042, 1, 0, 1),
     ];
-    let (bytes, consumed) = ansi_records(records.iter(), 8, 932);
+    let queue: VecDeque<_> = records.into_iter().collect();
+    let chars = |bytes: &[u8]| -> Vec<u16> {
+        bytes
+            .chunks(20)
+            .map(|record| u16::from_le_bytes([record[14], record[15]]))
+            .collect()
+    };
+    let mut cached = VecDeque::new();
+    let (bytes, consumed) = ansi_records(&mut cached, &queue, 8, false, 932);
     assert_eq!(consumed, 2);
-    let chars: Vec<_> = bytes
-        .chunks(20)
-        .map(|record| u16::from_le_bytes([record[14], record[15]]))
-        .collect();
-    assert_eq!(chars, [u16::from(b'a'), 0x82, 0xa0]);
-    // A split that would overflow the caller's buffer waits for the next read.
-    let (_, consumed) = ansi_records(records.iter(), 2, 932);
-    assert_eq!(consumed, 1);
+    assert_eq!(chars(&bytes), [u16::from(b'a'), 0x82, 0xa0]);
+    // A character split across the end of the caller's buffer is consumed,
+    // and its trail byte is the next read's first record.
+    let (bytes, consumed) = ansi_records(&mut cached, &queue, 2, false, 932);
+    assert_eq!((chars(&bytes), consumed), (vec![u16::from(b'a'), 0x82], 2));
+    let empty = VecDeque::new();
+    let (bytes, consumed) = ansi_records(&mut cached, &empty, 1, true, 932);
+    assert_eq!((chars(&bytes), consumed), (vec![0xa0], 0));
+    let (bytes, _) = ansi_records(&mut cached, &empty, 1, false, 932);
+    assert_eq!(chars(&bytes), [0xa0]);
+    assert!(cached.is_empty());
 }
 
 #[test]
@@ -229,4 +241,23 @@ fn the_first_event_into_an_empty_queue_is_marked_for_waiting_reads() {
     assert_eq!(input.first_event, Some(3));
     decode_input(&mut input, b"b", false, true);
     assert_eq!(input.first_event, Some(3), "only an empty queue sets it");
+}
+
+#[test]
+fn a_record_read_with_room_for_none_completes_at_once_while_input_is_queued() {
+    let input = input();
+    {
+        let mut state = lock(&input.0.state);
+        state.clients.insert(1);
+        state.handles.insert(2);
+        state.records.push_back(record(65, 30, 97, 1, 0, 1));
+    }
+    // ReadConsoleInput(h, records, 0, &read): the output holds no record.
+    let mut request = read(true, 1);
+    request.descriptor.object = 2;
+    assert_eq!(input.fulfill(&mut request).unwrap(), Some(Vec::new()));
+    assert_eq!(lock(&input.0.state).records.len(), 1);
+    // With nothing queued it waits, as any record read does.
+    lock(&input.0.state).records.clear();
+    assert_eq!(input.fulfill(&mut request).unwrap(), None);
 }

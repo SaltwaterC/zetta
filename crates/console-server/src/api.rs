@@ -155,7 +155,7 @@ impl Server {
             api::SET_CURSOR_POSITION => self.set_cursor_position(d.object),
             api::GET_LARGEST_WINDOW_SIZE => self.get_largest_window(),
             api::SET_TEXT_ATTRIBUTE => self.set_text_attribute(d.object),
-            api::SET_WINDOW_INFO => self.set_window_info(),
+            api::SET_WINDOW_INFO => self.set_window_info(d.object),
             api::GET_TITLE => self.get_title(handle, d, size),
             api::SET_TITLE => self.set_title(handle, d, size),
             api::GET_MOUSE_INFO => Ok(self.get_mouse_info()),

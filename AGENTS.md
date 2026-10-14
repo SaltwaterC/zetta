@@ -267,6 +267,13 @@ is the root's, because a client resolves the multiplexer beside its own
 executable — so `crates/zmux`'s tests passing says nothing about the binary a
 user runs.
 
+`crates/console-server` has a second suite on Windows: `make
+conformance-windows` runs Microsoft's own console feature tests against it and
+fails if one that inbox ConPTY passes does not (see
+`crates/console-server/conformance/README.md`). Run it after changing what a
+console API call does: the crate's unit tests check our reading of conhost,
+this checks conhost's own expectations.
+
 The root's own `tests/` directory holds the one thing no unit test can reach:
 a remote pane carried over Mosh, end to end. It is ignored by default:
 

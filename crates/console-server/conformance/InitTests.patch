@@ -1,0 +1,33 @@
+Microsoft's ft_host ModuleSetup attaches to the first other process in the
+job that OpenConsole.exe runs in. A pseudoconsole host (ConPTY's conhost)
+joins that job too, so prefer the process that is actually Nihilist.exe.
+Applied to microsoft/terminal v1.24.12741.0 by conformance.ps1.
+
+diff --git a/src/host/ft_host/InitTests.cpp b/src/host/ft_host/InitTests.cpp
+index 2612ce8e6..d021f01ba 100644
+--- a/src/host/ft_host/InitTests.cpp
++++ b/src/host/ft_host/InitTests.cpp
+@@ -219,8 +219,21 @@ MODULE_SETUP(ModuleSetup)
+ 
+         if (pidCandidate != pi.dwProcessId && 0 != pidCandidate)
+         {
+-            dwFindPid = static_cast<DWORD>(pidCandidate);
+-            break;
++            // Zetta harness: a pseudoconsole host shares the job with the
++            // client, so prefer the process that is actually Nihilist.exe.
++            if (dwFindPid == 0)
++            {
++                dwFindPid = static_cast<DWORD>(pidCandidate);
++            }
++            wil::unique_handle candidate{ OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, static_cast<DWORD>(pidCandidate)) };
++            WCHAR image[MAX_PATH]{};
++            DWORD length = MAX_PATH;
++            if (candidate && QueryFullProcessImageNameW(candidate.get(), 0, image, &length) &&
++                length >= 12 && _wcsicmp(image + length - 12, L"Nihilist.exe") == 0)
++            {
++                dwFindPid = static_cast<DWORD>(pidCandidate);
++                break;
++            }
+         }
+     }
+ 

@@ -19,6 +19,42 @@ pub enum Object {
     /// A screen buffer: 0 is the main one, others were created.
     Output(u32),
 }
+/// A handle's DesiredAccess and ShareMode, which ConsoleObjectHeader checks
+/// every new handle to the same object against.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Access {
+    pub desired: u32,
+    pub share: u32,
+}
+impl Access {
+    const GENERIC_READ: u32 = 0x8000_0000;
+    const GENERIC_WRITE: u32 = 0x4000_0000;
+    const FILE_SHARE_READ: u32 = 1;
+    const FILE_SHARE_WRITE: u32 = 2;
+    /// The handles a connecting process gets.
+    pub const SHARED: Self = Self {
+        desired: Self::GENERIC_READ | Self::GENERIC_WRITE,
+        share: Self::FILE_SHARE_READ | Self::FILE_SHARE_WRITE,
+    };
+    /// The handle COOKED_READ_DATA takes to the active buffer to echo into.
+    pub const ECHO: Self = Self {
+        desired: Self::GENERIC_WRITE,
+        share: Self::FILE_SHARE_READ | Self::FILE_SHARE_WRITE,
+    };
+    /// AllocateIoHandle's sharing check against one handle already open.
+    pub fn conflicts_with(self, open: Self) -> bool {
+        let reads = |access: Self| access.desired & Self::GENERIC_READ != 0;
+        let writes = |access: Self| access.desired & Self::GENERIC_WRITE != 0;
+        let shares_read = |access: Self| access.share & Self::FILE_SHARE_READ != 0;
+        let shares_write = |access: Self| access.share & Self::FILE_SHARE_WRITE != 0;
+        reads(self) && !shares_read(open)
+            || !shares_read(self) && reads(open)
+            || writes(self) && !shares_write(open)
+            || !shares_write(self) && writes(open)
+    }
+}
+/// HRESULT_FROM_WIN32(ERROR_SHARING_VIOLATION) as the driver carries it.
+pub(crate) const SHARING_VIOLATION: i32 = 0xc007_0020_u32 as i32;
 /// One attached process, as OpenConsole's ConsoleProcessHandle.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Client {
@@ -34,14 +70,14 @@ pub struct Server {
     /// Aliases and command history, shared with the input thread.
     pub(crate) editing: SharedEditing,
     pub objects: BTreeMap<usize, Object>,
+    /// What each handle in `objects` was opened for.
+    access: BTreeMap<usize, Access>,
     pub processes: BTreeMap<usize, Client>,
     next_token: usize,
     /// Created screen buffers, and which buffer is on screen.
     buffers: BTreeMap<u32, buffers::ScreenBuffer>,
     next_buffer: u32,
     active: u32,
-    /// The main buffer's settings while another buffer is on screen.
-    main_saved: Option<buffers::Saved>,
     /// Text for the main buffer while another buffer is on screen.
     deferred_main: Vec<buffers::Deferred>,
     /// GetConsoleWindow's window, its owner, and where it reports ShowWindow.
@@ -51,6 +87,12 @@ pub struct Server {
     /// The embedder stopped taking output (the pane is closing): writes are
     /// discarded so that clients can still finish and exit.
     detached: bool,
+    /// Bytes handed to the embedder, so that a cached legacy column can tell
+    /// whether anything else has been written since.
+    pub(super) sink_bytes: u64,
+    /// A WriteConsoleInputA call's trailing DBCS lead byte, for the next.
+    pub(super) input_lead: Option<[u8; 20]>,
+    pub(super) legacy_column: Option<(u64, crate::legacy::Column)>,
     /// A palette the embedder changed, applied before the next request.
     pub(crate) pending_palette: std::sync::Arc<std::sync::Mutex<Option<Palette>>>,
     /// Output code page state; the ASCII shortcut is cached per code page.
@@ -91,17 +133,20 @@ impl Server {
             input: None,
             editing: SharedEditing::default(),
             objects: BTreeMap::new(),
+            access: BTreeMap::new(),
             processes: BTreeMap::new(),
             next_token: 1,
             buffers: BTreeMap::new(),
             next_buffer: 1,
             active: buffers::MAIN,
-            main_saved: None,
             deferred_main: Vec::new(),
             window: None,
             window_owner: None,
             window_output: None,
             detached: false,
+            sink_bytes: 0,
+            input_lead: None,
+            legacy_column: None,
             pending_palette: Default::default(),
             decoder: Decoder::default(),
             requests: 0,
@@ -122,9 +167,10 @@ impl Server {
         self.next_token += 1;
         token
     }
-    fn object(&mut self, object: Object) -> usize {
+    fn object(&mut self, object: Object, access: Access) -> usize {
         let token = self.token();
         self.objects.insert(token, object);
+        self.access.insert(token, access);
         match object {
             Object::Input => {
                 if let Some(input) = &self.input {
@@ -134,6 +180,17 @@ impl Server {
             Object::Output(buffer) => self.output_opened(buffer),
         }
         token
+    }
+    /// Whether a new handle to `object` breaks the share mode of one already
+    /// open to it.
+    pub(crate) fn sharing_violation(&self, object: Object, access: Access) -> bool {
+        self.objects.iter().any(|(token, &open)| {
+            open == object
+                && self
+                    .access
+                    .get(token)
+                    .is_some_and(|&open| access.conflicts_with(open))
+        })
     }
     pub fn serve(&mut self, handle: &Handle) -> io::Result<()> {
         let mut packet = Packet::default();
@@ -202,6 +259,7 @@ impl Server {
             }
             3 => self.create_object(packet, available),
             4 => {
+                self.access.remove(&d.object);
                 match self.objects.remove(&d.object) {
                     Some(Object::Output(buffer)) => self.output_closed(buffer)?,
                     Some(Object::Input) => {
@@ -214,11 +272,11 @@ impl Server {
                 Ok((0, 0))
             }
             5 => self.write_request(handle, d, 0, false),
-            // CONSOLE_IO_RAW_READ: ReadFile, for which ^Z ends input when
-            // processed input is on.
+            // CONSOLE_IO_RAW_READ: ReadFile, for which IoSorter always sets
+            // ProcessControlZ, whatever the input mode.
             6 => {
                 let read = ReadParams {
-                    control_z: self.state.input_mode() & crate::state::mode::PROCESSED_INPUT != 0,
+                    control_z: true,
                     ..Default::default()
                 };
                 self.read_input(d, 0, false, false, read)
@@ -260,8 +318,11 @@ impl Server {
         if let Some(input) = &self.input {
             input.connected(process, d.process as u32);
         }
-        let input = self.object(Object::Input);
-        let output = self.object(Object::Output(self.active));
+        // conhost checks sharing here too and fails the connect; we let a
+        // process attach while a buffer is held exclusively, rather than have
+        // it fail to start.
+        let input = self.object(Object::Input, Access::SHARED);
+        let output = self.object(Object::Output(self.active), Access::SHARED);
         for token in [process, input, output] {
             self.reply.extend_from_slice(&token.to_ne_bytes());
         }
@@ -274,17 +335,22 @@ impl Server {
         }
         // CD_CREATE_OBJECT_INFORMATION: ObjectType, ShareMode, DesiredAccess.
         // CONOUT$ and write-only CON open whichever buffer is on screen.
+        let access = Access {
+            desired: u32_at(&packet.payload, 8),
+            share: u32_at(&packet.payload, 4),
+        };
         let kind = match u32_at(&packet.payload, 0) {
             1 => Object::Input,
             2 => Object::Output(self.active),
-            3 => return Ok((0, self.create_screen_buffer()?)),
-            4 if u32_at(&packet.payload, 8) & 0xc0000000 == 0x80000000 => Object::Input,
-            4 if u32_at(&packet.payload, 8) & 0xc0000000 == 0x40000000 => {
-                Object::Output(self.active)
-            }
+            3 => return Ok((0, self.create_screen_buffer(access)?)),
+            4 if access.desired & 0xc0000000 == 0x80000000 => Object::Input,
+            4 if access.desired & 0xc0000000 == 0x40000000 => Object::Output(self.active),
             _ => return Ok((INVALID_PARAMETER, 0)),
         };
-        Ok((0, self.object(kind)))
+        if self.sharing_violation(kind, access) {
+            return Ok((SHARING_VIOLATION, 0));
+        }
+        Ok((0, self.object(kind, access)))
     }
     pub fn write_request(
         &mut self,
@@ -347,6 +413,7 @@ impl Server {
         if self.detached {
             return Ok(());
         }
+        self.sink_bytes += bytes.len() as u64;
         match self.sink.write(bytes, self.output_mode()) {
             Err(error) if error.kind() == io::ErrorKind::BrokenPipe => {
                 self.detached = true;
@@ -428,8 +495,10 @@ impl Server {
         let Some(input) = &self.input else {
             return Ok((NOT_SUPPORTED, 0));
         };
+        // ServerGetConsoleInput takes an empty array: with input queued the
+        // read completes with no records, as ReadConsoleInput(h, p, 0) does.
         let minimum = if records {
-            20
+            0
         } else if unicode {
             2
         } else {
@@ -437,6 +506,15 @@ impl Server {
         };
         if (descriptor.output_size as usize).saturating_sub(body_size) < minimum {
             return Ok((INVALID_PARAMETER, 0));
+        }
+        // A cooked read that echoes opens the active buffer to write into,
+        // which fails while someone holds it without sharing.
+        const LINE_AND_ECHO: u32 = 0x2 | 0x4;
+        if !records
+            && input.input_mode() & LINE_AND_ECHO == LINE_AND_ECHO
+            && self.sharing_violation(Object::Output(self.active), Access::ECHO)
+        {
+            return Ok((SHARING_VIOLATION, 0));
         }
         let body = self.reply[..body_size].to_vec();
         let flags = if records {

@@ -42,4 +42,6 @@ fn entry() -> std::io::Result<()> {
 }
 
 #[cfg(windows)]
+use console_server::grid;
+#[cfg(windows)]
 use console_server::output;

@@ -32,17 +32,53 @@ impl Server {
         if self.vt_path() {
             return self.consume(String::from_utf16_lossy(wide).as_bytes(), process);
         }
+        let mut column = self.legacy_column(wide)?;
         let text = if self.state.output_mode & mode::PROCESSED_OUTPUT != 0 {
             let code_page = self.state.output_cp;
             legacy::processed(
                 wide,
                 self.state.output_mode & mode::DISABLE_NEWLINE_AUTO_RETURN == 0,
+                &mut column,
                 |byte| codepage::glyph(code_page, byte),
             )
         } else {
-            legacy::unprocessed(wide)
+            legacy::unprocessed(wide, &mut column)
         };
-        self.consume(text.as_bytes(), process)
+        self.consume(text.as_bytes(), process)?;
+        self.legacy_column =
+            (column != legacy::Column::UNKNOWN).then_some((self.sink_bytes, column));
+        Ok(())
+    }
+    /// The cursor column a legacy write needs: with wrap at EOL on, for every
+    /// write, and otherwise only for a TAB. Reading it from the terminal costs
+    /// a flush, so the column a legacy write ends at is reused while nothing
+    /// else has been written and the width is unchanged; a legacy write never
+    /// leaves a wrap pending, so only a fresh read can find one.
+    fn legacy_column(&mut self, wide: &[u16]) -> io::Result<legacy::Column> {
+        let wrap = self.state.output_mode & mode::WRAP_AT_EOL_OUTPUT != 0;
+        if !wrap && !wide.contains(&u16::from(b'\t')) {
+            return Ok(legacy::Column::UNKNOWN);
+        }
+        let width = self.sink.size().0.max(1) as usize;
+        if let Some((bytes, column)) = self.legacy_column
+            && bytes == self.sink_bytes
+            && column.width == width
+        {
+            return Ok(legacy::Column { wrap, ..column });
+        }
+        let screen = self.screen()?;
+        let mut at = screen.cursor.0.max(0) as usize;
+        // WriteCharsLegacy: the console APIs have no deferred wrap, so one a
+        // VT write left pending happens before any legacy text.
+        if wrap && screen.wrap_pending {
+            self.sink_write(b"\r\n")?;
+            at = 0;
+        }
+        Ok(legacy::Column {
+            at,
+            width: screen.columns.max(1) as usize,
+            wrap,
+        })
     }
     /// VT the server generates for a console API call, ordered with output.
     pub(super) fn write_vt(&mut self, vt: &str) -> io::Result<()> {

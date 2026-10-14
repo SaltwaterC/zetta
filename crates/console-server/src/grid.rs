@@ -37,7 +37,8 @@ fn clamp(value: usize) -> i16 {
     value.min(i16::MAX as usize) as i16
 }
 
-/// Size, cursor, cursor visibility and the pen the next character gets.
+/// Size, cursor, cursor visibility, the pen the next character gets, and
+/// whether a wrap is pending.
 pub fn screen<T>(term: &Term<T>) -> Screen {
     let cursor = &term.grid().cursor;
     Screen {
@@ -49,6 +50,7 @@ pub fn screen<T>(term: &Term<T>) -> Screen {
         ),
         cursor_visible: term.mode().contains(TermMode::SHOW_CURSOR),
         pen: Some(pen(&cursor.template)),
+        wrap_pending: cursor.input_needs_wrap,
     }
 }
 

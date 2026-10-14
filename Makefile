@@ -231,7 +231,7 @@ WINDOWS_ZMUX_UPGRADE_ARGS := $(if $(call tool_enabled,$(ZMUX)), -UpgradeMux,)
 .PHONY: all build fmt test lint check-platforms check-features \
 	check-linux check-windows check-macos \
 	clippy-platforms clippy-features clippy-linux clippy-windows clippy-macos \
-	can-check-linux can-check-windows can-check-macos \
+	can-check-linux can-check-windows can-check-macos conformance-windows \
 	install install-binary install-capabilities install-assets install-user-path uninstall \
 	uninstall-binary uninstall-assets uninstall-user-path refresh-desktop-caches upgrade-mux clean
 
@@ -511,6 +511,17 @@ check-platforms: check-features
 clippy-linux clippy-windows clippy-macos clippy-features clippy-platforms:
 	@$(MAKE) --no-print-directory $(patsubst clippy-%,check-%,$@) \
 		PLATFORM_CARGO_CMD=clippy PLATFORM_CARGO_ARGS='-- -D warnings'
+
+# Microsoft's console feature tests against console-server; see
+# crates/console-server/conformance/README.md. Builds and runs on a Windows host
+# only, and fetches microsoft/terminal the first time. Pass the script's options
+# through CONFORMANCE_ARGS, e.g. CONFORMANCE_ARGS="-Select 'OutputTests::*'".
+conformance-windows:
+ifeq ($(OS),Windows_NT)
+	powershell.exe -NoProfile -ExecutionPolicy Bypass -File crates/console-server/conformance/conformance.ps1 $(CONFORMANCE_ARGS)
+else
+	@echo "$@: the console feature tests run on a Windows host only."; exit 1
+endif
 
 # `zmux --upgrade` is intentionally best-effort only when no daemon exists:
 # that is the normal case on a first install, while a real upgrade failure must

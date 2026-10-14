@@ -1,0 +1,2 @@
+# The patch keeps the CRLF lines of the file it applies to.
+*.patch -text -whitespace

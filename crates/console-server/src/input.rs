@@ -53,6 +53,9 @@ struct State {
     handles: std::collections::BTreeSet<usize>,
     /// Control keys the input thread has yet to apply to pending reads.
     alert: Controls,
+    /// ReadConsoleInputA records a character expanded to that did not fit
+    /// the last read (_cachedInputEvents), served before the queue.
+    cached_ansi: VecDeque<[u8; 20]>,
 }
 struct Shared {
     state: Mutex<State>,
@@ -98,6 +101,7 @@ impl Input {
                 clients: Default::default(),
                 handles: Default::default(),
                 alert: Controls::default(),
+                cached_ansi: VecDeque::new(),
             }),
             changed: Condvar::new(),
             mode: AtomicU32::new(0x1f7),
@@ -390,6 +394,9 @@ impl Input {
                 state.records.pop_front();
             }
             let (bytes, count) = if request.unicode {
+                // Reading in another mode drops the cache, as
+                // _switchReadingMode does.
+                state.cached_ansi.clear();
                 let count = (capacity / 20).min(state.records.len());
                 let bytes = state
                     .records
@@ -400,9 +407,20 @@ impl Input {
                     .collect();
                 (bytes, count)
             } else {
-                ansi_records(state.records.iter(), capacity / 20, self.code_page())
+                let State {
+                    cached_ansi,
+                    records,
+                    ..
+                } = &mut *state;
+                ansi_records(
+                    cached_ansi,
+                    records,
+                    capacity / 20,
+                    request.peek,
+                    self.code_page(),
+                )
             };
-            if count == 0 && !request.nowait {
+            if bytes.is_empty() && !request.nowait && state.records.is_empty() {
                 return Ok(None);
             }
             if !request.peek {
@@ -413,6 +431,7 @@ impl Input {
             self.input_ready(input_ready);
             return Ok(Some(bytes));
         }
+        state.cached_ansi.clear();
         drop(state);
         self.read_text(request)
     }
@@ -608,22 +627,32 @@ fn record_char(unit: u16) -> [u8; 20] {
 /// ReadConsoleInputA: a key's character in the input code page, one record
 /// per byte, as OpenConsole splits a DBCS character into lead and trail.
 /// Returns the records' bytes and how many queued records they consumed.
-fn ansi_records<'a>(
-    records: impl Iterator<Item = &'a [u8; 20]>,
+fn ansi_records(
+    cached: &mut VecDeque<[u8; 20]>,
+    records: &VecDeque<[u8; 20]>,
     capacity: usize,
+    peek: bool,
     code_page: u32,
 ) -> (Vec<u8>, usize) {
-    let mut out = Vec::new();
+    let mut out: Vec<[u8; 20]> = cached.iter().take(capacity).copied().collect();
+    if !peek {
+        cached.drain(..out.len());
+    }
     let mut consumed = 0;
     for record in records {
-        let expanded = expand_record(record, code_page);
-        if out.len() + expanded.len() * 20 > capacity * 20 {
+        if out.len() >= capacity {
             break;
         }
-        out.extend(expanded.iter().flatten());
+        out.extend(expand_record(record, code_page));
         consumed += 1;
     }
-    (out, consumed)
+    if out.len() > capacity {
+        let overflow = out.split_off(capacity);
+        if !peek {
+            cached.extend(overflow);
+        }
+    }
+    (out.concat(), consumed)
 }
 fn expand_record(record: &[u8; 20], code_page: u32) -> Vec<[u8; 20]> {
     let ch = u16::from_le_bytes([record[14], record[15]]);

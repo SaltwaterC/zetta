@@ -142,35 +142,60 @@ pub fn fill_row(
 }
 
 /// VtIo::Writer::WriteInfos: positions at `target`, then each cell with an
-/// SGR whenever its attributes change. Trailing halves are covered by their
-/// leading half; a half cut off by the row's edge becomes a space.
-pub fn write_infos(out: &mut String, target: (i16, i16), cells: &[CharInfo], defaults: u16) {
-    out.push_str(&format!("\x1b[{};{}H", target.1 + 1, target.0 + 1));
+/// SGR whenever its attributes change. Wide halves follow ROW::WriteCells,
+/// since the terminal is our buffer: a leading half is the whole glyph when
+/// its trailing half follows, or when it ends the run with room left in the
+/// row (`row_width`); a trailing half that starts the run restores the glyph
+/// from the column before; any other trailing half is covered by its leading
+/// half or leaves its column as it was. A half that cannot be whole is a
+/// space.
+pub fn write_infos(
+    out: &mut String,
+    target: (i16, i16),
+    cells: &[CharInfo],
+    defaults: u16,
+    row_width: i16,
+) {
+    let half = |cell: &CharInfo| cell.attributes & (LEADING_BYTE | TRAILING_BYTE);
+    let paired = |index: usize| {
+        cells.get(index + 1).map_or(
+            i32::from(target.0) + index as i32 + 1 < i32::from(row_width),
+            |next| half(next) == TRAILING_BYTE,
+        )
+    };
+    let restore = target.0 > 0
+        && cells
+            .first()
+            .is_some_and(|cell| half(cell) == TRAILING_BYTE);
+    let start = if restore { target.0 - 1 } else { target.0 };
+    out.push_str(&format!("\x1b[{};{}H", target.1 + 1, start + 1));
     let mut current = None;
     for (index, cell) in cells.iter().enumerate() {
-        let mut ch = cell.ch;
-        let mut wide = cell.attributes & (LEADING_BYTE | TRAILING_BYTE) != 0;
-        if wide {
-            if cell.attributes & LEADING_BYTE != 0 {
-                if index == cells.len() - 1 {
-                    ch = u16::from(b' ');
-                    wide = false;
+        let wide = match half(cell) {
+            LEADING_BYTE => paired(index),
+            TRAILING_BYTE if index == 0 => restore,
+            TRAILING_BYTE => {
+                if !(half(&cells[index - 1]) == LEADING_BYTE && paired(index - 1)) {
+                    out.push_str("\x1b[C");
                 }
-            } else if index == 0 {
-                ch = u16::from(b' ');
-                wide = false;
-            } else {
                 continue;
             }
-        }
+            _ => false,
+        };
+        let ch = if wide || half(cell) == 0 {
+            cell.ch
+        } else {
+            u16::from(b' ')
+        };
         if current != Some(cell.attributes) {
             current = Some(cell.attributes);
             out.push_str(&legacy::sgr(cell.attributes, defaults));
         }
         let shown = legacy::sanitize(ch);
         out.push(shown);
-        // A control or replacement standing in for a wide glyph is narrow.
-        if wide && (legacy::is_control(ch) || (0xd800..=0xdfff).contains(&ch)) {
+        // Whatever stands in for a wide glyph without being one (a control's
+        // glyph, a replacement, a narrow character) fills both columns.
+        if wide && shown.width() != Some(2) {
             out.push(shown);
         }
     }

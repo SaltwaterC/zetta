@@ -115,6 +115,42 @@ fn native_input_records_preserve_resize_unicode_modifiers_and_key_up() {
     );
 }
 #[test]
+fn a_raw_read_ends_at_a_leading_control_z_whatever_the_input_mode() {
+    let (sender, receiver) = mpsc::channel();
+    let script =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/raw_read_control_z.py");
+    let mut session = Session::spawn(
+        Launch {
+            command: format!("python.exe \"{}\"", script.display()),
+            environment: Default::default(),
+            directory: None,
+            ..Default::default()
+        },
+        Output(sender),
+    )
+    .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut bytes = Vec::new();
+    let mut sent = false;
+    while Instant::now() < deadline {
+        match receiver.recv_timeout(Duration::from_millis(100)) {
+            Ok(Event::Bytes(data)) => bytes.extend_from_slice(&data),
+            Ok(Event::End) => break,
+            _ => {}
+        }
+        if !sent && bytes.windows(15).any(|bytes| bytes == b"CONTROL_Z_READY") {
+            assert_eq!(session.input(b"\x1a").unwrap(), 1);
+            sent = true;
+        }
+    }
+    session.close();
+    assert!(
+        sent && bytes.windows(16).any(|bytes| bytes == b"CONTROL_Z_READ 0"),
+        "{:?}",
+        String::from_utf8_lossy(&bytes)
+    );
+}
+#[test]
 fn close_cancels_a_parked_read_without_waiting_for_keyboard_input() {
     let (sender, receiver) = mpsc::channel();
     let mut session = Session::spawn(

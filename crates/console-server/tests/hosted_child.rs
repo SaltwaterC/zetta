@@ -63,7 +63,7 @@ fn timeout_cleans_up_the_owned_console_tree() {
 }
 
 #[test]
-fn native_console_api_probe_includes_ansi_and_unicode_titles() {
+fn native_console_api_probe_matches_conhost_titles_and_aliases() {
     let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/console_probe.py");
     let command = format!("python.exe \"{}\"", script.display());
     let output = Command::new(executable())

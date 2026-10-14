@@ -55,6 +55,22 @@ fn buffer_size_must_cover_the_window_and_lapses_on_resize() {
 }
 
 #[test]
+fn a_smaller_window_resizes_the_buffer_to_it_as_conpty_does() {
+    let mut state = state();
+    state.set_window_size((120, 30), (6, 6));
+    assert_eq!(state.window_size((120, 30)), (6, 6));
+    assert_eq!(state.buffer_size((120, 30)), (6, 6));
+    // Now a buffer smaller than the terminal but not the window is allowed.
+    assert!(state.set_buffer_size((120, 30), (20, 20)));
+    assert!(!state.set_buffer_size((120, 30), (5, 20)));
+    assert_eq!(state.buffer_size((120, 30)), (20, 20));
+    assert_eq!(state.window_size((120, 30)), (6, 6));
+    // A terminal resize puts both back to the terminal's size.
+    assert_eq!(state.window_size((100, 30)), (100, 30));
+    assert_eq!(state.buffer_size((100, 30)), (100, 30));
+}
+
+#[test]
 fn only_the_first_client_names_the_console() {
     let mut state = state();
     state.connected(r"C:\Windows\System32\cmd.exe");

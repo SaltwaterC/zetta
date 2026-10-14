@@ -127,10 +127,13 @@ impl Server {
         let bytes = self.encode(&target, unicode);
         let capacity = (d.output_size as usize).saturating_sub(size);
         if bytes.len() > capacity {
+            // GetConsoleAliasAImpl reports the buffer's size in wide
+            // characters' bytes, a long-standing bug kept for compatibility.
+            let reported = if unicode { capacity } else { capacity * 2 };
             set_u16(
                 &mut self.reply,
                 2,
-                capacity.min(usize::from(u16::MAX)) as u16,
+                reported.min(usize::from(u16::MAX)) as u16,
             );
             return Ok((BUFFER_TOO_SMALL, 0));
         }

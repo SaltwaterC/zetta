@@ -7,6 +7,7 @@
 //! for ConPTY, so the terminal sees what it would have seen from ConPTY.
 use crate::output::{Pen, PenColor};
 use crate::state::Palette;
+use unicode_width::UnicodeWidthChar;
 
 pub const FOREGROUND_MASK: u16 = 0x000f;
 pub const BACKGROUND_MASK: u16 = 0x00f0;
@@ -21,11 +22,6 @@ pub const VALID_ATTRIBUTES: u16 = !0x2000;
 pub fn ansi_index(legacy: u16) -> u8 {
     let legacy = legacy & 0xf;
     ((legacy & 0x8) | ((legacy & 0x1) << 2) | (legacy & 0x2) | ((legacy & 0x4) >> 2)) as u8
-}
-
-/// The inverse of [`ansi_index`]; the swap is its own inverse.
-pub fn legacy_index(ansi: u8) -> u16 {
-    u16::from(ansi_index(u16::from(ansi)))
 }
 
 /// formatAttributes: SGR 0 first, because SetConsoleTextAttribute replaces
@@ -75,62 +71,139 @@ pub fn sanitize(unit: u16) -> char {
     }
 }
 
-/// WriteUTF16StripControlChars, for ENABLE_PROCESSED_OUTPUT clear: every
-/// control is shown as its glyph so the terminal never acts on it.
-pub fn unprocessed(text: &[u16]) -> String {
-    let mut out = String::with_capacity(text.len());
-    for unit in char::decode_utf16(text.iter().copied()) {
-        match unit {
-            Ok(ch) if ch.is_ascii() && !is_control(ch as u16) => out.push(ch),
-            Ok(ch) if (ch as u32) <= 0xffff => out.push(sanitize(ch as u16)),
-            Ok(ch) => out.push(ch),
-            Err(_) => out.push('\u{fffd}'),
+/// The console's own cursor column, for the two things a legacy write does
+/// that a terminal cannot work out alone: how many spaces a TAB writes, and
+/// wrapping as soon as a character lands in the last column (a terminal waits
+/// for the next one). `width` 0 means the column is unknown, and neither
+/// happens.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Column {
+    /// Where the next character goes; `width` once the last column is full.
+    pub at: usize,
+    pub width: usize,
+    /// ENABLE_WRAP_AT_EOL_OUTPUT.
+    pub wrap: bool,
+}
+
+impl Column {
+    pub const UNKNOWN: Self = Self {
+        at: 0,
+        width: 0,
+        wrap: false,
+    };
+    fn known(&self) -> bool {
+        self.width > 0
+    }
+    fn advance(&mut self, out: &mut String, ch: char) {
+        out.push(ch);
+        let cells = ch.width().unwrap_or(0);
+        if self.wrap && self.at + cells > self.width {
+            self.at = 0;
+        }
+        self.at = (self.at + cells).min(self.width);
+    }
+    /// _writeCharsLegacyUnprocessed wraps a run of text that ends in the last
+    /// column at once, which ConPTY's writer spells as CRLF.
+    fn end_run(&mut self, out: &mut String) {
+        if self.known() && self.wrap && self.at >= self.width {
+            out.push_str("\r\n");
+            self.at = 0;
         }
     }
+}
+
+/// WriteUTF16StripControlChars, for ENABLE_PROCESSED_OUTPUT clear: every
+/// control is shown as its glyph so the terminal never acts on it.
+pub fn unprocessed(text: &[u16], column: &mut Column) -> String {
+    let mut out = String::with_capacity(text.len());
+    for unit in char::decode_utf16(text.iter().copied()) {
+        let ch = match unit {
+            Ok(ch) if ch.is_ascii() && !is_control(ch as u16) => ch,
+            Ok(ch) if (ch as u32) <= 0xffff => sanitize(ch as u16),
+            Ok(ch) => ch,
+            Err(_) => '\u{fffd}',
+        };
+        column.advance(&mut out, ch);
+    }
+    column.end_run(&mut out);
     out
 }
 
 /// WriteCharsLegacy with ENABLE_PROCESSED_OUTPUT set and VT processing off.
-/// BEL, BS, TAB and CR reach the terminal unchanged, NUL is a space, LF gains
-/// a CR unless DISABLE_NEWLINE_AUTO_RETURN is set, and any other control is
+/// BEL, BS and CR reach the terminal unchanged, NUL is a space, LF gains a
+/// CR unless DISABLE_NEWLINE_AUTO_RETURN is set, and any other control is
 /// the output code page's glyph for it (`glyph` returns None when the code
 /// page has none, as UTF-8 does, and the character is dropped).
-pub fn processed(text: &[u16], auto_return: bool, glyph: impl Fn(u8) -> Option<char>) -> String {
+///
+/// A TAB writes spaces to the next multiple of 8, never past the right edge,
+/// so it overwrites what it passes as the console's buffer does; with the
+/// column unknown it is the terminal's own tab.
+pub fn processed(
+    text: &[u16],
+    auto_return: bool,
+    column: &mut Column,
+    glyph: impl Fn(u8) -> Option<char>,
+) -> String {
     let mut out = String::with_capacity(text.len());
     let mut previous = None;
     for unit in char::decode_utf16(text.iter().copied()) {
         let ch = unit.unwrap_or('\u{fffd}');
+        let control = (ch as u32) < 0x20 || ch == '\x7f';
+        if control {
+            // conhost writes the text between controls as one run.
+            column.end_run(&mut out);
+        }
         match ch {
-            '\0' => out.push(' '),
-            '\x07' | '\x08' | '\t' | '\r' => out.push(ch),
-            '\n' if auto_return && previous != Some('\r') => out.push_str("\r\n"),
-            '\n' => out.push('\n'),
-            c if (c as u32) < 0x20 || c == '\x7f' => {
-                if let Some(glyph) = glyph(c as u8) {
-                    out.push(glyph);
+            '\0' => column.advance(&mut out, ' '),
+            '\x07' => out.push(ch),
+            '\x08' => {
+                out.push(ch);
+                column.at = column.at.saturating_sub(1);
+            }
+            '\t' if column.known() => {
+                let at = column.at.min(column.width - 1);
+                let count = (column.width - at).min(8 - (at & 7));
+                out.extend(std::iter::repeat_n(' ', count));
+                column.at = at + count;
+            }
+            '\t' => out.push(ch),
+            '\r' => {
+                out.push(ch);
+                column.at = 0;
+            }
+            '\n' if auto_return && previous != Some('\r') => {
+                out.push_str("\r\n");
+                column.at = 0;
+            }
+            '\n' => {
+                out.push('\n');
+                if auto_return {
+                    column.at = 0;
                 }
             }
-            c => out.push(c),
+            c if control => {
+                if let Some(glyph) = glyph(c as u8) {
+                    column.advance(&mut out, glyph);
+                }
+            }
+            c => column.advance(&mut out, c),
+        }
+        if control {
+            column.end_run(&mut out);
         }
         previous = Some(ch);
     }
+    column.end_run(&mut out);
     out
 }
 
 /// The attribute word GetConsoleScreenBufferInfo reports for a pen, as
 /// TextAttribute::GetLegacyAttributes: default colors are the console's
-/// default attributes, and colors outside the 16 take the nearest entry.
+/// default attributes, and other colors go through conhost's fixed tables,
+/// whatever the palette holds.
 pub fn attributes(pen: &Pen, palette: &Palette) -> u16 {
-    let foreground = nibble(
-        pen.foreground,
-        palette.attributes & FOREGROUND_MASK,
-        palette,
-    );
-    let background = nibble(
-        pen.background,
-        (palette.attributes & BACKGROUND_MASK) >> 4,
-        palette,
-    );
+    let foreground = nibble(pen.foreground, palette.attributes & FOREGROUND_MASK);
+    let background = nibble(pen.background, (palette.attributes & BACKGROUND_MASK) >> 4);
     let mut value = foreground | (background << 4);
     if pen.reverse {
         value |= REVERSE_VIDEO;
@@ -141,43 +214,62 @@ pub fn attributes(pen: &Pen, palette: &Palette) -> u16 {
     value
 }
 
-fn nibble(color: PenColor, default: u16, palette: &Palette) -> u16 {
-    match color {
-        PenColor::Default => default,
-        PenColor::Indexed(index) if index < 16 => legacy_index(index),
-        PenColor::Indexed(index) => nearest(xterm_rgb(index), palette),
-        PenColor::Rgb(r, g, b) => nearest((r, g, b), palette),
-    }
-}
-
-/// The xterm 256-color cube and gray ramp.
-fn xterm_rgb(index: u8) -> (u8, u8, u8) {
-    const LEVELS: [u8; 6] = [0, 95, 135, 175, 215, 255];
-    if index >= 232 {
-        let level = 8 + 10 * (index - 232);
-        return (level, level, level);
-    }
-    let cube = index - 16;
-    (
-        LEVELS[usize::from(cube / 36)],
-        LEVELS[usize::from(cube / 6 % 6)],
-        LEVELS[usize::from(cube % 6)],
-    )
-}
-
-/// The legacy index of the closest palette color (COLORREF is 0x00bbggrr).
-fn nearest((r, g, b): (u8, u8, u8), palette: &Palette) -> u16 {
-    let distance = |color: u32| {
-        let channel = |shift: u32, value: u8| {
-            let delta = i32::from(((color >> shift) & 0xff) as u8) - i32::from(value);
-            delta * delta
-        };
-        channel(0, r) + channel(8, g) + channel(16, b)
+/// TextColor::GetLegacyIndex.
+fn nibble(color: PenColor, default: u16) -> u16 {
+    let index = match color {
+        PenColor::Default => return default,
+        PenColor::Indexed(index) => INDEX256_TO_INDEX16[usize::from(index)],
+        PenColor::Rgb(r, g, b) => {
+            let compressed = (r & 0b1110_0000) + ((g >> 3) & 0b0001_1100) + ((b >> 6) & 0b11);
+            COMPRESSED_RGB_TO_INDEX16[usize::from(compressed)]
+        }
     };
-    (0..16u16)
-        .min_by_key(|&index| distance(palette.colors[usize::from(index)]))
-        .unwrap_or(0)
+    u16::from(index)
 }
+
+/// 8-bit RGB colors, in the form RRRGGGBB, to one of the 16 legacy colors
+/// (TextColor.cpp's CompressedRgbToIndex16).
+#[rustfmt::skip]
+const COMPRESSED_RGB_TO_INDEX16: [u8; 256] = [
+     0,  1,  1,  9,  0,  0,  1,  1,  2,  1,  1,  1,  2,  8,  1,  9,
+     2,  2,  3,  3,  2,  2, 11,  3, 10, 10, 11, 11, 10, 10, 10, 11,
+     0,  5,  1,  1,  0,  0,  1,  1,  8,  1,  1,  1,  2,  8,  1,  9,
+     2,  2,  3,  3,  2,  2, 11,  3, 10, 10, 10, 11, 10, 10, 10, 11,
+     5,  5,  5,  1,  4,  5,  1,  1,  8,  8,  1,  9,  2,  8,  9,  9,
+     2,  2,  3,  3,  2,  2, 11,  3, 10, 10, 11, 11, 10, 10, 10, 11,
+     4,  5,  5,  1,  4,  5,  5,  1,  8,  5,  5,  1,  8,  8,  9,  9,
+     2,  2,  8,  9, 10,  2, 11,  3, 10, 10, 11, 11, 10, 10, 10, 11,
+     4, 13,  5,  5,  4, 13,  5,  5,  4, 13, 13, 13,  6,  8, 13,  9,
+     6,  8,  8,  9, 10, 10, 11,  3, 10, 10, 11, 11, 10, 10, 10, 11,
+     4, 13, 13, 13,  4, 13, 13, 13,  4, 12, 13, 13,  6, 12, 13, 13,
+     6,  6,  8,  9,  6,  6,  7,  7, 10, 14, 14,  7, 10, 10, 14, 11,
+     4, 12, 13, 13,  4, 12, 13, 13,  4, 12, 13, 13,  6, 12, 12, 13,
+     6,  6, 12,  7,  6,  6,  7,  7,  6, 14, 14,  7, 14, 14, 14, 15,
+    12, 12, 13, 13, 12, 12, 13, 13, 12, 12, 12, 13, 12, 12, 12, 13,
+     6, 12, 12,  7,  6,  6,  7,  7,  6, 14, 14,  7, 14, 14, 14, 15,
+];
+
+/// The 256-color palette to one of the 16 legacy colors (TextColor.cpp's
+/// Index256ToIndex16); the first 16 are the ANSI-to-legacy swap.
+#[rustfmt::skip]
+const INDEX256_TO_INDEX16: [u8; 256] = [
+     0,  4,  2,  6,  1,  5,  3,  7,  8, 12, 10, 14,  9, 13, 11, 15,
+     0,  1,  1,  1,  9,  9,  2,  1,  1,  1,  1,  1,  2,  2,  3,  3,
+     3,  3,  2,  2, 11, 11,  3,  3, 10, 10, 11, 11, 11, 11, 10, 10,
+    10, 10, 11, 11,  5,  5,  5,  5,  1,  1,  8,  8,  1,  1,  9,  9,
+     2,  2,  3,  3,  3,  3,  2,  2, 11, 11,  3,  3, 10, 10, 11, 11,
+    11, 11, 10, 10, 10, 10, 11, 11,  4, 13,  5,  5,  5,  5,  4, 13,
+    13, 13, 13, 13,  6,  8,  8,  8,  9,  9, 10, 10, 11, 11,  3,  3,
+    10, 10, 11, 11, 11, 11, 10, 10, 10, 10, 11, 11,  4, 13, 13, 13,
+    13, 13,  4, 12, 13, 13, 13, 13,  6,  6,  8,  8,  9,  9,  6,  6,
+     7,  7,  7,  7, 10, 14, 14, 14,  7,  7, 10, 10, 14, 14, 11, 11,
+     4, 12, 13, 13, 13, 13,  4, 12, 13, 13, 13, 13,  6,  6, 12, 12,
+     7,  7,  6,  6,  7,  7,  7,  7,  6, 14, 14, 14,  7,  7, 14, 14,
+    14, 14, 15, 15, 12, 12, 13, 13, 13, 13, 12, 12, 12, 12, 13, 13,
+     6, 12, 12, 12,  7,  7,  6,  6,  7,  7,  7,  7,  6, 14, 14, 14,
+     7,  7, 14, 14, 14, 14, 15, 15,  0,  0,  0,  0,  0,  0,  8,  8,
+     8,  8,  8,  8,  8,  8,  8,  8,  7,  7,  7,  7,  7,  7, 15, 15,
+];
 
 #[cfg(test)]
 #[path = "tests/legacy.rs"]

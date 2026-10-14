@@ -112,8 +112,9 @@ ansi = ctypes.create_string_buffer(128)
 assert kernel.GetConsoleTitleA(ansi, 128) == len("ansi title: λ".encode("utf-8"))
 assert ansi.value.decode("utf-8") == "ansi title: λ"
 small = ctypes.create_string_buffer(5)
-assert kernel.GetConsoleTitleA(small, 5) == len("ansi title: λ".encode("utf-8"))
-assert small.value == b"ansi"
+# conhost's legacy A behaviour: too small for the title copies nothing.
+assert kernel.GetConsoleTitleA(small, 5) == 0
+assert small.value == b""
 checked(kernel.SetConsoleTitleW(""))
 assert kernel.GetConsoleTitleW(title, 128) == 0
 assert title.value == ""
@@ -123,3 +124,17 @@ osc = b"\x1b]2;VT title\x07"
 checked(kernel.WriteFile(output, ctypes.create_string_buffer(osc), len(osc), ctypes.byref(written), None))
 assert kernel.GetConsoleTitleW(title, 128) == len("VT title")
 assert title.value == "VT title"
+
+# GetConsoleAliasA reports a buffer too small for the alias at twice its size,
+# as if it held wide characters: conhost's long-standing bug, kept because
+# callers may size their retry from it.
+kernel.AddConsoleAliasA.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p]
+kernel.GetConsoleAliasA.argtypes = [ctypes.c_char_p, ctypes.c_void_p, DWORD, ctypes.c_char_p]
+kernel.GetConsoleAliasA.restype = DWORD
+checked(kernel.AddConsoleAliasA(b"probe", b"echo probe", b"probe.exe"))
+small = ctypes.create_string_buffer(4)
+assert kernel.GetConsoleAliasA(b"probe", small, 4, b"probe.exe") == 8
+assert ctypes.get_last_error() == 122, "ERROR_INSUFFICIENT_BUFFER"
+alias = ctypes.create_string_buffer(32)
+assert kernel.GetConsoleAliasA(b"probe", alias, 32, b"probe.exe") == len(b"echo probe") + 1
+assert alias.value == b"echo probe"

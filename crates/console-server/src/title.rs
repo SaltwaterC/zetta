@@ -49,37 +49,53 @@ impl Server {
                 .unwrap_or_else(|| self.state.title.clone())
         };
         let capacity = d.output_size as usize - size;
-        let (mut bytes, units) = if unicode {
-            let wide: Vec<_> = title.encode_utf16().collect();
-            let count = wide.len().min((capacity / 2).saturating_sub(1));
-            (
-                wide[..count]
-                    .iter()
-                    .flat_map(|ch| ch.to_le_bytes())
-                    .collect::<Vec<_>>(),
-                wide.len(),
-            )
-        } else {
-            // Whole characters only, so a DBCS pair is never split.
-            let mut bytes = Vec::new();
-            let mut needed = 0;
-            let mut fits = true;
-            for ch in title.chars() {
-                let encoded =
-                    codepage::from_utf16(self.state.input_cp, ch.encode_utf16(&mut [0; 2]));
-                needed += encoded.len();
-                // Stop at the first character that does not fit before the NUL.
-                fits &= needed < capacity;
-                if fits {
-                    bytes.extend(encoded);
-                }
-            }
-            (bytes, needed)
-        };
-        set_u32(&mut self.reply, 0, units as u32);
+        if !unicode {
+            return self.reply_title_ansi(handle, d, size, &title, capacity);
+        }
+        let wide: Vec<_> = title.encode_utf16().collect();
+        let count = wide.len().min((capacity / 2).saturating_sub(1));
+        let mut bytes: Vec<u8> = wide[..count]
+            .iter()
+            .flat_map(|ch| ch.to_le_bytes())
+            .collect();
+        set_u32(&mut self.reply, 0, wide.len() as u32);
         let written = bytes.len();
-        bytes.extend(std::iter::repeat_n(0, if unicode { 2 } else { 1 }));
+        bytes.extend([0, 0]);
         if bytes.len() <= capacity {
+            native::transfer(handle, WRITE_OUTPUT, d.id, size as u32, &mut bytes)?;
+        }
+        Ok((0, written))
+    }
+
+    /// GetConsoleTitleAImplHelper's legacy rule: a buffer too small for the
+    /// whole converted title gets only a NUL and a needed length of 0; one
+    /// exactly its length gets every byte and no terminator.
+    fn reply_title_ansi(
+        &mut self,
+        handle: &Handle,
+        d: Descriptor,
+        size: usize,
+        title: &str,
+        capacity: usize,
+    ) -> io::Result<(i32, usize)> {
+        let wide: Vec<u16> = title.encode_utf16().collect();
+        let converted = codepage::from_utf16(self.state.input_cp, &wide);
+        let (mut bytes, needed, written) = if capacity == 0 {
+            (Vec::new(), 0, 0)
+        } else if converted.is_empty() || capacity < converted.len() {
+            (vec![0], 0, usize::from(!converted.is_empty()))
+        } else {
+            let mut bytes = converted[..converted.len().min(capacity - 1)].to_vec();
+            bytes.push(if capacity == converted.len() {
+                converted[converted.len() - 1]
+            } else {
+                0
+            });
+            let written = capacity.min(converted.len() + 1);
+            (bytes, converted.len(), written)
+        };
+        set_u32(&mut self.reply, 0, needed as u32);
+        if !bytes.is_empty() {
             native::transfer(handle, WRITE_OUTPUT, d.id, size as u32, &mut bytes)?;
         }
         Ok((0, written))

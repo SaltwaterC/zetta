@@ -26,10 +26,10 @@ fn fixture() -> (Server, Handle) {
 fn input_event_query_rejects_output_handles_as_python_requires() {
     let (mut server, handle) = fixture();
     let mut packet = packet(0x01000003, &[0; 4]);
-    packet.descriptor.object = server.object(Object::Output(0));
+    packet.descriptor.object = server.object(Object::Output(0), Access::SHARED);
     assert_eq!(server.api(&handle, &packet, 12).unwrap().0, INVALID_HANDLE);
     server.reply.clear();
-    packet.descriptor.object = server.object(Object::Input);
+    packet.descriptor.object = server.object(Object::Input, Access::SHARED);
     assert_eq!(server.api(&handle, &packet, 12).unwrap().0, 0);
 }
 #[test]
@@ -63,7 +63,7 @@ fn screen_info_includes_geometry_cursor_and_the_whole_color_table() {
     let mut packet = packet(0x02000007, &[0; 92]);
     assert_eq!(server.api(&handle, &packet, 100).unwrap().0, INVALID_HANDLE);
     server.reply.clear();
-    packet.descriptor.object = server.object(Object::Output(0));
+    packet.descriptor.object = server.object(Object::Output(0), Access::SHARED);
     assert_eq!(server.api(&handle, &packet, 100).unwrap().0, 0);
     assert_eq!(server.reply.len(), 92);
     assert_eq!(&server.reply[..8], &[80, 0, 24, 0, 3, 0, 0, 0]);
@@ -79,4 +79,37 @@ fn unsupported_api_returns_an_error_and_is_counted_once() {
         assert_eq!(server.api(&handle, &packet, 20).unwrap().0, NOT_SUPPORTED);
     }
     assert_eq!(server.unsupported.len(), 1);
+}
+
+#[test]
+fn a_handle_opened_without_sharing_refuses_every_other_handle() {
+    let exclusive = Access {
+        desired: Access::SHARED.desired,
+        share: 0,
+    };
+    assert!(Access::ECHO.conflicts_with(exclusive));
+    assert!(Access::SHARED.conflicts_with(exclusive));
+    // Sharing both ways, any access mixes.
+    assert!(!Access::ECHO.conflicts_with(Access::SHARED));
+    // A handle that shares only reading still admits a reader.
+    let read_only = Access {
+        desired: 0x8000_0000,
+        share: 1,
+    };
+    assert!(!read_only.conflicts_with(read_only));
+    assert!(Access::ECHO.conflicts_with(read_only));
+}
+
+#[test]
+fn legacy_text_after_vt_text_that_filled_the_row_starts_on_the_next_line() {
+    let (mut server, _handle) = fixture();
+    // VT output fills the 80-column row and leaves the wrap pending.
+    server.state.output_mode = 0x7;
+    server.write_wide(&[u16::from(b'a'); 80], 0).unwrap();
+    assert!(server.sink.screen().wrap_pending);
+    // Legacy output (processed, wrap at EOL): conhost wraps first, then
+    // writes, so the cursor ends right after the x on the next row.
+    server.state.output_mode = 0x3;
+    server.write_wide(&[u16::from(b'x')], 0).unwrap();
+    assert_eq!(server.sink.cursor(), (1, 1));
 }

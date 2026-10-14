@@ -19,6 +19,12 @@ name = "console-server"
 path = "src/main.rs"
 required-features = ["harness"]
 
+# OpenConsole.exe's stand-in for Microsoft's console feature tests; see
+# conformance/README.md.
+[[example]]
+name = "fthost"
+required-features = ["harness"]
+
 [target.'cfg(windows)'.dependencies]
 alacritty_terminal = { path = "../alacritty_terminal", default-features = false, optional = true }
 unicode-width = "0.2.0"

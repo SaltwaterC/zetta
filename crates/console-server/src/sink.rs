@@ -60,6 +60,19 @@ impl ConsoleOutput for Sink {
             (point.column.0 as i16, point.line.0 as i16)
         })
     }
+    fn screen(&self) -> crate::output::Screen {
+        self.term.as_ref().map_or_else(
+            || crate::output::Screen {
+                columns: 80,
+                rows: 24,
+                cursor: (0, 0),
+                cursor_visible: true,
+                pen: None,
+                wrap_pending: false,
+            },
+            crate::grid::screen,
+        )
+    }
     fn title(&self) -> Option<String> {
         self.term
             .as_ref()

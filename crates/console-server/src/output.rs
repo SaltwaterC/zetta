@@ -58,6 +58,10 @@ pub struct Screen {
     /// None when the embedder cannot say; the server then reports the last
     /// attributes set through the console API.
     pub pen: Option<Pen>,
+    /// The cursor is past the last column with the wrap deferred to the next
+    /// character, as a terminal (and VT output) does it. False when the
+    /// embedder cannot say.
+    pub wrap_pending: bool,
 }
 pub trait ConsoleOutput: Send {
     fn write(&mut self, bytes: &[u8], mode: OutputMode) -> io::Result<()>;
@@ -81,6 +85,7 @@ pub trait ConsoleOutput: Send {
             cursor: self.cursor(),
             cursor_visible: true,
             pen: None,
+            wrap_pending: false,
         }
     }
     fn title(&self) -> Option<String> {

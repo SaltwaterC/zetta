@@ -76,9 +76,18 @@ pub struct ConsoleState {
     titled: bool,
     pub palette: Palette,
     pub popup_attributes: u16,
-    /// The buffer size an application set, valid for the window size it was
-    /// set against; a resize replaces it, as ResizePseudoConsole does.
-    buffer: Option<((i16, i16), (i16, i16))>,
+    /// The main buffer's window and size as an application set them.
+    view: Option<View>,
+}
+
+/// An application's window and buffer size for the main buffer, valid for
+/// the terminal size they were set against: a resize replaces both, as
+/// ResizePseudoConsole does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct View {
+    against: (i16, i16),
+    window: (i16, i16),
+    size: (i16, i16),
 }
 impl ConsoleState {
     pub fn new(code_page: u32, palette: Palette) -> Self {
@@ -103,7 +112,7 @@ impl ConsoleState {
             titled: false,
             palette,
             popup_attributes: 0xf5,
-            buffer: None,
+            view: None,
         }
     }
 
@@ -174,23 +183,62 @@ impl ConsoleState {
         }
     }
 
-    /// The reported buffer: what an application asked for, while the window
-    /// it asked against is still the window.
-    pub fn buffer_size(&self, window: (i16, i16)) -> (i16, i16) {
-        match self.buffer {
-            Some((against, size)) if against == window => size,
-            _ => window,
+    fn view(&self, terminal: (i16, i16)) -> View {
+        match self.view {
+            Some(view) if view.against == terminal => view,
+            _ => View {
+                against: terminal,
+                window: terminal,
+                size: terminal,
+            },
         }
+    }
+    fn store(&mut self, view: View) {
+        self.view = (view.window != view.against || view.size != view.against).then_some(view);
+    }
+
+    /// The main buffer's reported size on a terminal of `terminal` cells.
+    pub fn buffer_size(&self, terminal: (i16, i16)) -> (i16, i16) {
+        self.view(terminal).size
+    }
+
+    /// The main buffer's reported window on a terminal of `terminal` cells.
+    pub fn window_size(&self, terminal: (i16, i16)) -> (i16, i16) {
+        self.view(terminal).window
+    }
+
+    /// SetConsoleWindowInfoImpl in VtIo mode: the buffer is resized to the
+    /// window, which then shows all of it. The terminal is not resized.
+    pub fn set_window_size(&mut self, terminal: (i16, i16), window: (i16, i16)) {
+        self.store(View {
+            against: terminal,
+            window,
+            size: window,
+        });
     }
 
     /// SetConsoleScreenBufferSizeImpl: never smaller than the window, and
     /// SHORT_MAX is reserved.
-    pub fn set_buffer_size(&mut self, window: (i16, i16), size: (i16, i16)) -> bool {
-        if size.0 < window.0 || size.1 < window.1 || size.0 == i16::MAX || size.1 == i16::MAX {
+    pub fn set_buffer_size(&mut self, terminal: (i16, i16), size: (i16, i16)) -> bool {
+        let view = self.view(terminal);
+        if size.0 < view.window.0
+            || size.1 < view.window.1
+            || size.0 == i16::MAX
+            || size.1 == i16::MAX
+        {
             return false;
         }
-        self.buffer = (size != window).then_some((window, size));
+        self.store(View { size, ..view });
         true
+    }
+
+    /// Puts back what the main buffer had while another one was on screen.
+    pub fn restore_view(&mut self, terminal: (i16, i16), window: (i16, i16), size: (i16, i16)) {
+        self.store(View {
+            against: terminal,
+            window,
+            size,
+        });
     }
 }
 

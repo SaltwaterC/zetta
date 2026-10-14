@@ -51,8 +51,15 @@ impl Server {
             return Ok(self.off_screen_info(buffer));
         }
         let screen = self.screen()?;
-        let window = Self::window(&screen);
-        let buffer = self.state.buffer_size(window);
+        let terminal = Self::window(&screen);
+        let (buffer, window) = if self.active == buffers::MAIN {
+            (
+                self.state.buffer_size(terminal),
+                self.state.window_size(terminal),
+            )
+        } else {
+            (terminal, terminal)
+        };
         let attributes = screen.pen.map_or(self.attributes, |pen| {
             legacy::attributes(&pen, &self.state.palette)
         });
@@ -107,34 +114,65 @@ impl Server {
         }
         Ok((0, 0))
     }
+    /// SetConsoleScreenBufferSizeImpl. The main buffer's size is reported,
+    /// not given to the terminal, as ConPTY's is; a created buffer on screen
+    /// is the terminal's size.
     pub(super) fn set_buffer_size(&mut self, object: usize) -> io::Result<(i32, usize)> {
-        if self.off_screen(object).is_some() {
-            return Ok((0, 0));
-        }
         let size = (i16_at(&self.reply, 0), i16_at(&self.reply, 2));
-        let window = Self::window(&self.screen()?);
-        Ok(if self.state.set_buffer_size(window, size) {
+        if let Some(buffer) = self.off_screen(object) {
+            return Ok((self.set_off_screen_size(buffer, size), 0));
+        }
+        let terminal = Self::window(&self.screen()?);
+        let valid = if self.active == buffers::MAIN {
+            self.state.set_buffer_size(terminal, size)
+        } else {
+            size.0 >= terminal.0 && size.1 >= terminal.1 && size.0 < i16::MAX && size.1 < i16::MAX
+        };
+        Ok(if valid {
             (0, 0)
         } else {
             (INVALID_PARAMETER, 0)
         })
     }
-    /// SetConsoleWindowInfoImpl: only an inverted rectangle is refused. A
-    /// terminal pane cannot be moved or resized by its client, so a valid
-    /// request succeeds without effect, where ConPTY resizes only its own
-    /// internal buffer.
-    pub(super) fn set_window_info(&mut self) -> io::Result<(i32, usize)> {
+    /// SetConsoleWindowInfoImpl as ConPTY runs it: the buffer is resized to
+    /// the window, and only an inverted rectangle is refused. A terminal pane
+    /// cannot be resized by its client, so the main buffer's window and size
+    /// are what is reported, as ConPTY's own buffer is.
+    pub(super) fn set_window_info(&mut self, object: usize) -> io::Result<(i32, usize)> {
         let absolute = self.reply[0] != 0;
-        let [left, top, mut right, mut bottom] =
-            [2, 4, 6, 8].map(|offset| i16_at(&self.reply, offset));
-        if !absolute {
-            // Relative to the current window, whose origin is the buffer's.
-            let screen = self.screen()?;
-            right = right.saturating_add(screen.columns - 1);
-            bottom = bottom.saturating_add(screen.rows - 1);
+        let [left, top, right, bottom] =
+            [2, 4, 6, 8].map(|offset| i32::from(i16_at(&self.reply, offset)));
+        let requested = crate::cells::Rect {
+            left,
+            top,
+            right,
+            bottom,
+        };
+        if let Some(buffer) = self.off_screen(object) {
+            return Ok((self.set_off_screen_window(buffer, requested, absolute), 0));
         }
-        if right < left || bottom < top {
+        let terminal = Self::window(&self.screen()?);
+        let current = if self.active == buffers::MAIN {
+            self.state.window_size(terminal)
+        } else {
+            terminal
+        };
+        let window = if absolute {
+            requested
+        } else {
+            // Relative to the current window, whose origin is the buffer's.
+            crate::cells::Rect {
+                right: right + i32::from(current.0) - 1,
+                bottom: bottom + i32::from(current.1) - 1,
+                ..requested
+            }
+        };
+        if !window.is_valid() {
             return Ok((INVALID_PARAMETER, 0));
+        }
+        if self.active == buffers::MAIN {
+            let size = (window.width() as i16, window.height() as i16);
+            self.state.set_window_size(terminal, size);
         }
         Ok((0, 0))
     }

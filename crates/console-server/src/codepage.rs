@@ -179,12 +179,17 @@ fn utf8_complete(data: &[u8]) -> usize {
     }
 }
 
+/// Whether `byte` starts a two-byte character in `code_page`.
+pub fn is_lead_byte(code_page: u32, byte: u8) -> bool {
+    unsafe { IsDBCSLeadByteEx(code_page, byte) != 0 }
+}
+
 /// Length of `data` without a trailing DBCS lead byte. Lead and trail byte
 /// ranges overlap, so the scan has to start from a character boundary.
 fn dbcs_complete(code_page: u32, data: &[u8]) -> usize {
     let mut index = 0;
     while index < data.len() {
-        if unsafe { IsDBCSLeadByteEx(code_page, data[index]) } != 0 {
+        if is_lead_byte(code_page, data[index]) {
             if index + 1 == data.len() {
                 return index;
             }
