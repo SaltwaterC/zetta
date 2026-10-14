@@ -310,6 +310,7 @@ fn configuration_form_round_trip_serializes_the_resolved_homebrew_profile_name()
     let mut config = Config::defaults(Some(&root), None);
     config.profiles = vec![
         Profile {
+            console_backend: Default::default(),
             name: "System".to_owned(),
             command: Shell::System,
             theme: None,
@@ -317,6 +318,7 @@ fn configuration_form_round_trip_serializes_the_resolved_homebrew_profile_name()
             icon: ProfileIcon::Zetta,
         },
         Profile {
+            console_backend: Default::default(),
             name: "Fish (Homebrew)".to_owned(),
             command: Shell::Program("/opt/homebrew/bin/fish".to_owned()),
             theme: None,

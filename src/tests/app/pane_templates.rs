@@ -4,6 +4,7 @@ use super::*;
 fn cli_replacement_profile_resolution_is_case_insensitive_and_preserves_split_defaults() {
     let profiles = [
         Profile {
+            console_backend: Default::default(),
             name: "System".to_owned(),
             command: Shell::System,
             theme: Some("Configured Theme".to_owned()),
@@ -11,6 +12,7 @@ fn cli_replacement_profile_resolution_is_case_insensitive_and_preserves_split_de
             icon: ProfileIcon::Zetta,
         },
         Profile {
+            console_backend: Default::default(),
             name: "Alternate".to_owned(),
             command: Shell::Program("alternate-shell".to_owned()),
             theme: None,
@@ -40,6 +42,7 @@ fn cli_replacement_profile_resolution_is_case_insensitive_and_preserves_split_de
 #[test]
 fn cli_replacement_profile_resolution_requires_the_exact_homebrew_name() {
     let homebrew_profile = Profile {
+        console_backend: Default::default(),
         name: "Fish (Homebrew)".to_owned(),
         command: Shell::Program("/opt/homebrew/bin/fish".to_owned()),
         theme: Some("Homebrew Theme".to_owned()),
@@ -71,6 +74,7 @@ fn cli_replacement_profile_resolution_requires_the_exact_homebrew_name() {
     assert_eq!(selected.dark_theme.as_deref(), Some("Launch Theme"));
 
     let exact_profile = Profile {
+        console_backend: Default::default(),
         name: "Fish".to_owned(),
         command: Shell::Program("fish".to_owned()),
         theme: None,
@@ -220,6 +224,7 @@ fn pane_template_leaf_resolution_quotes_stacked_commands_for_the_resolved_shell(
 #[test]
 fn pane_template_labels_and_overlays_do_not_require_a_terminal_restart() {
     let profile = Profile {
+        console_backend: Default::default(),
         name: "System".to_owned(),
         command: Shell::System,
         theme: None,

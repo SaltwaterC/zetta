@@ -394,6 +394,7 @@ pub(crate) fn profile_controls(
         SettingsControl::Dropdown(SettingsDropdown::ProfileIcon(index)),
         SettingsControl::Dropdown(SettingsDropdown::ProfileTheme(index)),
         SettingsControl::Dropdown(SettingsDropdown::ProfileDarkTheme(index)),
+        SettingsControl::Dropdown(SettingsDropdown::ProfileConsoleBackend(index)),
     ]);
     controls
 }
@@ -424,6 +425,7 @@ pub(crate) fn project_profile_controls(index: usize, arguments: usize) -> Vec<Se
         SettingsControl::Dropdown(SettingsDropdown::ProjectProfileIcon(index)),
         SettingsControl::Dropdown(SettingsDropdown::ProjectProfileTheme(index)),
         SettingsControl::Dropdown(SettingsDropdown::ProjectProfileDarkTheme(index)),
+        SettingsControl::Dropdown(SettingsDropdown::ProjectProfileConsoleBackend(index)),
     ]);
     controls
 }
@@ -439,6 +441,7 @@ pub(crate) fn profile_draft_controls(arguments: usize) -> Vec<SettingsControl> {
         SettingsControl::Dropdown(SettingsDropdown::ProfileDraftIcon),
         SettingsControl::Dropdown(SettingsDropdown::ProfileDraftTheme),
         SettingsControl::Dropdown(SettingsDropdown::ProfileDraftDarkTheme),
+        SettingsControl::Dropdown(SettingsDropdown::ProfileDraftConsoleBackend),
         SettingsControl::CloseModal,
         SettingsControl::CreateProfile,
     ]);

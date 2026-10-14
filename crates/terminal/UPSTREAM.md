@@ -136,3 +136,8 @@ See `../UPSTREAM_AUDIT.md` for the reviewed upstream commit list.
 ## Zetta patch: physical cell geometry
 
 Terminal geometry replies and local PTY pixel dimensions use the viewing display scale and round to backing pixels. Scale changes update local PTY metadata without grid reflow.
+
+- Typed ConsoleLaunchOptions select native ConPTY or the embedded console-server
+  adapter before launch. Hosted output goes through the existing parser thread;
+  title/query hooks observe the authoritative grid after a completion fence.
+  Hosted byte-only providers are rejected before launch, with no relaunch.

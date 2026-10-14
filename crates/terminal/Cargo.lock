@@ -705,6 +705,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "console-server"
+version = "0.1.0"
+dependencies = [
+ "alacritty_terminal",
+ "unicode-width 0.2.2",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
 name = "const-oid"
 version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4286,6 +4295,7 @@ dependencies = [
  "anyhow",
  "async-channel",
  "collections",
+ "console-server",
  "futures",
  "futures-lite 1.13.0",
  "getrandom 0.3.4",
@@ -5498,8 +5508,3 @@ checksum = "27bc9d5b815bc103f142aa054f561d9187d191692ec7c2d1e2b4737f8dbd7296"
 dependencies = [
  "zune-core",
 ]
-
-[[patch.unused]]
-name = "tree-sitter-language"
-version = "0.1.8"
-source = "git+https://github.com/tree-sitter/tree-sitter?rev=43623ec9bf0eaaf7113285c46e8a09018f181b18#43623ec9bf0eaaf7113285c46e8a09018f181b18"

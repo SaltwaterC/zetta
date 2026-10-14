@@ -18,8 +18,10 @@ pub(super) fn discovered_profiles() -> Vec<Profile> {
     zetta_profiles::discovered_profiles()
         .into_iter()
         .map(|profile| {
+            let console_backend = profile.command.console_backend;
             let command = profile_shell(&profile.name, profile.command);
             Profile {
+                console_backend,
                 icon: ProfileIcon::automatic_for_profile(&profile.name, &command),
                 name: profile.name,
                 command,
@@ -35,7 +37,7 @@ pub(super) fn discovered_profiles() -> Vec<Profile> {
 /// The title override is the profile's name, which is what the detection used
 /// to set for every command that carried arguments.
 pub(crate) fn profile_shell(name: &str, command: zetta_profiles::ProfileCommand) -> Shell {
-    let zetta_profiles::ProfileCommand { program, args } = command;
+    let zetta_profiles::ProfileCommand { program, args, .. } = command;
     match program {
         None => Shell::System,
         Some(program) if args.is_empty() => Shell::Program(program),

@@ -43,12 +43,17 @@ use crate::{
 
 /// The host protocol. Additive only: a daemon that was just replaced still has
 /// to be able to speak to the host that was already running.
-pub const HOST_PROTOCOL_VERSION: u32 = 1;
+/// Version 2 adds console-server consoles to `Open`.
+pub const HOST_PROTOCOL_VERSION: u32 = 2;
+/// The first host that can hold console-server consoles. An older one would
+/// ignore the request's backend and start ConPTY instead.
+pub const CONSOLE_SERVER_HOST_PROTOCOL_VERSION: u32 = 2;
 
 /// Installer revision, independent of the additive wire protocol. Bump when
 /// existing installations need new host behavior. Revision 3 clears an inherited
-/// flag that disables Ctrl+C; revision 4 initializes colors without debugging the shell.
-pub const HOST_INSTALL_REVISION: u32 = 4;
+/// flag that disables Ctrl+C; revision 4 initializes colors without debugging the shell;
+/// revision 5 holds console-server consoles.
+pub const HOST_INSTALL_REVISION: u32 = 5;
 
 /// The oldest host this daemon can drive. An upgrade is refused rather than
 /// attempted when the running host is older than this, because the alternative
@@ -373,6 +378,12 @@ pub enum HostRequest {
         working_directory: Option<PathBuf>,
         size: TerminalSize,
         palette: ConsolePalette,
+        /// Absent for ConPTY, so an older host is asked nothing new.
+        #[serde(
+            default,
+            skip_serializing_if = "zetta_profiles::ConsoleBackend::is_default"
+        )]
+        console_backend: zetta_profiles::ConsoleBackend,
     },
     /// Duplicates an existing console's pipes into `target_process_id`, which
     /// is how a session is handed to a client after a daemon restart.
@@ -408,6 +419,7 @@ pub(crate) struct OpenConsoleRequest {
     pub(crate) working_directory: Option<PathBuf>,
     pub(crate) size: TerminalSize,
     pub(crate) palette: ConsolePalette,
+    pub(crate) console_backend: zetta_profiles::ConsoleBackend,
     pub(crate) target_process_id: u32,
 }
 
@@ -449,9 +461,61 @@ pub struct ConsoleExit {
     pub exit_code: Option<i32>,
 }
 
+/// What a console runs on: a pseudoconsole, or console-server in this host.
+enum ConsolePty {
+    Conpty(tty::PtyOwner),
+    Hosted(crate::hosted_console::HostedConsole),
+}
+impl ConsolePty {
+    fn child_pid(&self) -> u32 {
+        match self {
+            Self::Conpty(pty) => pty.child_pid(),
+            Self::Hosted(console) => console.child_pid(),
+        }
+    }
+    fn handover_handles(
+        &self,
+    ) -> (
+        &std::os::windows::io::OwnedHandle,
+        &std::os::windows::io::OwnedHandle,
+    ) {
+        match self {
+            Self::Conpty(pty) => pty.handover_handles(),
+            Self::Hosted(console) => console.handover_handles(),
+        }
+    }
+    fn resize(&mut self, columns: u16, lines: u16) {
+        match self {
+            Self::Conpty(pty) => pty.on_resize(WindowSize {
+                num_lines: lines.max(1),
+                num_cols: columns.max(1),
+                cell_width: 0,
+                cell_height: 0,
+            }),
+            Self::Hosted(console) => console.resize(columns, lines),
+        }
+    }
+    fn set_console_palette(&self, palette: ConsolePalette) {
+        match self {
+            Self::Conpty(pty) => pty.set_console_palette(palette),
+            Self::Hosted(console) => console.set_console_palette(palette),
+        }
+    }
+    /// The child's exit, once: Some(code) when it has exited.
+    fn next_exit(&mut self) -> Option<Option<i32>> {
+        match self {
+            Self::Conpty(pty) => pty.next_child_event().map(|event| match event {
+                alacritty_terminal::tty::ChildEvent::Exited(status) => status.code(),
+                _ => None,
+            }),
+            Self::Hosted(console) => console.exit_code(),
+        }
+    }
+}
+
 struct Console {
     id: u64,
-    pty: tty::PtyOwner,
+    pty: ConsolePty,
     exited: bool,
     /// Set when the exit has been observed but not yet collected by a daemon.
     /// Held until it is reported, so an exit that happens while the daemon is
@@ -569,6 +633,7 @@ fn handle(host: &Arc<Host>, envelope: HostEnvelope) -> HostResponse {
             working_directory,
             size,
             palette,
+            console_backend,
         } => match open_console(
             host,
             OpenConsoleRequest {
@@ -578,6 +643,7 @@ fn handle(host: &Arc<Host>, envelope: HostEnvelope) -> HostResponse {
                 working_directory,
                 size,
                 palette,
+                console_backend,
                 target_process_id: envelope.target_process_id,
             },
         ) {
@@ -601,12 +667,7 @@ fn handle(host: &Arc<Host>, envelope: HostEnvelope) -> HostResponse {
         } => {
             let mut consoles = host.consoles.lock().unwrap();
             if let Some(console) = consoles.iter_mut().find(|console| console.id == console_id) {
-                console.pty.on_resize(WindowSize {
-                    num_lines: lines.max(1),
-                    num_cols: columns.max(1),
-                    cell_width: 0,
-                    cell_height: 0,
-                });
+                console.pty.resize(columns, lines);
             }
             HostResponse::Ok
         }
@@ -678,13 +739,16 @@ fn open_console(host: &Arc<Host>, request: OpenConsoleRequest) -> Result<HostRes
         working_directory,
         size,
         palette,
+        console_backend,
         target_process_id,
     } = request;
     let escape_args = escape_windows_shell_args(program.as_deref());
+    let hosted = console_backend == zetta_profiles::ConsoleBackend::ConsoleServer;
     // The installer can archive this running image while keeping its consoles
     // alive. New bootstraps must use the active helper beside it, not an
     // archived image's filename.
-    let console_palette_helper = (!is_wsl_program(program.as_deref())).then(|| {
+    // console-server takes the palette directly; only ConPTY needs the helper.
+    let console_palette_helper = (!hosted && !is_wsl_program(program.as_deref())).then(|| {
         std::env::current_exe()
             .ok()
             .and_then(|image| {
@@ -695,6 +759,7 @@ fn open_console(host: &Arc<Host>, request: OpenConsoleRequest) -> Result<HostRes
             .unwrap_or_else(|| PathBuf::from("zmux-pty.exe"))
     });
     let options = tty::Options {
+        console_backend: Default::default(),
         shell: program.map(|program| tty::Shell::new(program, args)),
         working_directory,
         drain_on_exit: true,
@@ -707,16 +772,28 @@ fn open_console(host: &Arc<Host>, request: OpenConsoleRequest) -> Result<HostRes
         console_palette: palette,
         console_palette_helper,
     };
-    let pty = tty::new_host(
-        &options,
-        WindowSize {
-            num_lines: size.lines.max(1),
-            num_cols: size.columns.max(1),
-            cell_width: size.cell_width,
-            cell_height: size.cell_height,
-        },
-    )
-    .context("creating a pseudoconsole")?;
+    let pty = if hosted {
+        ConsolePty::Hosted(crate::hosted_console::HostedConsole::open(
+            crate::hosted_console::OpenHosted {
+                options,
+                columns: size.columns,
+                lines: size.lines,
+            },
+        )?)
+    } else {
+        ConsolePty::Conpty(
+            tty::new_host(
+                &options,
+                WindowSize {
+                    num_lines: size.lines.max(1),
+                    num_cols: size.columns.max(1),
+                    cell_width: size.cell_width,
+                    cell_height: size.cell_height,
+                },
+            )
+            .context("creating a pseudoconsole")?,
+        )
+    };
 
     let console_id = host
         .next_console_id
@@ -770,7 +847,7 @@ fn console_handles(
     })
 }
 
-fn duplicate_console(pty: &tty::PtyOwner, target_process_id: u32) -> Result<Vec<i64>> {
+fn duplicate_console(pty: &ConsolePty, target_process_id: u32) -> Result<Vec<i64>> {
     use std::os::windows::io::AsHandle as _;
     anyhow::ensure!(
         target_process_id != 0,
@@ -794,17 +871,12 @@ fn start_watcher(host: Arc<Host>) {
                     if console.exited {
                         continue;
                     }
-                    if let Some(event) = console.pty.next_child_event() {
+                    if let Some(exit_code) = console.pty.next_exit() {
                         console.exited = true;
                         console.pending_exit = Some(ConsoleExit {
                             console_id: console.id,
                             child_pid: console.pty.child_pid(),
-                            exit_code: match event {
-                                alacritty_terminal::tty::ChildEvent::Exited(status) => {
-                                    status.code()
-                                }
-                                _ => None,
-                            },
+                            exit_code,
                         });
                     }
                 }
@@ -1020,8 +1092,15 @@ impl HostClient {
             working_directory,
             size,
             palette,
+            console_backend,
             target_process_id,
         } = request;
+        anyhow::ensure!(
+            console_backend == zetta_profiles::ConsoleBackend::Conpty
+                || self.endpoint.protocol_version >= CONSOLE_SERVER_HOST_PROTOCOL_VERSION,
+            "the running pseudoconsole host predates console-server; it is replaced once it \
+             holds no sessions"
+        );
         match self.request(
             HostRequest::Open {
                 program,
@@ -1030,6 +1109,7 @@ impl HostClient {
                 working_directory,
                 size,
                 palette,
+                console_backend,
             },
             target_process_id,
         )? {

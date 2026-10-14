@@ -517,6 +517,8 @@ fn push_project_profile_rows(
                     icon: SettingsDropdown::ProjectProfileIcon(index),
                     theme: SettingsDropdown::ProjectProfileTheme(index),
                     dark_theme: SettingsDropdown::ProjectProfileDarkTheme(index),
+                    console_backend: SettingsDropdown::ProjectProfileConsoleBackend(index),
+                    unset_console_backend: crate::settings_ui::INHERIT_LABEL,
                     profile,
                     automatic_icon: &profile.automatic_icon,
                 },

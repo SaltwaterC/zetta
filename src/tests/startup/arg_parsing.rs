@@ -439,6 +439,7 @@ fn launch_profile_selects_an_available_profile_without_changing_the_configured_d
     let mut config = Config::defaults(None, None);
     config.profiles = vec![
         Profile {
+            console_backend: Default::default(),
             name: "System".to_owned(),
             command: Shell::System,
             theme: None,
@@ -446,6 +447,7 @@ fn launch_profile_selects_an_available_profile_without_changing_the_configured_d
             icon: ProfileIcon::Zetta,
         },
         Profile {
+            console_backend: Default::default(),
             name: "WSL: Ubuntu".to_owned(),
             command: Shell::Program("wsl.exe".to_owned()),
             theme: None,

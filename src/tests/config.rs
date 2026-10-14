@@ -1021,6 +1021,7 @@ fn pane_split_templates_reject_invalid_labels_and_label_types() {
 fn configured_profiles_extend_detected_profiles() {
     let mut profiles = vec![
         Profile {
+            console_backend: Default::default(),
             name: "System".to_owned(),
             command: Shell::System,
             theme: None,
@@ -1028,6 +1029,7 @@ fn configured_profiles_extend_detected_profiles() {
             icon: ProfileIcon::Zetta,
         },
         Profile {
+            console_backend: Default::default(),
             name: "Zsh".to_owned(),
             command: Shell::Program("zsh".to_owned()),
             theme: None,
@@ -1039,6 +1041,7 @@ fn configured_profiles_extend_detected_profiles() {
     merge_profiles(
         &mut profiles,
         vec![ProfileConfig {
+            console_backend: None,
             name: "Login Zsh".to_owned(),
             command: Some(Shell::Program("/bin/zsh".to_owned())),
             theme: None,
@@ -1046,6 +1049,7 @@ fn configured_profiles_extend_detected_profiles() {
             icon: None,
             hidden: None,
         }],
+        ConsoleBackend::Conpty,
     )
     .unwrap();
 
@@ -1063,6 +1067,7 @@ fn configured_profiles_extend_detected_profiles() {
 #[test]
 fn configured_profiles_override_detected_profiles_by_name() {
     let mut profiles = vec![Profile {
+        console_backend: Default::default(),
         name: "Zsh".to_owned(),
         command: Shell::Program("zsh".to_owned()),
         theme: None,
@@ -1073,6 +1078,7 @@ fn configured_profiles_override_detected_profiles_by_name() {
     merge_profiles(
         &mut profiles,
         vec![ProfileConfig {
+            console_backend: None,
             name: "zsh".to_owned(),
             command: Some(Shell::WithArguments {
                 program: "/bin/zsh".to_owned(),
@@ -1084,6 +1090,7 @@ fn configured_profiles_override_detected_profiles_by_name() {
             icon: None,
             hidden: None,
         }],
+        ConsoleBackend::Conpty,
     )
     .unwrap();
 
@@ -1099,6 +1106,7 @@ fn configured_profiles_override_detected_profiles_by_name() {
 #[test]
 fn profile_theme_override_does_not_require_a_program() {
     let mut profiles = vec![Profile {
+        console_backend: Default::default(),
         name: "Zsh".to_owned(),
         command: Shell::Program("zsh".to_owned()),
         theme: None,
@@ -1111,7 +1119,7 @@ fn profile_theme_override_does_not_require_a_program() {
     }))
     .unwrap();
 
-    merge_profiles(&mut profiles, vec![profile]).unwrap();
+    merge_profiles(&mut profiles, vec![profile], ConsoleBackend::Conpty).unwrap();
 
     assert!(matches!(profiles[0].command, Shell::Program(ref program) if program == "zsh"));
     assert_eq!(profiles[0].theme.as_deref(), Some("Solarized Dark"));
@@ -1140,6 +1148,7 @@ fn configured_profiles_can_hide_detected_profiles_by_name() {
 fn hidden_profiles_do_not_consume_visible_profile_slots() {
     let profiles = vec![
         Profile {
+            console_backend: Default::default(),
             name: "System".to_owned(),
             command: Shell::System,
             theme: None,
@@ -1147,6 +1156,7 @@ fn hidden_profiles_do_not_consume_visible_profile_slots() {
             icon: ProfileIcon::Zetta,
         },
         Profile {
+            console_backend: Default::default(),
             name: "Hidden".to_owned(),
             command: Shell::Program("hidden-shell".to_owned()),
             theme: None,
@@ -1154,6 +1164,7 @@ fn hidden_profiles_do_not_consume_visible_profile_slots() {
             icon: ProfileIcon::Zetta,
         },
         Profile {
+            console_backend: Default::default(),
             name: "Visible".to_owned(),
             command: Shell::Program("visible-shell".to_owned()),
             theme: None,
@@ -1306,4 +1317,99 @@ fn the_example_configuration_parses_and_names_every_remote_setting() {
             "config.example.json should show sessions.remote.{key}"
         );
     }
+}
+
+#[test]
+fn windows_console_backend_is_typed_and_defaults_to_conpty() {
+    assert_eq!(
+        parse_profile(serde_json::json!({"name": "System"}))
+            .unwrap()
+            .console_backend,
+        None
+    );
+    for (value, expected) in [
+        ("conpty", ConsoleBackend::Conpty),
+        ("console-server", ConsoleBackend::ConsoleServer),
+    ] {
+        let profile =
+            parse_profile(serde_json::json!({"name": "System", "windows_console_backend": value}))
+                .unwrap();
+        assert_eq!(profile.console_backend, Some(expected));
+    }
+    for value in [
+        serde_json::Value::Null,
+        serde_json::json!("auto"),
+        serde_json::json!(1),
+    ] {
+        assert!(
+            parse_profile(serde_json::json!({"name": "System", "windows_console_backend": value}))
+                .is_err()
+        );
+    }
+}
+
+#[test]
+fn backend_only_override_preserves_a_detected_shell() {
+    let mut profiles = vec![Profile {
+        console_backend: ConsoleBackend::Conpty,
+        name: "CMD".into(),
+        command: Shell::Program("cmd.exe".into()),
+        theme: None,
+        dark_theme: None,
+        icon: ProfileIcon::Zetta,
+    }];
+    let override_profile =
+        parse_profile(serde_json::json!({"name":"cmd","windows_console_backend":"console-server"}))
+            .unwrap();
+    merge_profiles(
+        &mut profiles,
+        vec![override_profile],
+        ConsoleBackend::Conpty,
+    )
+    .unwrap();
+    assert_eq!(profiles[0].console_backend, ConsoleBackend::ConsoleServer);
+    assert!(matches!(&profiles[0].command, Shell::Program(program) if program == "cmd.exe"));
+}
+
+#[test]
+fn top_level_console_backend_is_every_unspecified_profiles_default() {
+    let config = Config::parse(
+        r#"{
+            "windows_console_backend": "console-server",
+            "profiles": [
+                {"name": "Inherits", "program": "inherits.exe"},
+                {"name": "Pinned", "program": "pinned.exe", "windows_console_backend": "conpty"}
+            ]
+        }"#,
+        None,
+        None,
+    )
+    .unwrap();
+    assert_eq!(config.console_backend, ConsoleBackend::ConsoleServer);
+    for profile in &config.profiles {
+        let expected = if profile.name == "Pinned" {
+            ConsoleBackend::Conpty
+        } else {
+            ConsoleBackend::ConsoleServer
+        };
+        assert_eq!(profile.console_backend, expected, "{}", profile.name);
+    }
+    assert!(
+        config.profiles.len() > 2,
+        "the detected profiles are covered too"
+    );
+
+    let unset = Config::parse("{}", None, None).unwrap();
+    assert_eq!(unset.console_backend, ConsoleBackend::Conpty);
+    assert!(
+        unset
+            .profiles
+            .iter()
+            .all(|profile| profile.console_backend == ConsoleBackend::Conpty)
+    );
+    assert!(Config::parse(r#"{"windows_console_backend": null}"#, None, None).is_err());
+    // A project cannot change it: the field set would let a checked-in file
+    // move every profile of whoever opens the project onto another console.
+    let project = serde_json::json!({"windows_console_backend": "console-server"});
+    assert!(crate::project::validate_project_fields(project.as_object().unwrap()).is_err());
 }

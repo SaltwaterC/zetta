@@ -3,6 +3,7 @@ use super::*;
 #[test]
 fn launch_theme_override_applies_case_insensitively_by_name_only() {
     let mut profile = Profile {
+        console_backend: Default::default(),
         name: "System".to_owned(),
         command: Shell::System,
         theme: Some("Configured Theme".to_owned()),
@@ -17,6 +18,7 @@ fn launch_theme_override_applies_case_insensitively_by_name_only() {
     assert_eq!(profile.dark_theme, Some("Override Theme".to_owned()));
 
     let mut other_profile = Profile {
+        console_backend: Default::default(),
         name: "Other".to_owned(),
         command: Shell::System,
         theme: Some("Configured Theme".to_owned()),
@@ -31,6 +33,7 @@ fn launch_theme_override_applies_case_insensitively_by_name_only() {
     assert_eq!(other_profile.dark_theme, None);
 
     let mut unaffected_profile = Profile {
+        console_backend: Default::default(),
         name: "System".to_owned(),
         command: Shell::System,
         theme: Some("Configured Theme".to_owned()),
@@ -90,6 +93,7 @@ fn a_shared_tab_is_backgrounded_when_it_closes() {
 #[test]
 fn new_tab_inherits_the_active_profile_after_an_explicit_profile_tab_closes() {
     let system = Profile {
+        console_backend: Default::default(),
         name: "System".to_owned(),
         command: Shell::System,
         theme: None,
@@ -97,6 +101,7 @@ fn new_tab_inherits_the_active_profile_after_an_explicit_profile_tab_closes() {
         icon: ProfileIcon::Zetta,
     };
     let alternate = Profile {
+        console_backend: Default::default(),
         name: "Alternate".to_owned(),
         command: Shell::Program("alternate-shell".to_owned()),
         theme: None,
@@ -118,6 +123,7 @@ fn new_tab_inherits_the_active_profile_after_an_explicit_profile_tab_closes() {
 #[test]
 fn first_tab_uses_the_configured_default_profile() {
     let system = Profile {
+        console_backend: Default::default(),
         name: "System".to_owned(),
         command: Shell::System,
         theme: None,
@@ -125,6 +131,7 @@ fn first_tab_uses_the_configured_default_profile() {
         icon: ProfileIcon::Zetta,
     };
     let alternate = Profile {
+        console_backend: Default::default(),
         name: "Alternate".to_owned(),
         command: Shell::Program("alternate-shell".to_owned()),
         theme: None,
@@ -140,6 +147,7 @@ fn first_tab_uses_the_configured_default_profile() {
 #[test]
 fn default_new_tabs_ignore_the_active_profile() {
     let system = Profile {
+        console_backend: Default::default(),
         name: "System".to_owned(),
         command: Shell::System,
         theme: None,
@@ -147,6 +155,7 @@ fn default_new_tabs_ignore_the_active_profile() {
         icon: ProfileIcon::Zetta,
     };
     let alternate = Profile {
+        console_backend: Default::default(),
         name: "Alternate".to_owned(),
         command: Shell::Program("alternate-shell".to_owned()),
         theme: None,

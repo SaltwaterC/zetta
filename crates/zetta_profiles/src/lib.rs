@@ -17,6 +17,8 @@
 use std::path::Path;
 
 mod config_file;
+mod console_backend;
+pub use console_backend::ConsoleBackend;
 mod discovery;
 mod environment;
 mod shell_integration;
@@ -38,6 +40,12 @@ pub use shell_integration::{
 /// depending on it.
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ProfileCommand {
+    #[serde(
+        default,
+        rename = "windows_console_backend",
+        skip_serializing_if = "ConsoleBackend::is_default"
+    )]
+    pub console_backend: ConsoleBackend,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub program: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -51,6 +59,7 @@ impl ProfileCommand {
 
     pub fn program(program: impl Into<String>) -> Self {
         Self {
+            console_backend: ConsoleBackend::default(),
             program: Some(program.into()),
             args: Vec::new(),
         }
@@ -58,6 +67,7 @@ impl ProfileCommand {
 
     pub fn with_args(program: impl Into<String>, args: Vec<String>) -> Self {
         Self {
+            console_backend: ConsoleBackend::default(),
             program: Some(program.into()),
             args,
         }

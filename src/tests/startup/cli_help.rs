@@ -64,6 +64,7 @@ fn format_help_table_aligns_multiline_rows_without_trailing_whitespace() {
 fn help_text_uses_title_case_and_lists_built_in_features() {
     let profiles = [
         Profile {
+            console_backend: Default::default(),
             name: "System".to_owned(),
             command: Shell::System,
             theme: None,
@@ -71,6 +72,7 @@ fn help_text_uses_title_case_and_lists_built_in_features() {
             icon: ProfileIcon::Zetta,
         },
         Profile {
+            console_backend: Default::default(),
             name: "Operations".to_owned(),
             command: Shell::Program("zsh".to_owned()),
             theme: None,

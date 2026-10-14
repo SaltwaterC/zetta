@@ -29,6 +29,8 @@ pub mod retention;
 
 pub mod client;
 mod daemon_spawn;
+#[cfg(windows)]
+mod hosted_console;
 pub mod messages;
 mod mux_bridge;
 #[cfg(windows)]

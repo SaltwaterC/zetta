@@ -718,6 +718,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "console-server"
+version = "0.1.0"
+dependencies = [
+ "alacritty_terminal",
+ "unicode-width 0.2.2",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
 name = "const-oid"
 version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4423,6 +4432,7 @@ dependencies = [
  "anyhow",
  "async-channel",
  "collections",
+ "console-server",
  "futures",
  "futures-lite 1.13.0",
  "getrandom 0.3.4",

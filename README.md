@@ -472,6 +472,8 @@ pressed; `Escape` cancels. The shortcut can be changed in the keymap.
   servers, the TFTP client, and desktop notifications
 - [Performance profiling](docs/performance.md): overlays, automated reports,
   stress workloads, and diagnostics
+- [Experimental Windows console server](docs/windows-console-server-plan.md):
+  the opt-in OpenConsole replacement, its measurements and compatibility
 
 Use [`config.example.json`](config.example.json) and
 [`keymap.example.json`](keymap.example.json) as starting points for local

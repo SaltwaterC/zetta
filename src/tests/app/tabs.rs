@@ -2,6 +2,7 @@ use super::*;
 
 fn pin_test_tab(id: u64, pinned: bool) -> Tab {
     let profile = Profile {
+        console_backend: Default::default(),
         name: "System".to_owned(),
         command: Shell::System,
         theme: None,

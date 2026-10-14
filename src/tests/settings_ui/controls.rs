@@ -107,6 +107,7 @@ fn detected_profile_controls_follow_the_visible_selection_order() {
             SettingsControl::Dropdown(SettingsDropdown::ProfileIcon(3)),
             SettingsControl::Dropdown(SettingsDropdown::ProfileTheme(3)),
             SettingsControl::Dropdown(SettingsDropdown::ProfileDarkTheme(3)),
+            SettingsControl::Dropdown(SettingsDropdown::ProfileConsoleBackend(3)),
         ]
     );
 }
@@ -132,6 +133,7 @@ fn custom_profile_controls_follow_the_visible_selection_order() {
             SettingsControl::Dropdown(SettingsDropdown::ProfileIcon(3)),
             SettingsControl::Dropdown(SettingsDropdown::ProfileTheme(3)),
             SettingsControl::Dropdown(SettingsDropdown::ProfileDarkTheme(3)),
+            SettingsControl::Dropdown(SettingsDropdown::ProfileConsoleBackend(3)),
         ]
     );
 }
@@ -148,6 +150,7 @@ fn profile_draft_controls_include_visibility_and_modal_actions_in_order() {
             SettingsControl::Dropdown(SettingsDropdown::ProfileDraftIcon),
             SettingsControl::Dropdown(SettingsDropdown::ProfileDraftTheme),
             SettingsControl::Dropdown(SettingsDropdown::ProfileDraftDarkTheme),
+            SettingsControl::Dropdown(SettingsDropdown::ProfileDraftConsoleBackend),
             SettingsControl::CloseModal,
             SettingsControl::CreateProfile,
         ]
@@ -168,8 +171,10 @@ fn dismissing_the_profile_modal_clears_each_draft_dropdown() {
         SettingsDropdown::ProfileDraftTheme,
         SettingsDropdown::ProfileDraftDarkTheme,
         SettingsDropdown::ProfileDraftIcon,
+        SettingsDropdown::ProfileDraftConsoleBackend,
     ] {
         editor.profile_draft = Some(crate::settings_editor::ProfileForm {
+            console_backend: None,
             name: TextField::default(),
             program: TextField::default(),
             arguments: Vec::new(),

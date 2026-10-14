@@ -263,6 +263,7 @@ fn tab(tab_id: u64) -> Tab {
         theme_override: None,
     }
     .into_tab(tab_id, |_| Profile {
+        console_backend: Default::default(),
         name: "System".into(),
         command: task::Shell::System,
         theme: None,

@@ -201,6 +201,7 @@ fn spawn_requests_round_trip_shell_arguments_environment_and_working_directory()
             cell_height: 16,
         },
         console_palette: ConsolePalette::default(),
+        console_backend: Default::default(),
     };
 
     let wire = serde_json::to_string(&request).unwrap();

@@ -65,6 +65,8 @@ zetta_profiles = { path = "../zetta_profiles" }
 zclip = { path = "../zclip", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
+# The console host can run console-server consoles as well as ConPTY's.
+console-server = { path = "../console-server", default-features = false, features = ["grid"] }
 polling = "3"
 uds_windows = "1.2"
 windows = { version = "0.61", features = [
@@ -74,6 +76,7 @@ windows = { version = "0.61", features = [
     "Win32_Storage_FileSystem",
     "Win32_System_Console",
     "Win32_System_Diagnostics_Debug",
+    "Win32_System_IO",
     "Win32_System_Pipes",
     "Win32_System_Threading",
 ] }

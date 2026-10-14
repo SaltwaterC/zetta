@@ -3,6 +3,7 @@
   "new_tab_profile": "default",
   "working_directory": "~",
   "working_directory_scope": "tab",
+  "windows_console_backend": "conpty",
   "theme": "One Light",
   "dark_theme": "One Dark",
   "default_tab_icon": "terminal",
@@ -54,7 +55,8 @@
     }
   },
   "profiles": [
-    { "name": "System", "theme": "One Light", "dark_theme": "One Dark" },
-    { "name": "Login Zsh", "program": "/bin/zsh", "args": ["-l"], "icon": "zsh" }
+    { "name": "System", "theme": "One Light", "dark_theme": "One Dark", "windows_console_backend": "conpty" },
+    { "name": "Login Zsh", "program": "/bin/zsh", "args": ["-l"], "icon": "zsh" },
+    { "name": "CMD (experimental)", "program": "cmd.exe", "args": ["/d"], "windows_console_backend": "console-server" }
   ]
 }

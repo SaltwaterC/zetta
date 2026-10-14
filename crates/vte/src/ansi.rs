@@ -566,6 +566,11 @@ pub trait Handler {
     /// Linefeed.
     fn linefeed(&mut self) {}
 
+    /// A C0 line feed, which a host can give different semantics than IND.
+    fn linefeed_with_mode(&mut self) {
+        self.linefeed();
+    }
+
     /// Ring the bell.
     ///
     /// Hopefully this is never implemented.
@@ -1335,7 +1340,7 @@ where
             C0::HT => self.handler.put_tab(1),
             C0::BS => self.handler.backspace(),
             C0::CR => self.handler.carriage_return(),
-            C0::LF | C0::VT | C0::FF => self.handler.linefeed(),
+            C0::LF | C0::VT | C0::FF => self.handler.linefeed_with_mode(),
             C0::BEL => self.handler.bell(),
             C0::SUB => self.handler.substitute(),
             C0::SI => self.handler.set_active_charset(CharsetIndex::G0),

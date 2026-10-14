@@ -41,11 +41,19 @@ pub(crate) struct Chunk {
     bytes: Box<[u8]>,
     len: usize,
     parsed: usize,
+    pub(crate) mode: Option<crate::hosted_console::OutputMode>,
+    pub(crate) acknowledgement: Option<Arc<dyn crate::hosted_console::OutputAcknowledgement>>,
 }
 
 impl Chunk {
     fn new() -> Self {
-        Self { bytes: vec![0; READ_CHUNK_SIZE].into_boxed_slice(), len: 0, parsed: 0 }
+        Self {
+            bytes: vec![0; READ_CHUNK_SIZE].into_boxed_slice(),
+            len: 0,
+            parsed: 0,
+            mode: None,
+            acknowledgement: None,
+        }
     }
 
     /// The bytes still waiting to be parsed (all read bytes while the reader owns it).
@@ -224,7 +232,13 @@ impl<U: EventListener> Worker<U> {
             let count = current.filled().len().min(MAX_LOCKED_READ - processed);
             #[cfg(windows)]
             let parse_started = Instant::now();
+            if let Some(mode) = current.mode {
+                terminal.set_output_mode(mode);
+            }
             self.outcome.parser.advance(&mut *terminal, &current.filled()[..count]);
+            if let Some(acknowledgement) = &current.acknowledgement {
+                acknowledgement.parsed(count);
+            }
             #[cfg(windows)]
             {
                 self.outcome.parse_time += parse_started.elapsed();
@@ -257,6 +271,8 @@ impl<U: EventListener> Worker<U> {
     fn recycle(&self, mut chunk: Chunk) {
         chunk.len = 0;
         chunk.parsed = 0;
+        chunk.mode = None;
+        chunk.acknowledgement = None;
         // The pool holds every chunk there is, so this never blocks. It fails only once the event
         // loop has stopped taking chunks, and then nobody needs this one.
         let _ = self.free.try_send(chunk);

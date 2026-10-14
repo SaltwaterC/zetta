@@ -119,7 +119,7 @@ struct LocalTerminalLaunch {
     path_hyperlink_regexes: Vec<String>,
     restore_options: Option<RestoredTerminalOptions>,
     mux_provider: Option<Arc<crate::mux::MuxPtyProvider>>,
-    initial_console_palette: Option<terminal::ConsolePalette>,
+    initial_console_palette: Option<terminal::ConsoleLaunchOptions>,
     shell_integration_startup_command: Option<Vec<u8>>,
     tracked_multi_command_launch: bool,
 }
@@ -1287,7 +1287,9 @@ impl Zetta {
         let restore_replay = restore_options
             .as_ref()
             .and_then(|options| options.replay.clone());
-        let mux_provider =
+        let mux_provider = if self.uses_local_embedded_console(&profile, tab_id) {
+            None
+        } else {
             match self.mux_provider_for_tab_with_restore_replay(tab_id, restore_replay, cx) {
                 Ok(provider) => provider,
                 Err(error) => {
@@ -1301,9 +1303,22 @@ impl Zetta {
                 );
                     return;
                 }
-            };
-        let initial_console_palette =
-            (!is_wsl).then(|| terminal::console_palette_for_theme(effective_theme.as_ref()));
+            }
+        };
+        let mux_provider = match select_console_provider(&profile, is_wsl, mux_provider) {
+            Ok(provider) => provider,
+            Err(error) => {
+                self.report_pane_spawn_error(tab_id, pane_id, error.to_string(), cx);
+                return;
+            }
+        };
+        // WSL skips the palette helper, but still names its console backend.
+        let initial_console_palette = (!is_wsl
+            || profile.console_backend == crate::config::ConsoleBackend::ConsoleServer)
+            .then(|| terminal::ConsoleLaunchOptions {
+                palette: terminal::console_palette_for_theme(effective_theme.as_ref()),
+                backend: profile.console_backend,
+            });
         #[cfg(feature = "zmux")]
         if let Some(provider) = mux_provider.as_ref().filter(|provider| {
             provider
@@ -1356,7 +1371,9 @@ impl Zetta {
                         .filter(|_| !provider.runtime().is_remote()),
                     tracked_multi_command_launch,
                     base_revision,
-                    console_palette: initial_console_palette.unwrap_or_default(),
+                    console_palette: initial_console_palette
+                        .map(|options| options.palette)
+                        .unwrap_or_default(),
                     resynchronized: false,
                 },
                 window,
@@ -2768,10 +2785,13 @@ impl Zetta {
             completion_rx,
             spawned_task: task,
         };
-        let mux_provider = match self.mux_provider_for_tab(tab_id, cx) {
-            Ok(provider) => provider,
-            Err(error) => {
-                self.report_pane_spawn_error(
+        let mux_provider = if self.uses_local_embedded_console(&profile, tab_id) {
+            None
+        } else {
+            match self.mux_provider_for_tab(tab_id, cx) {
+                Ok(provider) => provider,
+                Err(error) => {
+                    self.report_pane_spawn_error(
                     tab_id,
                     pane_id,
                     format!(
@@ -2779,11 +2799,24 @@ impl Zetta {
                     ),
                     cx,
                 );
+                    return;
+                }
+            }
+        };
+        let mux_provider = match select_console_provider(&profile, is_wsl, mux_provider) {
+            Ok(provider) => provider,
+            Err(error) => {
+                self.stacked_terminal_failed(tab_id, pane_id, entry_id, error.to_string(), cx);
                 return;
             }
         };
-        let initial_console_palette =
-            (!is_wsl).then(|| terminal::console_palette_for_theme(effective_theme.as_ref()));
+        // WSL skips the palette helper, but still names its console backend.
+        let initial_console_palette = (!is_wsl
+            || profile.console_backend == crate::config::ConsoleBackend::ConsoleServer)
+            .then(|| terminal::ConsoleLaunchOptions {
+                palette: terminal::console_palette_for_theme(effective_theme.as_ref()),
+                backend: profile.console_backend,
+            });
         let image_paste_handler = Arc::new(crate::ssh_image_paste::SshImagePasteHandler::new(
             shell.clone(),
             environment.clone(),
@@ -3095,4 +3128,28 @@ where
     }
     environment.insert("ZDOTDIR".to_owned(), directory);
     Ok(())
+}
+
+/// Select exactly once before launching. A local pane hosts console-server
+/// in this process; a session's pane asks its daemon, whose console host
+/// makes the output a self-contained stream, as ConPTY's is.
+fn select_console_provider(
+    profile: &Profile,
+    _is_wsl: bool,
+    provider: Option<Arc<crate::mux::MuxPtyProvider>>,
+) -> Result<Option<Arc<crate::mux::MuxPtyProvider>>> {
+    if !cfg!(windows) || profile.console_backend == crate::config::ConsoleBackend::Conpty {
+        return Ok(provider);
+    }
+    Ok(provider.filter(|provider| !provider.supports_embedded_console()))
+}
+
+impl Zetta {
+    /// Local hosted panes need no daemon connection or process handover.
+    fn uses_local_embedded_console(&self, profile: &Profile, tab_id: u64) -> bool {
+        cfg!(windows)
+            && profile.console_backend == crate::config::ConsoleBackend::ConsoleServer
+            && !self.has_shared_tab_binding(tab_id)
+            && !self.mux_panes.is_remote_tab(tab_id)
+    }
 }

@@ -110,6 +110,7 @@ fn remote_splits_and_legacy_spawns_carry_the_same_provenance() {
             cell_height: 0,
         },
         console_palette: Default::default(),
+        console_backend: Default::default(),
     });
     apply_connection(&mut spawn, CONNECTION);
     let Request::SpawnShared(spawn) = spawn else {

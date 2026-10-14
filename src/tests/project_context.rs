@@ -465,6 +465,7 @@ fn invalidating_detection_never_reuses_an_in_flight_generation() {
 #[test]
 fn wsl_project_directories_are_lexical_but_cannot_escape_the_distribution() {
     let profile = Profile {
+        console_backend: Default::default(),
         name: "WSL: Ubuntu".to_owned(),
         command: Shell::WithArguments {
             program: "wsl.exe".to_owned(),
@@ -767,6 +768,7 @@ fn active_project_theme_overrides_a_profile_theme_it_never_mentioned(
         // opening the project must not let that inherited theme keep
         // outranking the project's own `theme`.
         let profile = Profile {
+            console_backend: Default::default(),
             name: "bash".to_owned(),
             command: Shell::Program("bash".to_owned()),
             theme: Some("Solarized Light".to_owned()),

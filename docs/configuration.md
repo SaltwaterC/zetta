@@ -690,3 +690,46 @@ user theme directory. Their files come from the official Zed Solarized
 extension at the revision recorded in
 [`assets/themes/solarized/UPSTREAM.md`](../assets/themes/solarized/UPSTREAM.md)
 and retain their GPL-3.0 license.
+
+## Experimental Windows console backend
+
+`windows_console_backend` chooses what hosts a Windows profile's console:
+`"conpty"` (the default) or `"console-server"`. At the top level of
+`config.json` it is the default for every profile, detected or configured, that
+does not set one of its own; the Configuration page offers it as **Windows
+console backend** under New tabs. A project file cannot set the top-level
+default.
+
+Each profile can also set `windows_console_backend` itself. The **Windows
+console backend** dropdown is available for user profiles, detected-profile
+overrides, and project profile overrides. On a user profile, **Default (…)**
+omits the key and names the backend that the top-level setting currently
+gives it. On a project's override, **Inherit** omits the key and keeps the
+user profile's choice. Selecting ConPTY explicitly keeps that profile on
+ConPTY whatever the default is. Unknown values and null are rejected.
+
+```json
+{
+  "windows_console_backend": "console-server",
+  "profiles": [
+    {
+      "name": "Windows PowerShell",
+      "windows_console_backend": "conpty"
+    }
+  ]
+}
+```
+
+Console-server replaces ConPTY's OpenConsole with a console host built into
+Zetta, so output reaches the terminal without being parsed and re-encoded
+first: about three times ConPTY's throughput for plain text and five times for
+random bytes. It implements the console API that cmd, PowerShell, PSReadLine,
+WSL and legacy console programs use, including cooked-line editing, command
+history and doskey aliases, screen-buffer reads and writes, and control
+events. In a local pane it runs inside Zetta; in a session pane, the session's
+console host runs it, and the pane survives a multiplexer upgrade like a
+ConPTY one. Other platforms continue using their native PTY.
+The choice applies to new panes, without restarting existing panes.
+Failures never automatically relaunch a child through another backend. A
+session whose console host is older than this release refuses console-server
+panes until the host is replaced, which happens once it holds no sessions.

@@ -3,6 +3,7 @@ use super::*;
 #[test]
 fn tab_pane_index_resolves_panes_without_scanning() {
     let profile = Profile {
+        console_backend: Default::default(),
         name: "System".to_owned(),
         command: Shell::System,
         theme: None,
@@ -59,6 +60,7 @@ fn tab_pane_index_resolves_panes_without_scanning() {
 #[test]
 fn split_profile_comes_from_the_active_pane() {
     let system = Profile {
+        console_backend: Default::default(),
         name: "System".to_owned(),
         command: task::Shell::System,
         theme: None,
@@ -66,6 +68,7 @@ fn split_profile_comes_from_the_active_pane() {
         icon: ProfileIcon::Zetta,
     };
     let zsh = Profile {
+        console_backend: Default::default(),
         name: "Zsh".to_owned(),
         command: task::Shell::Program("zsh".to_owned()),
         theme: Some("One Light".to_owned()),
@@ -120,6 +123,7 @@ fn split_profile_comes_from_the_active_pane() {
 #[test]
 fn closing_active_pane_restores_previous_focus() {
     let profile = Profile {
+        console_backend: Default::default(),
         name: "System".to_owned(),
         command: task::Shell::System,
         theme: None,
@@ -169,6 +173,7 @@ fn closing_active_pane_restores_previous_focus() {
 #[test]
 fn closing_inactive_pane_preserves_focus() {
     let profile = Profile {
+        console_backend: Default::default(),
         name: "System".to_owned(),
         command: task::Shell::System,
         theme: None,
@@ -217,6 +222,7 @@ fn closing_inactive_pane_preserves_focus() {
 
 fn pane_management_tab() -> Tab {
     let profile = Profile {
+        console_backend: Default::default(),
         name: "System".to_owned(),
         command: task::Shell::System,
         theme: None,

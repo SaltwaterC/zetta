@@ -293,6 +293,7 @@ fn project_profile_controls_follow_the_visible_selection_order() {
             SettingsControl::Dropdown(SettingsDropdown::ProjectProfileIcon(0)),
             SettingsControl::Dropdown(SettingsDropdown::ProjectProfileTheme(0)),
             SettingsControl::Dropdown(SettingsDropdown::ProjectProfileDarkTheme(0)),
+            SettingsControl::Dropdown(SettingsDropdown::ProjectProfileConsoleBackend(0)),
         ]
     );
     let start = controls

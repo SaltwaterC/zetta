@@ -65,6 +65,8 @@ pub struct ConfigurationForm {
     pub hide_title_bar_menus: bool,
     pub pane_controls_position: PaneControlsPosition,
     pub pane_controls_hidden_by_default: bool,
+    /// The backend of every profile that does not name its own.
+    pub console_backend: crate::config::ConsoleBackend,
     pub session_retention: SessionRetention,
     pub session_ring_bytes: TextField,
     /// What carries a remote session's panes. Its control traffic is OpenSSH
@@ -152,6 +154,10 @@ impl ConfigurationForm {
                     .flatten();
                 let detected = configured.is_none_or(|profile| !profile.contains_key("program"));
                 Ok(ProfileForm {
+                    console_backend: configured
+                        .and_then(|profile| profile.get("windows_console_backend"))
+                        .map(|value| serde_json::from_value(value.clone()))
+                        .transpose()?,
                     name: TextField::new(resolved.name.clone()),
                     program: TextField::new(
                         configured
@@ -210,6 +216,7 @@ impl ConfigurationForm {
             hide_title_bar_menus: false,
             pane_controls_position: PaneControlsPosition::default(),
             pane_controls_hidden_by_default: false,
+            console_backend: crate::config::ConsoleBackend::default(),
             session_retention: SessionRetention::default(),
             session_ring_bytes: TextField::default(),
             remote_session_protocol: crate::config::RemoteSessionProtocol::default(),
@@ -285,6 +292,7 @@ impl ConfigurationForm {
                                 || profile.dark_theme.is_some()
                                 || profile.icon.is_some()
                                 || profile.hidden
+                                || profile.console_backend.is_some()
                         })
                         .map(ProfileForm::to_entry)
                         .collect(),

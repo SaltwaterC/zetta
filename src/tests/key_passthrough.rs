@@ -78,6 +78,7 @@ fn shift_f9_arms_the_focused_terminal_and_escape_cancels(cx: &mut TestAppContext
     let received_for_view = received.clone();
     let focused = zetta.update_in(cx, |zetta, window, cx| {
         let profile = Profile {
+            console_backend: Default::default(),
             name: "System".to_owned(),
             command: Shell::System,
             theme: None,

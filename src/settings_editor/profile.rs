@@ -13,6 +13,7 @@ use super::*;
 
 #[derive(Clone, Debug)]
 pub struct ProfileForm {
+    pub console_backend: Option<crate::config::ConsoleBackend>,
     pub name: TextField,
     pub program: TextField,
     /// One field per argument. This used to be one comma-separated field, and
@@ -36,6 +37,7 @@ impl ProfileForm {
     /// new project override start.
     pub(crate) fn blank() -> Self {
         Self {
+            console_backend: None,
             name: TextField::default(),
             program: TextField::default(),
             arguments: Vec::new(),
@@ -59,6 +61,10 @@ impl ProfileForm {
         crate::config::check_profile_fields(value)?;
         let string = |key: &str| object.get(key).and_then(Value::as_str);
         Ok(Self {
+            console_backend: object
+                .get("windows_console_backend")
+                .map(|value| serde_json::from_value(value.clone()))
+                .transpose()?,
             name: TextField::new(string("name").context("profile.name must be a string")?),
             program: TextField::new(string("program").unwrap_or_default()),
             arguments: profile_arguments_from_json(object.get("args")),
@@ -87,6 +93,9 @@ impl ProfileForm {
         if !program.is_empty() {
             value.insert("program".into(), json!(program));
             value.insert("args".into(), profile_arguments_to_json(&self.arguments));
+        }
+        if let Some(backend) = self.console_backend {
+            value.insert("windows_console_backend".into(), json!(backend));
         }
         if let Some(theme) = &self.theme {
             value.insert("theme".into(), json!(theme));

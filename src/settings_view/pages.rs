@@ -646,6 +646,8 @@ fn profile_card(
         icon: SettingsDropdown::ProfileIcon(index),
         theme: SettingsDropdown::ProfileTheme(index),
         dark_theme: SettingsDropdown::ProfileDarkTheme(index),
+        console_backend: SettingsDropdown::ProfileConsoleBackend(index),
+        unset_console_backend: editor.configuration.console_backend.default_label(),
         profile,
         automatic_icon: &profile.automatic_icon,
     };
@@ -742,6 +744,9 @@ pub(super) struct ProfileOverrides<'a> {
     pub(super) icon: SettingsDropdown,
     pub(super) theme: SettingsDropdown,
     pub(super) dark_theme: SettingsDropdown,
+    pub(super) console_backend: SettingsDropdown,
+    /// What the backend dropdown shows while the profile has none of its own.
+    pub(super) unset_console_backend: &'static str,
     pub(super) profile: &'a crate::settings_editor::ProfileForm,
     /// The icon shown while the profile has none of its own. A draft's is
     /// worked out from the program as it is typed.
@@ -756,13 +761,15 @@ pub(super) fn profile_override_fields(
     colors: &ThemeColors,
     handle: &WeakEntity<Zetta>,
     dropdown: &dyn Fn(String, String, SettingsDropdown) -> AnyElement,
-) -> [AnyElement; 4] {
+) -> [AnyElement; 5] {
     let ProfileOverrides {
         id_prefix,
         visibility,
         icon,
         theme,
         dark_theme,
+        console_backend,
+        unset_console_backend,
         profile,
         automatic_icon,
     } = overrides;
@@ -807,6 +814,18 @@ pub(super) fn profile_override_fields(
                 format!("{id_prefix}-dark-theme"),
                 profile_theme_label(profile.dark_theme.as_deref()).to_owned(),
                 dark_theme,
+            ),
+            colors,
+        ),
+        profile_field(
+            "Windows console backend",
+            dropdown(
+                format!("{id_prefix}-console-backend"),
+                profile
+                    .console_backend
+                    .map_or(unset_console_backend, crate::config::ConsoleBackend::label)
+                    .to_owned(),
+                console_backend,
             ),
             colors,
         ),

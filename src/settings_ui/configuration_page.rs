@@ -104,6 +104,7 @@ impl ConfigSetting {
             Self::DefaultTabIcon => "Default tab icon",
             Self::WorkingDirectory => "Working directory",
             Self::WorkingDirectoryScope => "Inherit working directory",
+            Self::ConsoleBackend => "Windows console backend",
             Self::LightTheme => "Light theme",
             Self::DarkTheme => "Dark theme",
             Self::FontSize => "Font size",
@@ -147,6 +148,10 @@ impl ConfigSetting {
             Self::WorkingDirectory => "Where new shells start; ~ is your home directory",
             Self::WorkingDirectoryScope => {
                 "Which new shells start in the active pane's current directory instead"
+            }
+            Self::ConsoleBackend => {
+                "What hosts the console of profiles without a backend of their own; console \
+                 server is faster than ConPTY but experimental"
             }
             Self::LightTheme => "The application theme while the system appearance is light",
             Self::DarkTheme => "The application theme while the system appearance is dark",
@@ -254,6 +259,10 @@ pub(crate) fn configuration_layout(editor: &SettingsEditor) -> Vec<Configuration
         Row(R::DefaultTabIcon),
         Row(R::WorkingDirectory),
         Row(R::WorkingDirectoryScope),
+        // Other platforms have no console to choose. The key still parses and
+        // survives a save there, as the per-profile one does.
+        #[cfg(windows)]
+        Row(R::ConsoleBackend),
         Heading(S::Terminal),
         Row(R::LightTheme),
         Row(R::DarkTheme),

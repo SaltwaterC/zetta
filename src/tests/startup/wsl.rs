@@ -492,6 +492,7 @@ fn explicit_wsl_directory_is_not_overridden() {
 #[test]
 fn wsl_ignores_the_windows_side_inherited_directory() {
     let profile = Profile {
+        console_backend: Default::default(),
         name: "WSL: Ubuntu".to_owned(),
         command: Shell::WithArguments {
             program: "wsl.exe".to_owned(),
@@ -519,6 +520,7 @@ fn wsl_ignores_the_windows_side_inherited_directory() {
 fn explicitly_configured_home_alias_still_uses_the_wsl_home() {
     let config = Config::parse(r#"{"working_directory":"~"}"#, None, None).unwrap();
     let profile = Profile {
+        console_backend: Default::default(),
         name: "WSL: Ubuntu".to_owned(),
         command: Shell::Program("wsl.exe".to_owned()),
         theme: None,
@@ -541,6 +543,7 @@ fn explicitly_configured_home_alias_still_uses_the_wsl_home() {
 #[test]
 fn native_profiles_still_inherit_the_active_directory() {
     let profile = Profile {
+        console_backend: Default::default(),
         name: "PowerShell".to_owned(),
         command: Shell::Program("pwsh.exe".to_owned()),
         theme: None,
@@ -564,6 +567,7 @@ fn native_profiles_still_inherit_the_active_directory() {
 #[test]
 fn configured_directory_overrides_the_windows_side_wsl_directory() {
     let profile = Profile {
+        console_backend: Default::default(),
         name: "WSL: Ubuntu".to_owned(),
         command: Shell::Program("wsl.exe".to_owned()),
         theme: None,
@@ -587,6 +591,7 @@ fn configured_directory_overrides_the_windows_side_wsl_directory() {
 #[test]
 fn tracked_wsl_directory_takes_precedence_over_the_initial_configuration() {
     let profile = Profile {
+        console_backend: Default::default(),
         name: "WSL: Ubuntu".to_owned(),
         command: Shell::Program("wsl.exe".to_owned()),
         theme: None,
@@ -609,6 +614,7 @@ fn tracked_wsl_directory_takes_precedence_over_the_initial_configuration() {
 #[test]
 fn wsl_inherits_the_tracked_linux_directory() {
     let profile = Profile {
+        console_backend: Default::default(),
         name: "WSL: Ubuntu".to_owned(),
         command: Shell::Program("wsl.exe".to_owned()),
         theme: None,

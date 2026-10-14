@@ -319,6 +319,8 @@ pub(super) fn pty_options(
     #[cfg(windows)] console_palette_helper: Option<PathBuf>,
 ) -> tty::Options {
     tty::Options {
+        #[cfg(windows)]
+        console_backend: Default::default(),
         shell: shell.map(|(program, args)| tty::Shell::new(program, args)),
         working_directory,
         drain_on_exit: true,
@@ -1805,4 +1807,21 @@ mod tests {
             }
         );
     }
+}
+
+/// Select an embedded hosted backend before any child is started.
+pub(super) fn open_pty_with_terminal(
+    options: &tty::Options,
+    bounds: TerminalBounds,
+    scale_factor: f32,
+    window_id: u64,
+    term: &Arc<AlacrittyTermLock>,
+) -> io::Result<AlacrittyPty> {
+    #[cfg(windows)]
+    if options.console_backend == tty::ConsoleBackend::Hosted {
+        return crate::hosted_console::open(options, term);
+    }
+    #[cfg(not(windows))]
+    let _ = term;
+    open_pty(options, bounds, scale_factor, window_id)
 }

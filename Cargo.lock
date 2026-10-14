@@ -1482,6 +1482,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "console-server"
+version = "0.1.0"
+dependencies = [
+ "alacritty_terminal",
+ "unicode-width 0.2.2",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
 name = "console_error_panic_hook"
 version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8010,6 +8019,7 @@ dependencies = [
  "anyhow",
  "async-channel 2.5.0",
  "collections",
+ "console-server",
  "futures",
  "futures-lite 1.13.0",
  "getrandom 0.3.4",
@@ -10944,6 +10954,7 @@ dependencies = [
  "argon2",
  "async-channel 2.5.0",
  "base64 0.22.1",
+ "console-server",
  "getrandom 0.3.4",
  "hpke",
  "libc",

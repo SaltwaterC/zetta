@@ -616,3 +616,22 @@ fn pending_command_waits_for_the_shell_integration_line() {
         PendingCommandDelivery::Now("zetta edit -- f".into())
     );
 }
+
+#[test]
+fn console_server_profiles_start_wherever_conpty_ones_do() {
+    let config = Config::parse("{}", None, None).unwrap();
+    let mut profile = config.profiles[0].clone();
+    assert!(select_console_provider(&profile, true, None).is_ok());
+    profile.console_backend = crate::config::ConsoleBackend::ConsoleServer;
+    // WSL is a console program like any other, so it is no longer refused.
+    assert!(
+        select_console_provider(&profile, true, None)
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        select_console_provider(&profile, false, None)
+            .unwrap()
+            .is_none()
+    );
+}

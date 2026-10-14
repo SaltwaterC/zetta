@@ -62,6 +62,7 @@ fn cli_icon_names_are_snake_case_and_include_none() {
 
 fn icon_test_tab(attention_id: u64) -> Tab {
     let profile = Profile {
+        console_backend: Default::default(),
         name: "System".to_owned(),
         command: task::Shell::System,
         theme: None,

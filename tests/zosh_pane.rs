@@ -106,6 +106,7 @@ fn a_pane_carried_over_mosh_shows_its_output_and_takes_its_input() {
             working_directory: request.working_directory,
             size: request.size,
             console_palette: request.console_palette,
+            console_backend: Default::default(),
         })
         .expect("spawning the pane to relay");
     let relayed_pane = spawned.pane.pane_id();
@@ -259,6 +260,7 @@ fn an_agent_forwarded_pane_keeps_taking_input() {
             working_directory: request.working_directory,
             size: request.size,
             console_palette: request.console_palette,
+            console_backend: Default::default(),
         })
         .expect("spawning the agent-aware pane");
     let relayed_pane = spawned.pane.pane_id();
@@ -554,6 +556,7 @@ fn spawn_relayed_pane(
             working_directory: request.working_directory,
             size: request.size,
             console_palette: request.console_palette,
+            console_backend: Default::default(),
         })
         .expect("spawning another pane in the session");
     let mux_pane_id = spawned.pane.pane_id();
@@ -888,6 +891,7 @@ fn spawn_request(session_id: Option<u64>, command: &str) -> SpawnRequest {
             cell_height: 16,
         },
         console_palette: Default::default(),
+        console_backend: Default::default(),
     }
 }
 

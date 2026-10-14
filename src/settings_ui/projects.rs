@@ -180,6 +180,14 @@ pub(crate) fn project_dropdown_options(
                 .chain(form.template_names())
                 .collect(),
         ),
+        SettingsDropdown::ProjectProfileConsoleBackend(index) => {
+            super::dropdowns::console_backend_options(
+                form.profiles
+                    .get(index)
+                    .and_then(|profile| profile.console_backend),
+                super::INHERIT_LABEL,
+            )
+        }
         SettingsDropdown::ProjectProfileTheme(index) => (
             form.profiles
                 .get(index)
@@ -230,6 +238,12 @@ pub(crate) fn set_project_dropdown(
         SettingsDropdown::ProjectDefaultProfile => form.default_profile = optional(value),
         SettingsDropdown::ProjectInitialSplit => {
             form.initial_split = optional(value);
+        }
+        SettingsDropdown::ProjectProfileConsoleBackend(index) => {
+            let Some(profile) = form.profiles.get_mut(index) else {
+                return false;
+            };
+            profile.console_backend = super::dropdowns::selected_console_backend(choice.index);
         }
         SettingsDropdown::ProjectProfileTheme(index) => {
             let Some(profile) = form.profiles.get_mut(index) else {

@@ -4,6 +4,7 @@ use std::collections::HashMap;
 
 fn tab(attention_id: u64, custom_title: Option<&str>) -> Tab {
     let profile = Profile {
+        console_backend: Default::default(),
         name: "System".to_owned(),
         command: task::Shell::System,
         theme: None,

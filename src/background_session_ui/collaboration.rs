@@ -1989,6 +1989,7 @@ impl Zetta {
             .find(|profile| profile.name.eq_ignore_ascii_case(profile_name))
             .cloned()
             .unwrap_or_else(|| Profile {
+                console_backend: Default::default(),
                 name: profile_name.to_owned(),
                 command: task::Shell::System,
                 theme: None,

@@ -289,6 +289,7 @@ where
         }
 
         let mut chunk = parser.take_chunk()?;
+        chunk.acknowledgement = self.pty.output_acknowledgement();
         let retry = &mut state.read_retry;
         retry.begin_batch();
         let result = loop {
@@ -298,6 +299,12 @@ where
             #[cfg(windows)]
             {
                 state.profile.read_calls += 1;
+            }
+            let mode = self.pty.output_mode()?;
+            if chunk.is_empty() {
+                chunk.mode = mode;
+            } else if mode.is_some() && mode != chunk.mode {
+                break Ok(());
             }
             match self.pty.reader().read(chunk.unfilled()) {
                 // This is received on Windows/macOS when no more data is readable from the PTY.

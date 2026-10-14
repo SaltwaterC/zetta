@@ -27,6 +27,7 @@ pub(crate) enum ConfigSetting {
     DefaultTabIcon,
     WorkingDirectory,
     WorkingDirectoryScope,
+    ConsoleBackend,
     LightTheme,
     DarkTheme,
     FontSize,
@@ -67,6 +68,7 @@ pub(crate) const ALL_SETTINGS: &[ConfigSetting] = &[
     ConfigSetting::DefaultTabIcon,
     ConfigSetting::WorkingDirectory,
     ConfigSetting::WorkingDirectoryScope,
+    ConfigSetting::ConsoleBackend,
     ConfigSetting::LightTheme,
     ConfigSetting::DarkTheme,
     ConfigSetting::FontSize,
@@ -468,6 +470,22 @@ impl ConfigSetting {
                         }
                     },
                     default: "right",
+                }),
+            ),
+            Self::ConsoleBackend => (
+                &["windows_console_backend"],
+                K::Choice(ChoiceSpec {
+                    options: &[
+                        ("conpty", "ConPTY"),
+                        ("console-server", "Console server (experimental)"),
+                    ],
+                    get: |form| form.console_backend.as_str(),
+                    set: |form, value| {
+                        if let Some(value) = crate::config::ConsoleBackend::parse(value) {
+                            form.console_backend = value;
+                        }
+                    },
+                    default: "conpty",
                 }),
             ),
             Self::ShowPaneControls => (

@@ -148,6 +148,8 @@ pub(crate) fn render_profile_modal(
                 icon: SettingsDropdown::ProfileDraftIcon,
                 theme: SettingsDropdown::ProfileDraftTheme,
                 dark_theme: SettingsDropdown::ProfileDraftDarkTheme,
+                console_backend: SettingsDropdown::ProfileDraftConsoleBackend,
+                unset_console_backend: editor.configuration.console_backend.default_label(),
                 profile: draft,
                 automatic_icon: &automatic_icon,
             },
@@ -203,6 +205,7 @@ pub(crate) fn render_profile_modal(
                     SettingsControl::Dropdown(SettingsDropdown::ProfileDraftIcon),
                     SettingsControl::Dropdown(SettingsDropdown::ProfileDraftTheme),
                     SettingsControl::Dropdown(SettingsDropdown::ProfileDraftDarkTheme),
+                    SettingsControl::Dropdown(SettingsDropdown::ProfileDraftConsoleBackend),
                 ],
             ),
         ];

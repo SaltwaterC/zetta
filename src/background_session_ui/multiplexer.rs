@@ -913,6 +913,7 @@ impl Zetta {
                 .get(&routing_id)
                 .cloned()
                 .unwrap_or_else(|| Profile {
+                    console_backend: Default::default(),
                     name: name.to_owned(),
                     command: task::Shell::System,
                     theme: None,

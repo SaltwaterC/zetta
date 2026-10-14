@@ -2,6 +2,7 @@ use super::*;
 
 fn profile() -> Profile {
     Profile {
+        console_backend: Default::default(),
         name: "System".to_owned(),
         command: Shell::System,
         theme: None,

@@ -51,6 +51,7 @@ fn local_tab(tab_id: u64, pane_id: u64) -> Tab {
         panes: vec![TerminalPane::new(
             pane_id,
             Profile {
+                console_backend: Default::default(),
                 name: "System".to_owned(),
                 command: task::Shell::System,
                 theme: None,

@@ -143,6 +143,8 @@ bitflags! {
         const REPORT_ALL_KEYS_AS_ESC  = 1 << 21;
         const REPORT_ASSOCIATED_TEXT  = 1 << 22;
         const WIN32_INPUT             = 1 << 23;
+        /// Backend-owned C0 LF semantics, independent of ANSI LNM and IND.
+        const LF_IMPLIES_CR           = 1 << 24;
         const MOUSE_MODE              = Self::MOUSE_REPORT_CLICK.bits() | Self::MOUSE_MOTION.bits() | Self::MOUSE_DRAG.bits();
         const KITTY_KEYBOARD_PROTOCOL = Self::DISAMBIGUATE_ESC_CODES.bits()
                                       | Self::REPORT_EVENT_TYPES.bits()
@@ -362,6 +364,7 @@ pub struct Term<T> {
 
     /// Mode flags.
     mode: TermMode,
+    hosted_output_mode: Option<crate::hosted_console::OutputMode>,
 
     /// Scroll region.
     ///
@@ -516,6 +519,7 @@ impl<T> Term<T> {
             selection: Default::default(),
             title: Default::default(),
             mode: Default::default(),
+            hosted_output_mode: None,
         }
     }
 
@@ -818,6 +822,27 @@ impl<T> Term<T> {
         self.damage.resize(num_cols, num_lines);
     }
 
+    /// Current title, shared by VT title sequences and hosted console APIs.
+    pub fn title(&self) -> Option<&str> {
+        self.title.as_deref()
+    }
+
+    /// Apply ordered host output semantics without rewriting the byte stream.
+    pub fn set_output_mode(&mut self, mode: crate::hosted_console::OutputMode) {
+        self.mode.set(TermMode::LF_IMPLIES_CR, mode.lf_implies_cr);
+        if self.hosted_output_mode != Some(mode) {
+            self.mode.set(TermMode::LINE_WRAP, mode.wrap);
+        }
+        self.hosted_output_mode = Some(mode);
+    }
+
+    fn restore_output_mode(&mut self) {
+        if let Some(mode) = self.hosted_output_mode {
+            self.mode.set(TermMode::LF_IMPLIES_CR, mode.lf_implies_cr);
+            self.mode.set(TermMode::LINE_WRAP, mode.wrap);
+        }
+    }
+
     /// Active terminal modes.
     #[inline]
     pub fn mode(&self) -> &TermMode {
@@ -858,6 +883,7 @@ impl<T> Term<T> {
     {
         self.reset_state();
         self.mode = TermMode::default();
+        self.restore_output_mode();
         self.mark_fully_damaged();
     }
 
@@ -924,6 +950,7 @@ impl<T> Term<T> {
         self.keyboard_mode_stack = Default::default();
         self.inactive_keyboard_mode_stack = Default::default();
         self.mode = TermMode::default();
+        self.restore_output_mode();
         self.selection = None;
         self.mark_fully_damaged();
     }
@@ -1726,6 +1753,13 @@ impl<T: EventListener> Handler for Term<T> {
         }
     }
 
+    fn linefeed_with_mode(&mut self) {
+        self.linefeed();
+        if self.mode.contains(TermMode::LF_IMPLIES_CR) {
+            self.carriage_return();
+        }
+    }
+
     /// Set current position as a tabstop.
     #[inline]
     fn bell(&mut self) {
@@ -2146,6 +2180,7 @@ impl<T: EventListener> Handler for Term<T> {
         // Preserve vi mode across resets.
         self.mode &= TermMode::VI;
         self.mode.insert(TermMode::default());
+        self.restore_output_mode();
 
         self.event_proxy.send_event(Event::CursorBlinkingChange);
         self.mark_fully_damaged();
@@ -3903,5 +3938,41 @@ mod tests {
         assert_eq!(version_number("0.1.2-dev"), 1_02);
         assert_eq!(version_number("1.2.3-dev"), 1_02_03);
         assert_eq!(version_number("999.99.99"), 9_99_99_99);
+    }
+    #[test]
+    fn hosted_lf_mode_preserves_raw_crlf_and_index_semantics() {
+        use crate::hosted_console::OutputMode;
+        let size = TermSize::new(20, 10);
+        let mut term = Term::new(Config::default(), &size, VoidListener);
+        let mut parser = Processor::<StdSyncHandler>::new();
+        term.set_output_mode(OutputMode { lf_implies_cr: true, wrap: true });
+        parser.advance(&mut term, b"abc\nX");
+        assert_eq!(term.grid().cursor.point, Point::new(Line(1), Column(1)));
+        parser.advance(&mut term, b"\r\nY");
+        assert_eq!(term.grid().cursor.point, Point::new(Line(2), Column(1)));
+        parser.advance(&mut term, b"\x1bDZ");
+        assert_eq!(term.grid().cursor.point, Point::new(Line(3), Column(2)));
+        term.set_output_mode(OutputMode { lf_implies_cr: false, wrap: true });
+        parser.advance(&mut term, b"\nQ");
+        assert_eq!(term.grid().cursor.point, Point::new(Line(4), Column(3)));
+        term.set_output_mode(OutputMode { lf_implies_cr: true, wrap: false });
+        parser.advance(&mut term, b"\x1bc");
+        assert!(term.mode().contains(TermMode::LF_IMPLIES_CR));
+        assert!(!term.mode().contains(TermMode::LINE_WRAP));
+    }
+
+    #[test]
+    fn unchanged_host_mode_does_not_override_vt_wrap_changes() {
+        use crate::hosted_console::OutputMode;
+        let size = TermSize::new(20, 10);
+        let mut term = Term::new(Config::default(), &size, VoidListener);
+        let mut parser = Processor::<StdSyncHandler>::new();
+        let mode = OutputMode { lf_implies_cr: true, wrap: true };
+        term.set_output_mode(mode);
+        parser.advance(&mut term, b"\x1b[?7l");
+        term.set_output_mode(mode);
+        assert!(!term.mode().contains(TermMode::LINE_WRAP));
+        term.set_output_mode(OutputMode { lf_implies_cr: false, wrap: true });
+        assert!(term.mode().contains(TermMode::LINE_WRAP));
     }
 }

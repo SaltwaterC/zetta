@@ -801,6 +801,7 @@ fn minimized_pane_shortcuts_are_built_in() {
 fn native_macos_menus_duplicate_the_title_bar_menus() {
     let profiles = vec![
         Profile {
+            console_backend: Default::default(),
             name: "System".to_owned(),
             command: Shell::System,
             theme: None,
@@ -808,6 +809,7 @@ fn native_macos_menus_duplicate_the_title_bar_menus() {
             icon: ProfileIcon::Zetta,
         },
         Profile {
+            console_backend: Default::default(),
             name: "Alternate".to_owned(),
             command: Shell::Program("alternate-shell".to_owned()),
             theme: None,
@@ -885,6 +887,7 @@ fn native_macos_menus_duplicate_the_title_bar_menus() {
 fn native_macos_dock_menu_contains_visible_profile_actions() {
     let profiles = vec![
         Profile {
+            console_backend: Default::default(),
             name: "Visible".to_owned(),
             command: Shell::System,
             theme: None,
@@ -892,6 +895,7 @@ fn native_macos_dock_menu_contains_visible_profile_actions() {
             icon: ProfileIcon::Zetta,
         },
         Profile {
+            console_backend: Default::default(),
             name: "Hidden".to_owned(),
             command: Shell::System,
             theme: None,

@@ -234,3 +234,9 @@ The eight Zetta commits carrying these changes are `d6aa84b`, `d7b896f`,
 ## Zetta patch: physical cell geometry
 
 CSI 16 t uses the existing size-request event to report character cell height and width (CSI 6;HEIGHT;WIDTH t).
+
+- Hosted console event-loop contract, semantic output modes carried by pooled
+  parser chunks, parser-completion acknowledgements, bounded IOCP output
+  queues, and native/hosted Windows reader/writer adapters. LF-implies-CR is
+  applied only by C0 newline handling, preserving IND and raw CRLF. Host mode
+  reset and VT wrap changes retain their ordering. Native ConPTY remains default.

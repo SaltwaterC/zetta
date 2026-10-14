@@ -10,6 +10,11 @@ use std::sync::Arc;
 use anyhow::Result;
 
 pub(crate) struct MuxPtyProvider;
+impl MuxPtyProvider {
+    pub(crate) fn supports_embedded_console(&self) -> bool {
+        true
+    }
+}
 
 impl terminal::PtyProvider for MuxPtyProvider {
     fn open(&self, _: terminal::PtySpawnRequest) -> Result<terminal::PtyHandover> {

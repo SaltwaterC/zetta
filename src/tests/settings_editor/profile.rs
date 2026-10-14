@@ -77,3 +77,15 @@ fn a_profile_list_names_the_profile_and_field_at_fault() {
     let problem = check_profiles(&[profile("Work", "", &["-l"])]).unwrap_err();
     assert!(problem.is_in_program());
 }
+
+#[test]
+fn console_backend_round_trips_and_explicit_conpty_overrides_inheritance() {
+    for backend in ["conpty", "console-server"] {
+        let entry = json!({"name":"CMD", "windows_console_backend": backend});
+        let form = ProfileForm::from_entry(&entry, ProfileIcon::Zetta).unwrap();
+        assert_eq!(form.to_entry(), entry);
+    }
+    let form = ProfileForm::from_entry(&json!({"name":"CMD"}), ProfileIcon::Zetta).unwrap();
+    assert_eq!(form.console_backend, None);
+    assert!(form.to_entry().get("windows_console_backend").is_none());
+}

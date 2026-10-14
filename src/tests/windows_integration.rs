@@ -88,6 +88,7 @@ fn jump_list_profile_actions_open_fresh_profile_windows() {
 #[test]
 fn jump_list_omits_hidden_profiles() {
     let profile = |name: &str| Profile {
+        console_backend: Default::default(),
         name: name.to_owned(),
         command: task::Shell::System,
         theme: None,

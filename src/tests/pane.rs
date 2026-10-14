@@ -118,6 +118,7 @@ fn terminal_environment_identifies_zetta() {
 
 fn wsl_test_pane() -> TerminalPane {
     let profile = Profile {
+        console_backend: Default::default(),
         name: "WSL: Ubuntu".to_owned(),
         command: Shell::WithArguments {
             program: "wsl.exe".to_owned(),

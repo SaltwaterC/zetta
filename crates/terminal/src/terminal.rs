@@ -29,7 +29,11 @@
 mod mappings;
 
 mod alacritty;
+mod console_launch;
+pub use console_launch::ConsoleLaunchOptions;
 mod clipboard_channel;
+#[cfg(windows)]
+mod hosted_console;
 pub mod link_policy;
 pub mod paste_order;
 mod pty_info;
@@ -120,11 +124,11 @@ use crate::alacritty::{
     ReplayBarrier, SearchMatcher, WakeupGate, ZedListener, append_text_to_term, apply_config,
     clear_current_line, clear_saved_screen, content_text, display_offset, display_only_term_config,
     find_from_terminal_point, full_content_range, last_non_empty_lines, make_content, new_term,
-    open_pty, pty_options, pty_term_config, resize, screen_lines, scroll_display, scroll_to_point,
-    search_grid, set_default_cursor_style, set_selection as set_term_selection, shrink_to_used,
-    snapshot_content_text, spawn_event_loop, toggle_vi_mode as toggle_term_vi_mode, total_lines,
-    update_selection as update_term_selection, update_selection_to_vi_cursor,
-    update_vi_cursor_for_scroll, vi_goto_point, vi_motion,
+    open_pty, open_pty_with_terminal, pty_options, pty_term_config, resize, screen_lines,
+    scroll_display, scroll_to_point, search_grid, set_default_cursor_style,
+    set_selection as set_term_selection, shrink_to_used, snapshot_content_text, spawn_event_loop,
+    toggle_vi_mode as toggle_term_vi_mode, total_lines, update_selection as update_term_selection,
+    update_selection_to_vi_cursor, update_vi_cursor_for_scroll, vi_goto_point, vi_motion,
 };
 use crate::mappings::colors::to_vte_rgb;
 use crate::mappings::keys::to_esc_str;
@@ -2171,12 +2175,14 @@ fn open_provided_pty(request: ProvidedPtyRequest) -> Result<OpenedProvidedPty> {
         defer_replay: _defer_replay,
         initial_size,
     } = request;
-    let _ = pty_options;
     let (program, args) = match shell {
         Some((program, args)) => (Some(program), args),
         None => (None, Vec::new()),
     };
     let handover = provider.open(PtySpawnRequest {
+        // The provider's console, not this process's: what comes back is
+        // pipes either way.
+        console_backend: provided_backend(pty_options),
         program,
         args,
         env,
@@ -2195,6 +2201,17 @@ fn open_provided_pty(request: ProvidedPtyRequest) -> Result<OpenedProvidedPty> {
     ))
 }
 
+/// The console a provider should start: console-server where this pane
+/// would have hosted it, otherwise ConPTY.
+fn provided_backend(options: &alacritty_terminal::tty::Options) -> zetta_profiles::ConsoleBackend {
+    #[cfg(windows)]
+    if options.console_backend == alacritty_terminal::tty::ConsoleBackend::Hosted {
+        return zetta_profiles::ConsoleBackend::ConsoleServer;
+    }
+    let _ = options;
+    zetta_profiles::ConsoleBackend::Conpty
+}
+
 #[cfg(windows)]
 fn open_provided_pty(request: ProvidedPtyRequest) -> Result<OpenedProvidedPty> {
     let ProvidedPtyRequest {
@@ -2209,12 +2226,14 @@ fn open_provided_pty(request: ProvidedPtyRequest) -> Result<OpenedProvidedPty> {
         defer_replay,
         initial_size,
     } = request;
-    let _ = pty_options;
     let (program, args) = match shell {
         Some((program, args)) => (Some(program), args),
         None => (None, Vec::new()),
     };
     let handover = provider.open(PtySpawnRequest {
+        // The provider's console, not this process's: what comes back is
+        // pipes either way.
+        console_backend: provided_backend(pty_options),
         program,
         args,
         env,
@@ -2280,6 +2299,8 @@ impl PtyControl for PtySender {
 }
 
 pub struct PtySpawnRequest {
+    /// Which console the provider starts the child on; it owns the console.
+    pub console_backend: zetta_profiles::ConsoleBackend,
     pub program: Option<String>,
     pub args: Vec<String>,
     pub env: HashMap<String, String>,
@@ -2820,7 +2841,7 @@ impl TerminalBuilder {
         activation_script: Vec<String>,
         path_style: PathStyle,
         pty_provider: Option<Arc<dyn PtyProvider>>,
-        initial_console_palette: Option<ConsolePalette>,
+        initial_console_palette: Option<ConsoleLaunchOptions>,
         initial_bounds: Option<InitialTerminalSize>,
     ) -> Task<Result<TerminalBuilder>> {
         Self::new_with_console_palette_and_options(
@@ -2867,7 +2888,7 @@ impl TerminalBuilder {
         activation_script: Vec<String>,
         path_style: PathStyle,
         pty_provider: Option<Arc<dyn PtyProvider>>,
-        initial_console_palette: Option<ConsolePalette>,
+        initial_console_palette: Option<ConsoleLaunchOptions>,
         initial_bounds: Option<InitialTerminalSize>,
     ) -> Task<Result<TerminalBuilder>> {
         Self::new_with_console_palette_and_options(
@@ -2911,7 +2932,7 @@ impl TerminalBuilder {
         activation_script: Vec<String>,
         path_style: PathStyle,
         pty_provider: Option<Arc<dyn PtyProvider>>,
-        initial_console_palette: Option<ConsolePalette>,
+        initial_console_palette: Option<ConsoleLaunchOptions>,
         initial_bounds: Option<InitialTerminalSize>,
         require_pty_provider: bool,
     ) -> Task<Result<TerminalBuilder>> {
@@ -2929,7 +2950,8 @@ impl TerminalBuilder {
         let console_palette_enabled = initial_console_palette.is_some() && !is_wsl_startup;
         #[cfg(not(windows))]
         let console_palette_enabled = false;
-        let console_palette = initial_console_palette.unwrap_or_default();
+        let console_launch = initial_console_palette.unwrap_or_default();
+        let console_palette = console_launch.palette;
         // Headless hosts (e.g. the eval CLI) have no controlling TTY, so PTY
         // allocation / acquiring a controlling terminal fails with `ENOTTY`.
         // When set, run the command as a plain subprocess instead.
@@ -3148,6 +3170,20 @@ impl TerminalBuilder {
                         .flatten(),
                 );
 
+                #[cfg(windows)]
+                let pty_options = {
+                    let mut options = pty_options;
+                    options.console_backend = match console_launch.backend {
+                        zetta_profiles::ConsoleBackend::Conpty => {
+                            alacritty_terminal::tty::ConsoleBackend::Native
+                        }
+                        zetta_profiles::ConsoleBackend::ConsoleServer => {
+                            alacritty_terminal::tty::ConsoleBackend::Hosted
+                        }
+                    };
+                    options
+                };
+
                 //Setup the pty...
                 let mut opened = match &pty_provider {
                     // The multiplexer opens it and owns the child, so this
@@ -3166,9 +3202,15 @@ impl TerminalBuilder {
                         initial_size: initial_bounds
                             .map(|bounds| (bounds.num_columns() as u16, bounds.num_lines() as u16)),
                     }),
-                    None => open_pty(&pty_options, start_bounds, display_scale_factor, window_id)
-                        .map(|pty| (pty, None, Vec::new(), None))
-                        .map_err(anyhow::Error::from),
+                    None => open_pty_with_terminal(
+                        &pty_options,
+                        start_bounds,
+                        display_scale_factor,
+                        window_id,
+                        &term,
+                    )
+                    .map(|pty| (pty, None, Vec::new(), None))
+                    .map_err(anyhow::Error::from),
                 };
                 // A multiplexer that cannot open the terminal must not stop it
                 // from opening. Falling back to a local process costs the

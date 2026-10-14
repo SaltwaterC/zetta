@@ -81,6 +81,7 @@ impl Zetta {
                 .find(|profile| profile.name.eq_ignore_ascii_case(&profile_name))
                 .cloned()
                 .unwrap_or_else(|| Profile {
+                    console_backend: Default::default(),
                     name: profile_name,
                     command: task::Shell::System,
                     theme: None,
@@ -160,6 +161,7 @@ impl Zetta {
                     .find(|profile| profile.name.eq_ignore_ascii_case(name))
                     .cloned()
                     .unwrap_or_else(|| Profile {
+                        console_backend: Default::default(),
                         name: name.clone(),
                         command: task::Shell::System,
                         theme: None,

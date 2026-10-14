@@ -365,6 +365,7 @@ fn start_shared_draft(
                 working_directory: working_directory.clone(),
                 size: draft.size,
                 palette: draft.console_palette,
+                console_backend: command.console_backend,
                 target_process_id: std::process::id(),
             })?;
         let mut handles = crate::transport::claim_duplicated(&handles);
@@ -1161,6 +1162,7 @@ pub(super) fn spawn(
                 working_directory: start_directory,
                 size: request.size,
                 palette: request.console_palette,
+                console_backend: request.console_backend,
                 target_process_id: std::process::id(),
             })?;
         let mut handles = crate::transport::claim_duplicated(&handles);

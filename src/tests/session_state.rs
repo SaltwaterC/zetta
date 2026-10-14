@@ -4,6 +4,7 @@ use ui::IconName;
 
 fn profile(name: &str) -> Profile {
     Profile {
+        console_backend: Default::default(),
         name: name.to_owned(),
         command: task::Shell::System,
         theme: None,
@@ -247,6 +248,7 @@ fn a_profile_is_resolved_afresh_rather_than_frozen() {
     let state = TabState::from_tab(&populated_tab(), &HashMap::new());
     let restored = state
         .into_tab(1, |name| Profile {
+            console_backend: Default::default(),
             theme: Some("Edited Theme".to_owned()),
             dark_theme: None,
             ..profile(name)

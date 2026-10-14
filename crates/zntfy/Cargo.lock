@@ -359,6 +359,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "console-server"
+version = "0.1.0"
+dependencies = [
+ "alacritty_terminal",
+ "unicode-width",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
 name = "coreaudio-rs"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2462,6 +2471,7 @@ dependencies = [
  "argon2",
  "async-channel",
  "base64",
+ "console-server",
  "getrandom 0.3.4",
  "libc",
  "log",

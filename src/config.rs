@@ -491,8 +491,11 @@ impl PaneSplitTemplateConfig {
     }
 }
 
+pub use zetta_profiles::ConsoleBackend;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Profile {
+    pub console_backend: ConsoleBackend,
     pub name: String,
     pub command: Shell,
     pub theme: Option<String>,
@@ -501,6 +504,7 @@ pub struct Profile {
 }
 
 struct ProfileConfig {
+    console_backend: Option<ConsoleBackend>,
     name: String,
     command: Option<Shell>,
     theme: Option<String>,
@@ -586,6 +590,7 @@ struct ConfigFile {
     /// — which a derive cannot describe without losing the errors that say what
     /// was wrong with a layout. They stay hand-parsed, from here.
     pane_split_templates: Setting<serde_json::Map<String, Value>>,
+    windows_console_backend: Setting<ConsoleBackend>,
     profiles: Setting<Vec<ProfileFile>>,
 }
 
@@ -624,6 +629,8 @@ struct SessionPersistenceFile {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ProfileFile {
+    #[serde(default, rename = "windows_console_backend")]
+    console_backend: Setting<ConsoleBackend>,
     name: String,
     #[serde(default)]
     program: Setting<String>,
@@ -674,6 +681,9 @@ pub struct Config {
     pub tftp_server_port: u16,
     pub sessions: SessionsConfig,
     pub pane_split_templates: HashMap<String, PaneSplitTemplateConfig>,
+    /// The backend of every profile that does not name its own. Already folded
+    /// into each [`Profile`]; kept so a profile added later can inherit it.
+    pub console_backend: ConsoleBackend,
 }
 
 impl Config {
@@ -711,6 +721,7 @@ impl Config {
             tftp_server_port: DEFAULT_TFTP_SERVER_PORT,
             sessions: SessionsConfig::default(),
             pane_split_templates: default_pane_split_templates(),
+            console_backend: ConsoleBackend::default(),
         }
     }
 
@@ -861,12 +872,23 @@ impl Config {
             self.sessions.validate_without_zmux()?;
         }
 
+        // Before the profiles: it is the backend of the ones the file does not
+        // give one. Only the user's file can name it (a project's field set
+        // has no such key), so every profile it reaches here is a detected
+        // one, with no choice of its own to overwrite.
+        if let Some(backend) = file.windows_console_backend.get() {
+            self.console_backend = backend;
+            for profile in &mut self.profiles {
+                profile.console_backend = backend;
+            }
+        }
+
         if let Some(profiles) = file.profiles.get() {
             let parsed = profiles
                 .into_iter()
                 .map(ProfileFile::into_config)
                 .collect::<Result<Vec<_>>>()?;
-            merge_profiles(&mut self.profiles, &parsed)?;
+            merge_profiles(&mut self.profiles, &parsed, self.console_backend)?;
             merge_profile_visibility(&mut self.hidden_profiles, &parsed);
         }
 
@@ -1445,6 +1467,7 @@ fn resolve_default_profile(profiles: &[Profile], name: &str) -> Result<usize> {
 fn merge_profiles(
     profiles: &mut Vec<Profile>,
     configured: impl AsRef<[ProfileConfig]>,
+    default_backend: ConsoleBackend,
 ) -> Result<()> {
     let configured = configured.as_ref();
     for profile in configured {
@@ -1461,6 +1484,9 @@ fn merge_profiles(
             if let Some(dark_theme) = profile.dark_theme.clone() {
                 profiles[index].dark_theme = Some(dark_theme);
             }
+            if let Some(backend) = profile.console_backend {
+                profiles[index].console_backend = backend;
+            }
             profiles[index].icon = profile.icon.clone().unwrap_or_else(|| {
                 ProfileIcon::automatic_for_profile(&profiles[index].name, &profiles[index].command)
             });
@@ -1472,6 +1498,7 @@ fn merge_profiles(
                 )
             })?;
             profiles.push(Profile {
+                console_backend: profile.console_backend.unwrap_or(default_backend),
                 name: profile.name.clone(),
                 command: command.clone(),
                 theme: profile.theme.clone(),
@@ -1578,6 +1605,7 @@ impl ProfileFile {
             }
         });
         Ok(ProfileConfig {
+            console_backend: self.console_backend.get(),
             name,
             command,
             theme: self.theme.get(),

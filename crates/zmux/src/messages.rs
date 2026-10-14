@@ -16,6 +16,8 @@ use crate::protocol::{BackgroundPaneLayout, BackgroundSessionSummary, Restorable
 /// The wire format, and what a client and a multiplexer compare before they
 /// trust each other to understand one another.
 ///
+/// 10: profile commands carry a typed Windows console backend; older daemons
+///     must not silently discard an experimental backend opt-in.
 /// 9: a pane's relay can name the viewer it is relaying to, so a window whose
 ///    panes travel over Mosh is recognized as watching them.
 /// 8: a client can create a complete daemon-owned shared session without an
@@ -29,7 +31,7 @@ use crate::protocol::{BackgroundPaneLayout, BackgroundSessionSummary, Restorable
 /// `SharedPaneDraft` rejects unknown fields, so a client that sends a newer
 /// shape to a daemon that predates it gets a parse failure rather than a
 /// version mismatch — which is why this has to move with every change to it.
-pub const PROTOCOL_VERSION: u32 = 9;
+pub const PROTOCOL_VERSION: u32 = 10;
 
 /// Version of the durable collaboration envelope. This is independent from
 /// [`PROTOCOL_VERSION`]: a daemon upgrade may keep a session state produced by
@@ -694,6 +696,13 @@ pub struct SharedSpawnRequest {
     pub working_directory: Option<PathBuf>,
     pub size: TerminalSize,
     pub console_palette: ConsolePalette,
+    /// Absent for ConPTY, so an older daemon is asked nothing new and one that
+    /// cannot host console-server refuses rather than silently using ConPTY.
+    #[serde(
+        default,
+        skip_serializing_if = "zetta_profiles::ConsoleBackend::is_default"
+    )]
+    pub console_backend: zetta_profiles::ConsoleBackend,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1476,6 +1485,12 @@ pub struct SpawnRequest {
     pub working_directory: Option<PathBuf>,
     pub size: TerminalSize,
     pub console_palette: ConsolePalette,
+    /// As [`SharedSpawnRequest::console_backend`].
+    #[serde(
+        default,
+        skip_serializing_if = "zetta_profiles::ConsoleBackend::is_default"
+    )]
+    pub console_backend: zetta_profiles::ConsoleBackend,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

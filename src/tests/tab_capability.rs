@@ -35,6 +35,7 @@ fn window(cx: &mut gpui::TestAppContext) -> (gpui::Entity<Zetta>, &mut gpui::Vis
 fn open_stand_in_tab(zetta: &gpui::Entity<Zetta>, cx: &mut gpui::VisualTestContext) -> u64 {
     zetta.update(cx, |zetta, _| {
         let profile = Profile {
+            console_backend: Default::default(),
             name: "System".to_owned(),
             command: Shell::System,
             theme: None,

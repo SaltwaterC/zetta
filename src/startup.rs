@@ -108,6 +108,7 @@ fn terminal_rendering_profile_config(executable: &Path, workload: PerformanceWor
         PerformanceWorkload::AltScreenScroll => "--terminal-alt-screen-scroll-workload",
     };
     config.profiles = vec![Profile {
+        console_backend: Default::default(),
         name: "Terminal rendering profiler".to_owned(),
         command: Shell::WithArguments {
             program: executable.to_string_lossy().into_owned(),

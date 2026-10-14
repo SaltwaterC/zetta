@@ -13,6 +13,8 @@ use crate::tty::{ChildEvent, ConsolePalette, EventedPty, EventedReadWrite, Optio
 mod blocking;
 mod child;
 mod conpty;
+mod hosted;
+use hosted::{PtyReader, PtyWriter};
 
 use std::num::NonZeroU32;
 use std::os::windows::io::{FromRawHandle as _, IntoRawHandle as _};
@@ -53,8 +55,8 @@ pub struct Pty {
     // XXX: Backend is required to be the first field, to ensure correct drop order. Dropping
     // `conout` before `backend` will cause a deadlock (with Conpty).
     backend: PtyBackend,
-    conout: ReadPipe,
-    conin: WritePipe,
+    conout: PtyReader,
+    conin: PtyWriter,
     child_watcher: ChildExitWatcher,
     /// Duplicates of the console's pipes, retained only by a PTY this process
     /// created, which is the only one that has anything to hand over.
@@ -65,6 +67,7 @@ pub struct Pty {
 enum PtyBackend {
     /// Created here, so resizing and teardown happen here.
     Owned(Backend),
+    Hosted(hosted::Control),
     /// Created by the multiplexer, which passed this process the console's
     /// pipes. A pseudoconsole handle cannot cross a process boundary — it is
     /// only meaningful to its creator — so resizing has to be asked of the
@@ -129,8 +132,8 @@ pub fn attach(
     let (child_watcher, reporter) = ChildExitWatcher::external(NonZeroU32::new(child_pid));
     let pty = Pty {
         backend: PtyBackend::Attached,
-        conout: UnblockedReader::new(conout_pipe, PIPE_CAPACITY),
-        conin: UnblockedWriter::new(conin_pipe, PIPE_CAPACITY),
+        conout: UnblockedReader::new(conout_pipe, PIPE_CAPACITY).into(),
+        conin: UnblockedWriter::new(conin_pipe, PIPE_CAPACITY).into(),
         child_watcher,
         // An attached terminal is not this process's to hand on.
         handover: None,
@@ -153,6 +156,12 @@ pub(crate) fn releases_consoles() -> bool {
 }
 
 pub fn new(config: &Options, window_size: WindowSize, _window_id: u64) -> Result<Pty> {
+    if config.console_backend == crate::tty::ConsoleBackend::Hosted {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "console-server requires an embedded hosted adapter; byte-only handover is unavailable",
+        ));
+    }
     let conpty::SpawnedPty { backend, conout, conin, child_watcher } =
         conpty::new(config, window_size)?;
     // The multiplexer host keeps its consoles referenced; a terminal's own
@@ -176,6 +185,12 @@ pub fn new(config: &Options, window_size: WindowSize, _window_id: u64) -> Result
 /// those wrappers consume or write the pipe on their own threads, competing
 /// with the process that is actually displaying the terminal.
 pub fn new_host(config: &Options, window_size: WindowSize) -> Result<PtyOwner> {
+    if config.console_backend == crate::tty::ConsoleBackend::Hosted {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "console-server cannot hand over byte-only pipes; no child launched",
+        ));
+    }
     let conpty::SpawnedPty { backend, conout, conin, child_watcher } =
         conpty::new(config, window_size)?;
     Ok(PtyOwner { backend, conout, conin, child_watcher })
@@ -225,8 +240,8 @@ impl OnResize for PtyOwner {
 impl Pty {
     fn new(
         backend: impl Into<Backend>,
-        conout: impl Into<ReadPipe>,
-        conin: impl Into<WritePipe>,
+        conout: impl Into<PtyReader>,
+        conin: impl Into<PtyWriter>,
         child_watcher: ChildExitWatcher,
         handover: Option<(std::os::windows::io::OwnedHandle, std::os::windows::io::OwnedHandle)>,
     ) -> Self {
@@ -292,8 +307,8 @@ fn with_key(mut event: Event, key: usize) -> Event {
 }
 
 impl EventedReadWrite for Pty {
-    type Reader = ReadPipe;
-    type Writer = WritePipe;
+    type Reader = PtyReader;
+    type Writer = PtyWriter;
 
     #[inline]
     unsafe fn register(
@@ -336,6 +351,15 @@ impl EventedReadWrite for Pty {
     fn rearm_read(&mut self) -> io::Result<()> {
         self.conout.rearm();
         Ok(())
+    }
+
+    fn output_mode(&mut self) -> io::Result<Option<crate::hosted_console::OutputMode>> {
+        self.conout.mode()
+    }
+    fn output_acknowledgement(
+        &self,
+    ) -> Option<Arc<dyn crate::hosted_console::OutputAcknowledgement>> {
+        self.conout.acknowledgement()
     }
 
     #[inline]
@@ -385,6 +409,15 @@ impl OnResize for Pty {
             // the new size to the multiplexer instead; doing nothing here is
             // what keeps that from silently appearing to have worked.
             PtyBackend::Attached => {},
+            PtyBackend::Hosted(console) => {
+                if let Err(error) = console
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .resize(window_size)
+                {
+                    log::error!("hosted console resize failed: {error}");
+                }
+            },
         }
     }
 }
@@ -436,7 +469,7 @@ fn default_shell() -> Shell {
 /// launcher that re-reads the line — the palette bootstrap, which runs in the
 /// pane's directory — has nothing left to search. `None` is a relative path
 /// the configuration spelled out, left to `CreateProcessW` as before.
-fn command(config: &Options) -> Result<(Option<PathBuf>, String)> {
+pub fn command(config: &Options) -> Result<(Option<PathBuf>, String)> {
     let default_shell = default_shell();
     let shell = config.shell.as_ref().unwrap_or(&default_shell);
     // The child is started with `config.env` over this process's environment,
@@ -547,6 +580,27 @@ pub fn win32_string<S: AsRef<OsStr> + ?Sized>(value: &S) -> Vec<u16> {
     OsStr::new(value).encode_wide().chain(once(0)).collect()
 }
 
+impl Drop for PtyBackend {
+    fn drop(&mut self) {
+        if let Self::Hosted(console) = self {
+            console.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).close();
+        }
+    }
+}
+
+/// Construct a PTY around an embedded hosted backend before its event loop starts.
+pub fn from_hosted(hosted: crate::hosted_console::HostedPty) -> io::Result<Pty> {
+    let watcher = ChildExitWatcher::new(hosted.console.child_handle()?.into_raw_handle())?;
+    let control = Arc::new(std::sync::Mutex::new(hosted.console));
+    Ok(Pty {
+        backend: PtyBackend::Hosted(Arc::clone(&control)),
+        conout: PtyReader::Hosted(hosted.output),
+        conin: PtyWriter::Hosted(control),
+        child_watcher: watcher,
+        handover: None,
+    })
+}
+
 #[cfg(test)]
 mod test {
     use crate::tty::windows::{cmdline, push_escaped_arg};
@@ -601,6 +655,7 @@ mod test {
     #[test]
     fn test_cmdline() {
         let mut options = Options {
+            console_backend: Default::default(),
             shell: Some(Shell {
                 program: "echo".to_string(),
                 args: vec!["hello world".to_string()],
@@ -621,6 +676,7 @@ mod test {
     #[test]
     fn a_program_with_a_space_is_quoted_as_one_token() {
         let options = Options {
+            console_backend: Default::default(),
             shell: Some(Shell {
                 program: r"C:\Program Files\PowerShell\7\pwsh.exe".to_owned(),
                 args: vec!["-NoLogo".to_owned()],
@@ -634,6 +690,7 @@ mod test {
     #[test]
     fn a_bare_shell_is_started_from_the_system_directory_by_absolute_path() {
         let options = Options {
+            console_backend: Default::default(),
             shell: Some(Shell { program: "cmd.exe".to_owned(), args: vec!["/d".to_owned()] }),
             escape_args: true,
             ..Options::default()
@@ -652,6 +709,7 @@ mod test {
     fn test_powershell_command_is_quoted_as_one_argument() {
         let script = r#"[Console]::Write("$([char]27)]2;zetta-cwd:$zettaDirectory$([char]27)\")"#;
         let options = Options {
+            console_backend: Default::default(),
             shell: Some(Shell {
                 program: "pwsh.exe".to_owned(),
                 args: vec!["-NoExit".to_owned(), "-Command".to_owned(), script.to_owned()],

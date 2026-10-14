@@ -424,3 +424,16 @@ without that feature, so no call site needs a feature predicate:
 that runs, not `crates/zmux`'s), `zmux_pty.rs`, `zosh.rs`, `zwt.rs`,
 `zetta_gui.rs`, and `wslx.rs` (Windows only and built without any feature;
 everything it does lives in `crates/wslx`).
+
+## Experimental native Windows consoles
+
+Profile selection in `terminal_spawn.rs` resolves a typed backend before launch.
+`crates/terminal/src/console_launch.rs` owns the launch options; its
+`hosted_console.rs` adapter embeds `crates/console-server` and maps output/title
+hooks to the terminal engine. `crates/alacritty_terminal/src/hosted_console.rs`
+owns the event-loop contract, bounded output transport, and parser acknowledgements.
+Driver-specific requests and input scheduling stay inside console-server, whose
+README maps its modules. Session panes run it in the multiplexer's console host:
+`crates/zmux/src/hosted_console.rs` turns its output into a self-contained
+stream for the daemon's pipes and keeps a grid for its screen queries, and
+`pty_host.rs` chooses it or ConPTY per console (host protocol 2).

@@ -262,6 +262,7 @@ fn a_live_pane_missing_from_the_blob_is_synthesized_from_the_summary() {
 
 fn publication_profile() -> Profile {
     Profile {
+        console_backend: Default::default(),
         name: "System".into(),
         command: task::Shell::System,
         theme: None,

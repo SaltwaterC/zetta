@@ -36,6 +36,21 @@ impl Zetta {
                 editor.themes.clone(),
             ),
             SettingsDropdown::Setting(setting) => setting_choice_options(editor, setting),
+            SettingsDropdown::ProfileConsoleBackend(index) => console_backend_options(
+                editor
+                    .configuration
+                    .profiles
+                    .get(index)
+                    .and_then(|profile| profile.console_backend),
+                editor.configuration.console_backend.default_label(),
+            ),
+            SettingsDropdown::ProfileDraftConsoleBackend => console_backend_options(
+                editor
+                    .profile_draft
+                    .as_ref()
+                    .and_then(|profile| profile.console_backend),
+                editor.configuration.console_backend.default_label(),
+            ),
             SettingsDropdown::ProfileTheme(index) => (
                 editor
                     .configuration
@@ -150,6 +165,7 @@ impl Zetta {
             | SettingsDropdown::ProjectInitialSplit
             | SettingsDropdown::ProjectProfileTheme(_)
             | SettingsDropdown::ProjectProfileDarkTheme(_)
+            | SettingsDropdown::ProjectProfileConsoleBackend(_)
             | SettingsDropdown::ProjectProfileIcon(_) => {
                 projects::project_dropdown_options(editor, dropdown)
             }
@@ -276,7 +292,8 @@ impl Zetta {
             // A draft is not saved until it is created, and the template and
             // project setters mark whichever form they wrote, only when they
             // wrote it.
-            SettingsDropdown::ProfileDraftTheme
+            SettingsDropdown::ProfileDraftConsoleBackend
+            | SettingsDropdown::ProfileDraftTheme
             | SettingsDropdown::ProfileDraftDarkTheme
             | SettingsDropdown::ProfileDraftIcon
             | SettingsDropdown::PaneTemplateAxis(_)
@@ -290,6 +307,7 @@ impl Zetta {
             | SettingsDropdown::ProjectInitialSplit
             | SettingsDropdown::ProjectProfileTheme(_)
             | SettingsDropdown::ProjectProfileDarkTheme(_)
+            | SettingsDropdown::ProjectProfileConsoleBackend(_)
             | SettingsDropdown::ProjectProfileIcon(_) => {}
             SettingsDropdown::DefaultProfile
             | SettingsDropdown::Theme
@@ -297,6 +315,7 @@ impl Zetta {
             | SettingsDropdown::Setting(_)
             | SettingsDropdown::ProfileTheme(_)
             | SettingsDropdown::ProfileDarkTheme(_)
+            | SettingsDropdown::ProfileConsoleBackend(_)
             | SettingsDropdown::ProfileIcon(_) => editor.configuration_dirty = true,
         }
         editor.message = None;
@@ -331,6 +350,16 @@ fn apply_settings_dropdown_value(
         SettingsDropdown::DarkTheme => editor.configuration.dark_theme = value,
         SettingsDropdown::Setting(setting) => {
             setting.set_choice(&mut editor.configuration, choice.index);
+        }
+        SettingsDropdown::ProfileConsoleBackend(index) => {
+            if let Some(profile) = editor.configuration.profiles.get_mut(index) {
+                profile.console_backend = selected_console_backend(choice.index);
+            }
+        }
+        SettingsDropdown::ProfileDraftConsoleBackend => {
+            if let Some(profile) = editor.profile_draft.as_mut() {
+                profile.console_backend = selected_console_backend(choice.index);
+            }
         }
         SettingsDropdown::ProfileTheme(index) => {
             if let Some(profile) = editor.configuration.profiles.get_mut(index) {
@@ -446,6 +475,7 @@ fn apply_settings_dropdown_value(
         | SettingsDropdown::ProjectInitialSplit
         | SettingsDropdown::ProjectProfileTheme(_)
         | SettingsDropdown::ProjectProfileDarkTheme(_)
+        | SettingsDropdown::ProjectProfileConsoleBackend(_)
         | SettingsDropdown::ProjectProfileIcon(_) => {
             projects::set_project_dropdown(editor, dropdown, &choice);
         }
@@ -457,7 +487,9 @@ fn apply_settings_dropdown_value(
 /// dropdown has to say.
 pub(crate) fn dropdown_offers_unset(dropdown: SettingsDropdown) -> bool {
     match dropdown {
-        SettingsDropdown::ProfileTheme(_)
+        SettingsDropdown::ProfileConsoleBackend(_)
+        | SettingsDropdown::ProfileDraftConsoleBackend
+        | SettingsDropdown::ProfileTheme(_)
         | SettingsDropdown::ProfileDarkTheme(_)
         | SettingsDropdown::ProfileIcon(_)
         | SettingsDropdown::ProfileDraftTheme
@@ -473,6 +505,7 @@ pub(crate) fn dropdown_offers_unset(dropdown: SettingsDropdown) -> bool {
         | SettingsDropdown::ProjectInitialSplit
         | SettingsDropdown::ProjectProfileTheme(_)
         | SettingsDropdown::ProjectProfileDarkTheme(_)
+        | SettingsDropdown::ProjectProfileConsoleBackend(_)
         | SettingsDropdown::ProjectProfileIcon(_) => true,
         SettingsDropdown::DefaultProfile
         | SettingsDropdown::Theme
@@ -503,4 +536,31 @@ fn setting_choice_options(
             .map(|(_, label)| (*label).to_owned())
             .collect(),
     )
+}
+
+/// A profile's backend choices. The first is having none of its own, which
+/// `unset` names: the configured default for a user profile, and
+/// [`INHERIT_LABEL`] for a project's override of one.
+pub(super) fn console_backend_options(
+    backend: Option<crate::config::ConsoleBackend>,
+    unset: &str,
+) -> (String, Arc<[String]>) {
+    let options = [
+        unset,
+        crate::config::ConsoleBackend::Conpty.label(),
+        crate::config::ConsoleBackend::ConsoleServer.label(),
+    ]
+    .map(str::to_owned);
+    let selected = backend.map_or(0, |backend| match backend {
+        crate::config::ConsoleBackend::Conpty => 1,
+        crate::config::ConsoleBackend::ConsoleServer => 2,
+    });
+    (options[selected].clone(), Arc::from(options))
+}
+pub(super) fn selected_console_backend(index: usize) -> Option<crate::config::ConsoleBackend> {
+    match index {
+        1 => Some(crate::config::ConsoleBackend::Conpty),
+        2 => Some(crate::config::ConsoleBackend::ConsoleServer),
+        _ => None,
+    }
 }

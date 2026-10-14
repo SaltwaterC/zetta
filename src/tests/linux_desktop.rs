@@ -4,6 +4,7 @@ use task::Shell;
 
 fn profile(name: &str) -> Profile {
     Profile {
+        console_backend: Default::default(),
         name: name.to_owned(),
         command: Shell::System,
         theme: None,

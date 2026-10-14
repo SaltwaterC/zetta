@@ -65,6 +65,7 @@ fn no_mux_keep_running_is_explicitly_process_local() {
 #[test]
 fn background_session_is_reaped_after_its_final_pane_exits() {
     let profile = Profile {
+        console_backend: Default::default(),
         name: "System".to_owned(),
         command: Shell::System,
         theme: None,
@@ -160,6 +161,7 @@ fn the_reconnect_picker_never_offers_a_window_the_session_it_is_showing() {
 /// stacked entry as a pane in its own right.
 fn attached_tab_with_a_stacked_command() -> Tab {
     let profile = Profile {
+        console_backend: Default::default(),
         name: "System".to_owned(),
         command: Shell::System,
         theme: None,

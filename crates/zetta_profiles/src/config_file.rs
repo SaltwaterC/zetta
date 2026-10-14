@@ -1,26 +1,23 @@
-//! The profile entries of `config.json`, read for their commands alone.
-//!
-//! The application parses the whole file strictly — an unknown key is an error,
-//! and so is a `null` where a value belongs — because a misspelled setting the
-//! user cannot see is worse than a startup failure. This reader is the
-//! opposite: it is used by a daemon that has to start a shell on behalf of
-//! somebody else, so it takes the profiles it understands and ignores
-//! everything around them. The strict reading still happens, in the window that
-//! owns the file.
-
-use std::path::Path;
-
+//! Profile overlays read by the process which will start the pane.
+//! Partial entries preserve a discovered command and can override its backend;
+//! the top-level `windows_console_backend` is the backend of every profile that
+//! does not name one.
+use crate::{ConsoleBackend, ProfileCommand, ProfileDefinition};
 use anyhow::{Context as _, Result};
 use serde::Deserialize;
-
-use crate::{ProfileCommand, ProfileDefinition};
+use std::path::Path;
 
 #[derive(Deserialize)]
 struct ProfilesDocument {
+    #[serde(
+        default,
+        rename = "windows_console_backend",
+        deserialize_with = "backend_override"
+    )]
+    backend: Option<ConsoleBackend>,
     #[serde(default)]
     profiles: Vec<ProfileEntry>,
 }
-
 #[derive(Deserialize)]
 struct ProfileEntry {
     name: String,
@@ -28,43 +25,79 @@ struct ProfileEntry {
     program: Option<String>,
     #[serde(default)]
     args: Vec<String>,
+    #[serde(
+        default,
+        rename = "windows_console_backend",
+        deserialize_with = "backend_override"
+    )]
+    backend: Option<ConsoleBackend>,
 }
-
-pub(crate) fn configured_profiles(config_path: &Path) -> Result<Vec<ProfileDefinition>> {
+fn backend_override<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<ConsoleBackend>, D::Error> {
+    ConsoleBackend::deserialize(deserializer).map(Some)
+}
+pub(crate) struct ConfiguredProfile {
+    name: String,
+    command: Option<ProfileCommand>,
+    backend: Option<ConsoleBackend>,
+}
+/// The profile entries of a configuration file, and the backend every profile
+/// without one of its own runs on.
+#[derive(Default)]
+pub(crate) struct Configured {
+    pub(crate) backend: ConsoleBackend,
+    pub(crate) profiles: Vec<ConfiguredProfile>,
+}
+pub(crate) fn configured_profiles(config_path: &Path) -> Result<Configured> {
     if !config_path.is_file() {
-        return Ok(Vec::new());
+        return Ok(Configured::default());
     }
     let contents = std::fs::read_to_string(config_path)
         .with_context(|| format!("reading {}", config_path.display()))?;
     let document: ProfilesDocument = serde_json::from_str(&contents)
         .with_context(|| format!("parsing the profiles in {}", config_path.display()))?;
-    Ok(document
-        .profiles
-        .into_iter()
-        .filter_map(|entry| {
-            // A profile with arguments but no program is rejected by the
-            // application's own parser; here it simply has nothing to run.
-            let program = entry.program?;
-            Some(ProfileDefinition {
+    Ok(Configured {
+        backend: document.backend.unwrap_or_default(),
+        profiles: document
+            .profiles
+            .into_iter()
+            .map(|entry| ConfiguredProfile {
                 name: entry.name,
-                command: ProfileCommand::with_args(program, entry.args),
+                command: entry
+                    .program
+                    .map(|program| ProfileCommand::with_args(program, entry.args)),
+                backend: entry.backend,
             })
-        })
-        .collect())
+            .collect(),
+    })
 }
-
-/// Overlays configured profiles onto the discovered ones, matching by name the
-/// way the application does: an existing name has its command replaced, a new
-/// one is appended in the order the file lists it.
-pub(crate) fn merge(profiles: &mut Vec<ProfileDefinition>, configured: Vec<ProfileDefinition>) {
-    for profile in configured {
+/// Overlays `configured` on the discovered `profiles`, which have no backend
+/// of their own until the file's default reaches them here.
+pub(crate) fn merge(profiles: &mut Vec<ProfileDefinition>, configured: Configured) {
+    for profile in profiles.iter_mut() {
+        profile.command.console_backend = configured.backend;
+    }
+    for profile in configured.profiles {
         if let Some(existing) = profiles
             .iter_mut()
             .find(|existing| existing.name.eq_ignore_ascii_case(&profile.name))
         {
-            existing.command = profile.command;
-        } else {
-            profiles.push(profile);
+            let backend = profile.backend.unwrap_or(existing.command.console_backend);
+            if let Some(command) = profile.command {
+                existing.command = command;
+            }
+            existing.command.console_backend = backend;
+        } else if let Some(mut command) = profile.command {
+            command.console_backend = profile.backend.unwrap_or(configured.backend);
+            profiles.push(ProfileDefinition {
+                name: profile.name,
+                command,
+            });
         }
     }
 }
+
+#[cfg(test)]
+#[path = "tests/config_file.rs"]
+mod tests;

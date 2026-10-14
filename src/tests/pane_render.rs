@@ -154,6 +154,7 @@ fn a_pane_that_fell_back_to_ssh_is_marked_in_its_corner(cx: &mut gpui::TestAppCo
     let pane_id = window
         .update(cx, |zetta, _, _| {
             let profile = Profile {
+                console_backend: Default::default(),
                 name: "System".to_owned(),
                 command: task::Shell::System,
                 theme: None,

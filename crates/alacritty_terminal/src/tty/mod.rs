@@ -27,6 +27,8 @@ pub mod program_search;
 /// Configuration for the `Pty` interface.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct Options {
+    #[cfg(windows)]
+    pub console_backend: ConsoleBackend,
     /// Shell options.
     ///
     /// [`None`] will use the default shell.
@@ -59,6 +61,14 @@ pub struct Options {
     /// Internal executable used to apply legacy colors inside the pseudoconsole.
     #[cfg(target_os = "windows")]
     pub console_palette_helper: Option<PathBuf>,
+}
+
+/// Backend selection is made before launch; hosted adapters are supplied by the application.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ConsoleBackend {
+    #[default]
+    Native,
+    Hosted,
 }
 
 /// The legacy Win32 console color state associated with a pseudoconsole.
@@ -188,6 +198,17 @@ pub trait EventedReadWrite {
     /// pipe can override this to register a wakeup for newly buffered bytes.
     fn rearm_read(&mut self) -> io::Result<()> {
         Ok(())
+    }
+
+    /// Semantics of the next read. Hosted readers stop at a mode boundary.
+    fn output_mode(&mut self) -> io::Result<Option<crate::hosted_console::OutputMode>> {
+        Ok(None)
+    }
+
+    fn output_acknowledgement(
+        &self,
+    ) -> Option<Arc<dyn crate::hosted_console::OutputAcknowledgement>> {
+        None
     }
 
     fn reader(&mut self) -> &mut Self::Reader;

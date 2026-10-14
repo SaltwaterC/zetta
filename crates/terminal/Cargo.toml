@@ -48,6 +48,7 @@ zetta_profiles = { path = "../zetta_profiles" }
 zclip = { path = "../zclip", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
+console-server = { path = "../console-server", default-features = false, features = ["grid"] }
 getrandom = "0.3"
 windows = { version = "0.61", features = [
     "Foundation_Numerics",
@@ -114,4 +115,3 @@ util_macros = { path = "../../zed/crates/util_macros" }
 [patch.crates-io]
 block = { path = "../block" }
 async-process = { git = "https://github.com/zed-industries/async-process.git", rev = "0b6d6713570af61806e1e5cb40e0f757cb93fd9d" }
-tree-sitter-language = { git = "https://github.com/tree-sitter/tree-sitter", rev = "43623ec9bf0eaaf7113285c46e8a09018f181b18" }

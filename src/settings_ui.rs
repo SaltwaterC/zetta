@@ -86,9 +86,11 @@ pub(crate) enum SettingsDropdown {
     Setting(ConfigSetting),
     ProfileTheme(usize),
     ProfileDarkTheme(usize),
+    ProfileConsoleBackend(usize),
     ProfileIcon(usize),
     ProfileDraftTheme,
     ProfileDraftDarkTheme,
+    ProfileDraftConsoleBackend,
     ProfileDraftIcon,
     BindingAction(usize, usize),
     BindingTemplate(usize, usize),
@@ -104,6 +106,7 @@ pub(crate) enum SettingsDropdown {
     ProjectInitialSplit,
     ProjectProfileTheme(usize),
     ProjectProfileDarkTheme(usize),
+    ProjectProfileConsoleBackend(usize),
     ProjectProfileIcon(usize),
 }
 

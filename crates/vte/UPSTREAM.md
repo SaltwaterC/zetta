@@ -81,3 +81,7 @@ performer that ignores no controls and one that ignores most, and
 ## Zetta patch: physical cell geometry
 
 CSI 16 t dispatches to the default no-op `Handler::character_cell_size_pixels`, allowing the emulator to report physical cell dimensions.
+
+- Handler::linefeed_with_mode routes C0 LF/VT/FF to backend-selected terminal
+  newline semantics. The default delegates to linefeed; ESC D still calls
+  linefeed directly, preserving existing consumers and index semantics.

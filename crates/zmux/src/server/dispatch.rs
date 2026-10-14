@@ -142,6 +142,7 @@ pub(super) fn serve(daemon: &Arc<Daemon>, stream: Stream, token: &str) -> Result
                 working_directory: shared_request.working_directory.clone(),
                 size: shared_request.size,
                 console_palette: shared_request.console_palette,
+                console_backend: shared_request.console_backend,
             };
             match spawn(
                 daemon,

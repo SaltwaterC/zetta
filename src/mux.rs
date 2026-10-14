@@ -537,6 +537,10 @@ pub(crate) struct OpenedPane {
 }
 
 impl MuxPtyProvider {
+    pub(crate) fn supports_embedded_console(&self) -> bool {
+        !self.runtime.is_remote() && self.shared_key().is_none()
+    }
+
     /// What the multiplexer created, once [`PtyProvider::open`] has returned.
     pub(crate) fn opened(&self) -> Option<OpenedPane> {
         self.opened
@@ -582,6 +586,7 @@ impl PtyProvider for MuxPtyProvider {
             args: request.args,
             env: request.env.into_iter().collect(),
             working_directory: request.working_directory,
+            console_backend: request.console_backend,
             // The real size is applied by the first resize, which happens as
             // soon as the pane is laid out, unless the pane's grid was known
             // before that. Otherwise starting from a conventional terminal size

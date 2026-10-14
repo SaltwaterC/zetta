@@ -1,0 +1,39 @@
+[package]
+name = "console-server"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+license = "Apache-2.0 AND MIT"
+publish = false
+
+[workspace]
+
+[features]
+default = ["harness"]
+harness = ["grid", "dep:vte"]
+# Screen queries answered from an alacritty_terminal grid.
+grid = ["dep:alacritty_terminal"]
+
+[[bin]]
+name = "console-server"
+path = "src/main.rs"
+required-features = ["harness"]
+
+[target.'cfg(windows)'.dependencies]
+alacritty_terminal = { path = "../alacritty_terminal", default-features = false, optional = true }
+unicode-width = "0.2.0"
+vte = { path = "../vte", default-features = false, features = ["std", "ansi"], optional = true }
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation", "Win32_Globalization", "Win32_Security", "Win32_System_Console",
+    "Win32_System_IO", "Win32_System_Threading", "Win32_System_JobObjects",
+    "Win32_System_LibraryLoader", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Gdi",
+] }
+
+[lints.clippy]
+manual_let_else = "deny"
+map_unwrap_or = "deny"
+redundant_closure = "deny"
+semicolon_if_nothing_returned = "deny"
+
+[profile.release]
+codegen-units = 1

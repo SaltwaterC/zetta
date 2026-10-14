@@ -314,6 +314,7 @@ fn spawn_request(session_id: Option<u64>, command: &str) -> SpawnRequest {
             cell_height: 16,
         },
         console_palette: Default::default(),
+        console_backend: Default::default(),
     }
 }
 
@@ -3976,6 +3977,7 @@ fn republishing_an_unattachable_pane_set_repairs_shared_reconnect_state() {
             working_directory: request.working_directory,
             size: request.size,
             console_palette: request.console_palette,
+            console_backend: Default::default(),
         }
     };
     let fourth = client
@@ -4223,6 +4225,7 @@ fn shared_spawns_publish_events_and_preserve_local_grants() {
             working_directory: local_request.working_directory,
             size: local_request.size,
             console_palette: local_request.console_palette,
+            console_backend: Default::default(),
         })
         .unwrap();
     let (grant_tx, grant_rx) = async_channel::unbounded();
@@ -4269,6 +4272,7 @@ fn shared_spawns_publish_events_and_preserve_local_grants() {
                 working_directory: stream_request.working_directory,
                 size: stream_request.size,
                 console_palette: stream_request.console_palette,
+                console_backend: Default::default(),
             }),
         })
         .unwrap();
@@ -5684,6 +5688,7 @@ fn a_stalled_subscription_cannot_block_another_shared_panes_input() {
             working_directory: request.working_directory,
             size: request.size,
             console_palette: request.console_palette,
+            console_backend: Default::default(),
         })
         .expect("spawning the healthy shared pane");
     let mut healthy_reader = spawned.pane.reader();
@@ -7220,6 +7225,7 @@ fn a_claimed_viewer_cannot_take_a_protected_pane() {
             working_directory: request.working_directory,
             size: request.size,
             console_palette: request.console_palette,
+            console_backend: Default::default(),
         })
         .unwrap();
     let shared_pane_id = spawned.pane.pane_id();
@@ -8176,6 +8182,7 @@ fn pruning_an_exited_shared_pane_keeps_the_next_split_valid() {
             working_directory: request.working_directory,
             size: request.size,
             console_palette: request.console_palette,
+            console_backend: Default::default(),
         })
         .unwrap();
     let exited_pane = spawned.pane.pane_id();
@@ -8428,6 +8435,7 @@ fn a_handover_that_is_abandoned_leaves_the_pane_readable() {
             working_directory: request.working_directory,
             size: request.size,
             console_palette: request.console_palette,
+            console_backend: Default::default(),
         })
         .unwrap();
     let shared_pane_id = spawned.pane.pane_id();
@@ -8606,6 +8614,7 @@ fn a_pane_the_client_could_not_show_can_be_given_back() {
             working_directory: request.working_directory,
             size: request.size,
             console_palette: request.console_palette,
+            console_backend: Default::default(),
         })
         .unwrap();
     let shared_pane_id = spawned.pane.pane_id();
@@ -8700,6 +8709,7 @@ fn stale_handover_cleanup_cannot_release_a_newer_attachment() {
             working_directory: request.working_directory,
             size: request.size,
             console_palette: request.console_palette,
+            console_backend: Default::default(),
         })
         .unwrap();
     let pane_id = shared.pane.pane_id();
@@ -8783,6 +8793,7 @@ fn a_viewer_that_stops_reading_does_not_wedge_the_pane_for_the_others() {
             working_directory: request.working_directory,
             size: request.size,
             console_palette: request.console_palette,
+            console_backend: Default::default(),
         })
         .unwrap();
     let shared_pane_id = spawned.pane.pane_id();
@@ -9080,6 +9091,7 @@ fn relay_pane_copies_a_shared_pane_between_the_daemon_and_its_own_stdio() {
             working_directory: request.working_directory,
             size: request.size,
             console_palette: request.console_palette,
+            console_backend: Default::default(),
         })
         .unwrap();
     let relayed_pane = spawned.pane.pane_id();
@@ -9167,6 +9179,7 @@ fn a_relay_keeps_its_size_when_a_smaller_viewer_leaves_after_the_session_moves_o
             working_directory: request.working_directory,
             size: request.size,
             console_palette: request.console_palette,
+            console_backend: Default::default(),
         })
         .unwrap();
     let relayed_pane = spawned.pane.pane_id();
@@ -9268,6 +9281,7 @@ fn a_relays_size_report_survives_losing_a_race_with_an_edit() {
             working_directory: request.working_directory,
             size: request.size,
             console_palette: request.console_palette,
+            console_backend: Default::default(),
         })
         .unwrap();
     let relayed_pane = spawned.pane.pane_id();
@@ -9357,6 +9371,7 @@ fn a_relay_reports_its_size_after_the_session_revision_moves_on() {
             working_directory: request.working_directory,
             size: request.size,
             console_palette: request.console_palette,
+            console_backend: Default::default(),
         })
         .unwrap();
     let relayed_pane = spawned.pane.pane_id();
@@ -9675,6 +9690,7 @@ fn shared_pane_with_command(
             working_directory: request.working_directory,
             size: request.size,
             console_palette: request.console_palette,
+            console_backend: Default::default(),
         })
         .unwrap_or_else(|error| {
             panic!(

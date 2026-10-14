@@ -29,6 +29,9 @@ mod cleanup;
 #[path = "daemon_windows/ctrl_c.rs"]
 mod ctrl_c;
 
+#[path = "daemon_windows/console_server.rs"]
+mod console_server;
+
 struct TestDaemon {
     process: Child,
     _directory: tempfile::TempDir,
@@ -189,6 +192,7 @@ fn spawn_request() -> SpawnRequest {
             cell_height: 16,
         },
         console_palette: Default::default(),
+        console_backend: Default::default(),
     }
 }
 
