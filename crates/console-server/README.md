@@ -1,12 +1,12 @@
-# Experimental Windows console server
+# Windows console server
 
 Applications embed the `console_server::Session` library and implement
 `ConsoleOutput`. A session launches a child in its own console, serves requests
 on a thread, accepts keyboard/paste input, and joins its owned threads on close.
 It starts no OpenConsole or separate console-server process.
 
-Zetta's native Windows profiles can opt in with
-`"windows_console_backend": "console-server"`. ConPTY remains the default.
+Console-server is Zetta's default Windows console backend. Select ConPTY with
+`"windows_console_backend": "conpty"` at the top level or on an individual profile.
 The library has no GPUI, Zed, or terminal-engine dependency when built with
 `default-features = false`; the default `harness` feature builds the standalone
 parser/transport probe.

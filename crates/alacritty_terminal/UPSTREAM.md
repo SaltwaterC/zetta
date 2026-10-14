@@ -239,4 +239,5 @@ CSI 16 t uses the existing size-request event to report character cell height an
   parser chunks, parser-completion acknowledgements, bounded IOCP output
   queues, and native/hosted Windows reader/writer adapters. LF-implies-CR is
   applied only by C0 newline handling, preserving IND and raw CRLF. Host mode
-  reset and VT wrap changes retain their ordering. Native ConPTY remains default.
+  reset and VT wrap changes retain their ordering. The low-level native PTY factory stays independent of the application
+  default; Zetta selects console-server through its hosted adapter.

@@ -425,7 +425,7 @@ that runs, not `crates/zmux`'s), `zmux_pty.rs`, `zosh.rs`, `zwt.rs`,
 `zetta_gui.rs`, and `wslx.rs` (Windows only and built without any feature;
 everything it does lives in `crates/wslx`).
 
-## Experimental native Windows consoles
+## Native Windows consoles
 
 Profile selection in `terminal_spawn.rs` resolves a typed backend before launch.
 `crates/terminal/src/console_launch.rs` owns the launch options; its

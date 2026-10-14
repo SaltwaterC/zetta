@@ -1,4 +1,4 @@
-//! Ordered spike lifecycle: own a console, launch a child, serve, then report.
+//! Ordered probe lifecycle: own a console, launch a child, serve, then report.
 //! A watchdog bounds hangs and the job only contains this run's descendants.
 use crate::native::{Child, Console};
 use crate::options::Options;
@@ -69,7 +69,7 @@ pub fn run(options: Options) -> io::Result<()> {
         })
         .transpose()?;
     let report = format!(
-        "{{\n  \"version\": 1,\n  \"backend\": \"condrv-spike\",\n  \"parser\": {},\n  \"history\": {},\n  \"elapsed_seconds\": {:.6},\n  \"source_bytes\": {},\n  \"parser_bytes\": {},\n  \"mib_per_second\": {:.3},\n  \"requests\": {},\n  \"writes\": {},\n  \"connected_processes\": {},\n  \"child_exit_code\": {},\n  \"unsupported_apis\": {:?},\n  \"ctrl_c_status\": {},\n  \"ctrl_c_handled\": {}\n}}\n",
+        "{{\n  \"version\": 1,\n  \"backend\": \"console-server\",\n  \"parser\": {},\n  \"history\": {},\n  \"elapsed_seconds\": {:.6},\n  \"source_bytes\": {},\n  \"parser_bytes\": {},\n  \"mib_per_second\": {:.3},\n  \"requests\": {},\n  \"writes\": {},\n  \"connected_processes\": {},\n  \"child_exit_code\": {},\n  \"unsupported_apis\": {:?},\n  \"ctrl_c_status\": {},\n  \"ctrl_c_handled\": {}\n}}\n",
         !options.drain,
         options.history,
         elapsed,

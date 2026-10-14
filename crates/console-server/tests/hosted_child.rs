@@ -1,4 +1,4 @@
-//! End-to-end tests of the experimental executable's hosted child console.
+//! End-to-end tests of the executable's hosted child console.
 #![cfg(all(windows, feature = "harness"))]
 use std::process::Command;
 

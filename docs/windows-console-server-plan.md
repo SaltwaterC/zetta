@@ -6,8 +6,8 @@ attribute, and serves the console API itself. Output reaches Zetta's parser as
 the application wrote it, instead of being parsed into OpenConsole's buffer
 and re-encoded, which is where ConPTY's throughput went.
 
-Profiles opt in with `"windows_console_backend": "console-server"`; ConPTY
-remains the default.
+Console-server is the default Windows console backend. Select ConPTY with
+`"windows_console_backend": "conpty"` at the top level or on an individual profile.
 
 ## Measurements
 

@@ -80,17 +80,33 @@ fn programs_started_from_the_console_outlive_it() {
         .trim()
         .parse()
         .unwrap();
+    use windows_sys::Win32::Foundation::STILL_ACTIVE;
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE,
+        TerminateProcess,
+    };
+    // Hold this test's detached child directly. tasklist/taskkill depend on
+    // access to system-wide process enumeration, which a sandbox may deny.
+    let detached = console_server::native::Handle::new(unsafe {
+        OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE,
+            0,
+            pid,
+        )
+    })
+    .unwrap();
     session.close();
     drop(session);
     std::thread::sleep(Duration::from_secs(7));
-    let alive = std::process::Command::new("tasklist")
-        .args(["/fi", &format!("pid eq {pid}"), "/nh"])
-        .output()
-        .unwrap();
-    let listed = String::from_utf8_lossy(&alive.stdout).contains(&pid.to_string());
-    let _ = std::process::Command::new("taskkill")
-        .args(["/pid", &pid.to_string(), "/f"])
-        .output();
+    let mut exit_code = 0;
+    assert_ne!(
+        unsafe { GetExitCodeProcess(detached.raw(), &mut exit_code) },
+        0
+    );
+    let listed = exit_code == STILL_ACTIVE as u32;
+    if listed {
+        assert_ne!(unsafe { TerminateProcess(detached.raw(), 0) }, 0);
+    }
     let _ = std::fs::remove_file(&marker);
     assert!(listed, "the detached program died with the console");
 }
@@ -109,4 +125,29 @@ fn get_console_window_is_a_real_hidden_window() {
     let text = wait_for(&output, "WINDOW");
     session.close();
     assert!(text.contains("WINDOW True 1 0"), "{text:?}");
+}
+
+#[test]
+fn ctrl_c_interrupts_a_python_script() {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
+    use windows_sys::Win32::System::Threading::WaitForSingleObject;
+
+    let (sender, output) = mpsc::channel();
+    let mut session = Session::spawn(
+        Launch {
+            command:
+                r#"python.exe -u -c "import time; print('READY', flush=True); time.sleep(300)""#
+                    .into(),
+            ..Default::default()
+        },
+        Output(sender),
+    )
+    .unwrap();
+    wait_for(&output, "READY");
+    let process = session.child_handle().unwrap();
+    assert_eq!(session.input(b"\x03").unwrap(), 1);
+    let exited = unsafe { WaitForSingleObject(process.as_raw_handle(), 5000) };
+    session.close();
+    assert_eq!(exited, WAIT_OBJECT_0, "Python did not exit after Ctrl+C");
 }

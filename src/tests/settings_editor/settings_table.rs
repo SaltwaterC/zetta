@@ -281,20 +281,17 @@ fn a_working_directory_of_home_spelled_with_a_slash_is_still_the_default() {
 }
 
 #[test]
-fn the_console_backend_default_is_read_saved_and_stripped_at_conpty() {
+fn the_console_backend_default_is_read_saved_and_stripped_at_console_server() {
     let mut form = form_from(
         "zetta-table-backend",
-        r#"{"windows_console_backend":"console-server"}"#,
+        r#"{"windows_console_backend":"conpty"}"#,
     );
-    assert_eq!(
-        form.console_backend,
-        crate::config::ConsoleBackend::ConsoleServer
-    );
+    assert_eq!(form.console_backend, crate::config::ConsoleBackend::Conpty);
     assert_eq!(
         ConfigSetting::ConsoleBackend.choice_label(&form),
-        Some("Console server (experimental)")
+        Some("ConPTY")
     );
-    assert_eq!(saved(&form)["windows_console_backend"], "console-server");
-    ConfigSetting::ConsoleBackend.set_choice(&mut form, 0);
+    assert_eq!(saved(&form)["windows_console_backend"], "conpty");
+    ConfigSetting::ConsoleBackend.set_choice(&mut form, 1);
     assert!(!saved(&form).contains_key("windows_console_backend"));
 }

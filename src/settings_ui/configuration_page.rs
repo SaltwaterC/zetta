@@ -151,7 +151,7 @@ impl ConfigSetting {
             }
             Self::ConsoleBackend => {
                 "What hosts the console of profiles without a backend of their own; console \
-                 server is faster than ConPTY but experimental"
+                 server is the default Windows backend"
             }
             Self::LightTheme => "The application theme while the system appearance is light",
             Self::DarkTheme => "The application theme while the system appearance is dark",

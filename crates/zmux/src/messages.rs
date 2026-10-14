@@ -17,7 +17,7 @@ use crate::protocol::{BackgroundPaneLayout, BackgroundSessionSummary, Restorable
 /// trust each other to understand one another.
 ///
 /// 10: profile commands carry a typed Windows console backend; older daemons
-///     must not silently discard an experimental backend opt-in.
+///     must not silently discard the selected console backend.
 /// 9: a pane's relay can name the viewer it is relaying to, so a window whose
 ///    panes travel over Mosh is recognized as watching them.
 /// 8: a client can create a complete daemon-owned shared session without an
@@ -696,8 +696,7 @@ pub struct SharedSpawnRequest {
     pub working_directory: Option<PathBuf>,
     pub size: TerminalSize,
     pub console_palette: ConsolePalette,
-    /// Absent for ConPTY, so an older daemon is asked nothing new and one that
-    /// cannot host console-server refuses rather than silently using ConPTY.
+    /// Omitted when using the default Windows console backend.
     #[serde(
         default,
         skip_serializing_if = "zetta_profiles::ConsoleBackend::is_default"

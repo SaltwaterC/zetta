@@ -1,4 +1,4 @@
-//! CLI for the experimental harness, independent of Zetta's application CLI.
+//! CLI for the console-server harness, independent of Zetta's application CLI.
 use std::ffi::OsString;
 use std::io;
 use std::path::PathBuf;
@@ -75,7 +75,7 @@ fn number(args: &mut impl Iterator<Item = OsString>, name: &str) -> io::Result<u
 }
 pub fn help() -> String {
     format!(
-        "Console-server spike\n\nUsage: console-server [OPTIONS]\n\n\
+        "Console server\n\nUsage: console-server [OPTIONS]\n\n\
 Launch a private child console and consume output with Zetta's 80x24 parser.\n\
 Without --command, --ctrl-c launches this executable's handler probe.\n\nOptions:\n{}",
         format_help_table([

@@ -475,17 +475,14 @@ impl ConfigSetting {
             Self::ConsoleBackend => (
                 &["windows_console_backend"],
                 K::Choice(ChoiceSpec {
-                    options: &[
-                        ("conpty", "ConPTY"),
-                        ("console-server", "Console server (experimental)"),
-                    ],
+                    options: &[("conpty", "ConPTY"), ("console-server", "Console server")],
                     get: |form| form.console_backend.as_str(),
                     set: |form, value| {
                         if let Some(value) = crate::config::ConsoleBackend::parse(value) {
                             form.console_backend = value;
                         }
                     },
-                    default: "conpty",
+                    default: "console-server",
                 }),
             ),
             Self::ShowPaneControls => (

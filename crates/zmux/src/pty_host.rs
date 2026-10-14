@@ -52,8 +52,9 @@ pub const CONSOLE_SERVER_HOST_PROTOCOL_VERSION: u32 = 2;
 /// Installer revision, independent of the additive wire protocol. Bump when
 /// existing installations need new host behavior. Revision 3 clears an inherited
 /// flag that disables Ctrl+C; revision 4 initializes colors without debugging the shell;
-/// revision 5 holds console-server consoles.
-pub const HOST_INSTALL_REVISION: u32 = 5;
+/// revision 5 holds console-server consoles; revision 6 accepts inherited
+/// Windows internal environment names when launching those consoles.
+pub const HOST_INSTALL_REVISION: u32 = 6;
 
 /// The oldest host this daemon can drive. An upgrade is refused rather than
 /// attempted when the running host is older than this, because the alternative
@@ -378,7 +379,7 @@ pub enum HostRequest {
         working_directory: Option<PathBuf>,
         size: TerminalSize,
         palette: ConsolePalette,
-        /// Absent for ConPTY, so an older host is asked nothing new.
+        /// Omitted when using the default Windows console backend.
         #[serde(
             default,
             skip_serializing_if = "zetta_profiles::ConsoleBackend::is_default"
@@ -932,14 +933,17 @@ pub fn ensure_running(directory: &Path) -> Result<HostClient> {
         .with_context(|| format!("starting the pseudoconsole host {}", executable.display()))?;
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut last_error = None;
     loop {
-        if let Some(client) = HostClient::connect(directory)? {
-            return Ok(client);
+        match HostClient::connect(directory) {
+            Ok(Some(client)) => return Ok(client),
+            Ok(None) => {}
+            Err(error) => last_error = Some(error),
         }
-        anyhow::ensure!(
-            std::time::Instant::now() < deadline,
-            "the pseudoconsole host did not start"
-        );
+        if std::time::Instant::now() >= deadline {
+            return Err(last_error.unwrap_or_else(|| anyhow::anyhow!("no host endpoint")))
+                .context("the pseudoconsole host did not start");
+        }
         thread::sleep(std::time::Duration::from_millis(10));
     }
 }
@@ -1065,15 +1069,31 @@ impl HostClient {
              {MINIMUM_HOST_PROTOCOL_VERSION} this multiplexer requires",
             endpoint.protocol_version
         );
-        if Stream::connect(&endpoint.socket_path).is_err() {
+        let Ok(stream) = Stream::connect(&endpoint.socket_path) else {
             return Ok(None);
+        };
+        let client = Self { endpoint };
+        // A newly bound socket can answer before its new endpoint is published.
+        // Never cache an old file's token merely because that socket accepted us.
+        match client.exchange(stream, HostRequest::List, 0)? {
+            HostResponse::Consoles { .. } => Ok(Some(client)),
+            HostResponse::Error { message } => anyhow::bail!("{message}"),
+            other => anyhow::bail!("unexpected host authentication response: {other:?}"),
         }
-        Ok(Some(Self { endpoint }))
     }
 
     fn request(&self, request: HostRequest, target_process_id: u32) -> Result<HostResponse> {
         let stream = Stream::connect(&self.endpoint.socket_path)
             .context("connecting to the pseudoconsole host")?;
+        self.exchange(stream, request, target_process_id)
+    }
+
+    fn exchange(
+        &self,
+        stream: Stream,
+        request: HostRequest,
+        target_process_id: u32,
+    ) -> Result<HostResponse> {
         let mut connection = Connection::new(stream);
         connection.send(&HostEnvelope {
             version: HOST_PROTOCOL_VERSION,

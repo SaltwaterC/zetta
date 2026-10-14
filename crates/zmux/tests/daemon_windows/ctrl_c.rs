@@ -44,9 +44,26 @@ fn ignored_ctrl_c_subprocess() {
     unsafe { SetConsoleCtrlHandler(None, true) }.expect("disabling the caller's Ctrl+C handling");
     let daemon = TestDaemon::start();
     assert_returns_to_prompt(&daemon.client());
+    assert_backend_returns_to_prompt(
+        &daemon.client(),
+        zetta_profiles::ConsoleBackend::ConsoleServer,
+    );
+}
+
+#[test]
+fn console_server_ctrl_c_cancels_a_command_without_ending_the_shell() {
+    let daemon = TestDaemon::start();
+    assert_backend_returns_to_prompt(
+        &daemon.client(),
+        zetta_profiles::ConsoleBackend::ConsoleServer,
+    );
 }
 
 pub(super) fn assert_returns_to_prompt(client: &Client) {
+    assert_backend_returns_to_prompt(client, zetta_profiles::ConsoleBackend::Conpty);
+}
+
+fn assert_backend_returns_to_prompt(client: &Client, backend: zetta_profiles::ConsoleBackend) {
     for program in ["powershell.exe", "pwsh.exe"] {
         if Command::new(program)
             .args(["-NoLogo", "-NoProfile", "-Command", "exit"])
@@ -56,6 +73,7 @@ pub(super) fn assert_returns_to_prompt(client: &Client) {
             continue;
         }
         let mut request = output_request();
+        request.console_backend = backend;
         request.program = Some(program.to_owned());
         request.args = vec![
             "-NoLogo".to_owned(),
@@ -87,12 +105,13 @@ pub(super) fn assert_returns_to_prompt(client: &Client) {
             let running = read_until(
                 &mut output,
                 &mut input,
-                b"127.0.0.1",
+                b"bytes=32",
                 Duration::from_secs(10),
             );
-            assert!(running.windows(9).any(|bytes| bytes == b"127.0.0.1"));
-            // The address comes from ping itself, so Ctrl+C cannot race its
-            // startup even when the other test suites are busy.
+            assert!(running.windows(8).any(|bytes| bytes == b"bytes=32"));
+            // An actual reply establishes that ping is running. Its header
+            // contains the address too, and the hosted backend can deliver it
+            // while the native command is still completing startup.
             input.write_all(b"\x03").unwrap();
             let returned = read_until(
                 &mut output,

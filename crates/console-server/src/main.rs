@@ -1,4 +1,4 @@
-//! Standalone, Windows-only console-server feasibility experiment.
+//! Standalone Windows console-server benchmark and compatibility probe.
 //! Zetta embeds the library; this executable remains the independent probe.
 #[cfg(windows)]
 use console_server::control;
@@ -37,9 +37,7 @@ fn entry() -> std::io::Result<()> {
     }
     #[cfg(not(windows))]
     {
-        Err(std::io::Error::other(
-            "the console-server spike requires Windows",
-        ))
+        Err(std::io::Error::other("console-server requires Windows"))
     }
 }
 

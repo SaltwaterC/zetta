@@ -617,21 +617,32 @@ fn pending_command_waits_for_the_shell_integration_line() {
     );
 }
 
-#[test]
-fn console_server_profiles_start_wherever_conpty_ones_do() {
-    let config = Config::parse("{}", None, None).unwrap();
-    let mut profile = config.profiles[0].clone();
-    assert!(select_console_provider(&profile, true, None).is_ok());
-    profile.console_backend = crate::config::ConsoleBackend::ConsoleServer;
-    // WSL is a console program like any other, so it is no longer refused.
-    assert!(
-        select_console_provider(&profile, true, None)
-            .unwrap()
-            .is_none()
-    );
-    assert!(
-        select_console_provider(&profile, false, None)
-            .unwrap()
-            .is_none()
-    );
+#[cfg(all(windows, feature = "zmux"))]
+#[gpui::test]
+fn console_server_does_not_escape_mux_when_the_daemon_is_unavailable(
+    cx: &mut gpui::TestAppContext,
+) {
+    cx.update(|cx| {
+        theme_settings::init(theme::LoadThemes::JustBase, cx);
+        terminal::terminal_settings::TerminalSettings::init(cx);
+    });
+    let (zetta, cx) = cx.add_window_view(|window, cx| {
+        let mut config = Config::defaults(None, None);
+        config.profiles.clear();
+        Zetta::new(config, None, Default::default(), window, cx)
+    });
+    zetta.update_in(cx, |zetta, window, cx| {
+        assert!(!zetta.no_mux);
+        // Pin the connection failure so this test never starts a daemon.
+        zetta.mux_connect_failure = Some((Instant::now(), "test daemon unavailable".into()));
+        let config = Config::defaults(None, None);
+        let mut profile = config.profiles[0].clone();
+        profile.console_backend = crate::config::ConsoleBackend::ConsoleServer;
+        zetta.open_tab_with_profile(profile, window, cx);
+        let pane = zetta.tabs.last().unwrap().active_pane().unwrap();
+        assert!(pane.error.as_deref().is_some_and(|error| {
+            error.contains("session multiplexer") && error.contains("test daemon unavailable")
+        }));
+        assert!(pane.terminal.is_none());
+    });
 }

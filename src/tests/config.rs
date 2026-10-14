@@ -1320,7 +1320,7 @@ fn the_example_configuration_parses_and_names_every_remote_setting() {
 }
 
 #[test]
-fn windows_console_backend_is_typed_and_defaults_to_conpty() {
+fn windows_console_backend_is_typed_and_inherits_the_global_default() {
     assert_eq!(
         parse_profile(serde_json::json!({"name": "System"}))
             .unwrap()
@@ -1400,16 +1400,33 @@ fn top_level_console_backend_is_every_unspecified_profiles_default() {
     );
 
     let unset = Config::parse("{}", None, None).unwrap();
-    assert_eq!(unset.console_backend, ConsoleBackend::Conpty);
+    assert_eq!(unset.console_backend, ConsoleBackend::ConsoleServer);
     assert!(
         unset
             .profiles
             .iter()
-            .all(|profile| profile.console_backend == ConsoleBackend::Conpty)
+            .all(|profile| profile.console_backend == ConsoleBackend::ConsoleServer)
     );
     assert!(Config::parse(r#"{"windows_console_backend": null}"#, None, None).is_err());
     // A project cannot change it: the field set would let a checked-in file
     // move every profile of whoever opens the project onto another console.
     let project = serde_json::json!({"windows_console_backend": "console-server"});
     assert!(crate::project::validate_project_fields(project.as_object().unwrap()).is_err());
+}
+
+#[test]
+fn conpty_remains_an_explicit_global_choice() {
+    let config = Config::parse(
+        r#"{"windows_console_backend":"conpty","profiles":[{"name":"Hosted","program":"cmd.exe","windows_console_backend":"console-server"}]}"#,
+        None, None,
+    ).unwrap();
+    assert_eq!(config.console_backend, ConsoleBackend::Conpty);
+    for profile in &config.profiles {
+        let expected = if profile.name == "Hosted" {
+            ConsoleBackend::ConsoleServer
+        } else {
+            ConsoleBackend::Conpty
+        };
+        assert_eq!(profile.console_backend, expected, "{}", profile.name);
+    }
 }

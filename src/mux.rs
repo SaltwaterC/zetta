@@ -537,10 +537,6 @@ pub(crate) struct OpenedPane {
 }
 
 impl MuxPtyProvider {
-    pub(crate) fn supports_embedded_console(&self) -> bool {
-        !self.runtime.is_remote() && self.shared_key().is_none()
-    }
-
     /// What the multiplexer created, once [`PtyProvider::open`] has returned.
     pub(crate) fn opened(&self) -> Option<OpenedPane> {
         self.opened

@@ -691,10 +691,10 @@ extension at the revision recorded in
 [`assets/themes/solarized/UPSTREAM.md`](../assets/themes/solarized/UPSTREAM.md)
 and retain their GPL-3.0 license.
 
-## Experimental Windows console backend
+## Windows console backend
 
 `windows_console_backend` chooses what hosts a Windows profile's console:
-`"conpty"` (the default) or `"console-server"`. At the top level of
+`"console-server"` (the default) or `"conpty"`. At the top level of
 `config.json` it is the default for every profile, detected or configured, that
 does not set one of its own; the Configuration page offers it as **Windows
 console backend** under New tabs. A project file cannot set the top-level

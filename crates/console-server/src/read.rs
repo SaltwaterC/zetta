@@ -283,7 +283,17 @@ impl Input {
         let records: Vec<[u8; 20]> = {
             let mut state = lock(&self.0.state);
             state.first_event = None;
-            state.records.drain(..).collect()
+            // A cooked read normally ends at Enter. Copy only through that key
+            // so a queued paste does not copy and requeue every later line
+            // once for each ReadConsole call.
+            let count = state
+                .records
+                .iter()
+                .position(|record| {
+                    u32_at(record, 4) != 0 && u16::from_le_bytes([record[14], record[15]]) == 13
+                })
+                .map_or(state.records.len(), |index| index + 1);
+            state.records.drain(..count).collect()
         };
         let process = request.descriptor.process;
         let cooked = request.cooked.as_mut().unwrap();

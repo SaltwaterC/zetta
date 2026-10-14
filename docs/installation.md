@@ -245,7 +245,9 @@ to the per-user Windows `PATH`, and creates a Start Menu shortcut. The PATH
 change is inherited by new processes, so open a new console (or restart a
 process that was already running) before invoking `zetta`, `wslx`, `zmux`,
 `zosh`, `zosh-server`, `zwt`, or `zntfy`. The shortcut launches `zetta-gui.exe`, which starts
-the console-native executable without opening an extra console window.
+the console-native executable without opening an extra console window. Windows panes use
+`zmux` by default with either console backend; `zetta --no-mux` explicitly
+selects process-local sessions.
 
 Zetta can be reinstalled while it is running. Windows keeps the previous
 runtime under names such as `zetta.old.exe` until its processes exit. Repeating
@@ -265,6 +267,19 @@ works while Zetta and its multiplexer sessions are running. Existing hosts keep
 their consoles and their old image; future pane bootstraps use the active helper.
 An already-running pane keeps its original bootstrap until that pane is closed.
 The wire protocol remains compatible.
+
+Revision 6 fixes console-server pane startup when the inherited Windows
+environment contains internal variables such as `=C:` or `=ExitCode`. Rebuild
+and reinstall the helper to deploy this fix. A host already running keeps its
+existing image until it exits; restart Zetta and its multiplexer after closing
+the existing sessions when it is safe to end them.
+
+If installation reports `Could not upgrade the installed multiplexer: zmux:
+invalid host token`, the new files were copied but the running daemon could
+not complete its handover. Older daemons can cache a stale host token during
+startup. Close Zetta and, once its sessions can safely end, run `zmux stop
+--force`, then repeat the installation. The forced stop ends any remaining
+sessions. New daemons authenticate the host before caching its endpoint.
 
 The shortcut exposes available profiles in its Windows Jump List, including
 when Zetta appears in Start Menu search. Zetta refreshes the entries after

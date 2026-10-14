@@ -297,9 +297,10 @@ impl Child {
     ) -> io::Result<Self> {
         let command = &launch.command;
         if command.contains('\0')
-            || launch.environment.iter().any(|(name, value)| {
-                name.is_empty() || name.contains(['=', '\0']) || value.contains('\0')
-            })
+            || launch
+                .environment
+                .iter()
+                .any(|(name, value)| !valid_environment_name(name) || value.contains('\0'))
         {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -400,6 +401,12 @@ impl Child {
         })?;
         let process = Handle::new(info.hProcess)?;
         let thread = Handle::new(info.hThread)?;
+        if let Err(error) = crate::launch_control::enable_ctrl_c(process.raw()) {
+            unsafe {
+                TerminateProcess(process.raw(), 1);
+            }
+            return Err(error);
+        }
         if unsafe { AssignProcessToJobObject(job.raw(), process.raw()) } == 0 {
             let error = io::Error::last_os_error();
             unsafe {
@@ -449,3 +456,15 @@ fn check(ok: i32) -> io::Result<()> {
         Ok(())
     }
 }
+
+/// Windows inherits internal names such as `=C:` (a drive's current
+/// directory) and CMD's `=ExitCode`. Their leading equals sign is part of
+/// the name; additional equals signs would corrupt an environment entry.
+fn valid_environment_name(name: &str) -> bool {
+    let name = name.strip_prefix('=').unwrap_or(name);
+    !name.is_empty() && !name.contains(['=', '\0'])
+}
+
+#[cfg(test)]
+#[path = "tests/native.rs"]
+mod tests;

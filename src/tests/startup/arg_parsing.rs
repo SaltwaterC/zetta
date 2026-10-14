@@ -79,6 +79,8 @@ fn ordinary_and_explicit_new_window_launches_are_handoff_eligible() {
     let geometry =
         parse_args_from([OsString::from("--geometry"), OsString::from("80x24")]).unwrap();
 
+    assert!(!plain.no_mux);
+    assert!(!new_window.no_mux);
     assert!(should_handoff_to_existing_process(&plain));
     assert_eq!(new_window, short_new_window);
     assert_eq!(new_window.mode, StartupMode::NewWindow);

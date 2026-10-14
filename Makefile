@@ -59,6 +59,7 @@ BUILD_TARGET_DIR := target/$(BUILD_PROFILE)
 # change under crates/ cannot silently skip formatting or tests.
 ZETTA_CRATE_DIRS := \
 	crates/alacritty_terminal \
+	crates/console-server \
 	crates/block \
 	crates/proc-macro-error2 \
 	crates/gpui_linux \
@@ -80,6 +81,7 @@ ZETTA_CRATE_DIRS := \
 # independent locked test graph.
 ZETTA_TEST_CRATE_DIRS := \
 	crates/alacritty_terminal \
+	crates/console-server \
 	crates/proc-macro-error2 \
 	crates/terminal \
 	crates/zetta_profiles \

@@ -54,9 +54,9 @@ fn backend_values_are_typed_and_default_is_omitted_from_wire() {
             .get("windows_console_backend")
             .is_none()
     );
-    command.console_backend = ConsoleBackend::ConsoleServer;
+    command.console_backend = ConsoleBackend::Conpty;
     let encoded = serde_json::to_value(&command).unwrap();
-    assert_eq!(encoded["windows_console_backend"], "console-server");
+    assert_eq!(encoded["windows_console_backend"], "conpty");
     assert_eq!(
         serde_json::from_value::<ProfileCommand>(encoded).unwrap(),
         command
@@ -112,7 +112,7 @@ fn top_level_backend_is_read_from_the_file_and_typed() {
     std::fs::write(&path, "{}").unwrap();
     assert_eq!(
         configured_profiles(&path).unwrap().backend,
-        ConsoleBackend::Conpty
+        ConsoleBackend::ConsoleServer
     );
     for value in ["null", "\"unknown\""] {
         std::fs::write(&path, format!(r#"{{"windows_console_backend":{value}}}"#)).unwrap();
@@ -131,4 +131,23 @@ fn backend_spellings_round_trip() {
         );
     }
     assert_eq!(ConsoleBackend::parse("ConPTY"), None);
+}
+
+#[test]
+fn new_commands_and_missing_wire_backends_use_console_server() {
+    for command in [
+        ProfileCommand::system(),
+        ProfileCommand::program("cmd.exe"),
+        ProfileCommand::with_args("cmd.exe", vec!["/d".into()]),
+    ] {
+        assert_eq!(command.console_backend, ConsoleBackend::ConsoleServer);
+        let encoded = serde_json::to_value(&command).unwrap();
+        assert!(encoded.get("windows_console_backend").is_none());
+        assert_eq!(
+            serde_json::from_value::<ProfileCommand>(encoded).unwrap(),
+            command
+        );
+    }
+    assert!(ConsoleBackend::ConsoleServer.is_default());
+    assert!(!ConsoleBackend::Conpty.is_default());
 }

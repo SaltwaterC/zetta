@@ -1,4 +1,4 @@
-"""Reproduce the headless spike comparison with the existing shitty byte relay.
+"""Compare headless console backends with the byte relay.
 
 This compares transport+parser wall time, including child startup and shutdown.
 It does not measure GUI rendering. Run an optimized binary and keep history fixed.

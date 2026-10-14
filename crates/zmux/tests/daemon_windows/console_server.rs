@@ -116,3 +116,41 @@ fn a_console_server_pane_survives_a_daemon_upgrade() {
         .shutdown()
         .expect("stopping the replacement daemon");
 }
+
+/// Matches the GUI's interactive Windows PowerShell launch, including its
+/// startup integration and inherited environment rather than a short probe.
+#[test]
+fn a_console_server_pane_starts_powershell_with_shell_integration() {
+    let daemon = TestDaemon::start();
+    let client = daemon.client();
+    let mut request = spawn_request();
+    request.console_backend = zetta_profiles::ConsoleBackend::ConsoleServer;
+    request.program = Some("powershell.exe".into());
+    let integration = include_str!("../../../../src/shell_integration/powershell.ps1");
+    request.args = vec![
+        "-NoLogo".into(),
+        "-NoProfile".into(),
+        "-NoExit".into(),
+        "-Command".into(),
+        format!("{integration}\nWrite-Output 'zetta-powershell-ready'"),
+    ];
+    request.env.extend(std::env::vars());
+    // Deterministic even when the test runner was not started by CMD.
+    request.env.insert("=C:".into(), r"C:\Windows".into());
+    request.env.insert("=ExitCode".into(), "00000000".into());
+    let pane = client
+        .spawn(request)
+        .expect("starting PowerShell through zmux");
+    let mut output = std::fs::File::from(pane.conout);
+    let mut input = std::fs::File::from(pane.conin);
+    let bytes = read_until(
+        &mut output,
+        &mut input,
+        b"zetta-powershell-ready",
+        Duration::from_secs(15),
+    );
+    assert!(String::from_utf8_lossy(&bytes).contains("zetta-powershell-ready"));
+    client
+        .kill(pane.session_id)
+        .expect("cleaning up PowerShell");
+}

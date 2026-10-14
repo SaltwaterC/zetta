@@ -207,6 +207,11 @@ fn spawn_requests_round_trip_shell_arguments_environment_and_working_directory()
     let wire = serde_json::to_string(&request).unwrap();
     let parsed: SpawnRequest = serde_json::from_str(&wire).unwrap();
 
+    assert_eq!(
+        parsed.console_backend,
+        zetta_profiles::ConsoleBackend::ConsoleServer
+    );
+    assert_eq!(parsed.console_backend, request.console_backend);
     assert_eq!(parsed.session_id, request.session_id);
     assert_eq!(parsed.client_process_id, request.client_process_id);
     assert_eq!(parsed.program, request.program);

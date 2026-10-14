@@ -23,6 +23,8 @@ mod input;
 #[cfg(windows)]
 mod keys;
 #[cfg(windows)]
+mod launch_control;
+#[cfg(windows)]
 mod legacy;
 #[cfg(windows)]
 pub mod native;

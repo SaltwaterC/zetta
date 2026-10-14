@@ -184,3 +184,49 @@ fn openssh_handle_state_is_recognised_by_its_suffix() {
     assert!(!is_openssh_handle_state(OsStr::new("SSH_AUTH_SOCK")));
     assert!(!is_openssh_handle_state(OsStr::new("POSIX_FD_STATE_EXTRA")));
 }
+
+#[test]
+fn host_connections_authenticate_before_caching_the_endpoint() {
+    for authenticated in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        create_private_dir(directory.path()).unwrap();
+        let socket = socket_path(directory.path());
+        let listener = Listener::bind(&socket).unwrap();
+        let endpoint = Endpoint {
+            version: crate::transport::ENDPOINT_VERSION,
+            protocol_version: HOST_PROTOCOL_VERSION,
+            process_id: std::process::id(),
+            socket_path: socket,
+            token: "endpoint-token".into(),
+        };
+        endpoint.write(&endpoint_path(directory.path())).unwrap();
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut connection = Connection::new(stream);
+            // The old implementation accepted the socket and sent nothing.
+            let Ok((envelope, _)) = connection.receive::<HostEnvelope>() else {
+                return;
+            };
+            assert!(matches!(envelope.request, HostRequest::List));
+            let response = if authenticated {
+                HostResponse::Consoles {
+                    consoles: Vec::new(),
+                }
+            } else {
+                HostResponse::Error {
+                    message: "invalid host token".into(),
+                }
+            };
+            connection.send(&response).unwrap();
+        });
+        let result = HostClient::connect(directory.path());
+        server.join().unwrap();
+        if authenticated {
+            assert!(result.unwrap().is_some());
+        } else {
+            assert!(
+                matches!(result, Err(error) if error.to_string().contains("invalid host token"))
+            );
+        }
+    }
+}
