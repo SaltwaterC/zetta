@@ -724,6 +724,8 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
         let mut run = [0u8; LOSSY_RUN_CAPACITY];
         let mut run_len = 0;
 
+        // The run always has room at the top of the loop: every write to it is
+        // followed by a flush once it is full, on either path.
         let mut i = 0;
         while i < bytes.len() {
             // Every byte but the last has a successor to decide a lead byte by.
@@ -740,16 +742,15 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
                 }
             }
 
-            if run_len == LOSSY_RUN_CAPACITY {
-                run_len = flush(performer, &run[..run_len]);
-            }
-
             let byte = bytes[i];
             let invalid_len = match byte {
                 0x20..=0x7E => {
                     run[run_len] = byte;
                     run_len += 1;
                     i += 1;
+                    if run_len == LOSSY_RUN_CAPACITY {
+                        run_len = flush(performer, &run[..run_len]);
+                    }
                     continue;
                 },
                 // Bytes that never start a character: one byte each.
@@ -792,6 +793,9 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
             run[run_len] = ASCII_REPLACEMENT;
             run_len += 1;
             i += invalid_len;
+            if run_len == LOSSY_RUN_CAPACITY {
+                run_len = flush(performer, &run[..run_len]);
+            }
         }
         flush(performer, &run[..run_len]);
         bytes.len()
@@ -2006,6 +2010,26 @@ mod tests {
             let mut ignoring = IgnoringDispatcher::default();
             Parser::new().advance(&mut ignoring, &bytes);
             assert_eq!(unignored(ignoring.0.dispatched), unignored(upstream), "{bytes:x?}");
+        }
+    }
+
+    /// The per-byte path's replacement character can be the one that fills the
+    /// run. The table path that follows used to write before checking for room,
+    /// one past the end, which panicked the PTY parser thread partway through
+    /// random bytes often enough to fail the throughput comparison.
+    #[test]
+    fn a_replacement_that_fills_the_run_is_flushed_before_the_next_byte() {
+        for filled_by_slow_path in LOSSY_RUN_CAPACITY - 2..=LOSSY_RUN_CAPACITY + 1 {
+            // The invalid byte starts lossy dispatch and the printable ones take the
+            // table path. `E0 A0` could begin a character, so only the per-byte
+            // path finds that `b` ends it.
+            let mut bytes = vec![0xFF];
+            bytes.resize(filled_by_slow_path, b'a');
+            bytes.extend_from_slice(b"\xE0\xA0bc");
+
+            let mut dispatcher = Dispatcher::default();
+            Parser::new().advance(&mut dispatcher, &bytes);
+            assert_eq!(dispatcher.dispatched, upstream_ground_dispatch(&bytes));
         }
     }
 
