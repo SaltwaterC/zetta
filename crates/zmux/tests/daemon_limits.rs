@@ -384,12 +384,12 @@ fn connections_past_the_limit_are_refused_and_places_return() {
 
     // Idle connections, each holding a place until its request deadline.
     let held = (0..LIMIT)
-        .map(|_| UnixStream::connect(&endpoint.socket_path).unwrap())
+        .map(|_| connect_through_backlog(&endpoint.socket_path))
         .collect::<Vec<_>>();
     let mut refused = None;
     let deadline = Instant::now() + Duration::from_secs(5);
     while refused.is_none() && Instant::now() < deadline {
-        let mut connection = Connection::new(Stream::connect(&endpoint.socket_path).unwrap());
+        let mut connection = Connection::new(connect_through_backlog(&endpoint.socket_path));
         connection
             .set_read_timeout(Some(Duration::from_secs(2)))
             .unwrap();
@@ -403,6 +403,29 @@ fn connections_past_the_limit_are_refused_and_places_return() {
 
     drop(held);
     daemons.wait_for_ready();
+}
+
+/// Connects, waiting out a full listen backlog rather than failing on it.
+///
+/// Linux blocks a connect while the backlog is full; macOS refuses it with
+/// `ECONNREFUSED` instead, and its backlog is capped at `kern.ipc.somaxconn`
+/// (128). Connecting a thousand times in a loop outruns the daemon's accept
+/// loop there, which is the kernel refusing, not the daemon — the refusal
+/// this test is about is the daemon's own, sent as a response.
+fn connect_through_backlog(socket: &Path) -> UnixStream {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        match UnixStream::connect(socket) {
+            Ok(stream) => return stream,
+            Err(error)
+                if error.kind() == std::io::ErrorKind::ConnectionRefused
+                    && Instant::now() < deadline =>
+            {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Err(error) => panic!("could not connect to {}: {error}", socket.display()),
+        }
+    }
 }
 
 fn raise_descriptor_limit(wanted: u64) -> bool {
