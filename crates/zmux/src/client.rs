@@ -1692,7 +1692,15 @@ impl Client {
         loop {
             let endpoint = self.endpoint_snapshot();
             match self.ping_with_endpoint(&endpoint) {
-                Ok(()) => return Ok(()),
+                Ok(()) => {
+                    // A daemon serves nothing until it has published its
+                    // endpoint, so the file now names the one that answered.
+                    // The snapshot may predate that: a Windows replacement
+                    // keeps the socket and token, binds, and only then
+                    // publishes its own process ID over its predecessor's.
+                    self.refresh_endpoint_if_changed(&endpoint);
+                    return Ok(());
+                }
                 Err(error) if is_invalid_token_error(&error) => {
                     self.refresh_endpoint_after_token(&endpoint, deadline)
                         .with_context(

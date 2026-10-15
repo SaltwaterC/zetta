@@ -79,6 +79,51 @@ fn ready_connection_rejects_a_failed_ping() {
 
 #[cfg(unix)]
 #[test]
+fn ready_connection_reports_the_daemon_that_answered_its_ping() {
+    use std::os::unix::net::UnixListener;
+
+    let directory = tempfile::tempdir().unwrap();
+    let socket_path = directory.path().join("zmux.sock");
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    let endpoint_path = directory.path().join("zmux.json");
+    let replaced = Endpoint {
+        version: crate::transport::ENDPOINT_VERSION,
+        protocol_version: PROTOCOL_VERSION,
+        process_id: 4242,
+        socket_path: socket_path.clone(),
+        token: "kept-token".to_owned(),
+    };
+    replaced.write(&endpoint_path).unwrap();
+
+    let server = std::thread::spawn({
+        let endpoint_path = endpoint_path.clone();
+        move || {
+            // A Windows replacement binds the socket it inherited the token
+            // for while its predecessor's endpoint is still on disk, and
+            // publishes its own before it answers anything.
+            let _ = listener.accept().unwrap();
+            let (stream, _) = listener.accept().unwrap();
+            Endpoint {
+                process_id: 4243,
+                ..replaced
+            }
+            .write(&endpoint_path)
+            .unwrap();
+            let mut connection = Connection::new(stream);
+            let (envelope, _) = connection.receive::<Envelope>().unwrap();
+            assert!(matches!(envelope.request, Request::Ping));
+            assert_eq!(envelope.token, "kept-token");
+            connection.send(&Response::Ok).unwrap();
+        }
+    });
+
+    let client = Client::connect_ready_at(directory.path()).unwrap().unwrap();
+    assert_eq!(client.process_id(), 4243);
+    server.join().unwrap();
+}
+
+#[cfg(unix)]
+#[test]
 fn ready_connection_refreshes_a_stale_endpoint_token() {
     use std::os::unix::net::UnixListener;
 

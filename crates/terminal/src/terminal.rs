@@ -10715,8 +10715,10 @@ mod tests {
         );
 
         // A shell given a nonce reports with it: `cmd` has nowhere else to
-        // keep it.
+        // keep it. The prompt is given explicitly, because without one the
+        // tracker falls back to the test process's own `PROMPT`.
         let mut environment = HashMap::default();
+        environment.insert("PROMPT".to_owned(), "$N$G".to_owned());
         environment.insert(
             COMMAND_MARKER_NONCE_ENV.to_owned(),
             "0123456789abcdef0123456789abcdef".to_owned(),
@@ -10724,7 +10726,7 @@ mod tests {
         install_windows_cwd_tracking("cmd.exe", &mut arguments, &mut environment);
         assert_eq!(
             environment.get("PROMPT").map(String::as_str),
-            Some("$E]2;zetta-cwd;0123456789abcdef0123456789abcdef:$P$E\\$P$G")
+            Some("$E]2;zetta-cwd;0123456789abcdef0123456789abcdef:$P$E\\$N$G")
         );
     }
 
