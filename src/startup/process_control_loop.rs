@@ -28,8 +28,23 @@ pub(super) async fn serve(
     cx: &mut AsyncApp,
 ) {
     while let Some(command) = control_rx.next().await {
+        if command.came_from_control_socket() {
+            release_queued_control_command(cx);
+        }
         dispatch(command, cx);
     }
+}
+
+/// Gives the control server back the queue place a command it sent held.
+///
+/// Released as the command is taken, before it runs: the bound is on what is
+/// waiting, and a handler that takes a while is the reason it exists.
+fn release_queued_control_command(cx: &mut AsyncApp) {
+    cx.update(|cx| {
+        if let Some(state) = cx.try_global::<ZettaProcessState>() {
+            state.control_server.queued_commands().release();
+        }
+    });
 }
 
 fn dispatch(command: ProcessControlCommand, cx: &mut AsyncApp) {

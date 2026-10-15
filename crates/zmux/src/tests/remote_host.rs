@@ -81,3 +81,85 @@ fn a_windows_program_path_must_be_absolute() {
     assert!(parse_program_path(r"C:zmux.exe").is_err());
     assert!(parse_program_path("/usr/bin/zmux").is_err());
 }
+
+/// Literals a remote program path could need: PowerShell closes a
+/// single-quoted string at `'` and at each of U+2018–U+201B.
+const POWERSHELL_LITERALS: &[&str] = &[
+    "",
+    "it's",
+    r"C:\Users\O’Brien\AppData\Local\Programs\Zetta\zmux.exe",
+    "‘’‚‛",
+    "'‘’‚‛'",
+    "''’’",
+    "x’; Write-Output injected; ’",
+    "$HOME `n \"double\"",
+];
+
+#[test]
+fn every_powershell_single_quote_is_doubled() {
+    assert_eq!(quote("it's"), "'it''s'");
+    assert_eq!(quote("‘’‚‛"), "'‘‘’’‚‚‛‛'");
+    assert_eq!(quote("‟"), "'‟'");
+    let script = decoded(&start_daemon_command(Path::new(
+        r"C:\Users\O’Brien\zmux.exe",
+    )))
+    .unwrap();
+    assert!(
+        script.starts_with(r"& 'C:\Users\O’’Brien\zmux.exe' "),
+        "{script}"
+    );
+}
+
+/// What each PowerShell engine on this host reads every literal as, decoding
+/// [`encoded`]'s script as a remote host would. Windows PowerShell exists only
+/// on Windows, and `pwsh` only where it is installed; a host with neither
+/// returns nothing.
+fn powershell_readings(literals: &[String]) -> Vec<(&'static str, Vec<String>)> {
+    let script = literals
+        .iter()
+        .map(|literal| {
+            format!(
+                "[Console]::Out.WriteLine([Convert]::ToBase64String(\
+                 [Text.Encoding]::UTF8.GetBytes({literal})))"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    let command = encoded(&script);
+    let script = command.rsplit_once(' ').unwrap().1;
+    ["powershell.exe", "pwsh"]
+        .into_iter()
+        .filter_map(|engine| {
+            let output = std::process::Command::new(engine)
+                .args(["-NoProfile", "-NonInteractive", "-EncodedCommand", script])
+                .output()
+                .ok()?;
+            assert!(
+                output.status.success(),
+                "{engine}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let readings = String::from_utf8(output.stdout)
+                .unwrap()
+                .lines()
+                .map(|line| String::from_utf8(STANDARD.decode(line.trim()).unwrap()).unwrap())
+                .collect();
+            Some((engine, readings))
+        })
+        .collect()
+}
+
+#[test]
+fn powershell_reads_each_quoted_literal_back_unchanged() {
+    let quoted = POWERSHELL_LITERALS
+        .iter()
+        .map(|literal| quote(literal))
+        .collect::<Vec<_>>();
+    let readings = powershell_readings(&quoted);
+    if readings.is_empty() {
+        eprintln!("no PowerShell engine on this host; only the quoting itself was checked");
+    }
+    for (engine, read) in readings {
+        assert_eq!(read, POWERSHELL_LITERALS, "{engine}");
+    }
+}

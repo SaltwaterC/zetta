@@ -48,6 +48,7 @@ use crate::{
         SharedSessionOperation, SpawnRequest, TerminalSize,
     },
     paths::session_catalog_dir,
+    private_fs::remove_stale_socket,
     protocol::{BackgroundPaneLayout, BackgroundSessionSummary},
     retention::Retention,
     transport::{
@@ -795,6 +796,16 @@ pub struct Daemon {
     #[cfg(feature = "session-persistence")]
     restored: Mutex<Vec<RestoredSession>>,
     recipient_grants: Mutex<RecipientGrants>,
+    /// Connections being served, against [`ipc_limits::MAX_CONNECTIONS`].
+    connections: Arc<AtomicUsize>,
+    /// Raw snapshot bytes being read, across every request.
+    snapshot_budget: SnapshotBudget,
+    /// What makes this the directory's only daemon; see `lifetime_lock`.
+    /// `None` only for a replacement that could neither take over nor take
+    /// the lock, which carries on rather than drop its sessions.
+    lifetime_lock: Mutex<Option<LifetimeLock>>,
+    /// Set once a Windows replacement has taken over the socket and endpoint.
+    handed_over: AtomicBool,
 }
 
 struct Subscriber {
@@ -978,6 +989,10 @@ impl Daemon {
             #[cfg(feature = "session-persistence")]
             restored: Mutex::new(Vec::new()),
             recipient_grants: Mutex::new(RecipientGrants::default()),
+            connections: Arc::new(AtomicUsize::new(0)),
+            snapshot_budget: SnapshotBudget::default(),
+            lifetime_lock: Mutex::new(None),
+            handed_over: AtomicBool::new(false),
         }
     }
 }
@@ -1011,32 +1026,20 @@ pub fn run(
         );
     }
     #[cfg(unix)]
-    let resumed_handover = resume_from
+    let mut resumed_handover = resume_from
         .map(crate::upgrade::read_handover)
         .transpose()
         .context("reading the multiplexer upgrade handover")?;
     #[cfg(windows)]
-    let resumed_handover = resume_from
+    let mut resumed_handover = resume_from
         .as_ref()
         .map(crate::upgrade::receive_handover)
         .transpose()
         .context("reading the multiplexer upgrade handover")?;
-    #[cfg(unix)]
     let generation = resumed_handover
         .as_ref()
         .map(|handover| handover.generation)
         .unwrap_or(new_generation()?);
-    #[cfg(unix)]
-    let retention = resumed_handover
-        .as_ref()
-        .map(|handover| handover.retention)
-        .unwrap_or(retention);
-    #[cfg(windows)]
-    let generation = resumed_handover
-        .as_ref()
-        .map(|handover| handover.generation)
-        .unwrap_or(new_generation()?);
-    #[cfg(windows)]
     let retention = resumed_handover
         .as_ref()
         .map(|handover| handover.retention)
@@ -1045,6 +1048,18 @@ pub fn run(
     create_private_dir(&directory)?;
     let socket = socket_path(&directory);
     let endpoint = endpoint_path(&directory);
+
+    // Before anything here touches the socket or the pseudoconsole host, and
+    // held for the rest of this process's life: see `lifetime_lock`. A
+    // replacement carries its predecessor's.
+    let carried_lock = resumed_handover
+        .as_mut()
+        .and_then(|handover| handover.lifetime_lock.take());
+    let lifetime_lock = if resumed_handover.is_some() {
+        lock_for_replacement(&directory, carried_lock)
+    } else {
+        Some(claim_directory(&directory, &socket)?)
+    };
 
     // Replacing itself keeps the endpoint: a client holding the old token has
     // to keep working, and reissuing one would lock out every window that is
@@ -1078,61 +1093,12 @@ pub fn run(
         )?;
     }
 
-    // A stale socket from a daemon that died is not a reason to refuse to
-    // start, but a live one is: two daemons would each own half the sessions.
-    if inherited.is_none()
-        && let Ok(existing) = Endpoint::read(&endpoint)
-        && Stream::connect(&existing.socket_path).is_ok()
-    {
-        anyhow::bail!(
-            "another multiplexer is already running on {}",
-            existing.socket_path.display()
-        );
-    }
-    #[cfg(target_os = "macos")]
-    let resume_listener = {
-        if let Some(descriptor) = resume_listener {
-            // An older image may still have passed its listener through. It is
-            // unusable after a Darwin exec, so close it before binding the
-            // replacement's fresh listener.
-            // SAFETY: the descriptor was inherited from the previous image.
-            unsafe { libc::close(descriptor) };
-        }
-        None::<i32>
-    };
-    #[cfg(unix)]
-    let listener = if let Some(descriptor) = resume_listener {
-        anyhow::ensure!(
-            resumed_handover.is_some(),
-            "--resume-listener requires --resume-from"
-        );
-        anyhow::ensure!(
-            crate::upgrade::descriptor_is_open(descriptor),
-            "the inherited listener descriptor {descriptor} was not inherited"
-        );
-        // SAFETY: the descriptor was inherited from the previous image and is
-        // claimed by this listener exactly once.
-        unsafe { Listener::from_raw_fd(descriptor) }
-    } else {
-        #[cfg(not(target_os = "macos"))]
-        anyhow::ensure!(
-            resumed_handover.is_none(),
-            "an upgrade did not carry its listening socket"
-        );
-        let _ = std::fs::remove_file(&socket);
-        let listener = Listener::bind(&socket)
-            .with_context(|| format!("binding the multiplexer socket {}", socket.display()))?;
-        restrict_socket(&socket)?;
-        listener
-    };
-    #[cfg(windows)]
-    let listener = {
-        let _ = std::fs::remove_file(&socket);
-        let listener = Listener::bind(&socket)
-            .with_context(|| format!("binding the multiplexer socket {}", socket.display()))?;
-        restrict_socket(&socket)?;
-        listener
-    };
+    let listener = bind_listener(
+        &socket,
+        resumed_handover.is_some(),
+        #[cfg(unix)]
+        resume_listener,
+    )?;
     let token = match inherited {
         Some(endpoint) => endpoint.token,
         None => random_hex(32)?,
@@ -1182,35 +1148,17 @@ pub fn run(
         pty_host,
     ));
     *lock_grants(&daemon) = RecipientGrants::starting_with(startup_recipients);
-    #[cfg(unix)]
-    if let Some(mut handover) = resumed_handover {
-        let grants = handover.recipient_grants.take();
-        // The previous image left its sessions behind in this same process:
-        // the descriptors are still open and the shells are still this
-        // process's children, so they are adopted rather than restarted.
-        match adopt_handover(&daemon, handover) {
-            Ok(count) => log::info!("zmux resumed {count} session(s) across an upgrade"),
-            Err(error) => log::error!("could not resume sessions across the upgrade: {error:#}"),
-        }
-        adopt_seals(&daemon, grants);
-        // An older image could hand over panes whose process ended before the
-        // exec: the reaper never re-examines a pane already marked exited, so
-        // prune what an upgraded daemon should not offer.
-        prune_exited_panes(&daemon);
-        publish(&daemon);
-    }
-    #[cfg(windows)]
-    if let Some(mut handover) = resumed_handover {
-        let grants = handover.recipient_grants.take();
-        let count = adopt_handover(&daemon, handover)
-            .context("adopting sessions across the Windows upgrade")?;
-        adopt_seals(&daemon, grants);
-        log::info!("zmux resumed {count} session(s) across an upgrade");
-        prune_exited_panes(&daemon);
-        publish(&daemon);
-        if let Some(ready) = resume_ready.as_deref() {
-            crate::upgrade::remove_ready(ready);
-        }
+    *daemon
+        .lifetime_lock
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = lifetime_lock;
+    if let Some(handover) = resumed_handover {
+        adopt_resumed_handover(
+            &daemon,
+            handover,
+            #[cfg(windows)]
+            resume_ready.as_deref(),
+        )?;
     }
     sweep_image_staging(&daemon)?;
     #[cfg(feature = "session-persistence")]
@@ -1239,6 +1187,48 @@ pub fn run(
     .write(&endpoint)?;
 
     log::info!("zmux listening on {}", socket.display());
+    accept_connections(&daemon, &listener, &token);
+    shut_down(&daemon, &socket, &endpoint);
+    Ok(())
+}
+
+/// Takes over the sessions a previous image handed over, once the daemon that
+/// will serve them exists.
+fn adopt_resumed_handover(
+    daemon: &Arc<Daemon>,
+    mut handover: crate::upgrade::Handover,
+    #[cfg(windows)] resume_ready: Option<&Path>,
+) -> Result<()> {
+    let grants = handover.recipient_grants.take();
+    // The previous image left its sessions behind in this same process: the
+    // descriptors are still open and the shells are still this process's
+    // children, so they are adopted rather than restarted.
+    #[cfg(unix)]
+    match adopt_handover(daemon, handover) {
+        Ok(count) => log::info!("zmux resumed {count} session(s) across an upgrade"),
+        Err(error) => log::error!("could not resume sessions across the upgrade: {error:#}"),
+    }
+    #[cfg(windows)]
+    {
+        let count = adopt_handover(daemon, handover)
+            .context("adopting sessions across the Windows upgrade")?;
+        log::info!("zmux resumed {count} session(s) across an upgrade");
+    }
+    adopt_seals(daemon, grants);
+    // An older image could hand over panes whose process ended before the
+    // exec: the reaper never re-examines a pane already marked exited, so
+    // prune what an upgraded daemon should not offer.
+    prune_exited_panes(daemon);
+    publish(daemon);
+    #[cfg(windows)]
+    if let Some(ready) = resume_ready {
+        crate::upgrade::remove_ready(ready);
+    }
+    Ok(())
+}
+
+/// Serves every connection the listener accepts until the daemon stops.
+fn accept_connections(daemon: &Arc<Daemon>, listener: &Listener, token: &str) {
     for stream in listener.incoming() {
         if !daemon.running.load(Ordering::SeqCst) {
             break;
@@ -1250,11 +1240,25 @@ pub fn run(
                 continue;
             }
         };
-        let daemon = daemon.clone();
-        let token = token.clone();
-        spawn_connection(daemon, stream, token);
+        let accepted = Instant::now();
+        // Refused here rather than left in the kernel's backlog, where it would
+        // hold the user's own next request behind whatever filled the daemon.
+        let Some(permit) = ConnectionPermit::claim(&daemon.connections, MAX_CONNECTIONS) else {
+            log::warn!("refusing a multiplexer connection: {MAX_CONNECTIONS} are being served");
+            refuse_connection(stream);
+            continue;
+        };
+        spawn_connection(
+            daemon.clone(),
+            stream,
+            token.to_owned(),
+            Accepted { accepted, permit },
+        );
     }
+}
 
+/// What a stopping daemon does once it has stopped accepting connections.
+fn shut_down(daemon: &Daemon, socket: &Path, endpoint: &Path) {
     #[cfg(feature = "session-persistence")]
     {
         let mut persistence = daemon.persistence.lock();
@@ -1264,9 +1268,55 @@ pub fn run(
             log::warn!("could not flush encrypted scrollback: {error:#}");
         }
     }
-    let _ = std::fs::remove_file(&socket);
-    let _ = std::fs::remove_file(&endpoint);
-    Ok(())
+    // A Windows daemon that handed over to a replacement no longer owns
+    // either: the replacement may already have bound and published them.
+    if !daemon.handed_over.load(Ordering::SeqCst) {
+        let _ = std::fs::remove_file(socket);
+        let _ = std::fs::remove_file(endpoint);
+    }
+}
+
+/// The listener: inherited from the image this one replaced where the
+/// platform carries it across `execv`, otherwise bound afresh.
+fn bind_listener(
+    socket: &Path,
+    resumed: bool,
+    #[cfg(unix)] resume_listener: Option<i32>,
+) -> Result<Listener> {
+    #[cfg(target_os = "macos")]
+    let resume_listener = {
+        if let Some(descriptor) = resume_listener {
+            // An older image may still have passed its listener through. It is
+            // unusable after a Darwin exec, so close it before binding the
+            // replacement's fresh listener.
+            // SAFETY: the descriptor was inherited from the previous image.
+            unsafe { libc::close(descriptor) };
+        }
+        None::<i32>
+    };
+    #[cfg(unix)]
+    if let Some(descriptor) = resume_listener {
+        anyhow::ensure!(resumed, "--resume-listener requires --resume-from");
+        anyhow::ensure!(
+            crate::upgrade::descriptor_is_open(descriptor),
+            "the inherited listener descriptor {descriptor} was not inherited"
+        );
+        // SAFETY: the descriptor was inherited from the previous image and is
+        // claimed by this listener exactly once.
+        return Ok(unsafe { Listener::from_raw_fd(descriptor) });
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    anyhow::ensure!(!resumed, "an upgrade did not carry its listening socket");
+    #[cfg(windows)]
+    let _ = resumed;
+    // Only the lock's holder gets here. A fresh start found nothing answering
+    // on the socket, and a replacement's predecessor has stopped listening, so
+    // whatever is left there is a dead listener's.
+    remove_stale_socket(socket)?;
+    let listener = Listener::bind(socket)
+        .with_context(|| format!("binding the multiplexer socket {}", socket.display()))?;
+    restrict_socket(socket)?;
+    Ok(listener)
 }
 
 fn new_generation() -> Result<u64> {
@@ -1356,8 +1406,8 @@ fn restrict_socket(_path: &Path) -> Result<()> {
 /// Every refusal answers before it returns. A connection that simply closes
 /// tells the client nothing, and the client has to decide whether to fall back
 /// — which it cannot do sensibly without a reason.
-fn read_request(connection: &mut Connection, token: &str) -> Result<Envelope> {
-    let envelope: Envelope = match connection.receive() {
+fn read_request(connection: &mut Connection, token: &str, deadline: Instant) -> Result<Envelope> {
+    let envelope: Envelope = match connection.receive_by(deadline) {
         Ok((envelope, _)) => envelope,
         Err(error) => {
             let _ = connection.send(&Response::Error {
@@ -1637,6 +1687,13 @@ fn spawn_worker(name: &str, make_worker: impl Fn() -> Box<dyn FnOnce() + Send>) 
     }
 }
 
+/// When a connection was accepted, and its claim on one of the daemon's
+/// connection places, which it holds until its thread ends.
+struct Accepted {
+    accepted: Instant,
+    permit: ConnectionPermit,
+}
+
 /// Serves one accepted connection, waiting out a transient shortage of threads.
 ///
 /// `thread::Builder::spawn` consumes its closure even when the OS refuses to
@@ -1645,8 +1702,8 @@ fn spawn_worker(name: &str, make_worker: impl Fn() -> Box<dyn FnOnce() + Send>) 
 /// briefly exhausted the process's thread capacity: the peer cannot tell that
 /// apart from a daemon that died, and idempotent requests are not all retried by
 /// their callers.
-fn spawn_connection(daemon: Arc<Daemon>, stream: Stream, token: String) {
-    let stream = Arc::new(Mutex::new(Some(stream)));
+fn spawn_connection(daemon: Arc<Daemon>, stream: Stream, token: String, accepted: Accepted) {
+    let stream = Arc::new(Mutex::new(Some((stream, accepted))));
     loop {
         let stream_slot = Arc::clone(&stream);
         let daemon = daemon.clone();
@@ -1654,12 +1711,15 @@ fn spawn_connection(daemon: Arc<Daemon>, stream: Stream, token: String) {
         match thread::Builder::new()
             .name("zmux connection".to_owned())
             .spawn(move || {
-                let stream = stream_slot
+                let (stream, accepted) = stream_slot
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .take()
                     .expect("the accepted connection was already claimed");
-                if let Err(error) = serve(&daemon, stream, &token) {
+                let Accepted { accepted, permit } = accepted;
+                let _permit = permit;
+                let deadline = accepted + REQUEST_DEADLINE;
+                if let Err(error) = serve(&daemon, stream, &token, deadline) {
                     log::debug!("multiplexer connection ended: {error:#}");
                 }
             }) {
@@ -1683,7 +1743,9 @@ mod agent_pipe;
 mod attachment;
 mod dispatch;
 mod image_store;
+mod ipc_limits;
 mod lifecycle;
+mod lifetime_lock;
 #[cfg(feature = "session-persistence")]
 mod persistence_queue;
 mod sealing;
@@ -1699,7 +1761,9 @@ mod workers;
 use attachment::*;
 use dispatch::*;
 use image_store::*;
+use ipc_limits::*;
 use lifecycle::*;
+use lifetime_lock::*;
 #[cfg(feature = "session-persistence")]
 use persistence_queue::PersistenceQueue;
 pub use sealing::RecipientGrants;

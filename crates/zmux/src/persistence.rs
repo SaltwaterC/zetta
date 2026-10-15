@@ -8,6 +8,12 @@
 //! Scrollback sequence numbers are recovered once at open and reserved in
 //! memory thereafter. Only publication touches the filesystem on rotation;
 //! appending to a buffered segment never scans the persistence directory.
+//!
+//! Each file's plaintext starts with a line naming the slot it was written
+//! for, which loading checks; [`binding`] says what that does and does not
+//! guarantee. In short: a valid file copied into another file's place is
+//! refused, but age does not authenticate who wrote a file, and nothing here
+//! protects the store as a whole against being rolled back.
 
 use std::{
     collections::{HashMap, HashSet, hash_map::Entry},
@@ -38,9 +44,12 @@ use zeroize::Zeroizing;
 use crate::retention::Retention;
 use crate::{auth::SessionSecret, catalog, protocol::BackgroundSessionSummary, secret_prompt};
 
+mod binding;
 mod identity;
 mod postquantum;
 mod recipients;
+
+use binding::{Binding, StreamCheck};
 
 // The module was one file before it was split by responsibility; these keep
 // every name reachable as `crate::persistence::…`, which is how the daemon,
@@ -269,17 +278,29 @@ fn load_session_from_persistence_directory(
     let ciphertext = fs::read(&path)
         .with_context(|| format!("reading encrypted session record {}", path.display()))?;
     let plaintext = identities.decrypt(&ciphertext)?;
-    let metadata: PersistedSessionMetadata =
-        serde_json::from_slice(&plaintext).context("parsing encrypted session metadata")?;
-    let authentication = match fs::read(authentication_path(directory, id)) {
-        Ok(ciphertext) => Some(
-            serde_json::from_slice::<PersistedAuthentication>(&identities.decrypt(&ciphertext)?)
-                .context("parsing encrypted session authentication")?,
-        ),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
-        Err(error) => return Err(error).context("reading encrypted session authentication"),
+    let (binding, payload) = binding::split(&plaintext)
+        .with_context(|| format!("reading the binding of {}", path.display()))?;
+    // `None` for metadata written before bindings; see `binding`.
+    let generation = match binding {
+        Some(binding) => {
+            binding.check(&Binding::metadata_slot(id), &path)?;
+            binding.generation
+        }
+        None => None,
     };
-    let mut snapshots = load_snapshots(directory, id, &metadata.snapshots, identities)?;
+    let metadata: PersistedSessionMetadata =
+        serde_json::from_slice(payload).context("parsing encrypted session metadata")?;
+    // Checked for unbound metadata too, which has always named its record.
+    anyhow::ensure!(
+        metadata.id == id,
+        "refusing {}: it holds the metadata of record {}, not of record {id}; it was copied \
+         from another file",
+        path.display(),
+        metadata.id,
+    );
+    let authentication =
+        load_authentication(directory, id, &ciphertext, generation.is_some(), identities)?;
+    let mut snapshots = load_snapshots(directory, id, generation, &metadata.snapshots, identities)?;
     restore_scrollback(directory, id, &mut snapshots, identities)?;
     Ok(PersistedSession {
         id: metadata.id,
@@ -308,9 +329,55 @@ fn load_session_from_persistence_directory(
     })
 }
 
+/// The failed-resume counters written since `metadata` was, if there are any.
+///
+/// A sidecar names the metadata file it was written against. One written
+/// against an earlier metadata file is stale — a complete write removes it,
+/// but a crash can leave it behind — and is ignored, so it cannot replace the
+/// newer counters; one written for another record is refused. An unbound
+/// sidecar can only be current for unbound metadata.
+fn load_authentication(
+    directory: &Path,
+    id: u64,
+    metadata: &[u8],
+    metadata_bound: bool,
+    identities: &IdentitySet,
+) -> Result<Option<PersistedAuthentication>> {
+    let path = authentication_path(directory, id);
+    let ciphertext = match fs::read(&path) {
+        Ok(ciphertext) => ciphertext,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).context("reading encrypted session authentication"),
+    };
+    let plaintext = identities.decrypt(&ciphertext)?;
+    let (binding, payload) = binding::split(&plaintext)
+        .with_context(|| format!("reading the binding of {}", path.display()))?;
+    let current = match binding {
+        Some(binding) => {
+            binding.check(&Binding::authentication_slot(id), &path)?;
+            binding.metadata == Some(binding::metadata_digest(metadata))
+        }
+        None => !metadata_bound,
+    };
+    if !current {
+        log::warn!(
+            "ignoring {}: it was written for an earlier version of the record",
+            path.display()
+        );
+        return Ok(None);
+    }
+    serde_json::from_slice(payload)
+        .context("parsing encrypted session authentication")
+        .map(Some)
+}
+
+/// Reads the screens `locations` point at. Segments are checked against the
+/// write of the metadata that points at them — `generation`, `None` when that
+/// metadata predates bindings — since both are written together.
 fn load_snapshots(
     directory: &Path,
     session_id: u64,
+    generation: Option<u128>,
     locations: &[SnapshotLocation],
     identities: &IdentitySet,
 ) -> Result<Vec<PersistedSnapshot>> {
@@ -323,11 +390,28 @@ fn load_snapshots(
                 let ciphertext = fs::read(&path).with_context(|| {
                     format!("reading encrypted session bytes {}", path.display())
                 })?;
-                entry.insert(identities.decrypt(&ciphertext)?);
+                let plaintext = identities.decrypt(&ciphertext)?;
+                let (binding, payload) = binding::split(&plaintext)
+                    .with_context(|| format!("reading the binding of {}", path.display()))?;
+                match (binding, generation) {
+                    (Some(binding), Some(generation)) => binding.check(
+                        &Binding::snapshots(session_id, location.segment, generation),
+                        &path,
+                    )?,
+                    (None, None) => {}
+                    (Some(_), None) | (None, Some(_)) => anyhow::bail!(
+                        "refusing {}: it and the record's metadata were not written together; \
+                         it was copied from another file",
+                        path.display()
+                    ),
+                }
+                let start = plaintext.len() - payload.len();
+                entry.insert((plaintext, start));
             }
-            let segment = segments
+            let (plaintext, start) = segments
                 .get(&location.segment)
                 .expect("snapshot segment was inserted");
+            let segment = &plaintext[*start..];
             let offset =
                 usize::try_from(location.offset).context("snapshot offset is too large")?;
             let length =
@@ -388,14 +472,22 @@ fn restore_scrollback(
     }
 
     for path in scrollback_paths(directory, session_id)? {
-        let Some((pane_id, _)) = scrollback_path_parts(&path, session_id) else {
+        let Some((pane_id, sequence)) = scrollback_path_parts(&path, session_id) else {
             continue;
         };
         let Some(&retained_index) = retained_by_pane.get(&pane_id) else {
             continue;
         };
+        let screen = &mut retained[retained_index].1;
+        let mut check = StreamCheck::new(Binding::scrollback(session_id, pane_id, sequence), &path);
         identities.decrypt_file(&path, |chunk| {
-            retained[retained_index].1.push(chunk);
+            check.feed(chunk, |bytes| {
+                screen.push(bytes);
+                Ok(())
+            })
+        })?;
+        check.finish(|bytes| {
+            screen.push(bytes);
             Ok(())
         })?;
     }
@@ -680,11 +772,18 @@ impl PersistenceStore {
         };
         let plaintext =
             serde_json::to_vec(&authentication).context("serializing session authentication")?;
+        // Names the metadata file it updates, which the daemon can read but not
+        // decrypt, so a later complete write makes this sidecar stale.
+        let metadata = fs::read(self.session_path(id))
+            .with_context(|| format!("reading encrypted session record {id}"))?;
+        let binding = Binding::authentication(id, binding::metadata_digest(&metadata));
         // Sealed to the store rather than to the record's own recipients, which
         // the daemon cannot know for a record it did not write: a counter and a
         // delay are worth less to whoever configured the store than refusing to
         // record a failed resume would be to a guesser.
-        let ciphertext = self.recipients.encrypt(&plaintext)?;
+        let ciphertext = self
+            .recipients
+            .encrypt_parts(&[&binding.header(), &plaintext])?;
         let path = authentication_path(&self.directory, id);
         let previous_bytes = fs::metadata(&path)
             .map(|metadata| metadata.len())
@@ -704,8 +803,11 @@ impl PersistenceStore {
         if self.recipients_for(session.id).is_none() {
             return Ok(());
         }
+        // Shared by the metadata and its snapshot segments, which are only
+        // ever read together.
+        let generation = binding::new_generation()?;
         let (snapshots, snapshot_bytes) =
-            self.write_snapshot_stream(session.id, &session.snapshots)?;
+            self.write_snapshot_stream(session.id, generation, &session.snapshots)?;
         let metadata = PersistedSessionMetadata {
             id: session.id,
             created_at: session.created_at,
@@ -719,12 +821,16 @@ impl PersistenceStore {
             backoff_seconds: session.backoff_seconds,
             snapshots,
         };
-        let plaintext =
-            serde_json::to_vec(&metadata).context("serializing persisted session metadata")?;
+        // Built where it is erased afterwards: it holds the verifier.
+        let plaintext = crate::auth::encode_secret_json(&metadata, 0)
+            .context("serializing persisted session metadata")?;
         let ciphertext = self
             .recipients_for(session.id)
             .context("session was withheld while it was being written")?
-            .encrypt(&plaintext)?;
+            .encrypt_parts(&[
+                &Binding::metadata(session.id, generation).header(),
+                &plaintext,
+            ])?;
         atomic_write(&self.session_path(session.id), &ciphertext)?;
         // A complete session write carries the authoritative counters in its
         // metadata, so an older failed-resume sidecar must not override it on
@@ -823,8 +929,17 @@ impl PersistenceStore {
     pub fn read_scrollback(&self, id: u64, identities: &IdentitySet) -> Result<Vec<u8>> {
         let mut output = Vec::new();
         for path in scrollback_paths(&self.directory, id)? {
+            let (pane_id, sequence) =
+                scrollback_path_parts(&path, id).expect("scrollback paths parse");
+            let mut check = StreamCheck::new(Binding::scrollback(id, pane_id, sequence), &path);
             identities.decrypt_file(&path, |chunk| {
-                output.extend_from_slice(chunk);
+                check.feed(chunk, |bytes| {
+                    output.extend_from_slice(bytes);
+                    Ok(())
+                })
+            })?;
+            check.finish(|bytes| {
+                output.extend_from_slice(bytes);
                 Ok(())
             })?;
         }
@@ -839,6 +954,7 @@ impl PersistenceStore {
     fn write_snapshot_stream(
         &mut self,
         session_id: u64,
+        generation: u128,
         snapshots: &[PersistedSnapshot],
     ) -> Result<(Vec<SnapshotLocation>, u64)> {
         if snapshots.is_empty() {
@@ -854,7 +970,8 @@ impl PersistenceStore {
                 "snapshot is too large for an encrypted session byte stream segment"
             );
             if !segment.is_empty() && segment.len() + snapshot.bytes.len() > SEGMENT_BYTES {
-                encrypted_bytes += self.flush_snapshot_segment(session_id, sequence, &segment)?;
+                encrypted_bytes +=
+                    self.flush_snapshot_segment(session_id, sequence, generation, &segment)?;
                 sequence = sequence.saturating_add(1);
                 segment.clear();
             }
@@ -869,15 +986,23 @@ impl PersistenceStore {
                 lines: snapshot.lines,
             });
         }
-        encrypted_bytes += self.flush_snapshot_segment(session_id, sequence, &segment)?;
+        encrypted_bytes +=
+            self.flush_snapshot_segment(session_id, sequence, generation, &segment)?;
         Ok((locations, encrypted_bytes))
     }
 
-    fn flush_snapshot_segment(&self, session_id: u64, sequence: u64, bytes: &[u8]) -> Result<u64> {
+    fn flush_snapshot_segment(
+        &self,
+        session_id: u64,
+        sequence: u64,
+        generation: u128,
+        bytes: &[u8],
+    ) -> Result<u64> {
+        let binding = Binding::snapshots(session_id, sequence, generation);
         let ciphertext = self
             .recipients_for(session_id)
             .context("session was withheld while its screens were being written")?
-            .encrypt(bytes)?;
+            .encrypt_parts(&[&binding.header(), bytes])?;
         let path = snapshot_path(&self.directory, session_id, sequence);
         atomic_write(&path, &ciphertext)?;
         Ok(ciphertext.len() as u64)
@@ -1036,17 +1161,23 @@ impl PersistenceStore {
     ) -> Result<()> {
         // A seal can change between buffering and flushing; what it is now is
         // what the bytes are written under, or whether they are written at all.
-        let Some(recipients) = self.recipients_for(session_id) else {
+        if self.recipients_for(session_id).is_none() {
             segment.bytes.clear();
             return Ok(());
-        };
-        let ciphertext = recipients.encrypt(&segment.bytes)?;
-        let mut temporary = tempfile::NamedTempFile::new_in(&self.directory)
-            .context("creating private scrollback segment")?;
-        temporary
-            .write_all(&ciphertext)
-            .context("writing scrollback segment")?;
+        }
         loop {
+            // The sequence is bound into the ciphertext, so a retry under the
+            // next one needs a ciphertext of its own.
+            let binding = Binding::scrollback(session_id, pane_id, segment.sequence);
+            let ciphertext = self
+                .recipients_for(session_id)
+                .context("session was withheld while its output was being written")?
+                .encrypt_parts(&[&binding.header(), &segment.bytes])?;
+            let mut temporary = tempfile::NamedTempFile::new_in(&self.directory)
+                .context("creating private scrollback segment")?;
+            temporary
+                .write_all(&ciphertext)
+                .context("writing scrollback segment")?;
             let path = self.directory.join(format!(
                 "session-{session_id}-pane-{pane_id}-segment-{}.age",
                 segment.sequence
@@ -1056,7 +1187,6 @@ impl PersistenceStore {
             match temporary.persist_noclobber(&path) {
                 Ok(_) => break,
                 Err(error) if error.error.kind() == io::ErrorKind::AlreadyExists => {
-                    temporary = error.file;
                     segment.sequence = take_sequence(
                         self.next_sequences
                             .entry((session_id, pane_id))

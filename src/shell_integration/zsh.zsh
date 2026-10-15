@@ -143,6 +143,29 @@ if [[ -n ${ZETTA_HOST_EXECUTABLE:-} ]]; then
     }
 fi
 
+# The nonce Zetta gave this shell. Lifecycle and working-directory markers
+# carry it so that a `command-finished` or a directory printed by anything else
+# (a file, a remote host, a nested shell) cannot satisfy a `zetta pane wait` or
+# choose where a split, a file server or a project starts. Kept in a shell
+# variable, not the environment: the programs this shell runs must not inherit
+# it. A tracker that ran first may already hold it, so an absent variable
+# keeps that value.
+if (( ${+__ZETTA_COMMAND_MARKER_NONCE} )); then
+    typeset -g __zetta_marker_nonce="$__ZETTA_COMMAND_MARKER_NONCE"
+    unset __ZETTA_COMMAND_MARKER_NONCE
+fi
+# Signed when this shell holds the nonce. Without one — a shell on a remote
+# host, or one an older Zetta started — the untokened form is the one a
+# Zetta can still display.
+function __zetta_print_cwd() {
+    [[ "$PWD" == /* ]] || return 0
+    if [[ -n ${__zetta_marker_nonce-} ]]; then
+        printf '\033]2;zetta-cwd;%s:%s\033\\' "$__zetta_marker_nonce" "$PWD"
+    else
+        printf '\033]2;zetta-cwd:%s\033\\' "$PWD"
+    fi
+}
+
 if (( ! $+functions[__zetta_report_cwd] )); then
     typeset -g __ZETTA_LIFECYCLE_TRACKING_INSTALLED=1
     typeset -g __ZETTA_LIFECYCLE_TRACKING_VERSION=3
@@ -154,20 +177,20 @@ if (( ! $+functions[__zetta_report_cwd] )); then
     typeset -g __ZETTA_COMMAND_STARTED=0
     function __zetta_report_tracking_ready() {
         (( __ZETTA_LIFECYCLE_TRACKING_ENABLED )) || return
-        printf '\033]2;zetta-event:tracking-ready\033\\'
+        printf '\033]2;zetta-event;%s:tracking-ready\033\\' "${__zetta_marker_nonce-}"
     }
     function __zetta_report_preexec() {
         (( __ZETTA_LIFECYCLE_TRACKING_ENABLED )) || return
         __ZETTA_COMMAND_STARTED=1
-        printf '\033]2;zetta-event:command-started:%s\033\\' "$1"
+        printf '\033]2;zetta-event;%s:command-started:%s\033\\' "${__zetta_marker_nonce-}" "$1"
     }
     function __zetta_report_cwd() {
         local zetta_status=$?
         if (( __ZETTA_LIFECYCLE_TRACKING_ENABLED && __ZETTA_COMMAND_STARTED )); then
-            printf '\033]2;zetta-event:command-finished:%s\033\\' "$zetta_status"
+            printf '\033]2;zetta-event;%s:command-finished:%s\033\\' "${__zetta_marker_nonce-}" "$zetta_status"
             __ZETTA_COMMAND_STARTED=0
         fi
-        [[ "$PWD" == /* ]] && printf '\033]2;zetta-cwd:%s\033\\' "$PWD"
+        __zetta_print_cwd
         return $zetta_status
     }
     autoload -Uz add-zsh-hook
@@ -189,20 +212,20 @@ if [[ ${__ZETTA_LIFECYCLE_TRACKING_VERSION:-0} != 3 ||
         typeset -g __ZETTA_COMMAND_STARTED=0
         function __zetta_report_tracking_ready() {
             (( __ZETTA_LIFECYCLE_TRACKING_ENABLED )) || return
-            printf '\033]2;zetta-event:tracking-ready\033\\'
+            printf '\033]2;zetta-event;%s:tracking-ready\033\\' "${__zetta_marker_nonce-}"
         }
         function __zetta_report_preexec() {
             (( __ZETTA_LIFECYCLE_TRACKING_ENABLED )) || return
             __ZETTA_COMMAND_STARTED=1
-            printf '\033]2;zetta-event:command-started:%s\033\\' "$1"
+            printf '\033]2;zetta-event;%s:command-started:%s\033\\' "${__zetta_marker_nonce-}" "$1"
         }
         function __zetta_report_cwd() {
             local zetta_status=$?
             if (( __ZETTA_LIFECYCLE_TRACKING_ENABLED && __ZETTA_COMMAND_STARTED )); then
-                printf '\033]2;zetta-event:command-finished:%s\033\\' "$zetta_status"
+                printf '\033]2;zetta-event;%s:command-finished:%s\033\\' "${__zetta_marker_nonce-}" "$zetta_status"
                 __ZETTA_COMMAND_STARTED=0
             fi
-            [[ "$PWD" == /* ]] && printf '\033]2;zetta-cwd:%s\033\\' "$PWD"
+            __zetta_print_cwd
             return $zetta_status
         }
         autoload -Uz add-zsh-hook

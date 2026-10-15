@@ -118,6 +118,16 @@ an in-order datagram. The `expected_receiver_seq` fields are gone: the
 window's high-water mark is the same thing. Tests are in
 `src/tests/replay.rs` and `src/tests/transport_replay.rs`.
 
+**Receive MTU** (security review finding 3.10). Upstream decrypted any
+datagram the socket returned, and `zosh-server` reads into a 64 KiB buffer, so
+a peer without the key could make each datagram cost an allocation and an OCB
+pass of up to that size. `crypto::RECEIVE_MTU` is stock Mosh's
+`Session::RECEIVE_MTU`, 2048 bytes: stock receives into a buffer that size and
+refuses a truncated datagram, so no conforming peer sends a larger one.
+`Transport::open` and `Ocb::open_datagram` refuse anything longer before
+decrypting it or consulting the replay window. Tests are in
+`src/tests/transport_receive_mtu.rs`.
+
 Nothing else changed, and every upstream test still passes unmodified.
 
 See `../UPSTREAM_AUDIT.md` for the fork inventory.

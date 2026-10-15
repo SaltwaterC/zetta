@@ -1,6 +1,14 @@
 use super::*;
 use crate::protocol::BackgroundPaneLayout;
 
+/// Decrypts a file the store wrote and returns what follows its binding, so a
+/// test can compare what was stored. A file written without one comes back
+/// whole.
+fn payload(identity: &impl age::Identity, path: impl AsRef<Path>) -> Vec<u8> {
+    let plaintext = age::decrypt(identity, &fs::read(path).unwrap()).unwrap();
+    binding::split(&plaintext).unwrap().1.to_vec()
+}
+
 /// These tests exercise storage rather than sealing, so every session id they
 /// use is sealed to the store, as the daemon seals an unprotected session.
 fn seal_to_store(store: &mut PersistenceStore) {
@@ -42,10 +50,7 @@ fn scrollback_rotation_keeps_sequences_and_existing_segments() {
             scrollback_path_parts(&paths[index], 7),
             Some((1, index as u64 + 1))
         );
-        assert_eq!(
-            age::decrypt(&identity, &fs::read(&paths[index]).unwrap()).unwrap(),
-            *expected
-        );
+        assert_eq!(payload(&identity, &paths[index]), *expected);
     }
 }
 
@@ -89,10 +94,7 @@ fn scrollback_recovery_reconciles_orphans_and_each_panes_highest_sequence() {
         store.flush_segments().unwrap();
         let paths = scrollback_paths(&store.directory, 7).unwrap();
         assert_eq!(paths.len(), 6);
-        assert_eq!(
-            age::decrypt(&identity, &fs::read(&paths[0]).unwrap()).unwrap(),
-            b"first"
-        );
+        assert_eq!(payload(&identity, &paths[0]), b"first");
     }
 }
 
@@ -124,10 +126,7 @@ fn scrollback_publication_skips_collisions_without_overwriting() {
         .iter()
         .zip([b"existing".as_slice(), b"existing", b"new", b"next"])
     {
-        assert_eq!(
-            age::decrypt(&identity, &fs::read(path).unwrap()).unwrap(),
-            expected
-        );
+        assert_eq!(payload(&identity, path), expected);
     }
     assert!(
         fs::read_dir(&store.directory).unwrap().all(|entry| {
@@ -167,10 +166,7 @@ fn scrollback_publication_reserves_its_sequence_even_if_the_manifest_write_fails
         b"published before error".as_slice(),
         b"published after error",
     ]) {
-        assert_eq!(
-            age::decrypt(&identity, &fs::read(path).unwrap()).unwrap(),
-            expected
-        );
+        assert_eq!(payload(&identity, path), expected);
     }
 }
 
@@ -295,11 +291,10 @@ fn disk_segments_are_encrypted_and_manifest_sizes_are_updated() {
     let manifest = fs::read_to_string(directory.path().join("persistence/manifest.json")).unwrap();
     assert!(!manifest.contains("secret title"));
     assert!(manifest.contains(r#""scrollback_bytes": 18"#));
-    let metadata = age::decrypt(
+    let metadata = payload(
         &identity,
-        &fs::read(directory.path().join("persistence/session-7.age")).unwrap(),
-    )
-    .unwrap();
+        directory.path().join("persistence/session-7.age"),
+    );
     let metadata: serde_json::Value = serde_json::from_slice(&metadata).unwrap();
     assert!(metadata["snapshots"][0].get("bytes").is_none());
     assert_eq!(metadata["snapshots"][0]["length"], 14);

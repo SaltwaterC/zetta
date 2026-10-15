@@ -143,7 +143,10 @@ impl Zetta {
     /// recording deliberately have no paste target.
     fn overlay_text_field(&mut self) -> Option<&mut TextField> {
         let picking_style = self.is_picking_overlay_style();
-        if self.projects.trust_prompt.is_some() || self.close_tab_confirmation.is_some() {
+        if self.script_open_is_open()
+            || self.projects.trust_prompt.is_some()
+            || self.close_tab_confirmation.is_some()
+        {
             return None;
         }
         if let Some(prompt) = self.session_authentication.as_mut() {

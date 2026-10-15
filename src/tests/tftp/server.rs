@@ -153,3 +153,39 @@ fn incomplete_uploads_are_removed_and_completed_uploads_are_preserved() {
     assert!(PendingUpload::create(&root, "complete.bin").is_err());
     assert!(PendingUpload::create(&root, "../outside.bin").is_err());
 }
+
+#[test]
+fn uploads_refuse_dot_prefixed_names() {
+    let tempdir = tempfile::tempdir().unwrap();
+    let root = fs::canonicalize(tempdir.path()).unwrap();
+    fs::create_dir(root.join(".ssh")).unwrap();
+    fs::create_dir(root.join("firmware")).unwrap();
+
+    for name in [".bashrc", ".ssh/authorized_keys", "firmware/.hidden"] {
+        assert!(
+            PendingUpload::create(&root, name).is_err(),
+            "{name} was accepted"
+        );
+        assert!(!root.join(name).exists(), "{name} was created");
+    }
+
+    let mut upload = PendingUpload::create(&root, "firmware/image.v2.bin").unwrap();
+    upload.write_all(b"image").unwrap();
+    upload.finish().unwrap();
+    assert_eq!(
+        fs::read(root.join("firmware/image.v2.bin")).unwrap(),
+        b"image"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn uploads_refuse_a_symlink_into_a_dot_directory() {
+    let tempdir = tempfile::tempdir().unwrap();
+    let root = fs::canonicalize(tempdir.path()).unwrap();
+    fs::create_dir(root.join(".config")).unwrap();
+    std::os::unix::fs::symlink(root.join(".config"), root.join("cfg")).unwrap();
+
+    assert!(PendingUpload::create(&root, "cfg/autostart.desktop").is_err());
+    assert!(!root.join(".config/autostart.desktop").exists());
+}

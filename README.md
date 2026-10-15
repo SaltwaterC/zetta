@@ -14,7 +14,9 @@ see the [cross-check prerequisites](docs/installation.md#windows).
 Clipboard builds also ship standalone `zcopy` and `zpaste` commands. `zetta copy` and `zetta paste` forward to these sibling executables.
 In an interactive SSH or zosh pane, the helpers use the clipboard of the
 displaying Zetta window. Remote paste needs **Allow Remote Clipboard Paste**
-enabled in that tab's menu; it is off by default.
+enabled in that tab's menu; it is off by default. **Allow Remote Clipboard
+Copy**, on by default, can be turned off there to stop a tab's panes writing
+the clipboard, through `zcopy` or OSC 52.
 Applications that manage their own selections can also copy through OSC 52
 in local PTY, shared SSH, and Zosh panes. Zosh copying requires the updated
 bundled client and `zosh-server` on the remote host.
@@ -283,7 +285,8 @@ from a stale window association without creating an extra window.
 Choose **Set as Default Terminal** from the application menu or command palette
 to register Zetta as the preferred terminal for the current desktop. Linux
 registers Zetta with `xdg-terminal-exec` and also updates the supported desktop's
-legacy settings where available; macOS associates shell-script files;
+legacy settings where available; macOS associates shell-script files and asks
+before running one that is opened;
 Windows uses its default-terminal delegation and does not require
 administrator privileges.
 
@@ -492,8 +495,15 @@ the served directory. That is deliberate — their purpose is handing files to
 another device — but it means the GUI **Start HTTP server** and **Start TFTP
 server** actions expose the active pane's working directory to the network in
 one step. TFTP uploads are refused unless you pass `zetta tftp server
---writable`, and the GUI action is always read only. Restrict access with a
-firewall on untrusted networks; see [Serial and network tools](docs/tools.md).
+--writable`, and the GUI action is always read only. Writable uploads never
+overwrite and refuse dot-prefixed names, but can still create ordinary files
+anywhere under the root, so serve a dedicated directory. The HTTP server
+refuses dot-prefixed names such as `.git` and `.env` unless you pass
+`--serve-dotfiles`, answers only requests whose `Host` names this machine (add
+names with `--allow-host`, or disable the check with `--allow-any-host`), and
+disconnects clients that send a request or read a response too slowly.
+Restrict access with a firewall on untrusted networks; see
+[Serial and network tools](docs/tools.md#http-server).
 
 Background-session protection stores a salted Argon2id verifier in memory while
 the session is live. Disk-retained sessions keep that verifier, their commands,

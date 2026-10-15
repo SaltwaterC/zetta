@@ -8,16 +8,157 @@
 
 use super::*;
 
+use std::cell::Cell;
+use std::sync::atomic::AtomicUsize;
+
 use super::decode::handle_control_request;
 use super::endpoint::{
     control_endpoint_path, control_socket_path, random_hex, remove_socket_if_present,
     restrict_socket_permissions, write_endpoint,
 };
 
+/// How many control connections are served at once.
+///
+/// Each one is a thread, two for a `zetta pane wait`, and a wait lives as long
+/// as the command it wraps. A tab holds at most [`crate::pane::MAX_PANES_PER_TAB`]
+/// panes, so this admits four full tabs of waiting commands at the same time,
+/// on top of the short requests that shell hooks and `zetta` subcommands make.
+/// It bounds the threads one local process can make this one start to about
+/// five hundred, most of their stacks never touched.
+const MAX_CONTROL_CONNECTIONS: usize = 256;
+
+/// How many commands this server may have queued for the application that the
+/// application has not taken yet.
+///
+/// The main thread drains the queue between frames; it only backs up while
+/// that thread is busy, opening a window or restoring a session. Twice a full
+/// tab of panes reporting at once fits, and a request can carry up to
+/// `MAX_CONTROL_MESSAGE_BYTES`, so what is queued stays near 32 MiB at worst.
+/// Past it a request is refused with `process_busy` rather than queued.
+const MAX_QUEUED_CONTROL_COMMANDS: usize = 128;
+
+/// How long a connection has, from being accepted, to deliver its whole
+/// request.
+///
+/// A client writes its request in one go as soon as it connects, and gives up
+/// itself after [`CONTROL_CLIENT_TIMEOUT`], so a request that has not arrived
+/// by then has no one waiting for its answer. The per-read timeout alone let a
+/// peer that sent a byte a second hold a connection for days. Only the request
+/// is bounded: a `zetta pane wait` keeps its connection afterwards for as long
+/// as its command runs.
+const CONTROL_REQUEST_DEADLINE: Duration = CONTROL_CLIENT_TIMEOUT;
+
+/// The error code a request refused for lack of capacity carries.
+const PROCESS_BUSY: &str = "process_busy";
+
+/// The limits above, gathered so a test can start a server with small ones.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct ControlLimits {
+    pub(super) connections: usize,
+    pub(super) queued_commands: usize,
+    pub(super) request_deadline: Duration,
+}
+
+impl ControlLimits {
+    pub(super) const DEFAULT: Self = Self {
+        connections: MAX_CONTROL_CONNECTIONS,
+        queued_commands: MAX_QUEUED_CONTROL_COMMANDS,
+        request_deadline: CONTROL_REQUEST_DEADLINE,
+    };
+}
+
+/// How many commands this server has put on the application's queue that the
+/// application has not taken off it yet.
+///
+/// The queue itself is unbounded and shared with senders that are not this
+/// server (opened URLs, the Windows terminal handoff), so the bound is kept
+/// here, and the application loop releases a place as it takes each command
+/// that came from the socket — see [`ProcessControlCommand::came_from_control_socket`].
+#[derive(Clone, Default)]
+pub(crate) struct QueuedControlCommands(Arc<AtomicUsize>);
+
+impl QueuedControlCommands {
+    /// Records that the application has taken one command off its queue.
+    pub(crate) fn release(&self) {
+        let _ = self
+            .0
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |queued| {
+                queued.checked_sub(1)
+            });
+    }
+
+    #[cfg(test)]
+    pub(super) fn len(&self) -> usize {
+        self.0.load(Ordering::Acquire)
+    }
+}
+
+/// Why a command did not reach the application.
+enum QueueRefusal {
+    /// The queue holds as many commands from this server as it may.
+    Full,
+    /// The application has stopped taking commands.
+    Closed,
+}
+
+/// The application's command queue, as this server sends to it.
+struct ControlQueue {
+    sender: UnboundedSender<ProcessControlCommand>,
+    queued: QueuedControlCommands,
+    capacity: usize,
+}
+
+impl ControlQueue {
+    fn send(&self, command: ProcessControlCommand) -> std::result::Result<(), QueueRefusal> {
+        // Counted before it is sent, so the application taking it at once can
+        // never release a place that was not yet claimed.
+        self.queued
+            .0
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |queued| {
+                (queued < self.capacity).then_some(queued + 1)
+            })
+            .map_err(|_| QueueRefusal::Full)?;
+        self.sender.unbounded_send(command).map_err(|_| {
+            self.queued.release();
+            QueueRefusal::Closed
+        })
+    }
+}
+
+/// A claim on one of [`ControlLimits::connections`], given back when dropped.
+struct ConnectionSlot(Arc<AtomicUsize>);
+
+impl ConnectionSlot {
+    fn claim(in_use: &Arc<AtomicUsize>, capacity: usize) -> Option<Self> {
+        in_use
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                (count < capacity).then_some(count + 1)
+            })
+            .ok()
+            .map(|_| Self(Arc::clone(in_use)))
+    }
+}
+
+impl Drop for ConnectionSlot {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// What every connection thread shares.
+struct ControlServerState {
+    queue: ControlQueue,
+    token: String,
+    stopping: Arc<AtomicBool>,
+    limits: ControlLimits,
+    connections: Arc<AtomicUsize>,
+}
+
 pub(crate) struct ProcessControlServer {
     endpoint_path: PathBuf,
     socket_path: PathBuf,
     stopping: Arc<AtomicBool>,
+    queued: QueuedControlCommands,
     thread: Option<thread::JoinHandle<()>>,
 }
 
@@ -29,6 +170,14 @@ impl ProcessControlServer {
     pub(super) fn start_at(
         commands: UnboundedSender<ProcessControlCommand>,
         endpoint_path: PathBuf,
+    ) -> Result<Self> {
+        Self::start_with_limits(commands, endpoint_path, ControlLimits::DEFAULT)
+    }
+
+    pub(super) fn start_with_limits(
+        commands: UnboundedSender<ProcessControlCommand>,
+        endpoint_path: PathBuf,
+        limits: ControlLimits,
     ) -> Result<Self> {
         let parent = endpoint_path
             .parent()
@@ -51,23 +200,39 @@ impl ProcessControlServer {
         };
         write_endpoint(&endpoint_path, &endpoint)?;
         let stopping = Arc::new(AtomicBool::new(false));
-        let stopping_for_thread = stopping.clone();
+        let queued = QueuedControlCommands::default();
+        let state = Arc::new(ControlServerState {
+            queue: ControlQueue {
+                sender: commands,
+                queued: queued.clone(),
+                capacity: limits.queued_commands,
+            },
+            token,
+            stopping: stopping.clone(),
+            limits,
+            connections: Arc::new(AtomicUsize::new(0)),
+        });
         let thread = thread::Builder::new()
             .name("zetta-process-control".to_owned())
-            .spawn(move || {
-                accept_control_connections(&listener, &commands, &token, &stopping_for_thread);
-            })
+            .spawn(move || accept_control_connections(&listener, &state))
             .context("starting the Zetta process control thread")?;
         Ok(Self {
             endpoint_path,
             socket_path,
             stopping,
+            queued,
             thread: Some(thread),
         })
     }
 
     pub(crate) fn is_accepting(&self) -> bool {
         !self.stopping.load(Ordering::Acquire)
+    }
+
+    /// The count the application loop releases as it takes this server's
+    /// commands off its queue.
+    pub(crate) fn queued_commands(&self) -> &QueuedControlCommands {
+        &self.queued
     }
 
     pub(crate) fn begin_shutdown(&self) {
@@ -88,37 +253,68 @@ impl ProcessControlServer {
 ///
 /// Each connection is served on its own thread: a `zetta pane wait` connection
 /// stays open for the life of the command it wraps, so serving connections in
-/// turn would let one wait block every other request.
-fn accept_control_connections(
-    listener: &UnixListener,
-    commands: &UnboundedSender<ProcessControlCommand>,
-    token: &str,
-    stopping: &Arc<AtomicBool>,
-) {
+/// turn would let one wait block every other request. A connection past
+/// [`ControlLimits::connections`] is answered `process_busy` and closed here,
+/// rather than left in the kernel's backlog: a backlog would hold the user's
+/// own next request behind whatever filled it, where a refusal lets the client
+/// report it at once and the listener stays free for the next connection.
+fn accept_control_connections(listener: &UnixListener, state: &Arc<ControlServerState>) {
     for stream in listener.incoming() {
-        if stopping.load(Ordering::Acquire) {
+        if state.stopping.load(Ordering::Acquire) {
             break;
         }
         let Ok(stream) = stream else {
             continue;
         };
-        let commands = commands.clone();
-        let token = token.to_owned();
-        let stopping = stopping.clone();
+        let accepted = Instant::now();
+        let Some(slot) = ConnectionSlot::claim(&state.connections, state.limits.connections) else {
+            refuse_busy_connection(stream);
+            continue;
+        };
+        let state = Arc::clone(state);
         let _ = thread::Builder::new()
             .name("zetta-process-control-request".to_owned())
-            .spawn(move || serve_control_connection(stream, &commands, &token, &stopping));
+            .spawn(move || {
+                let _slot = slot;
+                serve_control_connection(stream, &state, accepted);
+            });
+    }
+}
+
+/// Answers a connection there is no room for without reading from it, which
+/// is why it can be done on the accepting thread: a fresh socket's send buffer
+/// takes the short reply without waiting.
+fn refuse_busy_connection(mut stream: UnixStream) {
+    let _ = stream.set_write_timeout(Some(Duration::from_millis(100)));
+    let _ = write_message(
+        &mut stream,
+        &refusal_response(
+            "rejected",
+            PROCESS_BUSY,
+            "the Zetta process is serving too many control connections",
+        ),
+    );
+}
+
+/// A response that carries only a status and a structured error.
+fn refusal_response(status: &str, code: &str, message: &str) -> ControlResponse {
+    ControlResponse {
+        status: status.to_owned(),
+        run_id: None,
+        themes: Vec::new(),
+        pane_theme: None,
+        pane_theme_revision: None,
+        silent_mode: false,
+        pane_labels: Vec::new(),
+        error: Some(ControlError {
+            code: code.to_owned(),
+            message: message.to_owned(),
+        }),
     }
 }
 
 /// Serves one connection: decode the request, apply it, answer it.
-fn serve_control_connection(
-    mut stream: UnixStream,
-    commands: &UnboundedSender<ProcessControlCommand>,
-    token: &str,
-    stopping: &AtomicBool,
-) {
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
+fn serve_control_connection(mut stream: UnixStream, state: &ControlServerState, accepted: Instant) {
     let _ = stream.set_write_timeout(Some(Duration::from_secs(1)));
     let mut response = ControlResponse {
         status: String::new(),
@@ -130,15 +326,29 @@ fn serve_control_connection(
         pane_labels: Vec::new(),
         error: None,
     };
-    let Some(status) = apply_control_request(&mut stream, commands, token, stopping, &mut response)
-    else {
+    let dispatch = ControlDispatch {
+        queue: &state.queue,
+        stopping: &state.stopping,
+        refused_full: Cell::new(false),
+    };
+    let deadline = accepted + state.limits.request_deadline;
+    let Some(status) = apply_control_request(
+        &mut stream,
+        &dispatch,
+        &state.token,
+        deadline,
+        &mut response,
+    ) else {
         // `run_wait` keeps the connection and answers on it itself.
         return;
     };
+    if dispatch.refused_full.get() && response.error.is_none() {
+        response.error = Some(queue_full_error());
+    }
     // A request that was applied while the process was quitting is reported as
     // refused, so a client cannot be told a change landed that the closing
     // window may not have kept.
-    response.status = if status == "ok" && stopping.load(Ordering::Acquire) {
+    response.status = if status == "ok" && state.stopping.load(Ordering::Acquire) {
         "rejected".to_owned()
     } else {
         status.to_owned()
@@ -146,25 +356,47 @@ fn serve_control_connection(
     let _ = write_message(&mut stream, &response);
 }
 
-/// The sender and the shutdown flag every arm of [`apply_control_request`]
+const QUEUE_FULL_MESSAGE: &str = "the Zetta process has too many control requests waiting for it";
+
+fn queue_full_error() -> ControlError {
+    ControlError {
+        code: PROCESS_BUSY.to_owned(),
+        message: QUEUE_FULL_MESSAGE.to_owned(),
+    }
+}
+
+/// The queue and the shutdown flag every arm of [`apply_control_request`]
 /// dispatches through, bound once so an arm names only the command it builds.
 struct ControlDispatch<'a> {
-    commands: &'a UnboundedSender<ProcessControlCommand>,
+    queue: &'a ControlQueue,
     stopping: &'a AtomicBool,
+    /// Set when a command was refused because the queue was full, so the
+    /// response can say so rather than report a bare rejection.
+    refused_full: Cell<bool>,
 }
 
 impl ControlDispatch<'_> {
+    /// Puts a command on the application's queue, reporting whether it went.
+    fn submit(&self, command: ProcessControlCommand) -> bool {
+        match self.queue.send(command) {
+            Ok(()) => true,
+            Err(QueueRefusal::Full) => {
+                self.refused_full.set(true);
+                false
+            }
+            Err(QueueRefusal::Closed) => false,
+        }
+    }
+
     /// Sends a command and waits for the window to acknowledge it.
     fn send(&self, build: impl FnOnce(Sender<bool>) -> ProcessControlCommand) -> &'static str {
-        dispatch_control_command(self.commands, self.stopping, build)
+        dispatch_control_command(self, build)
     }
 
     /// Acknowledge when the application queue accepts the command.
     fn queue(&self, build: impl FnOnce(Sender<bool>) -> ProcessControlCommand) -> &'static str {
         let (completion, _) = channel();
-        if self.stopping.load(Ordering::Acquire)
-            || self.commands.unbounded_send(build(completion)).is_err()
-        {
+        if self.stopping.load(Ordering::Acquire) || !self.submit(build(completion)) {
             "rejected"
         } else {
             "ok"
@@ -180,7 +412,7 @@ impl ControlDispatch<'_> {
         build: impl FnOnce(Sender<std::result::Result<T, String>>) -> ProcessControlCommand,
         apply: impl FnOnce(T, &mut ControlResponse),
     ) -> &'static str {
-        dispatch_control_result(self.commands, self.stopping, response, code, build, apply)
+        dispatch_control_result(self, response, code, build, apply)
     }
 }
 
@@ -192,12 +424,12 @@ impl ControlDispatch<'_> {
 /// wait is registered and once when the command it wraps has run.
 fn apply_control_request(
     stream: &mut UnixStream,
-    commands: &UnboundedSender<ProcessControlCommand>,
+    dispatch: &ControlDispatch<'_>,
     token: &str,
-    stopping: &AtomicBool,
+    deadline: Instant,
     response: &mut ControlResponse,
 ) -> Option<&'static str> {
-    let Some(command) = handle_control_request(stream, token) else {
+    let Some(command) = handle_control_request(stream, token, Some(deadline)) else {
         // An unauthenticated or undecodable request is refused on the
         // connection rather than dropped, so a client is told rather than left
         // waiting on a socket that closed.
@@ -207,10 +439,9 @@ fn apply_control_request(
     // — the client blocks on it until the command it is waiting for finishes —
     // so it is handled here rather than in a group.
     if let ControlRequestCommand::RunWait { request } = command {
-        serve_run_wait_connection(stream, commands, stopping, token, request);
+        serve_run_wait_connection(stream, dispatch, token, request);
         return None;
     }
-    let dispatch = ControlDispatch { commands, stopping };
     // Exhaustive, so a new command has to be given a group rather than falling
     // through. The groups mirror `decode.rs`'s, so a command is added to the
     // same-named function in both files; each group re-matches only its own
@@ -220,19 +451,19 @@ fn apply_control_request(
         | ControlRequestCommand::OpenWindow
         | ControlRequestCommand::OpenNewWindow { .. }
         | ControlRequestCommand::OpenProject { .. }
-        | ControlRequestCommand::ReloadProjects => apply_window_command(command, &dispatch),
+        | ControlRequestCommand::ReloadProjects => apply_window_command(command, dispatch),
         ControlRequestCommand::ReplacePane { .. }
         | ControlRequestCommand::OpenCommand { .. }
         | ControlRequestCommand::RunPane { .. }
         | ControlRequestCommand::RunShellCommand { .. }
         | ControlRequestCommand::RunComplete { .. }
         | ControlRequestCommand::ListPaneLabels { .. } => {
-            apply_pane_command(command, &dispatch, response)
+            apply_pane_command(command, dispatch, response)
         }
         ControlRequestCommand::ReconnectSession { .. }
         | ControlRequestCommand::OpenRemoteSession { .. }
         | ControlRequestCommand::ResumeDiskSession { .. } => {
-            apply_session_command(command, &dispatch)
+            apply_session_command(command, dispatch)
         }
         ControlRequestCommand::SetTabIcon { .. }
         | ControlRequestCommand::ResetTabIcon { .. }
@@ -240,7 +471,7 @@ fn apply_control_request(
         | ControlRequestCommand::ListThemes
         | ControlRequestCommand::GetPaneTheme { .. }
         | ControlRequestCommand::SetPaneOverlay { .. } => {
-            apply_appearance_command(command, &dispatch, response)
+            apply_appearance_command(command, dispatch, response)
         }
         // Already returned above; named so this match stays exhaustive and a new
         // command still has to be given a group.
@@ -250,7 +481,7 @@ fn apply_control_request(
         | ControlRequestCommand::SetTabName { .. }
         | ControlRequestCommand::SetWorktreeName { .. }
         | ControlRequestCommand::GetSilentMode { .. } => {
-            apply_tab_command(command, &dispatch, response)
+            apply_tab_command(command, dispatch, response)
         }
     })
 }
@@ -266,13 +497,10 @@ fn apply_window_command(
     match command {
         ControlRequestCommand::ReloadConfiguration { config_path } => {
             let (completion, completed) = channel();
-            let sent = dispatch
-                .commands
-                .unbounded_send(ProcessControlCommand::ReloadConfiguration {
-                    config_path,
-                    completion,
-                })
-                .is_ok();
+            let sent = dispatch.submit(ProcessControlCommand::ReloadConfiguration {
+                config_path,
+                completion,
+            });
             if sent && wait_for_reload_completion(&completed, dispatch.stopping) {
                 "ok"
             } else {
@@ -381,7 +609,7 @@ fn apply_session_command(
             session_id,
             attention_id,
             secret,
-        } => dispatch_reconnect_command(dispatch.commands, dispatch.stopping, |completion| {
+        } => dispatch_reconnect_command(dispatch, |completion| {
             ProcessControlCommand::ReconnectSession {
                 runner_id,
                 session_id,
@@ -398,7 +626,7 @@ fn apply_session_command(
             protocol,
             keep_alive_ms,
             forward_agent,
-        } => dispatch_reconnect_command(dispatch.commands, dispatch.stopping, |completion| {
+        } => dispatch_reconnect_command(dispatch, |completion| {
             ProcessControlCommand::OpenRemoteSession {
                 target,
                 port,
@@ -415,7 +643,7 @@ fn apply_session_command(
             identity_paths,
             identity_passphrases,
             secret,
-        } => dispatch_reconnect_command(dispatch.commands, dispatch.stopping, |completion| {
+        } => dispatch_reconnect_command(dispatch, |completion| {
             ProcessControlCommand::ResumeDiskSession {
                 session_id,
                 identity_paths,
@@ -477,10 +705,7 @@ fn apply_appearance_command(
         }
         ControlRequestCommand::ListThemes => {
             let (completion, completed) = channel();
-            let accepted = dispatch
-                .commands
-                .unbounded_send(ProcessControlCommand::ListThemes { completion })
-                .is_ok();
+            let accepted = dispatch.submit(ProcessControlCommand::ListThemes { completion });
             match accepted
                 .then(|| wait_for_theme_list_completion(&completed, dispatch.stopping))
                 .flatten()
@@ -578,14 +803,10 @@ fn apply_tab_command(
         }
         ControlRequestCommand::GetSilentMode { attention_id } => {
             let (completion, completed) = channel();
-            if dispatch
-                .commands
-                .unbounded_send(ProcessControlCommand::GetSilentMode {
-                    attention_id,
-                    completion,
-                })
-                .is_err()
-            {
+            if !dispatch.submit(ProcessControlCommand::GetSilentMode {
+                attention_id,
+                completion,
+            }) {
                 "rejected"
             } else if let Some(silent_mode) =
                 wait_for_silent_mode_completion(&completed, dispatch.stopping)
@@ -607,13 +828,12 @@ fn apply_tab_command(
 /// send and the wait have to stay together, because a command that was never
 /// sent must not be waited for.
 fn dispatch_control_command(
-    commands: &UnboundedSender<ProcessControlCommand>,
-    stopping: &AtomicBool,
+    dispatch: &ControlDispatch<'_>,
     build: impl FnOnce(Sender<bool>) -> ProcessControlCommand,
 ) -> &'static str {
     let (completion, completed) = channel();
-    let accepted = commands.unbounded_send(build(completion)).is_ok()
-        && wait_for_control_completion(&completed, stopping);
+    let accepted = dispatch.submit(build(completion))
+        && wait_for_control_completion(&completed, dispatch.stopping);
     if accepted { "ok" } else { "rejected" }
 }
 
@@ -622,18 +842,17 @@ fn dispatch_control_command(
 /// The reason becomes the response's structured error under `code`, so a client
 /// can report why rather than just that the request was rejected.
 fn dispatch_control_result<T>(
-    commands: &UnboundedSender<ProcessControlCommand>,
-    stopping: &AtomicBool,
+    dispatch: &ControlDispatch<'_>,
     response: &mut ControlResponse,
     code: &str,
     build: impl FnOnce(Sender<std::result::Result<T, String>>) -> ProcessControlCommand,
     apply: impl FnOnce(T, &mut ControlResponse),
 ) -> &'static str {
     let (completion, completed) = channel();
-    if commands.unbounded_send(build(completion)).is_err() {
+    if !dispatch.submit(build(completion)) {
         return "rejected";
     }
-    match wait_for_result_completion(&completed, stopping) {
+    match wait_for_result_completion(&completed, dispatch.stopping) {
         Some(Ok(value)) => {
             apply(value, response);
             "ok"
@@ -653,13 +872,12 @@ fn dispatch_control_result<T>(
 /// [`ReconnectSessionResult`]: their status distinguishes "the secret was
 /// wrong" from "no such session", which a bare rejection cannot.
 fn dispatch_reconnect_command(
-    commands: &UnboundedSender<ProcessControlCommand>,
-    stopping: &AtomicBool,
+    dispatch: &ControlDispatch<'_>,
     build: impl FnOnce(Sender<ReconnectSessionResult>) -> ProcessControlCommand,
 ) -> &'static str {
     let (completion, completed) = channel();
-    let result = if commands.unbounded_send(build(completion)).is_ok() {
-        wait_for_reconnect_completion(&completed, stopping)
+    let result = if dispatch.submit(build(completion)) {
+        wait_for_reconnect_completion(&completed, dispatch.stopping)
     } else {
         ReconnectSessionResult::Rejected
     };
@@ -668,11 +886,11 @@ fn dispatch_reconnect_command(
 
 fn serve_run_wait_connection(
     stream: &mut UnixStream,
-    commands: &UnboundedSender<ProcessControlCommand>,
-    stopping: &AtomicBool,
+    dispatch: &ControlDispatch<'_>,
     token: &str,
     request: RunWaitRequest,
 ) {
+    let stopping = dispatch.stopping;
     let Ok(mut client_stream) = stream.try_clone() else {
         let _ = write_message(
             stream,
@@ -698,7 +916,7 @@ fn serve_run_wait_connection(
     if thread::Builder::new()
         .name("zetta-run-connection".to_owned())
         .spawn(move || {
-            let request = handle_control_request(&mut client_stream, &monitor_token);
+            let request = handle_control_request(&mut client_stream, &monitor_token, None);
             let _ = client_request_sender.send(request);
         })
         .is_err()
@@ -723,29 +941,20 @@ fn serve_run_wait_connection(
     }
 
     let (completion, completed) = channel();
-    if commands
-        .unbounded_send(ProcessControlCommand::RunWait {
-            request,
-            completion,
-        })
-        .is_err()
-    {
-        let _ = write_message(
-            stream,
-            &ControlResponse {
-                status: "rejected".to_owned(),
-                run_id: None,
-                themes: Vec::new(),
-                pane_theme: None,
-                pane_theme_revision: None,
-                silent_mode: false,
-                pane_labels: Vec::new(),
-                error: Some(ControlError {
-                    code: "process_unavailable".to_owned(),
-                    message: "the Zetta process is no longer accepting run requests".to_owned(),
-                }),
-            },
-        );
+    if !dispatch.submit(ProcessControlCommand::RunWait {
+        request,
+        completion,
+    }) {
+        let response = if dispatch.refused_full.get() {
+            refusal_response("rejected", PROCESS_BUSY, QUEUE_FULL_MESSAGE)
+        } else {
+            refusal_response(
+                "rejected",
+                "process_unavailable",
+                "the Zetta process is no longer accepting run requests",
+            )
+        };
+        let _ = write_message(stream, &response);
         return;
     }
 

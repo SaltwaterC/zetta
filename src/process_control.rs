@@ -349,6 +349,25 @@ pub(crate) enum ProcessControlCommand {
     },
 }
 
+impl ProcessControlCommand {
+    /// Whether the control server sent this, and so holds a place for it in
+    /// its share of the application's queue that taking it has to release.
+    ///
+    /// Opened URLs and the Windows terminal handoff arrive on the same queue
+    /// from elsewhere, and never took a place.
+    pub(crate) fn came_from_control_socket(&self) -> bool {
+        #[cfg(target_os = "macos")]
+        if matches!(self, Self::OpenUrls(_)) {
+            return false;
+        }
+        #[cfg(windows)]
+        if matches!(self, Self::OpenWindowsHandoff { .. }) {
+            return false;
+        }
+        true
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 enum ControlRequestCommand {
     ReloadConfiguration {
@@ -754,6 +773,53 @@ fn read_message<T: DeserializeOwned>(stream: &mut UnixStream) -> Result<T> {
     );
     bytes.pop();
     serde_json::from_slice(&bytes).context("parsing process control message")
+}
+
+/// As [`read_message`], but the whole message has to have arrived by
+/// `deadline`.
+///
+/// A per-read timeout bounds only the gap between two reads, so a peer that
+/// trickles a byte at a time can keep a connection, and its thread, for as long
+/// as the message limit lets it. Each read here waits at most until the
+/// deadline instead. Like the [`BufReader`] in [`read_message`], it may read
+/// past the newline, and anything it reads there is discarded: a client sends
+/// one request and waits for its answer before sending anything else.
+fn read_message_by<T: DeserializeOwned>(stream: &mut UnixStream, deadline: Instant) -> Result<T> {
+    let mut bytes = Zeroizing::new(Vec::new());
+    let mut chunk = Zeroizing::new([0_u8; 8 * 1024]);
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        anyhow::ensure!(
+            !remaining.is_zero(),
+            "process control message did not arrive in time"
+        );
+        stream.set_read_timeout(Some(remaining))?;
+        let read = match stream.read(&mut chunk[..]) {
+            Ok(read) => read,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::Interrupted
+                        | std::io::ErrorKind::WouldBlock
+                        | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                continue;
+            }
+            Err(error) => return Err(error.into()),
+        };
+        anyhow::ensure!(read > 0, "process control message is incomplete");
+        let received = &chunk[..read];
+        let end = received.iter().position(|byte| *byte == b'\n');
+        bytes.extend_from_slice(&received[..end.unwrap_or(read)]);
+        anyhow::ensure!(
+            bytes.len() <= MAX_CONTROL_MESSAGE_BYTES,
+            "process control message is too long or incomplete"
+        );
+        if end.is_some() {
+            return serde_json::from_slice(&bytes).context("parsing process control message");
+        }
+    }
 }
 
 fn write_message(stream: &mut UnixStream, message: &impl Serialize) -> Result<()> {

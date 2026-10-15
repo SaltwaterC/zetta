@@ -35,14 +35,8 @@ pub fn prompt_for_optional_secret() -> Result<Option<SessionSecret>> {
 /// secret is masked and confirmed. This path is intentionally one-line and
 /// deterministic: an empty line leaves the session unprotected.
 pub fn read_optional_secret_from_stdin() -> Result<Option<SessionSecret>> {
-    use std::io::BufRead as _;
-
-    let mut line = Zeroizing::new(String::new());
-    std::io::stdin()
-        .lock()
-        .read_line(&mut line)
+    let line = read_secret_line(&mut std::io::stdin().lock())
         .context("reading the session secret from standard input")?;
-    strip_line_ending(&mut line);
     if line.is_empty() {
         Ok(None)
     } else {
@@ -74,6 +68,36 @@ pub fn prompt_for_passphrase(prompt: &str) -> Result<Zeroizing<String>> {
 fn confirmed(secret: Zeroizing<String>, confirmation: &str) -> Result<SessionSecret> {
     anyhow::ensure!(secret.as_str() == confirmation, "the secrets do not match");
     Ok(SessionSecret::from_zeroizing(secret))
+}
+
+/// Reads one line, without its line ending, into memory that is erased.
+///
+/// Not `read_line`: it appends through a `String` that reallocates as it grows,
+/// and a line that is not UTF-8 comes back as an error after the bytes have
+/// been dropped unerased. This grows as [`crate::auth::SecretBytes`] does and
+/// erases a refused line. The reader's own buffer still holds what it read
+/// until it is overwritten; for standard input that buffer is the standard
+/// library's, and out of reach.
+fn read_secret_line(reader: &mut impl std::io::BufRead) -> Result<Zeroizing<String>> {
+    let mut line = crate::auth::SecretBytes::default();
+    loop {
+        let available = reader.fill_buf()?;
+        if available.is_empty() {
+            break;
+        }
+        let (taken, complete) = match available.iter().position(|byte| *byte == b'\n') {
+            Some(end) => (end + 1, true),
+            None => (available.len(), false),
+        };
+        line.extend_from_slice(&available[..taken]);
+        reader.consume(taken);
+        if complete {
+            break;
+        }
+    }
+    let mut line = crate::auth::secret_utf8(line.into_inner())?;
+    strip_line_ending(&mut line);
+    Ok(line)
 }
 
 /// Strips the line ending a terminal read leaves on a typed secret.
@@ -340,7 +364,7 @@ impl SecretLine {
 
     #[cfg(unix)]
     fn append_char(&mut self, character: char) -> SecretInputAction {
-        self.value.push(character);
+        crate::auth::push_secret_char(&mut self.value, character);
         SecretInputAction::Echo(1)
     }
 
@@ -353,7 +377,8 @@ impl SecretLine {
             if (0xdc00..=0xdfff).contains(&code_unit) {
                 let code_point =
                     0x1_0000 + ((u32::from(high) - 0xd800) << 10) + (u32::from(code_unit) - 0xdc00);
-                self.value.push(
+                crate::auth::push_secret_char(
+                    &mut self.value,
                     char::from_u32(code_point)
                         .expect("a UTF-16 surrogate pair must produce a Unicode scalar"),
                 );
@@ -363,17 +388,18 @@ impl SecretLine {
             // A malformed pair should not panic or leave the reducer stuck.
             // The console normally supplies valid pairs; replacement keeps
             // the reducer deterministic if an input record is incomplete.
-            self.value.push('\u{fffd}');
+            crate::auth::push_secret_char(&mut self.value, '\u{fffd}');
             completed += 1;
         }
 
         if (0xd800..=0xdbff).contains(&code_unit) {
             self.pending_high_surrogate = Some(code_unit);
         } else if (0xdc00..=0xdfff).contains(&code_unit) {
-            self.value.push('\u{fffd}');
+            crate::auth::push_secret_char(&mut self.value, '\u{fffd}');
             completed += 1;
         } else {
-            self.value.push(
+            crate::auth::push_secret_char(
+                &mut self.value,
                 char::from_u32(u32::from(code_unit))
                     .expect("a non-surrogate UTF-16 code unit must be a Unicode scalar"),
             );
@@ -384,7 +410,7 @@ impl SecretLine {
 
     fn finish(mut self) -> Zeroizing<String> {
         if self.pending_high_surrogate.take().is_some() {
-            self.value.push('\u{fffd}');
+            crate::auth::push_secret_char(&mut self.value, '\u{fffd}');
         }
         self.value
     }

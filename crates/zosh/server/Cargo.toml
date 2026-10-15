@@ -17,6 +17,7 @@ base64 = "0.22"
 getrandom = "0.3"
 portable-pty = "0.9"
 vt100 = "0.16.2"
+zeroize = "1"
 zclip = { path = "../../zclip", default-features = false }
 
 moshcatty = { path = "../../moshcatty" }

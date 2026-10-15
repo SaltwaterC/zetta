@@ -176,8 +176,21 @@ fn windows_server_words(value: &str) -> Result<Vec<String>> {
     parse_server_command(value)
 }
 
+/// A single-quoted PowerShell literal. PowerShell ends such a string at any
+/// of `'` and U+2018–U+201B, and reads any two of them in a row as one literal
+/// quote, so each is doubled — doubling only `'` would let a path such as
+/// `C:\O’Brien` close the string early.
 fn powershell_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "''"))
+    let mut quoted = String::with_capacity(value.len() + 2);
+    quoted.push('\'');
+    for character in value.chars() {
+        if matches!(character, '\'' | '\u{2018}'..='\u{201B}') {
+            quoted.push(character);
+        }
+        quoted.push(character);
+    }
+    quoted.push('\'');
+    quoted
 }
 
 fn powershell_array(values: &[String]) -> String {

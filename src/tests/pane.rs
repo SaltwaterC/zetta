@@ -197,3 +197,130 @@ fn wsl_gui_directory_reads_only_the_accepted_observation(cx: &mut gpui::TestAppC
     pane.set_wsl_cwd_file(Some(file));
     cx.update(|cx| assert_eq!(pane.wsl_working_directory(cx), None));
 }
+
+pub(crate) const MARKER_NONCE: &str = "0123456789abcdef0123456789abcdef";
+
+/// A pane whose terminal expects [`MARKER_NONCE`] from its shell, as one this
+/// window started would.
+pub(crate) fn attach_reporting_terminal(
+    pane: &mut TerminalPane,
+    cx: &mut gpui::TestAppContext,
+) -> Entity<Terminal> {
+    let terminal = cx.new(|cx| {
+        terminal::TerminalBuilder::new_display_only(
+            terminal::terminal_settings::CursorShape::Block,
+            terminal::terminal_settings::AlternateScroll::On,
+            None,
+            0,
+            cx.background_executor(),
+            util::paths::PathStyle::local(),
+        )
+        .with_command_marker_nonce(Some(MARKER_NONCE.to_owned()))
+        .subscribe(cx)
+    });
+    pane.terminal = Some(terminal.clone());
+    terminal
+}
+
+/// Prints `title` into the pane as output, the way `cat` of a file would.
+pub(crate) fn print_title(terminal: &Entity<Terminal>, title: &str, cx: &mut gpui::TestAppContext) {
+    terminal.update(cx, |terminal, cx| {
+        terminal.write_output(format!("\x1b]2;{title}\x1b\\").as_bytes(), cx);
+    });
+    // The terminal batches the events its parser raises after the first; let
+    // the batch window pass so each title is handled before the next.
+    cx.executor().advance_clock(Duration::from_secs(1));
+    cx.run_until_parked();
+}
+
+/// A native shell's pane, with no terminal yet.
+pub(crate) fn bash_test_pane() -> TerminalPane {
+    TerminalPane::new(
+        1,
+        Profile {
+            console_backend: Default::default(),
+            name: "Bash".to_owned(),
+            command: Shell::Program("bash".to_owned()),
+            theme: None,
+            dark_theme: None,
+            icon: ProfileIcon::default(),
+        },
+    )
+}
+
+pub(crate) fn native_absolute(path: &str) -> String {
+    if cfg!(windows) {
+        format!(r"C:\{}", path.replace('/', r"\"))
+    } else {
+        format!("/{path}")
+    }
+}
+
+/// What a split, a tab, a command or stacked pane, a template and a restored
+/// session start in. A printed `zetta-cwd` — no nonce, or the wrong one —
+/// must not choose it: a shell started in a registered project enters it and
+/// applies its `initial_split`, and a command pane runs its command there.
+#[gpui::test]
+fn a_successor_pane_starts_only_where_the_shell_confirmed(cx: &mut gpui::TestAppContext) {
+    let mut pane = bash_test_pane();
+    let terminal = attach_reporting_terminal(&mut pane, cx);
+    let forged = native_absolute("registered/project");
+    let home = native_absolute("home/me");
+
+    for title in [
+        format!("zetta-cwd:{forged}"),
+        format!("zetta-cwd;ffffffffffffffffffffffffffffffff:{forged}"),
+    ] {
+        print_title(&terminal, &title, cx);
+        cx.update(|cx| {
+            assert_eq!(pane.working_directory(cx), None, "{title:?}");
+            assert_eq!(pane.current_directory(cx), None, "{title:?}");
+            assert_eq!(
+                pane.reported_current_directory(cx),
+                Some((PathBuf::from(&forged), true)),
+                "what the pane displays still follows it"
+            );
+        });
+    }
+
+    print_title(&terminal, &format!("zetta-cwd;{MARKER_NONCE}:{home}"), cx);
+    cx.update(|cx| assert_eq!(pane.working_directory(cx), Some(PathBuf::from(&home))));
+
+    // Once the shell has confirmed a directory, a later printed one cannot
+    // replace it.
+    print_title(&terminal, &format!("zetta-cwd:{forged}"), cx);
+    cx.update(|cx| {
+        assert_eq!(pane.working_directory(cx), Some(PathBuf::from(&home)));
+        assert_eq!(
+            pane.reported_current_directory(cx),
+            Some((PathBuf::from(&forged), true))
+        );
+    });
+}
+
+/// The same for a WSL pane, whose directory is the Linux path its shell
+/// reports.
+#[gpui::test]
+fn a_wsl_successor_pane_starts_only_where_the_shell_confirmed(cx: &mut gpui::TestAppContext) {
+    let mut pane = wsl_test_pane();
+    let terminal = attach_reporting_terminal(&mut pane, cx);
+
+    print_title(&terminal, "zetta-cwd:/registered/project", cx);
+    cx.update(|cx| {
+        assert_eq!(pane.wsl_working_directory(cx), None);
+        assert_eq!(
+            pane.reported_wsl_working_directory(cx).as_deref(),
+            Some("/registered/project")
+        );
+    });
+
+    print_title(&terminal, &format!("zetta-cwd;{MARKER_NONCE}:/home/me"), cx);
+    print_title(&terminal, "zetta-cwd:/registered/project", cx);
+    cx.update(|cx| {
+        assert_eq!(pane.wsl_working_directory(cx).as_deref(), Some("/home/me"));
+        assert_eq!(
+            pane.reported_wsl_working_directory(cx).as_deref(),
+            Some("/registered/project")
+        );
+    });
+}

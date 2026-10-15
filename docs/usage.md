@@ -77,6 +77,12 @@ desktop settings where available, macOS registers the shell-script file types
 `.command`, `.tool`, `.zsh`, `.csh`, `.sh`, and `.pl`, and Windows uses per-user
 default-terminal delegation.
 
+On macOS, opening one of those files — double-clicking it in Finder, or `open`
+— does not run it straight away. Zetta shows the file's path and asks first;
+**Cancel** is the default, so Enter alone runs nothing. Choosing **Run** starts
+the script in a new tab in its own directory. Files opened together are
+confirmed together; a file opened while a prompt is showing waits for its own.
+
 Manage persistent profile state with the typed `profile` command family:
 
 ```sh
@@ -303,6 +309,18 @@ integration is sourced again, so an existing shell can use the new tracking
 without recreating the pane. Results from commands run before tracking was
 enabled cannot be recovered; rerun the dependency command after reloading the
 integration.
+
+A dependency's result counts only when its shell reports it with the nonce
+Zetta gave that shell, so text printed into the pane — a file, a remote host,
+a nested shell — cannot release a wait. A pane whose shell cannot report that
+way (started by an older Zetta, a shared pane this window joined or
+reattached rather than created, or loading an older `zetta` from `PATH`) fails the wait with a message saying so; restart
+that pane's shell to use it as a dependency. Reloading the integration does
+not help there, because the nonce is given only when the shell starts. Nor
+does a shell that replaces the pane's own with `exec` inherit it: once the
+pane has reported with its nonce, a wait on it after such an `exec` does not
+complete until the pane is restarted. See
+[Shell integration](shell-integration.md) for the markers involved.
 
 Tab names follow the active terminal process. Press `Ctrl-Shift-R` or double-click
 a tab to set a persistent name. Use `Ctrl-Shift-Y` or the tab context menu

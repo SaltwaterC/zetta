@@ -323,3 +323,81 @@ fn an_endpoint_in_a_directory_others_can_write_is_not_read() {
 
     assert!(Endpoint::read(&path).is_err());
 }
+
+#[cfg(unix)]
+#[test]
+fn a_message_trickled_past_its_deadline_is_refused() {
+    use std::io::Write as _;
+
+    let (ours, mut theirs) = Stream::pair().unwrap();
+    let mut connection = Connection::new(ours);
+    let writer = std::thread::spawn(move || {
+        // A header for a short message, then one byte every 50 ms: every read
+        // finishes quickly, the message never does.
+        if theirs.write_all(&64_u32.to_be_bytes()).is_err() {
+            return;
+        }
+        for _ in 0..40 {
+            if theirs.write_all(b" ").is_err() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    });
+
+    let started = std::time::Instant::now();
+    let deadline = started + std::time::Duration::from_millis(300);
+    assert!(
+        connection
+            .receive_by::<serde_json::Value>(deadline)
+            .is_err()
+    );
+    assert!(started.elapsed() < std::time::Duration::from_millis(900));
+    // And the connection is left without a timeout, as `serve` expects.
+    assert_eq!(connection.stream().read_timeout().unwrap(), None);
+    drop(connection);
+    writer.join().unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn a_message_that_arrives_in_pieces_before_its_deadline_is_read() {
+    use std::io::Write as _;
+
+    let (ours, mut theirs) = Stream::pair().unwrap();
+    let mut connection = Connection::new(ours);
+    let frame = encode_message(&serde_json::json!({"request": "ping"})).unwrap();
+    let writer = std::thread::spawn(move || {
+        for piece in frame.chunks(3) {
+            theirs.write_all(piece).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        theirs
+    });
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let (message, _) = connection
+        .receive_by::<serde_json::Value>(deadline)
+        .unwrap();
+    assert_eq!(message["request"], "ping");
+    drop(writer.join().unwrap());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_claimed_length_is_not_allocated_before_its_bytes_arrive() {
+    use std::io::Write as _;
+
+    let (ours, mut theirs) = Stream::pair().unwrap();
+    let mut connection = Connection::new(ours);
+    theirs.write_all(b"short").unwrap();
+    drop(theirs);
+    // A length the process could never allocate: reading it up front would
+    // abort; growing with what arrives ends at the peer's end of stream.
+    let error = connection.read_exact(usize::MAX / 2).unwrap_err();
+    assert!(
+        error
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|error| error.kind() == std::io::ErrorKind::UnexpectedEof),
+        "{error:#}"
+    );
+}

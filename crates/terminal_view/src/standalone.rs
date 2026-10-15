@@ -356,7 +356,7 @@ impl TerminalView {
                 Event::ResizeRequested { .. }
                 | Event::GridSizeChanged
                 | Event::LocalGridSizeChanged
-                | Event::TrackingReady
+                | Event::TrackingReady { .. }
                 | Event::CommandStarted { .. }
                 | Event::CommandFinished { .. } => {}
                 Event::TitleChanged => cx.emit(TerminalViewEvent::TitleChanged),

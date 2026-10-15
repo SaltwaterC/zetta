@@ -534,8 +534,10 @@ pub fn try_run_resume_disk_session(identifier: &str, identity_paths: &[PathBuf])
         }
 
         let identity_passphrases = prompt_for_identity_passphrases(identity_paths)?;
-        let encoded_identity_payload =
-            Zeroizing::new(serde_json::to_string(&ResumeIdentityPayload {
+        // Built without reallocating, so no shorter copy of the passphrases is
+        // freed unerased on the way.
+        let encoded_identity_payload = crate::auth::secret_utf8(crate::auth::encode_secret_json(
+            &ResumeIdentityPayload {
                 identity_paths: identity_paths
                     .iter()
                     .map(|path| path.to_string_lossy().into_owned())
@@ -548,7 +550,9 @@ pub fn try_run_resume_disk_session(identifier: &str, identity_paths: &[PathBuf])
                         })
                     })
                     .collect(),
-            })?);
+            },
+            0,
+        )?)?;
 
         let mut last_error = None;
         for endpoint in endpoints {

@@ -181,6 +181,10 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        #[cfg(target_os = "macos")]
+        if self.script_open_key_down(event, window, cx) {
+            return;
+        }
         if self.project_trust_key_down(event, window, cx) {
             return;
         }

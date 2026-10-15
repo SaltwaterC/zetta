@@ -40,7 +40,7 @@ pub(super) fn attach(
     daemon: &Arc<Daemon>,
     session_id: u64,
     pane_id: Option<u64>,
-    secret: Option<String>,
+    secret: Option<crate::auth::SessionSecret>,
     attacher: Attacher,
     force_shared: bool,
     connection: &mut Connection,
@@ -1635,12 +1635,10 @@ pub(super) fn snapshot(
     peer_process_id: Option<u32>,
     connection: &mut Connection,
 ) -> Result<()> {
-    anyhow::ensure!(
-        length <= crate::retention::MAX_SNAPSHOT_BYTES,
-        "a pane snapshot exceeded the retention limit"
-    );
-    // The raw bytes can be large; read them before taking the lock.
-    let bytes = connection.read_exact(length)?;
+    // The raw bytes can be large; read them before taking the lock, and
+    // within the same limits as a detach's.
+    let mut received = read_snapshots(&daemon.snapshot_budget, connection, &[(pane_id, length)])?;
+    let bytes = received.bytes.remove(&pane_id).unwrap_or_default();
 
     let mut sessions = daemon.sessions.lock().unwrap();
     let Some(session) = sessions.iter_mut().find(|session| session.id == session_id) else {

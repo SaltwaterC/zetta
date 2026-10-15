@@ -406,6 +406,7 @@ pub(crate) enum HandoverOrigin {
     /// Detached because the window is closing; there is nowhere to put it back.
     WindowClose,
 }
+pub(crate) use observers::restorable_command_change;
 pub(crate) use reconnect::RemoteSessionRequest;
 
 #[cfg(not(feature = "zmux"))]

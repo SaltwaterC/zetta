@@ -11,6 +11,7 @@ use alacritty_terminal::tty::ConsolePalette;
 use anyhow::Context as _;
 use serde::{Deserialize, Serialize};
 
+use crate::auth::SessionSecret;
 use crate::protocol::{BackgroundPaneLayout, BackgroundSessionSummary, RestorableSessionRecord};
 
 /// The wire format, and what a client and a multiplexer compare before they
@@ -103,7 +104,7 @@ pub struct Envelope {
     /// its credential in [`Request::Attach`] because it is the first request
     /// on the long-lived shared data connection.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session_secret: Option<String>,
+    pub session_secret: Option<SessionSecret>,
     pub request: Request,
 }
 
@@ -1243,7 +1244,7 @@ pub enum Request {
     Attach {
         session_id: u64,
         pane_id: Option<u64>,
-        secret: Option<String>,
+        secret: Option<SessionSecret>,
         /// Refuses an exclusive descriptor handoff. Batch-created shared panes
         /// use this even for a local client so every viewer follows the same
         /// relay path.
@@ -1547,7 +1548,7 @@ pub struct ResumeRequest {
     /// The session secret is sent only after the client has decrypted the
     /// record. It is checked by the daemon and then discarded before the
     /// restored record is kept in memory.
-    pub secret: Option<String>,
+    pub secret: Option<SessionSecret>,
     /// Per-pane lengths for the raw snapshots that follow this message on the
     /// connection. Keeping the screen bytes out of the JSON frame matters for
     /// a disk record with a large scrollback buffer: control messages are

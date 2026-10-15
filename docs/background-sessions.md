@@ -26,8 +26,9 @@ Remote `zcopy` and `zpaste` requests are delivered only to the window viewing
 the pane. In a shared pane, `zmux` forwards a request when exactly one viewer
 is attached; with multiple viewers it returns an ambiguity error. Requests are
 removed before output is retained, so reattaching never replays a clipboard
-operation. Each viewer controls its own **Allow Remote Clipboard Paste** switch;
-another viewer never inherits it, and detaching clears it.
+operation. Each viewer controls its own **Allow Remote Clipboard Paste** and
+**Allow Remote Clipboard Copy** switches; another viewer never inherits them,
+and detaching resets them (paste off, copy on).
 
 When a tab is shared while it remains on screen, Zetta also checkpoints each
 exclusive pane when the offer is published. With disk retention this means a
@@ -909,6 +910,71 @@ multiplexer's own memory of failures is lost with it. This is an online limit
 only. The verifier is inside the record, so anyone holding an identity that
 decrypts the record can guess against it offline, at their own speed; a typed
 secret on a disk record is only as strong as the secret itself.
+
+The executables are part of the boundary too. Zetta starts the `zmux` beside
+its own executable, and `zmux --upgrade` runs the image the multiplexer found
+at that path when it started — on Unix by re-executing it, on Windows by
+starting it beside the old one, with every protected session's verifier handed
+to it. Whoever can replace `zetta`, `zmux` or `zmux-pty`, or write to the
+directory holding them, therefore runs code inside the boundary at the next
+start or upgrade, and session protection cannot stop that. Install them where
+only you, or an administrator, can write: not a directory another account can
+write to, nor one beneath such a directory. A per-user install under your home
+directory or an administrator-owned system directory both qualify.
+
+### What disk records do and do not guarantee
+
+A disk record is several age files: the session's metadata, an authentication
+sidecar holding the failed-resume counters written since, the saved screens,
+and each pane's scrollback segments. Each file's encrypted contents begin with
+a line naming the slot it was written for: what kind of file it is, its record,
+its pane and sequence number where those apply, and which write of the record
+it belongs to. The sidecar names the metadata file it updates by its SHA-256,
+because the multiplexer that writes it cannot decrypt the record. Restoring a
+record compares each file with the slot it was read from, and refuses the
+record if a file was written for another one: another record's metadata,
+sidecar or segments, another pane's or another sequence's segment, one kind of
+file in another's place, or saved screens from an earlier write of the same
+record. A sidecar written before the current metadata — which a crash can
+leave behind — is ignored rather than allowed to replace newer counters.
+
+That stops valid files from being copied or replayed between slots. It does
+not authenticate whoever wrote them. age encrypts to a public recipient, and
+the recipients are saved beside the records, so any process that can write the
+directory can write a new, correctly labelled file for any slot. Nor is the
+store protected against rollback: an earlier metadata file together with its
+own sidecar and screens is a consistent earlier state, and nothing in a
+writable directory can show that it is not the latest. Either needs a trusted
+anchor outside the store, which Zetta does not have. The private directory
+modes are what keep other accounts out; against code running as you, a record
+is confidential, not authentic.
+
+Files written before these labels existed have none, and still load. Their
+metadata must still name the record that was asked for. A record is labelled
+the next time the multiplexer saves it, but its older scrollback segments are
+kept as they were, so copying an *unlabelled* segment between slots goes
+undetected until those segments are pruned with their record — after 30 days
+at most. A labelled record cannot be resumed by a Zetta from before the
+labels.
+
+Decrypted records, identity files and secrets in transit are erased from
+memory once they have been used: an identity file as it is read, and an
+encrypted one's contents; each decrypted record file, sidecar and sealed key;
+a post-quantum identity's encoded text and the file key it unwraps; secrets
+typed at a terminal or read from standard input; each request as it is
+serialized to be sent to the multiplexer; and the session secret a request
+carries, on both sides of the socket. Buffers are sized up front, or grown by
+copying into fresh erased memory, so a reallocation does not free an unerased
+copy. Some copies are not reached. Inside libraries: age's buffer of plaintext
+being encrypted and its X25519 and SSH identities' own key handling, the
+post-quantum key's parse on `hpke`'s stack, `serde_json`'s scratch buffer for
+an escaped string, and the standard input buffer. Outside them: the
+read-ahead buffer a connection receives requests into, and the kernel's socket
+buffers. What a restored record turns into — terminal screens,
+tab state, the verifier — is ordinary memory. Erasing narrows what a later
+look at memory finds; it does not protect a secret from anything that can read
+the process while the secret is in use, which is the subject of the next
+section.
 
 ### The prerequisite: process memory must be protected
 

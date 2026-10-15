@@ -4,6 +4,33 @@
 //! feed it from the UI thread, while process-control workers wait on the small
 //! per-run channels it owns.  This keeps waiting out of rendering and makes the
 //! dependency graph useful to every window in one Zetta process.
+//!
+//! # What may satisfy a dependency
+//!
+//! A dependency is released by one of two things: a managed wrapper's
+//! `run_complete`, which arrives on the process-control connection that
+//! registered it, or a shell's `command-finished` lifecycle marker. The marker
+//! is a title printed into the pane, so any output can produce one — `cat` of
+//! a file, a remote host, a nested shell. Only a marker carrying the nonce the
+//! terminal gave its own shell (`authenticated` on the terminal event) moves
+//! this registry. [`RunCommandRegistry::observe_terminal_event`] is the one
+//! place terminal events enter it; the `command_started` and
+//! `command_finished` methods it routes them to take only trusted
+//! observations — that, the OS's foreground process, a stacked command's own
+//! exit.
+//!
+//! An unauthenticated marker never records a start or a result. In a pane that
+//! has authenticated, it is ignored: that is a forgery, or a nested or remote
+//! shell, whose result is not the pane's. In a pane that has never
+//! authenticated — a shell started by an older Zetta, a multiplexer pane this
+//! window joined or reattached rather than created (whose terminal holds no
+//! nonce), or an outdated `zetta` on `PATH` — it marks the pane as unable to report, and a wait on that pane
+//! fails closed with a message saying so rather than waiting forever.
+//!
+//! What this does not cover: anything that can read the shell's environment
+//! (a program the pane runs, any same-user process via `/proc`) can learn the
+//! nonce and forge a marker. The registration's owner identity is likewise
+//! the bearer-token caller's claim.
 
 use std::{
     collections::{HashMap, HashSet, VecDeque},
@@ -16,6 +43,7 @@ use std::{
 
 use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
+use terminal::Event as TerminalEvent;
 
 /// Stable identity exposed to a shell running in a pane.  `pane_id` is a
 /// window-local layout identifier and may change when a session is moved;
@@ -129,6 +157,12 @@ struct PaneState {
     /// duplicate markers from replacing the authoritative managed result until
     /// the next real command-start event.
     managed_shell_result_pending: bool,
+    /// The pane's shell has reported through an authenticated marker since the
+    /// pane was opened. Unauthenticated markers are then ignored outright.
+    authenticated: bool,
+    /// The pane has printed an unauthenticated lifecycle marker and no
+    /// authenticated one: its shell integration reports, but cannot prove it.
+    unauthenticated_reports: bool,
 }
 
 impl Default for PaneState {
@@ -139,6 +173,8 @@ impl Default for PaneState {
             active: None,
             last_result: None,
             managed_shell_result_pending: false,
+            authenticated: false,
+            unauthenticated_reports: false,
         }
     }
 }
@@ -168,7 +204,15 @@ enum DependencyObservation {
     ActiveManaged(u64),
     Last(LastResult),
     Unknown,
+    /// The pane's shell integration reports only unauthenticated markers.
+    Unauthenticated,
 }
+
+/// Why a wait on a pane that cannot authenticate its results failed.
+const UNAUTHENTICATED_DEPENDENCY_MESSAGE: &str = "a dependency pane's shell reports \
+     command results Zetta cannot authenticate (a shell started by an older Zetta, a shared \
+     pane this window joined or reattached, or an outdated `zetta` on PATH); restart that pane's shell \
+     from this Zetta to use it as a dependency";
 
 #[derive(Default)]
 struct RegistryState {
@@ -194,6 +238,71 @@ pub(crate) fn process_run_registry() -> RunCommandRegistry {
 }
 
 impl RunCommandRegistry {
+    /// Feeds one terminal event to the registry. The only route lifecycle
+    /// markers take into it: authenticated ones become shell observations,
+    /// unauthenticated ones can at most make a wait on this pane fail.
+    pub(crate) fn observe_terminal_event(&self, pane: RunPaneIdentity, event: &TerminalEvent) {
+        match event {
+            TerminalEvent::TrackingReady {
+                authenticated: true,
+            } => {
+                self.authenticated_marker(pane);
+                self.tracking_ready(pane);
+            }
+            TerminalEvent::CommandStarted {
+                command,
+                authenticated: true,
+            } => {
+                self.authenticated_marker(pane);
+                self.command_started(pane, command.clone());
+            }
+            TerminalEvent::CommandFinished {
+                exit_code,
+                authenticated: true,
+            } => {
+                self.authenticated_marker(pane);
+                self.command_finished(pane, *exit_code);
+            }
+            TerminalEvent::TrackingReady { .. }
+            | TerminalEvent::CommandStarted { .. }
+            | TerminalEvent::CommandFinished { .. } => self.unauthenticated_marker(pane),
+            TerminalEvent::TerminalExited(_) => self.terminal_lost(pane),
+            _ => {}
+        }
+    }
+
+    /// The pane's shell has proved it holds the nonce; from now on its
+    /// unauthenticated markers are somebody else's.
+    fn authenticated_marker(&self, pane: RunPaneIdentity) {
+        let mut state = self.lock_state();
+        let pane_state = state.panes.entry(pane).or_default();
+        if pane_state.available {
+            pane_state.authenticated = true;
+            pane_state.unauthenticated_reports = false;
+        }
+    }
+
+    /// A lifecycle marker without this pane's nonce. It never records a start
+    /// or a result. In a pane whose shell has authenticated it is ignored; in
+    /// one that never has, it fails every wait on the pane's next command,
+    /// and every later one until the shell authenticates.
+    fn unauthenticated_marker(&self, pane: RunPaneIdentity) {
+        let mut state = self.lock_state();
+        {
+            let pane_state = state.panes.entry(pane).or_default();
+            if !pane_state.available || pane_state.authenticated {
+                return;
+            }
+            pane_state.unauthenticated_reports = true;
+        }
+        let roots = replace_pending_command_observations(
+            &mut state,
+            pane,
+            DependencyObservation::Unauthenticated,
+        );
+        resolve_locked(&mut state, roots);
+    }
+
     pub(crate) fn register(
         &self,
         owner: RunPaneIdentity,
@@ -310,7 +419,7 @@ impl RunCommandRegistry {
     }
 
     /// Marks the shell integration as available.  Repeated markers are safe.
-    pub(crate) fn tracking_ready(&self, pane: RunPaneIdentity) {
+    fn tracking_ready(&self, pane: RunPaneIdentity) {
         let mut state = self.lock_state();
         let first_ready = {
             let pane_state = state.panes.entry(pane).or_default();
@@ -353,11 +462,17 @@ impl RunCommandRegistry {
         pane_state.active = None;
         pane_state.last_result = None;
         pane_state.managed_shell_result_pending = false;
+        pane_state.authenticated = false;
+        pane_state.unauthenticated_reports = false;
     }
 
     /// Records a command that is currently executing in a pane.  A managed
     /// wrapper owns its pane state once registration has completed, so a late
     /// shell marker cannot hide the graph node.
+    ///
+    /// For trusted observations only: an authenticated marker (routed by
+    /// [`Self::observe_terminal_event`]), or the OS reporting a foreground
+    /// process.
     pub(crate) fn command_started(&self, pane: RunPaneIdentity, command: String) {
         let mut state = self.lock_state();
         let roots = {
@@ -395,6 +510,9 @@ impl RunCommandRegistry {
 
     /// Records a shell command result.  `None` is deliberately retained as an
     /// unavailable result: it is not a success and cannot satisfy a later wait.
+    ///
+    /// For trusted observations only: an authenticated marker (routed by
+    /// [`Self::observe_terminal_event`]), or a stacked command's own exit.
     pub(crate) fn command_finished(&self, pane: RunPaneIdentity, exit_code: Option<i32>) {
         let mut state = self.lock_state();
         let active = {
@@ -642,6 +760,10 @@ fn evaluate_run(state: &RegistryState, id: u64, stack: &mut Vec<u64>) -> Option<
                 message: "dependency has no trustworthy command result".to_owned(),
                 structural: true,
             },
+            DependencyObservation::Unauthenticated => Evaluation::Failed {
+                message: UNAUTHENTICATED_DEPENDENCY_MESSAGE.to_owned(),
+                structural: true,
+            },
         };
         match evaluation {
             Evaluation::Ready => {}
@@ -709,6 +831,9 @@ fn snapshot_dependency(state: &RegistryState, pane: RunPaneIdentity) -> Dependen
                 DependencyObservation::ActiveManaged(id)
             }
             Some(ActiveOperation::Managed(_)) => recorded_result(pane_state),
+            // Its next command could only be reported by a marker this
+            // registry will not accept, so say so now instead of waiting.
+            _ if pane_state.unauthenticated_reports => DependencyObservation::Unauthenticated,
             Some(ActiveOperation::Ignored) => DependencyObservation::WaitingForCommand,
             Some(ActiveOperation::Shell(_)) => DependencyObservation::ActiveShell,
             // A previous result is intentionally not a valid snapshot for a

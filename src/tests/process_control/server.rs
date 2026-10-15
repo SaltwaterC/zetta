@@ -236,3 +236,148 @@ fn reload_completion_ends_on_shutdown_failure_or_worker_loss() {
     drop(sender);
     assert!(!wait_for_reload_completion(&receiver, &stopping));
 }
+
+/// Starts a server with `limits` in a fresh directory, returning what a client
+/// needs to reach it.
+fn start_limited_server(
+    limits: ControlLimits,
+) -> (
+    tempfile::TempDir,
+    ProcessControlServer,
+    ControlEndpoint,
+    futures::channel::mpsc::UnboundedReceiver<ProcessControlCommand>,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let endpoint_path = directory.path().join("control.json");
+    let (commands, received) = futures::channel::mpsc::unbounded();
+    let server =
+        ProcessControlServer::start_with_limits(commands, endpoint_path.clone(), limits).unwrap();
+    let endpoint: ControlEndpoint =
+        serde_json::from_slice(&fs::read(&endpoint_path).unwrap()).unwrap();
+    (directory, server, endpoint, received)
+}
+
+fn queued_icon_reset(endpoint: &ControlEndpoint, attention_id: u64) -> ControlResponse {
+    try_queued_icon_reset(endpoint, attention_id).unwrap()
+}
+
+/// Like [`queued_icon_reset`], but a connection the server refuses and closes
+/// before the request is written is an error rather than a panic.
+fn try_queued_icon_reset(endpoint: &ControlEndpoint, attention_id: u64) -> Result<ControlResponse> {
+    let mut reset = request(&endpoint.token, "reset_tab_icon");
+    reset.attention_id = Some(attention_id);
+    reset.queue = Some(true);
+    let mut stream = UnixStream::connect(&endpoint.socket_path)?;
+    stream.set_read_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
+    write_message(&mut stream, &reset)?;
+    read_message::<ControlResponse>(&mut stream)
+}
+
+#[test]
+fn a_connection_past_the_limit_is_refused_at_once() {
+    let (_directory, _server, endpoint, mut received) = start_limited_server(ControlLimits {
+        connections: 2,
+        ..ControlLimits::DEFAULT
+    });
+
+    // Two connections that say nothing hold both places until their request
+    // deadline, which is far away.
+    let silent = [
+        UnixStream::connect(&endpoint.socket_path).unwrap(),
+        UnixStream::connect(&endpoint.socket_path).unwrap(),
+    ];
+    // Let the accepting thread hand both to their own threads.
+    thread::sleep(Duration::from_millis(100));
+
+    let mut refused = UnixStream::connect(&endpoint.socket_path).unwrap();
+    refused
+        .set_read_timeout(Some(Duration::from_secs(1)))
+        .unwrap();
+    let response = read_message::<ControlResponse>(&mut refused)
+        .expect("the connection past the limit is answered before it sends anything");
+    assert_eq!(response.status, "rejected");
+    assert_eq!(response.error.unwrap().code, PROCESS_BUSY);
+
+    // Closing them gives the places back — once their threads have seen the
+    // close, so until then a connection may still be refused (and closed under
+    // the request being written).
+    drop(silent);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let response = loop {
+        let response = try_queued_icon_reset(&endpoint, 7);
+        if response
+            .as_ref()
+            .is_ok_and(|response| response.status == "ok")
+            || Instant::now() > deadline
+        {
+            break response.unwrap();
+        }
+        thread::sleep(Duration::from_millis(20));
+    };
+    assert_eq!(response.status, "ok");
+    assert!(matches!(
+        futures::executor::block_on(received.next()),
+        Some(ProcessControlCommand::ResetTabIcon { .. })
+    ));
+}
+
+#[test]
+fn a_request_trickled_past_its_deadline_is_refused() {
+    use std::io::Write as _;
+
+    let deadline = Duration::from_millis(400);
+    let (_directory, _server, endpoint, mut received) = start_limited_server(ControlLimits {
+        request_deadline: deadline,
+        ..ControlLimits::DEFAULT
+    });
+    let mut stream = UnixStream::connect(&endpoint.socket_path).unwrap();
+    let mut writer = stream.try_clone().unwrap();
+    let started = Instant::now();
+    // One byte every 100 ms keeps every individual read well inside any
+    // per-read timeout, and never finishes the request.
+    let trickle = thread::spawn(move || {
+        let request = serde_json::to_vec(&request("token", "open_window")).unwrap();
+        for byte in request.iter().cycle().take(40) {
+            if writer.write_all(&[*byte]).is_err() {
+                return;
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+    });
+
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    let response = read_message::<ControlResponse>(&mut stream).unwrap();
+    let elapsed = started.elapsed();
+    assert_eq!(response.status, "rejected");
+    assert!(
+        elapsed < deadline + Duration::from_millis(600),
+        "a trickled request held its connection for {elapsed:?}"
+    );
+    drop(stream);
+    trickle.join().unwrap();
+    assert!(received.try_recv().is_err());
+}
+
+#[test]
+fn a_full_command_queue_refuses_rather_than_queues() {
+    let (_directory, server, endpoint, mut received) = start_limited_server(ControlLimits {
+        queued_commands: 2,
+        ..ControlLimits::DEFAULT
+    });
+
+    assert_eq!(queued_icon_reset(&endpoint, 1).status, "ok");
+    assert_eq!(queued_icon_reset(&endpoint, 2).status, "ok");
+    let refused = queued_icon_reset(&endpoint, 3);
+    assert_eq!(refused.status, "rejected");
+    assert_eq!(refused.error.unwrap().code, PROCESS_BUSY);
+    assert_eq!(server.queued_commands().len(), 2);
+
+    // The application taking a command, as its loop does, makes room again.
+    let taken = futures::executor::block_on(received.next()).unwrap();
+    assert!(taken.came_from_control_socket());
+    server.queued_commands().release();
+    assert_eq!(queued_icon_reset(&endpoint, 4).status, "ok");
+    assert_eq!(server.queued_commands().len(), 2);
+}

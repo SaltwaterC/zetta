@@ -1152,6 +1152,19 @@ fn record_opens_with(
     age::decrypt(identity, &std::fs::read(path).unwrap()).is_ok()
 }
 
+/// Decrypts a file the persistence store wrote and returns what follows the
+/// line naming its slot, which every such file starts its plaintext with.
+#[cfg(feature = "session-persistence")]
+fn store_payload(identity: &impl age::Identity, ciphertext: &[u8]) -> Vec<u8> {
+    let plaintext = age::decrypt(identity, ciphertext).unwrap();
+    assert!(
+        plaintext.starts_with(b"\0zmux-binding/1 "),
+        "a store file without its binding"
+    );
+    let end = plaintext.iter().position(|byte| *byte == b'\n').unwrap();
+    plaintext[end + 1..].to_vec()
+}
+
 /// `Configure` replaces the store's recipients and any token holder may send
 /// it. Re-encrypting a protected session under the sender's key would hand its
 /// verifier, state and scrollback to whoever chose that key, without the secret.
@@ -1292,7 +1305,7 @@ fn disk_detach_encrypts_metadata_and_keeps_it_opaque_to_listing() {
             .any(|window| window == b"metadata must stay encrypted")
     );
     let metadata: serde_json::Value =
-        serde_json::from_slice(&age::decrypt(&identity, &ciphertext).unwrap()).unwrap();
+        serde_json::from_slice(&store_payload(&identity, &ciphertext)).unwrap();
     assert_eq!(metadata["state"], state);
     assert!(metadata["snapshots"][0].get("bytes").is_none());
     assert_eq!(metadata["snapshots"][0]["length"], 14);
@@ -1307,7 +1320,7 @@ fn disk_detach_encrypts_metadata_and_keeps_it_opaque_to_listing() {
         })
         .unwrap();
     assert_eq!(
-        age::decrypt(&identity, &std::fs::read(snapshot_path).unwrap()).unwrap(),
+        store_payload(&identity, &std::fs::read(snapshot_path).unwrap()),
         b"private screen"
     );
 
@@ -1592,7 +1605,7 @@ fn protected_disk_resume_preserves_failed_authentication_backoff() {
         sessions_dir.join(format!("persistence/session-{}-auth.age", pane.session_id));
     let read_authentication = || -> serde_json::Value {
         let ciphertext = std::fs::read(&authentication_path).unwrap();
-        serde_json::from_slice(&age::decrypt(&identity, &ciphertext).unwrap()).unwrap()
+        serde_json::from_slice(&store_payload(&identity, &ciphertext)).unwrap()
     };
     let update_backoff = |updated_at, backoff_seconds| {
         let metadata = read_authentication();
@@ -3484,7 +3497,7 @@ fn shared_clients_are_sized_to_the_smallest_of_them() {
             request: Request::Attach {
                 session_id: pane.session_id,
                 pane_id: Some(pane.pane_id),
-                secret: Some(TEST_SECRET.to_owned()),
+                secret: Some(SessionSecret::new(TEST_SECRET.to_owned())),
                 force_shared: false,
                 relaying_for: None,
             },
@@ -3649,7 +3662,7 @@ fn leaving_a_shared_session_lets_the_pane_grow_back_to_the_remaining_viewer() {
         Request::Attach {
             session_id: pane.session_id,
             pane_id: Some(pane.pane_id),
-            secret: Some(TEST_SECRET.to_owned()),
+            secret: Some(SessionSecret::new(TEST_SECRET.to_owned())),
             force_shared: false,
             relaying_for: None,
         },
@@ -4258,7 +4271,7 @@ fn shared_spawns_publish_events_and_preserve_local_grants() {
             client_process_id: std::process::id(),
             client_id: ClientId::new("stream-only-spawn"),
             stream_only: true,
-            session_secret: Some(TEST_SECRET.to_owned()),
+            session_secret: Some(SessionSecret::new(TEST_SECRET.to_owned())),
             request: Request::SpawnShared(SharedSpawnRequest {
                 session_id: pane.session_id,
                 base_revision: local.state.revision,
@@ -4321,11 +4334,11 @@ fn shared_spawns_publish_events_and_preserve_local_grants() {
             client_process_id: std::process::id(),
             client_id: ClientId::new("stream-only-attach"),
             stream_only: true,
-            session_secret: Some(TEST_SECRET.to_owned()),
+            session_secret: Some(SessionSecret::new(TEST_SECRET.to_owned())),
             request: Request::Attach {
                 session_id: pane.session_id,
                 pane_id: Some(local.pane.pane_id()),
-                secret: Some(TEST_SECRET.to_owned()),
+                secret: Some(SessionSecret::new(TEST_SECRET.to_owned())),
                 force_shared: false,
                 relaying_for: None,
             },
@@ -8466,7 +8479,7 @@ fn a_handover_that_is_abandoned_leaves_the_pane_readable() {
                 client_process_id: std::process::id(),
                 client_id: ClientId::new("abandoned-handover"),
                 stream_only: false,
-                session_secret: Some(TEST_SECRET.to_owned()),
+                session_secret: Some(SessionSecret::new(TEST_SECRET.to_owned())),
                 request: Request::TakeExclusive {
                     session_id: pane.session_id,
                     pane_id: shared_pane_id,
@@ -10132,11 +10145,11 @@ fn a_remote_shaped_viewer_uploads_over_its_own_request_connection() {
             client_process_id: std::process::id(),
             client_id: viewer.clone(),
             stream_only: true,
-            session_secret: Some(TEST_SECRET.to_owned()),
+            session_secret: Some(SessionSecret::new(TEST_SECRET.to_owned())),
             request: Request::Attach {
                 session_id,
                 pane_id: Some(pane_id),
-                secret: Some(TEST_SECRET.to_owned()),
+                secret: Some(SessionSecret::new(TEST_SECRET.to_owned())),
                 force_shared: false,
                 relaying_for: None,
             },
@@ -10160,7 +10173,7 @@ fn a_remote_shaped_viewer_uploads_over_its_own_request_connection() {
                 client_process_id: std::process::id(),
                 client_id: viewer.clone(),
                 stream_only: true,
-                session_secret: secret.map(str::to_owned),
+                session_secret: secret.map(|secret| SessionSecret::new(secret.to_owned())),
                 request: Request::StoreImage {
                     session_id,
                     pane_id,
@@ -10348,7 +10361,7 @@ fn rotating_disk_segments_leaves_other_panes_live_and_keeps_output_in_order() {
     let published = segments()
         .into_iter()
         .take(2)
-        .flat_map(|(_, path)| age::decrypt(&identity, &std::fs::read(path).unwrap()).unwrap())
+        .flat_map(|(_, path)| store_payload(&identity, &std::fs::read(path).unwrap()))
         .collect::<Vec<_>>();
     assert!(published.len() >= 2 * 8 * 1024 * 1024);
     let published = String::from_utf8(published).unwrap().replace("\r\n", "\n");

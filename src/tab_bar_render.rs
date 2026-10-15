@@ -232,6 +232,7 @@ struct TabChrome<'a> {
     tab_move_mode_active: bool,
     no_mux: bool,
     remote_clipboard_paste: bool,
+    remote_clipboard_copy: bool,
     is_shrinking: bool,
     is_renaming_tab: bool,
     compact_mode: bool,
@@ -476,6 +477,7 @@ fn render_tab(
         tab_move_mode_active,
         no_mux,
         remote_clipboard_paste,
+        remote_clipboard_copy,
         is_shrinking,
         is_renaming_tab,
         compact_mode,
@@ -586,6 +588,7 @@ fn render_tab(
             tab_count,
             tab_move_mode_active,
             remote_clipboard_paste,
+            remote_clipboard_copy,
         },
         remote_session_menu_header(remote_destination),
         cx,
@@ -991,6 +994,7 @@ struct TabMenuContext {
     tab_count: usize,
     tab_move_mode_active: bool,
     remote_clipboard_paste: bool,
+    remote_clipboard_copy: bool,
 }
 
 fn with_tab_context_menu(
@@ -1009,6 +1013,7 @@ fn with_tab_context_menu(
         tab_count,
         tab_move_mode_active,
         remote_clipboard_paste,
+        remote_clipboard_copy,
     } = menu;
     let menu_handle = handle.clone();
     let tab_silent_mode = tab.silent_mode;
@@ -1047,6 +1052,11 @@ fn with_tab_context_menu(
                             "Allow Remote Clipboard Paste",
                             Box::new(ToggleRemoteClipboardPaste),
                             remote_clipboard_paste,
+                        )
+                        .action_checked(
+                            "Allow Remote Clipboard Copy",
+                            Box::new(ToggleRemoteClipboardCopy),
+                            remote_clipboard_copy,
                         )
                     })
                     .separator()
@@ -1366,6 +1376,9 @@ fn tab_bar_tab_elements(
                                 no_mux,
                                 remote_clipboard_paste: this
                                     .remote_clipboard_paste_tabs
+                                    .contains(&tab.id),
+                                remote_clipboard_copy: !this
+                                    .remote_clipboard_copy_blocked_tabs
                                     .contains(&tab.id),
                                 is_shrinking,
                                 is_renaming_tab,

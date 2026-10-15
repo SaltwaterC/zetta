@@ -21,6 +21,8 @@ mod console_backend;
 pub use console_backend::ConsoleBackend;
 mod discovery;
 mod environment;
+#[cfg(any(windows, test))]
+mod installation_trust;
 mod shell_integration;
 
 pub use discovery::discovered_profiles;

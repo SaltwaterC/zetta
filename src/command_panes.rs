@@ -147,13 +147,47 @@ fn shell_kind_for_profile(profile: &Shell) -> task::ShellKind {
 }
 
 fn quote_shell_value(kind: task::ShellKind, value: &str) -> Result<String> {
-    kind.try_quote(value)
-        .map(|value| value.into_owned())
-        .context("shell command contains a value that cannot be quoted")
+    let quoted = kind
+        .try_quote(value)
+        .context("shell command contains a value that cannot be quoted")?;
+    // Upstream's PowerShell quoting doubles only `'`, and does not count
+    // U+2018–U+201B as needing quotes at all. When it quoted, the delimiters
+    // are ASCII, so doubling every curly quote in its output fixes the
+    // contents alone; when it did not, the value had nothing else that needed
+    // quoting, so a plain literal is what it would have produced.
+    let curly = |character| matches!(character, '\u{2018}'..='\u{201B}');
+    Ok(match kind {
+        task::ShellKind::PowerShell | task::ShellKind::Pwsh if value.contains(curly) => {
+            if quoted.starts_with('\'') {
+                quoted
+                    .chars()
+                    .flat_map(|character| {
+                        std::iter::repeat_n(character, if curly(character) { 2 } else { 1 })
+                    })
+                    .collect()
+            } else {
+                quote_powershell_literal(value)
+            }
+        }
+        _ => quoted.into_owned(),
+    })
 }
 
-fn quote_powershell_literal(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "''"))
+/// A single-quoted PowerShell literal. PowerShell ends such a string at any
+/// of `'` and U+2018–U+201B, and reads any two of them in a row as one literal
+/// quote, so each is doubled — doubling only `'` would let a path such as
+/// `C:\O’Brien` close the string early.
+pub(crate) fn quote_powershell_literal(value: &str) -> String {
+    let mut quoted = String::with_capacity(value.len() + 2);
+    quoted.push('\'');
+    for character in value.chars() {
+        if matches!(character, '\'' | '\u{2018}'..='\u{201B}') {
+            quoted.push(character);
+        }
+        quoted.push(character);
+    }
+    quoted.push('\'');
+    quoted
 }
 
 fn append_shell_arguments(

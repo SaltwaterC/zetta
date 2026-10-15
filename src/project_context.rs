@@ -447,6 +447,61 @@ impl ProjectContextPolicy {
     }
 }
 
+/// What project detection may do with where a pane is.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ProjectDetectionDirectory {
+    /// Confirmed by the pane's shell or the operating system: detection may
+    /// enter the project it is in.
+    Verified(PathBuf),
+    /// Only an unauthenticated report says so. It may take the pane out of a
+    /// project it is outside of, and nothing more.
+    Unverified(PathBuf),
+    /// Nothing usable is known.
+    Unknown,
+}
+
+/// Where project detection starts from for `pane`.
+///
+/// Entering a project applies its configuration and, the first time in a tab,
+/// its `initial_split`, so the directory has to be one the pane's shell
+/// confirmed — its authenticated report, the foreground process's directory,
+/// or a WSL shell's tracking file; see "Which directory a pane is in" in
+/// `pane.rs`. When the latest report of any kind says something else, the
+/// pane is `Unverified` there: a printed `zetta-cwd` can never enter a
+/// project, where previously `cat` of a file naming a registered project's
+/// directory would have applied its initial split.
+pub(crate) fn project_detection_directory(
+    pane: &TerminalPane,
+    cx: &App,
+) -> ProjectDetectionDirectory {
+    let (verified, reported) = if is_wsl_shell(&pane.profile.command) {
+        let directory = |directory: Option<String>| {
+            directory.and_then(|d| wsl_reported_directory(&pane.profile, &d))
+        };
+        (
+            directory(pane.wsl_working_directory(cx)),
+            directory(pane.reported_wsl_working_directory(cx)),
+        )
+    } else {
+        let directory = |current: Option<(PathBuf, bool)>| {
+            current
+                .filter(|(_, authoritative)| *authoritative)
+                .map(|(directory, _)| directory)
+        };
+        (
+            directory(pane.current_directory(cx)),
+            directory(pane.reported_current_directory(cx)),
+        )
+    };
+    match (verified, reported) {
+        (verified, Some(reported)) if verified.as_ref() != Some(&reported) => {
+            ProjectDetectionDirectory::Unverified(reported)
+        }
+        (Some(verified), _) => ProjectDetectionDirectory::Verified(verified),
+        (None, _) => ProjectDetectionDirectory::Unknown,
+    }
+}
+
 pub(crate) fn wsl_reported_directory(profile: &Profile, directory: &str) -> Option<PathBuf> {
     let distribution = wsl_distribution(profile)?;
     if distribution.is_empty()
@@ -701,23 +756,27 @@ impl Zetta {
             }
             return;
         }
-        let is_wsl = is_wsl_shell(&pane.profile.command);
         let wsl_cwd_file = observe_wsl_cwd_file
             .then(|| pane.wsl_cwd_file_needs_observing(cx))
             .flatten();
-        let directory = if is_wsl {
-            pane.wsl_working_directory(cx)
-                .and_then(|directory| wsl_reported_directory(&pane.profile, &directory))
-        } else {
-            pane.current_directory(cx)
-                .filter(|(_, authoritative)| *authoritative)
-                .map(|(directory, _)| directory)
-        };
+        let directory = project_detection_directory(pane, cx);
         if let Some(file) = wsl_cwd_file {
             self.observe_wsl_cwd_file(tab_id, pane_id, file, window, cx);
         }
-        let Some(directory) = directory else {
-            return;
+        let directory = match directory {
+            ProjectDetectionDirectory::Verified(directory) => directory,
+            ProjectDetectionDirectory::Unverified(directory) => {
+                // The pane appears to be somewhere its shell has not confirmed:
+                // a host it is logged in to, or a forged report. That may take
+                // it out of its project — what an OpenSSH session relies on, see
+                // `foreground_is_mosh_session` — but never into one. The entry
+                // is dropped so the shell's next confirmed report is detected
+                // again even when it names the directory detected last.
+                self.projects.detections.remove(&pane_id);
+                self.leave_project_ahead_of_detection(tab_id, pane_id, &directory, window, cx);
+                return;
+            }
+            ProjectDetectionDirectory::Unknown => return,
         };
         let Some(generation) = self.projects.begin_detection(pane_id, directory.clone()) else {
             return;

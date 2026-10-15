@@ -243,3 +243,59 @@ fn the_relayed_viewer_belongs_to_relay_pane() {
         usage(false)
     );
 }
+
+fn remote_session(
+    title: &str,
+    authentication_required: bool,
+) -> protocol::BackgroundSessionSummary {
+    protocol::BackgroundSessionSummary {
+        id: 7,
+        title: title.to_owned(),
+        authentication_required,
+        active_pane: 1,
+        layout: protocol::BackgroundPaneLayout::Pane { pane_id: 1 },
+        panes: Vec::new(),
+        held: false,
+        scoped_to: None,
+        key_envelope: None,
+    }
+}
+
+#[test]
+fn remote_session_titles_are_escaped_before_they_reach_the_terminal() {
+    let lines = remote_session_lines(&[
+        remote_session("build\u{1b}]52;c;cHduZWQ=\u{7}", false),
+        remote_session("csi\u{9b}2J\r\nspoofed", true),
+        remote_session("cargo ✓", false),
+    ]);
+
+    assert_eq!(
+        lines,
+        [
+            "7  build\\u{1b}]52;c;cHduZWQ=\\u{7}  (0 panes)",
+            "7  csi\\u{9b}2J\\r\\nspoofed  (0 panes, protected)",
+            "7  cargo ✓  (0 panes)",
+        ]
+    );
+}
+
+#[test]
+fn errors_escape_remote_text_but_keep_their_line_breaks() {
+    let error = anyhow::anyhow!("SSH command failed: denied\r\n\u{1b}]0;owned\u{7}\u{9b}2J")
+        .context("connecting to the remote multiplexer");
+
+    assert_eq!(
+        display_error(&error),
+        "connecting to the remote multiplexer: SSH command failed: denied\n\\u{1b}]0;owned\\u{7}\\u{9b}2J"
+    );
+}
+
+#[test]
+fn a_lone_carriage_return_in_an_error_is_escaped() {
+    let error = anyhow::anyhow!("remote refused\rzmux: everything is fine");
+
+    assert_eq!(
+        display_error(&error),
+        "remote refused\\rzmux: everything is fine"
+    );
+}

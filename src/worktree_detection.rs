@@ -256,7 +256,11 @@ impl Zetta {
             .and_then(|tab| {
                 let pane = tab.pane(pane_id)?;
                 let is_wsl = is_wsl_shell(&pane.profile.command);
-                let directory = (!is_wsl).then(|| pane.current_directory(cx)).flatten();
+                // Any report, authenticated or not: the worktree it finds only
+                // names the tab, and detection reads metadata, never runs Git.
+                let directory = (!is_wsl)
+                    .then(|| pane.reported_current_directory(cx))
+                    .flatten();
                 Some((directory, is_wsl))
             })
         else {
@@ -345,7 +349,8 @@ impl Zetta {
                     pane.worktree_detection_generation,
                     pane.worktree_detection_directory.as_deref(),
                     pane.worktree_detection_can_clear,
-                    pane.current_directory(cx).map(|(directory, _)| directory),
+                    pane.reported_current_directory(cx)
+                        .map(|(directory, _)| directory),
                 ))
             });
         let Some((current_generation, scheduled_directory, can_clear, current_directory)) =

@@ -149,13 +149,36 @@ fn packet_block(packet: &[u8]) -> Option<u16> {
     Some(u16::from_be_bytes([*packet.get(2)?, *packet.get(3)?]))
 }
 
+/// The ERROR packet's message, escaped for display.
+///
+/// The text is chosen by the peer and ends up in a terminal — the client's
+/// stderr, or the server log pane — so control characters are escaped rather
+/// than passed through, which would let any host that can answer a request
+/// write escape sequences into that terminal.
 fn error_message(packet: &[u8]) -> String {
     let message = packet.get(4..).unwrap_or_default();
     let end = message
         .iter()
         .position(|byte| *byte == 0)
         .unwrap_or(message.len());
-    String::from_utf8_lossy(&message[..end]).into_owned()
+    display_text(&String::from_utf8_lossy(&message[..end]))
+}
+
+fn display_text(text: &str) -> String {
+    let mut display = String::with_capacity(text.len());
+    for character in text.chars() {
+        match character {
+            '\n' => display.push_str("\\n"),
+            '\r' => display.push_str("\\r"),
+            '\t' => display.push_str("\\t"),
+            character if character.is_control() => {
+                use std::fmt::Write as _;
+                let _ = write!(display, "\\u{{{:x}}}", character as u32);
+            }
+            character => display.push(character),
+        }
+    }
+    display
 }
 
 #[cfg(feature = "tftp-client")]

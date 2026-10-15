@@ -416,6 +416,28 @@ startup keeps the inherited `PATH`, prepends the installation's `bin`, and
 sets `CHERE_INVOKING=1` so configured or inherited native working directories
 survive login startup.
 
+The conventional roots `C:\msys64`, `C:\cygwin64` and `C:\cygwin` are a guess
+rather than a record, and any account on the machine may create a folder at
+the root of `C:\`. Zetta therefore offers an installation found only at one of
+them when nobody but your account, SYSTEM, Administrators and TrustedInstaller
+can change it: the root, the launcher, runtime DLL and shells the profiles
+start, and the folders in between must be owned by one of those and grant
+nobody else write, delete, permission or ownership rights; `C:\` itself must
+not let anyone else remove the root; and none of them may be a junction or
+symbolic link. An installation made by the MSYS2 or Cygwin installer is found
+through its Start Menu shortcut or registry entry instead, and is not checked.
+A copy unpacked into `C:\msys64` by an ordinary account inherits `C:\`'s grant
+of Modify to Authenticated Users, so any other account could replace its
+programs, and Zetta does not offer it. To offer it, remove that grant:
+
+```bat
+icacls C:\msys64 /inheritance:d
+icacls C:\msys64 /remove:g *S-1-5-11
+```
+
+Alternatively, add its `bin` directory to `PATH` (Cygwin), or define the
+profile yourself in `config.json`.
+
 Each profile also has an icon. When `icon` is omitted, `null`, or `"auto"`,
 Zetta infers it from the shell executable on macOS and Linux (`bash`, `zsh`,
 and `fish` get their bundled artwork; other programs use the Zetta fallback).

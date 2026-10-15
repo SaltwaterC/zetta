@@ -461,21 +461,32 @@ fn print_remote_sessions(sessions: &[protocol::BackgroundSessionSummary]) {
         println!("No remote sessions.");
         return;
     }
-    for session in sessions {
-        let protected = if session.authentication_required {
-            ", protected"
-        } else {
-            ""
-        };
-        println!(
-            "{}  {}  ({} pane{}{})",
-            session.id,
-            session.title,
-            session.panes.len(),
-            if session.panes.len() == 1 { "" } else { "s" },
-            protected,
-        );
+    for line in remote_session_lines(sessions) {
+        println!("{line}");
     }
+}
+
+/// One line per session. Titles come from the remote host, so they are escaped
+/// like the local catalog's before they reach the terminal.
+fn remote_session_lines(sessions: &[protocol::BackgroundSessionSummary]) -> Vec<String> {
+    sessions
+        .iter()
+        .map(|session| {
+            let protected = if session.authentication_required {
+                ", protected"
+            } else {
+                ""
+            };
+            format!(
+                "{}  {}  ({} pane{}{})",
+                session.id,
+                catalog::display_text(&session.title),
+                session.panes.len(),
+                if session.panes.len() == 1 { "" } else { "s" },
+                protected,
+            )
+        })
+        .collect()
 }
 
 fn print_profiles(profiles: &[String], json: bool) -> Result<()> {
@@ -601,7 +612,28 @@ pub fn run(arguments: &[OsString]) -> Result<()> {
 }
 
 /// [`run`], with the client-side settings the caller has already resolved.
+///
+/// The error comes back already escaped for a terminal, because every caller
+/// prints it and some of its text is not ours: SSH's stderr carries the remote
+/// command's, and a remote daemon's refusals are relayed verbatim. Escaping it
+/// here, rather than where each such text enters an error, also covers the
+/// sources nobody has thought of yet.
 pub fn run_with_defaults(arguments: &[OsString], defaults: ClientDefaults) -> Result<()> {
+    run_command(arguments, defaults).map_err(|error| anyhow::anyhow!(display_error(&error)))
+}
+
+/// An error as `{error:#}` prints it, with every control character escaped but
+/// the line breaks, which SSH's own multi-line diagnostics need to stay
+/// readable. A line feed alone cannot reach back over what is already printed.
+fn display_error(error: &anyhow::Error) -> String {
+    format!("{error:#}")
+        .lines()
+        .map(catalog::display_text)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn run_command(arguments: &[OsString], defaults: ClientDefaults) -> Result<()> {
     let no_mux = no_mux_environment();
     let mut json = false;
     let mut ids_only = false;

@@ -5,8 +5,17 @@
 //! first instance refuses a name somebody else already holds
 //! (`FILE_FLAG_FIRST_PIPE_INSTANCE`), and a listener creates each further
 //! instance before it lets go of the previous one.
+//!
+//! Every client end is opened through `open`, at identification level, so
+//! whatever serves a name — a forwarded agent, a listener being woken — can
+//! learn who connected but cannot act as this process.
 
-use std::io;
+use std::{
+    fs::{File, OpenOptions},
+    io,
+    os::windows::fs::OpenOptionsExt as _,
+    path::Path,
+};
 use windows::{
     Win32::{
         Foundation::{CloseHandle, HANDLE, HLOCAL, INVALID_HANDLE_VALUE, LocalFree},
@@ -18,7 +27,9 @@ use windows::{
             GetTokenInformation, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, TOKEN_QUERY,
             TOKEN_USER, TokenUser,
         },
-        Storage::FileSystem::{FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_ACCESS_DUPLEX},
+        Storage::FileSystem::{
+            FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_ACCESS_DUPLEX, SECURITY_IDENTIFICATION,
+        },
         System::{
             Pipes::{
                 CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE,
@@ -29,6 +40,17 @@ use windows::{
     },
     core::{BOOL, PCWSTR, PWSTR},
 };
+
+/// Opens the client end of the pipe at `path` for reading and writing, with
+/// the server limited to identifying this process rather than impersonating
+/// it. Without it a pipe client grants `SecurityImpersonation`.
+pub(super) fn open(path: &Path) -> io::Result<File> {
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .security_qos_flags(SECURITY_IDENTIFICATION.0)
+        .open(path)
+}
 
 /// Creates an instance of `name`. `first_instance` refuses a name that already
 /// exists, which is what a listener's first instance must do.

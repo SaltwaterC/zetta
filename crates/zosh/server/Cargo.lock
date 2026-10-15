@@ -1442,6 +1442,7 @@ dependencies = [
  "windows",
  "zbus",
  "zclip",
+ "zeroize",
 ]
 
 [[package]]

@@ -136,9 +136,20 @@ if [[ -n ${ZETTA_HOST_EXECUTABLE:-} ]]; then
     }
 fi
 
+# The nonce Zetta gave this shell. Lifecycle and working-directory markers
+# carry it so that a `command-finished` or a directory printed by anything else
+# (a file, a remote host, a nested shell) cannot satisfy a `zetta pane wait` or
+# choose where a split, a file server or a project starts. Kept in a shell
+# variable, not the environment: the programs this shell runs must not inherit
+# it. A tracker that ran first may already hold it, so an absent variable
+# keeps that value.
+if [[ -n ${__ZETTA_COMMAND_MARKER_NONCE+x} ]]; then
+    __zetta_marker_nonce=$__ZETTA_COMMAND_MARKER_NONCE
+    unset __ZETTA_COMMAND_MARKER_NONCE
+fi
 __zetta_report_tracking_ready() {
     [[ ${__ZETTA_LIFECYCLE_TRACKING_ENABLED:-0} == 1 ]] || return
-    printf '\033]2;zetta-event:tracking-ready\033\\'
+    printf '\033]2;zetta-event;%s:tracking-ready\033\\' "${__zetta_marker_nonce-}"
 }
 __zetta_report_command_started() {
     [[ ${__ZETTA_LIFECYCLE_TRACKING_ENABLED:-0} == 1 ]] || return
@@ -148,15 +159,22 @@ __zetta_report_command_started() {
         __zetta_report_cwd|__zetta_mark_prompt) return ;;
     esac
     __ZETTA_COMMAND_STARTED=1
-    printf '\033]2;zetta-event:command-started:%s\033\\' "$BASH_COMMAND"
+    printf '\033]2;zetta-event;%s:command-started:%s\033\\' "${__zetta_marker_nonce-}" "$BASH_COMMAND"
 }
 __zetta_report_cwd() {
     local status=$?
     if [[ ${__ZETTA_LIFECYCLE_TRACKING_ENABLED:-0} == 1 && ${__ZETTA_COMMAND_STARTED:-0} == 1 ]]; then
-        printf '\033]2;zetta-event:command-finished:%s\033\\' "$status"
+        printf '\033]2;zetta-event;%s:command-finished:%s\033\\' "${__zetta_marker_nonce-}" "$status"
         __ZETTA_COMMAND_STARTED=0
     fi
-    printf '\033]2;zetta-cwd:%s\033\\' "$PWD"
+    # Signed when this shell holds the nonce. Without one — a shell on a
+    # remote host, or one an older Zetta started — the untokened form is the
+    # one a Zetta can still display.
+    if [[ -n ${__zetta_marker_nonce-} ]]; then
+        printf '\033]2;zetta-cwd;%s:%s\033\\' "$__zetta_marker_nonce" "$PWD"
+    else
+        printf '\033]2;zetta-cwd:%s\033\\' "$PWD"
+    fi
     return "$status"
 }
 __zetta_mark_prompt() {

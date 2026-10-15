@@ -126,11 +126,15 @@ fn seal_for_host(recipients: &RecipientSet, host_keys: &[String]) -> Result<Seal
     // the protocol, and the sealed text is what both the verifier and the
     // envelope have to agree on.
     let encoded = Zeroizing::new(STANDARD_NO_PAD.encode(key.as_slice()));
-    let sealed = Zeroizing::new(format!(
-        "{SEALED_KEY_TAG}{SEALED_KEY_VERSION};purpose={SESSION_AUTHENTICATION_PURPOSE};host={};key={}",
+    // Assembled at its final size: `format!` grows its string as it writes, and
+    // would free a copy holding part of the key each time.
+    let public = format!(
+        "{SEALED_KEY_TAG}{SEALED_KEY_VERSION};purpose={SESSION_AUTHENTICATION_PURPOSE};host={};key=",
         host_keys.join(","),
-        encoded.as_str()
-    ));
+    );
+    let mut sealed = Zeroizing::new(String::with_capacity(public.len() + encoded.len()));
+    sealed.push_str(&public);
+    sealed.push_str(&encoded);
     let envelope = recipients
         .encrypt(sealed.as_bytes())
         .context("sealing the automatic session key to the configured recipients")?;
@@ -215,16 +219,10 @@ fn decrypt(envelope: &str, identities: &IdentitySet) -> Result<Zeroizing<String>
     let ciphertext = STANDARD_NO_PAD
         .decode(envelope.trim())
         .context("decoding the sealed session key")?;
-    let mut plaintext = identities
+    let plaintext = identities
         .decrypt(&ciphertext)
         .context("opening the sealed session key with the configured identity")?;
-    match String::from_utf8(std::mem::take(&mut plaintext)) {
-        Ok(text) => Ok(Zeroizing::new(text)),
-        Err(error) => {
-            drop(Zeroizing::new(error.into_bytes()));
-            anyhow::bail!("the sealed session key is not valid text")
-        }
-    }
+    crate::auth::secret_utf8(plaintext).context("the sealed session key is not valid text")
 }
 
 /// What a sealed text says about its key.

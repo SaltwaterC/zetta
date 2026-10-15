@@ -586,7 +586,7 @@ _zetta() {
             fi
             return
             ;;
-        --port|-p|--baud-rate|-b|--profile-duration|--columns|--rows|-R)
+        --port|-p|--allow-host|--baud-rate|-b|--profile-duration|--columns|--rows|-R)
             return
             ;;
     esac
@@ -737,7 +737,7 @@ _zetta() {
                 compadd -S ' ' -- server
                 _zetta_options --help
             else
-                _zetta_options --root --port --config --help
+                _zetta_options --root --port --config --serve-dotfiles --allow-host --allow-any-host --help
             fi
             ;;
         tftp)

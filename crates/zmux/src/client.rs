@@ -1301,7 +1301,7 @@ impl Client {
         client.attach_as_process(
             session_id,
             Some(pane_id),
-            secret,
+            secret.map(SessionSecret::new),
             client_process_id,
             false,
             None,
@@ -1327,7 +1327,7 @@ impl Client {
         client.attach_as_process(
             session_id,
             Some(pane_id),
-            secret,
+            secret.map(SessionSecret::new),
             client_process_id,
             true,
             None,
@@ -1338,7 +1338,7 @@ impl Client {
         &self,
         session_id: u64,
         pane_id: Option<u64>,
-        secret: Option<String>,
+        secret: Option<SessionSecret>,
         client_process_id: u32,
         force_shared: bool,
         relaying_for: Option<ClientId>,
@@ -1665,7 +1665,7 @@ impl Client {
             client_process_id,
             client_id: self.client_id.clone(),
             stream_only: self.stream_only,
-            session_secret: secret.map(|secret| secret.expose().to_owned()),
+            session_secret: secret.cloned(),
             request,
         }
     }
@@ -2112,7 +2112,14 @@ impl Client {
         pane_id: Option<u64>,
         secret: Option<String>,
     ) -> Result<AttachOutcome> {
-        self.attach_as_process(session_id, pane_id, secret, std::process::id(), false, None)
+        self.attach_as_process(
+            session_id,
+            pane_id,
+            secret.map(SessionSecret::new),
+            std::process::id(),
+            false,
+            None,
+        )
     }
 
     /// Attaches with a secret kept in zeroizing memory by the caller. The
@@ -2126,7 +2133,7 @@ impl Client {
         self.attach_as_process(
             session_id,
             pane_id,
-            secret.map(|secret| secret.expose().to_owned()),
+            secret.cloned(),
             std::process::id(),
             false,
             None,
@@ -2144,7 +2151,7 @@ impl Client {
         self.attach_as_process(
             session_id,
             Some(pane_id),
-            secret.map(|secret| secret.expose().to_owned()),
+            secret.cloned(),
             std::process::id(),
             true,
             None,
@@ -2169,7 +2176,7 @@ impl Client {
         self.attach_as_process(
             session_id,
             Some(pane_id),
-            secret.map(|secret| secret.expose().to_owned()),
+            secret.cloned(),
             std::process::id(),
             true,
             Some(viewer),
@@ -2413,7 +2420,7 @@ impl Client {
             backoff_seconds: persisted.backoff_seconds,
             created_at: persisted.created_at,
             updated_at: persisted.updated_at,
-            secret: secret.map(|secret| secret.expose().to_owned()),
+            secret: secret.cloned(),
             snapshots: persisted
                 .snapshots
                 .iter()

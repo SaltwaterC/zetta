@@ -700,6 +700,9 @@ function __zetta_long_options
                 --root 'Directory to serve' \
                 --port 'Server port' \
                 --config 'Configuration file' \
+                --serve-dotfiles 'Serve dot-prefixed names such as .git' \
+                --allow-host 'Also answer this host name or address' \
+                --allow-any-host 'Answer every Host name' \
                 --help 'Print help'
         case tftp-server
             printf '%s\t%s\n' \
@@ -1069,10 +1072,14 @@ complete -c zetta -s f -r -a 'none software hardware' -n '__fish_seen_subcommand
 complete -c zetta -n '__fish_seen_subcommand_from http; and __fish_seen_subcommand_from server' -l root -r -a '(__fish_complete_directories)' -d 'Directory to serve'
 complete -c zetta -n '__fish_seen_subcommand_from http; and __fish_seen_subcommand_from server' -l port -r -d 'TCP port'
 complete -c zetta -n '__fish_seen_subcommand_from http; and __fish_seen_subcommand_from server' -l config -r -d 'Configuration file'
+complete -c zetta -n '__fish_seen_subcommand_from http; and __fish_seen_subcommand_from server' -l serve-dotfiles -d 'Serve dot-prefixed names such as .git'
+complete -c zetta -n '__fish_seen_subcommand_from http; and __fish_seen_subcommand_from server' -l allow-host -x -d 'Also answer this host name or address'
+complete -c zetta -n '__fish_seen_subcommand_from http; and __fish_seen_subcommand_from server' -l allow-any-host -d 'Answer every Host name'
 complete -c zetta -n '__fish_seen_subcommand_from http; and __fish_seen_subcommand_from server' -a '(__zetta_long_options http-server)'
 complete -c zetta -s r -r -a '(__fish_complete_directories)' -n '__fish_seen_subcommand_from http; and __fish_seen_subcommand_from server; and __zetta_short_option -r'
 complete -c zetta -s p -r -n '__fish_seen_subcommand_from http; and __fish_seen_subcommand_from server; and __zetta_short_option -p'
 complete -c zetta -s c -r -n '__fish_seen_subcommand_from http; and __fish_seen_subcommand_from server; and __zetta_short_option -c'
+complete -c zetta -s a -x -n '__fish_seen_subcommand_from http; and __fish_seen_subcommand_from server; and __zetta_short_option -a'
 complete -c zetta -n '__zetta_at_subcommand tftp' -a 'get put server'
 complete -c zetta -n '__zetta_tftp_client' -l port -r -d 'Server port'
 complete -c zetta -n '__zetta_tftp_server' -l root -r -a '(__fish_complete_directories)' -d 'Directory to serve'

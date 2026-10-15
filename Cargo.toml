@@ -39,7 +39,7 @@ syntax-highlighting = [
 zmux = ["dep:zmux"]
 session-persistence = ["zmux", "zmux/session-persistence"]
 serial-console = ["dep:serialport"]
-http-server = []
+http-server = ["dep:gethostname"]
 tftp-server = []
 tftp-client = []
 notifications = ["dep:zntfy"]
@@ -108,6 +108,9 @@ async-tar = "0.6"
 assets = { path = "crates/assets" }
 futures = "0.3"
 getrandom = "0.3"
+# The HTTP server answers to this machine's own host name; already in the
+# lock through x11rb.
+gethostname = { version = "1", optional = true }
 gpui = { path = "crates/gpui", features = ["profiler"] }
 gpui_platform = { path = "crates/gpui_platform", features = ["font-kit"] }
 image = { version = "0.25", default-features = false, features = [

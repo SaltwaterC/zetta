@@ -120,3 +120,58 @@ fn a_handed_over_instance_keeps_the_name_after_the_listener_stops() {
     let _ = unsafe { CloseHandle(HANDLE(instance as usize as _)) };
     assert!(is_free(&name));
 }
+
+/// Whatever serves an upstream name — a relay's pipe, a published path — may
+/// learn who connected but not act as this daemon.
+#[test]
+fn an_upstream_agent_is_granted_identification_only() {
+    use std::io::{Read as _, Write as _};
+    use windows::Win32::{
+        Security::{
+            RevertToSelf, SECURITY_IMPERSONATION_LEVEL, SecurityIdentification,
+            TokenImpersonationLevel,
+        },
+        System::{
+            Pipes::ImpersonateNamedPipeClient,
+            Threading::{GetCurrentThread, OpenThreadToken},
+        },
+    };
+
+    let name = test_name();
+    let instance = create_instance(&wide(&name), &user_only_descriptor().unwrap(), true)
+        .expect("the upstream agent's instance")
+        .0 as usize;
+    let agent = thread::spawn(move || {
+        let handle = HANDLE(instance as _);
+        if let Err(error) = unsafe { ConnectNamedPipe(handle, None) } {
+            assert_eq!(error.code().0 as u32 & 0xffff, ERROR_PIPE_CONNECTED.0);
+        }
+        let mut stream = unsafe { File::from_raw_handle(handle.0 as _) };
+        stream.read_exact(&mut [0_u8; 1]).unwrap();
+
+        unsafe { ImpersonateNamedPipeClient(handle) }.expect("impersonating the daemon");
+        let mut token = HANDLE::default();
+        // As self: an identification-level token cannot be opened as itself.
+        let opened = unsafe { OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, true, &mut token) };
+        unsafe { RevertToSelf() }.expect("reverting");
+        opened.expect("opening the impersonation token");
+        let mut level = SECURITY_IMPERSONATION_LEVEL::default();
+        let mut length = 0_u32;
+        let queried = unsafe {
+            GetTokenInformation(
+                token,
+                TokenImpersonationLevel,
+                Some((&raw mut level).cast()),
+                std::mem::size_of::<SECURITY_IMPERSONATION_LEVEL>() as u32,
+                &mut length,
+            )
+        };
+        let _ = unsafe { CloseHandle(token) };
+        queried.expect("reading the impersonation level");
+        level
+    });
+
+    let mut upstream = connect_upstream(&name).expect("connecting upstream");
+    upstream.write_all(&[0]).unwrap();
+    assert_eq!(agent.join().unwrap(), SecurityIdentification);
+}

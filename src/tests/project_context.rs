@@ -893,3 +893,47 @@ fn remote_terminal_theme_uses_application_fallback_below_session_overrides(
         assert_eq!(theme.name.as_ref(), "One Dark");
     });
 }
+
+/// Entering a project applies its `initial_split`, so a `zetta-cwd` the
+/// pane's shell did not sign — `cat` of a file, a remote host — may take the
+/// pane out of a project but never into one.
+#[gpui::test]
+fn a_printed_directory_can_leave_a_project_but_never_enter_one(cx: &mut gpui::TestAppContext) {
+    use crate::pane::tests::{
+        MARKER_NONCE, attach_reporting_terminal, bash_test_pane, native_absolute, print_title,
+    };
+    let mut pane = bash_test_pane();
+    let terminal = attach_reporting_terminal(&mut pane, cx);
+    let registered = native_absolute("registered/project");
+    let home = native_absolute("home/me");
+    let detection =
+        |cx: &mut gpui::TestAppContext| cx.update(|cx| project_detection_directory(&pane, cx));
+
+    print_title(&terminal, &format!("zetta-cwd:{registered}"), cx);
+    assert_eq!(
+        detection(cx),
+        ProjectDetectionDirectory::Unverified(PathBuf::from(&registered))
+    );
+    print_title(
+        &terminal,
+        &format!("zetta-cwd;ffffffffffffffffffffffffffffffff:{registered}"),
+        cx,
+    );
+    assert_eq!(
+        detection(cx),
+        ProjectDetectionDirectory::Unverified(PathBuf::from(&registered))
+    );
+
+    print_title(&terminal, &format!("zetta-cwd;{MARKER_NONCE}:{home}"), cx);
+    assert_eq!(
+        detection(cx),
+        ProjectDetectionDirectory::Verified(PathBuf::from(&home))
+    );
+
+    // A printed report after a confirmed one still cannot enter a project.
+    print_title(&terminal, &format!("zetta-cwd:{registered}"), cx);
+    assert_eq!(
+        detection(cx),
+        ProjectDetectionDirectory::Unverified(PathBuf::from(&registered))
+    );
+}

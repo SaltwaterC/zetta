@@ -8,17 +8,34 @@
 //! order, for one task that runs the zclip host on the background executor and
 //! writes the answer back to the pty. The queue is bounded, and a helper that
 //! has not finished within [`HELPER_TIMEOUT`] is killed.
+//!
+//! The tab's copy and paste permissions are shared with that task and read
+//! when a frame is served, not when it is queued. Withdrawing one wakes the
+//! task to end the transfers of that kind it holds, and the task also wakes
+//! when a transfer expires, so a captured clipboard is erased promptly rather
+//! than at the pane's next frame. The copy permission also governs OSC 52
+//! clipboard writes, which the terminal checks through
+//! [`RemoteClipboard::copy_allowed`].
 
 use anyhow::{Context as _, Result, bail, ensure};
+use futures::future::{Either, select};
 use gpui::{Context, Task};
 use std::{
     io::{Read as _, Write as _},
+    pin::pin,
     process::{Child, Command, Stdio},
-    sync::mpsc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
     thread,
     time::{Duration, Instant},
 };
-use zclip::protocol::{Frame, Message};
+use zclip::{
+    host::{Host, Permissions},
+    protocol::{Frame, Message},
+};
 
 use crate::Terminal;
 
@@ -44,33 +61,97 @@ impl Default for Helpers {
     }
 }
 
-struct Request {
-    frame: Frame,
-    allow_paste: bool,
+enum Request {
+    Frame(Frame),
+    /// Paste was disallowed: end the pastes in flight now.
+    RevokePaste,
+    /// Copy was disallowed: end the copies in flight now.
+    RevokeCopy,
+}
+
+/// The tab's grants, shared between the terminal and its worker.
+#[derive(Clone)]
+struct SharedPermissions {
+    copy: Arc<AtomicBool>,
+    paste: Arc<AtomicBool>,
+}
+
+impl SharedPermissions {
+    fn load(&self) -> Permissions {
+        Permissions {
+            copy: self.copy.load(Ordering::SeqCst),
+            paste: self.paste.load(Ordering::SeqCst),
+        }
+    }
 }
 
 /// One terminal's clipboard host, started on its first request.
-#[derive(Default)]
 pub(crate) struct RemoteClipboard {
     worker: Option<(async_channel::Sender<Request>, Task<()>)>,
     helpers: Helpers,
+    permissions: SharedPermissions,
+}
+
+impl Default for RemoteClipboard {
+    /// Copy allowed and paste withheld, as a tab starts: writing the clipboard
+    /// is what a pane has always been able to do, reading it is opted into.
+    fn default() -> Self {
+        Self {
+            worker: None,
+            helpers: Helpers::default(),
+            permissions: SharedPermissions {
+                copy: Arc::new(AtomicBool::new(true)),
+                paste: Arc::new(AtomicBool::new(false)),
+            },
+        }
+    }
 }
 
 impl RemoteClipboard {
+    /// Allows or disallows reading the host clipboard. Disallowing it also
+    /// ends, and erases, every paste the host is part way through.
+    pub(crate) fn set_paste_allowed(&mut self, allowed: bool) {
+        let was_allowed = self.permissions.paste.swap(allowed, Ordering::SeqCst);
+        if was_allowed && !allowed {
+            self.wake(Request::RevokePaste);
+        }
+    }
+
+    /// Allows or disallows writing the host clipboard. Disallowing it also
+    /// ends every copy the host is part way through, so none of them lands.
+    pub(crate) fn set_copy_allowed(&mut self, allowed: bool) {
+        let was_allowed = self.permissions.copy.swap(allowed, Ordering::SeqCst);
+        if was_allowed && !allowed {
+            self.wake(Request::RevokeCopy);
+        }
+    }
+
+    /// Whether the pane may write the host clipboard, by zcopy or OSC 52.
+    pub(crate) fn copy_allowed(&self) -> bool {
+        self.permissions.copy.load(Ordering::SeqCst)
+    }
+
+    fn wake(&self, revocation: Request) {
+        if let Some((requests, _)) = &self.worker {
+            // A full queue needs no wakeup: the frames in it are served with
+            // the permission withdrawn, and serving any frame so ends the
+            // transfers it covered.
+            let _ = requests.try_send(revocation);
+        }
+    }
+
     /// Queues `frame` for the host. The answer is written to the pty later;
     /// what this returns is an answer due now, for a frame the full queue
     /// turned away.
-    pub(crate) fn handle(
-        &mut self,
-        frame: Frame,
-        allow_paste: bool,
-        cx: &mut Context<Terminal>,
-    ) -> Option<Frame> {
+    pub(crate) fn handle(&mut self, frame: Frame, cx: &mut Context<Terminal>) -> Option<Frame> {
         let helpers = self.helpers;
-        let (requests, _) = self.worker.get_or_insert_with(|| start_worker(helpers, cx));
+        let permissions = &self.permissions;
+        let (requests, _) = self
+            .worker
+            .get_or_insert_with(|| start_worker(helpers, permissions.clone(), cx));
         let id = frame.id;
         let cancel = matches!(frame.message, Message::Error(_));
-        let error = requests.try_send(Request { frame, allow_paste }).err()?;
+        let error = requests.try_send(Request::Frame(frame)).err()?;
         log::warn!("dropping a remote clipboard request: {error}");
         (!cancel).then(|| Frame {
             id,
@@ -79,18 +160,42 @@ impl RemoteClipboard {
     }
 }
 
+/// What the worker does next: serve a request, or expire the transfers whose
+/// time is up.
+enum Work {
+    Request(Request),
+    Expire,
+}
+
 fn start_worker(
     helpers: Helpers,
+    permissions: SharedPermissions,
     cx: &mut Context<Terminal>,
 ) -> (async_channel::Sender<Request>, Task<()>) {
     let (sender, receiver) = async_channel::bounded::<Request>(QUEUED_REQUESTS);
     let task = cx.spawn(async move |terminal, cx| {
-        let mut host = zclip::host::Host::default();
-        while let Ok(Request { frame, allow_paste }) = receiver.recv().await {
+        let mut host = Host::default();
+        loop {
+            let work = match host.next_expiry() {
+                None => receiver.recv().await.map(Work::Request),
+                Some(deadline) => {
+                    let expiry = cx
+                        .background_executor()
+                        .timer(deadline.saturating_duration_since(Instant::now()));
+                    match select(pin!(receiver.recv()), expiry).await {
+                        Either::Left((request, _)) => request.map(Work::Request),
+                        Either::Right(_) => Ok(Work::Expire),
+                    }
+                }
+            };
+            let Ok(work) = work else {
+                break;
+            };
+            let permissions = permissions.clone();
             let (returned, response) = cx
                 .background_executor()
                 .spawn(async move {
-                    let response = host.handle(frame, allow_paste, helpers.copy, helpers.paste);
+                    let response = serve(&mut host, work, &permissions, helpers);
                     (host, response)
                 })
                 .await;
@@ -107,6 +212,44 @@ fn start_worker(
         }
     });
     (sender, task)
+}
+
+fn serve(
+    host: &mut Host,
+    work: Work,
+    permissions: &SharedPermissions,
+    helpers: Helpers,
+) -> Option<Frame> {
+    let frame = match work {
+        Work::Request(Request::Frame(frame)) => frame,
+        Work::Request(Request::RevokePaste) => {
+            host.revoke_paste();
+            return None;
+        }
+        Work::Request(Request::RevokeCopy) => {
+            host.revoke_copy();
+            return None;
+        }
+        Work::Expire => {
+            host.expire();
+            return None;
+        }
+    };
+    let granted = permissions.load();
+    let mut response = host.handle(frame, granted, helpers.copy, helpers.paste);
+    // Reading the clipboard can take the helper a while, and a revocation that
+    // lands meanwhile holds for the chunk it produced, too.
+    if granted.paste && !permissions.paste.load(Ordering::SeqCst) {
+        host.revoke_paste();
+        if let Some(Frame {
+            message: message @ Message::Data { .. },
+            ..
+        }) = &mut response
+        {
+            *message = Message::Error(zclip::host::PASTE_DISABLED.into());
+        }
+    }
+    response
 }
 
 fn sibling(name: &str) -> Result<std::path::PathBuf> {

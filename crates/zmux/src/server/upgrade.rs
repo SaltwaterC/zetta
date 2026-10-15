@@ -62,10 +62,20 @@ pub(super) fn prepare_and_exec(
     let listener = None;
     #[cfg(not(target_os = "macos"))]
     let listener = Some(daemon.listener_fd);
-    match crate::upgrade::exec_replacement(&executable, file.as_raw_fd(), listener) {
-        Ok(_) => Ok(()),
-        Err(error) => Err(UpgradeRefused::AfterAnswering(error)),
+    // The lifetime lock goes across too, as late as possible: anything started
+    // while its close-on-exec flag is clear would share it. If it cannot be
+    // carried, the replacement takes it itself.
+    let carried = held_lock(daemon, |lock| lock.set_inherited_across_exec(true).is_ok());
+    let error = match crate::upgrade::exec_replacement(&executable, file.as_raw_fd(), listener) {
+        Ok(never) => match never {},
+        Err(error) => error,
+    };
+    if carried == Some(true)
+        && let Some(Err(restore)) = held_lock(daemon, |lock| lock.set_inherited_across_exec(false))
+    {
+        log::error!("the multiplexer lock is left inheritable after a failed upgrade: {restore:#}");
     }
+    Err(UpgradeRefused::AfterAnswering(error))
 }
 
 /// Everything that can still be refused: resolving the image, checking it can
@@ -104,6 +114,7 @@ pub(super) fn prepare_upgrade(daemon: &Arc<Daemon>) -> Result<(PathBuf, std::fs:
         next_pane_id: daemon.next_pane_id.load(Ordering::SeqCst),
         retention: *daemon.retention.lock().unwrap(),
         recipient_grants: Some(lock_grants(daemon).clone()),
+        lifetime_lock: held_lock(daemon, |lock| lock.raw_fd()),
         sessions: sessions
             .iter_mut()
             .map(|session| {
@@ -195,7 +206,11 @@ pub(super) fn upgrade_daemon(
         Err(UpgradeRefused::Before(error))
     };
     hand_over_agent_pipes(&mut handover, &replacement);
-    if let Err(error) = crate::upgrade::send_handover(&mut replacement, &handover) {
+    let sent = held_lock(daemon, |lock| {
+        crate::upgrade::send_handover(&mut replacement, &handover, Some(lock.file()))
+    })
+    .unwrap_or_else(|| crate::upgrade::send_handover(&mut replacement, &handover, None));
+    if let Err(error) = sent {
         return refuse(&mut replacement, error);
     }
     drop(handover);
@@ -206,6 +221,9 @@ pub(super) fn upgrade_daemon(
         return refuse(&mut replacement, error);
     }
     broadcast(daemon, &Event::Replacing);
+    // The replacement binds and publishes as soon as this daemon's listener
+    // closes, so neither is this daemon's to remove on the way out.
+    daemon.handed_over.store(true, Ordering::SeqCst);
     daemon.running.store(false, Ordering::SeqCst);
     let _ = Stream::connect(socket_path(&session_catalog_dir()));
     Ok(())
@@ -260,6 +278,7 @@ pub(super) fn prepare_upgrade(daemon: &Arc<Daemon>) -> Result<(PathBuf, crate::u
         next_pane_id: daemon.next_pane_id.load(Ordering::SeqCst),
         retention: *daemon.retention.lock().unwrap(),
         recipient_grants: Some(lock_grants(daemon).clone()),
+        lifetime_lock: None,
         sessions: sessions
             .iter_mut()
             .map(|session| crate::upgrade::SessionHandover {

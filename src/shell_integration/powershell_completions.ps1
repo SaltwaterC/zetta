@@ -572,7 +572,7 @@ $zettaCompletions = {
                 elseif ($words[2] -eq 'console') { '--device', '--baud-rate', '--data-bits', '--parity', '--stop-bits', '--flow-control', '--help' }
             }
             'http' {
-                if ($words.Count -le 2) { 'server', '--help' } else { '--root', '--port', '--config', '--help' }
+                if ($words.Count -le 2) { 'server', '--help' } else { '--root', '--port', '--config', '--serve-dotfiles', '--allow-host', '--allow-any-host', '--help' }
             }
             'tftp' {
                 if ($words.Count -le 2) { 'get', 'put', 'server', '--help' }

@@ -334,11 +334,7 @@ fn windows_bootstrap_pipe_captures_binding_and_forwards_requests() {
         }
     });
     let relay = BootstrapAgentRelay::for_agent_path(path).unwrap().unwrap();
-    let mut forwarded = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(relay.path())
-        .unwrap();
+    let mut forwarded = windows_pipe::open(relay.path()).unwrap();
     forwarded.write_all(&binding).unwrap();
     forwarded.write_all(&request).unwrap();
     assert_eq!(read_frame_from_buffer(&mut forwarded).unwrap(), frame(&[6]));
@@ -347,6 +343,84 @@ fn windows_bootstrap_pipe_captures_binding_and_forwards_requests() {
     drop(forwarded);
     agent_thread.join().unwrap();
     drop(relay);
+}
+
+/// Serves one connection on a fresh pipe at `path` the way an agent would:
+/// reads `request_len` bytes, then reports the impersonation level the client
+/// granted, then answers with `reply`.
+#[cfg(windows)]
+fn impersonation_level_of_next_client(
+    path: &Path,
+    request_len: usize,
+    reply: Vec<u8>,
+) -> thread::JoinHandle<windows::Win32::Security::SECURITY_IMPERSONATION_LEVEL> {
+    use std::os::windows::{ffi::OsStrExt as _, io::FromRawHandle as _};
+    use windows::Win32::{
+        Foundation::{CloseHandle, ERROR_PIPE_CONNECTED, HANDLE},
+        Security::{
+            GetTokenInformation, RevertToSelf, SECURITY_IMPERSONATION_LEVEL, TOKEN_QUERY,
+            TokenImpersonationLevel,
+        },
+        System::{
+            Pipes::{ConnectNamedPipe, ImpersonateNamedPipeClient},
+            Threading::{GetCurrentThread, OpenThreadToken},
+        },
+    };
+
+    let wide = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let handle = windows_pipe::create(windows::core::PCWSTR(wide.as_ptr()), 1024, true)
+        .expect("create test agent pipe")
+        .0 as usize;
+    thread::spawn(move || {
+        let handle = HANDLE(handle as _);
+        if let Err(error) = unsafe { ConnectNamedPipe(handle, None) } {
+            assert_eq!(error.code().0 as u32 & 0xffff, ERROR_PIPE_CONNECTED.0);
+        }
+        let mut stream = unsafe { std::fs::File::from_raw_handle(handle.0 as _) };
+        let mut request = vec![0_u8; request_len];
+        stream.read_exact(&mut request).unwrap();
+
+        unsafe { ImpersonateNamedPipeClient(handle) }.expect("impersonating the client");
+        let mut token = HANDLE::default();
+        // As self: an identification-level token cannot be opened as itself.
+        let opened = unsafe { OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, true, &mut token) };
+        unsafe { RevertToSelf() }.expect("reverting");
+        opened.expect("opening the impersonation token");
+        let mut level = SECURITY_IMPERSONATION_LEVEL::default();
+        let mut length = 0_u32;
+        let queried = unsafe {
+            GetTokenInformation(
+                token,
+                TokenImpersonationLevel,
+                Some((&raw mut level).cast()),
+                std::mem::size_of::<SECURITY_IMPERSONATION_LEVEL>() as u32,
+                &mut length,
+            )
+        };
+        let _ = unsafe { CloseHandle(token) };
+        queried.expect("reading the impersonation level");
+
+        stream.write_all(&reply).unwrap();
+        level
+    })
+}
+
+/// Whatever answers the agent path — another account's pipe, a hostile
+/// forwarded agent — may learn who connected but not act as this process.
+#[cfg(windows)]
+#[test]
+fn windows_agent_connections_grant_identification_only() {
+    use windows::Win32::Security::SecurityIdentification;
+
+    let path = create_bootstrap_pipe_path();
+    let agent = impersonation_level_of_next_client(&path, 1, Vec::new());
+    let mut stream = connect_agent(&path).expect("connecting to the agent");
+    stream.write_all(&[0]).unwrap();
+    assert_eq!(agent.join().unwrap(), SecurityIdentification);
 }
 
 /// A pipe name somebody already holds is refused rather than joined: a later
@@ -452,4 +526,86 @@ fn printable_escapes_controls_and_bidi_overrides_but_keeps_text() {
         printable("bad\x1b]52;c;?\x07 \u{202e}txt.exe\u{9b} ok é"),
         "bad\\u{1b}]52;c;?\\u{7} \\u{202e}txt.exe\\u{9b} ok é"
     );
+}
+
+/// The relay's directory is never more open than `0700`, not just once `bind`
+/// is done: checked before anything else touches its mode, under whatever
+/// umask the test runs with (a typical `022` or `002` would leave a plain
+/// `create_dir` group- and world-readable).
+#[cfg(unix)]
+#[test]
+fn bootstrap_relay_directory_is_private_from_creation() {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = PathBuf::from(format!("/tmp/zbd-{}", std::process::id()));
+    unix_socket::create_private_dir(&root).unwrap();
+    let mode = fs::metadata(&root).unwrap().permissions().mode() & 0o777;
+    fs::remove_dir(&root).unwrap();
+    assert_eq!(mode & 0o077, 0, "created {mode:o}");
+    assert!(
+        unix_socket::create_private_dir(Path::new("/tmp")).is_err(),
+        "an existing directory must not be adopted"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn bootstrap_relay_admits_its_owner_and_root_only() {
+    assert!(unix_socket::uid_may_connect(1000, 1000));
+    assert!(unix_socket::uid_may_connect(0, 1000));
+    assert!(!unix_socket::uid_may_connect(1001, 1000));
+}
+
+/// A connection from someone other than the user the relay serves is closed
+/// at once and never reaches the agent behind it — the relay is opened for a
+/// user this test is not, so the test's own connection stands in for theirs.
+#[cfg(unix)]
+#[test]
+fn bootstrap_relay_refuses_a_peer_that_is_not_its_owner() {
+    use std::fs;
+    use std::os::unix::net::{UnixListener, UnixStream};
+    use std::time::Duration;
+
+    let owner = unix_socket::this_user();
+    if owner == 0 {
+        // Root is always admitted, so there is no other user to be.
+        return;
+    }
+    let directory = PathBuf::from(format!("/tmp/zbx-{}", std::process::id()));
+    fs::create_dir(&directory).unwrap();
+    let path = directory.join("agent.sock");
+    let agent = UnixListener::bind(&path).unwrap();
+    agent.set_nonblocking(true).unwrap();
+
+    let relay = BootstrapAgentRelay::for_test_agent_path_and_owner(&path, owner + 1).unwrap();
+    let mut forwarded = UnixStream::connect(relay.path()).unwrap();
+    forwarded
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    // A binding the relay would otherwise record and forward; written before
+    // the refusal can close the socket, so a failed write is as good as the
+    // closed read.
+    let _ = forwarded.write_all(&session_bind_frame(true));
+    let mut byte = [0; 1];
+    let read = forwarded.read(&mut byte);
+    assert!(
+        matches!(read, Ok(0))
+            || read
+                .as_ref()
+                .is_err_and(|error| error.kind() == io::ErrorKind::ConnectionReset),
+        "the refused connection must be closed, got {read:?}"
+    );
+    assert!(
+        agent
+            .accept()
+            .is_err_and(|error| error.kind() == io::ErrorKind::WouldBlock),
+        "a refused connection must not reach the agent"
+    );
+    assert_eq!(relay.binding(), None);
+
+    drop(forwarded);
+    drop(relay);
+    fs::remove_file(path).unwrap();
+    fs::remove_dir(directory).unwrap();
 }

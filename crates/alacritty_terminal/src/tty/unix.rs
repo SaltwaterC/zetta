@@ -903,12 +903,14 @@ mod tests {
         pty.file
             .write_all(b"source \"$ZETTA_TEST_INTEGRATION\"; PROMPT='ZETTA_READY> '\n")
             .unwrap();
-        read_until_marker(&mut pty, b"zetta-event:tracking-ready");
+        // The marker carries the pane's nonce, if the environment holds one:
+        // match what follows it.
+        read_until_marker(&mut pty, b":tracking-ready\x1b");
         for _ in 0..2 {
             pty.file.write_all(b"sleep 60\n").unwrap();
             wait_for_foreground_job(&mut pty);
             pty.file.write_all(b"\x03").unwrap();
-            read_until_marker(&mut pty, b"zetta-event:command-finished:130");
+            read_until_marker(&mut pty, b":command-finished:130\x1b");
             assert!(pty.try_wait().unwrap().is_none(), "Ctrl+C ended zsh");
             // A following command must execute; input echo cannot match this marker.
             pty.file.write_all(b"printf '%s%s\\n' ZETTA_ ALIVE\n").unwrap();

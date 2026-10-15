@@ -14,6 +14,7 @@
 use std::{
     io::{Read, Write},
     path::{Path, PathBuf},
+    time::Instant,
 };
 
 #[cfg(unix)]
@@ -156,10 +157,28 @@ fn encode_hex(bytes: &[u8]) -> String {
 }
 
 pub fn write_message(stream: &mut impl Write, message: &impl Serialize) -> Result<()> {
-    let frame = encode_message(message)?;
+    let frame = encode_secret_message(message)?;
     stream.write_all(&frame)?;
     stream.flush()?;
     Ok(())
+}
+
+/// [`encode_message`]'s frame, built in memory that is erased when dropped and
+/// is never reallocated on the way (see [`crate::auth::encode_secret_json`]).
+///
+/// What [`write_message`] sends, because a request can carry a session secret.
+/// Queued frames go through [`encode_message`]: they carry pane output, which
+/// is what makes a second serialization pass worth avoiding there.
+pub(crate) fn encode_secret_message(message: &impl Serialize) -> Result<Zeroizing<Vec<u8>>> {
+    let mut frame = crate::auth::encode_secret_json(message, 4)?;
+    let length = frame.len() - 4;
+    anyhow::ensure!(
+        length <= MAX_MESSAGE_BYTES,
+        "multiplexer message is too long"
+    );
+    let length = u32::try_from(length).context("multiplexer message length overflow")?;
+    frame[..4].copy_from_slice(&length.to_be_bytes());
+    Ok(frame)
 }
 
 /// Serializes a message exactly as [`write_message`] puts it on the wire.
@@ -558,6 +577,31 @@ pub struct Connection {
     leftover: Vec<u8>,
 }
 
+/// What arrives beside a message: descriptors on Unix. Windows carries a
+/// terminal's handles inside the message itself.
+#[cfg(unix)]
+pub type ReceivedHandle = OwnedFd;
+#[cfg(windows)]
+pub type ReceivedHandle = ();
+
+/// How much of a raw payload is read, and allocated, at a time.
+const RAW_READ_CHUNK: usize = 64 * 1024;
+
+/// Whether a read failed only because its timeout ran out, which a read
+/// against a deadline answers by checking the deadline again.
+fn io_timed_out(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+    )
+}
+
+fn is_timeout(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<std::io::Error>()
+        .is_some_and(|error| io_timed_out(error) || error.kind() == std::io::ErrorKind::Interrupted)
+}
+
 impl Connection {
     pub fn new(stream: Stream) -> Self {
         Self {
@@ -620,23 +664,49 @@ impl Connection {
         send_with_descriptors(&self.stream, &payload, descriptors)
     }
 
-    #[cfg(unix)]
-    pub fn receive<T: DeserializeOwned>(&mut self) -> Result<(T, Vec<OwnedFd>)> {
-        let mut descriptors = Vec::new();
+    pub fn receive<T: DeserializeOwned>(&mut self) -> Result<(T, Vec<ReceivedHandle>)> {
+        self.receive_until(None)
+    }
+
+    /// As [`Self::receive`], but the whole message has to have arrived by
+    /// `deadline`, however it is split.
+    ///
+    /// A read timeout bounds only the wait for the next piece, so a peer that
+    /// sends a byte at a time keeps a connection for as long as the message
+    /// limit allows. Leaves the connection with no read timeout, as an accepted
+    /// connection starts.
+    pub fn receive_by<T: DeserializeOwned>(
+        &mut self,
+        deadline: Instant,
+    ) -> Result<(T, Vec<ReceivedHandle>)> {
+        let received = self.receive_until(Some(deadline));
+        self.set_read_timeout(None)?;
+        received
+    }
+
+    fn receive_until<T: DeserializeOwned>(
+        &mut self,
+        deadline: Option<Instant>,
+    ) -> Result<(T, Vec<ReceivedHandle>)> {
+        let mut handles = Vec::new();
         loop {
             if let Some(frame) = take_frame(&mut self.leftover)? {
                 let message =
                     serde_json::from_slice(&frame).context("parsing multiplexer message")?;
-                return Ok((message, descriptors));
+                return Ok((message, handles));
             }
             anyhow::ensure!(
                 self.leftover.len() <= MAX_MESSAGE_BYTES + 4,
                 "multiplexer message is too long"
             );
+            self.wait_until(deadline)?;
 
             let mut buffer = [0; 8192];
-            let (read, mut received) = receive_with_descriptors(&self.stream, &mut buffer)?;
-            descriptors.append(&mut received);
+            let read = match self.read_some(&mut buffer, &mut handles) {
+                Ok(read) => read,
+                Err(error) if deadline.is_some() && is_timeout(&error) => continue,
+                Err(error) => return Err(error),
+            };
             if read == 0 {
                 return Err(connection_closed());
             }
@@ -644,16 +714,70 @@ impl Connection {
         }
     }
 
+    /// Lets the next read wait only until `deadline`, failing once it has
+    /// passed. Does nothing without one.
+    fn wait_until(&self, deadline: Option<Instant>) -> Result<()> {
+        let Some(deadline) = deadline else {
+            return Ok(());
+        };
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        anyhow::ensure!(
+            !remaining.is_zero(),
+            "the multiplexer peer did not send in time"
+        );
+        self.set_read_timeout(Some(remaining))
+    }
+
+    #[cfg(unix)]
+    fn read_some(&mut self, buffer: &mut [u8], descriptors: &mut Vec<OwnedFd>) -> Result<usize> {
+        let (read, mut received) = receive_with_descriptors(&self.stream, buffer)?;
+        descriptors.append(&mut received);
+        Ok(read)
+    }
+
+    #[cfg(windows)]
+    fn read_some(&mut self, buffer: &mut [u8], _handles: &mut Vec<()>) -> Result<usize> {
+        Ok(self.stream.read(buffer)?)
+    }
+
     /// Reads exactly `length` raw bytes that follow a message, starting with
     /// anything already buffered.
     pub fn read_exact(&mut self, length: usize) -> Result<Vec<u8>> {
-        let mut bytes = Vec::with_capacity(length);
+        self.read_exact_until(length, None)
+    }
+
+    /// As [`Self::read_exact`], but every byte has to have arrived by
+    /// `deadline`. Leaves the connection with no read timeout.
+    pub fn read_exact_by(&mut self, length: usize, deadline: Instant) -> Result<Vec<u8>> {
+        let bytes = self.read_exact_until(length, Some(deadline));
+        self.set_read_timeout(None)?;
+        bytes
+    }
+
+    /// Grows the buffer as the bytes arrive rather than allocating `length`
+    /// up front: the length is the peer's claim, and allocating what it
+    /// claims would let a peer that sends nothing reserve whatever it likes.
+    fn read_exact_until(&mut self, length: usize, deadline: Option<Instant>) -> Result<Vec<u8>> {
+        let mut bytes = Vec::with_capacity(length.min(RAW_READ_CHUNK));
         let buffered = self.leftover.len().min(length);
         bytes.extend(self.leftover.drain(..buffered));
-        if bytes.len() < length {
-            let mut rest = vec![0; length - bytes.len()];
-            self.stream.read_exact(&mut rest)?;
-            bytes.append(&mut rest);
+        while bytes.len() < length {
+            self.wait_until(deadline)?;
+            let start = bytes.len();
+            bytes.resize(start + (length - start).min(RAW_READ_CHUNK), 0);
+            match self.stream.read(&mut bytes[start..]) {
+                Ok(0) => {
+                    return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof).into());
+                }
+                Ok(read) => bytes.truncate(start + read),
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::Interrupted
+                        || (deadline.is_some() && io_timed_out(&error)) =>
+                {
+                    bytes.truncate(start);
+                }
+                Err(error) => return Err(error.into()),
+            }
         }
         Ok(bytes)
     }
@@ -971,26 +1095,5 @@ impl Connection {
     /// duplicated into the receiver, so there is nothing to attach.
     pub fn send_with(&mut self, message: &impl Serialize, _handles: &[()]) -> Result<()> {
         self.send(message)
-    }
-
-    pub fn receive<T: DeserializeOwned>(&mut self) -> Result<(T, Vec<()>)> {
-        loop {
-            if let Some(frame) = take_frame(&mut self.leftover)? {
-                let message =
-                    serde_json::from_slice(&frame).context("parsing multiplexer message")?;
-                return Ok((message, Vec::new()));
-            }
-            anyhow::ensure!(
-                self.leftover.len() <= MAX_MESSAGE_BYTES + 4,
-                "multiplexer message is too long"
-            );
-
-            let mut buffer = [0; 8192];
-            let read = self.stream.read(&mut buffer)?;
-            if read == 0 {
-                return Err(connection_closed());
-            }
-            self.leftover.extend_from_slice(&buffer[..read]);
-        }
     }
 }

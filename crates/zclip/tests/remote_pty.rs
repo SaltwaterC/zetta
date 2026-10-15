@@ -10,8 +10,14 @@ use std::{
     thread,
 };
 use zclip::{
-    host::Host,
+    host::{Host, Permissions},
     protocol::{Message, Scanner},
+};
+
+/// Paste withheld, as a tab starts; copy allowed, as it starts.
+const COPY_ONLY: Permissions = Permissions {
+    copy: true,
+    paste: false,
 };
 
 fn controlling_pty() -> (std::fs::File, std::fs::File) {
@@ -100,7 +106,10 @@ fn run_helper(
                 let response = host
                     .handle(
                         frame,
-                        allowed,
+                        Permissions {
+                            copy: true,
+                            paste: allowed,
+                        },
                         |text| {
                             *copied_by_host.lock().unwrap() = text.to_owned();
                             Ok(())
@@ -179,7 +188,7 @@ fn an_abandoned_copy_cancels_its_host_transfer() {
                 let cancelled = matches!(frame.message, Message::Error(_));
                 let data = matches!(frame.message, Message::Data { .. });
                 let id = frame.id;
-                let response = host.handle(frame, false, |_| Ok(()), || Ok(None));
+                let response = host.handle(frame, COPY_ONLY, |_| Ok(()), || Ok(None));
                 if cancelled {
                     assert!(response.is_none());
                     return host.handle(
@@ -187,7 +196,7 @@ fn an_abandoned_copy_cancels_its_host_transfer() {
                             id,
                             message: Message::End,
                         },
-                        false,
+                        COPY_ONLY,
                         |_| panic!("a cancelled copy reached the clipboard"),
                         || Ok(None),
                     );

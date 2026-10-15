@@ -24,6 +24,13 @@ pub const SEQ_MASK: u64 = !(1u64 << 63);
 /// Minimum wire datagram: 8 (nonce header) + 16 (tag).
 pub const MIN_DATAGRAM: usize = 24;
 
+/// Largest wire datagram accepted: stock Mosh's `Session::RECEIVE_MTU`.
+/// Stock receives into a buffer of this size and refuses a truncated one,
+/// so no conforming peer sends more. Checking it before decrypting keeps a
+/// peer without the key from making each datagram cost a 64 KiB allocation
+/// and a full OCB pass.
+pub const RECEIVE_MTU: usize = 2048;
+
 /// AES-128-OCB3 cipher used by Mosh.
 #[derive(Clone)]
 pub struct Ocb {
@@ -212,7 +219,7 @@ impl Ocb {
     }
 
     pub fn open_datagram(&self, packet: &[u8]) -> Option<(u64, Vec<u8>)> {
-        if packet.len() < MIN_DATAGRAM {
+        if !(MIN_DATAGRAM..=RECEIVE_MTU).contains(&packet.len()) {
             return None;
         }
         let mut seq_bytes = [0u8; 8];

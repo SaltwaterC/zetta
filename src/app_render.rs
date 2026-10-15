@@ -43,6 +43,7 @@ struct ZettaOverlays {
     session_authentication: Option<AnyElement>,
     close_confirmation: Option<AnyElement>,
     project_trust: Option<AnyElement>,
+    script_open: Option<AnyElement>,
 }
 
 impl Zetta {
@@ -124,6 +125,10 @@ impl Zetta {
         ));
         #[cfg(not(feature = "zmux"))]
         let remote_session: Option<AnyElement> = None;
+        #[cfg(target_os = "macos")]
+        let script_open = modal_overlay(self.render_script_open_overlay(cx));
+        #[cfg(not(target_os = "macos"))]
+        let script_open: Option<AnyElement> = None;
 
         ZettaOverlays {
             notice: self.render_transient_notice_overlay(colors, cx.theme().status(), handle),
@@ -171,6 +176,7 @@ impl Zetta {
             session_authentication: modal_overlay(self.render_session_authentication_overlay(cx)),
             close_confirmation: modal_overlay(self.render_tab_close_confirmation_overlay(cx)),
             project_trust: modal_overlay(self.render_project_trust_overlay(cx)),
+            script_open,
         }
     }
 
@@ -365,6 +371,7 @@ impl Zetta {
             .on_action(cx.listener(Self::request_focus_status_access))
             .on_action(cx.listener(Self::toggle_tab_silent_mode))
             .on_action(cx.listener(Self::toggle_remote_clipboard_paste))
+            .on_action(cx.listener(Self::toggle_remote_clipboard_copy))
             .on_action(cx.listener(Self::toggle_multi_command))
             .on_action(cx.listener(Self::toggle_stacked_command))
             .on_action(cx.listener(Self::select_previous_stacked_pane))
@@ -600,6 +607,7 @@ impl Zetta {
             overlays.session_authentication,
             overlays.close_confirmation,
             overlays.project_trust,
+            overlays.script_open,
         ]
         .into_iter()
         .flatten()

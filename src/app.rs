@@ -499,6 +499,10 @@ pub(crate) struct Zetta {
     pub(crate) tabs: Vec<Tab>,
     /// Paste access is local to this viewer and disappears with its tab.
     pub(crate) remote_clipboard_paste_tabs: HashSet<u64>,
+    /// Tabs whose panes may not write the clipboard. Copy is allowed by
+    /// default, so this records the exceptions; local to this viewer, and
+    /// gone with its tab.
+    pub(crate) remote_clipboard_copy_blocked_tabs: HashSet<u64>,
     pub(crate) background_sessions: BackgroundSessionRunner<Tab>,
     /// The multiplexer that owns every pane's process, connected on first use.
     /// `None` until then. Normal launches require the daemon; `--no-mux` is an
@@ -596,6 +600,12 @@ pub(crate) struct Zetta {
     pub(crate) remote_session_key_envelope: Option<String>,
     pub(crate) close_confirmation_focus: gpui::FocusHandle,
     pub(crate) close_tab_confirmation: Option<CloseTabConfirmation>,
+    /// Shell scripts macOS asked this window to open, held until the user
+    /// confirms running them.
+    #[cfg(target_os = "macos")]
+    pub(crate) script_open: crate::script_open_ui::ScriptOpenQueue,
+    #[cfg(target_os = "macos")]
+    pub(crate) script_open_focus: gpui::FocusHandle,
     pub(crate) active_tab: usize,
     /// Focuses the active pane while its selected terminal view is being
     /// replaced or is still starting. The corresponding render node carries
@@ -810,6 +820,8 @@ impl Zetta {
         }
         self.close_tab_confirmation = None;
         self.projects.trust_prompt = None;
+        #[cfg(target_os = "macos")]
+        self.script_open.clear();
         self.tab_search = None;
         cx.notify();
     }
@@ -1006,6 +1018,7 @@ impl Zetta {
             pending_grid_requests: HashMap::new(),
             launch_grid: None,
             remote_clipboard_paste_tabs: HashSet::new(),
+            remote_clipboard_copy_blocked_tabs: HashSet::new(),
             background_sessions: BackgroundSessionRunner::default(),
             #[cfg(feature = "zmux")]
             mux: None,
@@ -1061,6 +1074,10 @@ impl Zetta {
             remote_session_key_envelope: None,
             close_confirmation_focus: cx.focus_handle(),
             close_tab_confirmation: None,
+            #[cfg(target_os = "macos")]
+            script_open: Default::default(),
+            #[cfg(target_os = "macos")]
+            script_open_focus: cx.focus_handle(),
             active_tab: 0,
             terminal_placeholder_focus: cx.focus_handle(),
             visible_terminals: Vec::new(),

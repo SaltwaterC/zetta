@@ -21,23 +21,36 @@ impl Zetta {
             .get(self.active_tab)
             .and_then(Tab::active_pane)
             .context("finding the active pane")?;
-
-        if is_wsl_shell(&pane.profile.command) {
-            let directory = pane
-                .wsl_working_directory(cx)
-                .context("reading the active WSL pane working directory")?;
-            return Ok(ServerRoot::Wsl {
-                command: pane.profile.command.clone(),
-                directory,
-            });
-        }
-
-        let directory = pane
-            .working_directory(cx)
-            .or_else(|| env::current_dir().ok())
-            .context("reading the active pane working directory")?;
-        Ok(ServerRoot::Local(directory))
+        server_root_for_pane(pane, cx)
     }
+}
+
+/// The directory a file server started from `pane` serves.
+///
+/// Serving a directory publishes its files, so it is the pane's trusted
+/// directory — its shell's authenticated report or the foreground process's
+/// directory (see "Which directory a pane is in" in `pane.rs`) — never a
+/// `zetta-cwd` any output could print. A pane with none falls back to what a
+/// pane with no known directory always has: this process's own directory, or,
+/// for WSL, an error. A pane logged in to a remote host therefore serves the
+/// local directory it was opened from, not the remote path its shell reports,
+/// which names nothing on this machine.
+pub(crate) fn server_root_for_pane(pane: &TerminalPane, cx: &App) -> Result<ServerRoot> {
+    if is_wsl_shell(&pane.profile.command) {
+        let directory = pane
+            .wsl_working_directory(cx)
+            .context("reading the active WSL pane working directory")?;
+        return Ok(ServerRoot::Wsl {
+            command: pane.profile.command.clone(),
+            directory,
+        });
+    }
+
+    let directory = pane
+        .working_directory(cx)
+        .or_else(|| env::current_dir().ok())
+        .context("reading the active pane working directory")?;
+    Ok(ServerRoot::Local(directory))
 }
 
 #[cfg(windows)]

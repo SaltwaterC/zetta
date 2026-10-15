@@ -6,7 +6,7 @@ use std::{
     ffi::{OsStr, OsString},
     fs::{File, OpenOptions},
     io::{self, BufReader, Read, Write},
-    os::windows::process::CommandExt,
+    os::windows::{fs::OpenOptionsExt as _, process::CommandExt},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::{Arc, Mutex, mpsc},
@@ -35,6 +35,10 @@ const RELAY_TIMEOUT: Duration = Duration::from_secs(30);
 const PIPE_BUSY_TIMEOUT: Duration = Duration::from_secs(2);
 
 const ERROR_PIPE_BUSY: i32 = 231;
+/// `SECURITY_IDENTIFICATION`: the impersonation level the agent pipe's server
+/// is granted. std adds `SECURITY_SQOS_PRESENT`, without which a pipe client
+/// grants `SecurityImpersonation`.
+const SECURITY_IDENTIFICATION: u32 = 0x0001_0000;
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const CTRL_C_EVENT: u32 = 0;
 const CTRL_BREAK_EVENT: u32 = 1;
@@ -205,10 +209,17 @@ fn collect_diagnostics(
         .ok()
 }
 
+/// Opens the agent pipe at identification level, so whatever serves that
+/// name can learn who connected but cannot act as this process.
 fn open_pipe(pipe: &str) -> io::Result<File> {
     let deadline = Instant::now() + PIPE_BUSY_TIMEOUT;
     loop {
-        match OpenOptions::new().read(true).write(true).open(pipe) {
+        let opened = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .security_qos_flags(SECURITY_IDENTIFICATION)
+            .open(pipe);
+        match opened {
             Err(error)
                 if error.raw_os_error() == Some(ERROR_PIPE_BUSY) && Instant::now() < deadline =>
             {
@@ -251,3 +262,7 @@ fn ignore_console_interrupts() {
         SetConsoleCtrlHandler(Some(handler), 1);
     }
 }
+
+#[cfg(test)]
+#[path = "tests/launcher.rs"]
+mod tests;

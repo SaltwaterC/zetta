@@ -489,3 +489,129 @@ fn internal_startup_commands_do_not_satisfy_a_wait() {
     registry.command_finished(pane(1), Some(0));
     assert_ready(waiting);
 }
+
+fn ready_marker(authenticated: bool) -> TerminalEvent {
+    TerminalEvent::TrackingReady { authenticated }
+}
+
+fn started_marker(command: &str, authenticated: bool) -> TerminalEvent {
+    TerminalEvent::CommandStarted {
+        command: command.to_owned(),
+        authenticated,
+    }
+}
+
+fn finished_marker(exit_code: i32, authenticated: bool) -> TerminalEvent {
+    TerminalEvent::CommandFinished {
+        exit_code: Some(exit_code),
+        authenticated,
+    }
+}
+
+/// 3.17: the dependency pane's shell holds a nonce. Output printed while its
+/// command runs — `cat` of a file, a remote host, a nested shell — says the
+/// command succeeded, in the form any output can print and with a nonce that
+/// is not this pane's (which the terminal reports as unauthenticated alike).
+/// Neither releases the dependent; the shell's own authenticated marker does.
+#[test]
+fn printed_command_finished_markers_cannot_satisfy_a_dependent() {
+    let registry = RunCommandRegistry::default();
+    registry.observe_terminal_event(pane(1), &ready_marker(true));
+    let dependent = register(&registry, 2, &[1], false);
+    registry.observe_terminal_event(pane(1), &started_marker("make build", true));
+
+    // A forged start is ignored too: it cannot stand in for a later command.
+    registry.observe_terminal_event(pane(1), &started_marker("true", false));
+    registry.observe_terminal_event(pane(1), &finished_marker(0, false));
+    assert_pending(&dependent);
+    registry.observe_terminal_event(pane(1), &ready_marker(false));
+    registry.observe_terminal_event(pane(1), &finished_marker(0, false));
+    assert_pending(&dependent);
+
+    registry.observe_terminal_event(pane(1), &finished_marker(0, true));
+    assert_ready(dependent);
+}
+
+/// A forged success cannot end an idle wait either, nor a forged failure fail
+/// one: an authenticated pane's unauthenticated markers change nothing.
+#[test]
+fn an_authenticated_pane_ignores_unauthenticated_markers_entirely() {
+    let registry = RunCommandRegistry::default();
+    registry.observe_terminal_event(pane(1), &ready_marker(true));
+    let dependent = register(&registry, 2, &[1], false);
+
+    registry.observe_terminal_event(pane(1), &started_marker("true", false));
+    registry.observe_terminal_event(pane(1), &finished_marker(0, false));
+    registry.observe_terminal_event(pane(1), &finished_marker(1, false));
+    assert_pending(&dependent);
+
+    registry.observe_terminal_event(pane(1), &started_marker("make", true));
+    assert_pending(&dependent);
+    registry.observe_terminal_event(pane(1), &finished_marker(0, true));
+    assert_ready(dependent);
+}
+
+/// The registration's resolution, failing the test rather than hanging it
+/// when there is none.
+fn resolution(registration: &RunRegistration) -> RunResolutionMessage {
+    registration
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("the wait was resolved")
+}
+
+/// A pane whose terminal holds no nonce — a shell started by an older Zetta,
+/// a shared pane this window joined or reattached — reports only unauthenticated
+/// markers. A wait on it fails closed, saying why, instead of trusting the
+/// report or waiting for one that can never count.
+#[test]
+fn a_pane_that_cannot_authenticate_fails_its_dependents_closed() {
+    let registry = RunCommandRegistry::default();
+    let unreported = RunPaneIdentity::new(1, 1);
+    registry.pane_reopened(unreported);
+    let waiting = register(&registry, 2, &[1], false);
+    assert_pending(&waiting);
+
+    registry.observe_terminal_event(unreported, &started_marker("make", false));
+    let result = resolution(&waiting);
+    assert_eq!(result.resolution, RunResolution::Failed);
+    assert_eq!(
+        result.message.as_deref(),
+        Some(UNAUTHENTICATED_DEPENDENCY_MESSAGE)
+    );
+
+    // Once the pane has shown it cannot report, a new wait fails at once —
+    // even allowing failure, because no result is not a failed result.
+    registry.observe_terminal_event(unreported, &finished_marker(0, false));
+    let later = register(&registry, 3, &[1], true);
+    let result = resolution(&later);
+    assert_eq!(result.resolution, RunResolution::Failed);
+    assert_eq!(
+        result.message.as_deref(),
+        Some(UNAUTHENTICATED_DEPENDENCY_MESSAGE)
+    );
+}
+
+/// The shell authenticating later (its integration loaded after something
+/// printed an untokened marker) restores normal waiting; a reopened pane has
+/// to authenticate again, because its new terminal holds a different nonce
+/// or none.
+#[test]
+fn authentication_is_per_terminal_and_can_follow_an_unauthenticated_marker() {
+    let registry = RunCommandRegistry::default();
+    registry.observe_terminal_event(pane(1), &finished_marker(0, false));
+    registry.observe_terminal_event(pane(1), &ready_marker(true));
+    let dependent = register(&registry, 2, &[1], false);
+    assert_pending(&dependent);
+    registry.observe_terminal_event(pane(1), &started_marker("make", true));
+    registry.observe_terminal_event(pane(1), &finished_marker(0, true));
+    assert_ready(dependent);
+
+    registry.pane_closed(pane(1));
+    registry.pane_reopened(pane(1));
+    registry.observe_terminal_event(pane(1), &ready_marker(false));
+    let after_reopen = register(&registry, 3, &[1], false);
+    assert_eq!(
+        resolution(&after_reopen).message.as_deref(),
+        Some(UNAUTHENTICATED_DEPENDENCY_MESSAGE)
+    );
+}

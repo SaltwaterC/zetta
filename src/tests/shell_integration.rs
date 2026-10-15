@@ -131,7 +131,8 @@ fn clean_shell_command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Co
         .env_remove("ZETTA_ATTENTION_ID")
         .env_remove("ZETTA_PANE_ID")
         .env_remove("ZETTA_PANE_ROUTING_ID")
-        .env_remove("ZETTA_NO_MUX");
+        .env_remove("ZETTA_NO_MUX")
+        .env_remove("__ZETTA_COMMAND_MARKER_NONCE");
     command
 }
 
@@ -170,9 +171,13 @@ fn supported_shells_generate_completion_and_tftp_shortcut() {
         assert!(script.contains("ZETTA_NO_MUX"));
         assert!(script.contains("--direction"));
         assert!(script.contains("--pane"));
-        assert!(script.contains("zetta-event:tracking-ready"));
-        assert!(script.contains("zetta-event:command-started:"));
-        assert!(script.contains("zetta-event:command-finished:"));
+        // Every lifecycle marker carries the pane's nonce (3.17); none is
+        // emitted in the untokened form any printed output can produce.
+        assert!(script.contains("zetta-event;"));
+        assert!(!script.contains("zetta-event:"));
+        assert!(script.contains(":tracking-ready"));
+        assert!(script.contains(":command-started:"));
+        assert!(script.contains(":command-finished:"));
         assert!(!script.contains("codex"));
         assert!(!script.contains("tabicon ai_open_ai"));
         assert!(!script.contains("run --wait"));
@@ -586,6 +591,10 @@ typeset -g __ZETTA_LIFECYCLE_TRACKING_VERSION=2"#,
     );
     let mut child = match clean_shell_command("zsh")
         .env("ZETTA_PANE_ID", "7")
+        .env(
+            "__ZETTA_COMMAND_MARKER_NONCE",
+            "0123456789abcdef0123456789abcdef",
+        )
         .args(["-f"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -610,9 +619,151 @@ typeset -g __ZETTA_LIFECYCLE_TRACKING_VERSION=2"#,
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("zetta-event:command-finished:1"),
-        "{stdout}"
+        stdout.contains("zetta-event;0123456789abcdef0123456789abcdef:command-finished:1"),
+        "{stdout:?}"
     );
+}
+
+const MARKER_NONCE: &str = "00112233445566778899aabbccddeeff";
+
+/// Runs `driver` — the integration followed by a few commands — under `shell`
+/// in a pane-like environment that holds [`MARKER_NONCE`], and returns stdout.
+/// `None` when the shell is not installed.
+fn run_integration_with_nonce(mut command: std::process::Command, driver: &str) -> Option<String> {
+    use std::io::Write as _;
+    use std::process::Stdio;
+
+    let mut child = match command
+        .env("ZETTA_PANE_ID", "7")
+        .env("__ZETTA_COMMAND_MARKER_NONCE", MARKER_NONCE)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(error) => panic!("failed to launch the shell: {error}"),
+    };
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(driver.as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "the integration failed: {:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Some(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// 3.17: what a POSIX shell integration prints — lifecycle and directory
+/// markers alike — carries the nonce Zetta gave the shell, and nothing the
+/// shell runs inherits that nonce — so neither a child's output nor a
+/// recording of a nested shell can carry a valid one.
+fn assert_markers_carry_the_nonce_and_children_do_not(shell: &str, stdout: &str) {
+    assert!(
+        stdout.contains(&format!("zetta-event;{MARKER_NONCE}:tracking-ready")),
+        "{shell}: {stdout:?}"
+    );
+    assert!(
+        stdout.contains(&format!("zetta-event;{MARKER_NONCE}:command-finished:1")),
+        "{shell}: {stdout:?}"
+    );
+    assert_directory_markers_carry_the_nonce(shell, stdout);
+    assert!(!stdout.contains("zetta-event:"), "{shell}: {stdout:?}");
+    assert!(stdout.contains("child:unset"), "{shell}: {stdout:?}");
+}
+
+/// A shell's directory report decides where splits start, what a file server
+/// serves and which project a pane enters, so it carries the nonce too.
+fn assert_directory_markers_carry_the_nonce(shell: &str, stdout: &str) {
+    assert!(
+        stdout.contains(&format!("zetta-cwd;{MARKER_NONCE}:")),
+        "{shell}: {stdout:?}"
+    );
+    assert!(!stdout.contains("zetta-cwd:"), "{shell}: {stdout:?}");
+}
+
+const CHILD_ENVIRONMENT_PROBE: &str =
+    r#"sh -c 'echo "child:${__ZETTA_COMMAND_MARKER_NONCE-unset}"'"#;
+
+#[test]
+fn bash_lifecycle_markers_carry_the_pane_nonce_and_children_do_not_inherit_it() {
+    let _guard = lock_bash_tests();
+    if !bash_available() || cfg!(windows) {
+        return;
+    }
+    let mut command = bash_command();
+    command.args(["--noprofile", "--norc"]);
+    let driver = format!(
+        "{script}\n__ZETTA_COMMAND_STARTED=1\nfalse\n__zetta_report_cwd\n{CHILD_ENVIRONMENT_PROBE}\n",
+        script = ShellIntegration::Bash.eager_script(),
+    );
+    let stdout = run_integration_with_nonce(command, &driver).expect("bash is available");
+    assert_markers_carry_the_nonce_and_children_do_not("bash", &stdout);
+}
+
+#[test]
+fn zsh_lifecycle_markers_carry_the_pane_nonce_and_children_do_not_inherit_it() {
+    if cfg!(windows) {
+        return;
+    }
+    let mut command = clean_shell_command("zsh");
+    command.arg("-f");
+    let driver = format!(
+        "{script}\n__ZETTA_COMMAND_STARTED=1\nfalse\n__zetta_report_cwd\n{CHILD_ENVIRONMENT_PROBE}\nexit 0\n",
+        script = ShellIntegration::Zsh.eager_script(),
+    );
+    let Some(stdout) = run_integration_with_nonce(command, &driver) else {
+        return;
+    };
+    assert_markers_carry_the_nonce_and_children_do_not("zsh", &stdout);
+}
+
+#[test]
+fn fish_lifecycle_markers_carry_the_pane_nonce_and_children_do_not_inherit_it() {
+    if cfg!(windows) {
+        return;
+    }
+    let mut command = clean_shell_command("fish");
+    command.arg("--no-config");
+    let driver = format!(
+        "{script}\nset -g __ZETTA_COMMAND_STARTED 1\nfalse\n__zetta_report_cwd\n{CHILD_ENVIRONMENT_PROBE}\n",
+        script = ShellIntegration::Fish.eager_script(),
+    );
+    let Some(stdout) = run_integration_with_nonce(command, &driver) else {
+        return;
+    };
+    assert_markers_carry_the_nonce_and_children_do_not("fish", &stdout);
+}
+
+#[test]
+fn powershell_lifecycle_markers_carry_the_pane_nonce_and_leave_the_environment() {
+    let mut command = clean_shell_command(if cfg!(windows) { "pwsh.exe" } else { "pwsh" });
+    command.args([
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        "$source = [Console]::In.ReadToEnd(); . ([scriptblock]::Create($source))",
+    ]);
+    let driver = format!(
+        "{script}\n$null = prompt\nWrite-Output \"child:$(if (Test-Path Env:__ZETTA_COMMAND_MARKER_NONCE) {{ 'set' }} else {{ 'unset' }})\"\n",
+        script = ShellIntegration::PowerShell.eager_script(),
+    );
+    let Some(stdout) = run_integration_with_nonce(command, &driver) else {
+        return;
+    };
+    assert!(
+        stdout.contains(&format!("zetta-event;{MARKER_NONCE}:tracking-ready")),
+        "{stdout:?}"
+    );
+    assert_directory_markers_carry_the_nonce("pwsh", &stdout);
+    assert!(!stdout.contains("zetta-event:"), "{stdout:?}");
+    assert!(stdout.contains("child:unset"), "{stdout:?}");
 }
 
 #[test]
@@ -630,8 +781,13 @@ fn powershell_cwd_tracker_uses_the_shared_idempotence_guard() {
 fn powershell_cwd_trackers_reset_before_the_saved_prompt() {
     const TERMINAL_TRACKER: &str =
         include_str!("../../crates/terminal/src/terminal/powershell_cwd_tracker.ps1");
-    const MARKER_WRITE: &str =
-        r#"[Console]::Write("$([char]27)]2;zetta-cwd:$zettaDirectory$([char]27)\")"#;
+    // The tokened marker when the shell holds its nonce, else the untokened
+    // one: either way, one write the reset must follow at once.
+    const MARKER_WRITE: &str = r#"if ($global:__ZettaMarkerNonce) {
+                [Console]::Write("$([char]27)]2;zetta-cwd;$($global:__ZettaMarkerNonce):$zettaDirectory$([char]27)\")
+            } else {
+                [Console]::Write("$([char]27)]2;zetta-cwd:$zettaDirectory$([char]27)\")
+            }"#;
     const RESET_WRITE: &str = r#"[Console]::Write("$([char]27)[0m")"#;
 
     for (name, script) in [
@@ -654,7 +810,7 @@ fn powershell_cwd_trackers_reset_before_the_saved_prompt() {
         assert_eq!(
             script.matches(MARKER_WRITE).count(),
             1,
-            "{name} must have one CWD marker write"
+            "{name} must have one CWD marker block"
         );
         assert_eq!(
             script.matches(RESET_WRITE).count(),
@@ -2282,12 +2438,16 @@ fn service_completion_uses_command_local_short_options() {
     assert!(powershell.contains("'--device', '-d'"));
     assert!(powershell.contains("'--data-bits', '-D'"));
     assert!(powershell.contains("$previous -eq '-p' -and $subcommand -eq 'serial'"));
-    assert!(powershell.contains("{ '--root', '--port', '--config', '--help' }"));
+    assert!(powershell.contains(
+        "{ '--root', '--port', '--config', '--serve-dotfiles', '--allow-host', '--allow-any-host', '--help' }"
+    ));
 
     let zsh = ShellIntegration::Zsh.eager_script();
     assert!(zsh.contains("--data-bits|-D)"));
     assert!(zsh.contains("$words[2] == serial"));
-    assert!(zsh.contains("_zetta_options --root --port --config --help"));
+    assert!(zsh.contains(
+        "_zetta_options --root --port --config --serve-dotfiles --allow-host --allow-any-host --help"
+    ));
 }
 
 // Regression test: commit 72afe3b ("Add serial console, and HTTP, TFTP
@@ -2307,7 +2467,9 @@ fn service_subcommand_completions_only_offer_long_form_flags() {
             "'--device --baud-rate --data-bits --parity --stop-bits --flow-control --help'"
         )
     );
-    assert!(bash.contains("'--root --port --config --help'"));
+    assert!(bash.contains(
+        "'--root --port --config --serve-dotfiles --allow-host --allow-any-host --help'"
+    ));
 
     let zsh = ShellIntegration::Zsh.eager_script();
     assert!(!zsh.contains("-d --device -b --baud-rate"));
@@ -2316,7 +2478,9 @@ fn service_subcommand_completions_only_offer_long_form_flags() {
     assert!(zsh.contains(
         "_zetta_options --device --baud-rate --data-bits --parity --stop-bits --flow-control --help"
     ));
-    assert!(zsh.contains("_zetta_options --root --port --config --help"));
+    assert!(zsh.contains(
+        "_zetta_options --root --port --config --serve-dotfiles --allow-host --allow-any-host --help"
+    ));
 
     let powershell = ShellIntegration::PowerShell.eager_script();
     assert!(!powershell.contains("'-d', '--device', '-b', '--baud-rate'"));
@@ -2327,7 +2491,9 @@ fn service_subcommand_completions_only_offer_long_form_flags() {
     assert!(powershell.contains(
         "'--device', '--baud-rate', '--data-bits', '--parity', '--stop-bits', '--flow-control', '--help'"
     ));
-    assert!(powershell.contains("'--root', '--port', '--config', '--help'"));
+    assert!(powershell.contains(
+        "'--root', '--port', '--config', '--serve-dotfiles', '--allow-host', '--allow-any-host', '--help'"
+    ));
 
     let fish = ShellIntegration::Fish.eager_script();
     assert!(!fish.contains("-s d -l device"));
@@ -3162,7 +3328,15 @@ fn fish_displays_long_option_candidates_and_supports_short_option_values() {
         ("zetta http ", &["--help"][..]),
         (
             "zetta http server ",
-            &["--root", "--port", "--config", "--help"][..],
+            &[
+                "--root",
+                "--port",
+                "--config",
+                "--serve-dotfiles",
+                "--allow-host",
+                "--allow-any-host",
+                "--help",
+            ][..],
         ),
         ("zetta tftp ", &["--help"][..]),
         ("zetta tftp get ", &["--port", "--help"][..]),
@@ -3521,7 +3695,7 @@ fn lazy_startup_payloads_fit_budget_and_keep_completion_separate() {
         assert!(startup.contains("--completions"));
         assert!(!startup.contains("ZETTA_OVERLAY_COLORS"));
         let completions = shell.completion_script();
-        assert!(!completions.contains("zetta-event:tracking-ready"));
+        assert!(!completions.contains("tracking-ready"));
         assert!(completions.contains("--completions") || completions.contains("-l completions"));
     }
 }

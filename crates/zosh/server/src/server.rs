@@ -26,6 +26,7 @@ use std::path::Path;
 #[cfg(test)]
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
+use zeroize::Zeroizing;
 
 const INITIAL_ROWS: u16 = 24;
 const INITIAL_COLS: u16 = 80;
@@ -103,6 +104,36 @@ impl PtySession {
     }
 }
 
+/// The bootstrap contract parsed by the stock mosh wrapper, ending in its
+/// newline: `MOSH CONNECT <port> <key>`.
+///
+/// Built in place in a buffer sized for it, so the key text exists in one
+/// allocation, which is cleared when the line is dropped. Formatting it with
+/// `println!` instead left a copy behind in `encode`'s `String` and another in
+/// stdout's line buffer, which lives as long as the process.
+fn connect_line(port: u16, key: &[u8; 16]) -> Zeroizing<String> {
+    use std::fmt::Write as _;
+    // "MOSH CONNECT 65535 " is 19 bytes and the key 22, so nothing here grows
+    // the buffer and leaves the key in a freed one.
+    let mut line = Zeroizing::new(String::with_capacity(64));
+    let _ = write!(line, "MOSH CONNECT {port} ");
+    STANDARD_NO_PAD.encode_string(key, &mut line);
+    line.push('\n');
+    line
+}
+
+/// Writes `line` to stdout without it passing through stdout's buffer.
+///
+/// `LineWriter` hands a write that ends a line straight to the descriptor
+/// when nothing is buffered ahead of it, and copies it into the buffer
+/// otherwise — so stdout is flushed first, and the line is written whole.
+fn write_connect_line(line: &str) -> std::io::Result<()> {
+    let mut stdout = std::io::stdout().lock();
+    stdout.flush()?;
+    stdout.write_all(line.as_bytes())?;
+    stdout.flush()
+}
+
 #[cfg_attr(
     windows,
     allow(
@@ -114,19 +145,19 @@ pub fn run(mut cfg: Config) -> Result<()> {
     let timing_file = timing::open()?;
     let (socket, port) = bind_udp(cfg.bind_ip, cfg.port_low, cfg.port_high)?;
 
-    let mut key = [0u8; 16];
-    getrandom::fill(&mut key).map_err(|error| anyhow!("generating Mosh session key: {error}"))?;
-    let key_text = STANDARD_NO_PAD.encode(key);
-    let ocb = Ocb::new(&key).context("initializing AES-128-OCB3")?;
-    key.fill(0);
+    let mut key = Zeroizing::new([0u8; 16]);
+    getrandom::fill(key.as_mut_slice())
+        .map_err(|error| anyhow!("generating Mosh session key: {error}"))?;
+    let ocb = Ocb::new(key.as_slice()).context("initializing AES-128-OCB3")?;
+    let connect_line = connect_line(port, &key);
+    drop(key);
 
     if cfg.forward_agent {
         crate::agent::prime_forwarded_agent(cfg.verbose > 1);
     }
 
-    // This is the bootstrap contract parsed by the stock mosh wrapper.
-    println!("MOSH CONNECT {port} {key_text}");
-    std::io::stdout().flush().context("flushing MOSH CONNECT")?;
+    write_connect_line(&connect_line).context("writing MOSH CONNECT")?;
+    drop(connect_line);
 
     #[cfg(windows)]
     let _detached_stdout = if cfg.internal_child {

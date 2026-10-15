@@ -10,6 +10,8 @@
 use crate::protocol::AgentHostRecord;
 use crate::wake::{Waker, WakingSender};
 
+#[cfg(unix)]
+mod unix_socket;
 #[cfg(windows)]
 mod windows_pipe;
 use std::{
@@ -23,8 +25,6 @@ use std::{
 
 #[cfg(unix)]
 use std::fs;
-#[cfg(windows)]
-use std::fs::OpenOptions;
 #[cfg(any(unix, windows))]
 use std::sync::{
     Arc,
@@ -77,11 +77,8 @@ fn prime_agent_path(path: &Path) -> io::Result<()> {
         let path = path.to_owned();
         let (sender, receiver) = std::sync::mpsc::sync_channel(1);
         thread::spawn(move || {
-            let result = OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(path)
-                .and_then(|mut stream| prime_agent_stream(&mut stream));
+            let result =
+                windows_pipe::open(&path).and_then(|mut stream| prime_agent_stream(&mut stream));
             let _ = sender.send(result);
         });
         receiver.recv_timeout(PRIME_TIMEOUT).unwrap_or_else(|_| {
@@ -184,7 +181,7 @@ struct WindowsPipeListener {
 impl Drop for WindowsPipeListener {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Release);
-        let _ = OpenOptions::new().read(true).write(true).open(&self.path);
+        let _ = windows_pipe::open(&self.path);
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
@@ -447,6 +444,15 @@ impl Drop for AgentServer {
 
 #[cfg(unix)]
 fn create_listener(events: WakingSender<LocalEvent>) -> io::Result<UnixAgentListener> {
+    create_listener_for(events, unix_socket::this_user())
+}
+
+/// [`create_listener`], answering only `owner` (and root); see [`unix_socket`].
+#[cfg(unix)]
+fn create_listener_for(
+    events: WakingSender<LocalEvent>,
+    owner: libc::uid_t,
+) -> io::Result<UnixAgentListener> {
     let mut random = [0_u8; 8];
     getrandom::fill(&mut random).map_err(|error| io::Error::other(error.to_string()))?;
     let name = random
@@ -454,17 +460,16 @@ fn create_listener(events: WakingSender<LocalEvent>) -> io::Result<UnixAgentList
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
     let directory = std::env::temp_dir().join(format!("zosh-agent-{}-{name}", std::process::id()));
-    fs::create_dir(&directory)?;
+    unix_socket::create_private_dir(&directory)?;
     let path = directory.join("agent.sock");
     let listener = UnixListener::bind(&path)?;
-    fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))?;
     fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
     let stop = Arc::new(AtomicBool::new(false));
     let thread = thread::Builder::new()
         .name("zosh-agent-listener".to_owned())
         .spawn({
             let stop = Arc::clone(&stop);
-            move || accept_connections(&listener, &stop, &events)
+            move || accept_connections(&listener, owner, &stop, &events)
         })
         .map_err(io::Error::other)?;
     Ok(UnixAgentListener {
@@ -481,6 +486,7 @@ fn create_listener(events: WakingSender<LocalEvent>) -> io::Result<UnixAgentList
 #[cfg(unix)]
 fn accept_connections(
     listener: &UnixListener,
+    owner: libc::uid_t,
     stop: &AtomicBool,
     events: &WakingSender<LocalEvent>,
 ) {
@@ -490,6 +496,8 @@ fn accept_connections(
             return;
         }
         match accepted {
+            // Dropped unanswered: nothing it sent reaches the agent.
+            Ok((stream, _)) if !unix_socket::peer_may_connect(&stream, owner) => {}
             Ok((stream, _)) => match events.try_send(LocalEvent::Connected {
                 stream: Box::new(stream),
             }) {

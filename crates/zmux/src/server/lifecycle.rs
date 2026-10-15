@@ -1729,14 +1729,13 @@ pub(super) fn resume(
         // potentially large screen bytes through the raw side of the same
         // connection, just as detach does, so a record's scrollback cannot
         // exceed the control-message ceiling.
-        let mut snapshots = HashMap::new();
-        for snapshot in &request.snapshots {
-            anyhow::ensure!(
-                snapshot.length <= crate::retention::MAX_SNAPSHOT_BYTES,
-                "a pane snapshot exceeded the retention limit"
-            );
-            snapshots.insert(snapshot.pane_id, connection.read_exact(snapshot.length)?);
-        }
+        let lengths = request
+            .snapshots
+            .iter()
+            .map(|snapshot| (snapshot.pane_id, snapshot.length))
+            .collect::<Vec<_>>();
+        let mut received = read_snapshots(&daemon.snapshot_budget, connection, &lengths)?;
+        let snapshots = std::mem::take(&mut received.bytes);
         // A daemon that was started before the memory-fallback recovery path
         // was available may still be running without a persistence handle.
         // Open a temporary recovery handle in that case so a disk record can
@@ -1861,14 +1860,13 @@ pub(super) fn detach(
 ) -> Result<()> {
     // Read the snapshots before taking the lock: they arrive as raw bytes on
     // this connection and can be large.
-    let mut snapshots = HashMap::new();
-    for snapshot in &request.snapshots {
-        anyhow::ensure!(
-            snapshot.length <= crate::retention::MAX_SNAPSHOT_BYTES,
-            "a pane snapshot exceeded the retention limit"
-        );
-        snapshots.insert(snapshot.pane_id, connection.read_exact(snapshot.length)?);
-    }
+    let lengths = request
+        .snapshots
+        .iter()
+        .map(|snapshot| (snapshot.pane_id, snapshot.length))
+        .collect::<Vec<_>>();
+    let mut received = read_snapshots(&daemon.snapshot_budget, connection, &lengths)?;
+    let mut snapshots = std::mem::take(&mut received.bytes);
     #[cfg(feature = "session-persistence")]
     let persisted_snapshots = request
         .snapshots

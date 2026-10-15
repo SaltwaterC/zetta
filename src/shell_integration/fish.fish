@@ -149,6 +149,28 @@ if not type -q mosh
     set -g __ZETTA_MOSH_WRAPPER 1
 end
 
+# The nonce Zetta gave this shell. Lifecycle and working-directory markers
+# carry it so that a `command-finished` or a directory printed by anything else
+# (a file, a remote host, a nested shell) cannot satisfy a `zetta pane wait` or
+# choose where a split, a file server or a project starts. Kept in a global,
+# not exported, variable: the programs this shell runs must not inherit it. A
+# tracker that ran first may already hold it, so an absent variable keeps that
+# value.
+if set -q __ZETTA_COMMAND_MARKER_NONCE
+    set -g __zetta_marker_nonce "$__ZETTA_COMMAND_MARKER_NONCE"
+    set -e __ZETTA_COMMAND_MARKER_NONCE
+end
+# Signed when this shell holds the nonce. Without one — a shell on a remote
+# host, or one an older Zetta started — the untokened form is the one a
+# Zetta can still display.
+function __zetta_print_cwd
+    if test -n "$__zetta_marker_nonce"
+        printf '\033]2;zetta-cwd;%s:%s\033\\' "$__zetta_marker_nonce" "$PWD"
+    else
+        printf '\033]2;zetta-cwd:%s\033\\' "$PWD"
+    end
+end
+
 if not functions -q __zetta_report_cwd
     set -g __ZETTA_LIFECYCLE_TRACKING_INSTALLED 1
     if set -q ZETTA_PANE_ROUTING_ID
@@ -161,20 +183,20 @@ if not functions -q __zetta_report_cwd
     set -g __ZETTA_COMMAND_STARTED 0
     function __zetta_report_tracking_ready
         test "$__ZETTA_LIFECYCLE_TRACKING_ENABLED" = 1; or return
-        printf '\033]2;zetta-event:tracking-ready\033\\'
+        printf '\033]2;zetta-event;%s:tracking-ready\033\\' "$__zetta_marker_nonce"
     end
     function __zetta_report_preexec --on-event fish_preexec
         test "$__ZETTA_LIFECYCLE_TRACKING_ENABLED" = 1; or return
         set -g __ZETTA_COMMAND_STARTED 1
-        printf '\033]2;zetta-event:command-started:%s\033\\' "$argv[1]"
+        printf '\033]2;zetta-event;%s:command-started:%s\033\\' "$__zetta_marker_nonce" "$argv[1]"
     end
     function __zetta_report_cwd --on-event fish_prompt
         set -l command_status $status
         if test "$__ZETTA_LIFECYCLE_TRACKING_ENABLED" = 1; and test "$__ZETTA_COMMAND_STARTED" = 1
-            printf '\033]2;zetta-event:command-finished:%s\033\\' "$command_status"
+            printf '\033]2;zetta-event;%s:command-finished:%s\033\\' "$__zetta_marker_nonce" "$command_status"
             set -g __ZETTA_COMMAND_STARTED 0
         end
-        printf '\033]2;zetta-cwd:%s\033\\' "$PWD"
+        __zetta_print_cwd
     end
     __zetta_report_tracking_ready
 end
@@ -199,20 +221,20 @@ if test "$__zetta_lifecycle_needs_install" = 1
         functions -e __zetta_report_preexec 2>/dev/null
         function __zetta_report_tracking_ready
             test "$__ZETTA_LIFECYCLE_TRACKING_ENABLED" = 1; or return
-            printf '\033]2;zetta-event:tracking-ready\033\\'
+            printf '\033]2;zetta-event;%s:tracking-ready\033\\' "$__zetta_marker_nonce"
         end
         function __zetta_report_preexec --on-event fish_preexec
             test "$__ZETTA_LIFECYCLE_TRACKING_ENABLED" = 1; or return
             set -g __ZETTA_COMMAND_STARTED 1
-            printf '\033]2;zetta-event:command-started:%s\033\\' "$argv[1]"
+            printf '\033]2;zetta-event;%s:command-started:%s\033\\' "$__zetta_marker_nonce" "$argv[1]"
         end
         function __zetta_report_cwd --on-event fish_prompt
             set -l command_status $status
             if test "$__ZETTA_LIFECYCLE_TRACKING_ENABLED" = 1; and test "$__ZETTA_COMMAND_STARTED" = 1
-                printf '\033]2;zetta-event:command-finished:%s\033\\' "$command_status"
+                printf '\033]2;zetta-event;%s:command-finished:%s\033\\' "$__zetta_marker_nonce" "$command_status"
                 set -g __ZETTA_COMMAND_STARTED 0
             end
-            printf '\033]2;zetta-cwd:%s\033\\' "$PWD"
+            __zetta_print_cwd
         end
         __zetta_report_tracking_ready
     else

@@ -621,6 +621,16 @@ fn generated_remote_commands_use_bounded_private_storage() {
     }
 }
 
+/// The cleanup path comes back from the remote host; PowerShell would close
+/// the literal at a curly quote as readily as at `'`.
+#[test]
+fn powershell_cleanup_doubles_every_single_quote_in_the_path() {
+    assert_eq!(
+        powershell_cleanup_script(r"C:\Users\O’Brien\it's\zetta-image-‘x’"),
+        r"$ErrorActionPreference='SilentlyContinue';Remove-Item -LiteralPath 'C:\Users\O’’Brien\it''s\zetta-image-‘‘x’’' -Recurse -Force -ErrorAction SilentlyContinue"
+    );
+}
+
 #[test]
 fn powershell_commands_are_utf16le_base64_encoded() {
     let script = "$input = 'clipboard'; Write-Output 'done'";

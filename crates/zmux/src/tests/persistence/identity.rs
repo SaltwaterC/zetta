@@ -9,7 +9,7 @@ fn identity_set_decrypts_armored_age_files() {
         identities: vec![Box::new(identity)],
     };
     assert_eq!(
-        identities.decrypt(ciphertext.as_bytes()).unwrap(),
+        *identities.decrypt(ciphertext.as_bytes()).unwrap(),
         b"armored state"
     );
 }
@@ -24,7 +24,7 @@ fn identity_file_loader_accepts_native_age_keys() {
     let identities = IdentitySet::from_paths(std::slice::from_ref(&path)).unwrap();
     let recipients = RecipientSet::parse(&[identity.to_public().to_string()]).unwrap();
     let ciphertext = recipients.encrypt(b"identity file").unwrap();
-    assert_eq!(identities.decrypt(&ciphertext).unwrap(), b"identity file");
+    assert_eq!(*identities.decrypt(&ciphertext).unwrap(), b"identity file");
 }
 
 #[test]
@@ -37,7 +37,7 @@ fn identity_file_loader_accepts_pq_age_keys() {
     let recipients = RecipientSet::parse(&[identity.to_recipient().to_string()]).unwrap();
     let ciphertext = recipients.encrypt(b"pq identity file").unwrap();
     assert_eq!(
-        identities.decrypt(&ciphertext).unwrap(),
+        *identities.decrypt(&ciphertext).unwrap(),
         b"pq identity file"
     );
 }
@@ -74,7 +74,36 @@ LF7kNlDznn/nyZlg==\n\
         .encrypt(b"passphrase-protected identity")
         .unwrap();
     assert_eq!(
-        identities.decrypt(&ciphertext).unwrap(),
+        *identities.decrypt(&ciphertext).unwrap(),
         b"passphrase-protected identity"
     );
+}
+
+#[test]
+fn an_identity_file_is_read_into_erased_memory_without_reallocating() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("identity.txt");
+    let identity = age::x25519::Identity::generate();
+    // Longer than one read, so a buffer sized by what has arrived would grow.
+    let comments = "# a comment that makes the file span several reads\n".repeat(400);
+    fs::write(
+        &path,
+        format!("{comments}{}\n", identity.to_string().expose_secret()),
+    )
+    .unwrap();
+    let bytes: Zeroizing<Vec<u8>> = read_identity_file(&path).unwrap();
+    assert_eq!(bytes.len() as u64, fs::metadata(&path).unwrap().len());
+    assert!(bytes.len() > 8192);
+    assert_eq!(bytes.capacity(), bytes.len());
+    IdentitySet::from_paths(&[path]).unwrap();
+}
+
+#[test]
+fn an_oversized_identity_file_is_refused_before_it_is_read() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("identity.txt");
+    let file = fs::File::create(&path).unwrap();
+    file.set_len(MAX_IDENTITY_FILE_BYTES as u64 + 1).unwrap();
+    let error = read_identity_file(&path).unwrap_err().to_string();
+    assert!(error.contains("too large"), "{error}");
 }

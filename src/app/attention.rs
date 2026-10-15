@@ -9,6 +9,7 @@ use super::*;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum FocusSurface {
+    ScriptOpen,
     ProjectTrust,
     CloseConfirmation,
     SessionAuthentication,
@@ -26,6 +27,7 @@ pub(crate) enum FocusSurface {
 
 #[derive(Clone, Copy, Debug, Default)]
 struct FocusSurfaceAvailability {
+    script_open: bool,
     project_trust: bool,
     close_confirmation: bool,
     session_authentication: bool,
@@ -42,7 +44,9 @@ struct FocusSurfaceAvailability {
 }
 
 fn focus_surface(available: FocusSurfaceAvailability) -> Option<FocusSurface> {
-    if available.project_trust {
+    if available.script_open {
+        Some(FocusSurface::ScriptOpen)
+    } else if available.project_trust {
         Some(FocusSurface::ProjectTrust)
     } else if available.close_confirmation {
         Some(FocusSurface::CloseConfirmation)
@@ -76,6 +80,7 @@ fn focus_surface(available: FocusSurfaceAvailability) -> Option<FocusSurface> {
 impl Zetta {
     fn active_focus_surface(&self) -> Option<FocusSurface> {
         focus_surface(FocusSurfaceAvailability {
+            script_open: self.script_open_is_open(),
             project_trust: self.projects.trust_prompt.is_some(),
             close_confirmation: self.close_tab_confirmation.is_some(),
             session_authentication: self.session_authentication.is_some(),
@@ -102,6 +107,10 @@ impl Zetta {
             return false;
         };
         match surface {
+            #[cfg(target_os = "macos")]
+            FocusSurface::ScriptOpen => self.script_open_focus.focus(window, cx),
+            #[cfg(not(target_os = "macos"))]
+            FocusSurface::ScriptOpen => unreachable!("scripts are only opened on macOS"),
             FocusSurface::ProjectTrust => {
                 if let Some(prompt) = &self.projects.trust_prompt {
                     prompt.focus.focus(window, cx);

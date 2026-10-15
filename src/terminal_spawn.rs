@@ -135,6 +135,12 @@ pub(crate) struct SharedTerminalLaunch {
     provider: Arc<crate::mux::MuxPtyProvider>,
     shell: Shell,
     environment: HashMap<String, String>,
+    /// The nonce this pane's shell is given to authenticate its lifecycle
+    /// markers; see `shared_draft_process`. Drawn by the window, because the
+    /// window's terminal has to expect it and the daemon that starts the
+    /// shell cannot tell it. Kept across the one resynchronised retry, which
+    /// is safe because a refused draft started no shell.
+    marker_nonce: Option<String>,
     working_directory: Option<PathBuf>,
     title: String,
     profile_name: String,
@@ -207,6 +213,9 @@ struct SharedPaneTerminal<'a> {
     alternate_scroll: terminal::terminal_settings::AlternateScroll,
     max_scroll_history_lines: Option<usize>,
     working_directory: Option<PathBuf>,
+    /// What this pane's draft gave its shell; `None` for one that carried no
+    /// nonce, whose markers then authenticate nothing.
+    marker_nonce: Option<String>,
     executor: &'a gpui::BackgroundExecutor,
 }
 
@@ -233,6 +242,7 @@ fn build_shared_pane_terminal(
         alternate_scroll,
         max_scroll_history_lines,
         working_directory,
+        marker_nonce,
         executor,
     } = build;
     let session_id = pane.session_id();
@@ -261,7 +271,11 @@ fn build_shared_pane_terminal(
         // The relay reports this window's Mosh size to the multiplexer. Its
         // attachment viewport is only a bootstrap value and, unlike an SSH
         // shared stream, no later viewport frames arrive here to replace it.
-        return (built, Some(session), None);
+        return (
+            built.with_command_marker_nonce(marker_nonce),
+            Some(session),
+            None,
+        );
     }
     let fallback = streams.fallback(mux_pane_id).map(str::to_owned);
     let initial_viewport = pane.take_initial_viewport();
@@ -287,7 +301,8 @@ fn build_shared_pane_terminal(
         session_id,
         mux_pane_id,
         runtime.session_secret(),
-    ));
+    ))
+    .with_command_marker_nonce(marker_nonce);
     (built, None, fallback)
 }
 
@@ -374,6 +389,7 @@ fn build_shared_terminal_batch(
                 alternate_scroll: launch.alternate_scroll,
                 max_scroll_history_lines: launch.max_scroll_history_lines,
                 working_directory: launch.working_directory.clone(),
+                marker_nonce: launch.marker_nonce.clone(),
                 executor: terminal_executor,
             });
         let builder = builder
@@ -456,16 +472,39 @@ fn attach_committed_shared_pane(
 /// them is exactly how a Linux client came to start macOS's `/bin/bash` 3.2
 /// with a Linux `PATH` in front of it. Only the profile name and the pane's
 /// routing identity cross; the daemon resolves the rest.
+///
+/// Either way the draft also carries `marker_nonce`, the secret the pane's
+/// shell integration signs its lifecycle markers with (see `run_command.rs`'s
+/// "What may satisfy a dependency"). The daemon starts the shell, but it is
+/// this window's terminal that has to recognise the markers, so the window
+/// draws the nonce and tells both. It rides only where nothing prints it: the
+/// zmux request, over a same-user private socket locally and over `ssh -T`'s
+/// encrypted channel to a remote daemon, which puts it in the shell's
+/// environment and retains it nowhere. It is never typed into the pane — the
+/// integration loader the daemon types is constant text — so no viewer's
+/// replay can contain it.
+///
+/// A remote pane carries it too, deliberately past the `ZETTA_`-only filter:
+/// it names nothing about this machine, and without it a `zetta pane wait` on
+/// a remote shared pane whose own startup files load Zetta's integration could
+/// never succeed. Anyone on that host who could read it from the shell's
+/// environment could also type into the pane, so it widens nothing.
+///
+/// A pane this window did not create — one it joined, or reattached after a
+/// restart — was given a nonce it never knew, so its terminal expects none and
+/// its markers fail every dependent closed. That is the intended limit, not an
+/// oversight: the alternative is trusting what a pane prints.
 #[cfg(feature = "zmux")]
 fn shared_draft_process(
     remote: bool,
     shell: &Shell,
     environment: &HashMap<String, String>,
+    marker_nonce: Option<&str>,
 ) -> (
     Option<zetta_profiles::ProfileCommand>,
     HashMap<String, String>,
 ) {
-    if remote {
+    let (command, mut environment) = if remote {
         (
             None,
             zmux::messages::shared_draft_environment(environment.clone()),
@@ -475,7 +514,22 @@ fn shared_draft_process(
             Some(crate::config::profile_command(shell)),
             environment.clone(),
         )
+    };
+    // Whatever the window's own environment held is not this pane's.
+    environment.remove(terminal::COMMAND_MARKER_NONCE_ENV);
+    if let Some(nonce) = marker_nonce {
+        if remote {
+            // Not `give_command_marker_nonce`: its `WSLENV` entry is for a WSL
+            // distribution on this machine, and the shell runs on another.
+            environment.insert(
+                terminal::COMMAND_MARKER_NONCE_ENV.to_owned(),
+                nonce.to_owned(),
+            );
+        } else {
+            terminal::give_command_marker_nonce(shell, &mut environment, nonce);
+        }
     }
+    (command, environment)
 }
 
 /// The size a pane's pty starts at, before any viewer has laid the pane out and
@@ -1031,8 +1085,10 @@ impl Zetta {
         cx: &mut Context<Self>,
     ) {
         let remote_paste_allowed = self.remote_clipboard_paste_tabs.contains(&tab_id);
+        let remote_copy_allowed = !self.remote_clipboard_copy_blocked_tabs.contains(&tab_id);
         terminal.update(cx, |terminal, _| {
             terminal.set_remote_clipboard_paste_allowed(remote_paste_allowed);
+            terminal.set_remote_clipboard_copy_allowed(remote_copy_allowed);
         });
         let run_registry = crate::run_command::process_run_registry();
         if let Some(identity) = run_identity {
@@ -1043,25 +1099,11 @@ impl Zetta {
             window,
             move |this, _, event: &TerminalEvent, window, cx| {
                 if let Some(identity) = run_identity {
-                    match event {
-                        TerminalEvent::TrackingReady => run_registry.tracking_ready(identity),
-                        TerminalEvent::CommandStarted { command } => {
-                            run_registry.command_started(identity, command.clone());
-                            this.update_active_command(
-                                tab_id,
-                                pane_id,
-                                crate::session_state::valid_restore_command(command),
-                            );
-                        }
-                        TerminalEvent::CommandFinished { exit_code } => {
-                            run_registry.command_finished(identity, *exit_code);
-                            this.update_active_command(tab_id, pane_id, None);
-                        }
-                        TerminalEvent::TerminalExited(_) => {
-                            run_registry.terminal_lost(identity);
-                            this.update_active_command(tab_id, pane_id, None);
-                        }
-                        _ => {}
+                    run_registry.observe_terminal_event(identity, event);
+                    if let Some(command) =
+                        crate::background_session_ui::restorable_command_change(event)
+                    {
+                        this.update_active_command(tab_id, pane_id, command);
                     }
                 }
                 match event {
@@ -1343,6 +1385,7 @@ impl Zetta {
                     provider: provider.clone(),
                     shell,
                     environment,
+                    marker_nonce: terminal::draw_command_marker_nonce(),
                     working_directory,
                     title,
                     profile_name: profile.name.clone(),
@@ -1574,6 +1617,7 @@ impl Zetta {
             provider,
             shell,
             environment,
+            marker_nonce,
             working_directory,
             title,
             profile_name,
@@ -1646,7 +1690,8 @@ impl Zetta {
             return;
         }
         let remote = provider.runtime().is_remote();
-        let (draft_command, draft_environment) = shared_draft_process(remote, &shell, &environment);
+        let (draft_command, draft_environment) =
+            shared_draft_process(remote, &shell, &environment, marker_nonce.as_deref());
         // Loaded by the daemon, before the pane has an attachment or anything
         // retained. The wrapper that loads it is delivered as if typed, so the
         // terminal echoes it to every viewer of a shared pane — and a viewer
@@ -1791,6 +1836,7 @@ impl Zetta {
                     alternate_scroll,
                     max_scroll_history_lines,
                     working_directory,
+                    marker_nonce,
                     executor: &terminal_executor,
                 });
             let builder = builder
@@ -2003,8 +2049,12 @@ impl Zetta {
             .iter()
             .map(|launch| {
                 let (program, _args) = launch.shell.program_and_args();
-                let (command, env) =
-                    shared_draft_process(remote, &launch.shell, &launch.environment);
+                let (command, env) = shared_draft_process(
+                    remote,
+                    &launch.shell,
+                    &launch.environment,
+                    launch.marker_nonce.as_deref(),
+                );
                 zmux::messages::SharedPaneDraft {
                     draft_id: launch.pane_id,
                     profile: launch.profile_name.clone(),
@@ -2900,28 +2950,19 @@ impl Zetta {
         cx.subscribe_in(
             &terminal,
             window,
-            move |this, terminal, event: &TerminalEvent, _window, cx| match event {
-                TerminalEvent::TrackingReady => {
-                    run_registry.tracking_ready(run_identity);
+            move |this, terminal, event: &TerminalEvent, _window, cx| {
+                run_registry.observe_terminal_event(run_identity, event);
+                match event {
+                    TerminalEvent::TaskFinished { exit_code } => {
+                        this.stacked_task_finished(tab_id, pane_id, entry_id, *exit_code, cx);
+                    }
+                    TerminalEvent::ResizeRequested { .. } => {
+                        terminal.update(cx, |terminal, _| {
+                            terminal.truncate_on_next_resize();
+                        });
+                    }
+                    _ => {}
                 }
-                TerminalEvent::CommandStarted { command } => {
-                    run_registry.command_started(run_identity, command.clone());
-                }
-                TerminalEvent::CommandFinished { exit_code } => {
-                    run_registry.command_finished(run_identity, *exit_code);
-                }
-                TerminalEvent::TerminalExited(_) => {
-                    run_registry.terminal_lost(run_identity);
-                }
-                TerminalEvent::TaskFinished { exit_code } => {
-                    this.stacked_task_finished(tab_id, pane_id, entry_id, *exit_code, cx);
-                }
-                TerminalEvent::ResizeRequested { .. } => {
-                    terminal.update(cx, |terminal, _| {
-                        terminal.truncate_on_next_resize();
-                    });
-                }
-                _ => {}
             },
         )
         .detach();

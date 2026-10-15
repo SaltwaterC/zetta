@@ -143,3 +143,88 @@ fn an_embedded_windows_pane_is_bootstrapped_over_the_shared_login() {
         "{script}"
     );
 }
+
+/// Literals a server path or remote command could need: PowerShell closes a
+/// single-quoted string at `'` and at each of U+2018–U+201B.
+const POWERSHELL_LITERALS: &[&str] = &[
+    "",
+    "it's",
+    r"C:\Users\O’Brien\AppData\Local\Programs\Zetta\zosh-server.exe",
+    "‘’‚‛",
+    "'‘’‚‛'",
+    "''’’",
+    "x’; Write-Output injected; ’",
+    "$HOME `n \"double\"",
+];
+
+#[test]
+fn every_powershell_single_quote_is_doubled() {
+    assert_eq!(powershell_quote("it's"), "'it''s'");
+    assert_eq!(powershell_quote("‘’‚‛"), "'‘‘’’‚‚‛‛'");
+    assert_eq!(powershell_quote("‟"), "'‟'");
+    let command = MoshCommand {
+        server: r"C:\Users\O’Brien\zosh-server.exe".to_owned(),
+        server_explicit: true,
+        remote_command: vec!["echo".to_owned(), "it’s".to_owned()],
+        ..MoshCommand::default()
+    };
+    let script = windows_remote_script(&command, 256).unwrap();
+    assert!(
+        script.contains(r"'C:\Users\O’’Brien\zosh-server.exe'"),
+        "{script}"
+    );
+    assert!(script.contains("'it’’s'"), "{script}");
+}
+
+/// Runs `script` on each PowerShell engine on this host, encoded as
+/// [`windows_remote_command`] encodes it, and returns what each printed.
+/// Windows PowerShell exists only on Windows, and `pwsh` only where it is
+/// installed; a host with neither returns nothing.
+fn powershell_outputs(script: &str) -> Vec<(&'static str, String)> {
+    let encoded = STANDARD.encode(
+        script
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>(),
+    );
+    ["powershell.exe", "pwsh"]
+        .into_iter()
+        .filter_map(|engine| {
+            let output = Command::new(engine)
+                .args(["-NoProfile", "-NonInteractive", "-EncodedCommand", &encoded])
+                .output()
+                .ok()?;
+            assert!(
+                output.status.success(),
+                "{engine}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            Some((engine, String::from_utf8(output.stdout).unwrap()))
+        })
+        .collect()
+}
+
+#[test]
+fn powershell_reads_each_quoted_argument_back_unchanged() {
+    let values = POWERSHELL_LITERALS
+        .iter()
+        .map(|literal| (*literal).to_owned())
+        .collect::<Vec<_>>();
+    // Each value is printed as base64, which no console code page can mangle.
+    let script = format!(
+        "foreach ($value in {}) {{ [Console]::Out.WriteLine(\
+         [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($value))) }}",
+        powershell_array(&values)
+    );
+    let outputs = powershell_outputs(&script);
+    if outputs.is_empty() {
+        eprintln!("no PowerShell engine on this host; only the quoting itself was checked");
+    }
+    for (engine, output) in outputs {
+        let read = output
+            .lines()
+            .map(|line| String::from_utf8(STANDARD.decode(line.trim()).unwrap()).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(read, POWERSHELL_LITERALS, "{engine}");
+    }
+}

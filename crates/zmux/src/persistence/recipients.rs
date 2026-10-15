@@ -61,6 +61,12 @@ impl RecipientSet {
     }
 
     pub(crate) fn encrypt(&self, plaintext: &[u8]) -> Result<Vec<u8>> {
+        self.encrypt_parts(&[plaintext])
+    }
+
+    /// Encrypts `parts` as one plaintext without first joining them, which is
+    /// how a record's binding header goes in front of its payload.
+    pub(crate) fn encrypt_parts(&self, parts: &[&[u8]]) -> Result<Vec<u8>> {
         anyhow::ensure!(
             !self.recipients.is_empty(),
             "no persistence recipients configured"
@@ -73,13 +79,14 @@ impl RecipientSet {
                 .map(|recipient| recipient.as_ref() as &dyn age::Recipient),
         )
         .context("creating age encryptor")?;
-        let mut ciphertext = Vec::with_capacity(plaintext.len() + 4096);
+        let length = parts.iter().map(|part| part.len()).sum::<usize>();
+        let mut ciphertext = Vec::with_capacity(length + 4096);
         let mut writer = encryptor
             .wrap_output(&mut ciphertext)
             .context("creating age output stream")?;
-        writer
-            .write_all(plaintext)
-            .context("writing age plaintext")?;
+        for part in parts {
+            writer.write_all(part).context("writing age plaintext")?;
+        }
         writer.finish().context("finishing age output stream")?;
         Ok(ciphertext)
     }

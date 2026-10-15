@@ -79,6 +79,7 @@ fn handover() -> Handover {
             startup: None,
             by_process: vec![(4321, vec!["age1owner".to_owned()])],
         }),
+        lifetime_lock: Some(11),
     }
 }
 
@@ -91,6 +92,7 @@ fn a_handover_round_trips_through_its_anonymous_file() {
     assert_eq!(restored.retention, crate::retention::Retention::Disk);
     assert_eq!(restored.sessions[0].panes[0].descriptor, 7);
     assert_eq!(restored.sessions[0].panes[0].retained, b"output");
+    assert_eq!(restored.lifetime_lock, Some(11));
     assert_eq!(
         restored.sessions[0].summary.panes[0].working_directory,
         Some(std::path::PathBuf::from("/work/zetta"))
@@ -255,6 +257,25 @@ fn an_already_exited_panes_status_survives_the_handover() {
     // dropping it here would turn a real exit code into "status unavailable".
     assert!(restored.sessions[0].panes[0].exited);
     assert_eq!(restored.sessions[0].panes[0].exit_status, Some(256));
+}
+
+#[test]
+fn a_handover_from_before_the_lifetime_lock_is_still_adopted() {
+    // A daemon built before the lock hands over at version 8, with no lock
+    // field. Refusing it would make rebuilding the one thing an upgrade from
+    // that daemon could not survive.
+    let mut previous = serde_json::to_value(handover()).unwrap();
+    previous["version"] = PREVIOUS_HANDOVER_VERSION.into();
+    previous.as_object_mut().unwrap().remove("lifetime_lock");
+    let mut file = tempfile::tempfile().unwrap();
+    std::io::Write::write_all(&mut file, &serde_json::to_vec(&previous).unwrap()).unwrap();
+    std::io::Seek::rewind(&mut file).unwrap();
+
+    let restored = read_handover(file.into_raw_fd()).unwrap();
+    assert_eq!(restored.version, PREVIOUS_HANDOVER_VERSION);
+    assert_eq!(restored.lifetime_lock, None);
+    assert!(accepts_handover_version(PREVIOUS_HANDOVER_VERSION));
+    assert!(accepts_handover_version(HANDOVER_VERSION));
 }
 
 #[test]

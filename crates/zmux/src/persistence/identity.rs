@@ -3,6 +3,14 @@
 //! An identity file may itself be passphrase-encrypted, so an identity is
 //! resolved lazily: the passphrase is asked for only when a decryption
 //! actually needs that file, and the answer is remembered for the set.
+//!
+//! What passes through this module's own buffers is erased: an identity
+//! file as read, an encrypted one's decrypted contents, and every plaintext
+//! [`IdentitySet::decrypt`] returns, each read into memory sized up front so it
+//! is never reallocated (see [`crate::auth::read_secret_to_end`]). The parsed
+//! identities are another matter. `age`'s X25519 and SSH identities keep their
+//! keys in its own types, and its parsers' intermediate copies are its own; the
+//! post-quantum identity is covered in [`super::postquantum`].
 
 use super::*;
 
@@ -89,7 +97,7 @@ impl IdentitySet {
     /// Opens an age file with whichever of these identities fits it, armored or
     /// binary. The counterpart of [`Self::from_paths`], and the only way in to
     /// anything this store wrote.
-    pub fn decrypt(&self, ciphertext: &[u8]) -> Result<Vec<u8>> {
+    pub fn decrypt(&self, ciphertext: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
         let decryptor =
             age::Decryptor::new_buffered(age::armor::ArmoredReader::new(Cursor::new(ciphertext)))
                 .context("parsing age ciphertext")?;
@@ -100,11 +108,10 @@ impl IdentitySet {
         let mut reader = decryptor
             .decrypt(identities)
             .context("decrypting age ciphertext")?;
-        let mut plaintext = Vec::new();
-        reader
-            .read_to_end(&mut plaintext)
-            .context("reading age plaintext")?;
-        Ok(plaintext)
+        // The plaintext is never longer than the ciphertext, so this buffer is
+        // never reallocated.
+        crate::auth::read_secret_to_end(&mut reader, ciphertext.len(), usize::MAX)
+            .context("reading age plaintext")
     }
 
     /// Decrypts an age file a chunk at a time. Persistence reconstruction uses
@@ -126,10 +133,10 @@ impl IdentitySet {
         let mut reader = decryptor
             .decrypt(identities)
             .context("decrypting age scrollback ciphertext")?;
-        let mut buffer = [0u8; 64 * 1024];
+        let mut buffer = Zeroizing::new([0u8; 64 * 1024]);
         loop {
             let read = reader
-                .read(&mut buffer)
+                .read(&mut buffer[..])
                 .context("reading decrypted age scrollback")?;
             if read == 0 {
                 break;
@@ -173,7 +180,7 @@ impl age::Callbacks for PromptCallbacks {
 
 enum PassphraseIdentityState {
     Encrypted {
-        bytes: Vec<u8>,
+        bytes: Zeroizing<Vec<u8>>,
         filename: String,
         passphrase: Option<age::secrecy::SecretString>,
         source: PassphraseSource,
@@ -188,7 +195,7 @@ struct PassphraseIdentity {
 
 impl PassphraseIdentity {
     fn new(
-        bytes: Vec<u8>,
+        bytes: Zeroizing<Vec<u8>>,
         filename: String,
         passphrase: Option<age::secrecy::SecretString>,
         source: PassphraseSource,
@@ -268,14 +275,25 @@ impl age::Identity for PassphraseIdentity {
     }
 }
 
-fn read_identity_file(path: &Path) -> Result<Vec<u8>> {
-    let bytes =
-        fs::read(path).with_context(|| format!("reading identity file {}", path.display()))?;
+/// The largest identity file read. An encrypted one is read whole before it
+/// is decrypted.
+const MAX_IDENTITY_FILE_BYTES: usize = 16 * 1024 * 1024;
+
+/// Reads an identity file into erased memory, sized from the file so the read
+/// does not reallocate, and refuses one larger than
+/// [`MAX_IDENTITY_FILE_BYTES`] before it has all been read.
+fn read_identity_file(path: &Path) -> Result<Zeroizing<Vec<u8>>> {
+    let mut file = fs::File::open(path)
+        .with_context(|| format!("reading identity file {}", path.display()))?;
+    let size = file.metadata().map_or(0, |metadata| {
+        usize::try_from(metadata.len()).unwrap_or(usize::MAX)
+    });
     anyhow::ensure!(
-        bytes.len() <= 16 * 1024 * 1024,
+        size <= MAX_IDENTITY_FILE_BYTES,
         "identity file is too large"
     );
-    Ok(bytes)
+    crate::auth::read_secret_to_end(&mut file, size, MAX_IDENTITY_FILE_BYTES)
+        .with_context(|| format!("reading identity file {}", path.display()))
 }
 
 /// Reports whether an identity file will need a passphrase before it can
@@ -392,9 +410,8 @@ fn decrypt_passphrase_identity_file(
             age::DecryptError::DecryptionFailed => age::DecryptError::KeyDecryptionFailed,
             error => error,
         })?;
-    let mut plaintext = Zeroizing::new(Vec::new());
-    reader
-        .read_to_end(&mut plaintext)
+    // Sized from the ciphertext, which the plaintext never outgrows.
+    let plaintext = crate::auth::read_secret_to_end(&mut reader, bytes.len(), usize::MAX)
         .map_err(age::DecryptError::Io)?;
     parse_identity_file_bytes(
         &plaintext,

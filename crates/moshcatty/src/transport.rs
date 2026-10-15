@@ -18,7 +18,7 @@ use flate2::read::ZlibDecoder;
 use flate2::{Compress, Compression, FlushCompress, Status};
 use std::io::Read;
 
-use crate::crypto::{self, Ocb, DIR_TO_CLIENT, DIR_TO_SERVER, MIN_DATAGRAM, SEQ_MASK};
+use crate::crypto::{self, Ocb, DIR_TO_CLIENT, DIR_TO_SERVER, MIN_DATAGRAM, RECEIVE_MTU, SEQ_MASK};
 use crate::fragment::{
     fragmentize_with_payload, Assembler, Fragment, FRAGMENT_HEADER_SIZE, MAX_FRAGMENT_PAYLOAD,
     MAX_INSTRUCTION_BYTES,
@@ -744,7 +744,7 @@ impl Transport {
     /// Decrypt `wire` if its sequence number is fresh, recording it in the
     /// replay window and filling in `received`'s flags.
     fn open(&mut self, wire: &[u8], received: &mut Received) -> Option<Vec<u8>> {
-        if wire.len() < MIN_DATAGRAM {
+        if !(MIN_DATAGRAM..=RECEIVE_MTU).contains(&wire.len()) {
             return None;
         }
 
@@ -1058,6 +1058,11 @@ mod deadline_tests;
 #[cfg(test)]
 #[path = "tests/transport_replay.rs"]
 mod replay_tests;
+
+// Zetta's own tests for the receive MTU, likewise.
+#[cfg(test)]
+#[path = "tests/transport_receive_mtu.rs"]
+mod receive_mtu_tests;
 
 #[cfg(test)]
 mod tests {

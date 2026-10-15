@@ -234,12 +234,27 @@ fn homebrew_shell_profiles(prefixes: impl IntoIterator<Item = PathBuf>) -> Vec<P
         .collect()
 }
 
+/// What an MSYS2 profile starts, relative to the installation root.
+#[cfg(windows)]
+const MSYS2_LAUNCHED: &[&str] = &[
+    "msys2_shell.cmd",
+    "usr/bin/msys-2.0.dll",
+    "usr/bin/bash.exe",
+    "usr/bin/zsh.exe",
+];
+
+/// The installation a shortcut or registration records, or else the
+/// conventional root — which only counts when nobody else can have put it
+/// there (see `installation_trust`).
 #[cfg(windows)]
 fn msys2_installation_root() -> Option<PathBuf> {
+    let guessed = [PathBuf::from(r"C:\msys64")]
+        .into_iter()
+        .filter(|root| installation_trust::guessed_root_is_trusted(root, MSYS2_LAUNCHED));
     msys2_start_menu_installation_roots()
         .into_iter()
         .chain(msys2_registered_installation_roots())
-        .chain([PathBuf::from(r"C:\msys64")])
+        .chain(guessed)
         .find(|root| root.join("msys2_shell.cmd").is_file())
 }
 
@@ -512,10 +527,24 @@ fn cygwin_installation_roots() -> Vec<PathBuf> {
         }
     }
 
-    add_root(PathBuf::from(r"C:\cygwin64"));
-    add_root(PathBuf::from(r"C:\cygwin"));
+    // Nobody recorded these: see `installation_trust`.
+    for root in [r"C:\cygwin64", r"C:\cygwin"].map(PathBuf::from) {
+        if installation_trust::guessed_root_is_trusted(&root, CYGWIN_LAUNCHED) {
+            add_root(root);
+        }
+    }
     roots
 }
+
+/// What a Cygwin profile starts, relative to the installation root.
+#[cfg(windows)]
+const CYGWIN_LAUNCHED: &[&str] = &[
+    "bin/cygwin1.dll",
+    "bin/bash.exe",
+    "bin/zsh.exe",
+    "bin/fish.exe",
+    "bin/nu.exe",
+];
 
 #[cfg(windows)]
 fn cygwin_registered_installation_roots() -> Vec<PathBuf> {

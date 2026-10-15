@@ -6,6 +6,33 @@
 
 use super::*;
 
+/// How a terminal event changes the command a pane remembers as running, for
+/// [`Zetta::update_active_command`]: `Some(Some(command))` to remember one,
+/// `Some(None)` to forget it, `None` to leave it alone.
+///
+/// That command is typed into the prompt of the shell a restored pane starts —
+/// not submitted, but one Enter away — so only an authenticated start may set
+/// it. An unauthenticated marker is any printed title: `cat` of a file could
+/// otherwise plant the next line a restore offers. The same rule keeps a
+/// nested or remote shell's commands (a `vim` inside `ssh host`) from
+/// replacing the command the pane's own shell is running (`ssh host`), which
+/// is what a restore should offer. Shells that cannot authenticate — shared
+/// panes this window joined or reattached — offer no command.
+pub(crate) fn restorable_command_change(event: &TerminalEvent) -> Option<Option<String>> {
+    match event {
+        TerminalEvent::CommandStarted {
+            command,
+            authenticated: true,
+        } => Some(crate::session_state::valid_restore_command(command)),
+        TerminalEvent::CommandFinished {
+            authenticated: true,
+            ..
+        }
+        | TerminalEvent::TerminalExited(_) => Some(None),
+        _ => None,
+    }
+}
+
 impl Zetta {
     pub(crate) fn observe_background_terminal(
         &mut self,
@@ -21,28 +48,10 @@ impl Zetta {
         let run_registry = crate::run_command::process_run_registry();
         cx.subscribe(&terminal, move |this, _, event: &TerminalEvent, cx| {
             if let Some(identity) = run_identity {
-                match event {
-                    TerminalEvent::TrackingReady => run_registry.tracking_ready(identity),
-                    TerminalEvent::CommandStarted { command } => {
-                        run_registry.command_started(identity, command.clone());
-                    }
-                    TerminalEvent::CommandFinished { exit_code } => {
-                        run_registry.command_finished(identity, *exit_code);
-                    }
-                    TerminalEvent::TerminalExited(_) => run_registry.terminal_lost(identity),
-                    _ => {}
-                }
+                run_registry.observe_terminal_event(identity, event);
             }
-            match event {
-                TerminalEvent::CommandStarted { command } => this.update_active_command(
-                    tab_id,
-                    pane_id,
-                    crate::session_state::valid_restore_command(command),
-                ),
-                TerminalEvent::CommandFinished { .. } | TerminalEvent::TerminalExited(_) => {
-                    this.update_active_command(tab_id, pane_id, None);
-                }
-                _ => {}
+            if let Some(command) = restorable_command_change(event) {
+                this.update_active_command(tab_id, pane_id, command);
             }
             match event {
                 TerminalEvent::TerminalExited(exit)
@@ -143,17 +152,7 @@ impl Zetta {
         let run_registry = crate::run_command::process_run_registry();
         cx.subscribe(&terminal, move |this, _, event: &TerminalEvent, cx| {
             if let Some(identity) = run_identity {
-                match event {
-                    TerminalEvent::TrackingReady => run_registry.tracking_ready(identity),
-                    TerminalEvent::CommandStarted { command } => {
-                        run_registry.command_started(identity, command.clone());
-                    }
-                    TerminalEvent::CommandFinished { exit_code } => {
-                        run_registry.command_finished(identity, *exit_code);
-                    }
-                    TerminalEvent::TerminalExited(_) => run_registry.terminal_lost(identity),
-                    _ => {}
-                }
+                run_registry.observe_terminal_event(identity, event);
             }
             match event {
                 TerminalEvent::TaskFinished { exit_code } => {
@@ -303,11 +302,13 @@ impl Zetta {
                     })
                     .unwrap_or_default();
                 // Carry a restored directory across another detach even when a
-                // running TUI has not emitted fresh shell metadata. This is only
-                // publication metadata, not an authoritative shell CWD report.
+                // running TUI has not emitted fresh shell metadata. Only a
+                // trusted directory is published: a window that reattaches seeds
+                // the pane's terminal with it, and a split of that pane starts
+                // there (see "Which directory a pane is in" in `pane.rs`).
                 let working_directory = pane
                     .working_directory(cx)
-                    .or_else(|| pane.terminal.as_ref()?.read(cx).working_directory());
+                    .or_else(|| pane.terminal.as_ref()?.read(cx).trusted_working_directory());
                 let state = if pane.error.is_some() || pane.exit.is_some() {
                     BackgroundPaneState::Failed
                 } else if pane.terminal.is_some() {
@@ -414,31 +415,11 @@ impl Zetta {
             &terminal,
             window,
             move |this, _, event: &TerminalEvent, _, _| {
-                if let TerminalEvent::CommandStarted { command } = event {
-                    this.update_active_command(
-                        tab_id,
-                        pane_id,
-                        crate::session_state::valid_restore_command(command),
-                    );
-                } else if matches!(
-                    event,
-                    TerminalEvent::CommandFinished { .. } | TerminalEvent::TerminalExited(_)
-                ) {
-                    this.update_active_command(tab_id, pane_id, None);
+                if let Some(command) = restorable_command_change(event) {
+                    this.update_active_command(tab_id, pane_id, command);
                 }
-                let Some(identity) = run_identity else {
-                    return;
-                };
-                match event {
-                    TerminalEvent::TrackingReady => run_registry.tracking_ready(identity),
-                    TerminalEvent::CommandStarted { command } => {
-                        run_registry.command_started(identity, command.clone());
-                    }
-                    TerminalEvent::CommandFinished { exit_code } => {
-                        run_registry.command_finished(identity, *exit_code);
-                    }
-                    TerminalEvent::TerminalExited(_) => run_registry.terminal_lost(identity),
-                    _ => {}
+                if let Some(identity) = run_identity {
+                    run_registry.observe_terminal_event(identity, event);
                 }
             },
         )
@@ -548,17 +529,7 @@ impl Zetta {
             window,
             move |this, terminal, event: &TerminalEvent, _window, cx| {
                 if let Some(identity) = run_identity {
-                    match event {
-                        TerminalEvent::TrackingReady => run_registry.tracking_ready(identity),
-                        TerminalEvent::CommandStarted { command } => {
-                            run_registry.command_started(identity, command.clone());
-                        }
-                        TerminalEvent::CommandFinished { exit_code } => {
-                            run_registry.command_finished(identity, *exit_code);
-                        }
-                        TerminalEvent::TerminalExited(_) => run_registry.terminal_lost(identity),
-                        _ => {}
-                    }
+                    run_registry.observe_terminal_event(identity, event);
                 }
                 match event {
                     TerminalEvent::TaskFinished { exit_code } => {

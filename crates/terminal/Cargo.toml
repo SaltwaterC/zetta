@@ -23,6 +23,7 @@ anyhow = "1.0.86"
 collections = { path = "../../zed/crates/collections", version = "0.1.0" }
 futures = "0.3.32"
 futures-lite = "1.13"
+getrandom = "0.3"
 gpui = { path = "../gpui", default-features = false }
 itertools = "0.14.0"
 libc = "0.2"
@@ -49,7 +50,6 @@ zclip = { path = "../zclip", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
 console-server = { path = "../console-server", default-features = false, features = ["grid"] }
-getrandom = "0.3"
 windows = { version = "0.61", features = [
     "Foundation_Numerics",
     "Globalization_DateTimeFormatting",

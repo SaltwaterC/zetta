@@ -268,6 +268,7 @@ actions!(
         RequestFocusStatusAccess,
         ToggleTabSilentMode,
         ToggleRemoteClipboardPaste,
+        ToggleRemoteClipboardCopy,
         ToggleMultiCommand,
         ToggleStackedCommand,
         SelectPreviousStackedPane,
@@ -297,6 +298,7 @@ fn action_is_enabled_in_build(name: &str) -> bool {
         name if name == StartHttpServer.name() => cfg!(feature = "http-server"),
         name if name == StartTftpServer.name() => cfg!(feature = "tftp-server"),
         name if name == ToggleRemoteClipboardPaste.name() => cfg!(feature = "clipboard"),
+        name if name == ToggleRemoteClipboardCopy.name() => cfg!(feature = "clipboard"),
         name if name == RequestFocusStatusAccess.name() => cfg!(target_os = "macos"),
         _ => true,
     }
@@ -461,6 +463,8 @@ mod remote_session_ui;
 #[cfg(not(feature = "zmux"))]
 #[path = "remote_session_ui_stub.rs"]
 mod remote_session_ui;
+#[cfg(target_os = "macos")]
+mod script_open_ui;
 mod stacked_panes;
 mod tab_bar_render;
 mod tab_capability;

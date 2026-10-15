@@ -283,12 +283,24 @@ impl Fragmenter {
 /// Keyed by instruction id: a fragment carrying a different id wipes
 /// whatever was half-assembled, because mosh never interleaves two
 /// instructions on one connection.
+///
+/// What one instruction may hold is capped at [`MAX_INSTRUCTION_BYTES`]
+/// of compressed bytes. Decompression is capped too, but only once the
+/// instruction is complete: a server sending 32,768 full fragments of one
+/// instruction would otherwise have the client store, then concatenate,
+/// some 64 MiB first. mosh's own compressor writes into a buffer of that
+/// size, so no instruction it sends is larger.
 #[derive(Debug, Default)]
 pub struct FragmentAssembly {
     current_id: Option<u64>,
     fragments: Vec<Option<Vec<u8>>>,
     arrived: usize,
     total: Option<usize>,
+    /// Compressed bytes held across `fragments`.
+    stored: usize,
+    /// The current instruction outgrew the cap and was dropped; the rest
+    /// of its fragments are ignored rather than collected again.
+    discarded: bool,
 }
 
 impl FragmentAssembly {
@@ -297,24 +309,45 @@ impl FragmentAssembly {
     pub fn add(&mut self, frag: Fragment) -> bool {
         if self.current_id != Some(frag.id) {
             self.current_id = Some(frag.id);
-            self.fragments.clear();
-            self.arrived = 0;
-            self.total = None;
+            self.reset();
+        } else if self.discarded {
+            return false;
         }
         let idx = frag.num as usize;
         if self.fragments.len() <= idx {
             self.fragments.resize(idx + 1, None);
         }
-        if self.fragments[idx].is_none() {
+        let replaced = self.fragments[idx].as_ref().map(Vec::len);
+        if replaced.is_none() {
             self.arrived += 1;
         }
+        self.stored = self.stored - replaced.unwrap_or(0) + frag.contents.len();
         let is_final = frag.final_fragment;
         self.fragments[idx] = Some(frag.contents);
         if is_final {
             self.total = Some(idx + 1);
-            self.fragments.resize(idx + 1, None);
+            // Fragments numbered past the final one are not part of the
+            // instruction; stop counting them as arrived or stored.
+            for dropped in self.fragments.drain(idx + 1..).flatten() {
+                self.arrived -= 1;
+                self.stored -= dropped.len();
+            }
+        }
+        if self.stored > MAX_INSTRUCTION_BYTES {
+            self.reset();
+            self.discarded = true;
+            return false;
         }
         self.total == Some(self.arrived)
+    }
+
+    /// Forget the instruction being assembled, keeping its id.
+    fn reset(&mut self) {
+        self.fragments.clear();
+        self.arrived = 0;
+        self.total = None;
+        self.stored = 0;
+        self.discarded = false;
     }
 
     /// Concatenate and decode the completed instruction, resetting for
@@ -330,9 +363,7 @@ impl FragmentAssembly {
             };
             encoded.extend_from_slice(bytes);
         }
-        self.fragments.clear();
-        self.arrived = 0;
-        self.total = None;
+        self.reset();
         Ok(Some(Instruction::from_compressed(&encoded)?))
     }
 }
@@ -508,6 +539,66 @@ mod tests {
         }));
         assert_eq!(asm.arrived, 1);
         assert_eq!(asm.current_id, Some(2));
+    }
+
+    fn fragment(id: u64, num: u16, final_fragment: bool, len: usize) -> Fragment {
+        Fragment {
+            id,
+            num,
+            final_fragment,
+            contents: vec![0; len],
+        }
+    }
+
+    #[test]
+    fn an_instruction_past_the_compressed_cap_is_dropped_while_it_arrives() {
+        let mut asm = FragmentAssembly::default();
+        // The largest fragment a client receives: a whole RECEIVE_MTU.
+        let len = crate::crypto::RECEIVE_MTU;
+        let fit = MAX_INSTRUCTION_BYTES / len;
+        for num in 0..fit as u16 {
+            assert!(!asm.add(fragment(1, num, false, len)));
+        }
+        assert_eq!(asm.stored, fit * len);
+
+        assert!(!asm.add(fragment(1, fit as u16, false, len)));
+        assert_eq!(asm.stored, 0, "the over-cap instruction is still held");
+        assert!(asm.fragments.is_empty());
+        // The rest of it, final fragment included, is not collected again.
+        assert!(!asm.add(fragment(1, fit as u16 + 1, true, len)));
+        assert!(!asm.add(fragment(1, 0, false, len)));
+        assert_eq!(asm.stored, 0);
+        assert!(asm.take().unwrap().is_none());
+
+        // The next instruction assembles as usual.
+        let mut f = Fragmenter::default();
+        let i = inst(2, &incompressible(3000));
+        let mut complete = false;
+        for frag in f.fragment(&i, 500).unwrap() {
+            complete = asm.add(Fragment { id: 2, ..frag });
+        }
+        assert!(complete);
+        assert_eq!(asm.take().unwrap().unwrap(), i);
+    }
+
+    #[test]
+    fn a_resent_fragment_is_counted_at_its_new_length() {
+        let mut asm = FragmentAssembly::default();
+        asm.add(fragment(1, 0, false, 1000));
+        asm.add(fragment(1, 0, false, 10));
+        assert_eq!(asm.stored, 10);
+        assert_eq!(asm.arrived, 1);
+    }
+
+    #[test]
+    fn fragments_past_the_final_one_are_not_held() {
+        let mut asm = FragmentAssembly::default();
+        asm.add(fragment(1, 0, false, 10));
+        asm.add(fragment(1, 5, false, 1000));
+        asm.add(fragment(1, 1, true, 10));
+        assert_eq!(asm.stored, 20);
+        assert_eq!(asm.arrived, 2);
+        assert!(asm.take().is_err(), "complete, so decoded (and refused)");
     }
 
     #[test]

@@ -29,7 +29,7 @@ impl Zetta {
             let result = cx
                 .background_spawn(async move {
                     let root = root.resolve()?;
-                    start_http_server(&root, port)
+                    start_http_server(&root, port, HttpServerOptions::default())
                 })
                 .await;
             this.update_in(cx, |this, window, cx| match result {

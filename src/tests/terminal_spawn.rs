@@ -414,7 +414,7 @@ fn a_remote_shared_draft_sends_no_command_and_no_local_environment() {
         ("ZETTA_ATTENTION_ID".to_owned(), "3".to_owned()),
     ]);
 
-    let (command, env) = shared_draft_process(true, &shell, &environment);
+    let (command, env) = shared_draft_process(true, &shell, &environment, None);
 
     assert_eq!(
         command, None,
@@ -444,7 +444,7 @@ fn a_local_shared_draft_sends_the_command_it_resolved() {
     };
     let environment = HashMap::from([("PATH".to_owned(), "/usr/bin".to_owned())]);
 
-    let (command, env) = shared_draft_process(false, &shell, &environment);
+    let (command, env) = shared_draft_process(false, &shell, &environment, None);
 
     assert_eq!(
         command,
@@ -454,6 +454,51 @@ fn a_local_shared_draft_sends_the_command_it_resolved() {
         ))
     );
     assert_eq!(env, environment, "same machine, same environment");
+}
+
+/// The daemon starts a shared pane's shell, but this window's terminal is the
+/// one that has to recognise its lifecycle markers. Unless the draft carries
+/// the nonce the window drew, the shell signs nothing, and `zetta pane wait` on
+/// a fresh shared pane fails closed every time — locally, and on a remote host
+/// whose shell loads Zetta's integration from its own startup files.
+#[cfg(feature = "zmux")]
+#[test]
+fn a_shared_draft_gives_its_shell_the_windows_marker_nonce() {
+    const NONCE: &str = "0123456789abcdef0123456789abcdef";
+    let shell = Shell::WithArguments {
+        program: "/bin/bash".to_owned(),
+        args: Vec::new(),
+        title_override: None,
+    };
+    let environment = HashMap::from([
+        ("PATH".to_owned(), "/usr/bin".to_owned()),
+        ("ZETTA_PANE_ROUTING_ID".to_owned(), "7".to_owned()),
+        (
+            terminal::COMMAND_MARKER_NONCE_ENV.to_owned(),
+            "an inherited nonce that is not this pane's".to_owned(),
+        ),
+    ]);
+
+    for remote in [false, true] {
+        let (_, env) = shared_draft_process(remote, &shell, &environment, Some(NONCE));
+        assert_eq!(
+            env.get(terminal::COMMAND_MARKER_NONCE_ENV)
+                .map(String::as_str),
+            Some(NONCE),
+            "remote: {remote}"
+        );
+        assert_eq!(
+            env.get("ZETTA_PANE_ROUTING_ID").map(String::as_str),
+            Some("7")
+        );
+        assert_eq!(env.contains_key("PATH"), !remote, "remote: {remote}");
+
+        let (_, env) = shared_draft_process(remote, &shell, &environment, None);
+        assert!(
+            !env.contains_key(terminal::COMMAND_MARKER_NONCE_ENV),
+            "a pane with no nonce must not inherit the window's (remote: {remote})"
+        );
+    }
 }
 
 /// A window proposes geometry in the session's pane ids, translated from its

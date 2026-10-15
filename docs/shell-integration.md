@@ -300,13 +300,13 @@ When run from MSYS2 or Cygwin on Windows, Zetta resolves its Unix-style `$HOME`
 with `cygpath` before writing `.bashrc` or `.zshrc`, including for installations
 outside their conventional roots. Cygwin profiles also install session-local
 prompt and foreground-command hooks for Bash, Zsh, Fish, and Nushell; these
-hooks report `zetta-cwd:` and `zetta-cmd;<nonce>:` markers without changing the
+hooks report `zetta-cwd;<nonce>:` and `zetta-cmd;<nonce>:` markers without changing the
 user's shell startup files. Native editor dispatch uses `cygpath` for Cygwin paths.
 
 The foreground-command marker is title text, so anything printed into the pane
 — a remote host's output, `cat` of a file — can produce one. Image paste acts
 on it (it opens an SSH side connection with the options the marker names), so
-each WSL, MSYS2 and Cygwin pane gets a random nonce in
+every shell Zetta starts gets a random nonce in
 `__ZETTA_COMMAND_MARKER_NONCE`, and only a marker carrying it is acted on.
 The hooks move the nonce into a shell variable and unset it, so programs the
 pane runs do not inherit it, and it is outside the `ZETTA_` prefix that shared
@@ -318,6 +318,39 @@ authenticated marker is not run as written: the SSH executable is the
 environment's own, and its options are rebuilt from an allowlist that refuses
 `ProxyCommand`, `LocalCommand`, `KnownHostsCommand`, `Include`, `-F`, `-I` and
 `-E`, among others.
+
+The lifecycle markers behind `zetta pane wait` are title text too, so they
+carry the same nonce: `zetta-event;<nonce>:command-finished:<status>`. Only a
+marker with the pane's own nonce can start or finish a command a wait depends
+on. One printed by anything else — `cat` of a file, a remote host, a shell
+nested inside the pane, which does not inherit the nonce — is ignored once the
+pane's shell has reported with it. A pane whose shell never does — one started
+by an older Zetta, a multiplexer pane this window joined or reattached after a
+restart, whose window never knew its nonce, or one whose rc file loads an older
+`zetta` from `PATH` — cannot be a dependency: a wait on it fails with a message saying so, rather than trusting
+the report or waiting forever. Restart that pane's shell from this Zetta to
+use it again. A pane this window adds to a shared session is not one of
+those: the window draws the nonce and sends it with the pane's request to the
+multiplexer, which starts the shell with it, so waits on it work as on a local
+pane — including on a remote host whose shell loads the integration. The
+command a restored pane offers at its prompt likewise comes only from an
+authenticated start.
+
+The working-directory marker carries the nonce as well:
+`zetta-cwd;<nonce>:<path>`. Only that form moves the directory Zetta acts on —
+where a new pane, split, tab, command or stacked pane starts, what **Start HTTP
+Server** and **Start TFTP Server** serve, and which registered project a pane
+enters (entering one applies that project's initial split). Once the pane's
+shell has reported a directory with its nonce, nothing printed afterwards
+changes it. The untokened `zetta-cwd:` form, and a report with any other
+nonce, still update what the window shows: a remote host's shell reports its
+directory that way, and such a report can take a pane out of a project, but
+never into one. A pane whose shell has not reported with its nonce falls back
+to the foreground process's directory, as the operating system reports it;
+without that, a file server serves Zetta's own directory. The tab title stays
+unauthenticated. The nonce protects against bytes printed into the pane, not
+against a program the pane runs — anything that can read the shell's
+environment can learn it.
 
 The startup files and commands are:
 

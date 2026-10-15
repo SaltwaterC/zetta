@@ -142,6 +142,23 @@ fn segment_path(directory: &Path) -> PathBuf {
         .expect("a finalized scrollback segment")
 }
 
+/// What follows the line naming the file's slot, which every file the store
+/// writes starts its plaintext with (see the persistence module's `binding`).
+/// Checked to be there, because the reference implementation hands it back as
+/// part of the plaintext.
+fn after_binding(plaintext: Vec<u8>) -> Vec<u8> {
+    assert!(
+        plaintext.starts_with(b"\0zmux-binding/1 "),
+        "a store file without its binding: {:?}",
+        String::from_utf8_lossy(&plaintext[..plaintext.len().min(64)])
+    );
+    let end = plaintext
+        .iter()
+        .position(|byte| *byte == b'\n')
+        .expect("a complete binding line");
+    plaintext[end + 1..].to_vec()
+}
+
 fn age_decrypt(age: &Path, identity: &Path, file: &Path) -> Vec<u8> {
     let decrypted = Command::new(age)
         .arg("--decrypt")
@@ -186,14 +203,17 @@ fn the_reference_implementation_reads_a_classical_store() {
 
     let segment = segment_path(directory.path());
     assert_stanza_tag(&segment, "X25519");
-    assert_eq!(age_decrypt(&age, &identity, &segment), SCROLLBACK);
+    assert_eq!(
+        after_binding(age_decrypt(&age, &identity, &segment)),
+        SCROLLBACK
+    );
     // The metadata record too: the same envelope carries the title, layout and
     // working directory that a locked store must not disclose.
-    let metadata = age_decrypt(
+    let metadata = after_binding(age_decrypt(
         &age,
         &identity,
         &directory.path().join("persistence/session-3.age"),
-    );
+    ));
     let metadata: serde_json::Value = serde_json::from_slice(&metadata).unwrap();
     assert_eq!(metadata["summary"]["title"], "interop");
 }
@@ -218,7 +238,10 @@ fn the_reference_implementation_reads_a_post_quantum_store() {
 
     let segment = segment_path(directory.path());
     assert_stanza_tag(&segment, "mlkem768x25519");
-    assert_eq!(age_decrypt(&age, &identity, &segment), SCROLLBACK);
+    assert_eq!(
+        after_binding(age_decrypt(&age, &identity, &segment)),
+        SCROLLBACK
+    );
 }
 
 /// The other direction: a file the reference implementation encrypted, read
@@ -253,7 +276,7 @@ fn a_reference_encrypted_file_is_readable_with_our_identities() {
     let identities = IdentitySet::from_paths(&[identity]).expect("loading the generated identity");
     let ciphertext = fs::read(directory.path().join("cipher.age")).unwrap();
     assert_eq!(
-        identities
+        *identities
             .decrypt(&ciphertext)
             .expect("decrypting a file the reference implementation wrote"),
         SCROLLBACK

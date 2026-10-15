@@ -9,6 +9,22 @@
 //! markers are output too, and must not authorize local execution, session
 //! control, or access to host secrets merely because their syntax is valid.
 //!
+//! Where a marker does drive an action, it has to carry the nonce this
+//! terminal gave its own shell ([`COMMAND_MARKER_NONCE_ENV`]): the foreground
+//! command image paste runs `ssh` from (`zetta-cmd;`), the lifecycle events —
+//! reported with `authenticated` — that satisfy `zetta pane wait` or become a
+//! restored prompt's text (`zetta-event;`), and the directory a new pane,
+//! split or file server starts in and a registered project is entered from
+//! (`zetta-cwd;`, through [`Terminal::authenticated_working_directory`]). A
+//! terminal that did not start its shell (an attached multiplexer pane) holds
+//! no nonce and authenticates nothing. The rest stay observations any output
+//! can make: the title and breadcrumbs, unauthenticated lifecycle events
+//! (activity display), and every directory report through
+//! [`Terminal::reported_working_directory`] — what the window shows, and
+//! enough to take a pane *out* of a project, as a remote host's reports must.
+//! The nonce defends against printed bytes, not against a program in the
+//! pane, which can read its shell's environment.
+//!
 //! Clipboard reads require the viewer's explicit permission. Native OSC 52
 //! reads are disabled by the PTY's copy-only policy; the private zclip channel
 //! has a separate per-tab opt-in. Its request IDs correlate messages, they do
@@ -839,17 +855,26 @@ pub enum Event {
     PasteError(String),
     /// The shell integration has installed the lifecycle hooks used by
     /// `zetta pane wait`.
-    TrackingReady,
+    ///
+    /// Every lifecycle event is parsed from a title that any output can print.
+    /// `authenticated` says it carried the nonce this terminal gave its own
+    /// shell (see [`COMMAND_MARKER_NONCE_ENV`]); only such an event may drive
+    /// an action. An unauthenticated one is an observation, good for display.
+    TrackingReady {
+        authenticated: bool,
+    },
     /// A shell command has started. The command text is informational; the
     /// registry uses the event to distinguish an active command from an idle
     /// shell while it waits for the corresponding result.
     CommandStarted {
         command: String,
+        authenticated: bool,
     },
     /// A shell command has finished. `None` means the shell could not provide a
     /// trustworthy exit status and therefore cannot satisfy a dependency.
     CommandFinished {
         exit_code: Option<i32>,
+        authenticated: bool,
     },
     /// Reports completion of a terminal backed by a task. Unlike
     /// [`Event::CloseTerminal`], this event is emitted even when the task is
@@ -1423,19 +1448,28 @@ impl TerminalBackendEvent {
     }
 }
 
-const REPORTED_WORKING_DIRECTORY_TITLE_PREFIX: &str = "zetta-cwd:";
+/// Both forms of the working-directory marker: `zetta-cwd:<path>`, and
+/// `zetta-cwd;<nonce>:<path>`. One prefix test separates them from every other
+/// title; see [`reported_working_directory_from_title`].
+const REPORTED_WORKING_DIRECTORY_TITLE_PREFIX: &str = "zetta-cwd";
 const REPORTED_FOREGROUND_COMMAND_TITLE_PREFIX: &str = "zetta-cmd:";
 const AUTHENTICATED_FOREGROUND_COMMAND_TITLE_PREFIX: &str = "zetta-cmd;";
 
-/// The environment variable a WSL/MSYS2/Cygwin pane's shell integration reads
-/// its command-marker nonce from (see [`authenticated_foreground_command_from_title`]).
+/// The environment variable a pane's shell integration reads its marker nonce
+/// from. Markers that carry it — `zetta-cmd;<nonce>:` (see
+/// [`authenticated_foreground_command_from_title`]) and `zetta-event;<nonce>:`
+/// (see [`lifecycle_event_from_title`]) — are the only ones an action may
+/// rest on; every other marker is output anybody can print.
 ///
 /// Deliberately outside the `ZETTA_` namespace: shared-session drafts carry
 /// `ZETTA_*` to the machine that runs the pane, and a `SendEnv ZETTA_*` would
 /// forward it over SSH. The integrations copy it into a shell variable and
-/// unset it, so the programs a pane runs do not inherit it either.
+/// unset it, so the programs a pane runs do not inherit it either — and so a
+/// recorder such as `script` or `tmux`, whose own shell has no nonce, cannot
+/// capture a marker that would authenticate when its log is replayed.
 pub const COMMAND_MARKER_NONCE_ENV: &str = "__ZETTA_COMMAND_MARKER_NONCE";
 const REPORTED_LIFECYCLE_EVENT_PREFIX: &str = "zetta-event:";
+const AUTHENTICATED_LIFECYCLE_EVENT_PREFIX: &str = "zetta-event;";
 
 #[cfg(any(windows, test))]
 const POWERSHELL_CWD_TRACKER: &str = include_str!("terminal/powershell_cwd_tracker.ps1");
@@ -1491,10 +1525,19 @@ fn powershell_has_command_arguments(arguments: &[String]) -> bool {
     })
 }
 
+/// `cmd.exe`'s prompt, prefixed with a working-directory marker.
+///
+/// `cmd` has no hooks to hold the nonce in, so the nonce is written into the
+/// prompt itself. That exposes it no further than `cmd` already does: it
+/// cannot unset [`COMMAND_MARKER_NONCE_ENV`], so its children inherit both.
 #[cfg(windows)]
-fn cmd_prompt_with_cwd_tracking(existing: Option<&str>) -> String {
+fn cmd_prompt_with_cwd_tracking(existing: Option<&str>, nonce: Option<&str>) -> String {
+    let marker = match nonce.filter(|nonce| !nonce.is_empty()) {
+        Some(nonce) => format!("$E]2;zetta-cwd;{nonce}:$P$E\\"),
+        None => "$E]2;zetta-cwd:$P$E\\".to_owned(),
+    };
     format!(
-        "$E]2;zetta-cwd:$P$E\\{}",
+        "{marker}{}",
         existing
             .filter(|prompt| !prompt.is_empty())
             .unwrap_or("$P$G")
@@ -1515,7 +1558,12 @@ fn install_windows_cwd_tracking(
             .or_else(|| std::env::var("PROMPT").ok());
         environment.insert(
             "PROMPT".to_owned(),
-            cmd_prompt_with_cwd_tracking(inherited_prompt.as_deref()),
+            cmd_prompt_with_cwd_tracking(
+                inherited_prompt.as_deref(),
+                environment
+                    .get(COMMAND_MARKER_NONCE_ENV)
+                    .map(String::as_str),
+            ),
         );
         return;
     }
@@ -1543,14 +1591,52 @@ fn install_windows_cwd_tracking(
     arguments.extend(["-Command".to_owned(), POWERSHELL_CWD_TRACKER.to_owned()]);
 }
 
-fn reported_working_directory_from_title(title: &str) -> Option<String> {
-    let directory = title.strip_prefix(REPORTED_WORKING_DIRECTORY_TITLE_PREFIX)?;
+/// A working-directory marker, and whether it proved it came from this
+/// terminal's own shell.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct WorkingDirectoryReport {
+    directory: String,
+    /// Carried the nonce this terminal gave its shell. Only such a report may
+    /// decide where something runs; see [`Terminal::authenticated_working_directory`].
+    authenticated: bool,
+}
+
+/// Parses `zetta-cwd:<path>`, or `zetta-cwd;<nonce>:<path>` from an
+/// integration that holds [`COMMAND_MARKER_NONCE_ENV`].
+///
+/// Both forms are returned, because what the window displays wants every
+/// report a shell makes — a remote host's included. The report is
+/// `authenticated` only when it carried `expected`, the nonce this terminal
+/// gave its own shell, compared in constant time; a terminal that gave none
+/// authenticates nothing, and a wrong, truncated or empty nonce reads exactly
+/// like the untokened form.
+///
+/// Called once per title: one prefix test, then a fixed-length comparison.
+/// The nonce is hex, so the first `:` after it ends it even when the path is a
+/// Windows one with a drive letter.
+fn reported_working_directory_from_title(
+    title: &str,
+    expected: Option<&str>,
+) -> Option<WorkingDirectoryReport> {
+    let marked = title.strip_prefix(REPORTED_WORKING_DIRECTORY_TITLE_PREFIX)?;
+    let (authenticated, directory) = if let Some(directory) = marked.strip_prefix(':') {
+        (false, directory)
+    } else {
+        let (nonce, directory) = marked.strip_prefix(';')?.split_once(':')?;
+        let authenticated = expected
+            .filter(|expected| !expected.is_empty())
+            .is_some_and(|expected| nonces_match(nonce, expected));
+        (authenticated, directory)
+    };
     if directory.chars().any(char::is_control) {
         return None;
     }
     let is_unix_absolute = directory.starts_with('/');
     let is_native_absolute = Path::new(directory).is_absolute();
-    (is_unix_absolute || is_native_absolute).then(|| directory.to_owned())
+    (is_unix_absolute || is_native_absolute).then(|| WorkingDirectoryReport {
+        directory: directory.to_owned(),
+        authenticated,
+    })
 }
 
 /// Parses the foreground-command marker that WSL, MSYS2, and Cygwin sessions
@@ -1601,7 +1687,6 @@ fn authenticated_foreground_command_from_title(
 }
 
 /// Compares two nonces without stopping at the first difference.
-#[cfg(any(windows, test))]
 fn nonces_match(reported: &str, expected: &str) -> bool {
     reported.len() == expected.len()
         && reported
@@ -1611,35 +1696,49 @@ fn nonces_match(reported: &str, expected: &str) -> bool {
             == 0
 }
 
-/// Gives a WSL/MSYS2/Cygwin shell the nonce its command markers have to carry,
-/// and returns it. Any nonce already in `env` — a duplicated pane's template,
-/// or one inherited from a Zetta started inside such a pane — is replaced, so
-/// no two terminals share one.
+/// Gives a shell this terminal starts the nonce its markers have to carry, and
+/// returns it. Any nonce already in `env` — a duplicated pane's template, or
+/// one inherited from a Zetta started inside a pane — is replaced, so no two
+/// terminals share one.
 ///
-/// `None`, with the variable removed, for every other shell, and when no
-/// random nonce could be drawn: that terminal then trusts no marker.
+/// Every shell gets one, whether or not it runs an integration that will read
+/// it: which integration a shell loads is up to its own startup files. A shell
+/// without one leaves the variable in its programs' environment, where it
+/// authenticates nothing those programs could not already claim — they can
+/// read the shell's environment, and print into the pane, regardless.
+///
+/// `None`, with the variable removed, when no random nonce could be drawn:
+/// that terminal then trusts no marker.
 ///
 /// A WSL distribution sees only the variables `WSLENV` names, so the nonce is
 /// added there, one way (`/u`), for the WSL tracker to read. That is the local
 /// VM, not a remote host: nothing forwards it further.
-#[cfg(windows)]
 fn install_command_marker_nonce(
     shell: &Shell,
     env: &mut HashMap<String, String>,
 ) -> Option<String> {
     env.remove(COMMAND_MARKER_NONCE_ENV);
-    let host = posix_host(shell)?;
-    let mut bytes = [0u8; 16];
-    if let Err(error) = getrandom::fill(&mut bytes) {
-        log::warn!("could not draw a command-marker nonce: {error}");
-        return None;
-    }
-    let nonce = bytes
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
-    env.insert(COMMAND_MARKER_NONCE_ENV.to_owned(), nonce.clone());
-    if matches!(host, PosixHost::Wsl) {
+    let nonce = draw_command_marker_nonce()?;
+    give_command_marker_nonce(shell, env, &nonce);
+    Some(nonce)
+}
+
+/// Puts `nonce` in the environment `shell` will be started with, including the
+/// `WSLENV` entry a WSL distribution needs to see it; see
+/// [`install_command_marker_nonce`].
+///
+/// Public for a terminal whose shell another process starts — a shared pane's,
+/// which the multiplexer daemon spawns from the environment this fills in. The
+/// terminal reading that pane is then told the same nonce with
+/// [`TerminalBuilder::with_command_marker_nonce`].
+pub fn give_command_marker_nonce<S: std::hash::BuildHasher>(
+    shell: &Shell,
+    env: &mut std::collections::HashMap<String, String, S>,
+    nonce: &str,
+) {
+    env.insert(COMMAND_MARKER_NONCE_ENV.to_owned(), nonce.to_owned());
+    #[cfg(windows)]
+    if matches!(posix_host(shell), Some(PosixHost::Wsl)) {
         let mut wslenv = env
             .get("WSLENV")
             .cloned()
@@ -1657,31 +1756,77 @@ fn install_command_marker_nonce(
         }
         env.insert("WSLENV".to_owned(), wslenv);
     }
-    Some(nonce)
+    #[cfg(not(windows))]
+    let _ = shell;
 }
 
-fn lifecycle_event_from_title(title: &str) -> Option<Event> {
-    let event = title.strip_prefix(REPORTED_LIFECYCLE_EVENT_PREFIX)?;
+/// A fresh random nonce for [`COMMAND_MARKER_NONCE_ENV`]: 128 bits, as hex.
+///
+/// `None` when the system could not supply randomness; the caller then gives
+/// its shell no nonce, and its terminal trusts no marker.
+pub fn draw_command_marker_nonce() -> Option<String> {
+    let mut bytes = [0u8; 16];
+    if let Err(error) = getrandom::fill(&mut bytes) {
+        log::warn!("could not draw a command-marker nonce: {error}");
+        return None;
+    }
+    Some(
+        bytes
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>(),
+    )
+}
+
+/// Parses a shell-integration lifecycle marker: `zetta-event:<event>`, or
+/// `zetta-event;<nonce>:<event>` from an integration that was given
+/// [`COMMAND_MARKER_NONCE_ENV`].
+///
+/// Both forms are returned, because display and other observations want every
+/// report a shell makes. The event is `authenticated` only when it carried
+/// `expected`, the nonce this terminal gave its own shell; a terminal that gave
+/// none (an attached multiplexer pane) authenticates nothing. That is what
+/// keeps a `command-finished:0` printed by `cat`, a remote host, or a nested
+/// shell from satisfying `zetta pane wait`.
+///
+/// Called once per title, never per byte: one prefix test, and a fixed
+/// 32-byte comparison for the tokened form.
+fn lifecycle_event_from_title(title: &str, expected: Option<&str>) -> Option<Event> {
+    let (authenticated, event) =
+        if let Some(marked) = title.strip_prefix(AUTHENTICATED_LIFECYCLE_EVENT_PREFIX) {
+            let (nonce, event) = marked.split_once(':')?;
+            let authenticated = expected
+                .filter(|expected| !expected.is_empty())
+                .is_some_and(|expected| nonces_match(nonce, expected));
+            (authenticated, event)
+        } else {
+            (false, title.strip_prefix(REPORTED_LIFECYCLE_EVENT_PREFIX)?)
+        };
     match event {
-        "tracking-ready" => Some(Event::TrackingReady),
+        "tracking-ready" => Some(Event::TrackingReady { authenticated }),
         command if command.starts_with("command-started:") => {
             let command = command.strip_prefix("command-started:")?;
             (!command.is_empty() && !command.chars().any(char::is_control)).then(|| {
                 Event::CommandStarted {
                     command: command.to_owned(),
+                    authenticated,
                 }
             })
         }
         status if status.starts_with("command-finished:") => {
             let status = status.strip_prefix("command-finished:")?;
             if status == "unknown" {
-                return Some(Event::CommandFinished { exit_code: None });
+                return Some(Event::CommandFinished {
+                    exit_code: None,
+                    authenticated,
+                });
             }
             status
                 .parse::<i32>()
                 .ok()
                 .map(|exit_code| Event::CommandFinished {
                     exit_code: Some(exit_code),
+                    authenticated,
                 })
         }
         _ => None,
@@ -2420,7 +2565,6 @@ impl TerminalBuilder {
             output_processor: Processor::<StdSyncHandler>::new(),
             output_clipboard_scanner: zclip::protocol::Scanner::default(),
             remote_clipboard: clipboard_channel::RemoteClipboard::default(),
-            remote_clipboard_paste_allowed: false,
             title_override: None,
             events: VecDeque::with_capacity(10),
             last_content: Content {
@@ -2455,7 +2599,6 @@ impl TerminalBuilder {
             shell_program: None,
             #[cfg(windows)]
             wsl_startup_timing: None,
-            #[cfg(windows)]
             command_marker_nonce: None,
             #[cfg(windows)]
             authenticated_foreground_command: None,
@@ -2508,6 +2651,7 @@ impl TerminalBuilder {
             pending_cwd_boundary: None,
             reported_theme: None,
             reported_working_directory: None,
+            authenticated_working_directory: None,
             restored_working_directory: None,
             reported_foreground_command: None,
             reported_shell_command: None,
@@ -2757,6 +2901,20 @@ impl TerminalBuilder {
         self
     }
 
+    /// The nonce this terminal's shell was given in [`COMMAND_MARKER_NONCE_ENV`]
+    /// by whoever started it, for a terminal that does not start its own.
+    ///
+    /// A shared pane's shell is started by the multiplexer daemon, so the
+    /// window draws the nonce, sends it in the pane's draft environment, and
+    /// tells the terminal reading that pane here. A terminal built without
+    /// one — a pane this window joined or reattached, whose shell's nonce it
+    /// never knew — authenticates no lifecycle marker. An empty nonce is the
+    /// same as none.
+    pub fn with_command_marker_nonce(mut self, nonce: Option<String>) -> Self {
+        self.terminal.command_marker_nonce = nonce.filter(|nonce| !nonce.is_empty());
+        self
+    }
+
     /// Installs the fixed-pane controller for a byte-stream-backed shared pane.
     pub fn with_pty_control(mut self, control: Arc<dyn PtyControl>) -> Self {
         self.terminal.pty_control = Some(control);
@@ -2944,7 +3102,6 @@ impl TerminalBuilder {
         let wsl_startup_started_at = Instant::now();
         #[cfg(windows)]
         let is_wsl_startup = matches!(posix_host(&shell), Some(PosixHost::Wsl));
-        #[cfg(windows)]
         let command_marker_nonce = install_command_marker_nonce(&shell, &mut env);
         #[cfg(windows)]
         let console_palette_enabled = initial_console_palette.is_some() && !is_wsl_startup;
@@ -3309,7 +3466,6 @@ impl TerminalBuilder {
                 output_processor,
                 output_clipboard_scanner: zclip::protocol::Scanner::default(),
                 remote_clipboard: clipboard_channel::RemoteClipboard::default(),
-                remote_clipboard_paste_allowed: false,
                 title_override: terminal_title_override,
                 events: VecDeque::with_capacity(10), //Should never get this high.
                 last_content: Default::default(),
@@ -3347,7 +3503,6 @@ impl TerminalBuilder {
                 shell_program,
                 #[cfg(windows)]
                 wsl_startup_timing,
-                #[cfg(windows)]
                 command_marker_nonce,
                 #[cfg(windows)]
                 authenticated_foreground_command: None,
@@ -3399,6 +3554,7 @@ impl TerminalBuilder {
                 pending_cwd_boundary: None,
                 reported_theme: None,
                 reported_working_directory: None,
+                authenticated_working_directory: None,
                 restored_working_directory: None,
                 reported_foreground_command: None,
                 reported_shell_command: None,
@@ -3634,7 +3790,6 @@ pub struct Terminal {
     output_processor: Processor<StdSyncHandler>,
     output_clipboard_scanner: zclip::protocol::Scanner,
     remote_clipboard: clipboard_channel::RemoteClipboard,
-    remote_clipboard_paste_allowed: bool,
     events: VecDeque<InternalEvent>,
     /// This is only used for mouse mode cell change detection
     last_mouse: Option<(Point, SelectionSide)>,
@@ -3676,11 +3831,10 @@ pub struct Terminal {
     shell_program: Option<String>,
     #[cfg(windows)]
     wsl_startup_timing: Option<WslStartupTiming>,
-    /// The nonce this terminal gave its WSL/MSYS2/Cygwin shell in
-    /// [`COMMAND_MARKER_NONCE_ENV`]. `None` for every terminal that did not
-    /// start its own shell — an attached multiplexer pane included — so none
-    /// of them can accept a command marker as authenticated.
-    #[cfg(windows)]
+    /// The nonce this terminal gave its shell in [`COMMAND_MARKER_NONCE_ENV`].
+    /// `None` for every terminal that did not start its own shell — an
+    /// attached multiplexer pane, shared or reattached, included — so none of
+    /// them can accept a command or lifecycle marker as authenticated.
     command_marker_nonce: Option<String>,
     /// The last foreground command reported with [`Self::command_marker_nonce`].
     /// Unlike `reported_foreground_command`, which any printed title can set,
@@ -3783,6 +3937,8 @@ pub struct Terminal {
     pending_cwd_boundary: Option<i32>,
     reported_theme: Option<Arc<Theme>>,
     reported_working_directory: Option<String>,
+    /// See [`Terminal::authenticated_working_directory`].
+    authenticated_working_directory: Option<String>,
     restored_working_directory: Option<PathBuf>,
     reported_foreground_command: Option<String>,
     /// The first command reported by the WSL/MSYS2 shell integration is its
@@ -3887,8 +4043,17 @@ const FIND_HYPERLINK_THROTTLE_PX: Pixels = px(5.0);
 const SELECTION_DRAG_THRESHOLD: f64 = 2.0;
 
 impl Terminal {
+    /// Allows or disallows the pane reading the host clipboard. Disallowing it
+    /// also ends, and erases, any paste already part way through.
     pub fn set_remote_clipboard_paste_allowed(&mut self, allowed: bool) {
-        self.remote_clipboard_paste_allowed = allowed;
+        self.remote_clipboard.set_paste_allowed(allowed);
+    }
+
+    /// Allows or disallows the pane writing the host clipboard, through zcopy
+    /// or OSC 52. Disallowing it also ends any copy already part way through,
+    /// so none lands.
+    pub fn set_remote_clipboard_copy_allowed(&mut self, allowed: bool) {
+        self.remote_clipboard.set_copy_allowed(allowed);
     }
 
     /// Serves a clipboard request printed by the pane. The answer is written
@@ -3901,10 +4066,7 @@ impl Terminal {
         if self.pty_control.is_none() {
             return;
         }
-        if let Some(response) =
-            self.remote_clipboard
-                .handle(frame, self.remote_clipboard_paste_allowed, cx)
-        {
+        if let Some(response) = self.remote_clipboard.handle(frame, cx) {
             self.write_to_pty(response.encode());
         }
     }
@@ -3938,8 +4100,48 @@ impl Terminal {
         }
     }
 
+    /// The directory the latest `zetta-cwd` marker named, whoever printed it:
+    /// this pane's shell, a shell on a host it is logged in to, or `cat` of a
+    /// file that contains one. Right for showing where a pane appears to be;
+    /// never for deciding where something runs — that is
+    /// [`Self::authenticated_working_directory`].
     pub fn reported_working_directory(&self) -> Option<&str> {
         self.reported_working_directory.as_deref()
+    }
+
+    /// The directory this terminal's own shell last reported with the nonce it
+    /// was given: the one a split inherits, a file server serves, and a
+    /// project is entered from.
+    ///
+    /// Only an authenticated report moves it, so once the shell has reported
+    /// one, nothing printed afterwards — a nested `ssh`, a `cat` — can, though
+    /// [`Self::reported_working_directory`] follows them. `None` until the
+    /// shell has reported with its nonce, and always for a terminal that holds
+    /// none (one that joined or reattached a multiplexer pane).
+    ///
+    /// It does not fall back to the foreground process's directory, though
+    /// that comes from the operating system and is trusted too: callers already
+    /// weigh the two against each other — a PowerShell's process directory
+    /// stays where it started after `Set-Location`, and a child's is not the
+    /// shell's — and a fallback inside would hide which one answered. See
+    /// [`Self::trusted_working_directory`] for the combination.
+    pub fn authenticated_working_directory(&self) -> Option<&str> {
+        self.authenticated_working_directory.as_deref()
+    }
+
+    /// Records a `zetta-cwd` marker, returning whether what either accessor
+    /// answers changed.
+    fn record_working_directory_report(&mut self, report: WorkingDirectoryReport) -> bool {
+        let mut changed =
+            self.reported_working_directory.as_deref() != Some(report.directory.as_str());
+        if report.authenticated
+            && self.authenticated_working_directory.as_deref() != Some(report.directory.as_str())
+        {
+            self.authenticated_working_directory = Some(report.directory.clone());
+            changed = true;
+        }
+        self.reported_working_directory = Some(report.directory);
+        changed
     }
 
     fn process_pty_event(&mut self, event: PtyEvent, cx: &mut Context<Self>) {
@@ -3969,15 +4171,17 @@ impl Terminal {
                     }
                     return;
                 }
-                if let Some(event) = lifecycle_event_from_title(&title) {
+                if let Some(event) =
+                    lifecycle_event_from_title(&title, self.command_marker_nonce.as_deref())
+                {
                     cx.emit(event);
                     return;
                 }
-                if let Some(directory) = reported_working_directory_from_title(&title) {
-                    let changed =
-                        self.reported_working_directory.as_deref() != Some(directory.as_str());
-                    self.reported_working_directory = Some(directory);
-                    if changed {
+                if let Some(report) = reported_working_directory_from_title(
+                    &title,
+                    self.command_marker_nonce.as_deref(),
+                ) {
+                    if self.record_working_directory_report(report) {
                         cx.emit(Event::TitleChanged);
                     }
                     return;
@@ -4032,8 +4236,14 @@ impl Terminal {
                 self.breadcrumb_text = String::new();
                 cx.emit(Event::BreadcrumbsChanged);
             }
+            // OSC 52 is the other way pane output writes the clipboard, so the
+            // tab's copy permission governs it as well as zcopy.
             TerminalBackendEvent::ClipboardStore(data) => {
-                selection_clipboard::write(ClipboardItem::new_string(data), cx)
+                if self.remote_clipboard.copy_allowed() {
+                    selection_clipboard::write(ClipboardItem::new_string(data), cx)
+                } else {
+                    log::debug!("refusing an OSC 52 clipboard write: copy is disabled");
+                }
             }
             TerminalBackendEvent::ClipboardLoad(format) => {
                 self.read_selection_clipboard(format, cx)
@@ -6183,7 +6393,18 @@ impl Terminal {
             // the working directory on the client and persist that.
             None
         } else {
-            self.client_side_working_directory()
+            self.client_side_working_directory(self.reported_working_directory.as_deref())
+        }
+    }
+
+    /// [`Self::working_directory`] from what can be trusted to decide where
+    /// something runs: the shell's [authenticated](Self::authenticated_working_directory)
+    /// report, then the foreground process's directory and a restored one.
+    pub fn trusted_working_directory(&self) -> Option<PathBuf> {
+        if self.is_remote_terminal {
+            None
+        } else {
+            self.client_side_working_directory(self.authenticated_working_directory.as_deref())
         }
     }
 
@@ -6314,8 +6535,8 @@ impl Terminal {
     ///
     /// This does *not* return the working directory of the shell that runs on the
     /// remote host, in case Zed is connected to a remote host.
-    fn client_side_working_directory(&self) -> Option<PathBuf> {
-        if let Some(directory) = self.reported_working_directory.as_deref() {
+    fn client_side_working_directory(&self, reported: Option<&str>) -> Option<PathBuf> {
+        if let Some(directory) = reported {
             #[cfg(windows)]
             if matches!(posix_host(&self.template.shell), Some(PosixHost::Cygwin))
                 && let Some(root) = cygwin_root_from_program(&self.template.shell.program())
@@ -8088,33 +8309,108 @@ mod tests {
 
     #[test]
     fn reported_working_directory_titles_require_safe_absolute_paths() {
+        let unauthenticated = |directory: &str| {
+            Some(WorkingDirectoryReport {
+                directory: directory.to_owned(),
+                authenticated: false,
+            })
+        };
         assert_eq!(
-            reported_working_directory_from_title("zetta-cwd:/home/user/project"),
-            Some("/home/user/project".to_owned())
+            reported_working_directory_from_title("zetta-cwd:/home/user/project", None),
+            unauthenticated("/home/user/project")
         );
         assert_eq!(
-            reported_working_directory_from_title("ordinary title"),
+            reported_working_directory_from_title("ordinary title", None),
             None
         );
         assert_eq!(
-            reported_working_directory_from_title("zetta-cwd:relative"),
+            reported_working_directory_from_title("zetta-cwd:relative", None),
             None
         );
         assert_eq!(
-            reported_working_directory_from_title("zetta-cwd:/home/user\nproject"),
+            reported_working_directory_from_title("zetta-cwd:/home/user\nproject", None),
+            None
+        );
+        assert_eq!(
+            reported_working_directory_from_title("zetta-cwdx:/home/user", None),
             None
         );
         #[cfg(windows)]
         {
             assert_eq!(
-                reported_working_directory_from_title(r"zetta-cwd:C:\source\zetta"),
-                Some(r"C:\source\zetta".to_owned())
+                reported_working_directory_from_title(r"zetta-cwd:C:\source\zetta", None),
+                unauthenticated(r"C:\source\zetta")
             );
             assert_eq!(
-                reported_working_directory_from_title(r"zetta-cwd:\\server\share\zetta"),
-                Some(r"\\server\share\zetta".to_owned())
+                reported_working_directory_from_title(r"zetta-cwd:\\server\share\zetta", None),
+                unauthenticated(r"\\server\share\zetta")
             );
         }
+    }
+
+    /// A directory report decides where splits, file servers and projects
+    /// start only when it carries the nonce this terminal gave its own shell.
+    /// Every other spelling — no nonce, someone else's, a truncated or
+    /// lengthened one, an empty one — is the same as the untokened form.
+    #[test]
+    fn working_directory_markers_authenticate_only_with_this_terminals_nonce() {
+        const NONCE: &str = "00112233445566778899aabbccddeeff";
+        let report = |directory: &str, authenticated| {
+            Some(WorkingDirectoryReport {
+                directory: directory.to_owned(),
+                authenticated,
+            })
+        };
+
+        assert_eq!(
+            reported_working_directory_from_title(
+                &format!("zetta-cwd;{NONCE}:/srv/app"),
+                Some(NONCE)
+            ),
+            report("/srv/app", true)
+        );
+        for forged in [
+            "zetta-cwd:/srv/app".to_owned(),
+            "zetta-cwd;ffeeddccbbaa99887766554433221100:/srv/app".to_owned(),
+            "zetta-cwd;00112233445566778899aabbccddeef:/srv/app".to_owned(),
+            format!("zetta-cwd;{NONCE}0:/srv/app"),
+            "zetta-cwd;:/srv/app".to_owned(),
+        ] {
+            assert_eq!(
+                reported_working_directory_from_title(&forged, Some(NONCE)),
+                report("/srv/app", false),
+                "{forged:?}"
+            );
+        }
+        // A terminal that gave its shell no nonce authenticates nothing.
+        assert_eq!(
+            reported_working_directory_from_title(&format!("zetta-cwd;{NONCE}:/srv/app"), None),
+            report("/srv/app", false)
+        );
+        assert_eq!(
+            reported_working_directory_from_title("zetta-cwd;:/srv/app", Some("")),
+            report("/srv/app", false)
+        );
+        // The path is validated whichever form carried it.
+        assert_eq!(
+            reported_working_directory_from_title(
+                &format!("zetta-cwd;{NONCE}:relative"),
+                Some(NONCE)
+            ),
+            None
+        );
+        assert_eq!(
+            reported_working_directory_from_title("zetta-cwd;no-separator", Some(NONCE)),
+            None
+        );
+        // The nonce is hex, so a drive letter's colon stays in the path.
+        assert_eq!(
+            reported_working_directory_from_title(
+                &format!("zetta-cwd;{NONCE}:/c:/work"),
+                Some(NONCE)
+            ),
+            report("/c:/work", true)
+        );
     }
 
     #[gpui::test]
@@ -8290,6 +8586,113 @@ mod tests {
         assert_eq!(events_rx.try_recv().unwrap(), Event::TitleChanged);
     }
 
+    /// Once the shell has reported its directory with its nonce, nothing
+    /// printed afterwards — `cat` of a file, a nested `ssh` — moves what the
+    /// window acts on, though what it displays follows them.
+    #[gpui::test]
+    fn an_authenticated_working_directory_ignores_later_printed_reports(cx: &mut TestAppContext) {
+        const NONCE: &str = "0123456789abcdef0123456789abcdef";
+        let builder = cx.update(|cx| {
+            TerminalBuilder::new_display_only(
+                SettingsCursorShape::Block,
+                AlternateScroll::On,
+                None,
+                0,
+                cx.background_executor(),
+                PathStyle::local(),
+            )
+            .with_command_marker_nonce(Some(NONCE.to_owned()))
+        });
+        let terminal = cx.new(|cx| builder.subscribe(cx));
+        let (events_tx, events_rx) = async_channel::unbounded();
+        cx.update(|cx| {
+            cx.subscribe(&terminal, move |_, event: &Event, _| {
+                events_tx.send_blocking(event.clone()).unwrap();
+            })
+        })
+        .detach();
+        let print_title = |cx: &mut TestAppContext, title: &str| {
+            terminal.update(cx, |terminal, cx| {
+                terminal.process_event(TerminalBackendEvent::Title(title.to_owned()), cx);
+            });
+            let changed = events_rx.try_recv().ok();
+            terminal.read_with(cx, |terminal, _| {
+                (
+                    changed,
+                    terminal.reported_working_directory().map(str::to_owned),
+                    terminal
+                        .authenticated_working_directory()
+                        .map(str::to_owned),
+                )
+            })
+        };
+        let some = |directory: &str| Some(directory.to_owned());
+
+        // Before the shell has reported with its nonce, a printed report is
+        // displayed and trusted for nothing.
+        assert_eq!(
+            print_title(cx, "zetta-cwd:/forged"),
+            (Some(Event::TitleChanged), some("/forged"), None)
+        );
+        assert_eq!(
+            print_title(cx, &format!("zetta-cwd;{NONCE}:/home/me")),
+            (
+                Some(Event::TitleChanged),
+                some("/home/me"),
+                some("/home/me")
+            )
+        );
+        for (forged, directory) in [
+            ("zetta-cwd:/srv/remote", "/srv/remote"),
+            (
+                "zetta-cwd;ffffffffffffffffffffffffffffffff:/srv/other",
+                "/srv/other",
+            ),
+        ] {
+            assert_eq!(
+                print_title(cx, forged),
+                (Some(Event::TitleChanged), some(directory), some("/home/me")),
+                "{forged:?}"
+            );
+            // A POSIX path is not absolute to Windows' `Path`, so there the
+            // path-valued accessors answer from elsewhere.
+            if cfg!(not(windows)) {
+                assert_eq!(
+                    terminal.read_with(cx, |terminal, _| terminal.trusted_working_directory()),
+                    Some(PathBuf::from("/home/me"))
+                );
+                assert_eq!(
+                    terminal.read_with(cx, |terminal, _| terminal.working_directory()),
+                    Some(PathBuf::from(directory))
+                );
+            }
+        }
+        // The shell confirming the directory it already reported is a change
+        // to what is displayed, so the window looks again.
+        assert_eq!(
+            print_title(cx, &format!("zetta-cwd;{NONCE}:/home/me")),
+            (
+                Some(Event::TitleChanged),
+                some("/home/me"),
+                some("/home/me")
+            )
+        );
+        // A printed report naming the authenticated directory changes neither.
+        assert_eq!(
+            print_title(cx, "zetta-cwd:/home/me"),
+            (None, some("/home/me"), some("/home/me"))
+        );
+        // Moving under the shell's own report moves both.
+        assert_eq!(
+            print_title(cx, &format!("zetta-cwd;{NONCE}:/home/me/project")),
+            (
+                Some(Event::TitleChanged),
+                some("/home/me/project"),
+                some("/home/me/project")
+            )
+        );
+    }
+
     #[test]
     fn reported_foreground_command_titles_are_parsed_from_the_marker() {
         assert_eq!(
@@ -8360,32 +8763,220 @@ mod tests {
     #[test]
     fn lifecycle_titles_parse_ready_start_and_exit_status_markers() {
         assert_eq!(
-            lifecycle_event_from_title("zetta-event:tracking-ready"),
-            Some(Event::TrackingReady)
-        );
-        assert_eq!(
-            lifecycle_event_from_title("zetta-event:command-started:cargo test"),
-            Some(Event::CommandStarted {
-                command: "cargo test".to_owned()
+            lifecycle_event_from_title("zetta-event:tracking-ready", None),
+            Some(Event::TrackingReady {
+                authenticated: false
             })
         );
         assert_eq!(
-            lifecycle_event_from_title("zetta-event:command-finished:0"),
-            Some(Event::CommandFinished { exit_code: Some(0) })
+            lifecycle_event_from_title("zetta-event:command-started:cargo test", None),
+            Some(Event::CommandStarted {
+                command: "cargo test".to_owned(),
+                authenticated: false,
+            })
         );
         assert_eq!(
-            lifecycle_event_from_title("zetta-event:command-finished:unknown"),
-            Some(Event::CommandFinished { exit_code: None })
+            lifecycle_event_from_title("zetta-event:command-finished:0", None),
+            Some(Event::CommandFinished {
+                exit_code: Some(0),
+                authenticated: false,
+            })
         );
         assert_eq!(
-            lifecycle_event_from_title("zetta-event:command-started:"),
+            lifecycle_event_from_title("zetta-event:command-finished:unknown", None),
+            Some(Event::CommandFinished {
+                exit_code: None,
+                authenticated: false,
+            })
+        );
+        assert_eq!(
+            lifecycle_event_from_title("zetta-event:command-started:", None),
             None
         );
         assert_eq!(
-            lifecycle_event_from_title("zetta-event:command-finished:not-a-status"),
+            lifecycle_event_from_title("zetta-event:command-finished:not-a-status", None),
             None
         );
-        assert_eq!(lifecycle_event_from_title("ordinary title"), None);
+        assert_eq!(lifecycle_event_from_title("ordinary title", None), None);
+    }
+
+    /// 3.17: a lifecycle marker authenticates only with the nonce this
+    /// terminal gave its shell. Everything else — the untokened form any
+    /// output can print, a wrong or truncated nonce, an empty one, or any
+    /// marker at all in a terminal that gave none — still parses, for display,
+    /// but as unauthenticated.
+    #[test]
+    fn lifecycle_markers_authenticate_only_with_this_terminals_nonce() {
+        const NONCE: &str = "00112233445566778899aabbccddeeff";
+        let finished = |authenticated| {
+            Some(Event::CommandFinished {
+                exit_code: Some(0),
+                authenticated,
+            })
+        };
+
+        assert_eq!(
+            lifecycle_event_from_title(
+                &format!("zetta-event;{NONCE}:command-finished:0"),
+                Some(NONCE)
+            ),
+            finished(true)
+        );
+        assert_eq!(
+            lifecycle_event_from_title(&format!("zetta-event;{NONCE}:tracking-ready"), Some(NONCE)),
+            Some(Event::TrackingReady {
+                authenticated: true
+            })
+        );
+        assert_eq!(
+            lifecycle_event_from_title(
+                &format!("zetta-event;{NONCE}:command-started:make"),
+                Some(NONCE)
+            ),
+            Some(Event::CommandStarted {
+                command: "make".to_owned(),
+                authenticated: true,
+            })
+        );
+        for forged in [
+            "zetta-event:command-finished:0".to_owned(),
+            "zetta-event;ffeeddccbbaa99887766554433221100:command-finished:0".to_owned(),
+            "zetta-event;00112233445566778899aabbccddeef:command-finished:0".to_owned(),
+            format!("zetta-event;{NONCE}0:command-finished:0"),
+            "zetta-event;:command-finished:0".to_owned(),
+        ] {
+            assert_eq!(
+                lifecycle_event_from_title(&forged, Some(NONCE)),
+                finished(false),
+                "{forged:?}"
+            );
+        }
+        assert_eq!(
+            lifecycle_event_from_title(&format!("zetta-event;{NONCE}:command-finished:0"), None),
+            finished(false)
+        );
+        assert_eq!(
+            lifecycle_event_from_title("zetta-event;:command-finished:0", Some("")),
+            finished(false)
+        );
+        assert_eq!(
+            lifecycle_event_from_title("zetta-event;no-separator", Some(NONCE)),
+            None
+        );
+    }
+
+    /// The same, through the terminal itself: what the window is told about a
+    /// forged and a genuine marker printed into a pane whose shell holds the
+    /// nonce.
+    #[gpui::test]
+    fn printed_lifecycle_markers_reach_the_window_marked_by_origin(cx: &mut TestAppContext) {
+        const NONCE: &str = "0123456789abcdef0123456789abcdef";
+        let builder = cx.update(|cx| {
+            TerminalBuilder::new_display_only(
+                SettingsCursorShape::Block,
+                AlternateScroll::On,
+                None,
+                0,
+                cx.background_executor(),
+                PathStyle::local(),
+            )
+        });
+        let terminal = cx.new(|cx| builder.subscribe(cx));
+        let (events_tx, events_rx) = async_channel::unbounded();
+        cx.update(|cx| {
+            cx.subscribe(&terminal, move |_, event: &Event, _| {
+                events_tx.send_blocking(event.clone()).unwrap();
+            })
+        })
+        .detach();
+        let print_title = |cx: &mut TestAppContext, title: &str| {
+            terminal.update(cx, |terminal, cx| {
+                terminal.process_event(TerminalBackendEvent::Title(title.to_owned()), cx);
+            });
+            events_rx.try_recv().ok()
+        };
+
+        // A display-only terminal started no shell, so it holds no nonce.
+        assert_eq!(
+            print_title(cx, &format!("zetta-event;{NONCE}:command-finished:0")),
+            Some(Event::CommandFinished {
+                exit_code: Some(0),
+                authenticated: false,
+            })
+        );
+        terminal.update(cx, |terminal, _| {
+            terminal.command_marker_nonce = Some(NONCE.to_owned());
+        });
+        assert_eq!(
+            print_title(cx, "zetta-event:command-finished:0"),
+            Some(Event::CommandFinished {
+                exit_code: Some(0),
+                authenticated: false,
+            })
+        );
+        assert_eq!(
+            print_title(
+                cx,
+                "zetta-event;ffffffffffffffffffffffffffffffff:command-finished:0"
+            ),
+            Some(Event::CommandFinished {
+                exit_code: Some(0),
+                authenticated: false,
+            })
+        );
+        assert_eq!(
+            print_title(cx, &format!("zetta-event;{NONCE}:command-finished:0")),
+            Some(Event::CommandFinished {
+                exit_code: Some(0),
+                authenticated: true,
+            })
+        );
+    }
+
+    /// A shared pane's shell is started by the multiplexer daemon, not by the
+    /// terminal reading it, so that terminal is told the nonce the window put
+    /// in the pane's draft. Without it, every marker from a fresh shared pane
+    /// reads as forged and `zetta pane wait` on one can never succeed.
+    #[gpui::test]
+    fn a_terminal_told_its_shells_nonce_authenticates_that_shells_markers(cx: &mut TestAppContext) {
+        const NONCE: &str = "fedcba9876543210fedcba9876543210";
+        let marker = format!("zetta-event;{NONCE}:command-finished:0");
+        for (given, authenticated) in [
+            (Some(NONCE.to_owned()), true),
+            (None, false),
+            (Some(String::new()), false),
+        ] {
+            let builder = cx.update(|cx| {
+                TerminalBuilder::new_display_only(
+                    SettingsCursorShape::Block,
+                    AlternateScroll::On,
+                    None,
+                    0,
+                    cx.background_executor(),
+                    PathStyle::local(),
+                )
+                .with_command_marker_nonce(given.clone())
+            });
+            let terminal = cx.new(|cx| builder.subscribe(cx));
+            let (events_tx, events_rx) = async_channel::unbounded();
+            cx.update(|cx| {
+                cx.subscribe(&terminal, move |_, event: &Event, _| {
+                    events_tx.send_blocking(event.clone()).unwrap();
+                })
+            })
+            .detach();
+            terminal.update(cx, |terminal, cx| {
+                terminal.process_event(TerminalBackendEvent::Title(marker.clone()), cx);
+            });
+            assert_eq!(
+                events_rx.try_recv().ok(),
+                Some(Event::CommandFinished {
+                    exit_code: Some(0),
+                    authenticated,
+                }),
+                "given {given:?}"
+            );
+        }
     }
 
     #[cfg(windows)]
@@ -10119,8 +10710,21 @@ mod tests {
             Some("$E]2;zetta-cwd:$P$E\\$N$G")
         );
         assert_eq!(
-            cmd_prompt_with_cwd_tracking(None),
+            cmd_prompt_with_cwd_tracking(None, None),
             "$E]2;zetta-cwd:$P$E\\$P$G"
+        );
+
+        // A shell given a nonce reports with it: `cmd` has nowhere else to
+        // keep it.
+        let mut environment = HashMap::default();
+        environment.insert(
+            COMMAND_MARKER_NONCE_ENV.to_owned(),
+            "0123456789abcdef0123456789abcdef".to_owned(),
+        );
+        install_windows_cwd_tracking("cmd.exe", &mut arguments, &mut environment);
+        assert_eq!(
+            environment.get("PROMPT").map(String::as_str),
+            Some("$E]2;zetta-cwd;0123456789abcdef0123456789abcdef:$P$E\\$P$G")
         );
     }
 
@@ -10469,36 +11073,40 @@ mod tests {
         );
     }
 
-    #[cfg(windows)]
     #[test]
-    fn only_posix_host_shells_are_given_a_fresh_command_marker_nonce() {
-        let msys2 = Shell::WithArguments {
-            program: "cmd.exe".to_owned(),
-            args: vec![r#""C:\msys64\msys2_shell.cmd" -shell bash"#.to_owned()],
-            title_override: None,
-        };
+    fn every_started_shell_is_given_a_fresh_command_marker_nonce() {
         let inherited = || {
             HashMap::from_iter([(
                 COMMAND_MARKER_NONCE_ENV.to_owned(),
                 "inherited-from-a-template".to_owned(),
             )])
         };
+        #[cfg(windows)]
+        let msys2 = Shell::WithArguments {
+            program: "cmd.exe".to_owned(),
+            args: vec![r#""C:\msys64\msys2_shell.cmd" -shell bash"#.to_owned()],
+            title_override: None,
+        };
+        #[cfg(windows)]
+        let shells = [msys2, Shell::Program("powershell.exe".to_owned())];
+        #[cfg(not(windows))]
+        let shells = [
+            Shell::Program("bash".to_owned()),
+            Shell::Program("zsh".to_owned()),
+        ];
 
-        let mut env = inherited();
-        let nonce = install_command_marker_nonce(&msys2, &mut env).expect("MSYS2 gets a nonce");
-        assert_eq!(nonce.len(), 32);
-        assert!(nonce.bytes().all(|byte| byte.is_ascii_hexdigit()));
-        assert_eq!(env.get(COMMAND_MARKER_NONCE_ENV), Some(&nonce));
-        let mut second = inherited();
-        assert_ne!(
-            install_command_marker_nonce(&msys2, &mut second),
-            Some(nonce)
-        );
-
-        let mut env = inherited();
-        let powershell = Shell::Program("powershell.exe".to_owned());
-        assert_eq!(install_command_marker_nonce(&powershell, &mut env), None);
-        assert!(!env.contains_key(COMMAND_MARKER_NONCE_ENV));
+        for shell in shells {
+            let mut env = inherited();
+            let nonce = install_command_marker_nonce(&shell, &mut env).expect("a nonce is drawn");
+            assert_eq!(nonce.len(), 32);
+            assert!(nonce.bytes().all(|byte| byte.is_ascii_hexdigit()));
+            assert_eq!(env.get(COMMAND_MARKER_NONCE_ENV), Some(&nonce));
+            let mut second = inherited();
+            assert_ne!(
+                install_command_marker_nonce(&shell, &mut second),
+                Some(nonce)
+            );
+        }
     }
 
     #[cfg(windows)]

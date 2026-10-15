@@ -10,9 +10,6 @@ use std::path::Path;
 #[cfg(target_os = "linux")]
 use std::{env, fs, path::Path, process::Command};
 
-#[cfg(target_os = "macos")]
-use crate::command_panes::PaneCommand;
-
 /// Selects the platform's user-level default-terminal integration. Installing
 /// Zetta only registers the application; this function is called by the
 /// explicit action exposed in the application menu.
@@ -57,6 +54,19 @@ pub(crate) fn is_default_terminal() -> bool {
 }
 
 impl crate::Zetta {
+    /// Whether a macOS script-open confirmation is waiting for an answer; the
+    /// prompt itself lives in `script_open_ui.rs`, which only macOS compiles.
+    pub(crate) fn script_open_is_open(&self) -> bool {
+        #[cfg(target_os = "macos")]
+        {
+            self.script_open.is_open()
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            false
+        }
+    }
+
     pub(crate) fn set_default_terminal(
         &mut self,
         _: &crate::SetDefaultTerminal,
@@ -107,39 +117,6 @@ impl crate::Zetta {
                 format!("Could not set Zetta as the default terminal: {error:#}"),
                 cx,
             ),
-        }
-    }
-
-    #[cfg(target_os = "macos")]
-    pub(crate) fn open_script_urls(
-        &mut self,
-        urls: &[String],
-        window: &mut gpui::Window,
-        cx: &mut gpui::Context<Self>,
-    ) {
-        let mut rejected = 0;
-        for path in script_paths_from_urls(urls) {
-            let request = PaneCommand {
-                direction: None,
-                label: None,
-                pane: None,
-                overlay: None,
-                stack: false,
-                list: false,
-                command: vec![path.to_string_lossy().into_owned()],
-            };
-            if self
-                .open_command_in_new_tab(request, path.parent().map(Path::to_path_buf), window, cx)
-                .is_err()
-            {
-                rejected += 1;
-            }
-        }
-        if rejected != 0 {
-            self.show_error_notice(
-                format!("Could not open {rejected} shell-script file(s) in Zetta"),
-                cx,
-            );
         }
     }
 }

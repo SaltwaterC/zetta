@@ -236,7 +236,7 @@ mod resume_authentication {
             backoff_seconds: 0,
             created_at: 0,
             updated_at: 0,
-            secret: Some(secret.to_owned()),
+            secret: Some(crate::auth::SessionSecret::new(secret.to_owned())),
             snapshots: Vec::new(),
         }
     }

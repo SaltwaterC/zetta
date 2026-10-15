@@ -16,8 +16,6 @@ use std::{
 
 #[cfg(unix)]
 use std::fs;
-#[cfg(windows)]
-use std::fs::OpenOptions;
 #[cfg(any(unix, windows))]
 use std::{
     sync::{
@@ -32,6 +30,8 @@ use std::os::unix::{fs::PermissionsExt, net::UnixListener};
 
 use mosh_rs::HostEvent;
 
+#[cfg(unix)]
+mod unix_socket;
 #[cfg(windows)]
 mod windows_pipe;
 
@@ -590,9 +590,7 @@ fn connect_agent(path: &Path) -> io::Result<AgentStream> {
     }
     #[cfg(windows)]
     {
-        Ok(Box::new(
-            OpenOptions::new().read(true).write(true).open(path)?,
-        ))
+        Ok(Box::new(windows_pipe::open(path)?))
     }
     #[cfg(not(any(unix, windows)))]
     {
@@ -635,6 +633,13 @@ impl BootstrapAgentRelay {
 
     #[cfg(unix)]
     fn from_agent_path(agent_path: PathBuf) -> io::Result<Self> {
+        Self::from_agent_path_for(agent_path, unix_socket::this_user())
+    }
+
+    /// [`Self::from_agent_path`], answering only `owner` (and root); see
+    /// [`unix_socket`].
+    #[cfg(unix)]
+    fn from_agent_path_for(agent_path: PathBuf, owner: libc::uid_t) -> io::Result<Self> {
         let (directory, socket_path) = create_bootstrap_relay_paths()?;
         let listener = match UnixListener::bind(&socket_path) {
             Ok(listener) => listener,
@@ -643,7 +648,6 @@ impl BootstrapAgentRelay {
                 return Err(error);
             }
         };
-        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))?;
         fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o600))?;
         listener.set_nonblocking(true)?;
         let binding = Arc::new(Mutex::new(None));
@@ -654,7 +658,7 @@ impl BootstrapAgentRelay {
                 let binding = Arc::clone(&binding);
                 let agent_path = agent_path.clone();
                 let stop = Arc::clone(&stop);
-                move || relay_accept_loop(listener, agent_path, binding, stop)
+                move || relay_accept_loop(listener, owner, agent_path, binding, stop)
             })?;
         Ok(Self {
             path: socket_path,
@@ -695,6 +699,11 @@ impl BootstrapAgentRelay {
         Self::from_agent_path(agent_path.to_owned())
     }
 
+    #[cfg(all(test, unix))]
+    fn for_test_agent_path_and_owner(agent_path: &Path, owner: libc::uid_t) -> io::Result<Self> {
+        Self::from_agent_path_for(agent_path.to_owned(), owner)
+    }
+
     #[cfg(any(unix, windows))]
     pub(crate) fn path(&self) -> &Path {
         &self.path
@@ -727,7 +736,7 @@ impl Drop for BootstrapAgentRelay {
         {
             self.stop.store(true, Ordering::Release);
             #[cfg(windows)]
-            let _wake = OpenOptions::new().read(true).write(true).open(&self.path);
+            let _wake = windows_pipe::open(&self.path);
             if let Some(thread) = self.thread.take() {
                 let _ = thread.join();
             }
@@ -756,7 +765,7 @@ fn create_bootstrap_relay_paths() -> io::Result<(PathBuf, PathBuf)> {
                 stamp,
                 attempt
             ));
-            match fs::create_dir(&directory) {
+            match unix_socket::create_private_dir(&directory) {
                 Ok(()) => return Ok((directory.clone(), directory.join("agent.sock"))),
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
                 Err(error) => {
@@ -777,12 +786,15 @@ fn create_bootstrap_relay_paths() -> io::Result<(PathBuf, PathBuf)> {
 #[cfg(unix)]
 fn relay_accept_loop(
     listener: UnixListener,
+    owner: libc::uid_t,
     agent_path: PathBuf,
     binding: Arc<Mutex<Option<Vec<u8>>>>,
     stop: Arc<AtomicBool>,
 ) {
     while !stop.load(Ordering::Acquire) {
         match listener.accept() {
+            // Dropped unanswered: nothing it sent reaches the agent.
+            Ok((stream, _)) if !unix_socket::peer_may_connect(&stream, owner) => {}
             Ok((stream, _)) => {
                 // An accepted socket inherits the listener's O_NONBLOCK on
                 // macOS and the BSDs, and the relay reads it blocking.

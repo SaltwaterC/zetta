@@ -27,6 +27,26 @@ fn a_typed_secret_keeps_whatever_is_not_the_line_ending() {
     }
 }
 
+#[test]
+fn a_secret_line_is_read_up_to_its_ending_and_no_further() {
+    let mut input = std::io::Cursor::new(b"hunter2\r\nnext line".to_vec());
+    let line = read_secret_line(&mut input).unwrap();
+    assert_eq!(line.as_str(), "hunter2");
+    assert_eq!(input.position(), 9, "the next line was consumed");
+
+    let line = read_secret_line(&mut std::io::Cursor::new(b"no ending".to_vec())).unwrap();
+    assert_eq!(line.as_str(), "no ending");
+    // Across the reader's buffer boundary, a byte at a time.
+    let mut slow = std::io::BufReader::with_capacity(1, b"slow\n".as_slice());
+    assert_eq!(read_secret_line(&mut slow).unwrap().as_str(), "slow");
+}
+
+#[test]
+fn a_secret_line_that_is_not_utf8_is_refused() {
+    let error = read_secret_line(&mut std::io::Cursor::new(b"hunt\xffer\n".to_vec())).unwrap_err();
+    assert!(error.to_string().contains("not valid UTF-8"), "{error}");
+}
+
 #[cfg(windows)]
 fn key_down(unicode_char: u16, virtual_key_code: u16) -> ConsoleKeyEvent {
     ConsoleKeyEvent {

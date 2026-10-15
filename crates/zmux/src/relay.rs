@@ -620,7 +620,7 @@ fn read_secret_from(input: &mut impl io::Read) -> Result<SessionSecret> {
                     secret.len() < MAX_SECRET_BYTES,
                     "the session secret is longer than {MAX_SECRET_BYTES} bytes"
                 );
-                secret.push(char::from(value));
+                crate::auth::push_secret_char(&mut secret, char::from(value));
             }
         }
     }

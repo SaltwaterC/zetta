@@ -12,4 +12,12 @@ impl Zetta {
     }
 
     pub(crate) fn set_tab_remote_clipboard_paste(&self, _: u64, _: bool, _: &mut Context<Self>) {}
+
+    pub(crate) fn toggle_remote_clipboard_copy(
+        &mut self,
+        _: &ToggleRemoteClipboardCopy,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) {
+    }
 }

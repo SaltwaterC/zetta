@@ -90,6 +90,13 @@ pub struct Handover {
     /// older image; see `server::sealing::adopted_grants`.
     #[serde(default)]
     pub recipient_grants: Option<crate::server::RecipientGrants>,
+    /// The daemon's lifetime lock, as a handle the old daemon duplicated into
+    /// this process (see `server/lifetime_lock.rs`). Never serialized: it is
+    /// announced on stdin after the pipe's handle, so a daemon from before the
+    /// lock, which announces only the pipe, still upgrades into this image, and
+    /// this image still upgrades into one that ignores the extra line.
+    #[serde(skip)]
+    pub lifetime_lock: Option<File>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -197,15 +204,29 @@ pub fn remove_ready(ready: &Path) {
 /// from a thread, since the replacement only drains it once it is running.
 /// Should the replacement die or be killed, its end closes and the write fails,
 /// so the thread never outlives a failed upgrade for long.
-pub fn send_handover(replacement: &mut Child, handover: &Handover) -> Result<()> {
+pub fn send_handover(
+    replacement: &mut Child,
+    handover: &Handover,
+    lifetime_lock: Option<&File>,
+) -> Result<()> {
     let stdin = replacement
         .stdin
         .take()
         .context("the Windows replacement has no stdin")?;
-    send_handover_to(HANDLE(replacement.as_raw_handle()), stdin, handover)
+    send_handover_to(
+        HANDLE(replacement.as_raw_handle()),
+        stdin,
+        handover,
+        lifetime_lock,
+    )
 }
 
-fn send_handover_to(process: HANDLE, mut announce: impl Write, handover: &Handover) -> Result<()> {
+fn send_handover_to(
+    process: HANDLE,
+    mut announce: impl Write,
+    handover: &Handover,
+    lifetime_lock: Option<&File>,
+) -> Result<()> {
     let encoded =
         Zeroizing::new(serde_json::to_vec(handover).context("serializing the Windows handover")?);
     let mut read = HANDLE::default();
@@ -234,6 +255,9 @@ fn send_handover_to(process: HANDLE, mut announce: impl Write, handover: &Handov
     writeln!(announce, "{}", remote.0 as usize)
         .and_then(|()| announce.flush())
         .context("telling the Windows replacement where its handover is")?;
+    if let Some(lock) = lifetime_lock {
+        announce_lifetime_lock(process, &mut announce, lock);
+    }
     drop(announce);
     std::thread::Builder::new()
         .name("zmux-handover".to_owned())
@@ -244,6 +268,39 @@ fn send_handover_to(process: HANDLE, mut announce: impl Write, handover: &Handov
         })
         .context("starting the handover writer")?;
     Ok(())
+}
+
+/// Duplicates the lifetime lock into the replacement and announces it.
+///
+/// The source is kept: this daemon holds the lock until it exits, and the
+/// replacement's copy holds it from then on, so it is never free in between.
+/// Best effort — a replacement that is not given it takes the lock itself
+/// once this daemon has exited.
+fn announce_lifetime_lock(process: HANDLE, announce: &mut impl Write, lock: &File) {
+    let mut remote = HANDLE::default();
+    // SAFETY: both process handles are valid for the call, and the source is a
+    // handle this process owns through `lock`.
+    let duplicated = unsafe {
+        DuplicateHandle(
+            GetCurrentProcess(),
+            HANDLE(lock.as_raw_handle()),
+            process,
+            &mut remote,
+            0,
+            false,
+            DUPLICATE_SAME_ACCESS,
+        )
+    };
+    if let Err(error) = duplicated
+        .context("duplicating the multiplexer lock")
+        .and_then(|()| {
+            writeln!(announce, "{}", remote.0 as usize)
+                .and_then(|()| announce.flush())
+                .context("announcing the multiplexer lock")
+        })
+    {
+        log::warn!("the Windows replacement will take the lock itself: {error:#}");
+    }
 }
 
 /// Reads the handover the previous daemon sent to this process.
@@ -276,6 +333,7 @@ fn receive_handover_from(mut announce: impl BufRead) -> Result<Handover> {
     // SAFETY: the previous daemon duplicated this handle into this process
     // for it to own, and nothing else here knows its value.
     let pipe = unsafe { File::from_raw_handle(value as _) };
+    let lifetime_lock = receive_lifetime_lock(&mut announce);
     anyhow::ensure!(
         unsafe { GetFileType(HANDLE(pipe.as_raw_handle())) } == FILE_TYPE_PIPE,
         "the handover handle is not a pipe"
@@ -284,7 +342,24 @@ fn receive_handover_from(mut announce: impl BufRead) -> Result<Handover> {
     pipe.take(MAX_HANDOVER_BYTES)
         .read_to_end(&mut encoded)
         .context("reading the Windows handover")?;
-    parse_handover(&encoded, HANDOVER_VERSION)
+    let mut handover = parse_handover(&encoded, HANDOVER_VERSION)?;
+    handover.lifetime_lock = lifetime_lock;
+    Ok(handover)
+}
+
+/// The lock handle announced after the pipe's, if the previous daemon sent
+/// one. One from before the lock closes stdin after the pipe's line.
+fn receive_lifetime_lock(announce: &mut impl BufRead) -> Option<File> {
+    let mut line = String::new();
+    announce.read_line(&mut line).ok()?;
+    let value = line
+        .trim()
+        .parse::<usize>()
+        .ok()
+        .filter(|value| *value != 0)?;
+    // SAFETY: as for the pipe: the previous daemon duplicated this handle into
+    // this process for it to own, and nothing else here knows its value.
+    Some(unsafe { File::from_raw_handle(value as _) })
 }
 
 fn parse_handover(encoded: &[u8], version: u32) -> Result<Handover> {

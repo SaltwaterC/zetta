@@ -5,8 +5,46 @@
 //! it acts on: `pane/layout.rs` (the split tree), `pane/tab.rs` (the tab and
 //! what it shows), `pane/stack.rs` (the command terminals sharing a pane's
 //! region), and `pane/overlay.rs` (the overlay's text and colour model).
+//!
+//! # Which directory a pane is in
+//!
+//! A shell reports its directory with a `zetta-cwd` title, which is output:
+//! `cat` of a file, a remote host's shell, or a nested shell can print one.
+//! Only a report carrying the nonce this pane's terminal gave its own shell is
+//! authenticated (see `crates/terminal`'s module doc), and only that, the
+//! operating system's view of the foreground process, or a WSL shell's
+//! tracking file decides where something runs. That is what
+//! [`TerminalPane::working_directory`], [`TerminalPane::current_directory`]
+//! and [`TerminalPane::wsl_working_directory`] answer, so a split, a tab, a
+//! command or stacked pane, a template, a file server, a restored session and
+//! project entry all start from a directory the pane's shell confirmed. A
+//! forged one could otherwise start a shell in a registered project, which
+//! enters it and applies its `initial_split`, or run a command pane's command
+//! among files the forger chose.
+//!
+//! The `reported_*` variants answer from every report, for what a pane only
+//! displays and for noticing that it appears to be somewhere its shell has
+//! not confirmed — a remote host it is logged in to, typically.
 
 use super::*;
+
+/// Which of a terminal's `zetta-cwd` reports an accessor answers from.
+#[derive(Clone, Copy)]
+enum DirectoryReports {
+    /// Only those carrying the shell's nonce.
+    Authenticated,
+    /// The latest, whoever printed it.
+    Any,
+}
+
+impl DirectoryReports {
+    fn of(self, terminal: &Terminal) -> Option<&str> {
+        match self {
+            Self::Authenticated => terminal.authenticated_working_directory(),
+            Self::Any => terminal.reported_working_directory(),
+        }
+    }
+}
 
 pub(crate) const MAX_PANES_PER_TAB: usize = 64;
 pub(crate) const MAX_CONCURRENT_MULTI_COMMAND_SPAWNS: usize = 4;
@@ -370,20 +408,35 @@ impl TerminalPane {
             .unwrap_or_else(|| format!("Pane {}", self.label_number))
     }
 
-    /// The authoritative OSC directory, or the latest accepted background
-    /// tracking-file observation. GUI callers never open the tracking file.
-    /// Before the first observation, launch actions use their existing profile
-    /// or application directory fallback.
+    /// The WSL shell's authenticated OSC directory, or the latest accepted
+    /// background tracking-file observation. GUI callers never open the
+    /// tracking file. Before the first observation, launch actions use their
+    /// existing profile or application directory fallback.
+    ///
+    /// Trusted to decide where something runs (see "Which directory a pane
+    /// is in" in `pane.rs`): an unauthenticated report never answers. The
+    /// tracking file is the shell's own write, which printed output cannot
+    /// make.
     pub(crate) fn wsl_working_directory(&self, cx: &App) -> Option<String> {
+        self.wsl_directory(cx, DirectoryReports::Authenticated)
+    }
+
+    /// [`Self::wsl_working_directory`] from the latest report of any kind,
+    /// authenticated or not. For display, and for noticing that the pane
+    /// appears to have moved somewhere its shell has not confirmed.
+    pub(crate) fn reported_wsl_working_directory(&self, cx: &App) -> Option<String> {
+        self.wsl_directory(cx, DirectoryReports::Any)
+    }
+
+    fn wsl_directory(&self, cx: &App, reports: DirectoryReports) -> Option<String> {
         if !is_wsl_shell(&self.profile.command) {
             return None;
         }
-        if let Some(directory) = self.terminal.as_ref().and_then(|terminal| {
-            terminal
-                .read(cx)
-                .reported_working_directory()
-                .map(str::to_owned)
-        }) {
+        if let Some(directory) = self
+            .terminal
+            .as_ref()
+            .and_then(|terminal| reports.of(terminal.read(cx)).map(str::to_owned))
+        {
             return Some(directory);
         }
         let observation = self.wsl_cwd_observation.as_ref()?;
@@ -393,15 +446,18 @@ impl TerminalPane {
     }
 
     /// Whether a callback should refresh the tracking-file observation: a WSL
-    /// pane whose shell is not reporting its directory itself.
+    /// pane whose shell is not reporting its directory itself — with its
+    /// nonce, so a printed report cannot stop the file being read.
     pub(crate) fn wsl_cwd_file_needs_observing(&self, cx: &App) -> Option<PathBuf> {
         if !is_wsl_shell(&self.profile.command) {
             return None;
         }
-        let reported = self
-            .terminal
-            .as_ref()
-            .is_some_and(|terminal| terminal.read(cx).reported_working_directory().is_some());
+        let reported = self.terminal.as_ref().is_some_and(|terminal| {
+            terminal
+                .read(cx)
+                .authenticated_working_directory()
+                .is_some()
+        });
         (!reported).then(|| self.wsl_cwd_file.clone()).flatten()
     }
 
@@ -444,9 +500,29 @@ impl TerminalPane {
     /// running, a process-only result is explicitly non-authoritative. MSYS2
     /// and Cygwin report POSIX paths even though the rest of the application
     /// operates on native Windows paths.
+    ///
+    /// Trusted to decide where something runs: the reported directory is the
+    /// shell's authenticated one. [`Self::reported_current_directory`] is the
+    /// same choice from any report, for display.
     pub(crate) fn current_directory(&self, cx: &App) -> Option<(PathBuf, bool)> {
+        self.current_directory_from(cx, DirectoryReports::Authenticated)
+    }
+
+    /// [`Self::current_directory`] from the latest report of any kind. Right
+    /// for what a pane displays — its worktree title — and for noticing that
+    /// it appears to have moved somewhere its shell has not confirmed; never
+    /// for where something runs.
+    pub(crate) fn reported_current_directory(&self, cx: &App) -> Option<(PathBuf, bool)> {
+        self.current_directory_from(cx, DirectoryReports::Any)
+    }
+
+    fn current_directory_from(
+        &self,
+        cx: &App,
+        reports: DirectoryReports,
+    ) -> Option<(PathBuf, bool)> {
         let terminal = self.terminal.as_ref()?.read(cx);
-        let reported_directory = terminal.reported_working_directory().and_then(|directory| {
+        let reported_directory = reports.of(terminal).and_then(|directory| {
             if let Some((root, _)) = msys2_profile(&self.profile.command) {
                 msys2_path_to_windows(&root, directory)
             } else if let Some((root, _)) = cygwin_profile(&self.profile.command) {
@@ -466,12 +542,15 @@ impl TerminalPane {
         )
     }
 
+    /// The directory a split, a tab, a command or stacked pane, a template or a
+    /// restored session starts this pane's successor in. Trusted, like
+    /// [`Self::current_directory`].
     pub(crate) fn working_directory(&self, cx: &App) -> Option<PathBuf> {
         // Windows process inspection sees the CWD of wsl.exe, not the Linux
         // shell. Keep the existing reported-WSL-path behavior for launch and
         // inheritance; native shell consumers use `current_directory` above.
         if is_wsl_shell(&self.profile.command) {
-            return self.terminal.as_ref()?.read(cx).working_directory();
+            return self.terminal.as_ref()?.read(cx).trusted_working_directory();
         }
         self.current_directory(cx).map(|(directory, _)| directory)
     }
@@ -562,4 +641,4 @@ pub(crate) use tab::*;
 
 #[cfg(test)]
 #[path = "tests/pane.rs"]
-mod tests;
+pub(crate) mod tests;

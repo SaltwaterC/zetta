@@ -17,11 +17,21 @@
 
 use super::*;
 
+/// Reads one request and decodes it.
+///
+/// `deadline` bounds the whole read, not each piece of it: see
+/// [`read_message_by`]. `None` is for the one read that may wait indefinitely,
+/// a `zetta pane wait` connection's completion report.
 pub(super) fn handle_control_request(
     stream: &mut UnixStream,
     token: &str,
+    deadline: Option<Instant>,
 ) -> Option<ControlRequestCommand> {
-    let mut request = read_message::<ControlRequest>(stream).ok()?;
+    let mut request = match deadline {
+        Some(deadline) => read_message_by::<ControlRequest>(stream, deadline),
+        None => read_message::<ControlRequest>(stream),
+    }
+    .ok()?;
     decode_control_request(&mut request, token)
 }
 

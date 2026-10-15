@@ -153,6 +153,118 @@ fn pane_command_quoting_keeps_shell_metacharacters_literal() {
     assert!(powershell.contains("'$(touch marker)'"));
 }
 
+/// Literals a command argument or environment value could need: PowerShell
+/// closes a single-quoted string at `'` and at each of U+2018–U+201B.
+const POWERSHELL_LITERALS: &[&str] = &[
+    "it's",
+    "O’Brien",
+    "‘’‚‛",
+    "'‘’‚‛'",
+    "''’’",
+    "x’; Write-Output injected; ’",
+    "$HOME `n ‘a;b’",
+];
+
+#[test]
+fn every_powershell_single_quote_is_doubled() {
+    assert_eq!(quote_powershell_literal("it's"), "'it''s'");
+    assert_eq!(quote_powershell_literal("‘’‚‛"), "'‘‘’’‚‚‛‛'");
+    assert_eq!(quote_powershell_literal("‟"), "'‟'");
+    for kind in [task::ShellKind::PowerShell, task::ShellKind::Pwsh] {
+        // Upstream would leave the first unquoted, and quotes the second.
+        assert_eq!(
+            quote_shell_value(kind, "O’Brien").unwrap(),
+            "'O’’Brien'",
+            "{kind:?}"
+        );
+        assert_eq!(
+            quote_shell_value(kind, "x’; y").unwrap(),
+            "'x’’; y'",
+            "{kind:?}"
+        );
+    }
+
+    let request = ShellCommandRequest {
+        command: "echo".to_owned(),
+        arguments: vec!["it’s".to_owned()],
+        environment: BTreeMap::from([("FOO".to_owned(), "a’ b".to_owned())]),
+    };
+    let powershell =
+        shell_command_for_profile(&Shell::Program("pwsh".to_owned()), &request).unwrap();
+    assert!(powershell.contains("echo 'it’’s'"), "{powershell}");
+    assert!(powershell.contains("-Value 'a’’ b'"), "{powershell}");
+}
+
+/// What each PowerShell engine on this host reads every literal as. Windows
+/// PowerShell exists only on Windows, and `pwsh` only where it is installed; a
+/// host with neither returns nothing.
+fn powershell_readings(literals: &[String]) -> Vec<(&'static str, Vec<String>)> {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+
+    // Each value is printed as base64, which no console code page can mangle.
+    let script = literals
+        .iter()
+        .map(|literal| {
+            format!(
+                "[Console]::Out.WriteLine([Convert]::ToBase64String(\
+                 [Text.Encoding]::UTF8.GetBytes({literal})))"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    let encoded = STANDARD.encode(
+        script
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>(),
+    );
+    ["powershell.exe", "pwsh"]
+        .into_iter()
+        .filter_map(|engine| {
+            let output = std::process::Command::new(engine)
+                .args(["-NoProfile", "-NonInteractive", "-EncodedCommand", &encoded])
+                .output()
+                .ok()?;
+            assert!(
+                output.status.success(),
+                "{engine}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let readings = String::from_utf8(output.stdout)
+                .unwrap()
+                .lines()
+                .map(|line| String::from_utf8(STANDARD.decode(line.trim()).unwrap()).unwrap())
+                .collect();
+            Some((engine, readings))
+        })
+        .collect()
+}
+
+#[test]
+fn powershell_reads_each_quoted_value_back_unchanged() {
+    let mut quoted = POWERSHELL_LITERALS
+        .iter()
+        .map(|literal| quote_powershell_literal(literal))
+        .collect::<Vec<_>>();
+    for kind in [task::ShellKind::PowerShell, task::ShellKind::Pwsh] {
+        quoted.extend(
+            POWERSHELL_LITERALS
+                .iter()
+                .map(|literal| quote_shell_value(kind, literal).unwrap()),
+        );
+    }
+    let readings = powershell_readings(&quoted);
+    if readings.is_empty() {
+        eprintln!("no PowerShell engine on this host; only the quoting itself was checked");
+    }
+    for (engine, read) in readings {
+        for (index, chunk) in read.chunks(POWERSHELL_LITERALS.len()).enumerate() {
+            assert_eq!(chunk, POWERSHELL_LITERALS, "{engine}, set {index}");
+        }
+        assert_eq!(read.len(), 3 * POWERSHELL_LITERALS.len(), "{engine}");
+    }
+}
+
 #[test]
 fn new_split_overlays_resolve_text_style_and_color() {
     let overlay = resolve_pane_overlay(Some(PaneOverlayRequest {

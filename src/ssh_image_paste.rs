@@ -50,6 +50,7 @@ use gpui::Image;
 use task::Shell;
 use terminal::{ImagePasteHandler, ImagePasteResult};
 
+use crate::command_panes::quote_powershell_literal;
 use crate::image_paste::normalize_image;
 
 #[cfg(windows)]
@@ -552,7 +553,8 @@ fn resolve_native_ssh(environment: &HashMap<String, String>) -> Option<PathBuf> 
 ///
 /// Project detection asks this, not image paste. An OpenSSH session needs no
 /// such check, because the remote shell's own `zetta-cwd:` reports pass
-/// through it and move the pane out of any local project. A Mosh client
+/// through it and, unauthenticated, move the pane out of any local project
+/// (never into one; see `project_detection_directory`). A Mosh client
 /// redraws the remote screen and sends the remote title with a `[mosh] `
 /// prefix, so those reports never arrive and the pane would keep the local
 /// directory it had before the session started. This is not gated on
@@ -958,7 +960,7 @@ fn powershell_probe_script(sentinel: &str) -> String {
 }
 
 fn powershell_upload_script(sentinel: &str) -> String {
-    let sentinel = powershell_quote(sentinel);
+    let sentinel = quote_powershell_literal(sentinel);
     format!(
         "$ErrorActionPreference='Stop';$root=[IO.Path]::GetTempPath();$directory=Join-Path $root ('zetta-image-'+[Guid]::NewGuid().ToString('N'));New-Item -ItemType Directory -Path $directory | Out-Null;$acl=Get-Acl -LiteralPath $directory;$acl.SetAccessRuleProtection($true,$false);foreach($entry in @($acl.Access)){{[void]$acl.RemoveAccessRule($entry)}};$identity=[Security.Principal.WindowsIdentity]::GetCurrent().Name;$rule=New-Object Security.AccessControl.FileSystemAccessRule($identity,'FullControl','ContainerInherit,ObjectInherit','None','Allow');[void]$acl.AddAccessRule($rule);Set-Acl -LiteralPath $directory -AclObject $acl;$path=Join-Path $directory '{IMAGE_FILE_NAME}';$input=[Console]::OpenStandardInput();$output=[IO.File]::Open($path,[IO.FileMode]::Create,[IO.FileAccess]::Write,[IO.FileShare]::None);try{{$input.CopyTo($output)}}finally{{$output.Dispose();$input.Dispose()}};[Console]::Out.WriteLine({sentinel}+$path+{sentinel})"
     )
@@ -967,12 +969,8 @@ fn powershell_upload_script(sentinel: &str) -> String {
 fn powershell_cleanup_script(directory: &str) -> String {
     format!(
         "$ErrorActionPreference='SilentlyContinue';Remove-Item -LiteralPath {} -Recurse -Force -ErrorAction SilentlyContinue",
-        powershell_quote(directory)
+        quote_powershell_literal(directory)
     )
-}
-
-fn powershell_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "''"))
 }
 
 fn powershell_remote_command(executable: &str, script: &str) -> String {

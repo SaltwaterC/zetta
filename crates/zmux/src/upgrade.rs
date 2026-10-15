@@ -36,12 +36,20 @@ use crate::messages::ClientId;
 /// Bumped whenever [`Handover`] changes incompatibly. Optional fields with a
 /// serde default deliberately keep the version so an older running daemon can
 /// hand its state to the build that introduced them.
-pub const HANDOVER_VERSION: u32 = 8;
+///
+/// 9 added [`Handover::lifetime_lock`]. It is always present in what this
+/// image writes, and an image that predates it refuses unknown fields, so the
+/// version says so before `execv` rather than after it.
+pub const HANDOVER_VERSION: u32 = 9;
+
+/// The version before [`Handover::lifetime_lock`], which an older daemon still
+/// hands over in; its replacement takes the lock itself.
+pub const PREVIOUS_HANDOVER_VERSION: u32 = 8;
 
 /// Whether this image can adopt a handover of `version`, which is what
 /// `--resume-check` answers.
 pub fn accepts_handover_version(version: u32) -> bool {
-    version == HANDOVER_VERSION
+    version == HANDOVER_VERSION || version == PREVIOUS_HANDOVER_VERSION
 }
 
 /// Everything the next image needs to carry on.
@@ -71,6 +79,11 @@ pub struct Handover {
     /// older image; see `server::sealing::adopted_grants`.
     #[serde(default)]
     pub recipient_grants: Option<crate::server::RecipientGrants>,
+    /// The descriptor holding the daemon's lifetime lock, kept open across the
+    /// `execv` so the lock is never free while the image is replaced (see
+    /// `server/lifetime_lock.rs`). Absent from a version 8 handover.
+    #[serde(default)]
+    pub lifetime_lock: Option<RawFd>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -255,7 +268,7 @@ pub fn read_handover(descriptor: RawFd) -> Result<Handover> {
         .context("reading the handover")?;
     let handover: Handover = serde_json::from_slice(&encoded).context("parsing the handover")?;
     anyhow::ensure!(
-        handover.version == HANDOVER_VERSION,
+        accepts_handover_version(handover.version),
         "handover version {} is not the {HANDOVER_VERSION} this multiplexer understands",
         handover.version
     );

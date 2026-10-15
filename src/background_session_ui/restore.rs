@@ -263,7 +263,7 @@ impl Zetta {
                         entry
                             .terminal
                             .as_ref()
-                            .and_then(|terminal| terminal.read(cx).working_directory())
+                            .and_then(|terminal| terminal.read(cx).trusted_working_directory())
                             .or_else(|| entry.working_directory.clone())
                             .or_else(|| entry.wsl_directory.as_deref().map(PathBuf::from)),
                     )

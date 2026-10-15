@@ -7,7 +7,15 @@
 
 use super::*;
 
-pub(super) fn serve(daemon: &Arc<Daemon>, stream: Stream, token: &str) -> Result<()> {
+/// Serves one connection. `deadline` bounds the handshake — the request, and
+/// on Windows the attestation that may precede it — but not what follows: a
+/// subscription or a shared stream stays open as long as its client does.
+pub(super) fn serve(
+    daemon: &Arc<Daemon>,
+    stream: Stream,
+    token: &str,
+    deadline: Instant,
+) -> Result<()> {
     // A terminal must never cross a user boundary. The socket's permissions
     // already restrict this; checking the peer as well means a mistake in the
     // directory's access control is not on its own enough.
@@ -18,7 +26,7 @@ pub(super) fn serve(daemon: &Arc<Daemon>, stream: Stream, token: &str) -> Result
     let peer_process_id = crate::transport::peer_process_id(&stream)?;
 
     let mut connection = Connection::new(stream);
-    let mut envelope = read_request(&mut connection, token)?;
+    let mut envelope = read_request(&mut connection, token, deadline)?;
 
     // A client may ask to be identified before it sends the request that needs
     // it, which is how a request that streams raw bytes after its message gets
@@ -36,7 +44,7 @@ pub(super) fn serve(daemon: &Arc<Daemon>, stream: Stream, token: &str) -> Result
             }
         };
         connection.send(&Response::Ok)?;
-        envelope = read_request(&mut connection, token)?;
+        envelope = read_request(&mut connection, token, deadline)?;
         attested
     } else {
         peer_process_id
@@ -46,7 +54,7 @@ pub(super) fn serve(daemon: &Arc<Daemon>, stream: Stream, token: &str) -> Result
     #[cfg(unix)]
     if matches!(envelope.request, Request::Attest) {
         connection.send(&Response::Ok)?;
-        envelope = read_request(&mut connection, token)?;
+        envelope = read_request(&mut connection, token, deadline)?;
     }
 
     // Where the platform reports no peer credentials, a request whose answer

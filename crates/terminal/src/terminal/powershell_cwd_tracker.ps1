@@ -1,3 +1,15 @@
+# The nonce Zetta gave this shell. Lifecycle and working-directory markers
+# carry it so that a `command-finished` or a directory printed by anything else
+# cannot satisfy a `zetta pane wait` or choose where a split, a file server or a
+# project starts. Kept in a global, not the environment, which programs
+# inherit. A tracker that ran first may already hold it, so an absent
+# variable keeps it.
+if (Test-Path Env:__ZETTA_COMMAND_MARKER_NONCE) {
+    $global:__ZettaMarkerNonce = $env:__ZETTA_COMMAND_MARKER_NONCE
+    Remove-Item Env:__ZETTA_COMMAND_MARKER_NONCE
+} elseif ($null -eq (Get-Variable -Name __ZettaMarkerNonce -Scope Global -ErrorAction SilentlyContinue)) {
+    $global:__ZettaMarkerNonce = ''
+}
 $terminalTrackerActive = Get-Variable -Name __ZettaCwdTrackerInstalled -Scope Global -ErrorAction SilentlyContinue
 if (-not $terminalTrackerActive) {
     $global:__ZettaCwdTrackerInstalled = $true
@@ -10,13 +22,13 @@ if (-not $terminalTrackerActive) {
     $global:__ZettaOriginalCommandValidationHandler = $null
     function global:__zetta_report_tracking_ready {
         if (-not $global:__ZettaLifecycleTrackingEnabled) { return }
-        [Console]::Write("$([char]27)]2;zetta-event:tracking-ready$([char]27)\")
+        [Console]::Write("$([char]27)]2;zetta-event;$($global:__ZettaMarkerNonce):tracking-ready$([char]27)\")
     }
     function global:__zetta_report_command_started([string] $command) {
         if (-not $global:__ZettaLifecycleTrackingEnabled) { return }
         if ($global:__ZettaCommandStarted) { return }
         $global:__ZettaCommandStarted = $true
-        [Console]::Write("$([char]27)]2;zetta-event:command-started:$command$([char]27)\")
+        [Console]::Write("$([char]27)]2;zetta-event;$($global:__ZettaMarkerNonce):command-started:$command$([char]27)\")
     }
     function global:prompt {
         $promptSucceeded = $?
@@ -29,11 +41,15 @@ if (-not $terminalTrackerActive) {
                 } else {
                     1
                 }
-                [Console]::Write("$([char]27)]2;zetta-event:command-finished:$status$([char]27)\")
+                [Console]::Write("$([char]27)]2;zetta-event;$($global:__ZettaMarkerNonce):command-finished:$status$([char]27)\")
                 $global:__ZettaCommandStarted = $false
             }
             $zettaDirectory = $ExecutionContext.SessionState.Path.CurrentFileSystemLocation.ProviderPath
-            [Console]::Write("$([char]27)]2;zetta-cwd:$zettaDirectory$([char]27)\")
+            if ($global:__ZettaMarkerNonce) {
+                [Console]::Write("$([char]27)]2;zetta-cwd;$($global:__ZettaMarkerNonce):$zettaDirectory$([char]27)\")
+            } else {
+                [Console]::Write("$([char]27)]2;zetta-cwd:$zettaDirectory$([char]27)\")
+            }
             [Console]::Write("$([char]27)[0m")
         } catch {}
         if ($null -ne $global:__ZettaOriginalPrompt) {

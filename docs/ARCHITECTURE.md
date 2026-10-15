@@ -150,6 +150,8 @@ layering rule: every module named here is a sibling under `src/`.
 - `multi_command_ui.rs`: multi-command prompt interaction, rendering, and its
   overlay
 - `close_confirmation_ui.rs`: the pinned-tab close confirmation
+- `script_open_ui.rs` (macOS): the confirmation before running a shell script
+  Finder or `open` asked Zetta to open
 - `session_auth_ui.rs`: the session passphrase/secret prompt, its field model,
   and the protect/reconnect flows that submit it
 - `remote_session_ui.rs`: the remote-session picker; SSH discovery is kept off

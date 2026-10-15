@@ -478,7 +478,7 @@ fn scoped_session_instructions(
     )
 }
 
-fn display_text(text: &str) -> String {
+pub(crate) fn display_text(text: &str) -> String {
     let mut display = String::with_capacity(text.len());
     for character in text.chars() {
         match character {

@@ -27,6 +27,18 @@ fn udp_port_candidates_start_randomly_and_wrap_the_complete_range() {
 }
 
 #[test]
+fn the_connect_line_is_built_without_growing_its_buffer() {
+    let key = [0xff; 16];
+    let line = connect_line(u16::MAX, &key);
+    assert_eq!(line.as_str(), "MOSH CONNECT 65535 /////////////////////w\n");
+    // A reallocation would have left a copy of the key in the freed buffer,
+    // where `Zeroizing` cannot reach it.
+    assert_eq!(line.capacity(), 64);
+    let text = line.trim_end().rsplit(' ').next().unwrap();
+    assert_eq!(STANDARD_NO_PAD.decode(text).unwrap(), key);
+}
+
+#[test]
 fn the_server_keeps_its_half_alive_without_hearing_anything() {
     let interval = Duration::from_millis(500);
     let armed = Some(interval);

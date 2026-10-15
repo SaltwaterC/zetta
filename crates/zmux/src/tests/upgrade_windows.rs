@@ -9,6 +9,7 @@ fn handover(version: u32) -> Handover {
         retention: crate::retention::Retention::None,
         sessions: Vec::new(),
         recipient_grants: None,
+        lifetime_lock: None,
     }
 }
 
@@ -22,11 +23,51 @@ fn handover_round_trips_through_a_pipe() {
         unsafe { GetCurrentProcess() },
         &mut announcement,
         &handover(HANDOVER_VERSION),
+        None,
     )
     .unwrap();
     let received = receive_handover_from(announcement.as_slice()).unwrap();
 
     assert_eq!(received.generation, 7);
+    assert!(received.lifetime_lock.is_none());
+}
+
+/// The lock travels as a second announced handle, and is still held through
+/// the copy once the original is closed.
+#[test]
+fn the_lifetime_lock_is_announced_after_the_pipe() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("zmux.lock");
+    let lock = {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .share_mode(0)
+            .open(&path)
+            .unwrap()
+    };
+    let mut announcement = Vec::new();
+
+    send_handover_to(
+        unsafe { GetCurrentProcess() },
+        &mut announcement,
+        &handover(HANDOVER_VERSION),
+        Some(&lock),
+    )
+    .unwrap();
+    drop(lock);
+    let received = receive_handover_from(announcement.as_slice()).unwrap();
+
+    assert!(received.lifetime_lock.is_some());
+    assert!(
+        fs::OpenOptions::new().read(true).open(&path).is_err(),
+        "the duplicated handle no longer holds the lock"
+    );
+    drop(received);
+    assert!(fs::OpenOptions::new().read(true).open(&path).is_ok());
 }
 
 #[test]

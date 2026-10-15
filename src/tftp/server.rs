@@ -380,6 +380,19 @@ fn safe_server_path(root: &Path, filename: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
+/// Whether any component of `relative` starts with a dot.
+///
+/// Uploads refuse these. Containment and `create_new` already stop a peer
+/// escaping the root or overwriting a file, but a root that is a home or
+/// project directory still has dot-directories where a *new* file is
+/// executable configuration — `.ssh/authorized_keys`, `.config/autostart/`,
+/// `.git/hooks/`, `.bashrc` — and a firmware upload has no reason to need one.
+fn has_dot_prefixed_component(relative: &Path) -> bool {
+    relative.components().any(|component| {
+        matches!(component, Component::Normal(name) if name.as_encoded_bytes().starts_with(b"."))
+    })
+}
+
 struct PendingUpload {
     file: Option<File>,
     path: PathBuf,
@@ -396,6 +409,10 @@ impl PendingUpload {
                 .all(|component| matches!(component, Component::Normal(_))),
             "paths outside the server root are not accepted"
         );
+        anyhow::ensure!(
+            !has_dot_prefixed_component(relative),
+            "dot-prefixed names are not accepted"
+        );
         let path = root.join(relative);
         let parent = path
             .parent()
@@ -409,6 +426,14 @@ impl PendingUpload {
         let path = canonical_parent.join(
             path.file_name()
                 .context("upload path must include a file name")?,
+        );
+        // Checked again after resolution: a symlink without a dot, such as
+        // `cfg -> .config`, would otherwise reach the directory the request
+        // could not name.
+        anyhow::ensure!(
+            path.strip_prefix(root)
+                .is_ok_and(|stored| !has_dot_prefixed_component(stored)),
+            "dot-prefixed names are not accepted"
         );
         let file = OpenOptions::new()
             .write(true)

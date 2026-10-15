@@ -22,6 +22,7 @@ fn http_server_parser_accepts_root_port_and_configuration_file() {
             root: PathBuf::from("firmware"),
             port: Some(8080),
             config_path: Some(PathBuf::from("zetta.json")),
+            options: crate::HttpServerOptions::default(),
         })
     );
     assert!(
@@ -34,6 +35,67 @@ fn http_server_parser_accepts_root_port_and_configuration_file() {
     );
 }
 
+/// The defaults are the restrictive side, and both spellings of each flag reach
+/// the server: dotfiles refused, the Host check on.
+#[cfg(feature = "http-server")]
+#[test]
+fn http_server_parser_accepts_dotfile_and_host_flags() {
+    let parse = |args: &[&str]| {
+        parse_http_args(
+            std::iter::once("server")
+                .chain(args.iter().copied())
+                .map(OsString::from),
+        )
+    };
+    let command = |args: &[&str]| match parse(args).unwrap() {
+        CliServiceCommand::Http(command) => command,
+        #[allow(
+            unreachable_patterns,
+            reason = "the only variant when http-server is the sole CLI service feature"
+        )]
+        _ => panic!("expected an HTTP server command"),
+    };
+    let options = |args: &[&str]| command(args).options;
+
+    assert_eq!(options(&[]), crate::HttpServerOptions::default());
+    for args in [
+        &[
+            "--serve-dotfiles",
+            "--allow-host",
+            "Builds.LAN.",
+            "-a",
+            "[FE80::1]",
+            "--allow-any-host",
+        ][..],
+        &["-d", "-a", "builds.lan", "--allow-host", "fe80::1", "-A"][..],
+    ] {
+        assert_eq!(
+            options(args),
+            crate::HttpServerOptions {
+                serve_dotfiles: true,
+                allowed_hosts: vec!["builds.lan".to_owned(), "fe80::1".to_owned()],
+                allow_any_host: true,
+            },
+            "{args:?}"
+        );
+    }
+
+    // A shared option keeps its value even when the value looks like a flag.
+    let command = command(&["--root", "-d"]);
+    assert_eq!(command.root, PathBuf::from("-d"));
+    assert!(!command.options.serve_dotfiles);
+
+    for (args, message) in [
+        (&["--allow-host"][..], "--allow-host requires"),
+        (&["--allow-host", "builds.lan:8000"][..], "without a port"),
+        (&["-d", "--serve-dotfiles"][..], "--serve-dotfiles may only"),
+        (&["-A", "-A"][..], "--allow-any-host may only"),
+    ] {
+        let error = parse(args).unwrap_err().to_string();
+        assert!(error.contains(message), "{args:?}: {error}");
+    }
+}
+
 #[cfg(feature = "http-server")]
 #[test]
 fn http_server_uses_the_configured_port_unless_the_cli_overrides_it() {
@@ -44,6 +106,7 @@ fn http_server_uses_the_configured_port_unless_the_cli_overrides_it() {
         root: PathBuf::from("."),
         port: None,
         config_path: Some(config_path.clone()),
+        options: crate::HttpServerOptions::default(),
     };
     assert_eq!(configured.resolved_port().unwrap(), 8081);
     assert_eq!(

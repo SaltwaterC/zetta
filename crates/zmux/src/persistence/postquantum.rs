@@ -3,6 +3,17 @@
 //!
 //! age 1.3.1 defines this stanza; it is implemented here rather than taken
 //! from the `age` crate because that crate does not expose it.
+//!
+//! Every buffer here that holds private key material is erased: the decoded
+//! and encoded Bech32 text of an identity and the 5-bit groups in between,
+//! each sized up front so it is never reallocated, the key bytes taken out of
+//! `hpke` to encode, and the unwrapped file key. `hpke`'s own copies are its
+//! business: the X-Wing decapsulation key erases itself on drop, but parsing
+//! one goes through an array on `hpke`'s stack that is not erased. Writing an
+//! identity through [`fmt::Display`] puts it into the caller's buffer, which
+//! this module does not own either.
+
+use zeroize::Zeroize as _;
 
 use super::*;
 
@@ -29,7 +40,7 @@ impl MlKem768X25519Recipient {
         write!(
             formatter,
             "{}",
-            bech32_encode(PQ_RECIPIENT_HRP, &self.key.to_bytes(), false)
+            bech32_encode(PQ_RECIPIENT_HRP, &self.key.to_bytes(), false).as_str()
         )
     }
 }
@@ -98,8 +109,11 @@ impl MlKem768X25519Identity {
         }
     }
 
-    fn encoded(&self) -> String {
-        bech32_encode(PQ_IDENTITY_HRP, &self.key.to_bytes(), true)
+    fn encoded(&self) -> Zeroizing<String> {
+        let mut key = self.key.to_bytes();
+        let encoded = bech32_encode(PQ_IDENTITY_HRP, &key, true);
+        key.as_mut_slice().zeroize();
+        encoded
     }
 }
 
@@ -156,12 +170,12 @@ impl age::Identity for MlKem768X25519Identity {
             Ok(context) => context,
             Err(_) => return Some(Err(age::DecryptError::InvalidHeader)),
         };
-        match context.open(&stanza.body, &[]) {
+        // Erased however it is dropped, including when it is the wrong length.
+        let plaintext = context.open(&stanza.body, &[]).map(Zeroizing::new);
+        match plaintext {
             Ok(plaintext) if plaintext.len() == FILE_KEY_BYTES => {
-                let mut plaintext = plaintext;
                 Some(Ok(FileKey::init_with_mut(|file_key| {
                     file_key.copy_from_slice(&plaintext);
-                    plaintext.fill(0);
                 })))
             }
             // X-Wing is anonymous. A failed open means this stanza was not
@@ -171,30 +185,36 @@ impl age::Identity for MlKem768X25519Identity {
     }
 }
 
-fn bech32_encode(hrp: &str, bytes: &[u8], uppercase: bool) -> String {
+/// Encodes `bytes` in Bech32, into erased memory of exactly the final size.
+/// Both callers' bytes may be a private key.
+fn bech32_encode(hrp: &str, bytes: &[u8], uppercase: bool) -> Zeroizing<String> {
     const CHARSET: &[u8; 32] = b"qpzry9x8gf2tvdw0s3jn54khce6mua7l";
     let data = convert_bits(bytes, 8, 5, true).expect("valid 8-to-5 conversion");
-    let mut values = data.clone();
-    values.extend([0; 6]);
+    let mut values = Zeroizing::new(Vec::with_capacity(data.len() + 6));
+    values.extend_from_slice(&data);
+    values.extend_from_slice(&[0; 6]);
     let checksum_hrp = hrp.to_ascii_lowercase();
     let checksum = bech32_polymod(&bech32_hrp_expand(&checksum_hrp), &values) ^ 1;
-    let mut output = String::with_capacity(hrp.len() + 1 + data.len() + 6);
+    let mut output = Zeroizing::new(String::with_capacity(hrp.len() + 1 + data.len() + 6));
     output.push_str(hrp);
     output.push('1');
     for value in data
-        .into_iter()
+        .iter()
+        .copied()
         .chain((0..6).map(|index| ((checksum >> (5 * (5 - index))) & 31) as u8))
     {
         output.push(CHARSET[value as usize] as char);
     }
     if uppercase {
-        output.to_ascii_uppercase()
-    } else {
-        output
+        // In place: `to_ascii_uppercase` would return a copy and drop this one.
+        output.make_ascii_uppercase();
     }
+    output
 }
 
-fn bech32_decode(value: &str, expected_hrp: &str, uppercase: bool) -> Result<Vec<u8>> {
+/// Decodes Bech32 text into erased memory. The identity's caller passes a
+/// private key, so the 5-bit groups between the two are erased as well.
+fn bech32_decode(value: &str, expected_hrp: &str, uppercase: bool) -> Result<Zeroizing<Vec<u8>>> {
     const CHARSET: &[u8; 32] = b"qpzry9x8gf2tvdw0s3jn54khce6mua7l";
     const MAX_BECH32_LENGTH: usize = 4096;
     anyhow::ensure!(!value.is_empty(), "invalid Bech32 encoding");
@@ -218,9 +238,10 @@ fn bech32_decode(value: &str, expected_hrp: &str, uppercase: bool) -> Result<Vec
             .all(|character| !character.is_ascii() || character.is_ascii_graphic()),
         "invalid Bech32 encoding"
     );
+    // Compared in place: `to_ascii_uppercase` would copy an identity's text.
     anyhow::ensure!(
-        (uppercase && value == value.to_ascii_uppercase())
-            || (!uppercase && value == value.to_ascii_lowercase()),
+        (uppercase && !value.bytes().any(|byte| byte.is_ascii_lowercase()))
+            || (!uppercase && !value.bytes().any(|byte| byte.is_ascii_uppercase())),
         "non-canonical Bech32 case"
     );
     let separator = value.rfind('1').context("invalid Bech32 encoding")?;
@@ -228,16 +249,14 @@ fn bech32_decode(value: &str, expected_hrp: &str, uppercase: bool) -> Result<Vec
     anyhow::ensure!(hrp == expected_hrp, "incorrect Bech32 HRP");
     let encoded = &encoded[1..];
     anyhow::ensure!(encoded.len() >= 6, "invalid Bech32 checksum");
-    let values = encoded
-        .bytes()
-        .map(|byte| {
-            CHARSET
-                .iter()
-                .position(|candidate| *candidate == byte.to_ascii_lowercase())
-                .map(|value| value as u8)
-                .context("invalid Bech32 character")
-        })
-        .collect::<Result<Vec<_>>>()?;
+    let mut values = Zeroizing::new(Vec::with_capacity(encoded.len()));
+    for byte in encoded.bytes() {
+        let value = CHARSET
+            .iter()
+            .position(|candidate| *candidate == byte.to_ascii_lowercase())
+            .context("invalid Bech32 character")?;
+        values.push(value as u8);
+    }
     let checksum_hrp = hrp.to_ascii_lowercase();
     anyhow::ensure!(
         bech32_polymod(&bech32_hrp_expand(&checksum_hrp), &values) == 1,
@@ -246,13 +265,16 @@ fn bech32_decode(value: &str, expected_hrp: &str, uppercase: bool) -> Result<Vec
     convert_bits(&values[..values.len() - 6], 5, 8, false)
 }
 
-fn convert_bits(data: &[u8], from: u32, to: u32, pad: bool) -> Result<Vec<u8>> {
+/// Regroups bits for Bech32 into an erased buffer sized for the whole result,
+/// so it never reallocates part of a key into freed memory.
+fn convert_bits(data: &[u8], from: u32, to: u32, pad: bool) -> Result<Zeroizing<Vec<u8>>> {
     let mut accumulator = 0u32;
     let mut bits = 0u32;
     let max_value = (1u32 << to) - 1;
     let max_input = (1u32 << from) - 1;
     let max_accumulator = (1u32 << (from + to - 1)) - 1;
-    let mut result = Vec::new();
+    let total_bits = data.len().saturating_mul(from as usize);
+    let mut result = Zeroizing::new(Vec::with_capacity(total_bits.div_ceil(to as usize)));
     for &value in data {
         anyhow::ensure!(u32::from(value) <= max_input, "invalid Bech32 data");
         accumulator = ((accumulator << from) | u32::from(value)) & max_accumulator;

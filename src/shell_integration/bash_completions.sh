@@ -644,7 +644,7 @@ _zetta_complete() {
             fi
             return
             ;;
-        --port|-p|--baud-rate|-b|--profile-duration|--columns|--rows|-R)
+        --port|-p|--allow-host|--baud-rate|-b|--profile-duration|--columns|--rows|-R)
             COMPREPLY=()
             return
             ;;
@@ -851,7 +851,7 @@ _zetta_complete() {
             if (( COMP_CWORD == 2 )); then
                 _zetta_compgen 'server --help'
             else
-                _zetta_compgen '--root --port --config --help'
+                _zetta_compgen '--root --port --config --serve-dotfiles --allow-host --allow-any-host --help'
             fi
             ;;
         tftp)

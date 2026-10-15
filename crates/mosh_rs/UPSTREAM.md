@@ -109,6 +109,20 @@ waits on it, because a Mosh client whose packets never arrive otherwise looks
 like a working session with nothing to show — and its server gives up on it
 a minute later, leaving the pane blank for good.
 
+**Fragment assembly bound** (security review finding 3.10).
+`src/transport.rs`: `FragmentAssembly` stops holding an instruction once
+its fragments add up to more than `MAX_INSTRUCTION_BYTES` of compressed
+bytes, and ignores the rest of that instruction's fragments. Upstream
+capped only the decompressed output, after storing and concatenating
+every fragment, so a server could make the client hold 32,768 fragments
+of up to 2 KiB each (about 64 MiB) twice over. mosh's compressor writes into a
+buffer of the same 4 MiB, so nothing it sends reaches the cap. Keeping
+the count exact also changed two edge cases: a resent fragment is counted
+at its new length, and fragments numbered past the final one are dropped
+from `arrived`, where upstream left them counted and the instruction could
+then never complete. The tests are the three inline ones beside
+`a_new_id_wipes_a_half_assembled_instruction`.
+
 Nothing else changed, and with the keep-alive off every upstream test
 still passes unmodified.
 

@@ -113,6 +113,40 @@ fn a_remote_session_offering_another_hosts_sealed_key_is_sent_nothing() {
     assert!(error.to_string().contains("was not sent"), "{error:#}");
 }
 
+/// The same substitution through `remote_session_secret` itself — the function
+/// `run_remote_attach` and `run_remote_admin` take their secret from — so the
+/// wiring to the host check is pinned, not just the check.
+///
+/// The envelope is bound to this machine (or to nothing, where its host keys
+/// cannot be read), and the destination is one no `known_hosts` can list. Every
+/// outcome of the real lookup — no `ssh`, no entry, an unbound key — is a
+/// refusal; only opening without the host check releases the key.
+#[cfg(all(any(unix, windows), feature = "session-persistence"))]
+#[test]
+fn remote_session_secret_checks_the_users_destination_before_releasing_a_key() {
+    use age::secrecy::ExposeSecret as _;
+
+    let directory = tempfile::tempdir().unwrap();
+    let identity = age::x25519::Identity::generate();
+    let identity_path = directory.path().join("identity.txt");
+    fs::write(
+        &identity_path,
+        format!("{}\n", identity.to_string().expose_secret()),
+    )
+    .unwrap();
+    let recipients =
+        crate::persistence::RecipientSet::parse(&[identity.to_public().to_string()]).unwrap();
+    let elsewhere = crate::auto_protect::seal(&recipients).unwrap();
+    let mut summary = catalog(1, 1, &[2]).sessions.remove(0);
+    summary.key_envelope = elsewhere.authentication.key_envelope().map(str::to_owned);
+    let target = RemoteTarget::new("zetta-substituted-key-test.invalid");
+
+    let result = remote_session_secret(&summary, std::slice::from_ref(&identity_path), &target);
+
+    let error = result.expect_err("the key must not be released");
+    assert!(format!("{error:#}").contains("was not sent"), "{error:#}");
+}
+
 #[cfg(unix)]
 mod control_endpoints {
     use std::{os::unix::fs::PermissionsExt as _, path::Path};
