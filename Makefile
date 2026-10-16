@@ -589,9 +589,10 @@ install:
 		$(MAKE) build; \
 	fi
 	$(MAKE) install-binary
-	$(MAKE) upgrade-mux
 	$(MAKE) install-capabilities
 	$(MAKE) install-assets
+# The app-hosted daemon must execute the completed, signed bundle.
+	$(MAKE) upgrade-mux
 	$(MAKE) install-user-path
 
 upgrade-mux:

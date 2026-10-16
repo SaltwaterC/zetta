@@ -1,5 +1,27 @@
 use super::*;
 
+#[cfg(unix)]
+#[test]
+fn shell_detection_does_not_require_the_address_discovery_proxy() {
+    let fixture =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("src/tests/launcher/remote_platform_probe.sh");
+    for (name, expected) in [
+        ("windows", RemotePlatform::Windows),
+        ("posix", RemotePlatform::Posix),
+    ] {
+        let command = MoshCommand {
+            ssh: vec![
+                "/bin/sh".to_owned(),
+                fixture.to_string_lossy().into_owned(),
+                name.to_owned(),
+            ],
+            ..MoshCommand::default()
+        };
+        assert_eq!(command.remote_ip, RemoteIpMode::Proxy);
+        assert_eq!(probe(&command, "host").unwrap(), expected);
+    }
+}
+
 #[test]
 fn probe_classifies_both_native_windows_shells() {
     assert_eq!(

@@ -67,8 +67,8 @@ zmux create -H HOST --profile System
 
 `zmux create` keeps the session in the standalone multiplexer, so a later
 `zmux attach` or Zetta remote-session dialog can open it. A remote create
-queries the host's available profiles and starts its `zmux` daemon on demand;
-ordinary remote listing and attach still require an existing daemon. Pass
+queries the host's available profiles. Remote create, listing, and attach start
+the deployed `zmux` daemon on demand when none is reachable. Pass
 `--secret-stdin` to read an optional session secret from the first input line
 without exposing it in shell history or the process list. `--layout -` reads
 the JSON layout from standard input, and therefore cannot be combined with
@@ -355,6 +355,17 @@ does not inspect, connect to, or stop an already-running multiplexer. On
 Windows the daemon is accompanied by `zmux-pty.exe`, a small helper that owns
 the pseudoconsole handles so the daemon can be replaced without ending the
 shells it holds.
+
+On macOS, a packaged daemon runs as `Zetta.app/Contents/MacOS/zetta mux
+--daemon` with its own application responsibility. Its shells therefore retain
+Zetta's privacy identity after a GUI exits or is updated. The installed `zmux`
+command remains the CLI entry point, and an older standalone daemon migrates
+in place during upgrade without changing its PID or ending its panes. An
+unbundled `zmux` installation still uses the standalone daemon.
+
+An existing shell retains the macOS responsibility assigned when it started.
+After migrating an affected installation, open a new pane to use the corrected
+identity; the upgrade deliberately preserves the older shells and their work.
 
 Debug builds use a protocol-scoped `sessions-debug-vN` directory. This lets a
 `target/debug/zetta` and its adjacent `target/debug/zmux` run alongside an

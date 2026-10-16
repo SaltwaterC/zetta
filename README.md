@@ -94,6 +94,15 @@ zosh. The launcher prefers `zosh-server` through SSH, falls back to the stock
 `mosh-server` when it is unavailable, and uses plain SSH only when neither
 remote server is clearly usable.
 
+If the local machine rejects Zosh's UDP sends before the server first replies,
+Zosh reports the destination and original socket error. Established sessions
+keep retrying through temporary network failures so roaming still works.
+
+The packaged macOS multiplexer runs through `Zetta.app` with its own application
+responsibility, so surviving terminals retain Zetta's Local Network identity
+after the GUI exits or is updated. Standalone remote installations still run
+the small `zmux` executable.
+
 The Windows client follows the remote shell's application cursor mode for
 arrows, Home, and End, including Zsh/Prezto history substring search bindings.
 
@@ -132,8 +141,9 @@ Windows console. Each shell there is given its own agent pipe, which the
 daemon relays to the agent a Zosh pane forwarded, or to the host's own agent
 when none is attached. Forwarding over a native SSH pane is not linked there
 yet. SSH host aliases, authentication, and the optional agent-forwarding setting still use OpenSSH.
-If no remote daemon is running, the picker offers creation; creating a session
-starts a fresh daemon even when a crashed one left an endpoint file behind.
+Remote connections start the deployed `zmux` daemon automatically when none is
+reachable, including when loading the picker or attaching from the CLI. A
+stale endpoint left by a crashed daemon does not prevent startup.
 
 New panes in a remote session inherit the source pane's working directory.
 On Windows, interactive PowerShell panes synchronize that directory at each

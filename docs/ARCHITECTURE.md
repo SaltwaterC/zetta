@@ -48,7 +48,9 @@ layering rule: every module named here is a sibling under `src/`.
   platform), `startup/preparation.rs` (Windows launch configuration resolved
   while the main thread initializes the graphics platform),
   `startup/http_client.rs` (the HTTP client, built on its first
-  request), `startup/workload.rs` (the deterministic
+  request), `startup/macos_responsibility.rs` (establishing the packaged app's
+  own privacy identity before opening windows or hosting its daemon),
+  `startup/workload.rs` (the deterministic
   producer workloads `zetta benchmark` drives the renderer with), and
   `startup/wsl.rs` (WSL/MSYS2 profile and working-directory integration)
 

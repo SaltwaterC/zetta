@@ -50,6 +50,8 @@
 	<string>public.app-category.utilities</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Zetta and programs running in its terminals connect to devices on your local network.</string>
 	<key>NSFocusStatusUsageDescription</key>
 	<string>Zetta uses Focus status to silence terminal bells and notification sounds while Do Not Disturb is active.</string>
 </dict>

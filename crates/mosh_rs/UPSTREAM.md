@@ -123,6 +123,13 @@ from `arrived`, where upstream left them counted and the instruction could
 then never complete. The tests are the three inline ones beside
 `a_new_id_wipes_a_half_assembled_instruction`.
 
+**Initial UDP send failures.** `src/session.rs` reports local route,
+address and permission errors before any authenticated server reply, retaining
+the endpoint and original OS error in `MoshError::SendBeforeConnect`. Previously
+those errors were discarded, leaving a blank terminal waiting for packets that
+could not be sent. MTU fallback and transient retries are unchanged, and an
+established session keeps retrying through route changes so roaming still works.
+
 Nothing else changed, and with the keep-alive off every upstream test
 still passes unmodified.
 

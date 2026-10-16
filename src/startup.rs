@@ -46,6 +46,8 @@ mod cli_help;
 mod cli_modes;
 mod http_client;
 mod keybindings;
+#[cfg(target_os = "macos")]
+mod macos_responsibility;
 mod prefetch;
 #[cfg(windows)]
 mod preparation;
@@ -291,6 +293,8 @@ fn run_application(args: StartupArgs) -> Result<()> {
     if handed_off_to_existing_process(&args, project.root.as_deref())? {
         return Ok(());
     }
+    #[cfg(target_os = "macos")]
+    macos_responsibility::establish()?;
     launch_gui(args, project, activation_token)
 }
 

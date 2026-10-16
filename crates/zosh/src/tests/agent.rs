@@ -565,7 +565,7 @@ fn bootstrap_relay_admits_its_owner_and_root_only() {
 fn bootstrap_relay_refuses_a_peer_that_is_not_its_owner() {
     use std::fs;
     use std::os::unix::net::{UnixListener, UnixStream};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     let owner = unix_socket::this_user();
     if owner == 0 {
@@ -580,15 +580,27 @@ fn bootstrap_relay_refuses_a_peer_that_is_not_its_owner() {
 
     let relay = BootstrapAgentRelay::for_test_agent_path_and_owner(&path, owner + 1).unwrap();
     let mut forwarded = UnixStream::connect(relay.path()).unwrap();
-    forwarded
-        .set_read_timeout(Some(Duration::from_secs(2)))
-        .unwrap();
-    // A binding the relay would otherwise record and forward; written before
-    // the refusal can close the socket, so a failed write is as good as the
-    // closed read.
+    // The relay can close the peer before connect returns. On macOS setting
+    // SO_RCVTIMEO on that socket can fail with EINVAL; nonblocking reads also
+    // bound the test without depending on that socket-option race.
+    forwarded.set_nonblocking(true).unwrap();
+    // A binding the relay would otherwise record and forward. The refusal can
+    // close the socket before this write, so a failed write is acceptable.
     let _ = forwarded.write_all(&session_bind_frame(true));
     let mut byte = [0; 1];
-    let read = forwarded.read(&mut byte);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let read = loop {
+        let read = forwarded.read(&mut byte);
+        if read
+            .as_ref()
+            .is_err_and(|error| error.kind() == io::ErrorKind::WouldBlock)
+            && Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(1));
+            continue;
+        }
+        break read;
+    };
     assert!(
         matches!(read, Ok(0))
             || read

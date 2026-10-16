@@ -10,9 +10,9 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 /// Everything that can go wrong below the terminal.
 ///
-/// All of it is recoverable by dropping the datagram: on a public
-/// UDP port anyone can send bytes, so a parse failure is an
-/// ordinary event rather than a fault.
+/// Peer-supplied parse failures are recoverable by dropping the datagram:
+/// anyone can send to a public UDP port. Local socket failures can instead
+/// prevent a session from starting at all.
 pub enum MoshError {
     /// The printable key is not the 22-character canonical base64 form
     /// mosh-server prints. The message texts follow crypto.cc verbatim
@@ -59,6 +59,16 @@ pub enum MoshError {
     /// opened for its address family.
     #[error("Could not open a socket to the server.")]
     BadAddress,
+    /// The local machine rejected a UDP send before the first server reply.
+    /// Established sessions keep retrying through network changes instead.
+    #[error("Could not send UDP to {server} before receiving a server reply")]
+    SendBeforeConnect {
+        /// The server endpoint selected by the SSH bootstrap.
+        server: std::net::SocketAddr,
+        /// The original socket error, retained for diagnostics.
+        #[source]
+        source: std::io::Error,
+    },
 }
 
 /// The crate's result type.

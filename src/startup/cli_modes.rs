@@ -454,6 +454,10 @@ pub(super) fn set_pane_overlay(request: PaneOverlayRequest) -> Result<()> {
 /// the `zmux` binary cannot accept different arguments.
 #[cfg(feature = "zmux")]
 pub(super) fn run_mux_command(arguments: &[OsString], config_path: Option<PathBuf>) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    if arguments.iter().any(|argument| argument == "--daemon") {
+        super::macos_responsibility::establish()?;
+    }
     // The same reader `src/bin/zmux.rs` uses, so `zetta mux` and `zmux`
     // resolve the identity identically.
     #[cfg(feature = "session-persistence")]

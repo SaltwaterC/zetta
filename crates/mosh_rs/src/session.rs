@@ -702,10 +702,8 @@ impl<S: Screen> MoshSession<S> {
                     &out.packet.to_plaintext(),
                 )?;
                 let socket = self.sockets.last().expect("a session always has a socket");
-                if let Err(error) = socket.send_to(&datagram, self.server)
-                    && error.raw_os_error() == Some(EMSGSIZE)
-                {
-                    too_large = true;
+                if let Err(error) = socket.send_to(&datagram, self.server) {
+                    too_large |= self.send_error_requires_mtu_fallback(error)?;
                 }
             }
             if too_large {
@@ -723,6 +721,31 @@ impl<S: Screen> MoshSession<S> {
         self.prediction
             .set_local_frame_sent(self.sender.sent_state_last());
         Ok(events)
+    }
+
+    /// Distinguish MTU fallback and retryable loss from a local route or
+    /// permission failure that prevents the initial connection. Once the
+    /// peer has replied, even route failures are retried so roaming survives
+    /// a temporary loss of network connectivity.
+    fn send_error_requires_mtu_fallback(&self, error: std::io::Error) -> Result<bool> {
+        if error.raw_os_error() == Some(EMSGSIZE) {
+            return Ok(true);
+        }
+        if !self.heard_from_server
+            && matches!(
+                error.kind(),
+                std::io::ErrorKind::PermissionDenied
+                    | std::io::ErrorKind::HostUnreachable
+                    | std::io::ErrorKind::NetworkUnreachable
+                    | std::io::ErrorKind::AddrNotAvailable
+            )
+        {
+            return Err(MoshError::SendBeforeConnect {
+                server: self.server,
+                source: error,
+            });
+        }
+        Ok(false)
     }
 
     fn handle_datagram(&mut self, datagram: &[u8]) -> Result<Vec<HostEvent>> {
@@ -941,6 +964,74 @@ mod tests {
     fn offline_session() -> MoshSession<crate::screen::Vt100Screen> {
         let key = Base64Key::from_printable("AAAAAAAAAAAAAAAAAAAAAA").expect("valid key");
         MoshSession::connect("127.0.0.1", 1, &key).expect("bind a local socket")
+    }
+
+    #[test]
+    fn a_local_route_failure_reports_the_endpoint_and_original_error_before_connecting() {
+        use std::error::Error as _;
+        let session = offline_session();
+        for (kind, message) in [
+            (std::io::ErrorKind::HostUnreachable, "No route to host"),
+            (
+                std::io::ErrorKind::NetworkUnreachable,
+                "Network unreachable",
+            ),
+            (std::io::ErrorKind::PermissionDenied, "Permission denied"),
+            (std::io::ErrorKind::AddrNotAvailable, "Address unavailable"),
+        ] {
+            let error = session
+                .send_error_requires_mtu_fallback(std::io::Error::new(kind, message))
+                .unwrap_err();
+            assert!(error.to_string().contains("127.0.0.1:1"));
+            assert_eq!(error.source().unwrap().to_string(), message);
+        }
+    }
+
+    #[test]
+    fn an_established_session_keeps_retrying_route_and_permission_failures() {
+        let mut session = offline_session();
+        session.heard_from_server = true;
+        for kind in [
+            std::io::ErrorKind::HostUnreachable,
+            std::io::ErrorKind::NetworkUnreachable,
+            std::io::ErrorKind::PermissionDenied,
+            std::io::ErrorKind::AddrNotAvailable,
+        ] {
+            assert!(
+                !session
+                    .send_error_requires_mtu_fallback(kind.into())
+                    .unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn oversized_datagrams_still_request_mtu_fallback_before_and_after_connecting() {
+        let mut session = offline_session();
+        for connected in [false, true] {
+            session.heard_from_server = connected;
+            assert!(
+                session
+                    .send_error_requires_mtu_fallback(std::io::Error::from_raw_os_error(EMSGSIZE))
+                    .unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn transient_send_errors_do_not_end_a_starting_session() {
+        let session = offline_session();
+        for kind in [
+            std::io::ErrorKind::WouldBlock,
+            std::io::ErrorKind::Interrupted,
+            std::io::ErrorKind::TimedOut,
+        ] {
+            assert!(
+                !session
+                    .send_error_requires_mtu_fallback(kind.into())
+                    .unwrap()
+            );
+        }
     }
 
     #[test]

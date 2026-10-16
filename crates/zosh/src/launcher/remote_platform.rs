@@ -4,6 +4,7 @@
 //! observes the host's default shell instead of using this process's `cfg`.
 
 use super::*;
+
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -25,14 +26,9 @@ pub(super) fn probe(command: &MoshCommand, target: &str) -> Result<RemotePlatfor
         arguments.push(flag.to_owned());
     }
     arguments.extend(["-T".to_owned(), "-a".to_owned()]);
-    if command.remote_ip == RemoteIpMode::Proxy {
-        arguments.extend([
-            "-S".to_owned(),
-            "none".to_owned(),
-            "-o".to_owned(),
-            proxy_command(command),
-        ]);
-    }
+    // This query needs no server address. Keep OpenSSH's own transport and
+    // configured route, rather than requiring Zosh's TCP proxy just to learn
+    // which shell to use.
     arguments.extend([
         "-n".to_owned(),
         target.to_owned(),

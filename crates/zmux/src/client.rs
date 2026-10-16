@@ -1105,30 +1105,13 @@ impl Client {
         }))
     }
 
-    /// Connects to a remote daemon through a persistent OpenSSH stream-local
-    /// forward. Remote clients never start or upgrade a daemon and never ask
-    /// the remote host for a descriptor.
+    /// Connects to a remote daemon over SSH, starting the deployed standalone
+    /// multiplexer when none is reachable. Never upgrades a running daemon
+    /// or asks the remote host for a descriptor.
     ///
     /// The SSH login is the process's shared one for `target`, so a client
     /// made moments after another (the picker's, then the attach's) reuses it.
     pub fn connect_remote(target: RemoteTarget) -> Result<Self> {
-        let remote = RemoteTransport::shared(target)?;
-        let endpoint = remote.ensure_endpoint()?;
-        Ok(Self {
-            endpoint: Mutex::new(endpoint),
-            directory: PathBuf::new(),
-            client_id: ClientId::random()?,
-            stream_only: true,
-            remote: Some(remote),
-            session_secret: Arc::new(Mutex::new(None)),
-            operation_counter: Arc::new(AtomicU64::new(1)),
-        })
-    }
-
-    /// Connects to a remote daemon for a headless create operation. The
-    /// standalone remote `zmux` is bootstrapped only here; ordinary remote
-    /// listing and attachment continue to require an already-running daemon.
-    pub fn connect_remote_for_creation(target: RemoteTarget) -> Result<Self> {
         let remote = RemoteTransport::shared(target)?;
         let endpoint = remote.ensure_daemon()?;
         Ok(Self {
@@ -1142,29 +1125,15 @@ impl Client {
         })
     }
 
+    /// Connects to a remote daemon for a headless create operation.
+    pub fn connect_remote_for_creation(target: RemoteTarget) -> Result<Self> {
+        Self::connect_remote(target)
+    }
+
     /// Testable variant of [`Self::connect_remote`] that uses a supplied SSH
     /// executable.
     #[cfg(any(test, feature = "test-support"))]
     pub fn connect_remote_with_ssh_program(
-        target: RemoteTarget,
-        ssh_program: impl Into<PathBuf>,
-    ) -> Result<Self> {
-        let remote = Arc::new(RemoteTransport::with_ssh_program(target, ssh_program)?);
-        let endpoint = remote.endpoint()?;
-        Ok(Self {
-            endpoint: Mutex::new(endpoint),
-            directory: PathBuf::new(),
-            client_id: ClientId::random()?,
-            stream_only: true,
-            remote: Some(remote),
-            session_secret: Arc::new(Mutex::new(None)),
-            operation_counter: Arc::new(AtomicU64::new(1)),
-        })
-    }
-
-    /// Testable variant of [`Self::connect_remote_for_creation`].
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn connect_remote_for_creation_with_ssh_program(
         target: RemoteTarget,
         ssh_program: impl Into<PathBuf>,
     ) -> Result<Self> {
@@ -1182,6 +1151,15 @@ impl Client {
             session_secret: Arc::new(Mutex::new(None)),
             operation_counter: Arc::new(AtomicU64::new(1)),
         })
+    }
+
+    /// Testable variant of [`Self::connect_remote_for_creation`].
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn connect_remote_for_creation_with_ssh_program(
+        target: RemoteTarget,
+        ssh_program: impl Into<PathBuf>,
+    ) -> Result<Self> {
+        Self::connect_remote_with_ssh_program(target, ssh_program)
     }
 
     #[cfg(all(test, unix))]
@@ -3611,6 +3589,10 @@ fn append_startup_retention_arguments(arguments: &mut Vec<String>, retention: Op
 /// unrelated `zmux` earlier in the path cannot be handed a session's terminals.
 fn multiplexer_command() -> Result<(PathBuf, Vec<String>)> {
     let current = std::env::current_exe().context("locating this executable")?;
+    #[cfg(target_os = "macos")]
+    if let Some(application) = crate::macos_application::executable(&current) {
+        return Ok((application, vec!["mux".to_owned(), "--daemon".to_owned()]));
+    }
     let current_name = current
         .file_name()
         .and_then(|name| name.to_str())

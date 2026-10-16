@@ -854,7 +854,46 @@ PATH='{bin}':"$PATH" exec /bin/sh -c "$last"
     (ssh, log)
 }
 
-/// What this whole transport exists to do: one login, however many requests.
+/// Listing and attachment use the same startup path as creation, and an
+/// already-live daemon must not be replaced by the next client.
+#[cfg(unix)]
+#[test]
+fn ordinary_remote_clients_start_a_missing_or_stale_daemon() {
+    for stale in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let daemon = CountingDaemon::start(directory.path());
+        let (ssh, _) = fake_ssh(directory.path(), &daemon.endpoint());
+        let marker = directory.path().join("starts");
+        let mut old_endpoint = daemon.endpoint();
+        old_endpoint.socket_path = directory.path().join("dead.sock");
+        let before_start = if stale {
+            format!(
+                "printf '%s\\n' '{}'",
+                serde_json::to_string(&old_endpoint).unwrap()
+            )
+        } else {
+            "echo 'No such file or directory' >&2; exit 1".to_owned()
+        };
+        write_script(
+            &directory.path().join("bin/zmux"),
+            format!(
+                "#!/bin/sh\ncase \"$1\" in\n\
+                 endpoint) if test -f '{marker}'; then printf '%s\\n' '{endpoint}'; else {before_start}; fi;;\n\
+                 --daemon) echo started >> '{marker}';;\nesac\n",
+                marker = marker.display(),
+                endpoint = serde_json::to_string(&daemon.endpoint()).unwrap(),
+            ),
+        );
+        let target = RemoteTarget::new(format!("auto-start-{stale}"));
+        let client = crate::client::Client::connect_remote_with_ssh_program(target.clone(), &ssh)
+            .expect("ordinary remote clients must start the deployed daemon");
+        assert!(client.list().unwrap().is_empty());
+        let second = crate::client::Client::connect_remote_with_ssh_program(target, &ssh).unwrap();
+        assert!(second.list().unwrap().is_empty());
+        assert_eq!(std::fs::read_to_string(marker).unwrap(), "started\n");
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn connecting_and_requesting_costs_one_login() {

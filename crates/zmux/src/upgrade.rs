@@ -299,7 +299,12 @@ fn tempfile_anonymous() -> Result<std::fs::File> {
 /// which then refused the handover would have destroyed its own sessions to
 /// find out.
 pub fn replacement_accepts_handover(executable: &std::path::Path) -> Result<bool> {
-    let status = std::process::Command::new(executable)
+    let mut command = std::process::Command::new(executable);
+    #[cfg(target_os = "macos")]
+    if crate::macos_application::is_application(executable) {
+        command.arg("mux");
+    }
+    let status = command
         .arg("--resume-check")
         .arg(HANDOVER_VERSION.to_string())
         .stdin(std::process::Stdio::null())
@@ -326,7 +331,12 @@ pub fn exec_replacement(
     let resume_listener = listener
         .map(|listener| CString::new(format!("--resume-listener={listener}")))
         .transpose()?;
-    let mut arguments = vec![program.as_ptr(), daemon.as_ptr(), resume.as_ptr()];
+    let mut arguments = vec![program.as_ptr()];
+    #[cfg(target_os = "macos")]
+    if crate::macos_application::is_application(executable) {
+        arguments.push(c"mux".as_ptr());
+    }
+    arguments.extend([daemon.as_ptr(), resume.as_ptr()]);
     if let Some(resume_listener) = resume_listener.as_ref() {
         arguments.push(resume_listener.as_ptr());
     }

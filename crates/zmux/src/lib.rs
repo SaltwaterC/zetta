@@ -31,6 +31,8 @@ pub mod client;
 mod daemon_spawn;
 #[cfg(windows)]
 mod hosted_console;
+#[cfg(target_os = "macos")]
+mod macos_application;
 pub mod messages;
 mod mux_bridge;
 #[cfg(windows)]
@@ -619,6 +621,9 @@ pub fn run(arguments: &[OsString]) -> Result<()> {
 /// here, rather than where each such text enters an error, also covers the
 /// sources nobody has thought of yet.
 pub fn run_with_defaults(arguments: &[OsString], defaults: ClientDefaults) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    macos_application::host_daemon(arguments)
+        .map_err(|error| anyhow::anyhow!(display_error(&error)))?;
     run_command(arguments, defaults).map_err(|error| anyhow::anyhow!(display_error(&error)))
 }
 
