@@ -56,6 +56,8 @@ function global:__zetta_install_lifecycle_tracking([bool] $trackingEnabled) {
                 $global:__ZettaCommandStarted = $false
             }
             $zettaDirectory = $ExecutionContext.SessionState.Path.CurrentFileSystemLocation.ProviderPath
+            # Keep the native CWD used by zmux in sync with PowerShell's location.
+            [Environment]::CurrentDirectory = $zettaDirectory
             if ($global:__ZettaMarkerNonce) {
                 [Console]::Write("$([char]27)]2;zetta-cwd;$($global:__ZettaMarkerNonce):$zettaDirectory$([char]27)\")
             } else {

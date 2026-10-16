@@ -45,6 +45,9 @@ if (-not $terminalTrackerActive) {
                 $global:__ZettaCommandStarted = $false
             }
             $zettaDirectory = $ExecutionContext.SessionState.Path.CurrentFileSystemLocation.ProviderPath
+            # Set-Location changes PowerShell's provider location, not the native
+            # process CWD queried by zmux when a remote viewer splits this pane.
+            [Environment]::CurrentDirectory = $zettaDirectory
             if ($global:__ZettaMarkerNonce) {
                 [Console]::Write("$([char]27)]2;zetta-cwd;$($global:__ZettaMarkerNonce):$zettaDirectory$([char]27)\")
             } else {

@@ -6,6 +6,36 @@
 //! because the shell it has to match is resolved on the machine that starts the
 //! pane — for a shared session, the daemon's host, not the viewer's.
 
+/// Startup tracker shared by local terminals and daemon-created PowerShell panes.
+pub const POWERSHELL_CWD_TRACKER: &str =
+    include_str!("shell_integration/powershell_cwd_tracker.ps1");
+
+/// Installs tracking before the first prompt, preserving explicit commands and files.
+pub fn install_powershell_tracking(arguments: &mut Vec<String>) {
+    if arguments.iter().any(|argument| {
+        matches!(
+            argument.to_ascii_lowercase().as_str(),
+            "-c" | "-command"
+                | "-commandwithargs"
+                | "-cwa"
+                | "-encodedarguments"
+                | "-encodedcommand"
+                | "-ec"
+                | "-f"
+                | "-file"
+        )
+    }) {
+        return;
+    }
+    if !arguments
+        .iter()
+        .any(|argument| argument.eq_ignore_ascii_case("-NoExit"))
+    {
+        arguments.push("-NoExit".to_owned());
+    }
+    arguments.extend(["-Command".to_owned(), POWERSHELL_CWD_TRACKER.to_owned()]);
+}
+
 /// The shell families Zetta can install its integration into. Anything else
 /// runs without it rather than being sent a line it would print.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

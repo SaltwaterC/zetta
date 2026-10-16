@@ -779,8 +779,7 @@ fn powershell_cwd_tracker_uses_the_shared_idempotence_guard() {
 
 #[test]
 fn powershell_cwd_trackers_reset_before_the_saved_prompt() {
-    const TERMINAL_TRACKER: &str =
-        include_str!("../../crates/terminal/src/terminal/powershell_cwd_tracker.ps1");
+    const TERMINAL_TRACKER: &str = zetta_profiles::POWERSHELL_CWD_TRACKER;
     // The tokened marker when the shell holds its nonce, else the untokened
     // one: either way, one write the reset must follow at once.
     const MARKER_WRITE: &str = r#"if ($global:__ZettaMarkerNonce) {

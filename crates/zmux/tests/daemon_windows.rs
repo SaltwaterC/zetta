@@ -32,6 +32,9 @@ mod ctrl_c;
 #[path = "daemon_windows/console_server.rs"]
 mod console_server;
 
+#[path = "daemon_windows/cwd.rs"]
+mod cwd;
+
 struct TestDaemon {
     process: Child,
     _directory: tempfile::TempDir,
@@ -439,8 +442,7 @@ fn palette_initialization_does_not_block_native_shell_startup() {
 fn conpty_powershell_prompts_reset_native_attributes_with_or_without_profile_integration() {
     const POWERSHELL_INTEGRATION: &str =
         include_str!("../../../src/shell_integration/powershell.ps1");
-    const POWERSHELL_CWD_TRACKER: &str =
-        include_str!("../../terminal/src/terminal/powershell_cwd_tracker.ps1");
+    const POWERSHELL_CWD_TRACKER: &str = zetta_profiles::POWERSHELL_CWD_TRACKER;
 
     let profile_tracker = POWERSHELL_INTEGRATION
         .split_once("\n\nif (-not (Test-Path Env:EDITOR))")

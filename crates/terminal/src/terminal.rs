@@ -1472,7 +1472,7 @@ const REPORTED_LIFECYCLE_EVENT_PREFIX: &str = "zetta-event:";
 const AUTHENTICATED_LIFECYCLE_EVENT_PREFIX: &str = "zetta-event;";
 
 #[cfg(any(windows, test))]
-const POWERSHELL_CWD_TRACKER: &str = include_str!("terminal/powershell_cwd_tracker.ps1");
+const POWERSHELL_CWD_TRACKER: &str = zetta_profiles::POWERSHELL_CWD_TRACKER;
 
 #[cfg(any(windows, test))]
 fn visible_process_argv(argv: &[String]) -> &[String] {
@@ -1506,23 +1506,6 @@ fn windows_shell_program_name(program: &str) -> &str {
 fn is_windows_shell_program(program: &str, names: &[&str]) -> bool {
     let program = windows_shell_program_name(program);
     names.iter().any(|name| program.eq_ignore_ascii_case(name))
-}
-
-#[cfg(windows)]
-fn powershell_has_command_arguments(arguments: &[String]) -> bool {
-    arguments.iter().any(|argument| {
-        matches!(
-            argument.to_ascii_lowercase().as_str(),
-            "-c" | "-command"
-                | "-commandwithargs"
-                | "-cwa"
-                | "-encodedarguments"
-                | "-encodedcommand"
-                | "-ec"
-                | "-f"
-                | "-file"
-        )
-    })
 }
 
 /// `cmd.exe`'s prompt, prefixed with a working-directory marker.
@@ -1578,17 +1561,7 @@ fn install_windows_cwd_tracking(
     // This tracker is injected into ordinary interactive PowerShell panes, so
     // CWD and prompt-style reporting does not depend on the optional profile
     // integration installed by `zetta init powershell`.
-    let arguments = arguments.get_or_insert_default();
-    if powershell_has_command_arguments(arguments) {
-        return;
-    }
-    if !arguments
-        .iter()
-        .any(|argument| argument.eq_ignore_ascii_case("-NoExit"))
-    {
-        arguments.push("-NoExit".to_owned());
-    }
-    arguments.extend(["-Command".to_owned(), POWERSHELL_CWD_TRACKER.to_owned()]);
+    zetta_profiles::install_powershell_tracking(arguments.get_or_insert_default());
 }
 
 /// A working-directory marker, and whether it proved it came from this

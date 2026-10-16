@@ -135,6 +135,10 @@ yet. SSH host aliases, authentication, and the optional agent-forwarding setting
 If no remote daemon is running, the picker offers creation; creating a session
 starts a fresh daemon even when a crashed one left an endpoint file behind.
 
+New panes in a remote session inherit the source pane's working directory.
+On Windows, interactive PowerShell panes synchronize that directory at each
+prompt, including Windows PowerShell 5.1 without profile integration.
+
 Shared panes carried over SSH use the daemon's common terminal grid. Maximizing
 a pane can leave spare space until every viewer has room for a larger grid.
 During resizing, a smaller pane clips the existing grid until the daemon

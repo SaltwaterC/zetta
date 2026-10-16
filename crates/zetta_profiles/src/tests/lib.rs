@@ -2,6 +2,39 @@ use super::*;
 
 use std::io::Write as _;
 
+#[test]
+fn powershell_tracking_preserves_commands_and_is_idempotent() {
+    for flag in [
+        "-c",
+        "-Command",
+        "-cwa",
+        "-EncodedCommand",
+        "-ec",
+        "-File",
+        "-f",
+        "-EncodedArguments",
+    ] {
+        let original = vec![flag.to_owned(), "payload".to_owned()];
+        let mut arguments = original.clone();
+        install_powershell_tracking(&mut arguments);
+        assert_eq!(arguments, original);
+    }
+    for original in [vec!["-NoLogo".to_owned()], vec!["-NoExit".to_owned()]] {
+        let mut arguments = original;
+        install_powershell_tracking(&mut arguments);
+        assert_eq!(
+            arguments
+                .iter()
+                .filter(|arg| arg.eq_ignore_ascii_case("-NoExit"))
+                .count(),
+            1
+        );
+        let installed = arguments.clone();
+        install_powershell_tracking(&mut arguments);
+        assert_eq!(arguments, installed);
+    }
+}
+
 fn config_with(contents: &str) -> (tempfile::TempDir, std::path::PathBuf) {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("config.json");

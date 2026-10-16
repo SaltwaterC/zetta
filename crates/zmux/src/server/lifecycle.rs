@@ -195,6 +195,18 @@ fn shared_draft_process(
             }
             zetta_profiles::ProfileCommand::system()
         });
+    // Local viewers already prepared their shell arguments. Remote viewers only
+    // name a profile, so install the same tracker here on the executing host.
+    // Its prompt synchronizes PowerShell's location with the native process CWD
+    // that pane_working_directory reads; Set-Location alone leaves that stale.
+    #[cfg(windows)]
+    let command = {
+        let mut command = command;
+        if command.shell_kind() == zetta_profiles::ShellKind::PowerShell {
+            zetta_profiles::install_powershell_tracking(&mut command.args);
+        }
+        command
+    };
     let mut env = draft.env.clone();
     for name in zetta_profiles::REMOVED_TERMINAL_ENVIRONMENT {
         env.remove(*name);

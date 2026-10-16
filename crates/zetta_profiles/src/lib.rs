@@ -31,8 +31,9 @@ pub use environment::{
 };
 pub use shell_integration::{
     INIT_COMMAND_DONE_TITLE_PREFIX, INIT_COMMAND_HISTORY_PREFIX, INIT_COMMAND_MARKER_PREFIX,
-    INIT_COMMAND_MARKER_SUFFIX, ShellKind, init_command_done_title, init_command_marker,
-    init_command_wrapper, runs_a_command, shell_integration_startup_command,
+    INIT_COMMAND_MARKER_SUFFIX, POWERSHELL_CWD_TRACKER, ShellKind, init_command_done_title,
+    init_command_marker, init_command_wrapper, install_powershell_tracking, runs_a_command,
+    shell_integration_startup_command,
 };
 
 /// What a profile starts, on the machine that will start it.
