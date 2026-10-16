@@ -68,7 +68,10 @@ pub(crate) fn write_repaint(
     // Before the clear, not after: these are the rows that scrolled past
     // between the last frame and this one, and the repaint that follows is
     // what would otherwise erase them unseen.
-    if let Some(replay) = session.displayed().scrollback_replay(&previous) {
+    if let Some(replay) = session
+        .displayed()
+        .scrollback_replay_after_resize(&previous)
+    {
         output.write_all(&replay)?;
     }
     display::repaint_after_resize(output, &repaint, &input_modes, scrollback_clear)

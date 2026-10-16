@@ -462,7 +462,11 @@ impl FakeServer {
                 out.push(0x07);
             }
         }
-        out.extend_from_slice(&self.parser.screen().state_diff(&self.base));
+        if self.parser.screen().size() == self.base.size() {
+            out.extend_from_slice(&self.parser.screen().state_diff(&self.base));
+        } else {
+            out.extend_from_slice(&self.parser.screen().state_formatted());
+        }
         self.base = self.parser.screen().clone();
         out
     }
@@ -636,6 +640,56 @@ fn a_resize_mid_burst_still_keeps_the_history() {
     }
 }
 
+#[test]
+fn a_split_preserves_every_character_through_server_client_and_display() {
+    for (rows, cols) in [(3, 6), (2, 12), (8, 3), (8, 20)] {
+        let mut server = FakeServer::new(4, 12, true);
+        let mut terminal = ClientTerminal::new(DisplayScreen::new(4, 12));
+        let mut model = ModelTerminal::new(4, 12);
+        server.run(b"abcdefghijkl\r\nsecond-line\r\nthird-line\r\nprompt> ");
+        assert!(terminal.apply_diff(0, 1, &server.diff()));
+        model.write(&terminal.render(&[], OverlayCursor::Unchanged));
+
+        server.parser.screen_mut().set_size_reflow(rows, cols);
+        terminal.resize(rows, cols);
+        assert!(terminal.apply_diff(1, 2, &server.diff()));
+        // Fixed-grid geometry models a terminal that clips locally, so only
+        // data explicitly delivered by Zosh can make this assertion pass.
+        model.parser.screen_mut().set_size(rows, cols);
+        repaint_resized_terminal(&mut terminal, &mut model);
+        let retained = model.history.join("") + &model.text().replace('\n', "");
+        assert_eq!(
+            retained.trim_end(),
+            "abcdefghijklsecond-linethird-lineprompt>",
+            "{cols}x{rows}: {retained:?}"
+        );
+        assert_eq!(model.text(), server.text());
+    }
+}
+
+#[test]
+fn successive_resizes_before_a_frame_preserve_history_at_older_widths() {
+    for (rows, cols) in [(3, 3), (4, 1), (5, 8), (2, 12)] {
+        let mut server = FakeServer::new(4, 12, true);
+        let mut terminal = ClientTerminal::new(DisplayScreen::new(4, 12));
+        let mut model = ModelTerminal::new(4, 12);
+        server.run(b"abcdefghijkl\r\nsecond-line\r\nthird-line\r\nprompt> ");
+        assert!(terminal.apply_diff(0, 1, &server.diff()));
+        model.write(&terminal.render(&[], OverlayCursor::Unchanged));
+        server.parser.screen_mut().set_size_reflow(3, 6);
+        server.parser.screen_mut().set_size_reflow(rows, cols);
+        terminal.resize(rows, cols);
+        assert!(terminal.apply_diff(1, 2, &server.diff()));
+        model.parser.screen_mut().set_size(rows, cols);
+        repaint_resized_terminal(&mut terminal, &mut model);
+        let retained = model.history.join("") + &model.text().replace('\n', "");
+        assert_eq!(
+            retained.trim_end(),
+            "abcdefghijklsecond-linethird-lineprompt>"
+        );
+    }
+}
+
 /// Rows the server had to drop are reported rather than silently skipped, and
 /// the screen still lands where it should.
 #[test]
@@ -709,4 +763,22 @@ fn a_query_inside_a_carried_row_never_reaches_the_terminal() {
             "{query:?} reached the terminal: {text:?}"
         );
     }
+}
+
+// The same sequence as frame::write_repaint, using a deterministic protocol
+// terminal so multiple server sizes can be delivered in one received frame.
+fn repaint_resized_terminal(
+    terminal: &mut ClientTerminal<DisplayScreen>,
+    model: &mut ModelTerminal,
+) {
+    let previous = terminal.displayed().clone();
+    let repaint = terminal.repaint();
+    if let Some(history) = terminal
+        .displayed()
+        .scrollback_replay_after_resize(&previous)
+    {
+        model.write(&history);
+    }
+    model.write(DISPLAY_RESIZE);
+    model.write(&repaint);
 }

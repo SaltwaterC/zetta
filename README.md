@@ -166,6 +166,13 @@ and how to prove it is working on a real link.
 The Zosh client and bundled Rust server support repeated-character (REP)
 updates, including repeated spaces used to align full-screen applications.
 
+The bundled server reflows normal-screen text when a window or remote-session
+pane becomes narrower, and carries rows displaced by a smaller pane into local
+scrollback. This applies to plain Zosh and Zosh session panes on every host
+platform. Update both the local client and the remote `zosh-server` for this
+resize behavior; a client update alone cannot recover cells an older server
+discarded. Alternate-screen applications keep their fixed-grid resize behavior.
+
 Output that scrolls off the screen is kept, which Mosh alone cannot do. Mosh
 synchronizes a screen, so anything that scrolled past between two of its
 updates is in neither of them: `cat` a long file over stock Mosh and you are

@@ -141,6 +141,16 @@ impl Screen {
             .set_size(crate::grid::Size { rows, cols });
     }
 
+    /// Resizes with normal-screen text reflow, capturing rows displaced off
+    /// the top through the eviction queue. Alternate screens and scrolling
+    /// regions retain their fixed-coordinate resize semantics. Protocol
+    /// replicas should use `set_size` and apply the authoritative repaint.
+    pub fn set_size_reflow(&mut self, rows: u16, cols: u16) {
+        self.grid.set_size_reflow(crate::grid::Size { rows, cols });
+        self.alternate_grid
+            .set_size(crate::grid::Size { rows, cols });
+    }
+
     /// Returns the current size of the terminal.
     ///
     /// The return value will be (rows, cols).
@@ -711,11 +721,10 @@ impl Screen {
     /// for long enough to fill the buffer, and the gap is the caller's to
     /// report.
     pub fn take_evicted_rows(&mut self) -> (u64, Vec<EvictedRow>) {
-        let cols = self.grid.size().cols;
         let (first, rows) = self.grid.take_evicted();
         let rows = rows
             .iter()
-            .map(|row| EvictedRow::from_row(row, cols))
+            .map(|row| EvictedRow::from_row(row, row.cols()))
             .collect();
         (first, rows)
     }
@@ -821,6 +830,7 @@ impl Screen {
         }
         let width = width
             .unwrap_or(1)
+            .min(usize::from(size.cols))
             .try_into()
             // width() can only return 0, 1, or 2
             .unwrap();
@@ -987,6 +997,9 @@ impl Screen {
                 // that self.grid().pos().col has a valid value.
                 .unwrap();
             cell.set(c, attrs);
+            // A one-column pane can retain the glyph but has no cell for
+            // its continuation. Reflow restores its width when space returns.
+            cell.set_wide(width > 1);
             self.grid_mut().col_inc(1);
             if width > 1 {
                 let pos = self.grid().pos();

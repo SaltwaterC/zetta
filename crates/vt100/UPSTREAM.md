@@ -48,6 +48,15 @@ merge friction; it is a no-op against the unmodified source.
 Regression tests are inline in perform.rs and screen.rs, plus the protocol/diff
 test in crates/zosh/src/tests/display.rs.
 
+`Screen::set_size_reflow` is an opt-in authoritative resize for `zosh-server`:
+normal-screen logical lines are rewrapped with their cells and attributes,
+bottom overflow moves the top rows into the existing eviction queue, and
+alternate screens and partial scroll regions keep fixed coordinates. The
+ordinary `set_size` remains the protocol replica's clipping resize; a height
+change now retains wrap flags. Evicted rows are serialized at their original
+width, since rows collected after a resize can have different widths.
+`grid/reflow.rs` owns this behavior and its inline regression tests.
+
 The htop reproduction is server-side: forwarding macOS LC_CTYPE=UTF-8 to
 a Linux host without that locale makes ncurses use ASCII output with REP
 padding. An unpatched Rust server drops those repeats before the client

@@ -4,6 +4,61 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+#[test]
+#[ignore = "requires ZOSH_TEST_SERVER pointing at the bundled Rust server"]
+fn a_plain_zosh_resize_preserves_text_without_a_program_redraw() {
+    let mut session = connect_test_session(&[
+        "new",
+        "-i",
+        "127.0.0.1",
+        "--",
+        "/bin/sh",
+        "-c",
+        include_str!("fixtures/resize.sh"),
+    ]);
+    session.request_scrollback(64);
+    session.send_resize(12, 4);
+    pump_until(&mut session, |session, _| {
+        session.screen_text().contains("READY") && session.displayed().cols() == 12
+    });
+    session.send_input(b"\r");
+    pump_until(&mut session, |session, _| {
+        session.screen_text().contains("prompt>")
+    });
+    session.send_resize(6, 3);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut output = Vec::new();
+    loop {
+        let events = session.pump_ready().unwrap();
+        match crate::frame::next_frame(&session, &events, Some((6, 3))) {
+            crate::frame::Frame::Repaint { .. } => {
+                crate::frame::write_repaint(&mut session, &mut output).unwrap();
+                break;
+            }
+            crate::frame::Frame::Skip => {}
+            crate::frame::Frame::Paint => unreachable!(),
+        }
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let mut physical = vt100::Parser::new(3, 6, 0);
+    physical.screen_mut().set_capture_evicted_rows(true);
+    physical.process(&output);
+    let mut retained = String::new();
+    for row in physical.screen_mut().take_evicted_rows().1 {
+        let mut line = vt100::Parser::new(1, 6, 0);
+        line.process(&row.contents);
+        retained.push_str(&line.screen().contents());
+    }
+    retained.push_str(&physical.screen().contents());
+    let text = retained.replace('\n', "");
+    assert!(text.contains("abcdefghijklsecond-line"), "{text:?}");
+    assert!(text.contains("third-lineprompt>"), "{text:?}");
+    session.send_input(b"\r");
+    session.shutdown();
+    pump_until(&mut session, |session, _| session.finished());
+}
+
 // Build the bundled server in ../../server, or a patched upstream server, and
 // point ZOSH_TEST_SERVER at the resulting executable. This uses loopback only
 // and no user's shell config.

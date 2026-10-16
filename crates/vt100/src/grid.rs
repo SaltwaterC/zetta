@@ -1,5 +1,7 @@
 use crate::term::BufWrite as _;
 
+mod reflow;
+
 #[derive(Clone, Debug)]
 pub struct Grid {
     size: Size,
@@ -99,9 +101,8 @@ impl Grid {
 
         self.size = size;
         for row in &mut self.rows {
-            // `Row::resize` also unwraps, so a row that already fits is left
-            // shared only when there is nothing to unwrap either.
-            if row.cols() != size.cols || row.wrapped() {
+            // A height-only resize preserves both sharing and soft wraps.
+            if row.cols() != size.cols {
                 std::sync::Arc::make_mut(row)
                     .resize(size.cols, crate::Cell::new());
             }
@@ -633,22 +634,26 @@ impl Grid {
                 // redraw out of the history.
                 continue;
             }
-            self.evicted_total += 1;
-            if self.capture_evicted {
-                if self.evicted.len() >= EVICTED_CAP {
-                    self.evicted.pop_front();
-                }
-                self.evicted.push_back(removed.clone());
+            self.remember_row(removed);
+        }
+    }
+
+    fn remember_row(&mut self, removed: crate::row::Row) {
+        self.evicted_total += 1;
+        if self.capture_evicted {
+            if self.evicted.len() >= EVICTED_CAP {
+                self.evicted.pop_front();
             }
-            if self.scrollback_len > 0 {
-                self.scrollback.push_back(removed);
-                while self.scrollback.len() > self.scrollback_len {
-                    self.scrollback.pop_front();
-                }
-                if self.scrollback_offset > 0 {
-                    self.scrollback_offset =
-                        self.scrollback.len().min(self.scrollback_offset + 1);
-                }
+            self.evicted.push_back(removed.clone());
+        }
+        if self.scrollback_len > 0 {
+            self.scrollback.push_back(removed);
+            while self.scrollback.len() > self.scrollback_len {
+                self.scrollback.pop_front();
+            }
+            if self.scrollback_offset > 0 {
+                self.scrollback_offset =
+                    self.scrollback.len().min(self.scrollback_offset + 1);
             }
         }
     }

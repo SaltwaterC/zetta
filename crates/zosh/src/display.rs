@@ -113,7 +113,7 @@ impl DiffScreen for DisplayScreen {
             // Anything that scrolled past on the way has to reach the
             // terminal's history before the clear does, or resizing during a
             // burst would be the one way to lose output.
-            if let Some(replay) = self.scrollback_replay(previous) {
+            if let Some(replay) = self.scrollback_replay_after_resize(previous) {
                 output.extend_from_slice(&replay);
             }
             output.extend_from_slice(DISPLAY_RESIZE);
@@ -152,6 +152,100 @@ impl DiffScreen for DisplayScreen {
 }
 
 impl DisplayScreen {
+    /// A physical resize may have reflowed or clipped the old screen, and the
+    /// protocol has already resized its copy. Neither is a reliable source
+    /// for the rows about to enter history: rebuild them from carried rows.
+    pub(crate) fn scrollback_replay_after_resize(&self, previous: &Self) -> Option<Vec<u8>> {
+        if !self.scrollback.active || self.scrollback.evicted <= previous.scrollback.evicted {
+            return None;
+        }
+        // Several resizes can arrive before a frame is displayed. Carried
+        // rows can then be wider than the final screen: placing them at fixed
+        // row coordinates would wrap into and overwrite their neighbours.
+        let rows = self.resized_history(previous.scrollback.evicted);
+        let mut current = self.clone();
+        current.scrollback.evicted = rows.len() as u64;
+        current.scrollback.rows_first = 0;
+        current.scrollback.rows = std::sync::Arc::new(rows);
+        let blank = Self::new(self.rows(), self.cols());
+        let replay = current.scrollback_replay(&blank)?;
+        let mut output = DISPLAY_RESIZE.to_vec();
+        output.extend(replay);
+        Some(output)
+    }
+
+    fn resized_history(&self, since: u64) -> Vec<crate::scrollback::ScrollbackRow> {
+        use crate::scrollback::ScrollbackRow;
+
+        // Two rows let vt100 mark a soft wrap before the row is evicted.
+        let mut parser = vt100::Parser::new(2, self.cols(), 0);
+        parser.screen_mut().set_capture_evicted_rows(true);
+        let mut rows = Vec::new();
+        let mut wrapped = false;
+        let mut feed = |contents: &[u8], continues: bool| {
+            parser.process(contents);
+            if !continues {
+                parser.process(b"\r\n");
+            }
+            rows.extend(
+                parser
+                    .screen_mut()
+                    .take_evicted_rows()
+                    .1
+                    .into_iter()
+                    .map(|row| ScrollbackRow {
+                        contents: row.contents,
+                        wrapped: row.wrapped,
+                    }),
+            );
+            wrapped = continues;
+        };
+        let first = since
+            .max(self.scrollback.rows_first)
+            .min(self.scrollback.evicted);
+        if first > since {
+            feed(
+                format!("[zosh: {} lines of scrollback dropped]", first - since).as_bytes(),
+                false,
+            );
+        }
+        let offset =
+            usize::try_from(first.saturating_sub(self.scrollback.rows_first)).unwrap_or(usize::MAX);
+        let mut end = first;
+        for row in self
+            .scrollback
+            .rows
+            .iter()
+            .skip(offset)
+            .take(usize::try_from(self.scrollback.evicted - first).unwrap_or(usize::MAX))
+        {
+            feed(&row.contents, row.wrapped);
+            end += 1;
+        }
+        if self.scrollback.evicted > end {
+            feed(
+                format!(
+                    "[zosh: {} lines of scrollback dropped]",
+                    self.scrollback.evicted - end
+                )
+                .as_bytes(),
+                false,
+            );
+        }
+        let visible = usize::from(parser.screen().cursor_position().0) + usize::from(wrapped);
+        rows.extend(
+            parser
+                .screen()
+                .visible_rows_as_evicted()
+                .take(visible)
+                .map(|row| ScrollbackRow {
+                    contents: row.contents,
+                    wrapped: row.wrapped,
+                }),
+        );
+        rows
+    }
+
     pub(crate) fn clears_scrollback_since(&self, previous: &Self) -> bool {
         self.scrollback.generation != previous.scrollback.generation
     }
