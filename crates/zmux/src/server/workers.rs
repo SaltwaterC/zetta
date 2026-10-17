@@ -90,12 +90,21 @@ pub(super) fn observe_pane_exit(
     let raw_status = pane_exit_status(pane)?;
     pane.exited = true;
     pane.exit_status = raw_status;
-    Some((
-        session_id,
+    let input_sent = shared_input_sent(&pane.attachment);
+    // Preserve the actual exit beside subsequent broken-pipe/pruning errors.
+    // The default warning log must retain abnormal and unavailable statuses;
+    // a clean shell exit only needs the more verbose lifecycle log.
+    log::log!(
+        if raw_status == Some(0) {
+            log::Level::Info
+        } else {
+            log::Level::Warn
+        },
+        "pane exited: session_id={session_id} pane_id={} child_pid={} raw_status={raw_status:?} input_sent={input_sent}",
         pane.id,
-        raw_status,
-        shared_input_sent(&pane.attachment),
-    ))
+        pane.pty.child_pid(),
+    );
+    Some((session_id, pane.id, raw_status, input_sent))
 }
 
 /// Checks whether a pane's child has ended.

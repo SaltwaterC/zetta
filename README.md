@@ -121,6 +121,12 @@ Zetta falls back to the SSH byte stream when a pane's Mosh link cannot be
 brought up, and marks that pane with an **SSH** chip whose tooltip says why. Native background sessions on this machine are local and
 need no transport at all.
 
+If an established Zosh pane connection fails, its terminal shows the connection
+error after the last received output. Abnormal pane process exits are recorded
+in `daemon.log` in the server's Zetta session directory, with the session, pane,
+process ID and raw exit status. Set `ZMUX_LOG=info` before starting the daemon
+to record clean process exits as well.
+
 Without Zosh agent forwarding, each remote host costs one SSH login, however
 many panes and requests follow.
 On Linux and macOS, Zetta keeps a private OpenSSH control connection to the

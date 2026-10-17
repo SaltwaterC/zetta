@@ -182,15 +182,13 @@ impl PaneSession {
                         passes: &passes,
                     };
                     let result = drive(session, (columns, rows), agent_settings, ends);
-                    if let Err(failure) = result {
-                        *error
-                            .lock()
-                            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
-                            Some(format!("{failure:#}"));
-                    }
+                    let failure = result.err().map(|failure| format!("{failure:#}"));
+                    *error
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner()) = failure.clone();
                     finished.store(true, Ordering::SeqCst);
                     answer.end();
-                    output.close();
+                    output.close(failure);
                 }
             })
             .context("starting the Mosh session thread")?;
@@ -341,6 +339,7 @@ impl Answer {
 }
 
 /// The display bytes of a [`PaneSession`], as a blocking reader.
+/// A failed session reports its error after its last display bytes, before EOF.
 pub struct PaneReader {
     pipe: Arc<OutputPipe>,
 }
@@ -566,6 +565,9 @@ struct OutputState {
     bytes: VecDeque<u8>,
     /// The loop has ended: a reader that drains the rest sees EOF.
     closed: bool,
+    /// Delivered once, after the buffered display, so a failed link cannot
+    /// masquerade as clean EOF in an embedded terminal.
+    failure: Option<String>,
     /// The reader has gone: the loop stops rendering into a buffer nothing
     /// will ever read.
     abandoned: bool,
@@ -609,6 +611,11 @@ impl OutputPipe {
                 .wait(state)
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
         }
+        if state.bytes.is_empty()
+            && let Some(failure) = state.failure.take()
+        {
+            return Err(io::Error::new(io::ErrorKind::ConnectionAborted, failure));
+        }
         // Copied a run at a time rather than a byte at a time: a pane reading
         // a fast program moves megabytes through here, and a `VecDeque` is at
         // most two contiguous runs.
@@ -624,11 +631,14 @@ impl OutputPipe {
         Ok(count)
     }
 
-    fn close(&self) {
-        self.state
+    fn close(&self, failure: Option<String>) {
+        let mut state = self
+            .state
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .closed = true;
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.failure = failure;
+        state.closed = true;
+        drop(state);
         self.changed.notify_all();
     }
 

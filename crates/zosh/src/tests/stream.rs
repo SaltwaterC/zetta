@@ -2,6 +2,54 @@ use super::*;
 
 use std::time::{Duration, Instant};
 
+#[test]
+fn a_failed_session_delivers_its_last_display_then_its_error_before_eof() {
+    let pipe = OutputPipe::default();
+    pipe.write(b"last frame").unwrap();
+    pipe.close(Some(
+        "receiving the Mosh response: connection reset".to_owned(),
+    ));
+
+    let mut buffer = [0; 32];
+    let count = pipe.read(&mut buffer).unwrap();
+    assert_eq!(&buffer[..count], b"last frame");
+    // A zero-length read must not consume the error a real reader is owed.
+    assert_eq!(pipe.read(&mut []).unwrap(), 0);
+    let error = pipe
+        .read(&mut buffer)
+        .expect_err("a failed link is not clean EOF");
+    assert_eq!(error.kind(), io::ErrorKind::ConnectionAborted);
+    assert_eq!(
+        error.to_string(),
+        "receiving the Mosh response: connection reset"
+    );
+    assert_eq!(pipe.read(&mut buffer).unwrap(), 0);
+}
+
+#[test]
+fn failing_a_session_wakes_its_blocked_reader() {
+    let pipe = Arc::new(OutputPipe::default());
+    let reader = Arc::clone(&pipe);
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let (result_tx, result_rx) = std::sync::mpsc::channel();
+    let thread = thread::spawn(move || {
+        started_tx.send(()).unwrap();
+        let _ = result_tx.send(reader.read(&mut [0; 1]));
+    });
+    started_rx.recv().unwrap();
+    assert!(matches!(
+        result_rx.recv_timeout(Duration::from_millis(50)),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+    ));
+    pipe.close(Some("Mosh session failed".to_owned()));
+    let error = result_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("the reader must wake when the session fails")
+        .expect_err("a failure must reach the reader");
+    assert_eq!(error.to_string(), "Mosh session failed");
+    thread.join().unwrap();
+}
+
 /// The pipe is what an embedder reads a pane through, so its two ends have to
 /// hold up the contract a pipe does: a reader blocks until there is something
 /// to read, and sees end of file once the loop has gone.
@@ -38,7 +86,7 @@ fn the_output_pipe_blocks_until_bytes_arrive_and_ends_when_the_loop_does() {
     writer
         .write(b"second")
         .expect("a read pipe accepts a frame");
-    writer.close();
+    writer.close(None);
 
     let (bytes, waited) = reader.join().expect("the reader thread finishes");
     assert_eq!(bytes, b"firstsecond", "every painted byte reaches the pane");
@@ -68,7 +116,7 @@ fn bytes_come_back_in_order_across_a_wrapped_buffer() {
         let read = pipe.read(&mut buffer).expect("a live pipe reads");
         read_back.extend_from_slice(&buffer[..read]);
     }
-    pipe.close();
+    pipe.close(None);
     loop {
         let read = pipe.read(&mut buffer).expect("a live pipe reads");
         if read == 0 {

@@ -1327,6 +1327,18 @@ fn an_attached_client_learns_that_its_console_child_exited() {
         Some(7),
         "the multiplexer reported the wrong exit status"
     );
+    let log = std::fs::read_to_string(daemon.sessions_dir().join("daemon.log"))
+        .expect("abnormal exits must survive in the daemon's default log");
+    assert!(
+        log.lines().any(|line| {
+            line.contains("pane exited:")
+                && line.contains(&format!("session_id={} ", pane.session_id))
+                && line.contains(&format!("pane_id={} ", pane.pane_id))
+                && line.contains(&format!("child_pid={} ", pane.child_pid))
+                && line.contains("raw_status=Some(7)")
+        }),
+        "the log must identify the failed pane and its actual exit status: {log}"
+    );
 
     drop(output);
     drop(input);
