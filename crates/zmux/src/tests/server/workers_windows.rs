@@ -55,6 +55,30 @@ fn idle_wait_uses_the_deadline_and_control_work_interrupts_it() {
     assert_idle(&mut wait);
 }
 
+// IOCP may return an empty batch while processing internal completions. Keep
+// waiting for the requested notification without rearming or reading the pipe.
+fn wait_for_pipe(wait: &mut DrainWait, writable: bool) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        wait.wait_ready(deadline.saturating_duration_since(Instant::now()))
+            .unwrap();
+        if wait.events.iter().any(|event| {
+            event.key == PIPE
+                && if writable {
+                    event.writable
+                } else {
+                    event.readable
+                }
+        }) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the pipe never reported readiness"
+        );
+    }
+}
+
 #[test]
 fn output_after_arming_wakes_the_wait_and_rearms_for_the_next_burst() {
     let (mut wait, _control) = wait_pair();
@@ -68,7 +92,7 @@ fn output_after_arming_wakes_the_wait_and_rearms_for_the_next_burst() {
             producer.write_all(b"echo").unwrap();
             producer
         });
-        wait.wait_ready(Duration::from_secs(1)).unwrap();
+        wait_for_pipe(&mut wait, false);
         assert!(
             wait.events
                 .iter()
@@ -89,12 +113,12 @@ fn buffered_output_survives_disarming_and_exclusive_handover() {
     arm_pipes(&mut pty, &wait.poller, true, false);
     settle(&mut wait);
     producer.write_all(b"before").unwrap();
-    wait.wait_ready(Duration::from_secs(1)).unwrap();
+    wait_for_pipe(&mut wait, false);
     // The queue is already readable when its interest is installed again.
     arm_pipes(&mut pty, &wait.poller, false, false);
     settle(&mut wait);
     arm_pipes(&mut pty, &wait.poller, true, false);
-    wait.wait_ready(Duration::from_secs(1)).unwrap();
+    wait_for_pipe(&mut wait, false);
     assert!(wait.events.iter().any(|event| event.key == PIPE));
     pty.pause_reader().unwrap();
     arm_pipes(&mut pty, &wait.poller, false, false);
@@ -110,7 +134,7 @@ fn buffered_output_survives_disarming_and_exclusive_handover() {
     assert_eq!(pty.read_buffered(&mut bytes), 0);
     pty.resume_reader();
     arm_pipes(&mut pty, &wait.poller, true, false);
-    wait.wait_ready(Duration::from_secs(1)).unwrap();
+    wait_for_pipe(&mut wait, false);
     assert!(wait.events.iter().any(|event| event.key == PIPE));
     assert_eq!(pty.reader().try_read(&mut bytes), 6);
     assert_eq!(&bytes, b"after!");
@@ -148,12 +172,16 @@ fn a_full_input_queue_wakes_when_the_consumer_makes_room() {
     arm_pipes(&mut pty, &wait.poller, false, true);
     settle(&mut wait);
     assert_idle(&mut wait);
+    // A final native write can complete during settle(), consuming the
+    // one-shot interest as well as its packet. Rearm after discarding those
+    // startup completions so the consumer's next write completion can wake us.
+    arm_pipes(&mut pty, &wait.poller, false, true);
     let reader = thread::spawn(move || {
         let mut bytes = vec![0; accepted];
         consumer.read_exact(&mut bytes).unwrap();
         assert!(bytes.iter().all(|byte| *byte == b'x'));
     });
-    wait.wait_ready(Duration::from_secs(1)).unwrap();
+    wait_for_pipe(&mut wait, true);
     assert!(
         wait.events
             .iter()
@@ -175,7 +203,7 @@ fn large_output_crosses_the_bounded_pipe_in_order_and_hangup_does_not_spin() {
     let deadline = Instant::now() + Duration::from_secs(10);
     while received.len() < expected.len() && Instant::now() < deadline {
         arm_pipes(&mut pty, &wait.poller, true, false);
-        wait.wait_ready(Duration::from_secs(1)).unwrap();
+        wait_for_pipe(&mut wait, false);
         let mut buffer = [0; 16 * 1024];
         let count = pty.reader().try_read(&mut buffer);
         received.extend_from_slice(&buffer[..count]);
