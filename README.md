@@ -52,6 +52,9 @@ environment they started with; create a new remote pane to apply this context.
   Broadcast, and Silent available, and preserves responsive tab sizing
 - Open paths or the complete pane scrollback in `$EDITOR`, with built-in vi as
   the fallback
+- Ctrl-click file paths across terminal wraps and indented continuation rows
+  drawn by applications such as Codex. Application-drawn wraps are inferred
+  when matching text styles reach the right edge with at most two blank columns.
 - Native command, path, and SSH-alias completion in a multi-command prompt
 - Stacked command panes that retain each command's PTY, output, and exit status
 - Typed settings and keymap editor, system-aware light/dark per-profile themes

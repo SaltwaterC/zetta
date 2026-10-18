@@ -15,6 +15,7 @@ use std::{
 
 mod hyperlinks;
 mod search;
+mod wrapped_paths;
 
 use crate::{
     Cell, Color, Content, Cursor, CursorShape, GridLinesChange, HoveredWord, Hyperlink,

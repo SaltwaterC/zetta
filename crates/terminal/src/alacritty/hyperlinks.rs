@@ -139,7 +139,7 @@ pub(crate) fn find_from_grid_point<T: EventListener>(
                 line_start,
                 line_end,
                 point,
-                &mut regex_searches.path_hyperlink_regexes,
+                &regex_searches.path_hyperlink_regexes,
                 regex_searches.path_hyperlink_timeout,
             )
             .map(|(path, path_match)| (path, false, path_match))
@@ -316,22 +316,22 @@ fn path_match<T>(
     line_start: AlacPoint,
     line_end: AlacPoint,
     hovered: AlacPoint,
-    path_hyperlink_regexes: &mut Vec<Regex>,
+    path_hyperlink_regexes: &[Regex],
     path_hyperlink_timeout: Duration,
 ) -> Option<(String, Match)> {
     if path_hyperlink_regexes.is_empty() || path_hyperlink_timeout.as_millis() == 0 {
         return None;
     }
+    if let Some(found) = super::wrapped_paths::find(
+        term,
+        hovered,
+        path_hyperlink_regexes,
+        path_hyperlink_timeout,
+    ) {
+        return Some(found);
+    }
     debug_assert!(line_start <= hovered);
     debug_assert!(line_end >= hovered);
-    let search_start_time = Instant::now();
-
-    let timed_out = || {
-        let elapsed_time = Instant::now().saturating_duration_since(search_start_time);
-        (elapsed_time > path_hyperlink_timeout)
-            .then_some((elapsed_time.as_millis(), path_hyperlink_timeout.as_millis()))
-    };
-
     // This used to be: `let line = term.bounds_to_string(line_start, line_end)`, however, that
     // api compresses tab characters into a single space, whereas we require a cell accurate
     // string representation of the line. The below algorithm does this, but seems a bit odd.
@@ -371,9 +371,13 @@ fn path_match<T>(
     if line.len() <= hovered_point_byte_offset {
         return None;
     }
-    let found_from_range = |path_range: StdRange<usize>,
-                            link_range: StdRange<usize>,
-                            position: Option<(u32, Option<u32>)>| {
+    let (path, link_range) = match_path_text(
+        line,
+        hovered_point_byte_offset,
+        path_hyperlink_regexes,
+        path_hyperlink_timeout,
+    )?;
+    let link_match = {
         let advance_point_by_str = |mut point: AlacPoint, s: &str| {
             for _ in s.chars() {
                 point = term
@@ -395,24 +399,22 @@ fn path_match<T>(
 
         let link_start = advance_point_by_str(line_start, &line[..link_range.start]);
         let link_end = advance_point_by_str(link_start, &line[link_range]);
-        let link_match = link_start
+        link_start
             ..=term
                 .expand_wide(link_end, AlacDirection::Left)
-                .sub(term, Boundary::Grid, 1);
-
-        (
-            {
-                let mut path = line[path_range].to_string();
-                position.inspect(|(line, column)| {
-                    path += &format!(":{line}");
-                    column.inspect(|column| path += &format!(":{column}"));
-                });
-                path
-            },
-            link_match,
-        )
+                .sub(term, Boundary::Grid, 1)
     };
+    link_match.contains(&hovered).then_some((path, link_match))
+}
 
+/// Match path text independently of how an application placed it on the grid.
+pub(super) fn match_path_text(
+    line: &str,
+    hovered_point_byte_offset: usize,
+    path_hyperlink_regexes: &[Regex],
+    path_hyperlink_timeout: Duration,
+) -> Option<(String, StdRange<usize>)> {
+    let search_start_time = Instant::now();
     for regex in path_hyperlink_regexes {
         let mut path_found = false;
 
@@ -425,7 +427,7 @@ fn path_match<T>(
                 let parse = |name: &str| {
                     captures
                         .name(name)
-                        .and_then(|capture| capture.as_str().parse().ok())
+                        .and_then(|capture| capture.as_str().parse::<u32>().ok())
                 };
 
                 (
@@ -458,18 +460,24 @@ fn path_match<T>(
                 // No match, just skip.
                 continue;
             }
-            let found = found_from_range(path_range, link_range, line_column);
-
-            if found.1.contains(&hovered) {
-                return Some(found);
+            let mut path = line[path_range].to_string();
+            if let Some((line, column)) = line_column {
+                path += &format!(":{line}");
+                if let Some(column) = column {
+                    path += &format!(":{column}");
+                }
             }
+            return Some((path, link_range));
         }
 
         if path_found {
             return None;
         }
 
-        if let Some((timed_out_ms, timeout_ms)) = timed_out() {
+        let elapsed_time = Instant::now().saturating_duration_since(search_start_time);
+        if elapsed_time > path_hyperlink_timeout {
+            let timed_out_ms = elapsed_time.as_millis();
+            let timeout_ms = path_hyperlink_timeout.as_millis();
             warn!("Timed out processing path hyperlink regexes after {timed_out_ms}ms");
             info!("{timeout_ms}ms time out specified in `terminal.path_hyperlink_timeout_ms`");
             return None;

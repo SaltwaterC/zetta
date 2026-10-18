@@ -6,6 +6,11 @@ standalone manifest and is not a drop-in copy of Zed's workspace terminal.
 
 Retain these Zetta-specific behaviors when synchronizing:
 
+- reconstruct file paths across indented, equally styled application-drawn
+  continuation rows near the right edge (`alacritty/wrapped_paths.rs`). These
+  have no terminal wrap flag; keep byte-to-cell mappings for the reconstructed
+  target so hovering any fragment returns the complete path and highlight.
+  Inference scans at most sixteen adjacent rows and never probes the filesystem;
 - allow scrollback up to Alacritty's signed line-coordinate range instead of
   Zed's 100,000-line product limit;
 - expose PTY metadata, startup signaling, process tracking, and shell markers
