@@ -30,12 +30,17 @@ use crate::term::cell::{Cell, Flags};
 /// Above this many distinct attributes a chunk stays as rows. Looking them up is linear, and
 /// output colourful enough to need more is too rare to be worth a hash table on every run.
 const MAX_ATTRIBUTES: usize = 64;
+// Chunks are small, leaving two bits in each existing row offset for search
+// metadata. Keeping these here adds no allocation or per-row memory overhead.
+const OFFSET_MASK: u32 = (1 << 30) - 1;
+const ASCII_ROW: u32 = 1 << 30;
+const WRAPPED_ROW: u32 = 1 << 31;
 
 /// A sealed chunk of history rows, newest first, in compact form.
 #[derive(Clone)]
 pub(super) struct CompactRows<T> {
     bytes: Box<[u8]>,
-    /// Where each row starts in `bytes`.
+    /// Where each row starts in `bytes`, plus ASCII/run and wrap metadata.
     offsets: Box<[u32]>,
     /// Rows still retained; the oldest past it were dropped from history.
     len: usize,
@@ -111,8 +116,15 @@ impl<T: GridCell + Default + PartialEq> CompactRows<T> {
         };
         let mut offsets = Vec::with_capacity(rows.len());
         for row in rows {
-            offsets.push(u32::try_from(encoder.bytes.len()).ok()?);
-            encoder.row(&row[..])?;
+            let offset = u32::try_from(encoder.bytes.len()).ok()?;
+            if offset > OFFSET_MASK {
+                return None;
+            }
+            let ascii = encoder.row(&row[..])?;
+            let wraps = row.last()?.archive_wrap();
+            offsets.push(
+                offset | if ascii { ASCII_ROW } else { 0 } | if wraps { WRAPPED_ROW } else { 0 },
+            );
         }
 
         Some(Self {
@@ -133,7 +145,7 @@ struct Encoder<T> {
 }
 
 impl<T: GridCell + PartialEq> Encoder<T> {
-    fn row(&mut self, cells: &[T]) -> Option<()> {
+    fn row(&mut self, cells: &[T]) -> Option<bool> {
         let fill = cells.last()?;
         let mut explicit = cells.len() - 1;
         while explicit > 0 && cells[explicit - 1] == *fill {
@@ -143,7 +155,10 @@ impl<T: GridCell + PartialEq> Encoder<T> {
         write_varint(&mut self.bytes, explicit);
 
         let mut start = 0;
+        let mut runs = 0;
+        let mut ascii = true;
         while start < explicit {
+            runs += 1;
             let attribute = self.attribute(&cells[start])?;
             write_varint(&mut self.bytes, attribute);
             // The run's length is only known once its characters are written; rows are at most
@@ -153,7 +168,9 @@ impl<T: GridCell + PartialEq> Encoder<T> {
             let template = &self.attributes[attribute];
             let mut end = start;
             while end < explicit && cells[end].same_archive_attributes(template) {
-                write_char(&mut self.bytes, cells[end].archive_char()?);
+                let character = cells[end].archive_char()?;
+                ascii &= character.is_ascii();
+                write_char(&mut self.bytes, character);
                 end += 1;
             }
             let run = u16::try_from(end - start).ok()?;
@@ -163,8 +180,9 @@ impl<T: GridCell + PartialEq> Encoder<T> {
 
         let attribute = self.attribute(fill)?;
         write_varint(&mut self.bytes, attribute);
-        write_char(&mut self.bytes, fill.archive_char()?);
-        Some(())
+        let character = fill.archive_char()?;
+        write_char(&mut self.bytes, character);
+        Some(runs <= 1 && ascii && character.is_ascii())
     }
 
     /// The index of `cell`'s attributes, added if new.
@@ -195,7 +213,8 @@ impl<T: GridCell + PartialEq> Encoder<T> {
 }
 
 fn decode_row<T: GridCell + Default>(rows: &CompactRows<T>, index: usize) -> Row<T> {
-    let mut reader = Reader { bytes: &rows.bytes, position: rows.offsets[index] as usize };
+    let mut reader =
+        Reader { bytes: &rows.bytes, position: (rows.offsets[index] & OFFSET_MASK) as usize };
     let len = reader.varint();
     let explicit = reader.varint();
     let (kept, columns) =
@@ -236,7 +255,8 @@ impl CompactRows<Cell> {
     /// cells are kept out of how many columns it now has.
     fn header(&self, index: usize) -> (Reader<'_>, usize, usize, usize) {
         debug_assert!(index < self.len);
-        let mut reader = Reader { bytes: &self.bytes, position: self.offsets[index] as usize };
+        let mut reader =
+            Reader { bytes: &self.bytes, position: (self.offsets[index] & OFFSET_MASK) as usize };
         let len = reader.varint();
         let explicit = reader.varint();
         let (kept, columns) = self
@@ -248,6 +268,12 @@ impl CompactRows<Cell> {
     /// Append row `index`, as `line`, to `text`.
     pub(super) fn append_text(&self, index: usize, line: Line, text: &mut RowText) {
         let (mut reader, explicit, kept, columns) = self.header(index);
+        if self.resized.is_none()
+            && self.offsets[index] & ASCII_ROW != 0
+            && self.append_ascii(index, reader, explicit, columns, line, text)
+        {
+            return;
+        }
         // The text ends after the last occupied cell, unless the row wraps.
         let mut occupied_end = text.len();
         let mut last_flags = Flags::empty();
@@ -306,6 +332,9 @@ impl CompactRows<Cell> {
 
     /// Whether row `index`'s last cell carries [`Flags::WRAPLINE`].
     pub(super) fn wraps(&self, index: usize) -> bool {
+        if self.resized.is_none() {
+            return self.offsets[index] & WRAPPED_ROW != 0;
+        }
         let (mut reader, explicit, kept, columns) = self.header(index);
         if columns > kept {
             return false;
@@ -331,12 +360,63 @@ impl CompactRows<Cell> {
 
     /// The attribute index of row `index`'s fill, read back from the row's end.
     fn fill_attribute(&self, index: usize) -> usize {
-        let end = self.offsets.get(index + 1).map_or(self.bytes.len(), |&end| end as usize);
+        let end = self.row_end(index);
         let mut fill = end - 1;
         while self.bytes[fill] & 0xc0 == 0x80 {
             fill -= 1;
         }
         usize::from(self.bytes[fill - 1])
+    }
+
+    fn row_end(&self, index: usize) -> usize {
+        self.offsets.get(index + 1).map_or(self.bytes.len(), |&end| (end & OFFSET_MASK) as usize)
+    }
+
+    /// The common single-attribute ASCII row, including wrapped rows whose last
+    /// cell has a separate wrap attribute. Retain coordinate anchors and exact
+    /// trailing-space semantics without parsing every run or revalidating UTF-8.
+    fn append_ascii(
+        &self,
+        index: usize,
+        mut reader: Reader<'_>,
+        explicit: usize,
+        columns: usize,
+        line: Line,
+        text: &mut RowText,
+    ) -> bool {
+        let fill = &self.attributes[self.fill_attribute(index)];
+        if fill.flags.intersects(SPACERS) || has_zerowidth(fill) {
+            return false;
+        }
+        if explicit != 0 {
+            let attributes = &self.attributes[reader.varint()];
+            if attributes.flags.intersects(SPACERS) || has_zerowidth(attributes) {
+                return false;
+            }
+            let run = reader.run_length();
+            debug_assert_eq!(run, explicit);
+        }
+        let character = self.bytes[self.row_end(index) - 1];
+        let keep_fill = self.offsets[index] & WRAPPED_ROW != 0 || character != b' ';
+        let prefix = &self.bytes[reader.position..reader.position + explicit];
+        let length = if keep_fill {
+            explicit
+        } else {
+            prefix.iter().rposition(|&c| c != b' ').map_or(0, |last| last + 1)
+        };
+        // SAFETY: ASCII_ROW is set only when the encoder wrote at most one
+        // explicit run and every character was ASCII. Resized rows bypass this
+        // path; compact storage cannot be constructed from external bytes.
+        let prefix = unsafe { std::str::from_utf8_unchecked(&prefix[..length]) };
+        text.push_ascii(prefix, Point::new(line, Column(0)));
+        if keep_fill {
+            text.push_repeated(
+                char::from(character),
+                columns - explicit,
+                Point::new(line, Column(explicit)),
+            );
+        }
+        true
     }
 }
 
@@ -356,6 +436,7 @@ fn write_char(bytes: &mut Vec<u8>, c: char) {
     }
 }
 
+#[derive(Clone, Copy)]
 struct Reader<'a> {
     bytes: &'a [u8],
     position: usize,

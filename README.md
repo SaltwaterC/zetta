@@ -86,6 +86,9 @@ stop those sessions. Later installs remove the backups once they are released;
 `zmux --upgrade` preserves sessions and can leave their console runtime in use.
 New Windows shells accept `Ctrl-C` even when the process that launched Zetta
 had disabled console interrupts.
+PowerShell integration also restores Ctrl-C at new command prompts if an earlier
+program left console interrupts disabled, while preserving PSReadLine's raw input
+during command editing.
 
 The build also produces `zosh`, Zetta's standalone cross-platform client,
 and the bundled Rust `zosh-server`. Run either zosh USER@HOST or zetta mosh
@@ -172,6 +175,24 @@ and how to prove it is working on a real link.
 The Zosh client and bundled Rust server support repeated-character (REP)
 updates, including repeated spaces used to align full-screen applications.
 
+Local panes reflow normal-screen text when splitting, resizing, maximizing, or
+restoring panes, including Windows PowerShell panes. As with window resizing,
+large scrollback buffers reflow on a background worker while the visible grid
+continues drawing and accepting output. Text beyond a narrower pane's right edge
+is wrapped and retained rather than discarded. History remains scrollable during
+reflow; the requested viewport wraps immediately while the worker streams the
+remaining compact history. Shell cursor and screen queries use the live screen
+without waiting for scrollback.
+Search reads compact reflowed history directly and counts older matches without
+building highlight coordinates after the navigation limit is reached.
+Search-field edits display immediately while history reflow and matching continue
+in the background.
+In narrow panes, the match counter wraps below the search query to keep the input
+visible.
+Pane and tab searches can search, navigate, and copy the retained history while
+background reflow is still running. Results refresh against the completed layout
+when it is published.
+
 The bundled server reflows normal-screen text when a window or remote-session
 pane becomes narrower, and carries rows displaced by a smaller pane into local
 scrollback. This applies to plain Zosh and Zosh session panes on every host
@@ -218,6 +239,22 @@ as well. Linux system dependencies and platform-specific build and desktop
 installation instructions are in the [installation guide](docs/installation.md).
 `make build` uses an incremental development build; use `RELEASE=1` for an
 optimized release build.
+
+`make test` runs at reduced CPU priority so interactive applications stay
+responsive: BelowNormal on Windows and niceness 10 on Unix. The Windows Cargo
+wrapper also applies BelowNormal to lint and build commands; the validation stop
+hook starts Make and its shell processes at the same priority.
+Tests default to two crate suites at once, four compiler jobs per Cargo process,
+and eight test threads per suite. Override `TEST_CRATE_JOBS`, `TEST_BUILD_JOBS`,
+or `TEST_THREADS` on the Make command line when needed.
+
+Run the terminal's opt-in long-line scrolling benchmark with `make test-scroll`.
+It uses an optimized build and the same reduced priority and resource limits.
+The default suite retains a short scrolling regression and tests shell exit
+policy without repeatedly starting native shells. The standalone `zmux` test
+profile optimizes cryptographic dependencies while retaining production costs.
+Its pre-test daemon build uses that same profile and `test-support` feature set
+to reuse the binaries built by `cargo test`.
 
 The default build also produces the standalone `zwt` Git worktree command. Set
 `WORKTREE=0` on `make build` and `make install` to omit the in-process

@@ -74,6 +74,17 @@ impl SearchRanges {
         self.newest_first.clear();
     }
 
+    /// A source cell's highlight, without scanning every match on its row.
+    /// Starts and ends are ordered even when literal matches overlap.
+    pub(crate) fn contains_point(&self, point: crate::Point) -> bool {
+        let index = self
+            .newest_first
+            .partition_point(|range| range.start() > point);
+        self.newest_first
+            .get(index)
+            .is_some_and(|range| range.end() >= point)
+    }
+
     /// Match `index`, counting from the oldest.
     pub fn get(&self, index: usize) -> Option<&Range> {
         let from_newest = self.newest_first.len().checked_sub(index)?.checked_sub(1)?;
@@ -156,6 +167,37 @@ impl Search {
 }
 
 impl SearchMatcher {
+    /// Count older matches once navigation/highlighting is full. In particular,
+    /// a one-byte query can count a whole ASCII run with memchr instead of
+    /// allocating and mapping a range for every character it finds.
+    fn count(&self, text: &mut RowText) -> usize {
+        match self {
+            Self::Literal {
+                finder,
+                case_insensitive,
+            } => {
+                if *case_insensitive {
+                    text.make_ascii_lowercase();
+                }
+                let bytes = text.as_str().as_bytes();
+                if finder.needle().len() == 1 {
+                    return memchr::memchr_iter(finder.needle()[0], bytes).count();
+                }
+                let mut count = 0;
+                let mut from = 0;
+                while let Some(at) = finder.find(&bytes[from..]) {
+                    count += 1;
+                    from += at + 1;
+                }
+                count
+            }
+            Self::Regex(regex) => regex
+                .find_iter(text.as_str())
+                .filter(|found| !found.is_empty())
+                .count(),
+        }
+    }
+
     /// Append the byte ranges of `text` that match, in ascending order. May lowercase `text`.
     fn find(&self, text: &mut RowText, found: &mut Vec<(usize, usize)>) {
         match self {
@@ -204,9 +246,10 @@ pub(crate) struct ScrollbackSearch {
     found: Vec<(usize, usize)>,
     /// The storage of the last logical line read and the matches in it, which repeated output
     /// reuses instead of reading the same rows again.
-    cached_rows: Vec<usize>,
+    cached_lines: Option<(Line, Line)>,
+    cached_first_row: usize,
     cached_matches: Vec<(LinePoint, LinePoint)>,
-    rows: Vec<usize>,
+    cached_count: usize,
     #[cfg(test)]
     pub(crate) physical_rows_scanned: usize,
 }
@@ -229,9 +272,10 @@ impl ScrollbackSearch {
             total_count: 0,
             text: RowText::default(),
             found: Vec::new(),
-            cached_rows: Vec::new(),
+            cached_lines: None,
+            cached_first_row: 0,
             cached_matches: Vec::new(),
-            rows: Vec::new(),
+            cached_count: 0,
             #[cfg(test)]
             physical_rows_scanned: 0,
         }
@@ -288,41 +332,61 @@ impl ScrollbackSearch {
         newest: Line,
         match_limit: usize,
     ) {
-        self.rows.clear();
-        self.rows
-            .extend((oldest.0..=newest.0).map(|line| grid.row_storage_id(Line(line))));
-        if self.rows != self.cached_rows {
-            std::mem::swap(&mut self.rows, &mut self.cached_rows);
+        let first_row = grid.row_storage_id(oldest);
+        let cached = self
+            .cached_lines
+            .is_some_and(|(cached_oldest, cached_newest)| {
+                newest - oldest == cached_newest - cached_oldest
+                    && first_row == self.cached_first_row
+                    && (1..=(newest - oldest).0).all(|offset| {
+                        grid.row_storage_id(oldest + offset)
+                            == grid.row_storage_id(cached_oldest + offset)
+                    })
+            });
+        if !cached {
+            self.cached_lines = Some((oldest, newest));
+            self.cached_first_row = first_row;
             #[cfg(test)]
             {
-                self.physical_rows_scanned += self.cached_rows.len();
+                self.physical_rows_scanned += (newest - oldest).0 as usize + 1;
             }
             self.text.clear();
             for line in oldest.0..=newest.0 {
                 grid.row_text(Line(line), &mut self.text);
             }
             self.found.clear();
-            self.matcher.find(&mut self.text, &mut self.found);
             let relative = |point: AlacPoint| (point.line.0 - oldest.0, point.column);
             self.cached_matches.clear();
-            self.cached_matches
-                .extend(self.found.iter().map(|&(start, end)| {
-                    (
-                        relative(self.text.point(start)),
-                        relative(self.text.last_point(end)),
-                    )
-                }));
+            if self.kept < match_limit {
+                self.matcher.find(&mut self.text, &mut self.found);
+                self.cached_count = self.found.len();
+                self.cached_matches
+                    .extend(self.found.iter().map(|&(start, end)| {
+                        (
+                            relative(self.text.point(start)),
+                            relative(self.text.last_point(end)),
+                        )
+                    }));
+            } else {
+                self.cached_count = self.matcher.count(&mut self.text);
+            }
         }
 
+        // Counting does not need cell coordinates. Once highlighting reaches
+        // its cap, avoid mapping every occurrence in the rest of a large
+        // history; keep counting cached repeated lines in constant time too.
+        self.total_count = self.total_count.saturating_add(self.cached_count);
         // Rightmost first, so the matches kept under the limit are the newest.
-        for &(start, end) in self.cached_matches.iter().rev() {
-            self.total_count = self.total_count.saturating_add(1);
-            if self.kept < match_limit {
-                self.kept += 1;
-                let point = |(line, column): LinePoint| AlacPoint::new(oldest + line, column);
-                self.matches
-                    .push(Range::from_alacritty(point(start)..=point(end)));
-            }
+        for &(start, end) in self
+            .cached_matches
+            .iter()
+            .rev()
+            .take(match_limit.saturating_sub(self.kept))
+        {
+            self.kept += 1;
+            let point = |(line, column): LinePoint| AlacPoint::new(oldest + line, column);
+            self.matches
+                .push(Range::from_alacritty(point(start)..=point(end)));
         }
     }
 

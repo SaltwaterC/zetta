@@ -401,11 +401,9 @@ pub(super) fn resize(term: &mut AlacrittyTerm, bounds: TerminalBounds, reflow: b
         return;
     }
 
-    // Alacritty always reflows the primary grid. For discrete layout changes this can move a
-    // live multi-line shell prompt before the shell handles SIGWINCH, so its redraw uses a stale
-    // cursor-relative line and leaves duplicated prompt fragments behind. Resize the primary
-    // grid without reflow, while still letting Term::resize update its inactive grid, tab stops,
-    // selection, scroll region, and damage state.
+    // An explicitly fixed-grid resize still needs Term::resize's updates to
+    // the inactive grid, tab stops, selection, scroll region and damage state.
+    // Large foreground histories use resize_with_async_history instead.
     let old_lines = term.screen_lines();
     let old_columns = term.columns();
     let mut placeholder = Grid::new(old_lines, old_columns, 0);
@@ -612,7 +610,7 @@ impl SelectionType {
 }
 
 impl Selection {
-    fn to_alacritty(&self) -> AlacSelection {
+    pub(super) fn to_alacritty(&self) -> AlacSelection {
         let mut selection = AlacSelection::new(
             self.ty.to_alacritty(),
             self.start.point.to_alacritty(),
@@ -1105,7 +1103,10 @@ fn adjusted_last_hovered_word(
     (hovered_word, grid_lines_change)
 }
 
-pub(super) fn make_content(term: &Term<ZedListener>, last_content: &mut Content) -> Content {
+pub(super) fn make_content<T: alacritty_terminal::event::EventListener>(
+    term: &Term<T>,
+    last_content: &mut Content,
+) -> Content {
     let content = term.renderable_content();
 
     // Reuse the previous snapshot's buffer. A screenful is on the order of
@@ -1153,17 +1154,38 @@ pub(super) fn make_content(term: &Term<ZedListener>, last_content: &mut Content)
     }
 }
 
-pub(super) fn content_text(term: &Term<ZedListener>) -> String {
+pub(super) fn content_text<T>(term: &Term<T>) -> String {
     let start = AlacPoint::new(term.topmost_line(), Column(0));
     let end = AlacPoint::new(term.bottommost_line(), term.last_column());
     term.bounds_to_string(start, end)
 }
 
 /// [`content_text`] of a snapshot, releasing compact history as it is decoded.
-pub(super) fn snapshot_content_text(term: &mut Term<ZedListener>) -> String {
+pub(super) fn snapshot_content_text<T>(term: &mut Term<T>) -> String {
     let start = AlacPoint::new(term.topmost_line(), Column(0));
     let end = AlacPoint::new(term.bottommost_line(), term.last_column());
     term.bounds_to_string_releasing_history(start, end)
+}
+
+/// Capture complete history on a background thread, never holding the live
+/// lock while waiting for a resize worker or traversing its retained cells.
+pub(super) fn complete_snapshot(
+    term: &AlacrittyTermLock,
+) -> Term<alacritty_terminal::term::ReflowListener> {
+    loop {
+        let reader = {
+            let terminal = term.lock_unfair();
+            match terminal.reflow_reader() {
+                Some(reader) => reader,
+                None => return terminal.snapshot_without_events(),
+            }
+        };
+        if let Some(snapshot) = reader.snapshot() {
+            return snapshot;
+        }
+        // Publication won the race. Capture the now-complete live grid, or
+        // wait for a subsequent resize if one has already started.
+    }
 }
 
 pub(super) fn total_lines(term: &Term<ZedListener>) -> usize {

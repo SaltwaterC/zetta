@@ -297,6 +297,10 @@ impl<T: PartialEq> PartialEq for Storage<T> {
 }
 
 impl<T> Storage<T> {
+    pub(crate) fn has_retained_allocations(&self) -> bool {
+        self.len() != 0 || !self.recycled.0.is_empty()
+    }
+
     #[inline]
     pub fn len(&self) -> usize {
         self.live.len() + self.archive_head.len() + self.archived_lines + self.pending.len()
@@ -364,6 +368,17 @@ impl<T> Storage<T> {
         }
     }
 
+    pub(super) fn owned_row(&self, requested: Line) -> Row<T>
+    where
+        T: Clone,
+    {
+        let index = self.compute_index(requested);
+        match self.compact_row(index) {
+            Some((rows, row_index)) => rows.row(row_index),
+            None => self.row_at(index).clone(),
+        }
+    }
+
     #[inline]
     fn compact_row(&self, index: usize) -> Option<(&CompactRows<T>, usize)> {
         let archived = index
@@ -388,6 +403,39 @@ impl<T> Storage<T> {
 }
 
 impl<T: Clone> Storage<T> {
+    /// Consume rows oldest first without expanding the compact archive. Reflow
+    /// keeps only its current row and the bounded mutable output tier decoded.
+    pub(super) fn into_top_down(mut self) -> impl ExactSizeIterator<Item = Row<T>> {
+        self.release_decoded();
+        let count = self.len();
+        (0..count).map(move |_| self.pop_oldest().unwrap())
+    }
+
+    pub(super) fn push_newest(&mut self, row: Row<T>)
+    where
+        T: GridCell + Default + PartialEq,
+    {
+        self.live.push_front(row);
+        self.archive_live_excess();
+    }
+
+    pub(super) fn newest_mut(&mut self) -> Option<&mut Row<T>> {
+        self.live.front_mut()
+    }
+
+    pub(super) fn remove_newest(&mut self, count: usize) {
+        for _ in 0..count {
+            self.live.pop_front().unwrap();
+            if let Some(row) = self.pop_newest_after_live() {
+                self.live.push_back(row);
+            }
+        }
+    }
+
+    pub(super) fn set_visible_lines(&mut self, lines: usize) {
+        self.visible_lines = lines;
+    }
+
     #[inline]
     pub fn with_capacity(visible_lines: usize, columns: usize) -> Storage<T>
     where
@@ -492,7 +540,6 @@ impl<T: Clone> Storage<T> {
     /// Detach all history rows without destroying their cell allocations.
     #[inline]
     pub fn take_history(&mut self) -> Self {
-        self.release_decoded();
         let history_live = self.live.split_off(self.visible_lines);
         Self {
             live: history_live,
@@ -501,9 +548,41 @@ impl<T: Clone> Storage<T> {
             archived_lines: std::mem::take(&mut self.archived_lines),
             pending: std::mem::take(&mut self.pending),
             visible_lines: 0,
-            recycled: RecycledRows::default(),
-            decoded: DecodedChunks::default(),
+            recycled: std::mem::take(&mut self.recycled),
+            decoded: std::mem::take(&mut self.decoded),
         }
+    }
+
+    /// Leave the bounded mutable prefix in place and detach sealed history.
+    pub(crate) fn take_archived_history(&mut self) -> Self {
+        Self {
+            live: VecDeque::new(),
+            archive_head: std::mem::take(&mut self.archive_head),
+            archive_chunks: std::mem::take(&mut self.archive_chunks),
+            archived_lines: std::mem::take(&mut self.archived_lines),
+            pending: std::mem::take(&mut self.pending),
+            visible_lines: 0,
+            recycled: std::mem::take(&mut self.recycled),
+            decoded: std::mem::take(&mut self.decoded),
+        }
+    }
+
+    /// Move the archive index, cache and spare rows to the private owner. Only
+    /// the bounded mutable prefix is copied for a resize source snapshot.
+    pub(crate) fn take_reflow_source(&mut self) -> Self {
+        let mut source = self.take_archived_history();
+        source.live = self.live.clone();
+        source.visible_lines = self.visible_lines;
+        source
+    }
+
+    pub(crate) fn take_recycled(&mut self) -> Self
+    where
+        T: Default,
+    {
+        let mut detached = Self::with_capacity(0, 1);
+        detached.recycled = std::mem::take(&mut self.recycled);
+        detached
     }
 
     /// Resize every retained row, cloning only archive chunks held by an active snapshot.
@@ -556,6 +635,11 @@ impl<T: Clone> Storage<T> {
         if !self.live.is_empty() {
             let keep = self.live.len().saturating_sub(ARCHIVE_CHUNK_ROWS);
             self.live.truncate(keep);
+            return true;
+        }
+        if !self.recycled.0.is_empty() {
+            let keep = self.recycled.0.len().saturating_sub(ARCHIVE_CHUNK_ROWS);
+            self.recycled.0.truncate(keep);
             return true;
         }
         false
@@ -654,6 +738,7 @@ impl<T: Clone> Storage<T> {
     }
 
     /// Replace all raw rows.
+    #[cfg(test)]
     pub fn replace_inner(&mut self, rows: Vec<Row<T>>)
     where
         T: GridCell + Default + PartialEq,
@@ -673,6 +758,7 @@ impl<T: Clone> Storage<T> {
     }
 
     /// Remove and return all rows in bottom-to-top order.
+    #[cfg(test)]
     pub fn take_all(&mut self) -> Vec<Row<T>> {
         self.release_decoded();
         let mut rows = Vec::with_capacity(self.len());
@@ -760,6 +846,7 @@ impl<T: Clone> Storage<T> {
         }
     }
 
+    #[cfg(test)]
     fn rebuild_archive(&mut self, rows: Vec<Row<T>>)
     where
         T: GridCell + Default + PartialEq,
@@ -872,6 +959,22 @@ mod tests {
         );
         assert_eq!(storage.archive_chunks.len(), 2);
         assert!(matches!(storage.archive_chunks[0].rows, ArchivedRows::Uniform { .. }));
+    }
+
+    #[test]
+    fn reflow_moves_the_archive_index_and_cache_instead_of_copying_history() {
+        let mut storage = Storage::<crate::term::cell::Cell>::with_capacity(24, 80);
+        for _ in 0..LIVE_HISTORY_ROWS + 4 * ARCHIVE_CHUNK_ROWS {
+            storage.scroll_up(1, 1, 80);
+        }
+        let rows = storage.len();
+        let index = storage.archive_chunks.as_slices().0.as_ptr();
+        let source = storage.take_reflow_source();
+        assert_eq!(source.archive_chunks.as_slices().0.as_ptr(), index);
+        assert_eq!(source.len(), rows);
+        assert_eq!(storage.len(), 24 + LIVE_HISTORY_ROWS);
+        assert!(storage.archive_chunks.is_empty());
+        assert!(source.live.len() <= 24 + LIVE_HISTORY_ROWS);
     }
 
     #[test]
@@ -1129,6 +1232,42 @@ mod tests {
         assert_eq!(snapshot.decoded.len(), 1);
         assert_eq!(storage.decoded.len(), 0);
         assert!(snapshot == storage);
+    }
+
+    #[test]
+    fn detaching_history_moves_its_decoded_cache_to_the_background_owner() {
+        for archived_only in [false, true] {
+            let lines = LIVE_HISTORY_ROWS + 2 * ARCHIVE_CHUNK_ROWS;
+            let mut storage = distinct_history(lines, 2);
+            let _ = &storage[Line(-(lines as i32))];
+            let _ = &storage[Line(-(LIVE_HISTORY_ROWS as i32 + 1))];
+            assert_eq!(storage.decoded.len(), 2);
+            let detached = if archived_only {
+                storage.take_archived_history()
+            } else {
+                storage.take_history()
+            };
+            assert_eq!(storage.decoded.len(), 0);
+            assert_eq!(detached.decoded.len(), 2, "cached rows must not be freed by detaching");
+        }
+    }
+
+    #[test]
+    fn detached_spare_rows_remain_reclaimable_without_retained_history() {
+        let mut storage = Storage::<char>::with_capacity(1, 2);
+        storage.initialize(4_096, 2);
+        storage.shrink_lines(4_096);
+        assert!(storage.recycled.0.len() >= 4_096);
+        let mut detached = storage.take_recycled();
+        assert!(storage.recycled.0.is_empty());
+        assert_eq!(detached.len(), 0);
+        assert!(detached.has_retained_allocations());
+        let mut chunks = 0;
+        while detached.reclaim_next_chunk() {
+            chunks += 1;
+        }
+        assert!(chunks >= 16);
+        assert!(!detached.has_retained_allocations());
     }
 
     #[test]

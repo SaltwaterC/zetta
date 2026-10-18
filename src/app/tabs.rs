@@ -421,15 +421,6 @@ impl Zetta {
         } else if self.active_tab >= self.tabs.len() {
             self.active_tab = self.tabs.len() - 1;
         }
-        // Returning to a tab can change its pane bounds during the first paint. Keep that
-        // visibility transition from synchronously reflowing its complete retained history.
-        for terminal in self.tabs[self.active_tab]
-            .panes
-            .iter()
-            .flat_map(TerminalPane::all_terminals)
-        {
-            terminal.update(cx, |terminal, _| terminal.truncate_on_next_resize());
-        }
         self.focus_active(window, cx);
     }
 }

@@ -113,6 +113,13 @@ ifeq ($(CARGO_BUILD_JOBS),)
 CARGO_BUILD_JOBS := 1
 endif
 
+# Standalone crates have independent Cargo and libtest worker pools. Bound all
+# three levels during tests rather than multiplying the host's CPU count by
+# every crate, especially when several are compiling and starting shells.
+TEST_CRATE_JOBS ?= 2
+TEST_BUILD_JOBS ?= 4
+TEST_THREADS ?= 8
+
 # Set any of SERIAL, HTTP, TFTP, TFTP_SERVER, TFTP_CLIENT, NOTIFY, CLIPBOARD,
 # SYNTAX_HIGHLIGHTING, ZMUX, SESSION_PERSISTENCE, WORKTREE, ZOSH, ZOSH_CLIENT,
 # or ZOSH_SERVER to 0, false, no, or off to omit that capability from the built
@@ -192,8 +199,10 @@ ifeq ($(OS),Windows_NT)
 # Cargo command through one initializer so lint, test, and build share cache
 # entries instead of alternately invalidating them.
 CARGO_RUN := "$(CURDIR)/scripts/cargo-windows.cmd"
+TEST_CARGO_RUN := CARGO_BUILD_JOBS=$(TEST_BUILD_JOBS) RUST_TEST_THREADS=$(TEST_THREADS) $(CARGO_RUN)
 else
 CARGO_RUN := $(CARGO)
+TEST_CARGO_RUN := CARGO_BUILD_JOBS=$(TEST_BUILD_JOBS) RUST_TEST_THREADS=$(TEST_THREADS) nice -n 10 $(CARGO_RUN)
 endif
 
 APP_ID := Zetta
@@ -228,7 +237,7 @@ WINDOWS_ZOSH_ARGS := $(if $(call tool_enabled,$(ZOSH_CLIENT)), -SourceZoshBinary
 WINDOWS_ZMUX_ARGS := $(if $(call tool_enabled,$(ZMUX)),, -MuxDisabled)
 WINDOWS_ZMUX_UPGRADE_ARGS := $(if $(call tool_enabled,$(ZMUX)), -UpgradeMux,)
 
-.PHONY: all build fmt test lint check-platforms check-features \
+.PHONY: all build fmt test test-scroll lint check-platforms check-features \
 	check-linux check-windows check-macos \
 	clippy-platforms clippy-features clippy-linux clippy-windows clippy-macos \
 	can-check-linux can-check-windows can-check-macos conformance-windows \
@@ -238,11 +247,12 @@ WINDOWS_ZMUX_UPGRADE_ARGS := $(if $(call tool_enabled,$(ZMUX)), -UpgradeMux,)
 all: fmt lint test build
 
 # Parallel execution helper: runs command for each item in $(1), collects results
-# Usage: $(call parallel_for,items,command_template,description)
+# Usage: $(call parallel_for,items,command_template,description,optional_job_limit)
 # command_template should use $$item for the current item
 #
 # Each item's [OK]/[FAIL] line is printed the moment it finishes, followed by
-# how many are still running, and by their names once three or fewer remain,
+# how many are unfinished (including queued items), and by their names once
+# three or fewer remain,
 # so an item that hangs is named on screen instead of stalling the whole call
 # silently. Its captured output is printed at the end only if it failed. The
 # template is evaluated in its own subshell so an `exit` in it still records a
@@ -252,11 +262,26 @@ define parallel_for
 	@items="$(1)"; \
 	cmd_template='$(2)'; \
 	desc="$(3)"; \
+	max_jobs="$(4)"; \
+	if [ -n "$$max_jobs" ] && ! [ "$$max_jobs" -gt 0 ] 2>/dev/null; then \
+		echo "Parallel job limit must be a positive integer" >&2; exit 2; \
+	fi; \
 	tmpdir=$$(mktemp -d); \
 	trap 'rm -rf "$$tmpdir"' EXIT; \
 	pids=""; \
 	idx=0; \
 	for item in $$items; do \
+		if [ -n "$$max_jobs" ]; then \
+			while :; do \
+				active=0; n=0; \
+				while [ $$n -lt $$idx ]; do \
+					n=$$((n + 1)); \
+					[ -f "$$tmpdir/status.$$n" ] || active=$$((active + 1)); \
+				done; \
+				[ $$active -lt "$$max_jobs" ] && break; \
+				sleep 0.1; \
+			done; \
+		fi; \
 		idx=$$((idx + 1)); \
 		echo "$$item" >"$$tmpdir/name.$$idx"; \
 		( \
@@ -279,9 +304,9 @@ define parallel_for
 			if [ $$left -eq 0 ]; then \
 				printf "  [%s] %s (%ss)\n" "$$result" "$$item" "$$elapsed"; \
 			elif [ $$left -le 3 ]; then \
-				printf "  [%s] %s (%ss); still running:%s\n" "$$result" "$$item" "$$elapsed" "$$running"; \
+				printf "  [%s] %s (%ss); remaining:%s\n" "$$result" "$$item" "$$elapsed" "$$running"; \
 			else \
-				printf "  [%s] %s (%ss); %s still running\n" "$$result" "$$item" "$$elapsed" "$$left"; \
+				printf "  [%s] %s (%ss); %s remaining\n" "$$result" "$$item" "$$elapsed" "$$left"; \
 			fi; \
 		) & \
 		pids="$$pids $$!"; \
@@ -315,23 +340,28 @@ define parallel_for
 endef
 
 test:
-	$(CARGO_RUN) test --locked --quiet --no-default-features --features "$(BUILD_FEATURES)" -- --format=terse
+	$(TEST_CARGO_RUN) test --locked --quiet --no-default-features --features "$(BUILD_FEATURES)" -- --format=terse
 	$(call parallel_for,$(ZETTA_TEST_CRATE_DIRS), \
 		cd "$$item" && \
 		if [ "$$item" = "crates/zmux" ]; then \
-			$(CARGO_RUN) build --locked --bin zmux --bin zmux-pty; \
+			$(TEST_CARGO_RUN) build --locked --profile test --features test-support --bin zmux --bin zmux-pty; \
 		fi && \
-		$(CARGO_RUN) test --locked --quiet -- --format=terse, \
-		Crate tests)
+		$(TEST_CARGO_RUN) test --locked --quiet -- --format=terse, \
+		Crate tests,$(TEST_CRATE_JOBS))
 
 ifneq ($(OS),Windows_NT)
 	$(MAKE) test-zosh-interop
 endif
 
+# The scrolling workload is kept out of ordinary validation. Always optimize it
+# and retain the same priority and resource limits as the normal test runner.
+test-scroll:
+	$(TEST_CARGO_RUN) test --locked --manifest-path crates/terminal/Cargo.toml --release scroll_long_line_benchmark -- --ignored --nocapture
+
 .PHONY: test-zosh-interop
 test-zosh-interop:
-	$(CARGO_RUN) build --locked --manifest-path crates/zosh/server/Cargo.toml --bin zosh-server --target-dir "$(CURDIR)/target/zosh-interop"
-	ZOSH_TEST_SERVER="$(CURDIR)/target/zosh-interop/debug/zosh-server" $(CARGO_RUN) test --locked --manifest-path crates/zosh/Cargo.toml interop_tests -- --ignored
+	$(TEST_CARGO_RUN) build --locked --manifest-path crates/zosh/server/Cargo.toml --bin zosh-server --target-dir "$(CURDIR)/target/zosh-interop"
+	ZOSH_TEST_SERVER="$(CURDIR)/target/zosh-interop/debug/zosh-server" $(TEST_CARGO_RUN) test --locked --manifest-path crates/zosh/Cargo.toml interop_tests -- --ignored
 
 fmt:
 	$(CARGO) fmt --check

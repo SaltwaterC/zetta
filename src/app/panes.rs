@@ -197,21 +197,6 @@ impl Zetta {
             return;
         }
 
-        // Closing a pane changes the dimensions of the survivors. Reflowing millions of retained
-        // scrollback rows synchronously during the next paint can freeze the entire application.
-        // A layout-driven resize only needs to truncate/grow rows; the shells redraw their live
-        // prompts after receiving SIGWINCH.
-        let surviving_terminals = self.tabs[tab_index]
-            .panes
-            .iter()
-            .filter(|pane| pane.id != pane_id)
-            .flat_map(TerminalPane::all_terminals)
-            .cloned()
-            .collect::<Vec<_>>();
-        for terminal in surviving_terminals {
-            terminal.update(cx, |terminal, _| terminal.truncate_on_next_resize());
-        }
-
         self.cancel_tab_search_for_tab(tab_id, cx);
         if let Some(identity) = self.run_pane_identity(tab_id, pane_id) {
             crate::run_command::process_run_registry().pane_closed(identity);
@@ -378,15 +363,6 @@ impl Zetta {
             launch_fallback,
             working_directory_configured,
         );
-        let terminals_resized_by_split = matches!(axis, SplitAxis::Vertical)
-            .then(|| {
-                tab.panes
-                    .iter()
-                    .flat_map(TerminalPane::all_terminals)
-                    .cloned()
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
         let pane_id = self.next_pane_id;
         self.next_pane_id += 1;
         let wsl_cwd_file = wsl_cwd_tracking_file(&profile, pane_id);
@@ -395,13 +371,6 @@ impl Zetta {
                 pane_controls_hidden_by_default,
                 [pane_id],
             ));
-
-        // A vertical split changes terminal widths. Reflowing a large retained buffer during the
-        // next paint blocks the UI before the new pane can appear. Preserve logical rows for this
-        // layout-driven resize; each shell will redraw its live prompt after SIGWINCH.
-        for terminal in terminals_resized_by_split {
-            terminal.update(cx, |terminal, _| terminal.truncate_on_next_resize());
-        }
 
         self.projects.inherit_pane_root(active_pane_id, pane_id);
         let tab = &mut self.tabs[tab_index];
@@ -600,9 +569,6 @@ impl Zetta {
         let tab_id = tab.id;
         if !tab.layout.rotate_pane(tab.active_pane, direction) {
             return;
-        }
-        for terminal in tab.panes.iter().flat_map(TerminalPane::all_terminals) {
-            terminal.update(cx, |terminal, _| terminal.truncate_on_next_resize());
         }
         self.sync_shared_tab_state(tab_id, cx);
         cx.notify();

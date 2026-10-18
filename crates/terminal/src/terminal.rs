@@ -55,6 +55,8 @@ pub mod paste_order;
 mod pty_info;
 mod reader_handover;
 mod replay;
+mod resize;
+mod search_reflow;
 pub mod selection_clipboard;
 mod snapshot;
 pub mod terminal_settings;
@@ -1366,6 +1368,7 @@ enum InternalEvent {
     Scroll(Scroll),
     ScrollToPoint(Point),
     SetSelection(Option<Selection>),
+    SelectAll,
     /// Replays a restore after startup integration has completed. It remains
     /// queued when layout has not supplied the real grid size yet.
     ReplayFreshShell,
@@ -2014,10 +2017,6 @@ pub const MAX_SCROLL_HISTORY_LINES: usize = i32::MAX as usize;
 #[cfg(not(any(test, feature = "test-support")))]
 const TERMINAL_EVENT_DRAIN_INTERVAL: Duration = Duration::from_millis(4);
 const MAX_TERMINAL_EVENTS_PER_BATCH: usize = 100;
-// Reflow cost scales with every retained cell and runs synchronously during paint. Above this
-// budget, preserve logical rows during width changes so dragging a window cannot monopolize the
-// UI thread for a large scrollback buffer.
-const MAX_SYNCHRONOUS_REFLOW_CELLS: usize = 1_000_000;
 const TERMINAL_SYNC_STALL_THRESHOLD: Duration = Duration::from_secs(2);
 const TERMINAL_SYNC_IDLE: u8 = 0;
 const TERMINAL_SYNC_WAITING_FOR_GRID: u8 = 1;
@@ -2028,10 +2027,6 @@ static TERMINAL_SYNC_STARTED_MS: AtomicU64 = AtomicU64::new(0);
 static TERMINAL_SYNC_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static TERMINAL_SYNC_PHASE: AtomicU8 = AtomicU8::new(TERMINAL_SYNC_IDLE);
 static NEXT_INIT_COMMAND_STARTUP_MARKER_ID: AtomicU64 = AtomicU64::new(1);
-
-fn synchronous_reflow_is_bounded(history_lines: usize, columns: usize) -> bool {
-    history_lines.saturating_mul(columns) <= MAX_SYNCHRONOUS_REFLOW_CELLS
-}
 
 fn terminal_diagnostic_millis() -> u64 {
     TERMINAL_SYNC_STARTED_AT
@@ -2547,9 +2542,9 @@ impl TerminalBuilder {
             last_mouse: None,
             mouse_down_position: None,
             matches: Arc::default(),
+            reflow_search: Default::default(),
             content_dirty: true,
             content_revision: 0,
-            reflow_on_next_resize: true,
 
             display_scale_factor: 1.0,
             local_terminal_bounds: terminal_bounds,
@@ -3445,9 +3440,9 @@ impl TerminalBuilder {
                 last_mouse: None,
                 mouse_down_position: None,
                 matches: Arc::default(),
+                reflow_search: Default::default(),
                 content_dirty: true,
                 content_revision: 0,
-                reflow_on_next_resize: true,
 
                 display_scale_factor,
                 local_terminal_bounds,
@@ -3770,10 +3765,10 @@ pub struct Terminal {
     /// apply a drag threshold before starting a selection (see #58970).
     mouse_down_position: Option<GpuiPoint<Pixels>>,
     pub matches: Arc<SearchRanges>,
+    reflow_search: search_reflow::ReflowSearch,
     pub last_content: Content,
     content_dirty: bool,
     content_revision: u64,
-    reflow_on_next_resize: bool,
     /// Converts logical layout units to protocol backing pixels.
     display_scale_factor: f32,
     /// The pane size measured in this window. A shared pane reports this to
@@ -4330,7 +4325,14 @@ impl Terminal {
             .as_ref()
             .is_some_and(|bytes| !bytes.is_empty() || self.fresh_shell_restore)
             && (!self.fresh_shell_restore || self.restore_startup_ready);
-        if self.replay_job.defer_event(event, awaiting_replay) {
+        if self.replay_job.defer_event(
+            event,
+            awaiting_replay
+                || (term.reflow_reader().is_some()
+                    && !matches!(event, InternalEvent::Scroll(_))
+                    && !(matches!(event, InternalEvent::Copy(_))
+                        && self.reflow_search_selection().is_some())),
+        ) {
             return;
         }
         self.content_dirty = true;
@@ -4340,74 +4342,14 @@ impl Terminal {
                 reflow,
                 local_grid_changed,
                 effective_resize,
-            } => {
-                let new_bounds = normalize_terminal_bounds(new_bounds);
-                trace!("Resizing: new_bounds={new_bounds:?}");
-
-                // Compare against the grid rather than `last_content`, which
-                // `set_size` already advanced when it queued this event.
-                let grid_size_changed = term.screen_lines() != new_bounds.num_lines()
-                    || term.columns() != new_bounds.num_columns();
-                let columns_changed = term.columns() != new_bounds.num_columns();
-                let was_size_initialized = self.terminal_size_initialized;
-                self.last_content.terminal_bounds = new_bounds;
-                self.terminal_size_initialized = true;
-                self.size_initialization_queued = false;
-
-                if effective_resize {
-                    // A byte-stream terminal has no local PTY event loop, so
-                    // its supplied controller is the only resize route.
-                    if matches!(self.terminal_type, TerminalType::DisplayOnly)
-                        && let Some(control) = &self.pty_control
-                    {
-                        control.resize(
-                            new_bounds.num_columns() as u16,
-                            new_bounds.num_lines() as u16,
-                        );
-                    }
-                    #[cfg(windows)]
-                    if let TerminalType::Pty { pty_tx, .. } = &self.terminal_type {
-                        if let Some(control) = &self.pty_control {
-                            control.resize(
-                                new_bounds.num_columns() as u16,
-                                new_bounds.num_lines() as u16,
-                            );
-                        } else if let Some(pty_tx) = pty_tx {
-                            pty_tx.resize(new_bounds, self.display_scale_factor);
-                        }
-                    }
-                    #[cfg(not(windows))]
-                    if let TerminalType::Pty {
-                        pty_tx: Some(pty_tx),
-                        ..
-                    } = &self.terminal_type
-                    {
-                        pty_tx.resize(new_bounds, self.display_scale_factor);
-                    }
-
-                    let reflow = reflow
-                        && synchronous_reflow_is_bounded(term.history_size(), term.columns());
-                    resize(term, new_bounds, reflow);
-                }
-                self.redraw_attached_after_first_layout();
-                if grid_size_changed || !was_size_initialized {
-                    cx.emit(Event::GridSizeChanged);
-                }
-                if local_grid_changed {
-                    cx.emit(Event::LocalGridSizeChanged);
-                }
-                // A reflow rewraps the scrollback, which moves every line the
-                // recorded directories are keyed by.
-                if columns_changed {
-                    self.reset_cwd_history();
-                }
-                // If there are matches we need to emit a wake up event to
-                // invalidate the matches and recalculate their locations
-                // in the new terminal layout
-                if !self.matches.is_empty() {
-                    cx.emit(Event::Wakeup);
-                }
-            }
+            } => self.apply_terminal_resize(
+                term,
+                new_bounds,
+                reflow,
+                local_grid_changed,
+                effective_resize,
+                cx,
+            ),
             InternalEvent::InitializeSize => {
                 self.terminal_size_initialized = true;
                 self.size_initialization_queued = false;
@@ -4422,6 +4364,7 @@ impl Terminal {
                 cx.emit(Event::Wakeup);
             }
             InternalEvent::Scroll(scroll) => {
+                self.reflow_search_scrolled();
                 trace!("Scrolling: scroll={scroll:?}");
                 scroll_display(term, *scroll);
                 self.refresh_hovered_word(window);
@@ -4438,17 +4381,13 @@ impl Terminal {
                 }
             }
             InternalEvent::SetSelection(selection) => {
-                trace!("Setting selection: selection={selection:?}");
-                set_term_selection(term, selection.as_ref());
-
-                #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-                selection_clipboard::primary::copy(term, cx);
-
-                if let Some(selection) = selection {
-                    self.selection_head = Some(selection.head);
-                }
-                cx.emit(Event::SelectionsChanged)
+                self.apply_grid_selection(term, selection.as_ref(), cx)
             }
+            InternalEvent::SelectAll => self.apply_grid_selection(
+                term,
+                Some(&Selection::simple_range(full_content_range(term))),
+                cx,
+            ),
             InternalEvent::UpdateSelection(position) => {
                 trace!("Updating selection: position={position:?}");
                 let (point, side) = grid_point_and_side(
@@ -4729,11 +4668,13 @@ impl Terminal {
     /// and this is what carries it across so the multiplexer's own grid starts
     /// from what the user was looking at.
     pub fn ansi_snapshot(&self, max_lines: usize) -> Vec<u8> {
-        snapshot::ansi_snapshot(&self.term.lock_unfair(), max_lines)
+        snapshot::ansi_snapshot(&crate::alacritty::complete_snapshot(&self.term), max_lines)
     }
 
     pub fn total_lines(&self) -> usize {
-        total_lines(&self.term.lock_unfair())
+        let term = self.term.lock_unfair();
+        term.pending_reflow_total_lines()
+            .unwrap_or_else(|| total_lines(&term))
     }
 
     pub fn viewport_lines(&self) -> usize {
@@ -4746,6 +4687,9 @@ impl Terminal {
 
     pub fn activate_match(&mut self, index: usize) {
         if let Some(search_match) = self.matches.get(index).cloned() {
+            if self.activate_reflow_search(search_match) {
+                return;
+            }
             self.set_selection(Some(Selection::simple_range(search_match)));
             if self.vi_mode_enabled {
                 self.events
@@ -4770,10 +4714,22 @@ impl Terminal {
     }
 
     pub fn select_all(&mut self) {
-        let term = self.term.lock();
-        let range = full_content_range(&term);
-        drop(term);
-        self.set_selection(Some(Selection::simple_range(range)));
+        self.events.push_back(InternalEvent::SelectAll);
+    }
+
+    fn apply_grid_selection(
+        &mut self,
+        term: &mut AlacrittyTerm,
+        selection: Option<&Selection>,
+        cx: &mut Context<Self>,
+    ) {
+        set_term_selection(term, selection);
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        selection_clipboard::primary::copy(term, cx);
+        if let Some(selection) = selection {
+            self.selection_head = Some(selection.head);
+        }
+        cx.emit(Event::SelectionsChanged);
     }
 
     fn set_selection(&mut self, selection: Option<Selection>) {
@@ -4913,20 +4869,7 @@ impl Terminal {
             || old_bounds.cell_width != new_bounds.cell_width
             || old_bounds.line_height != new_bounds.line_height;
 
-        if !requires_resize && old_bounds == new_bounds {
-            self.reflow_on_next_resize = true;
-        }
         if !requires_resize && !local_grid_changed {
-            // Identical bounds mean this is the layout pass the truncate request
-            // was armed for, landing without resizing this grid at all. Callers
-            // arm whole sets of terminals speculatively — every pane in a tab
-            // being switched to, every survivor of a closed pane — so leaving
-            // the request standing would hand it to the next genuine window
-            // resize, which would truncate a grid that should have reflowed.
-            //
-            // A sub-cell pixel change is not that layout pass. It is the drag
-            // guard above, which exists to be transparent, so it leaves the
-            // request alone.
             if !self.terminal_size_initialized && !self.size_initialization_queued {
                 self.size_initialization_queued = true;
                 self.events.push_back(InternalEvent::InitializeSize);
@@ -4937,11 +4880,9 @@ impl Terminal {
         if !self.terminal_size_initialized {
             self.size_initialization_queued = true;
         }
-        let reflow = if requires_resize {
-            mem::replace(&mut self.reflow_on_next_resize, true)
-        } else {
-            true
-        };
+        // Layout changes and window resizes must preserve wrapped text alike.
+        // `process_terminal_event` bounds synchronous work for large histories.
+        let reflow = true;
 
         // Publish geometry even if the replay finishes before `sync` drains
         // this event. A prepared grid must never replace a newer layout.
@@ -4970,14 +4911,6 @@ impl Terminal {
                 effective_resize: requires_resize,
             }),
         }
-    }
-
-    /// Truncate instead of reflowing the primary grid during the next layout-driven resize.
-    ///
-    /// The request is dropped again if the layout settles on the size this
-    /// terminal already had, so it cannot reach a later window resize.
-    pub fn truncate_on_next_resize(&mut self) {
-        self.reflow_on_next_resize = false;
     }
 
     /// Write input to the interactive backend, if applicable.
@@ -5690,6 +5623,15 @@ impl Terminal {
         let term = self.term.clone();
         let mut terminal = term.lock_unfair();
         diagnostic.acquired_grid();
+        if terminal.finish_pending_reflow() {
+            self.content_dirty = true;
+            self.replay_job.release_deferred(&mut self.events);
+            self.reflow_search = Default::default();
+            self.matches = Arc::default();
+            // Source-coordinate searches must restart against the published layout.
+            cx.emit(Event::Wakeup);
+            cx.emit(Event::GridSizeChanged);
+        }
         //Note that the ordering of events matters for event processing
         while let Some(e) = self.events.pop_front() {
             self.process_terminal_event(&e, &mut terminal, window, cx)
@@ -5698,7 +5640,21 @@ impl Terminal {
         self.start_pending_replay(&terminal, cx);
 
         if self.content_dirty && !self.init_command_startup_suppress_render {
-            self.last_content = make_content(&terminal, &mut self.last_content);
+            if self.render_reflow_search(&terminal) {
+                // Search coordinates belong to the immutable source until publication.
+            } else if let Some((view, offset, total_lines)) = terminal.pending_reflow_view() {
+                self.last_content = make_content(&view, &mut self.last_content);
+                let delta = offset as i32 - self.last_content.display_offset as i32;
+                for cell in &mut self.last_content.cells {
+                    cell.point.line -= delta;
+                }
+                self.last_content.display_offset = offset;
+                self.last_content.total_lines = total_lines;
+                self.last_content.scrolled_to_top = offset + view.screen_lines() == total_lines;
+                self.last_content.scrolled_to_bottom = false;
+            } else {
+                self.last_content = make_content(&terminal, &mut self.last_content);
+            }
             self.content_dirty = false;
             self.content_revision = self.content_revision.wrapping_add(1);
 
@@ -5737,7 +5693,7 @@ impl Terminal {
             // Only the mutable prefix is copied; sealed history chunks stay shared.
             // End the guard's lifetime here so PTY parsing and rendering can proceed
             // throughout the history-sized traversal and allocation below.
-            let mut snapshot = term.lock_unfair().clone();
+            let mut snapshot = crate::alacritty::complete_snapshot(&term);
             #[cfg(test)]
             if let Some(gate) = gate {
                 gate.after_capture(&term, snapshot.grid()).await;
@@ -6273,10 +6229,16 @@ impl Terminal {
     ///
     /// The search runs on background workers against a snapshot of the grid, and reports
     /// provisional results while it runs (see [`SearchUpdate`]).
-    pub fn find_matches(&self, searcher: Search, cx: &Context<Self>) -> SearchJob {
+    pub fn find_matches(&mut self, searcher: Search, cx: &Context<Self>) -> SearchJob {
         // Queue only the live handle: tab search submits every pane in one foreground update.
         // A cancelled job that has not started must not copy any terminal rows.
         let term = self.term.clone();
+        if self.reflow_search.source().is_some() {
+            self.matches = Arc::default();
+            self.content_dirty = true;
+        }
+        self.reflow_search = Default::default();
+        let source_slot = self.reflow_search.source.clone();
         #[cfg(test)]
         let gate = self.content_snapshot_gate.clone();
         let executor = cx.background_executor().clone();
@@ -6286,7 +6248,20 @@ impl Terminal {
             .spawn_with_priority(Priority::Low, async move {
                 // Copy the bounded mutable prefix and share sealed history on the worker. Release
                 // the live PTY/render lock before yielding or traversing the captured contents.
-                let snapshot = Arc::new(term.lock().grid().clone());
+                let snapshot = {
+                    let live = term.lock_unfair();
+                    match live.reflow_search_source() {
+                        Some(source) => {
+                            drop(live);
+                            let grid = Arc::new(source.grid().clone());
+                            *source_slot
+                                .lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(source);
+                            grid
+                        }
+                        None => Arc::new(live.grid().clone()),
+                    }
+                };
                 #[cfg(test)]
                 if let Some(gate) = gate {
                     gate.after_capture(&term, &snapshot).await;
@@ -7908,6 +7883,10 @@ pub fn rgba_color(r: u8, g: u8, b: u8) -> Hsla {
     }
     .into()
 }
+
+#[cfg(test)]
+#[path = "tests/exit_policy.rs"]
+mod exit_policy_tests;
 
 #[cfg(test)]
 mod tests {
@@ -12702,7 +12681,9 @@ mod tests {
         );
     }
 
-    #[gpui::test(iterations = 10)]
+    // Native shell startup is outside the deterministic scheduler. Exercise it
+    // once; exit_policy_tests covers the state transition across scheduler seeds.
+    #[gpui::test]
     async fn test_terminal_no_exit_on_spawn_failure(cx: &mut TestAppContext) {
         cx.executor().allow_parking();
 
@@ -13324,126 +13305,6 @@ mod tests {
             1,
             "a resize that changes the number of rows is reported once"
         );
-    }
-
-    #[gpui::test]
-    async fn test_layout_resize_can_disable_reflow_once(cx: &mut TestAppContext) {
-        let builder = cx.update(|cx| {
-            TerminalBuilder::new_display_only(
-                SettingsCursorShape::Block,
-                AlternateScroll::On,
-                None,
-                0,
-                cx.background_executor(),
-                PathStyle::local(),
-            )
-        });
-        let mut terminal = builder.terminal;
-        let base_bounds = terminal.last_content.terminal_bounds;
-        let mut pixel_only = base_bounds;
-        pixel_only.bounds.size.width += Pixels::from(1.);
-
-        terminal.truncate_on_next_resize();
-        terminal.set_size(pixel_only);
-        assert!(matches!(
-            terminal.events.back(),
-            Some(InternalEvent::InitializeSize)
-        ));
-
-        let mut resized = pixel_only;
-        resized.bounds.size.width += resized.cell_width;
-        terminal.set_size(resized);
-        assert!(
-            matches!(
-                terminal.events.back(),
-                Some(InternalEvent::Resize { reflow: false, .. })
-            ),
-            "a sub-cell pixel change must leave the truncate request standing"
-        );
-
-        terminal.events.clear();
-        resized.bounds.size.width += resized.cell_width;
-        terminal.set_size(resized);
-        assert!(matches!(
-            terminal.events.back(),
-            Some(InternalEvent::Resize { reflow: true, .. })
-        ));
-    }
-
-    /// Callers arm whole sets of terminals without knowing which of them will
-    /// actually change size. A request that outlives the layout it was armed for
-    /// would truncate the next window resize instead of reflowing it.
-    #[gpui::test]
-    async fn test_a_settled_layout_drops_an_unused_truncate_request(cx: &mut TestAppContext) {
-        let builder = cx.update(|cx| {
-            TerminalBuilder::new_display_only(
-                SettingsCursorShape::Block,
-                AlternateScroll::On,
-                None,
-                0,
-                cx.background_executor(),
-                PathStyle::local(),
-            )
-        });
-        let mut terminal = builder.terminal;
-        let base_bounds = terminal.last_content.terminal_bounds;
-
-        terminal.truncate_on_next_resize();
-        terminal.set_size(base_bounds);
-        assert!(matches!(
-            terminal.events.back(),
-            Some(InternalEvent::InitializeSize)
-        ));
-
-        let mut resized = base_bounds;
-        resized.bounds.size.width += resized.cell_width;
-        terminal.set_size(resized);
-        assert!(matches!(
-            terminal.events.back(),
-            Some(InternalEvent::Resize { reflow: true, .. })
-        ));
-    }
-
-    #[gpui::test]
-    async fn test_coalesced_layout_resizes_preserve_non_reflow_decision(cx: &mut TestAppContext) {
-        let builder = cx.update(|cx| {
-            TerminalBuilder::new_display_only(
-                SettingsCursorShape::Block,
-                AlternateScroll::On,
-                None,
-                0,
-                cx.background_executor(),
-                PathStyle::local(),
-            )
-        });
-        let mut terminal = builder.terminal;
-        let base_bounds = terminal.last_content.terminal_bounds;
-
-        terminal.truncate_on_next_resize();
-        let mut first_resize = base_bounds;
-        first_resize.bounds.size.width += first_resize.cell_width;
-        terminal.set_size(first_resize);
-
-        let mut coalesced_resize = first_resize;
-        coalesced_resize.bounds.size.width += coalesced_resize.cell_width;
-        terminal.set_size(coalesced_resize);
-
-        assert_eq!(terminal.events.len(), 1);
-        assert!(matches!(
-            terminal.events.back(),
-            Some(InternalEvent::Resize {
-                bounds,
-                reflow: false,
-                ..
-            }) if *bounds == coalesced_resize
-        ));
-    }
-
-    #[test]
-    fn synchronous_history_reflow_has_a_cell_budget() {
-        assert!(synchronous_reflow_is_bounded(10_000, 100));
-        assert!(!synchronous_reflow_is_bounded(10_001, 100));
-        assert!(!synchronous_reflow_is_bounded(usize::MAX, 2));
     }
 
     #[gpui::test]
@@ -14740,41 +14601,31 @@ mod tests {
         use util::default;
         use util_macros::perf;
 
-        async fn init_scroll_perf_test(
+        fn init_scroll_perf_test(
             cx: &mut TestAppContext,
         ) -> (Entity<Terminal>, &mut VisualTestContext) {
             cx.update(|cx| {
                 TerminalSettings::init(cx);
             });
 
-            cx.executor().allow_parking();
-
             let window = cx.add_empty_window();
-            let builder = window
-                .update(|window, cx| {
-                    let settings = TerminalSettings::get_global(cx);
-                    let test_path_hyperlink_timeout_ms = 100;
-                    TerminalBuilder::new(
-                        None,
-                        None,
-                        task::Shell::System,
-                        HashMap::default(),
-                        SettingsCursorShape::default(),
-                        AlternateScroll::On,
-                        None,
-                        settings.path_hyperlink_regexes.clone(),
-                        test_path_hyperlink_timeout_ms,
-                        false,
-                        window.window_handle().window_id().as_u64(),
-                        None,
-                        cx,
-                        vec![],
-                        PathStyle::local(),
-                        None,
-                    )
-                })
-                .await
-                .unwrap();
+            let builder = window.update(|_, cx| {
+                let settings = TerminalSettings::get_global(cx);
+                let test_path_hyperlink_timeout_ms = 100;
+                let mut builder = TerminalBuilder::new_display_only(
+                    SettingsCursorShape::default(),
+                    AlternateScroll::On,
+                    None,
+                    test_path_hyperlink_timeout_ms,
+                    cx.background_executor(),
+                    PathStyle::local(),
+                );
+                builder.terminal.hyperlink_regex_searches = RegexSearches::new(
+                    &settings.path_hyperlink_regexes,
+                    test_path_hyperlink_timeout_ms,
+                );
+                builder
+            });
             let terminal = window.new(|cx| builder.subscribe(cx));
 
             terminal.update(window, |term, cx| {
@@ -14786,8 +14637,18 @@ mod tests {
 
         #[perf]
         #[gpui::test]
+        #[ignore = "manual optimized-build long-line scrolling benchmark"]
         async fn scroll_long_line_benchmark(cx: &mut TestAppContext) {
-            let (terminal, window) = init_scroll_perf_test(cx).await;
+            exercise_long_line_scroll(cx, 20_000);
+        }
+
+        #[gpui::test]
+        fn scrolling_a_long_line_emits_scroll_events(cx: &mut TestAppContext) {
+            exercise_long_line_scroll(cx, 8);
+        }
+
+        fn exercise_long_line_scroll(cx: &mut TestAppContext, iterations: usize) {
+            let (terminal, window) = init_scroll_perf_test(cx);
             let wobble = point(FIND_HYPERLINK_THROTTLE_PX, px(0.0));
             let mut scroll_by = |lines: i32| {
                 window.update_window_entity(&terminal, |terminal, window, cx| {
@@ -14823,7 +14684,7 @@ mod tests {
                 });
             };
 
-            for _ in 0..20000 {
+            for _ in 0..iterations {
                 scroll_by(1);
                 scroll_by(-1);
             }

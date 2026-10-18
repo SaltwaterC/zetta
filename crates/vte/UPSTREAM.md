@@ -85,3 +85,7 @@ CSI 16 t dispatches to the default no-op `Handler::character_cell_size_pixels`, 
 - Handler::linefeed_with_mode routes C0 LF/VT/FF to backend-selected terminal
   newline semantics. The default delegates to linefeed; ESC D still calls
   linefeed directly, preserving existing consumers and index semantics.
+
+- ANSI clear modes and attributes are `Copy`/`Clone`, and hyperlinks are `Clone`,
+  so the engine can retain typed semantic operations during asynchronous history
+  reflow without reparsing bytes or losing escape sequences split across batches.

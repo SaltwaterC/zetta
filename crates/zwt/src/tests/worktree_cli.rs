@@ -4,12 +4,9 @@ use std::{
     fs,
     path::{Path, PathBuf},
     process::{Command, Output},
-    sync::{Mutex, MutexGuard, OnceLock},
 };
 
 use tempfile::TempDir;
-
-static WORKTREE_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 pub(super) struct GitFixture {
     pub(super) _tempdir: TempDir,
@@ -20,6 +17,7 @@ pub(super) struct GitFixture {
 pub(super) struct EnvironmentGuard {
     test_directory: Option<PathBuf>,
     test_git_config: Option<(OsString, OsString)>,
+    worktree_name_requests: Option<Vec<Option<String>>>,
 }
 
 pub(super) fn empty_system_config() -> &'static str {
@@ -30,6 +28,7 @@ impl Drop for EnvironmentGuard {
     fn drop(&mut self) {
         replace_test_current_directory(self.test_directory.take());
         replace_test_git_config(self.test_git_config.take());
+        replace_test_worktree_name_requests(self.worktree_name_requests.take());
     }
 }
 
@@ -63,6 +62,9 @@ impl GitFixture {
         EnvironmentGuard {
             test_directory,
             test_git_config,
+            // Tests run inside Zetta too. Never send fixture worktree names to
+            // the real tab or wait for its process-control endpoint.
+            worktree_name_requests: replace_test_worktree_name_requests(Some(Vec::new())),
         }
     }
 
@@ -247,19 +249,13 @@ impl GitFixture {
     }
 }
 
-pub(super) fn test_lock() -> MutexGuard<'static, ()> {
-    WORKTREE_TEST_LOCK
-        .get_or_init(|| Mutex::new(()))
-        .lock()
-        .unwrap()
-}
-
 pub(super) fn in_directory<T>(
     fixture: &GitFixture,
     path: &Path,
     operation: impl FnOnce() -> T,
 ) -> T {
-    let _lock = test_lock();
+    // All overrides are thread-local and every fixture owns its repositories.
+    // Serializing Git subprocesses here makes the whole suite wait on I/O.
     let _environment = fixture.enter(path);
     operation()
 }
@@ -271,6 +267,65 @@ pub(super) fn capture_worktree_name_requests<T>(
     let result = operation();
     let requests = replace_test_worktree_name_requests(previous).unwrap();
     (result, requests)
+}
+
+#[test]
+fn fixture_environment_captures_requests_and_restores_nested_overrides() {
+    let fixture = GitFixture::new();
+    let _environment = fixture.enter(&fixture.root);
+    request_originating_worktree_name(Some("outer"));
+    {
+        let nested = fixture.root.join("nested");
+        let _nested_environment = fixture.enter(&nested);
+        assert_eq!(test_current_directory(), Some(nested));
+        request_originating_worktree_name(None);
+        TEST_WORKTREE_NAME_REQUESTS.with(|requests| {
+            assert_eq!(*requests.borrow(), Some(vec![None]));
+        });
+    }
+    assert_eq!(test_current_directory(), Some(fixture.root.clone()));
+    TEST_WORKTREE_NAME_REQUESTS.with(|requests| {
+        assert_eq!(*requests.borrow(), Some(vec![Some("outer".to_owned())]));
+    });
+}
+
+#[test]
+fn fixture_operations_can_overlap_without_sharing_overrides() {
+    use std::{sync::mpsc, thread, time::Duration};
+
+    let (entered_tx, entered_rx) = mpsc::channel();
+    thread::scope(|scope| {
+        let mut releases = Vec::new();
+        for name in ["first", "second"] {
+            let entered_tx = entered_tx.clone();
+            let (release_tx, release_rx) = mpsc::channel();
+            releases.push(release_tx);
+            scope.spawn(move || {
+                let fixture = GitFixture::new();
+                let path = fixture.root.join(name);
+                in_directory(&fixture, &path, || {
+                    entered_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    assert_eq!(test_current_directory(), Some(path.clone()));
+                    TEST_GIT_CONFIG.with(|config| {
+                        assert_eq!(
+                            config.borrow().as_ref().unwrap().0,
+                            fixture.global_config.as_os_str()
+                        );
+                    });
+                });
+            });
+        }
+        // Release both workers before asserting so a serialization regression
+        // fails instead of leaving a worker blocked forever.
+        let first = entered_rx.recv_timeout(Duration::from_secs(10));
+        let second = entered_rx.recv_timeout(Duration::from_secs(10));
+        for release in releases {
+            release.send(()).unwrap();
+        }
+        first.unwrap();
+        second.unwrap();
+    });
 }
 
 #[test]

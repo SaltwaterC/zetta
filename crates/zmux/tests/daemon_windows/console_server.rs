@@ -48,13 +48,13 @@ fn a_console_server_pane_streams_self_contained_output_and_answers_queries() {
     input
         .write_all(b"hello\r")
         .expect("typing into the console");
-    let bytes = read_until(&mut output, &mut input, b"got=", Duration::from_secs(10));
+    // Wait for the complete answer in one read. A second unconditional read
+    // waits out its deadline when this read already consumed the answer.
+    let bytes = read_until(&mut output, &mut input, b"'hello'", Duration::from_secs(10));
     let more = String::from_utf8_lossy(&bytes);
-    let tail = read_until(&mut output, &mut input, b"'hello'", Duration::from_secs(5));
-    let tail = String::from_utf8_lossy(&tail);
     assert!(
-        more.contains("'hello'") || tail.contains("'hello'"),
-        "{more:?}{tail:?}"
+        more.contains("got=") && more.contains("'hello'"),
+        "{more:?}"
     );
     client.kill(pane.session_id).expect("cleaning up");
     client.shutdown().expect("stopping the daemon");

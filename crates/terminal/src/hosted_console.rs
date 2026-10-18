@@ -2,7 +2,6 @@
 //! Only this adapter translates console-server hooks into terminal-engine state.
 use crate::alacritty::AlacrittyTermLock;
 use alacritty_terminal::event::WindowSize;
-use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::hosted_console::queue::{self, OutputWriter};
 use alacritty_terminal::hosted_console::{HostedConsole, HostedPty, OutputMode};
 use alacritty_terminal::tty;
@@ -30,18 +29,16 @@ impl ConsoleOutput for Output {
         self.writer.flush()
     }
     fn cursor(&self) -> (i16, i16) {
-        let term = self.term.lock();
-        let point = term.grid().cursor.point;
-        (point.column.0 as i16, point.line.0 as i16)
+        self.screen().cursor
     }
     fn size(&self) -> (i16, i16) {
-        let term = self.term.lock();
-        (
-            term.columns().min(i16::MAX as usize) as i16,
-            term.screen_lines().min(i16::MAX as usize) as i16,
-        )
+        let screen = self.screen();
+        (screen.columns, screen.rows)
     }
     fn screen(&self) -> Screen {
+        // Console screen coordinates describe the live viewport, never the
+        // scrollback archive. Waiting for history here also blocks PSReadLine's
+        // cursor queries and makes typing appear lost during a large reflow.
         grid::screen(&self.term.lock())
     }
     fn read_cells(

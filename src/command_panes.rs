@@ -684,20 +684,6 @@ impl Zetta {
         let path_hyperlink_regexes = settings.path_hyperlink_regexes(true);
         let pane_id = self.next_pane_id;
         let wsl_cwd_file = wsl_cwd_tracking_file(&profile, pane_id);
-        let terminals_resized_by_split = matches!(axis, SplitAxis::Vertical)
-            .then(|| {
-                self.tabs[tab_index]
-                    .panes
-                    .iter()
-                    .flat_map(TerminalPane::all_terminals)
-                    .cloned()
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        for terminal in terminals_resized_by_split {
-            terminal.update(cx, |terminal, _| terminal.truncate_on_next_resize());
-        }
-
         self.next_pane_id += 1;
         self.projects.inherit_pane_root(active_pane_id, pane_id);
         self.pane_controls_hidden_for

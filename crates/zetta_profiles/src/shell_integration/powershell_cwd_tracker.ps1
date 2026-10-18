@@ -18,6 +18,7 @@ if (-not $terminalTrackerActive) {
         (-not [string]::IsNullOrEmpty($env:ZETTA_PANE_ROUTING_ID)) -or
         (-not [string]::IsNullOrEmpty($env:ZETTA_PANE_ID))
     $global:__ZettaCommandStarted = $false
+    $global:__ZettaShellInputInitialized = $false
     $global:__ZettaOriginalPrompt = $function:prompt
     $global:__ZettaOriginalCommandValidationHandler = $null
     function global:__zetta_report_tracking_ready {
@@ -32,6 +33,17 @@ if (-not $terminalTrackerActive) {
     }
     function global:prompt {
         $promptSucceeded = $?
+        # PSReadLine saves the current mode for the command it will run.
+        # Repair Ctrl-C left disabled by an earlier command before that save.
+        # InvokePrompt also calls us during editing (for example Ctrl+L), when
+        # PSReadLine must keep its raw mode: only repair actual new prompts.
+        if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT -and
+            (-not $global:__ZettaShellInputInitialized -or $global:__ZettaCommandStarted)) {
+            try {
+                [Console]::TreatControlCAsInput = $false
+                $global:__ZettaShellInputInitialized = $true
+            } catch {}
+        }
         try {
             if ($global:__ZettaLifecycleTrackingEnabled -and $global:__ZettaCommandStarted) {
                 $status = if ($promptSucceeded) {

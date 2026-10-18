@@ -395,9 +395,6 @@ impl Zetta {
             return;
         }
         let tab_id = tab.id;
-        for terminal in tab.panes.iter().flat_map(TerminalPane::all_terminals) {
-            terminal.update(cx, |terminal, _| terminal.truncate_on_next_resize());
-        }
         self.sync_shared_tab_state(tab_id, cx);
         cx.notify();
     }
@@ -424,9 +421,6 @@ impl Zetta {
             return;
         }
         tab.activate_pane(dragged.pane_id);
-        for terminal in tab.panes.iter().flat_map(TerminalPane::all_terminals) {
-            terminal.update(cx, |terminal, _| terminal.truncate_on_next_resize());
-        }
         self.sync_shared_tab_state(target.tab_id, cx);
         cx.notify();
     }
@@ -624,15 +618,6 @@ impl Zetta {
             gutter.axis,
             layout_delta / available_extent,
         ) {
-            // A gutter drag changes terminal geometry just like keyboard pane
-            // resizing, so defer scrollback reflow until that resize arrives.
-            for terminal in self.tabs[tab_index]
-                .panes
-                .iter()
-                .flat_map(TerminalPane::all_terminals)
-            {
-                terminal.update(cx, |terminal, _| terminal.truncate_on_next_resize());
-            }
             self.sync_shared_tab_state(gutter.tab_id, cx);
             cx.notify();
         }
@@ -875,13 +860,6 @@ impl Zetta {
         }
         changed |= resize_window(window, window_resize, cx);
         if changed {
-            // The next terminal size change is driven by pane geometry, so do
-            // not synchronously reflow retained scrollback for every keypress.
-            if let Some(tab) = self.tabs.get(tab_index) {
-                for terminal in tab.panes.iter().flat_map(TerminalPane::all_terminals) {
-                    terminal.update(cx, |terminal, _| terminal.truncate_on_next_resize());
-                }
-            }
             self.sync_shared_tab_state(tab_id, cx);
             cx.notify();
         }

@@ -45,6 +45,13 @@ enum Update {
 }
 
 impl ReplayJob {
+    pub(super) fn release_deferred(&mut self, events: &mut VecDeque<InternalEvent>) {
+        if !self.is_running() {
+            self.events.append(events);
+            mem::swap(events, &mut self.events);
+        }
+    }
+
     pub(super) fn is_running(&self) -> bool {
         self.updates.is_some()
     }
@@ -104,8 +111,8 @@ impl PreparedReplay {
     fn apply(&mut self, updates: Vec<Update>) {
         for update in updates {
             match update {
-                // Private reflow need not truncate large histories to satisfy
-                // the foreground's synchronous cell budget.
+                // Restored history already belongs to a private worker, so
+                // replay resizes can reflow it completely here.
                 Update::Resize(bounds, reflow) => resize(&mut self.term, bounds, reflow),
                 Update::Configure(config) => self.term.set_options(config),
                 Update::Output(bytes) => self.processor.advance(&mut self.term, &bytes),

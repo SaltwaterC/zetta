@@ -30,7 +30,7 @@ use log::debug;
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
-use crate::{ascii_run_char, control_bits, Params, ParamsIter};
+use crate::{Params, ParamsIter, ascii_run_char, control_bits};
 
 /// Maximum time before a synchronized update is aborted.
 const SYNC_UPDATE_TIMEOUT: Duration = Duration::from_millis(150);
@@ -47,7 +47,7 @@ const BSU_CSI: [u8; SYNC_ESCAPE_LEN] = *b"\x1b[?2026h";
 /// ESU CSI sequence for terminating synchronized updates.
 const ESU_CSI: [u8; SYNC_ESCAPE_LEN] = *b"\x1b[?2026l";
 
-#[derive(Debug, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Hyperlink {
     /// Identifier for the given hyperlink.
     pub id: Option<String>,
@@ -991,7 +991,7 @@ pub enum NamedPrivateMode {
 /// Mode for clearing line.
 ///
 /// Relative to cursor.
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub enum LineClearMode {
     /// Clear right of cursor.
     Right,
@@ -1004,7 +1004,7 @@ pub enum LineClearMode {
 /// Mode for clearing terminal.
 ///
 /// Relative to cursor.
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub enum ClearMode {
     /// Clear below cursor.
     Below,
@@ -1017,7 +1017,7 @@ pub enum ClearMode {
 }
 
 /// Mode for clearing tab stops.
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub enum TabulationClearMode {
     /// Clear stop under cursor.
     Current,
@@ -1153,7 +1153,7 @@ pub enum Color {
 }
 
 /// Terminal character attributes.
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum Attr {
     /// Clear all special abilities.
     Reset,

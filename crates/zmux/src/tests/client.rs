@@ -1,5 +1,42 @@
 use super::*;
 
+#[test]
+fn an_acknowledged_upgrade_accepts_peer_disconnects_but_not_other_failures() {
+    struct Reader(VecDeque<io::Result<usize>>);
+    impl io::Read for Reader {
+        fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+            self.0
+                .pop_front()
+                .expect("unexpected extra read while waiting for upgrade close")
+        }
+    }
+    for (kind, closed) in [
+        (io::ErrorKind::ConnectionReset, true),
+        (io::ErrorKind::ConnectionAborted, true),
+        (io::ErrorKind::BrokenPipe, true),
+        (io::ErrorKind::UnexpectedEof, true),
+        (io::ErrorKind::TimedOut, false),
+        (io::ErrorKind::WouldBlock, false),
+        (io::ErrorKind::PermissionDenied, false),
+    ] {
+        let reader = Reader(VecDeque::from([Err(io::Error::from(kind))]));
+        assert_eq!(
+            Client::wait_for_upgrade_disconnect(reader).is_ok(),
+            closed,
+            "{kind:?}"
+        );
+    }
+    assert!(
+        Client::wait_for_upgrade_disconnect(Reader(VecDeque::from([
+            Err(io::Error::from(io::ErrorKind::Interrupted)),
+            Ok(0),
+        ])))
+        .is_ok()
+    );
+    assert!(Client::wait_for_upgrade_disconnect(&b""[..]).is_ok());
+    assert!(Client::wait_for_upgrade_disconnect(&b"unexpected data"[..]).is_err());
+}
+
 #[cfg(unix)]
 #[test]
 fn ready_connection_requires_a_successful_ping() {

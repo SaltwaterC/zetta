@@ -11,6 +11,7 @@ use crate::term::cell::{Flags, ResetDiscriminant};
 use crate::vte::ansi::{CharsetIndex, StandardCharset};
 
 mod archive;
+mod reflow_view;
 pub mod resize;
 mod row;
 mod storage;
@@ -29,7 +30,7 @@ pub(crate) struct DetachedRows<T> {
 
 impl<T: Clone> DetachedRows<T> {
     pub(crate) fn is_empty(&self) -> bool {
-        self.storage.len() == 0
+        !self.storage.has_retained_allocations()
     }
 
     pub(crate) fn reclaim_next_chunk(&mut self) -> bool {
@@ -68,6 +69,12 @@ pub trait GridCell: Sized + Clone {
     /// else. `None` keeps history of this cell type as rows.
     fn archive_char(&self) -> Option<char> {
         None
+    }
+
+    /// Whether this archived cell continues its row on the next row. Only
+    /// terminal cells use the compact text reader's cached wrap metadata.
+    fn archive_wrap(&self) -> bool {
+        false
     }
 
     /// Whether `self` and `other` differ in nothing but [`Self::archive_char`].
@@ -447,6 +454,34 @@ impl<T: Clone> Grid<T> {
     pub(crate) fn take_history(&mut self) -> DetachedRows<T> {
         self.display_offset = 0;
         DetachedRows { storage: self.raw.take_history() }
+    }
+
+    /// Detach the immutable older tier for a bounded live resize preview.
+    pub(crate) fn take_archived_history(&mut self) -> DetachedRows<T> {
+        let storage = self.raw.take_archived_history();
+        self.display_offset = self.display_offset.min(self.history_size());
+        DetachedRows { storage }
+    }
+
+    pub(crate) fn take_reflow_source(&mut self) -> Self {
+        let source = Self {
+            raw: self.raw.take_reflow_source(),
+            columns: self.columns,
+            lines: self.lines,
+            cursor: self.cursor.clone(),
+            saved_cursor: self.saved_cursor.clone(),
+            display_offset: self.display_offset,
+            max_scroll_limit: self.max_scroll_limit,
+        };
+        self.display_offset = self.display_offset.min(self.history_size());
+        source
+    }
+
+    pub(crate) fn take_recycled(&mut self) -> DetachedRows<T>
+    where
+        T: Default,
+    {
+        DetachedRows { storage: self.raw.take_recycled() }
     }
 
     /// This is used only for initializing after loading ref-tests.

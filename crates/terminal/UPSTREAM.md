@@ -28,7 +28,15 @@ Retain these Zetta-specific behaviors when synchronizing:
   (`SearchJob`, `SearchUpdate`) newest first while the exact count is still
   being taken. Each update carries only the matches found since the previous
   one; `Terminal::matches` is a `SearchRanges`, stored newest first so those
-  append, and looked up by binary search for the lines on screen;
+  append, and looked up by binary search for the lines on screen. Repeated-line
+  detection compares shared row identities against the previous snapshot lines
+  without building an identity vector for every unique line. After the highlight
+  limit, count matches without allocating byte ranges or mapping cell coordinates;
+- search during retained-history reflow never calls the blocking export snapshot
+  reader. It scans the immutable source immediately. `search_reflow.rs` projects
+  only the displayed source matches through a bounded viewport, including wide
+  characters, selection copying, and navigation after repeated resizes. Publication
+  invalidates source coordinates and emits a wakeup to restart active searches;
 - capture and terminate both the shell and foreground process groups during
   PTY teardown, including application shutdown. Upstream reverted its own
   version of this in `492acd6c81`; do not import that revert. The regression it
@@ -141,3 +149,20 @@ Terminal geometry replies and local PTY pixel dimensions use the viewing display
   adapter before launch. Hosted output goes through the existing parser thread;
   title/query hooks observe the authoritative grid after a completion fence.
   Hosted byte-only providers are rejected before launch, with no relaunch.
+
+Local layout changes use normal reflow instead of one-shot truncation requests.
+Splits, gutter resizes and maximize/restore preserve wrapped output and the input
+cursor. Above the synchronous cell budget, a private engine worker reflows full
+history while the bounded recent tier supplies a live preview. ANSI operations,
+resizes and output-mode changes are mirrored in order. Background exports read
+the complete worker result. Scrolling renders bounded, reflowed source windows
+before publication, while selection waits for the complete history. Native
+console screen/cursor/cell queries read the live viewport immediately, so
+PSReadLine can continue reading and echoing input during history reflow. Tests
+keep the worker paused until PowerShell 5.1, PowerShell 7 and cmd have accepted
+their commands and exited.
+
+`resize.rs` owns geometry application and its sidecar regression tests. It counts
+history in both active and inactive screens, prepares the emulator before
+notifying the backend, and retries layout without changing shell geometry if a
+reflow worker cannot be started.

@@ -856,12 +856,14 @@ impl TerminalView {
         self.search_matches_limited = false;
         self.search_total_matches = 0;
         self.search_complete = query.is_empty();
+        // Query edits must paint independently of the debounced background search.
+        // In particular, a post-resize search may wait for retained history to reflow.
+        cx.notify();
         if query.is_empty() {
             self.search_active_match = None;
             self.terminal.update(cx, |terminal, _| {
                 Arc::make_mut(&mut terminal.matches).clear()
             });
-            cx.notify();
             return;
         }
         let Some(search) = Search::new_literal(&query) else {
@@ -1352,12 +1354,16 @@ impl Render for TerminalView {
                         .child(
                             h_flex()
                                 .w_full()
+                                .flex_wrap()
                                 .justify_between()
                                 .gap_3()
                                 .child(
                                     h_flex()
+                                        .flex_1()
+                                        .flex_basis(px(120.))
                                         .min_w_0()
                                         .overflow_hidden()
+                                        .debug_selector(|| format!("terminal-search-query:{query}"))
                                         .when(query_selected, |input| {
                                             input.bg(theme.colors().element_selection_background)
                                         })
@@ -1376,6 +1382,7 @@ impl Render for TerminalView {
                                 .child(
                                     div()
                                         .flex_none()
+                                        .max_w_full()
                                         .text_color(theme.colors().text_muted)
                                         .child(status),
                                 ),

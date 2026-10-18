@@ -144,7 +144,10 @@ function Invoke-MakeTarget {
             $outputRedirection = '1>"{0}" 2>&1' -f $targetLogPath
             Write-HookProgress "$Target`: output $targetLogPath"
         }
-        $processStartInfo.Arguments = '/d /c ""{0}" {1} {2}"' -f `
+        # Set priority at launch so Make's shells inherit it too, including
+        # when this script is invoked from an interactive PowerShell session.
+        $processStartInfo.Arguments = '/d /v:on /s /c "start "" /b /belownormal /wait "{0}" /d /s /c ""{1}" {2} {3}" & exit /b !errorlevel!"' -f `
+            $env:ComSpec, `
             $makeCommand.Source, `
             ($makeArguments -join " "), `
             $outputRedirection

@@ -32,6 +32,12 @@ Zed editor, workspace, project, database,
 language, panel, and persistence integrations are out of scope unless Zetta
 independently adopts the corresponding feature.
 
+Search query edits notify the view immediately, independently of debounce,
+snapshot capture, history reflow, or match updates. The windowed regression
+checks the rendered field after resize before the debounce timer can fire.
+The match counter wraps below the query in narrow panes instead of squeezing
+the input to zero width; a windowed layout test covers large match counts.
+
 Files belonging only to Zed's uncompiled workspace view are reference material,
 not a source of automatic imports. See `../UPSTREAM_AUDIT.md` for decisions on
 such changes.

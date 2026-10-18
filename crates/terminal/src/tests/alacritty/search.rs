@@ -7,6 +7,133 @@ use vte::ansi::Handler as _;
 use crate::TerminalBounds;
 use crate::alacritty::{WakeupGate, ZedListener};
 
+#[test]
+#[ignore = "manual optimized-build large-history search throughput"]
+fn large_unique_history_search_benchmark() {
+    assert!(
+        !std::hint::black_box(cfg!(debug_assertions)),
+        "run with --release"
+    );
+    let mib = std::env::var("ZETTA_SEARCH_STRESS_MIB")
+        .ok()
+        .map(|v| v.parse::<usize>().unwrap())
+        .unwrap_or(1000);
+    let count = mib * 1024 * 1024 / 80;
+    let mut term = term_with_lines(100, []);
+    term.set_options(Config {
+        scrolling_history: i32::MAX as usize - 1024,
+        ..Config::default()
+    });
+    let mut parser = vte::ansi::Processor::<vte::ansi::StdSyncHandler>::new();
+    let populated = Instant::now();
+    let mut batch = Vec::with_capacity(128 * 1024);
+    for line in 0..count {
+        batch.extend_from_slice(
+            format!(
+                "line {line:016x} {}\r\n",
+                "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTU"
+            )
+            .as_bytes(),
+        );
+        if batch.len() >= 128 * 1024 {
+            parser.advance(&mut term, &batch);
+            batch.clear();
+        }
+    }
+    parser.advance(&mut term, &batch);
+    eprintln!(
+        "search populated mib={mib} elapsed_ms={:.3}",
+        populated.elapsed().as_secs_f64() * 1000.
+    );
+    let executor = BackgroundExecutor::new(Arc::new(gpui::ThreadedDispatcher::new()));
+    for columns in [100, 31, 120, 17] {
+        let resize = Instant::now();
+        term.resize(alacritty_terminal::term::test::TermSize::new(columns, 24));
+        let resize_ms = resize.elapsed().as_secs_f64() * 1000.;
+        for query in ["line ", "not present"] {
+            let started = Instant::now();
+            let (matches, _) = search_all(term.grid(), literal(query), SEARCH_CHUNK_LINES);
+            let elapsed_ms = started.elapsed().as_secs_f64() * 1000.;
+            assert_eq!(
+                matches.total_count,
+                if query == "line " { count } else { 0 }
+            );
+            eprintln!(
+                "search mib={mib} columns={columns} rows={} query={query:?} resize_ms={resize_ms:.3} search_ms={elapsed_ms:.3}",
+                term.total_lines()
+            );
+            benchmark_parallel_search(
+                term.grid(),
+                literal(query),
+                &executor,
+                matches.total_count,
+                columns,
+            );
+        }
+    }
+}
+
+fn benchmark_parallel_search(
+    grid: &Grid<Cell>,
+    query: Search,
+    executor: &BackgroundExecutor,
+    expected: usize,
+    columns: usize,
+) {
+    let captured = Instant::now();
+    let grid = Arc::new(grid.clone());
+    let capture_ms = captured.elapsed().as_secs_f64() * 1000.;
+    let (updates_tx, updates) = async_channel::unbounded();
+    let worker = executor.clone();
+    let started = Instant::now();
+    let task = executor.spawn(async move { search_grid(grid, query, &worker, &updates_tx).await });
+    let mut first_ms = None;
+    let mut result = SearchMatches::default();
+    futures_lite::future::block_on(async {
+        while let Ok(update) = updates.recv().await {
+            first_ms.get_or_insert_with(|| started.elapsed().as_secs_f64() * 1000.);
+            let complete = update.complete;
+            result.record(update);
+            if complete {
+                break;
+            }
+        }
+        task.await;
+    });
+    assert!(result.complete);
+    assert_eq!(result.total_count, expected);
+    eprintln!(
+        "search parallel columns={columns} capture_ms={capture_ms:.3} first_ms={:.3} complete_ms={:.3} count={expected}",
+        first_ms.unwrap(),
+        started.elapsed().as_secs_f64() * 1000.
+    );
+}
+
+#[test]
+fn capped_search_keeps_exact_overlap_unicode_and_empty_regex_counts_after_reflow() {
+    let mut term = term_with_lines(
+        40,
+        std::iter::repeat_n("aaaa Éé line 0000000000000000", 3_000),
+    );
+    term.resize(alacritty_terminal::term::test::TermSize::new(7, 4));
+    for query in [
+        literal("aa"),
+        literal("0"),
+        literal("é"),
+        Search::new("a*|É").unwrap(),
+    ] {
+        let expected = search_all(term.grid(), query.clone(), SEARCH_CHUNK_LINES).0;
+        let mut capped = ScrollbackSearch::new(term.grid(), query);
+        while !capped.advance(term.grid(), 31, 3) {}
+        let capped = capped.finish();
+        assert_eq!(capped.total_count, expected.total_count);
+        assert_eq!(
+            capped.ranges.newest_first,
+            expected.ranges.newest_first[..3]
+        );
+    }
+}
+
 /// A terminal `columns` wide holding `lines` of output, with history for all of it.
 fn term_with_lines<'a>(
     columns: usize,
@@ -234,6 +361,29 @@ fn partitions_cover_the_grid_and_keep_wrapped_lines_whole() {
 
 fn range(line: i32) -> Range {
     Range::new(crate::Point::new(line, 0), crate::Point::new(line, 0))
+}
+
+#[test]
+fn point_lookup_handles_overlaps_multiline_matches_and_edges() {
+    let point = crate::Point::new;
+    let mut ranges = SearchRanges::default();
+    ranges.extend_older([
+        Range::new(point(2, 3), point(2, 8)),
+        Range::new(point(2, 1), point(2, 5)),
+        Range::new(point(-1, 7), point(1, 2)),
+        Range::new(point(-3, 0), point(-3, 0)),
+    ]);
+    for line in -4..=3 {
+        for column in 0..12 {
+            let point = point(line, column);
+            assert_eq!(
+                ranges.contains_point(point),
+                ranges.iter().any(|range| range.contains(point)),
+                "{point:?}"
+            );
+        }
+    }
+    assert!(!SearchRanges::default().contains_point(point(0, 0)));
 }
 
 #[test]

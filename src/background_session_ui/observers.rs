@@ -527,18 +527,12 @@ impl Zetta {
         cx.subscribe_in(
             &terminal,
             window,
-            move |this, terminal, event: &TerminalEvent, _window, cx| {
+            move |this, _terminal, event: &TerminalEvent, _window, cx| {
                 if let Some(identity) = run_identity {
                     run_registry.observe_terminal_event(identity, event);
                 }
-                match event {
-                    TerminalEvent::TaskFinished { exit_code } => {
-                        this.stacked_task_finished(tab_id, pane_id, entry_id, *exit_code, cx);
-                    }
-                    TerminalEvent::ResizeRequested { .. } => {
-                        terminal.update(cx, |terminal, _| terminal.truncate_on_next_resize());
-                    }
-                    _ => {}
+                if let TerminalEvent::TaskFinished { exit_code } = event {
+                    this.stacked_task_finished(tab_id, pane_id, entry_id, *exit_code, cx);
                 }
             },
         )

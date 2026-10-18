@@ -42,9 +42,9 @@ fn invalidate(slot: usize, cx: &mut App) -> u64 {
     version
 }
 
-fn request(
+fn request<T: Clone + Send + 'static>(
     slot: usize,
-    term: &AlacrittyTerm,
+    term: &alacritty_terminal::term::Term<T>,
     write: fn(&App, ClipboardItem),
     cx: &mut App,
 ) -> bool {
@@ -108,7 +108,10 @@ fn publish_when_ready(
     cx.default_global::<SelectionClipboard>().0[slot].pending = Some(publication);
 }
 
-pub(crate) fn copy(term: &AlacrittyTerm, cx: &mut App) -> bool {
+pub(crate) fn copy<T: Clone + Send + 'static>(
+    term: &alacritty_terminal::term::Term<T>,
+    cx: &mut App,
+) -> bool {
     request(0, term, App::write_to_clipboard, cx)
 }
 
@@ -186,10 +189,20 @@ impl crate::Terminal {
         term: &AlacrittyTerm,
         cx: &mut gpui::Context<Self>,
     ) {
-        if copy(term, cx)
+        let copied = if let (Some(source), Some(selection)) =
+            (self.reflow_search.source(), self.reflow_search_selection())
+        {
+            let mut snapshot = source.as_ref().clone();
+            snapshot.selection = Some(crate::Selection::simple_range(selection).to_alacritty());
+            copy(&snapshot, cx)
+        } else {
+            copy(term, cx)
+        };
+        if copied
             && !keep_selection
                 .unwrap_or_else(|| crate::TerminalSettings::get_global(cx).keep_selection_on_copy)
         {
+            self.clear_reflow_search_selection();
             self.events
                 .push_back(crate::InternalEvent::SetSelection(None));
         }

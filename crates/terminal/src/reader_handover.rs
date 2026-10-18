@@ -106,7 +106,7 @@ pub struct GridSnapshotSource {
 impl GridSnapshotSource {
     /// The grid as ANSI, as [`Terminal::ansi_snapshot`] renders it.
     pub fn ansi_snapshot(&self, max_lines: usize) -> Vec<u8> {
-        snapshot::ansi_snapshot(&self.term.lock_unfair(), max_lines)
+        snapshot::ansi_snapshot(&crate::alacritty::complete_snapshot(&self.term), max_lines)
     }
 }
 

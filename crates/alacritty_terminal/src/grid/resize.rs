@@ -6,10 +6,49 @@ use std::mem;
 use crate::index::{Boundary, Column, Line};
 use crate::term::cell::{Flags, ResetDiscriminant};
 
+use super::storage::Storage;
 use crate::grid::row::Row;
 use crate::grid::{Dimensions, Grid, GridCell};
 
 impl<T: GridCell + Default + PartialEq> Grid<T> {
+    /// Reflow a screen-sized slice for browsing while the complete archive is
+    /// being transformed. Offsets refer to source rows until publication; this
+    /// makes even the oldest row reachable before its background reflow finishes.
+    pub(crate) fn reflow_window(&self, offset: usize, lines: usize, columns: usize) -> Self {
+        let start = Line(-(offset.min(self.history_size()) as i32));
+        let source_lines = lines.saturating_mul(columns.div_ceil(self.columns) + 1);
+        let end = (start.0 as i64 + source_lines as i64).min(self.lines as i64) as i32;
+        let count = ((end - start.0) as usize).max(lines);
+        let mut raw = Storage::with_capacity(0, self.columns);
+        raw.set_visible_lines(count);
+        for line in start.0..end {
+            // Read one encoded row directly, without accumulating decoded
+            // archive chunks in the immutable browsing source.
+            raw.push_newest(self.raw.owned_row(Line(line)));
+        }
+        for _ in (end - start.0) as usize..count {
+            raw.push_newest(Row::new(self.columns));
+        }
+        let mut window = Self {
+            raw,
+            columns: self.columns,
+            lines: count,
+            cursor: Default::default(),
+            saved_cursor: Default::default(),
+            display_offset: 0,
+            max_scroll_limit: usize::MAX - count,
+        };
+        match self.columns.cmp(&columns) {
+            Ordering::Less => window.grow_columns(true, columns),
+            Ordering::Greater => window.shrink_columns(true, columns),
+            Ordering::Equal => (),
+        }
+        window.lines = lines;
+        window.raw.set_visible_lines(lines);
+        window.display_offset = window.history_size();
+        window
+    }
+
     /// Resize the grid's width and/or height.
     pub fn resize<D>(&mut self, reflow: bool, lines: usize, columns: usize)
     where
@@ -113,7 +152,8 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
 
         self.columns = columns;
 
-        let mut reversed: Vec<Row<T>> = Vec::with_capacity(self.raw.len());
+        let mut reversed = Storage::with_capacity(0, columns);
+        reversed.set_visible_lines(self.lines);
         let mut cursor_line_delta = 0;
 
         // Remove the linewrap special case, by moving the cursor outside of the grid.
@@ -122,14 +162,16 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
             self.cursor.point.column += 1;
         }
 
-        let mut rows = self.raw.take_all();
+        let rows = mem::replace(&mut self.raw, Storage::with_capacity(0, columns));
+        let row_count = rows.len();
 
-        for (i, mut row) in rows.drain(..).enumerate().rev() {
+        for (index, mut row) in rows.into_top_down().enumerate() {
+            let i = row_count - index - 1;
             // Check if reflowing should be performed.
-            let last_row = match reversed.last_mut() {
+            let last_row = match reversed.newest_mut() {
                 Some(last_row) if should_reflow(last_row) => last_row,
                 _ => {
-                    reversed.push(row);
+                    Self::push_growing_row(&mut reversed, row, columns);
                     continue;
                 },
             };
@@ -212,14 +254,16 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
                 cell.flags_mut().insert(Flags::WRAPLINE);
             }
 
-            reversed.push(row);
+            Self::push_growing_row(&mut reversed, row, columns);
         }
 
         // Make sure we have at least the viewport filled.
         if reversed.len() < self.lines {
             let delta = (self.lines - reversed.len()) as i32;
             self.cursor.point.line = max(self.cursor.point.line - delta, Line(0));
-            reversed.resize_with(self.lines, || Row::new(columns));
+            for _ in 0..delta {
+                Self::push_growing_row(&mut reversed, Row::new(columns), columns);
+            }
         }
 
         // Pull content down to put cursor in correct position, or move cursor up if there's no
@@ -228,23 +272,26 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
             let cursor_buffer_line = self.lines - self.cursor.point.line.0 as usize - 1;
             let available = min(cursor_buffer_line, reversed.len() - self.lines);
             let overflow = cursor_line_delta.saturating_sub(available);
-            reversed.truncate(reversed.len() + overflow - cursor_line_delta);
+            reversed.remove_newest(cursor_line_delta - overflow);
             self.cursor.point.line = max(self.cursor.point.line - overflow, Line(0));
         }
 
-        // Reverse iterator and fill all rows that are still too short.
-        let mut new_raw = Vec::with_capacity(reversed.len());
-        for mut row in reversed.drain(..).rev() {
-            if row.len() < columns {
-                row.grow(columns);
-            }
-            new_raw.push(row);
+        if let Some(row) = reversed.newest_mut() {
+            row.grow(columns);
         }
-
-        self.raw.replace_inner(new_raw);
+        self.raw = reversed;
 
         // Clamp display offset in case lines above it got merged.
         self.display_offset = min(self.display_offset, self.history_size());
+    }
+
+    fn push_growing_row(rows: &mut Storage<T>, row: Row<T>, columns: usize) {
+        // Only the most recent row can still absorb the next source row.
+        // Finish its width before it can enter compact history storage.
+        if let Some(previous) = rows.newest_mut() {
+            previous.grow(columns);
+        }
+        rows.push_newest(row);
     }
 
     /// Shrink number of columns in each row, reflowing if necessary.
@@ -265,11 +312,14 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
             self.cursor.point.column += 1;
         }
 
-        let mut new_raw = Vec::with_capacity(self.raw.len());
+        let mut new_raw = Storage::with_capacity(0, columns);
+        new_raw.set_visible_lines(self.lines);
         let mut buffered: Option<Vec<T>> = None;
 
-        let mut rows = self.raw.take_all();
-        for (i, mut row) in rows.drain(..).enumerate().rev() {
+        let rows = mem::replace(&mut self.raw, Storage::with_capacity(0, columns));
+        let row_count = rows.len();
+        for (index, mut row) in rows.into_top_down().enumerate() {
+            let i = row_count - index - 1;
             // Append lines left over from the previous row.
             if let Some(buffered) = buffered.take() {
                 // Add a column for every cell added before the cursor, if it goes beyond the new
@@ -294,7 +344,7 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
                             Vec::new()
                         } else {
                             // Since it fits, just push the existing line without any reflow.
-                            new_raw.push(row);
+                            new_raw.push_newest(row);
                             break;
                         }
                     },
@@ -316,7 +366,7 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
                 if len > 0 && wrapped[len - 1].flags().contains(Flags::LEADING_WIDE_CHAR_SPACER) {
                     if len == 1 {
                         row[Column(columns - 1)].flags_mut().insert(Flags::WRAPLINE);
-                        new_raw.push(row);
+                        new_raw.push_newest(row);
                         break;
                     } else {
                         // Remove the leading spacer from the end of the wrapped row.
@@ -325,10 +375,10 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
                     }
                 }
 
-                new_raw.push(row);
+                new_raw.push_newest(row);
 
                 // Set line as wrapped if cells got removed.
-                if let Some(cell) = new_raw.last_mut().and_then(|r| r.last_mut()) {
+                if let Some(cell) = new_raw.newest_mut().and_then(|r| r.last_mut()) {
                     cell.flags_mut().insert(Flags::WRAPLINE);
                 }
 
@@ -377,10 +427,11 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
             }
         }
 
-        // Reverse iterator and use it as the new grid storage.
-        let mut reversed: Vec<Row<T>> = new_raw.drain(..).rev().collect();
-        reversed.truncate(self.max_scroll_limit + self.lines);
-        self.raw.replace_inner(reversed);
+        // Discard only rows outside the configured scrollback limit. Both
+        // source and destination stay compact throughout the transformation.
+        let excess = new_raw.len().saturating_sub(self.max_scroll_limit + self.lines);
+        new_raw.shrink_lines(excess);
+        self.raw = new_raw;
 
         // Clamp display offset in case some lines went off.
         self.display_offset = min(self.display_offset, self.history_size());

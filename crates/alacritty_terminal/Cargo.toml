@@ -11,6 +11,7 @@ edition = "2024"
 rust-version = "1.99"
 
 [features]
+test-support = []
 default = ["serde"]
 serde = ["dep:serde", "bitflags/serde", "vte/serde"]
 

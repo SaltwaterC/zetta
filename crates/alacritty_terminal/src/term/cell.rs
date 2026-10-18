@@ -277,6 +277,11 @@ impl GridCell for Cell {
         Some(self.c)
     }
 
+    #[inline]
+    fn archive_wrap(&self) -> bool {
+        self.flags.contains(Flags::WRAPLINE)
+    }
+
     /// Shared `extra` storage counts as the same only when it is the same allocation, which is
     /// how the cells written under one cursor template share it.
     #[inline]

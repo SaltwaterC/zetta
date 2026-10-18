@@ -27,6 +27,7 @@ function global:__zetta_install_lifecycle_tracking([bool] $trackingEnabled) {
     $global:__ZettaLifecycleTrackerInstalled = $true
     $global:__ZettaLifecycleTrackingEnabled = $trackingEnabled
     $global:__ZettaCommandStarted = $false
+    $global:__ZettaShellInputInitialized = $false
     if ($null -eq (Get-Variable -Name __ZettaOriginalPrompt -Scope Global -ErrorAction SilentlyContinue)) {
         $global:__ZettaOriginalPrompt = $function:prompt
     }
@@ -43,6 +44,17 @@ function global:__zetta_install_lifecycle_tracking([bool] $trackingEnabled) {
     }
     function global:prompt {
         $promptSucceeded = $?
+        # PSReadLine saves the current mode for the command it will run.
+        # Repair Ctrl-C left disabled by an earlier command before that save.
+        # InvokePrompt also calls us during editing (for example Ctrl+L), when
+        # PSReadLine must keep its raw mode: only repair actual new prompts.
+        if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT -and
+            (-not $global:__ZettaShellInputInitialized -or $global:__ZettaCommandStarted)) {
+            try {
+                [Console]::TreatControlCAsInput = $false
+                $global:__ZettaShellInputInitialized = $true
+            } catch {}
+        }
         try {
             if ($global:__ZettaLifecycleTrackingEnabled -and $global:__ZettaCommandStarted) {
                 $status = if ($promptSucceeded) {
@@ -95,7 +107,9 @@ function global:__zetta_install_lifecycle_tracking([bool] $trackingEnabled) {
 }
 
 $zettaLifecycleTracker = Get-Variable -Name __ZettaLifecycleTrackerInstalled -Scope Global -ErrorAction SilentlyContinue
+$zettaInputRecovery = Get-Variable -Name __ZettaShellInputInitialized -Scope Global -ErrorAction SilentlyContinue
 if ($null -eq $zettaLifecycleTracker -or
+    $null -eq $zettaInputRecovery -or
     ($zettaPaneIdentityAvailable -and -not $global:__ZettaLifecycleTrackingEnabled)) {
     __zetta_install_lifecycle_tracking $zettaPaneIdentityAvailable
 }

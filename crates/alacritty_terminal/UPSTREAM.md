@@ -53,7 +53,16 @@ Retain these Zetta changes when synchronizing:
   three quarters of its time decoding cells it then read only the characters
   of. It touches upstream code only by declaring the module in `grid/mod.rs`;
   `Storage::stored_row` and `CompactRows<Cell>::append_text`/`wraps` are in
-  Zetta-authored code;
+  Zetta-authored code. Compact offsets also cache wrap and single-run ASCII
+  metadata in spare bits, so searching reflowed plain text copies UTF-8 runs
+  directly without revisiting every cell or attribute. Resized, styled, wide,
+  and combining-character rows retain the general reader;
+- `grid/reflow_view.rs` reflows a viewport with source coordinates carried beside
+  the cells. It uses the ordinary grid algorithm, preserving wide spacers, styles,
+  and combining marks without duplicating wrapping rules. Pending-reflow searches
+  obtain the immutable source without waiting for the worker, and request only
+  a bounded mapped viewport when navigating. The ordinary browsing path retains
+  its unmapped viewport;
 - scrollback allocator, large-history, and benchmark fixes;
 - Windows ConPTY read-ahead and terminal-hangup handling. The output kernel
   pipe holds 128 KiB instead of the system default, while the existing bounded
@@ -241,3 +250,39 @@ CSI 16 t uses the existing size-request event to report character cell height an
   applied only by C0 newline handling, preserving IND and raw CRLF. Host mode
   reset and VT wrap changes retain their ordering. The low-level native PTY factory stays independent of the application
   default; Zetta selects console-server through its hosted adapter.
+
+## Zetta patch: Windows child-exit notifications
+
+Windows child-exit notification readiness is published after its channel payload,
+so registering an already-exited child cannot wake a reader before the payload
+is available. Poller regression tests tolerate empty wakes and use a bounded
+deadline rather than assuming a child starts and exits within 200 ms under the
+parallel crate-test workload; late registration is covered explicitly.
+
+## Zetta patch: asynchronous retained-history reflow
+
+`term/reflow.rs` owns a private full-history worker and bounded live preview.
+`term/handler.rs` holds the ANSI implementation formerly in `term/mod.rs`; its
+outermost operations are mirrored while a resize runs, so partial escapes need
+no second byte parser. Consecutive geometry changes coalesce only across no
+output. Unicode/ASCII runs batch without an allocation per character. A ready
+result publishes only when every operation has caught up. Destruction, canceled
+jobs and old history are reclaimed off the UI thread. Queries are answered once
+by the live parser so an application never waits for scrollback to reflow. `ReflowReader`
+provides complete snapshots and console geometry without holding the live lock
+while waiting. Tests stop the worker to prove foreground progress, compare the
+complete ANSI snapshots and cursors against synchronous reflow, and cover long
+wrapped Unicode lines, split escapes, alternate buffers, clears and queries.
+
+History detachment transfers decoded caches and spare row allocations to the
+background owner too. Width changes retire spare rows of the old width before a
+parser batch can destroy them while holding the live terminal lock.
+
+Column reflow streams oldest-to-newest rows directly between compact stores,
+instead of materializing the entire archive as cell arrays. Resize startup moves
+the archive index to its private owner and copies only the bounded mutable tier.
+While the full worker runs, scrolling renders a bounded source window at the new
+width; scrollbar coordinates use source rows until publication. Regression tests
+pause the worker before checking scroll and query progress. An ignored optimized
+1000 MiB unique-output workload checks scrolling throughout repeated reflows and
+validates every retained logical line after each resize.

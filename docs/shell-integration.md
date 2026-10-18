@@ -195,6 +195,9 @@ even when the hook runner does not show the captured output. Each target's full
 stdout and stderr go to a neighbouring `*.output.log` file; the runner receives
 progress messages and the final JSON result.
 
+On Windows the hook starts Make at BelowNormal priority, inherited by its
+children. The Cargo wrapper uses the same priority for manual validation runs.
+
 Theme completion works the same way: completing `zetta theme pane` or
 `zetta theme tab` runs `zetta theme <scope> --list` at completion time against
 the running Zetta process, so the generated script does not embed a theme list
@@ -265,6 +268,9 @@ is accepted as an alternative spelling).
 
 The PowerShell integration supports Windows PowerShell 5.1 and PowerShell 7+
 (`pwsh`).
+On Windows, it re-enables console Ctrl-C processing at the initial prompt and
+after a tracked command completes. This repairs input modes left behind by
+programs without changing PSReadLine's raw mode during editing or prompt redraws.
 
 ## Enable for the current shell
 

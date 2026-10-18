@@ -28,5 +28,18 @@ if not defined VSCMD_VER (
     if errorlevel 1 exit /b !errorlevel!
 )
 
-%CARGO% %*
+rem Git Bash can prepend usr\bin after MSVC was initialized. VSCMD_VER then
+rem remains set even though link.exe resolves to Git's unrelated file utility.
+rem Restore the tool directory on every invocation, including that fast path.
+if defined VCToolsInstallDir (
+    if not exist "!VCToolsInstallDir!bin\Hostx64\x64\link.exe" (
+        echo Error: The initialized MSVC environment has no x64 linker. 1>&2
+        exit /b 1
+    )
+    set "PATH=!VCToolsInstallDir!bin\Hostx64\x64;!PATH!"
+)
+
+rem Set priority before Cargo starts, so compiler, test and helper processes
+rem inherit it too. /b keeps the caller's console and /wait preserves failures.
+start "" /b /belownormal /wait %CARGO% %*
 exit /b !errorlevel!

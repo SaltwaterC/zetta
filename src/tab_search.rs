@@ -34,6 +34,7 @@ struct TabSearchPane {
     total_count: usize,
     limit_reached: bool,
     complete: bool,
+    _subscription: Option<Subscription>,
 }
 
 impl TabSearch {
@@ -193,6 +194,8 @@ impl Zetta {
         let tab_id = search_state.tab_id;
         let query = search_state.query.text.clone();
         let generation = search_state.generation;
+        // Editing the field must repaint even while every pane's search is pending.
+        cx.notify();
 
         let terminals = self
             .tabs
@@ -213,7 +216,6 @@ impl Zetta {
             clear_terminal_matches(terminal, cx);
         }
         if query.is_empty() {
-            cx.notify();
             return;
         }
         let Some(pattern) = Search::new_literal(&query) else {
@@ -234,6 +236,17 @@ impl Zetta {
                         let (panes, jobs): (Vec<_>, Vec<_>) = terminals
                             .into_iter()
                             .map(|(pane_id, stack_id, terminal)| {
+                                let subscription =
+                                    cx.subscribe(&terminal, move |this, _, event, cx| {
+                                        if matches!(event, TerminalEvent::GridSizeChanged)
+                                            && this.tab_search.as_ref().is_some_and(|search| {
+                                                search.tab_id == tab_id
+                                                    && search.generation == generation
+                                            })
+                                        {
+                                            this.refresh_tab_search(cx);
+                                        }
+                                    });
                                 let job = terminal.update(cx, |terminal, cx| {
                                     terminal.find_matches(pattern.clone(), cx)
                                 });
@@ -245,6 +258,7 @@ impl Zetta {
                                     total_count: 0,
                                     limit_reached: false,
                                     complete: false,
+                                    _subscription: Some(subscription),
                                 };
                                 (pane, job)
                             })
@@ -431,7 +445,12 @@ impl Zetta {
         top_inset: Pixels,
     ) -> Option<AnyElement> {
         let search = self.tab_search.as_ref()?;
-        let query = field_query_run(&search.query, Some("Search all panes…"), colors);
+        let query = field_query_run(&search.query, Some("Search all panes…"), colors)
+            .flex_1()
+            .flex_basis(px(120.))
+            .min_w_0()
+            .overflow_hidden()
+            .debug_selector(|| format!("tab-search-query:{}", search.query.text));
         let status = SearchStatus {
             active_match: search.active_match,
             shown: search.match_count(),
@@ -470,12 +489,14 @@ impl Zetta {
                         .child(
                             h_flex()
                                 .w_full()
+                                .flex_wrap()
                                 .justify_between()
                                 .gap_3()
                                 .child(query)
                                 .child(
                                     div()
                                         .flex_none()
+                                        .max_w_full()
                                         .text_color(colors.text_muted)
                                         .child(status),
                                 ),

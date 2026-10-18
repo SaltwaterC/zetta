@@ -1681,7 +1681,7 @@ impl Element for TerminalElement {
                     )
                 };
 
-                let search_matches = self.terminal.read(cx).matches.clone();
+                let search_matches = self.terminal.read(cx).renderable_search_matches();
 
                 let background_color = theme.colors().terminal_background;
 

@@ -51,8 +51,10 @@ extern "system" fn child_exit_callback(ctx: *mut c_void, timed_out: BOOLEAN) {
     } else {
         ChildEvent::Exited(ExitStatus::from_raw(exit_code))
     };
-    event_tx.event_pending.store(true, Ordering::Release);
     event_tx.sender.send(event).ok();
+    // Registration may observe this flag and post its own wakeup. Publish it
+    // only after the channel payload is available to the awakened event loop.
+    event_tx.event_pending.store(true, Ordering::Release);
 
     let interest = event_tx.interest.lock().unwrap();
     if let Some(interest) = interest.as_ref() {
@@ -226,15 +228,13 @@ mod tests {
     use std::os::windows::io::IntoRawHandle;
     use std::process::Command;
     use std::sync::Arc;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use super::super::PTY_CHILD_EVENT_TOKEN;
     use super::*;
 
     #[test]
     pub fn event_is_emitted_when_child_exits() {
-        const WAIT_TIMEOUT: Duration = Duration::from_millis(200);
-
         let poller = Arc::new(Poller::new().unwrap());
 
         let child = Command::new("cmd.exe").args(["/c", "exit", "1"]).spawn().unwrap();
@@ -242,16 +242,49 @@ mod tests {
         let child_exit_watcher = ChildExitWatcher::new(child_handle).unwrap();
         child_exit_watcher.register(&poller, Event::readable(PTY_CHILD_EVENT_TOKEN));
 
-        // Poll for the event or fail with timeout if nothing has been sent.
-        let mut events = polling::Events::new();
-        poller.wait(&mut events, Some(WAIT_TIMEOUT)).unwrap();
-        assert_eq!(events.iter().next().unwrap().key, PTY_CHILD_EVENT_TOKEN);
+        wait_for_exit_notification(&poller);
         // Verify that at least one `ChildEvent::Exited` was received.
         let expected_status = ExitStatus::from_raw(1);
         assert_eq!(
             child_exit_watcher.event_rx().try_recv(),
             Ok(ChildEvent::Exited(expected_status))
         );
+    }
+
+    fn wait_for_exit_notification(poller: &Poller) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut events = polling::Events::new();
+        loop {
+            let remaining = deadline
+                .checked_duration_since(Instant::now())
+                .expect("timed out waiting for the child-exit poller notification");
+            events.clear();
+            poller.wait(&mut events, Some(remaining)).unwrap();
+            // An empty return is permitted; it does not imply that the child
+            // has exited. In parallel suite runs even starting cmd can take
+            // longer than the old test's entire 200 ms allowance.
+            if let Some(event) = events.iter().next() {
+                assert_eq!(event.key, PTY_CHILD_EVENT_TOKEN);
+                return;
+            }
+        }
+    }
+
+    #[test]
+    fn registering_after_the_callback_still_posts_the_pending_exit() {
+        let poller = Arc::new(Poller::new().unwrap());
+        let child = Command::new("cmd.exe").args(["/c", "exit", "7"]).spawn().unwrap();
+        let watcher = ChildExitWatcher::new(child.into_raw_handle() as HANDLE).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        // Force registration to happen after notification readiness was
+        // published, rather than relying on the OS to win this race by chance.
+        while !watcher.event_pending.load(Ordering::Acquire) {
+            assert!(Instant::now() < deadline, "child-exit callback did not publish readiness");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        watcher.register(&poller, Event::readable(PTY_CHILD_EVENT_TOKEN));
+        wait_for_exit_notification(&poller);
+        assert_eq!(watcher.event_rx().try_recv(), Ok(ChildEvent::Exited(ExitStatus::from_raw(7))));
     }
 
     #[test]

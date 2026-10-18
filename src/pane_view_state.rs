@@ -1,14 +1,6 @@
 use super::*;
 
 impl Zetta {
-    fn truncate_active_tab_terminals(&self, cx: &mut Context<Self>) {
-        if let Some(tab) = self.tabs.get(self.active_tab) {
-            for terminal in tab.panes.iter().flat_map(TerminalPane::all_terminals) {
-                terminal.update(cx, |terminal, _| terminal.truncate_on_next_resize());
-            }
-        }
-    }
-
     pub(crate) fn toggle_maximize_pane_by_id(
         &mut self,
         pane_id: u64,
@@ -20,7 +12,6 @@ impl Zetta {
         };
         let tab_id = tab.id;
         if tab.toggle_maximize(pane_id) {
-            self.truncate_active_tab_terminals(cx);
             self.focus_active(window, cx);
             self.sync_shared_tab_state(tab_id, cx);
             cx.notify();
@@ -50,7 +41,6 @@ impl Zetta {
         };
         let tab_id = tab.id;
         if tab.minimize(pane_id) {
-            self.truncate_active_tab_terminals(cx);
             self.focus_active(window, cx);
             self.sync_shared_tab_state(tab_id, cx);
             cx.notify();
@@ -80,7 +70,6 @@ impl Zetta {
         };
         let tab_id = tab.id;
         if tab.restore_minimized(pane_id) {
-            self.truncate_active_tab_terminals(cx);
             self.focus_active(window, cx);
             self.sync_shared_tab_state(tab_id, cx);
             cx.notify();
@@ -98,7 +87,6 @@ impl Zetta {
         };
         let tab_id = tab.id;
         if tab.restore_last_minimized() {
-            self.truncate_active_tab_terminals(cx);
             self.focus_active(window, cx);
             self.sync_shared_tab_state(tab_id, cx);
             cx.notify();

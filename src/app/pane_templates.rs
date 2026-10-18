@@ -280,12 +280,6 @@ impl Zetta {
             .collect::<Vec<_>>();
         let terminal_settings = TerminalSpawnSettings::current(cx);
 
-        if !replacing_active
-            && let Some(terminal) = active_pane.and_then(|pane| pane.terminal.clone())
-        {
-            terminal.update(cx, |terminal, _| terminal.truncate_on_next_resize());
-        }
-
         let new_pane_ids = (0..new_pane_count).map(|_| {
             let pane_id = self.next_pane_id;
             self.next_pane_id += 1;

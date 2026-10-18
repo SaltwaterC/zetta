@@ -108,6 +108,7 @@ windows = { version = "0.61", features = [
 ] }
 
 [dev-dependencies]
+alacritty_terminal = { path = "../alacritty_terminal", features = ["test-support"] }
 gpui = { path = "../gpui", default-features = false, features = ["test-support"] }
 rand = "0.9"
 util_macros = { path = "../../zed/crates/util_macros" }

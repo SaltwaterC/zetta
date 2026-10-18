@@ -88,6 +88,33 @@ fn compact_rows_read_as_their_decoded_cells() {
 }
 
 #[test]
+fn compact_ascii_metadata_preserves_text_at_encoding_boundaries() {
+    for columns in [1, 2, 127, 128, 255, 256, 16_383, 16_384] {
+        let mut rows = Vec::new();
+        for fill in [' ', 'x', '\t', '\0'] {
+            for wrapped in [false, true] {
+                let mut cells = row(&fill.to_string().repeat(columns), columns);
+                if columns > 1 {
+                    cells[Column(0)].c = 'A';
+                }
+                if wrapped {
+                    cells[Column(columns - 1)].flags.insert(Flags::WRAPLINE);
+                }
+                rows.push(cells);
+            }
+        }
+        let mut compact = CompactRows::encode(&rows).unwrap();
+        assert_reads_as_decoded(&compact, &format!("{columns} columns"));
+        compact.truncate_oldest(3);
+        assert_reads_as_decoded(&compact, "dropped oldest rows");
+        compact.resize_columns(columns + 1);
+        assert_reads_as_decoded(&compact, "grown rows");
+        compact.resize_columns(1);
+        assert_reads_as_decoded(&compact, "shrunk rows");
+    }
+}
+
+#[test]
 fn resized_compact_rows_read_as_their_decoded_cells() {
     let rows = varied_rows().into_iter().map(|mut row| {
         row.grow(30);

@@ -2619,7 +2619,7 @@ impl Client {
         let response = self.receive(&mut connection)?.0;
         match response {
             Response::Ok => {
-                Self::wait_for_upgrade_disconnect(&mut connection)?;
+                Self::wait_for_upgrade_disconnect(connection.stream())?;
                 Ok(())
             }
             Response::Error { message } => anyhow::bail!("{message}"),
@@ -2637,14 +2637,31 @@ impl Client {
     /// and socket path are deliberately unchanged while the replacement
     /// rebinds. The close is the completion signal that distinguishes the old
     /// image from its replacement.
-    fn wait_for_upgrade_disconnect(connection: &mut Connection) -> Result<()> {
-        use std::io::Read as _;
-
+    fn wait_for_upgrade_disconnect(mut stream: impl io::Read) -> Result<()> {
         let mut byte = [0; 1];
-        match connection.stream().read(&mut byte) {
-            Ok(0) => Ok(()),
-            Ok(_) => anyhow::bail!("the multiplexer sent data after accepting its upgrade"),
-            Err(error) => Err(error).context("waiting for the multiplexer to finish upgrading"),
+        loop {
+            match stream.read(&mut byte) {
+                Ok(0) => return Ok(()),
+                Ok(_) => anyhow::bail!("the multiplexer sent data after accepting its upgrade"),
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                // After the acknowledgement, a peer reset is also the old
+                // daemon leaving this connection behind. Windows can report
+                // WSAECONNRESET here instead of an orderly EOF during upgrade.
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::ConnectionReset
+                            | io::ErrorKind::ConnectionAborted
+                            | io::ErrorKind::BrokenPipe
+                            | io::ErrorKind::UnexpectedEof
+                    ) =>
+                {
+                    return Ok(());
+                }
+                Err(error) => {
+                    return Err(error).context("waiting for the multiplexer to finish upgrading");
+                }
+            }
         }
     }
 
