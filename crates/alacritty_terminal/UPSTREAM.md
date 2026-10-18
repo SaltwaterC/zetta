@@ -286,3 +286,9 @@ width; scrollbar coordinates use source rows until publication. Regression tests
 pause the worker before checking scroll and query progress. An ignored optimized
 1000 MiB unique-output workload checks scrolling throughout repeated reflows and
 validates every retained logical line after each resize.
+
+Narrowing the grid consumes trailing empty viewport rows below the input cursor
+before scrolling wrapped content into history. This keeps an unsubmitted shell
+prompt visible when splitting a pane, including its cursor position; occupied
+rows below the cursor remain intact. Grid boundary tests and native PSReadLine
+tests in `console-server` cover this behavior.

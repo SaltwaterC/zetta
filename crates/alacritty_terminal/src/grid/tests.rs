@@ -162,6 +162,62 @@ fn test_iter() {
 }
 
 #[test]
+fn shrink_reflow_uses_empty_rows_below_the_cursor() {
+    for cursor_column in [1, 7] {
+        let mut grid = Grid::<Cell>::new(4, 10, 10);
+        for (column, ch) in "abcdefgh".chars().enumerate() {
+            grid[Line(0)][Column(column)] = cell(ch);
+        }
+        grid.cursor.point = Point::new(Line(0), Column(cursor_column));
+
+        grid.resize(true, 4, 5);
+
+        assert_eq!(grid.history_size(), 0);
+        assert_eq!(grid[Line(0)][Column(0)], cell('a'));
+        assert_eq!(grid[Line(1)][Column(0)], cell('f'));
+        assert_eq!(
+            grid.cursor.point,
+            Point::new(Line((cursor_column / 5) as i32), Column(cursor_column % 5))
+        );
+    }
+}
+
+#[test]
+fn shrink_reflow_preserves_occupied_rows_below_the_cursor() {
+    let mut grid = Grid::<Cell>::new(3, 10, 10);
+    for (column, ch) in "abcdefgh".chars().enumerate() {
+        grid[Line(0)][Column(column)] = cell(ch);
+    }
+    grid[Line(2)][Column(0)] = cell('z');
+    grid.cursor.point = Point::new(Line(0), Column(7));
+
+    grid.resize(true, 3, 5);
+
+    assert_eq!(grid.history_size(), 1);
+    assert_eq!(grid[Line(-1)][Column(0)], cell('a'));
+    assert_eq!(grid[Line(0)][Column(0)], cell('f'));
+    assert_eq!(grid[Line(2)][Column(0)], cell('z'));
+    assert_eq!(grid.cursor.point, Point::new(Line(0), Column(2)));
+}
+
+#[test]
+fn shrink_reflow_scrolls_after_using_the_remaining_empty_row() {
+    let mut grid = Grid::<Cell>::new(2, 10, 10);
+    for (column, ch) in "abcdefgh".chars().enumerate() {
+        grid[Line(0)][Column(column)] = cell(ch);
+    }
+    grid.cursor.point = Point::new(Line(0), Column(8));
+
+    grid.resize(true, 2, 3);
+
+    assert_eq!(grid.history_size(), 1);
+    assert_eq!(grid[Line(-1)][Column(0)], cell('a'));
+    assert_eq!(grid[Line(0)][Column(0)], cell('d'));
+    assert_eq!(grid[Line(1)][Column(0)], cell('g'));
+    assert_eq!(grid.cursor.point, Point::new(Line(1), Column(2)));
+}
+
+#[test]
 fn shrink_reflow() {
     let mut grid = Grid::<Cell>::new(1, 5, 2);
     grid[Line(0)][Column(0)] = cell('1');

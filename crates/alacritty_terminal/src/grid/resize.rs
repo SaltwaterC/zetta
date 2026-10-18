@@ -318,8 +318,13 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
 
         let rows = mem::replace(&mut self.raw, Storage::with_capacity(0, columns));
         let row_count = rows.len();
+        let rows_below_cursor = self.lines - self.cursor.point.line.0 as usize - 1;
+        let mut trailing_empty_rows = 0;
+        let mut cursor_rows_above_viewport = 0;
         for (index, mut row) in rows.into_top_down().enumerate() {
             let i = row_count - index - 1;
+            trailing_empty_rows =
+                if i < rows_below_cursor && row.is_clear() { trailing_empty_rows + 1 } else { 0 };
             // Append lines left over from the previous row.
             if let Some(buffered) = buffered.take() {
                 // Add a column for every cell added before the cursor, if it goes beyond the new
@@ -402,6 +407,9 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
                     if (i == cursor_buffer_line && self.cursor.point.column < columns)
                         || i < cursor_buffer_line
                     {
+                        if self.cursor.point.line == Line(0) {
+                            cursor_rows_above_viewport += 1;
+                        }
                         self.cursor.point.line = max(self.cursor.point.line - 1, Line(0));
                     }
 
@@ -426,6 +434,14 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
                 }
             }
         }
+
+        // Wrapping a prompt near the top must use the empty space below it
+        // before pushing its first rows into history. Keep occupied rows below
+        // the cursor, and scroll normally once the empty space is exhausted.
+        let added_rows = new_raw.len().saturating_sub(row_count);
+        let removed_rows = min(added_rows, trailing_empty_rows);
+        new_raw.remove_newest(removed_rows);
+        self.cursor.point.line += removed_rows.saturating_sub(cursor_rows_above_viewport) as i32;
 
         // Discard only rows outside the configured scrollback limit. Both
         // source and destination stay compact throughout the transformation.
