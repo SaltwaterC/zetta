@@ -607,6 +607,7 @@ impl TerminalPane {
         }
     }
 
+    #[cfg(feature = "clipboard")]
     pub(crate) fn all_terminals(&self) -> impl Iterator<Item = &Entity<Terminal>> {
         self.terminal.iter().chain(
             self.stack

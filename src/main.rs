@@ -159,8 +159,8 @@ use settings_editor::{
 use silent_mode::{FocusStatusAccess, SilentModeState};
 use task::{Shell, ShellBuilder, SpawnInTerminal, TaskId};
 use terminal::{
-    Clear, Event as TerminalEvent, Paste, PasteTrimmed, Search, SearchUpdate, TaskState,
-    TaskStatus, Terminal, TerminalBuilder, TerminalExited, terminal_settings::TerminalSettings,
+    Clear, Event as TerminalEvent, Paste, PasteTrimmed, TaskState, TaskStatus, Terminal,
+    TerminalBuilder, TerminalExited, terminal_settings::TerminalSettings,
 };
 use terminal_view::{
     ChangePaneTheme, ClearClipboard, CopyAndClearSelection, DismissSearch, EditScrollback,

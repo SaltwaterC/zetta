@@ -35,6 +35,11 @@ independently adopts the corresponding feature.
 Search query edits notify the view immediately, independently of debounce,
 snapshot capture, history reflow, or match updates. The windowed regression
 checks the rendered field after resize before the debounce timer can fire.
+The view delegates search jobs, invalidation, result application and navigation
+to `terminal::search_session::SearchSession`, also used by tab-wide search.
+Keep only query editing, focus and a display-status snapshot in this view.
+`search_overlay.rs` draws the pane field; its sidecar keeps the windowed
+repaint and narrow-layout regressions with that presentation.
 The match counter wraps below the query in narrow panes instead of squeezing
 the input to zero width; a windowed layout test covers large match counts.
 

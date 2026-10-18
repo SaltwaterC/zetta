@@ -37,6 +37,11 @@ Retain these Zetta-specific behaviors when synchronizing:
   only the displayed source matches through a bounded viewport, including wide
   characters, selection copying, and navigation after repeated resizes. Publication
   invalidates source coordinates and emits a wakeup to restart active searches;
+- `search_session.rs` owns the lifecycle shared by pane and tab searches:
+  debounced per-terminal jobs, generation checks, output/layout subscriptions,
+  incremental highlights and counts, and navigation. UI callers only edit the
+  query, display status, and reveal the selected pane/stack. Invalidating one
+  terminal preserves the other terminals' search work;
 - capture and terminate both the shell and foreground process groups during
   PTY teardown, including application shutdown. Upstream reverted its own
   version of this in `492acd6c81`; do not import that revert. The regression it

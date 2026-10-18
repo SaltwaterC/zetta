@@ -192,6 +192,8 @@ visible.
 Pane and tab searches can search, navigate, and copy the retained history while
 background reflow is still running. Results refresh against the completed layout
 when it is published.
+Both scopes use the same search session backend; output or layout changes refresh
+only the affected terminal's results.
 
 The bundled server reflows normal-screen text when a window or remote-session
 pane becomes narrower, and carries rows displaced by a smaller pane into local

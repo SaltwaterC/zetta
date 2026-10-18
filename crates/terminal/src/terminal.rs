@@ -57,6 +57,7 @@ mod reader_handover;
 mod replay;
 mod resize;
 mod search_reflow;
+pub mod search_session;
 pub mod selection_clipboard;
 mod snapshot;
 pub mod terminal_settings;

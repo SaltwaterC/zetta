@@ -136,9 +136,10 @@ layering rule: every module named here is a sibling under `src/`.
   for searchable dropdowns. The settings editor and the remote-session picker
   own different option lists and commit different values, but their dropdown
   interaction is the same, and lives here so the two cannot drift
-- `tab_search.rs`: tab-wide query input, incremental pane searches, result
-  navigation, and subscriptions that refresh searches when pane layout publication
-  changes their snapshots
+- `tab_search.rs`: tab-wide query input, search overlay, and revealing the
+  pane/stack selected by search navigation. Both tab and pane search use
+  `crates/terminal/src/search_session.rs` for debouncing, cancellation,
+  incremental results, navigation, and per-terminal output/reflow invalidation
 - `tab_icon_picker.rs`: tab icon picker model, rendering, and the
   `Zetta` methods that drive it
 - `pane_theme_picker.rs`: per-pane theme picker model and overlay

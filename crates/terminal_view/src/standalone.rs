@@ -2,6 +2,7 @@ mod blink_manager;
 mod clipboard;
 mod grid_fit;
 mod scrollback_temp;
+mod search_overlay;
 mod terminal_element;
 mod terminal_scrollbar;
 
@@ -13,13 +14,13 @@ pub use scrollback_temp::{
     start_cleanup_monitor as start_scrollback_cleanup_monitor,
 };
 
-use std::{cmp, ops::Range as StdRange, path::PathBuf, sync::Arc, time::Duration};
+use std::{cmp, ops::Range as StdRange, path::PathBuf, sync::Arc};
 
 use gpui::{
     Action, AnyElement, App, AppContext as _, ClipboardEntry, ClipboardItem, Context, Corners,
     DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, KeyContext, KeyDownEvent,
     Keystroke, MouseButton, MouseDownEvent, Pixels, Point, PromptButton, PromptLevel, Render,
-    ScrollWheelEvent, Subscription, Task, Window, actions, anchored, deferred, div, px,
+    ScrollWheelEvent, Subscription, Window, actions, anchored, deferred, div, px,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -27,10 +28,10 @@ use settings_content::{TerminalBell, TerminalBlink};
 use terminal::{
     Clear, Copy, Event, HoveredWord, MaybeNavigationTarget, Modes, Paste, PasteText, PasteTrimmed,
     ScrollLineDown, ScrollLineUp, ScrollPageDown, ScrollPageUp, ScrollToBottom, ScrollToTop,
-    Search, SearchUpdate, ShowCharacterPalette, Terminal, TerminalBounds, ToggleViMode,
-    console_palette_for_theme,
+    ShowCharacterPalette, Terminal, TerminalBounds, ToggleViMode, console_palette_for_theme,
     link_policy::display_safe_link_text,
     paste_order::{PasteOrder, PasteTicket},
+    search_session::{SearchSession, SearchSessionStatus},
     terminal_settings::{CursorShape, TerminalSettings},
 };
 use terminal_element::TerminalElement;
@@ -102,15 +103,6 @@ fn first_clipboard_image(clipboard: &ClipboardItem) -> Option<Arc<gpui::Image>> 
         ClipboardEntry::Image(image) if !image.bytes.is_empty() => Some(Arc::new(image.clone())),
         _ => None,
     })
-}
-
-fn search_request_is_current(
-    expected_generation: u64,
-    expected_query: &str,
-    current_generation: u64,
-    current_query: Option<&str>,
-) -> bool {
-    expected_generation == current_generation && current_query == Some(expected_query)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -225,13 +217,9 @@ pub struct TerminalView {
     font_size_override: Option<Pixels>,
     search_focus_handle: FocusHandle,
     search_query: Option<String>,
-    search_active_match: Option<usize>,
-    search_generation: u64,
-    search_matches_limited: bool,
-    search_total_matches: usize,
-    /// The running search has read all of the scrollback, so its count is exact.
-    search_complete: bool,
-    search_task: Option<Task<()>>,
+    search_session: Option<Entity<SearchSession>>,
+    search_status: SearchStatus,
+    search_subscription: Option<Subscription>,
     search_select_all: bool,
     search_cursor: usize,
     emit_input_events: bool,
@@ -284,15 +272,13 @@ impl TerminalView {
 
     pub fn clear_search(&mut self, cx: &mut Context<Self>) {
         self.search_query = None;
-        self.search_generation = self.search_generation.wrapping_add(1);
-        self.search_matches_limited = false;
-        self.search_total_matches = 0;
-        self.search_active_match = None;
+        if let Some(session) = self.search_session.take() {
+            session.update(cx, SearchSession::clear);
+        }
+        self.search_subscription = None;
+        self.search_status = SearchSessionStatus::default().into();
         self.search_select_all = false;
         self.search_cursor = 0;
-        self.terminal.update(cx, |terminal, _| {
-            Arc::make_mut(&mut terminal.matches).clear()
-        });
         cx.notify();
     }
 
@@ -330,9 +316,6 @@ impl TerminalView {
             |view, terminal, event, window, cx| match event {
                 Event::Wakeup | Event::SelectionsChanged | Event::BreadcrumbsChanged => {
                     window.invalidate_character_coordinates();
-                    if matches!(event, Event::Wakeup) {
-                        view.refresh_search(cx);
-                    }
                     cx.notify();
                 }
                 Event::TaskFinished { .. } => cx.notify(),
@@ -401,12 +384,9 @@ impl TerminalView {
             font_size_override: None,
             search_focus_handle,
             search_query: None,
-            search_active_match: None,
-            search_generation: 0,
-            search_matches_limited: false,
-            search_total_matches: 0,
-            search_complete: true,
-            search_task: None,
+            search_session: None,
+            search_status: SearchSessionStatus::default().into(),
+            search_subscription: None,
             search_select_all: false,
             search_cursor: 0,
             emit_input_events: false,
@@ -776,20 +756,11 @@ impl TerminalView {
     }
 
     fn dismiss_search(&mut self, _: &DismissSearch, window: &mut Window, cx: &mut Context<Self>) {
-        if self.search_query.take().is_none() {
+        if self.search_query.is_none() {
             return;
         }
-        self.search_generation = self.search_generation.wrapping_add(1);
-        self.search_matches_limited = false;
-        self.search_total_matches = 0;
-        self.search_active_match = None;
-        self.search_select_all = false;
-        self.search_cursor = 0;
-        self.terminal.update(cx, |terminal, _| {
-            Arc::make_mut(&mut terminal.matches).clear()
-        });
+        self.clear_search(cx);
         self.focus_handle.focus(window, cx);
-        cx.notify();
     }
 
     fn select_all_search_text(
@@ -835,112 +806,25 @@ impl TerminalView {
     }
 
     fn navigate_search(&mut self, previous: bool, cx: &mut Context<Self>) {
-        let match_count = self.terminal.read(cx).matches.len();
-        let Some(index) = navigated_match_index(self.search_active_match, match_count, previous)
-        else {
-            return;
-        };
-        self.search_active_match = Some(index);
-        self.terminal
-            .update(cx, |terminal, _| terminal.activate_match(index));
-        cx.notify();
+        if let Some(session) = &self.search_session {
+            session.update(cx, |session, cx| session.navigate(previous, cx));
+        }
     }
 
     fn refresh_search(&mut self, cx: &mut Context<Self>) {
-        self.search_task.take();
-        let Some(query) = self.search_query.as_ref().cloned() else {
+        let Some(query) = &self.search_query else {
             return;
         };
-        self.search_generation = self.search_generation.wrapping_add(1);
-        let generation = self.search_generation;
-        self.search_matches_limited = false;
-        self.search_total_matches = 0;
-        self.search_complete = query.is_empty();
-        // Query edits must paint independently of the debounced background search.
-        // In particular, a post-resize search may wait for retained history to reflow.
-        cx.notify();
-        if query.is_empty() {
-            self.search_active_match = None;
-            self.terminal.update(cx, |terminal, _| {
-                Arc::make_mut(&mut terminal.matches).clear()
-            });
-            return;
-        }
-        let Some(search) = Search::new_literal(&query) else {
-            return;
-        };
-        let terminal = self.terminal.clone();
-        let executor = cx.background_executor().clone();
-        let task = cx.spawn(async move |this, cx| {
-            executor.timer(Duration::from_millis(75)).await;
-            let Some(mut job) = this
-                .update(cx, |this, cx| {
-                    search_request_is_current(
-                        generation,
-                        &query,
-                        this.search_generation,
-                        this.search_query.as_deref(),
-                    )
-                    .then(|| terminal.update(cx, |terminal, cx| terminal.find_matches(search, cx)))
-                })
-                .ok()
-                .flatten()
-            else {
-                return;
-            };
-            let mut first = true;
-            while let Some(update) = job.next().await {
-                let current = this
-                    .update(cx, |this, cx| {
-                        let current = search_request_is_current(
-                            generation,
-                            &query,
-                            this.search_generation,
-                            this.search_query.as_deref(),
-                        );
-                        if current {
-                            this.apply_search_update(update, first, cx);
-                        }
-                        current
-                    })
-                    .unwrap_or(false);
-                if !current {
-                    return;
-                }
-                first = false;
-            }
+        let session = self.search_session.get_or_insert_with(|| {
+            let session = cx.new(|cx| SearchSession::new(vec![self.terminal.clone()], cx));
+            self.search_subscription = Some(cx.observe(&session, |view, session, cx| {
+                view.search_status = session.read(cx).status().into();
+                cx.notify();
+            }));
+            session
         });
-        self.search_task = Some(task);
-    }
-
-    /// Show a running search's latest results. The first matches of a query activate its newest
-    /// one; later ones are older, and keep whichever match is active.
-    fn apply_search_update(&mut self, update: SearchUpdate, first: bool, cx: &mut Context<Self>) {
-        let added = update.older_matches.len();
-        let active = (!first).then_some(self.search_active_match).flatten();
-        self.search_matches_limited = update.limit_reached;
-        self.search_total_matches = update.total_count;
-        self.search_complete = update.complete;
-        let active_match = self.terminal.update(cx, |terminal, _| {
-            // The previous query's matches stay on screen until the first of this one's arrive.
-            if first {
-                terminal.matches = Arc::default();
-            }
-            if added > 0 {
-                Arc::make_mut(&mut terminal.matches).extend_older(update.older_matches);
-            }
-            let active_match = match active {
-                Some(index) => Some(index + added),
-                None => terminal.matches.len().checked_sub(1),
-            };
-            if active.is_none()
-                && let Some(index) = active_match
-            {
-                terminal.activate_match(index);
-            }
-            active_match
-        });
-        self.search_active_match = active_match;
+        session.update(cx, |session, cx| session.set_query(query, cx));
+        self.search_status = session.read(cx).status().into();
         cx.notify();
     }
 
@@ -1306,95 +1190,10 @@ impl Render for TerminalView {
         let owns_transient_focus =
             focused || self.has_open_context_menu() || self.search_query.is_some();
         let theme = self.theme.clone().unwrap_or_else(|| cx.theme().clone());
-        let search_overlay = self.search_query.as_ref().map(|query| {
-            let status = SearchStatus {
-                active_match: self.search_active_match,
-                shown: self.terminal.read(cx).matches.len(),
-                total_count: self.search_total_matches,
-                limit_reached: self.search_matches_limited,
-                complete: self.search_complete,
-            }
-            .label();
-            let cursor = self.search_cursor.min(query.len());
-            let (query_before, query_after) = query.split_at(cursor);
-            let query_before = query_before.to_owned();
-            let query_after = query_after.to_owned();
-            let query_selected = self.search_select_all;
-            let search_focus_handle = self.search_focus_handle.clone();
-
-            div()
-                .absolute()
-                .top_2()
-                .left_2()
-                .right_2()
-                .flex()
-                .justify_end()
-                .child(
-                    div()
-                        .id("terminal-search")
-                        .track_focus(&self.search_focus_handle)
-                        .w_full()
-                        .max_w(px(440.0))
-                        .px_3()
-                        .py_2()
-                        .flex()
-                        .flex_col()
-                        .gap_1()
-                        .rounded(px(5.0))
-                        .border_1()
-                        .border_color(theme.colors().border)
-                        .bg(theme.colors().elevated_surface_background.alpha(1.0))
-                        .shadow_sm()
-                        .text_sm()
-                        .text_color(theme.colors().text)
-                        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-                            search_focus_handle.focus(window, cx);
-                            cx.stop_propagation();
-                        })
-                        .child(
-                            h_flex()
-                                .w_full()
-                                .flex_wrap()
-                                .justify_between()
-                                .gap_3()
-                                .child(
-                                    h_flex()
-                                        .flex_1()
-                                        .flex_basis(px(120.))
-                                        .min_w_0()
-                                        .overflow_hidden()
-                                        .debug_selector(|| format!("terminal-search-query:{query}"))
-                                        .when(query_selected, |input| {
-                                            input.bg(theme.colors().element_selection_background)
-                                        })
-                                        .child(div().whitespace_nowrap().child(query_before))
-                                        .when(!query_selected, |input| {
-                                            input.child(
-                                                div()
-                                                    .flex_none()
-                                                    .w(px(1.0))
-                                                    .h(px(16.0))
-                                                    .bg(theme.colors().text_accent),
-                                            )
-                                        })
-                                        .child(div().whitespace_nowrap().child(query_after)),
-                                )
-                                .child(
-                                    div()
-                                        .flex_none()
-                                        .max_w_full()
-                                        .text_color(theme.colors().text_muted)
-                                        .child(status),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(theme.colors().text_muted)
-                                .child("Enter next  Shift+Enter previous  Esc close"),
-                        ),
-                )
-        });
+        let search_overlay = self
+            .search_query
+            .as_ref()
+            .map(|query| self.render_search_overlay(query, &theme));
         div()
             .id("terminal-view")
             .size_full()
@@ -1540,6 +1339,18 @@ pub struct SearchStatus {
     pub complete: bool,
 }
 
+impl From<SearchSessionStatus> for SearchStatus {
+    fn from(status: SearchSessionStatus) -> Self {
+        Self {
+            active_match: status.active_match,
+            shown: status.shown,
+            total_count: status.total_count,
+            limit_reached: status.limit_reached,
+            complete: status.complete,
+        }
+    }
+}
+
 impl SearchStatus {
     pub fn label(self) -> String {
         if !self.complete && self.total_count == 0 {
@@ -1557,24 +1368,6 @@ impl SearchStatus {
             format!("{position} / {total}")
         }
     }
-}
-
-fn navigated_match_index(
-    active: Option<usize>,
-    match_count: usize,
-    previous: bool,
-) -> Option<usize> {
-    if match_count == 0 {
-        return None;
-    }
-    let active = active
-        .filter(|index| *index < match_count)
-        .unwrap_or(if previous { 0 } else { match_count - 1 });
-    Some(if previous {
-        active.checked_sub(1).unwrap_or(match_count - 1)
-    } else {
-        (active + 1) % match_count
-    })
 }
 
 fn trim_paste_text(text: &str) -> &str {

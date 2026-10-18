@@ -1,4 +1,5 @@
 use super::*;
+use crate::search_session::SearchSession;
 use gpui::{TestAppContext, VisualContext as _, bounds, size};
 
 #[gpui::test]
@@ -125,7 +126,7 @@ async fn exercise_paused_reflow_search(cx: &mut TestAppContext, rows: usize) {
         clipboard.await.and_then(|item| item.text()).as_deref(),
         Some("needle")
     );
-    for columns in [2., 31., 97.] {
+    for columns in [2., 97., 31.] {
         let job = window.update_window_entity(&terminal, |terminal, window, cx| {
             terminal
                 .term
@@ -162,6 +163,10 @@ async fn exercise_paused_reflow_search(cx: &mut TestAppContext, rows: usize) {
         drop(release);
         return;
     }
+    // Exercise the controller both UIs use while the same reflow gate is still
+    // closed. Keep the multi-target session open across layout publication.
+    let session = search_sessions_during_paused_reflow(&terminal, window).await;
+    let source_matches = terminal.read_with(window, |terminal, _| terminal.matches.clone());
     let reader = window.update_window_entity(&terminal, |terminal, _, _| {
         // Publication is pumped explicitly below; a native worker must not
         // schedule GPUI's deterministic test executor from an OS thread.
@@ -170,12 +175,66 @@ async fn exercise_paused_reflow_search(cx: &mut TestAppContext, rows: usize) {
     });
     release.send(()).unwrap();
     reader.snapshot().unwrap();
-    let job = window.update_window_entity(&terminal, |terminal, window, cx| {
+    window.update_window_entity(&terminal, |terminal, window, cx| {
         terminal.sync(window, cx);
         assert!(terminal.reflow_search.source().is_none());
-        terminal.find_matches(Search::new_literal("needle").unwrap(), cx)
     });
-    let result = job.finish().await;
-    assert_eq!(result.total_count, 1);
+    cx.condition(&session, |session, _| session.status().complete)
+        .await;
+    assert_eq!(
+        session.read_with(cx, |session, _| session.status().total_count),
+        2
+    );
     assert!(terminal.read_with(cx, |terminal, _| terminal.reflow_search.source().is_none()));
+    assert_ne!(
+        *source_matches,
+        *terminal.read_with(cx, |terminal, _| terminal.matches.clone()),
+        "publication must replace source coordinates with the reflowed layout's"
+    );
+}
+
+async fn search_sessions_during_paused_reflow(
+    terminal: &gpui::Entity<Terminal>,
+    cx: &mut TestAppContext,
+) -> gpui::Entity<SearchSession> {
+    let other = cx.new(|cx| {
+        let mut terminal = TerminalBuilder::new_display_only(
+            SettingsCursorShape::Block,
+            AlternateScroll::On,
+            None,
+            0,
+            cx.background_executor(),
+            PathStyle::local(),
+        )
+        .subscribe(cx);
+        terminal.write_output(b"another needle\r\n", cx);
+        terminal
+    });
+    let mut retained = None;
+    for count in [1, 2] {
+        let targets = if count == 1 {
+            vec![terminal.clone()]
+        } else {
+            vec![terminal.clone(), other.clone()]
+        };
+        let session = cx.new(|cx| SearchSession::new(targets, cx));
+        session.update(cx, |session, cx| session.set_query("needle", cx));
+        cx.condition(&session, |session, _| session.status().complete)
+            .await;
+        assert_eq!(
+            session.read_with(cx, |session, _| session.status().total_count),
+            count
+        );
+        session.update(cx, |session, cx| {
+            session.navigate(false, cx);
+            session.navigate(true, cx);
+        });
+        assert!(terminal.read_with(cx, |terminal, _| terminal.reflow_search.source().is_some()));
+        if count == 1 {
+            session.update(cx, SearchSession::clear);
+        } else {
+            retained = Some(session);
+        }
+    }
+    retained.unwrap()
 }

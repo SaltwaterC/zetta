@@ -1,111 +1,55 @@
-use super::*;
+//! Tab search presentation and pane/stack revelation. Search lifecycle and
+//! navigation belong to `terminal::search_session`, shared with pane search.
 
-#[derive(Clone, Copy)]
-pub(crate) struct TabSearchMatch {
-    pub(crate) pane_id: u64,
-    pub(crate) stack_id: Option<u64>,
-    pub(crate) match_index: usize,
-}
+use super::*;
+use terminal::search_session::{SearchActivated, SearchMatch, SearchSession, SearchSessionStatus};
 
 pub(crate) struct TabSearch {
     pub(crate) tab_id: u64,
     pub(crate) query: TextField,
-    pub(crate) generation: u64,
-    /// The panes searched, in the order navigation visits their matches: one pane's from oldest
-    /// to newest, then the next pane's. Each terminal holds its own; this keeps only their counts,
-    /// so a search with many matches costs nothing per match here.
-    panes: Vec<TabSearchPane>,
-    /// An index into the matches of all of `panes`, counted across them in order.
-    pub(crate) active_match: Option<usize>,
-    pub(crate) limit_reached: bool,
-    pub(crate) total_count: usize,
-    /// Every pane's search has read all of its scrollback, so the count is exact.
-    pub(crate) complete: bool,
-    pub(crate) task: Option<Task<()>>,
-}
-
-/// One pane's part of a running tab search: what its search has reported so far.
-struct TabSearchPane {
-    pane_id: u64,
-    stack_id: Option<u64>,
-    terminal: Entity<Terminal>,
-    /// Matches highlighted in the terminal.
-    shown: usize,
-    total_count: usize,
-    limit_reached: bool,
-    complete: bool,
-    _subscription: Option<Subscription>,
+    session: Entity<SearchSession>,
+    targets: Vec<(u64, Option<u64>)>,
+    status: SearchStatus,
+    _observer: Subscription,
+    _activation: Subscription,
 }
 
 impl TabSearch {
-    pub(crate) fn match_count(&self) -> usize {
-        self.panes.iter().map(|pane| pane.shown).sum()
-    }
-
-    /// Match `index`, counted across the panes in order.
-    pub(crate) fn match_at(&self, mut index: usize) -> Option<TabSearchMatch> {
-        for pane in &self.panes {
-            if index < pane.shown {
-                return Some(TabSearchMatch {
-                    pane_id: pane.pane_id,
-                    stack_id: pane.stack_id,
-                    match_index: index,
-                });
+    fn new(tab_id: u64, cx: &mut Context<Zetta>) -> Self {
+        let session = cx.new(|cx| SearchSession::new(Vec::new(), cx));
+        let observer = cx.observe(&session, |this, session, cx| {
+            if let Some(search) = this
+                .tab_search
+                .as_mut()
+                .filter(|search| search.session == session)
+            {
+                search.status = session.read(cx).status().into();
+                cx.notify();
             }
-            index -= pane.shown;
-        }
-        None
-    }
-
-    /// Record that pane `index` found `added` matches older than any it had, which go in front
-    /// of its own. Returns whether there was no active match before, but now is.
-    fn add_pane_matches(&mut self, index: usize, added: usize) -> bool {
-        let start = self.panes[..index]
-            .iter()
-            .map(|pane| pane.shown)
-            .sum::<usize>();
-        self.panes[index].shown += added;
-        match self.active_match {
-            Some(active) => {
-                if active >= start {
-                    self.active_match = Some(active + added);
-                }
-                false
+        });
+        let activation = cx.subscribe(&session, |this, session, event: &SearchActivated, cx| {
+            if this
+                .tab_search
+                .as_ref()
+                .is_some_and(|search| search.session == session)
+            {
+                this.reveal_tab_search_match(event.0, cx);
             }
-            None => {
-                self.active_match = self.match_count().checked_sub(1);
-                self.active_match.is_some()
-            }
+        });
+        Self {
+            tab_id,
+            query: TextField::default(),
+            session,
+            targets: Vec::new(),
+            status: SearchSessionStatus::default().into(),
+            _observer: observer,
+            _activation: activation,
         }
     }
-}
-
-pub(crate) fn tab_search_request_is_current(
-    search: Option<&TabSearch>,
-    tab_id: u64,
-    generation: u64,
-    query: &str,
-) -> bool {
-    search.is_some_and(|search| {
-        search.tab_id == tab_id && search.generation == generation && search.query.text == query
-    })
 }
 
 pub(crate) fn tab_search_targets_tab(search: Option<&TabSearch>, tab_id: u64) -> bool {
     search.is_some_and(|search| search.tab_id == tab_id)
-}
-
-/// Drops a terminal's highlighted matches. Notifying the terminal is what
-/// repaints the panes: the highlights come from terminal state, so the search
-/// overlay's own `cx.notify()` doesn't cover them.
-fn clear_terminal_matches(terminal: &Entity<Terminal>, cx: &mut Context<Zetta>) {
-    terminal.update(cx, |terminal, cx| {
-        if terminal.matches.is_empty() {
-            return;
-        }
-        Arc::make_mut(&mut terminal.matches).clear();
-        cx.notify();
-    });
 }
 
 impl Zetta {
@@ -130,43 +74,18 @@ impl Zetta {
                 view.update(cx, TerminalView::clear_search);
             }
             self.command_palette = None;
-            self.tab_search = Some(TabSearch {
-                tab_id,
-                query: TextField::default(),
-                generation: 0,
-                panes: Vec::new(),
-                active_match: None,
-                limit_reached: false,
-                total_count: 0,
-                complete: true,
-                task: None,
-            });
+            self.tab_search = Some(TabSearch::new(tab_id, cx));
             self.refresh_tab_search(cx);
         }
         self.tab_search_focus.focus(window, cx);
         cx.notify();
     }
 
-    pub(crate) fn clear_tab_search_matches(&mut self, tab_id: u64, cx: &mut Context<Self>) {
-        let terminals = self
-            .tabs
-            .iter()
-            .find(|tab| tab.id == tab_id)
-            .into_iter()
-            .flat_map(|tab| tab.panes.iter())
-            .flat_map(TerminalPane::all_terminals)
-            .cloned()
-            .collect::<Vec<_>>();
-        for terminal in terminals {
-            clear_terminal_matches(&terminal, cx);
-        }
-    }
-
     pub(crate) fn dismiss_tab_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(search) = self.tab_search.take() else {
             return;
         };
-        self.clear_tab_search_matches(search.tab_id, cx);
+        search.session.update(cx, SearchSession::clear);
         self.focus_active(window, cx);
         cx.notify();
     }
@@ -176,27 +95,15 @@ impl Zetta {
             return;
         }
         let search = self.tab_search.take().expect("targeted search must exist");
-        self.clear_tab_search_matches(search.tab_id, cx);
+        search.session.update(cx, SearchSession::clear);
         cx.notify();
     }
 
     pub(crate) fn refresh_tab_search(&mut self, cx: &mut Context<Self>) {
-        let Some(search_state) = self.tab_search.as_mut() else {
+        let Some(search) = self.tab_search.as_ref() else {
             return;
         };
-        search_state.task.take();
-        search_state.generation = search_state.generation.wrapping_add(1);
-        search_state.panes.clear();
-        search_state.active_match = None;
-        search_state.limit_reached = false;
-        search_state.total_count = 0;
-        search_state.complete = search_state.query.text.is_empty();
-        let tab_id = search_state.tab_id;
-        let query = search_state.query.text.clone();
-        let generation = search_state.generation;
-        // Editing the field must repaint even while every pane's search is pending.
-        cx.notify();
-
+        let tab_id = search.tab_id;
         let terminals = self
             .tabs
             .iter()
@@ -212,186 +119,54 @@ impl Zetta {
                     }))
             })
             .collect::<Vec<_>>();
-        for (_, _, terminal) in &terminals {
-            clear_terminal_matches(terminal, cx);
-        }
-        if query.is_empty() {
-            return;
-        }
-        let Some(pattern) = Search::new_literal(&query) else {
-            return;
-        };
-        let executor = cx.background_executor().clone();
-        let task = cx.spawn(async move |this, cx| {
-            executor.timer(Duration::from_millis(75)).await;
-            let Some(jobs) = this
-                .update(cx, |this, cx| {
-                    let valid = tab_search_request_is_current(
-                        this.tab_search.as_ref(),
-                        tab_id,
-                        generation,
-                        &query,
-                    );
-                    valid.then(|| {
-                        let (panes, jobs): (Vec<_>, Vec<_>) = terminals
-                            .into_iter()
-                            .map(|(pane_id, stack_id, terminal)| {
-                                let subscription =
-                                    cx.subscribe(&terminal, move |this, _, event, cx| {
-                                        if matches!(event, TerminalEvent::GridSizeChanged)
-                                            && this.tab_search.as_ref().is_some_and(|search| {
-                                                search.tab_id == tab_id
-                                                    && search.generation == generation
-                                            })
-                                        {
-                                            this.refresh_tab_search(cx);
-                                        }
-                                    });
-                                let job = terminal.update(cx, |terminal, cx| {
-                                    terminal.find_matches(pattern.clone(), cx)
-                                });
-                                let pane = TabSearchPane {
-                                    pane_id,
-                                    stack_id,
-                                    terminal,
-                                    shown: 0,
-                                    total_count: 0,
-                                    limit_reached: false,
-                                    complete: false,
-                                    _subscription: Some(subscription),
-                                };
-                                (pane, job)
-                            })
-                            .unzip();
-                        if let Some(search) = this.tab_search.as_mut() {
-                            search.panes = panes;
-                        }
-                        jobs
-                    })
-                })
-                .ok()
-                .flatten()
-            else {
-                return;
-            };
-            // Every pane's results as they arrive, tagged with the pane they belong to.
-            let mut updates =
-                futures::stream::select_all(jobs.into_iter().enumerate().map(|(index, job)| {
-                    Box::pin(futures::stream::unfold(job, move |mut job| async move {
-                        let result = job.next().await?;
-                        Some(((index, result), job))
-                    }))
-                }));
-            while let Some((index, update)) = futures::StreamExt::next(&mut updates).await {
-                let current = this
-                    .update(cx, |this, cx| {
-                        let current = tab_search_request_is_current(
-                            this.tab_search.as_ref(),
-                            tab_id,
-                            generation,
-                            &query,
-                        );
-                        if current {
-                            this.apply_tab_search_update(index, update, cx);
-                        }
-                        current
-                    })
-                    .unwrap_or(false);
-                if !current {
-                    return;
-                }
-            }
-        });
-        if let Some(search) = self.tab_search.as_mut() {
-            search.task = Some(task);
-        }
-    }
-
-    /// Fold pane `index`'s latest results into the tab search. The active match stays where it
-    /// is; the first match found becomes active when there is none.
-    fn apply_tab_search_update(
-        &mut self,
-        index: usize,
-        update: SearchUpdate,
-        cx: &mut Context<Self>,
-    ) {
         let Some(search) = self.tab_search.as_mut() else {
             return;
         };
-        let pane = &mut search.panes[index];
-        pane.total_count = update.total_count;
-        pane.limit_reached = update.limit_reached;
-        pane.complete = update.complete;
-        let added = update.older_matches.len();
-        if added > 0 {
-            pane.terminal.update(cx, |terminal, cx| {
-                Arc::make_mut(&mut terminal.matches).extend_older(update.older_matches);
-                // The match highlights are painted from the terminal's own state, so the
-                // terminal has to repaint even though this update was driven by the search
-                // overlay.
-                cx.notify();
-            });
-        }
-        let activate = search.add_pane_matches(index, added);
-        search.limit_reached = search.panes.iter().any(|pane| pane.limit_reached);
-        search.total_count = search
-            .panes
+        search.targets = terminals
             .iter()
-            .fold(0, |total, pane| total.saturating_add(pane.total_count));
-        search.complete = search.panes.iter().all(|pane| pane.complete);
-        if activate && let Some(index) = search.active_match {
-            self.activate_tab_search_match(index, cx);
-        }
+            .map(|(pane, stack, _)| (*pane, *stack))
+            .collect();
+        search.session.update(cx, |session, cx| {
+            session.set_targets(
+                terminals
+                    .into_iter()
+                    .map(|(_, _, terminal)| terminal)
+                    .collect(),
+                cx,
+            );
+            session.set_query(&search.query.text, cx);
+        });
+        search.status = search.session.read(cx).status().into();
         cx.notify();
     }
 
-    pub(crate) fn activate_tab_search_match(&mut self, index: usize, cx: &mut Context<Self>) {
-        let Some((tab_id, search_match)) = self.tab_search.as_ref().and_then(|search| {
+    fn reveal_tab_search_match(&mut self, found: SearchMatch, cx: &mut Context<Self>) {
+        let Some((tab_id, pane_id, stack_id)) = self.tab_search.as_ref().and_then(|search| {
             search
-                .match_at(index)
-                .map(|search_match| (search.tab_id, search_match))
+                .targets
+                .get(found.target)
+                .map(|&(pane, stack)| (search.tab_id, pane, stack))
         }) else {
             return;
         };
         let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) else {
             return;
         };
-        tab.restore_minimized(search_match.pane_id);
+        tab.restore_minimized(pane_id);
         tab.maximized_pane = None;
         tab.activate_stack_entry(
-            search_match.pane_id,
-            search_match
-                .stack_id
-                .map_or(PaneStackSelection::Base, PaneStackSelection::Stacked),
+            pane_id,
+            stack_id.map_or(PaneStackSelection::Base, PaneStackSelection::Stacked),
         );
-        let terminal = tab.active_terminal();
-        if let Some(terminal) = terminal {
-            terminal.update(cx, |terminal, cx| {
-                terminal.activate_match(search_match.match_index);
-                cx.notify();
-            });
-        }
         cx.notify();
     }
 
     pub(crate) fn navigate_tab_search(&mut self, previous: bool, cx: &mut Context<Self>) {
-        let Some(search) = self.tab_search.as_mut() else {
-            return;
-        };
-        let match_count = search.match_count();
-        if match_count == 0 {
-            return;
+        if let Some(search) = &self.tab_search {
+            search
+                .session
+                .update(cx, |session, cx| session.navigate(previous, cx));
         }
-        let current = search
-            .active_match
-            .unwrap_or(if previous { 0 } else { match_count - 1 });
-        let index = if previous {
-            current.checked_sub(1).unwrap_or(match_count - 1)
-        } else {
-            (current + 1) % match_count
-        };
-        search.active_match = Some(index);
-        self.activate_tab_search_match(index, cx);
     }
 
     pub(crate) fn tab_search_key_down(
@@ -451,14 +226,7 @@ impl Zetta {
             .min_w_0()
             .overflow_hidden()
             .debug_selector(|| format!("tab-search-query:{}", search.query.text));
-        let status = SearchStatus {
-            active_match: search.active_match,
-            shown: search.match_count(),
-            total_count: search.total_count,
-            limit_reached: search.limit_reached,
-            complete: search.complete,
-        }
-        .label();
+        let status = search.status.label();
 
         Some(
             div()

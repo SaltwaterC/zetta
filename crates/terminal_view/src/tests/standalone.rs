@@ -220,24 +220,10 @@ fn trimmed_paste_removes_only_outer_whitespace() {
 }
 
 #[test]
-fn search_navigation_wraps_in_both_directions() {
-    assert_eq!(navigated_match_index(Some(2), 3, false), Some(0));
-    assert_eq!(navigated_match_index(Some(0), 3, true), Some(2));
-    assert_eq!(navigated_match_index(None, 0, false), None);
-}
-
-#[test]
 fn search_caret_respects_utf8_boundaries() {
-    let text = "aé中";
+    let text = "a\u{e9}\u{4e2d}";
     assert_eq!(next_char_boundary(text, 1), 3);
     assert_eq!(previous_char_boundary(text, 3), 1);
-}
-
-#[test]
-fn superseded_search_requests_are_rejected() {
-    assert!(search_request_is_current(3, "cargo", 3, Some("cargo")));
-    assert!(!search_request_is_current(3, "cargo", 4, Some("cargo")));
-    assert!(!search_request_is_current(3, "cargo", 3, Some("rust")));
 }
 
 #[test]
@@ -531,21 +517,21 @@ fn search_status_marks_a_count_that_is_still_growing() {
         .label()
     };
 
-    assert_eq!(label(None, 0, 0, false, false), "Searching…");
+    assert_eq!(label(None, 0, 0, false, false), "Searching\u{2026}");
     assert_eq!(label(None, 0, 0, false, true), "0 / 0");
     assert_eq!(label(Some(2), 3, 3, false, false), "3 / 3+");
     assert_eq!(label(Some(2), 3, 3, false, true), "3 / 3");
     assert_eq!(
         label(Some(255), 256, 9_000, true, false),
-        "256 / 256 shown · 9000+ matches"
+        "256 / 256 shown \u{b7} 9000+ matches"
     );
     assert_eq!(
         label(Some(255), 256, 9_000, true, true),
-        "256 / 256 shown · 9000 matches"
+        "256 / 256 shown \u{b7} 9000 matches"
     );
 }
 
-fn link_test_view(
+pub(super) fn link_test_view(
     cx: &mut gpui::TestAppContext,
 ) -> (Entity<TerminalView>, &mut gpui::VisualTestContext) {
     cx.update(|cx| {
@@ -566,74 +552,6 @@ fn link_test_view(
         });
         TerminalView::new(terminal, window, cx)
     })
-}
-
-#[gpui::test]
-async fn search_query_repaints_before_results_after_window_resize(cx: &mut gpui::TestAppContext) {
-    let (view, cx) = link_test_view(cx);
-    cx.run_until_parked();
-    cx.simulate_resize(gpui::size(px(400.), px(300.)));
-    cx.run_until_parked();
-    view.update_in(cx, |view, window, cx| {
-        view.search_scrollback(&SearchScrollback, window, cx);
-    });
-    cx.run_until_parked();
-    assert!(cx.debug_bounds("terminal-search-query:").is_some());
-
-    // Do not advance the 75 ms search debounce: these frames must come from
-    // editing the field itself, with no search result or terminal output to
-    // trigger a repaint. Check rendered elements, not just the backing String.
-    for (keys, query, selector) in [
-        ("n", "n", "terminal-search-query:n"),
-        ("e", "ne", "terminal-search-query:ne"),
-        ("backspace", "n", "terminal-search-query:n"),
-        ("left delete", "", "terminal-search-query:"),
-        ("é", "é", "terminal-search-query:é"),
-    ] {
-        cx.simulate_keystrokes(keys);
-        cx.run_until_parked();
-        view.update(cx, |view, _| {
-            assert_eq!(view.search_query.as_deref(), Some(query));
-            assert_eq!(view.search_complete, query.is_empty());
-            assert_eq!(view.search_total_matches, 0);
-        });
-        assert!(
-            cx.debug_bounds(selector).is_some(),
-            "field did not repaint {query:?}"
-        );
-    }
-}
-
-#[gpui::test]
-async fn search_query_keeps_space_beside_large_counts_after_narrowing(
-    cx: &mut gpui::TestAppContext,
-) {
-    let (view, cx) = link_test_view(cx);
-    cx.run_until_parked();
-    view.update_in(cx, |view, window, cx| {
-        view.search_scrollback(&SearchScrollback, window, cx);
-        view.insert_search_text("needle", cx);
-        view.apply_search_update(
-            SearchUpdate {
-                total_count: 13_107_200,
-                limit_reached: true,
-                complete: true,
-                ..SearchUpdate::default()
-            },
-            true,
-            cx,
-        );
-    });
-    cx.run_until_parked();
-    for width in [180., 320., 800.] {
-        cx.simulate_resize(gpui::size(px(width), px(300.)));
-        cx.run_until_parked();
-        let bounds = cx.debug_bounds("terminal-search-query:needle").unwrap();
-        assert!(
-            bounds.size.width >= px(80.),
-            "counter squeezed the query out at {width}px: {bounds:?}"
-        );
-    }
 }
 
 fn emit_terminal_event(
