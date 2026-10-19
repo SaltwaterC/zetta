@@ -532,7 +532,7 @@ fn a_request_head_must_arrive_before_the_header_deadline() {
         return;
     }
     let root = tempfile::tempdir().unwrap();
-    let server = start_test_server(
+    let mut server = start_test_server(
         root.path(),
         HttpServerOptions::default(),
         ServerLimits {
@@ -562,10 +562,29 @@ fn a_request_head_must_arrive_before_the_header_deadline() {
         "the server was still waiting for the head after {elapsed:?}"
     );
     assert!(elapsed < Duration::from_millis(1500), "took {elapsed:?}");
-    // A reset can discard the response; when it arrives it says why.
-    assert!(response.is_empty() || response.starts_with(b"HTTP/1.1 408 Request Timeout\r\n"));
+    // Closing with unread trickle bytes can reset TCP and discard any suffix
+    // of the response, including part of the status line.
+    let status = b"HTTP/1.1 408 Request Timeout\r\n";
+    assert!(
+        status.starts_with(&response) || response.starts_with(status),
+        "unexpected response: {:?}",
+        String::from_utf8_lossy(&response)
+    );
     let _ = stream.shutdown(Shutdown::Both);
     trickler.join().unwrap();
+
+    // The rejection is logged before the response is written, so verify the
+    // timeout even when the reset discarded all of the response bytes.
+    let mut logs = Vec::new();
+    let mut buffer = [0; 1024];
+    while !contains(&logs, "the request head did not arrive in time") {
+        let count = server.reader.read(&mut buffer).unwrap();
+        assert_ne!(
+            count, 0,
+            "server closed its log before recording the timeout"
+        );
+        logs.extend_from_slice(&buffer[..count]);
+    }
 }
 
 /// A peer that stops reading holds its slot for at most the response deadline,
