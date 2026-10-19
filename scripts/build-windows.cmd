@@ -87,5 +87,19 @@ if /i not "%CLIPBOARD%"=="0" if /i not "%CLIPBOARD%"=="false" if /i not "%CLIPBO
     if errorlevel 1 exit /b !errorlevel!
 )
 
+if /i not "%HTTP%"=="0" if /i not "%HTTP%"=="false" if /i not "%HTTP%"=="no" if /i not "%HTTP%"=="off" (
+    set "VERIFY_ARGS=!VERIFY_ARGS! -HttpBinaryPath !TARGET_DIR!\zhttp.exe"
+    call scripts\cargo-windows.cmd build %PROFILE_ARGS% --jobs %CARGO_BUILD_JOBS% --locked --manifest-path crates\zhttp\Cargo.toml --target-dir target --bin zhttp
+    if errorlevel 1 exit /b !errorlevel!
+)
+
+rem Build the standalone TFTP helper when either compatibility command is enabled.
+echo ,%FEATURES%, | findstr /c:",tftp-client," /c:",tftp-server," >nul
+if not errorlevel 1 (
+    set "VERIFY_ARGS=!VERIFY_ARGS! -TftpBinaryPath !TARGET_DIR!\ztftp.exe"
+    call scripts\cargo-windows.cmd build %PROFILE_ARGS% --jobs %CARGO_BUILD_JOBS% --locked --manifest-path crates\ztftp\Cargo.toml --target-dir target --bin ztftp
+    if errorlevel 1 exit /b !errorlevel!
+)
+
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\verify-windows-binary.ps1 -ConsoleBinaryPath !TARGET_DIR!\zetta.exe -GuiBinaryPath !TARGET_DIR!\zetta-gui.exe !VERIFY_ARGS!
 exit /b !errorlevel!

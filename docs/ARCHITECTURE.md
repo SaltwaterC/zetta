@@ -400,10 +400,13 @@ without that feature, so no call site needs a feature predicate:
   built-in sounds live in `crates/zntfy`
 - `byte_stream_pane.rs`: shared pane opener for byte-stream-backed panes
   (HTTP/TFTP server log panes, the serial console)
-- `http_server.rs`: the embedded HTTP file server and the log stream its pane
-  reads
-- `tftp.rs`: shared TFTP packet/opcode types; a module directory —
-  `tftp/server.rs` and `tftp/client.rs`
+- `http_server.rs`: proxy to sibling `zhttp` and engine re-exports for the HTTP
+  server pane. `crates/zhttp` owns the HTTP engine and standalone CLI;
+  `cli_services/servers.rs` resolves configuration for the proxy.
+- `tftp.rs`: validated client proxy to sibling `ztftp`, and re-exports for
+  server panes. The engine and standalone CLI live in `crates/ztftp`; the pane
+  retains its byte-stream lifecycle through that shared library.
+  `cli_services/servers.rs` resolves configuration for the server proxy.
 - `serial_console.rs`: serial device detection and the serial field model
 - `output_benchmark.rs`: the `zetta benchmark output` workloads and results
 

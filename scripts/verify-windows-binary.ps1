@@ -10,6 +10,8 @@ param(
     [string]$ZoshServerBinaryPath,
     [string]$WorktreeBinaryPath,
     [string]$NotifyBinaryPath,
+    [string]$TftpBinaryPath,
+    [string]$HttpBinaryPath,
     [string]$CopyBinaryPath,
     [string]$PasteBinaryPath,
     [string]$WslxBinaryPath
@@ -252,4 +254,20 @@ if ($notifyBinary) {
 }
 if ($wslxBinary) {
     Write-Host "Verified WSL agent wrapper: $wslxBinary"
+}
+
+if ($TftpBinaryPath) {
+    if ((Get-PeSubsystem $TftpBinaryPath) -ne 3) { throw "ztftp must use the console subsystem" }
+    $tftpHelp = @(& $TftpBinaryPath --help 2>&1) -join "`n"
+    if ($LASTEXITCODE -ne 0 -or $tftpHelp -notmatch 'ztftp get' -or $tftpHelp -notmatch 'ztftp server') {
+        throw "ztftp --help did not describe client and server commands"
+    }
+}
+
+if ($HttpBinaryPath) {
+    if ((Get-PeSubsystem $HttpBinaryPath) -ne 3) { throw "zhttp must use the console subsystem" }
+    $httpHelp = @(& $HttpBinaryPath --help 2>&1) -join "`n"
+    if ($LASTEXITCODE -ne 0 -or $httpHelp -notmatch 'zhttp server' -or $httpHelp -notmatch '--allow-host') {
+        throw "zhttp --help did not describe server options"
+    }
 }

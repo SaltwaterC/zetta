@@ -316,8 +316,7 @@ case "$OSTYPE" in
 esac
 # ZETTA_CLIPBOARD_INTEGRATION_END
 
-ztftp() { zetta tftp "$@"; }
-
+unset -f ztftp 2>/dev/null
 zntfy() { zetta notify "$@"; }
 
 # Completion code is generated once, on the first request. Failed loads retry.
@@ -339,7 +338,7 @@ __zetta_lazy_complete() {
     [[ $handler != __zetta_lazy_complete && -n $handler ]] && "$handler" "$@"
 }
 if [[ ${__ZETTA_COMPLETIONS_LOADED:-0} != 1 ]]; then
-    complete -F __zetta_lazy_complete zetta zosh zvi ztftp zntfy
+    complete -F __zetta_lazy_complete zetta zosh zvi ztftp zhttp zntfy
     [[ ${__ZETTA_MOSH_WRAPPER:-0} == 1 ]] && complete -F __zetta_lazy_complete mosh
 # ZETTA_WORKTREE_INTEGRATION_BEGIN
     complete -F __zetta_lazy_complete zwt

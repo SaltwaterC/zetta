@@ -1,5 +1,5 @@
 use super::*;
-use crate::tftp::request_packet;
+use crate::request_packet;
 
 #[test]
 fn request_parser_accepts_options_and_rejects_malformed_packets() {

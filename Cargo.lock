@@ -10836,7 +10836,6 @@ dependencies = [
  "busy-v",
  "embed-resource",
  "futures",
- "gethostname",
  "getrandom 0.3.4",
  "gpui",
  "gpui_platform",
@@ -10912,9 +10911,11 @@ dependencies = [
  "zed_actions",
  "zeroize",
  "zetta_profiles",
+ "zhttp",
  "zmux",
  "zntfy",
  "zosh",
+ "ztftp",
  "zwt",
 ]
 
@@ -10926,6 +10927,15 @@ dependencies = [
  "serde",
  "serde_json",
  "windows 0.61.3",
+]
+
+[[package]]
+name = "zhttp"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "gethostname",
+ "time",
 ]
 
 [[package]]
@@ -11011,6 +11021,14 @@ dependencies = [
  "vt100",
  "windows 0.61.3",
  "zclip",
+]
+
+[[package]]
+name = "ztftp"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "time",
 ]
 
 [[package]]

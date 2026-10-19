@@ -195,7 +195,7 @@ function zwt {
 # ZETTA_WORKTREE_INTEGRATION_END
 
 
-function ztftp { & zetta tftp @args }
+Remove-Item -Path Function:ztftp -ErrorAction SilentlyContinue
 function zntfy { & zetta notify @args }
 
 # ZETTA_CLIPBOARD_INTEGRATION_BEGIN
@@ -239,6 +239,7 @@ Register-ArgumentCompleter -Native -CommandName zosh -ScriptBlock $zettaLazyComp
 Register-ArgumentCompleter -Native -CommandName zmux -ScriptBlock $zettaLazyCompletions
 # ZETTA_ZMUX_INTEGRATION_END
 Register-ArgumentCompleter -CommandName ztftp -ScriptBlock $zettaLazyCompletions
+Register-ArgumentCompleter -CommandName zhttp -ScriptBlock $zettaLazyCompletions
 Register-ArgumentCompleter -CommandName zntfy -ScriptBlock $zettaLazyCompletions
 # ZETTA_CLIPBOARD_INTEGRATION_BEGIN
 Register-ArgumentCompleter -CommandName zcopy -ScriptBlock $zettaLazyCompletions

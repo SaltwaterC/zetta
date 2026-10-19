@@ -17,6 +17,8 @@ param(
     [string]$SourceZoshServerBinary,
     [string]$SourceZwtBinary,
     [string]$SourceNotifyBinary,
+    [string]$SourceTftpBinary,
+    [string]$SourceHttpBinary,
     [string]$SourceCopyBinary,
     [string]$SourcePasteBinary,
     [string]$SourceWslxBinary,
@@ -106,6 +108,8 @@ $installedZoshBinary = Join-Path $InstallDirectory "zosh.exe"
 $installedZoshServerBinary = Join-Path $InstallDirectory "zosh-server.exe"
 $legacyMoshServerBinary = Join-Path $InstallDirectory "mosh-server.exe"
 $installedZwtBinary = Join-Path $InstallDirectory "zwt.exe"
+$installedTftpBinary = Join-Path $InstallDirectory "ztftp.exe"
+$installedHttpBinary = Join-Path $InstallDirectory "zhttp.exe"
 $installedNotifyBinary = Join-Path $InstallDirectory "zntfy.exe"
 $installedCopyBinary = Join-Path $InstallDirectory "zcopy.exe"
 $installedPasteBinary = Join-Path $InstallDirectory "zpaste.exe"
@@ -178,6 +182,12 @@ function Get-InstallFiles {
     if ($NotifyEnabled) {
         $files += [pscustomobject]@{ Source = $SourceNotifyBinary; Destination = $installedNotifyBinary }
     }
+    if ($SourceTftpBinary) {
+        $files += [pscustomobject]@{ Source = $SourceTftpBinary; Destination = $installedTftpBinary }
+    }
+    if ($SourceHttpBinary) {
+        $files += [pscustomobject]@{ Source = $SourceHttpBinary; Destination = $installedHttpBinary }
+    }
     if ($clipboardEnabled) {
         $files += [pscustomobject]@{ Source = $SourceCopyBinary; Destination = $installedCopyBinary }
         $files += [pscustomobject]@{ Source = $SourcePasteBinary; Destination = $installedPasteBinary }
@@ -235,6 +245,20 @@ function Remove-DisabledNotifyFiles {
                 Write-Warning "Could not remove disabled notification executable ${path}: $_"
             }
         }
+    }
+}
+
+function Remove-DisabledTftpFiles {
+    if ($SourceTftpBinary) { return }
+    foreach ($path in @($installedTftpBinary, (Get-VersionedPath $installedTftpBinary "new"), (Get-VersionedPath $installedTftpBinary "old"))) {
+        if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force }
+    }
+}
+
+function Remove-DisabledHttpFiles {
+    if ($SourceHttpBinary) { return }
+    foreach ($path in @($installedHttpBinary, (Get-VersionedPath $installedHttpBinary "new"), (Get-VersionedPath $installedHttpBinary "old"))) {
+        if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force }
     }
 }
 
@@ -449,6 +473,8 @@ function Install-Binary {
     Remove-DisabledWorktreeFiles
     Remove-DisabledNotifyFiles
     Remove-DisabledClipboardFiles
+    Remove-DisabledTftpFiles
+    Remove-DisabledHttpFiles
     Remove-DisabledMuxFiles
     Remove-DisabledZoshFiles
     Remove-DisabledZoshServerFiles
@@ -659,6 +685,12 @@ function Uninstall-Binary {
     }
     if (-not $WorktreeEnabled) {
         $filesToRemove += [pscustomobject]@{ Source = $null; Destination = $installedZwtBinary }
+    }
+    if (-not $SourceTftpBinary) {
+        $filesToRemove += [pscustomobject]@{ Source = $null; Destination = $installedTftpBinary }
+    }
+    if (-not $SourceHttpBinary) {
+        $filesToRemove += [pscustomobject]@{ Source = $null; Destination = $installedHttpBinary }
     }
     if (-not $clipboardEnabled) {
         $filesToRemove += [pscustomobject]@{ Source = $null; Destination = $installedCopyBinary }

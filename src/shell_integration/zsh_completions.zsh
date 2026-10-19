@@ -886,7 +886,11 @@ _zetta_tftp() {
     operation=${words[operation_index]}
     if [[ $operation == server ]]; then
         if [[ $current == -* || -z $current ]]; then
-            _zetta_options --root --port --config --writable --help
+            if [[ $words[1] == ztftp ]]; then
+                _zetta_options --root --port --writable --help
+            else
+                _zetta_options --root --port --config --writable --help
+            fi
         fi
         return
     fi
@@ -1068,3 +1072,17 @@ case "$OSTYPE" in
         ;;
 esac
 # ZETTA_CLIPBOARD_INTEGRATION_END
+
+_zhttp() {
+    if (( CURRENT == 2 )); then
+        compadd -S ' ' -- server
+        _zetta_options --help
+    else
+        case $words[CURRENT-1] in
+            --root|-r) _files -/ ;;
+            --port|-p|--allow-host|-a) return ;;
+            *) _zetta_options --root --port --serve-dotfiles --allow-host --allow-any-host --help ;;
+        esac
+    fi
+}
+compdef _zhttp zhttp

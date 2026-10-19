@@ -11,6 +11,13 @@ for active development.
 Windows code can also be checked from Linux/WSL2 with `make check-windows`;
 see the [cross-check prerequisites](docs/installation.md#windows).
 
+HTTP builds ship standalone `zhttp server`. `zetta http` forwards to the sibling
+executable, and the **Start HTTP Server** action still opens a server log pane.
+
+TFTP builds ship standalone `ztftp` client and server commands. `zetta tftp`
+forwards to the sibling executable, and the **Start TFTP Server** action still
+opens a server log pane.
+
 Clipboard builds also ship standalone `zcopy` and `zpaste` commands. `zetta copy` and `zetta paste` forward to these sibling executables.
 In an interactive SSH or zosh pane, the helpers use the clipboard of the
 displaying Zetta window. Remote paste needs **Allow Remote Clipboard Paste**
@@ -270,7 +277,7 @@ bundled Zosh client and server executables and the `zetta mosh` route. Set
 Headless hosts (a Raspberry Pi, say) can build and install only the
 command-line tools, without compiling the GUI: `make install-tools RELEASE=1
 TOOLS_BINDIR=$HOME/bin`. `TOOLS` selects the subset from `zmux`, `zosh`,
-`zosh-server`, `zcopy`, `zpaste`, `zwt` and `zntfy` (default: the first five;
+`zosh-server`, `zcopy`, `zpaste`, `ztftp`, `zhttp`, `zwt` and `zntfy` (default: the first seven;
 Windows also gets `zmux-pty` with `zmux`),
 so `make build-tools TOOLS="zmux zosh"` builds two of them. `TOOLS_BINDIR`
 defaults to `BINDIR`. They build into `target/tools`, and `zmux` there is the

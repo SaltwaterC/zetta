@@ -71,6 +71,8 @@ ZETTA_CRATE_DIRS := \
 	crates/zetta_profiles \
 	crates/zntfy \
 	crates/zclip \
+	crates/ztftp \
+	crates/zhttp \
 	crates/zwt \
 	crates/wslx \
 	crates/zmux \
@@ -87,6 +89,8 @@ ZETTA_TEST_CRATE_DIRS := \
 	crates/zetta_profiles \
 	crates/zntfy \
 	crates/zclip \
+	crates/ztftp \
+	crates/zhttp \
 	crates/zwt \
 	crates/wslx \
 	crates/zmux \
@@ -219,6 +223,8 @@ MAC_CLI_PATH := $(MAC_CLI_DIR)/zetta
 MAC_ZMUX_CLI_PATH := $(MAC_CLI_DIR)/zmux
 MAC_ZWT_CLI_PATH := $(MAC_CLI_DIR)/zwt
 MAC_ZNTFY_CLI_PATH := $(MAC_CLI_DIR)/zntfy
+MAC_ZTFTP_CLI_PATH := $(MAC_CLI_DIR)/ztftp
+MAC_ZHTTP_CLI_PATH := $(MAC_CLI_DIR)/zhttp
 MAC_ZOSH_CLI_PATH := $(MAC_CLI_DIR)/zosh
 MAC_ZOSH_SERVER_PATH := $(MAC_CLI_DIR)/zosh-server
 LINUX_USER_INSTALL := $(if $(and $(filter Linux,$(UNAME_S)),$(IS_ROOT)),,1)
@@ -228,10 +234,14 @@ LINUX_USER_DESKTOP_DIR := $(LINUX_USER_DATA_DIR)/applications
 LINUX_USER_CLI_PATH := $(LINUX_USER_BIN_DIR)/zetta
 LINUX_USER_ZWT_PATH := $(LINUX_USER_BIN_DIR)/zwt
 LINUX_USER_ZNTFY_PATH := $(LINUX_USER_BIN_DIR)/zntfy
+LINUX_USER_ZTFTP_PATH := $(LINUX_USER_BIN_DIR)/ztftp
+LINUX_USER_ZHTTP_PATH := $(LINUX_USER_BIN_DIR)/zhttp
 LINUX_USER_ZOSH_PATH := $(LINUX_USER_BIN_DIR)/zosh
 
 WINDOWS_ZWT_ARGS := $(if $(call tool_enabled,$(WORKTREE)), -SourceZwtBinary "$(BUILD_TARGET_DIR)/zwt.exe",)
 WINDOWS_CLIP_ARGS := $(if $(call tool_enabled,$(CLIPBOARD)), -SourceCopyBinary "$(BUILD_TARGET_DIR)/zcopy.exe" -SourcePasteBinary "$(BUILD_TARGET_DIR)/zpaste.exe",)
+WINDOWS_HTTP_ARGS := $(if $(call tool_enabled,$(HTTP)), -SourceHttpBinary "$(BUILD_TARGET_DIR)/zhttp.exe",)
+WINDOWS_TFTP_ARGS := $(if $(or $(call tool_enabled,$(TFTP_SERVER)),$(call tool_enabled,$(TFTP_CLIENT))), -SourceTftpBinary "$(BUILD_TARGET_DIR)/ztftp.exe",)
 WINDOWS_NOTIFY_ARGS := $(if $(call tool_enabled,$(NOTIFY)), -SourceNotifyBinary "$(BUILD_TARGET_DIR)/zntfy.exe",)
 WINDOWS_ZOSH_ARGS := $(if $(call tool_enabled,$(ZOSH_CLIENT)), -SourceZoshBinary "$(BUILD_TARGET_DIR)/zosh.exe",)$(if $(call tool_enabled,$(ZOSH_SERVER)), -SourceZoshServerBinary "$(BUILD_TARGET_DIR)/zosh-server.exe",)
 WINDOWS_ZMUX_ARGS := $(if $(call tool_enabled,$(ZMUX)),, -MuxDisabled)
@@ -575,10 +585,10 @@ build:
 	cmd.exe /d /c scripts\build-windows.cmd $(CARGO_PROFILE_ARGS)
 
 install: build
-	powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/install-windows.ps1 -Action Install -SourceBinary "$(BUILD_TARGET_DIR)/zetta.exe" -SourceGuiBinary "$(BUILD_TARGET_DIR)/zetta-gui.exe" -SourceWslxBinary "$(BUILD_TARGET_DIR)/wslx.exe" $(WINDOWS_ZMUX_ARGS)$(WINDOWS_ZMUX_UPGRADE_ARGS) $(WINDOWS_ZOSH_ARGS)$(WINDOWS_ZWT_ARGS)$(WINDOWS_NOTIFY_ARGS)$(WINDOWS_CLIP_ARGS)
+	powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/install-windows.ps1 -Action Install -SourceBinary "$(BUILD_TARGET_DIR)/zetta.exe" -SourceGuiBinary "$(BUILD_TARGET_DIR)/zetta-gui.exe" -SourceWslxBinary "$(BUILD_TARGET_DIR)/wslx.exe" $(WINDOWS_ZMUX_ARGS)$(WINDOWS_ZMUX_UPGRADE_ARGS) $(WINDOWS_ZOSH_ARGS)$(WINDOWS_ZWT_ARGS)$(WINDOWS_NOTIFY_ARGS)$(WINDOWS_CLIP_ARGS)$(WINDOWS_TFTP_ARGS)$(WINDOWS_HTTP_ARGS)
 
 install-binary:
-	powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/install-windows.ps1 -Action InstallBinary -SourceBinary "$(BUILD_TARGET_DIR)/zetta.exe" -SourceGuiBinary "$(BUILD_TARGET_DIR)/zetta-gui.exe" -SourceWslxBinary "$(BUILD_TARGET_DIR)/wslx.exe" $(WINDOWS_ZMUX_ARGS) $(WINDOWS_ZOSH_ARGS)$(WINDOWS_ZWT_ARGS)$(WINDOWS_NOTIFY_ARGS)$(WINDOWS_CLIP_ARGS)
+	powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/install-windows.ps1 -Action InstallBinary -SourceBinary "$(BUILD_TARGET_DIR)/zetta.exe" -SourceGuiBinary "$(BUILD_TARGET_DIR)/zetta-gui.exe" -SourceWslxBinary "$(BUILD_TARGET_DIR)/wslx.exe" $(WINDOWS_ZMUX_ARGS) $(WINDOWS_ZOSH_ARGS)$(WINDOWS_ZWT_ARGS)$(WINDOWS_NOTIFY_ARGS)$(WINDOWS_CLIP_ARGS)$(WINDOWS_TFTP_ARGS)$(WINDOWS_HTTP_ARGS)
 
 install-capabilities:
 
@@ -604,6 +614,12 @@ build:
 	$(ENV) -u DESTDIR $(CARGO_RUN) build $(CARGO_PROFILE_ARGS) --locked --no-default-features --features "$(BUILD_FEATURES)"
 ifneq ($(call tool_enabled,$(NOTIFY)),)
 	$(ENV) -u DESTDIR $(CARGO_RUN) build $(CARGO_PROFILE_ARGS) --locked --manifest-path crates/zntfy/Cargo.toml --target-dir target --bin zntfy
+endif
+ifneq ($(or $(call tool_enabled,$(TFTP_SERVER)),$(call tool_enabled,$(TFTP_CLIENT))),)
+	$(ENV) -u DESTDIR $(CARGO_RUN) build $(CARGO_PROFILE_ARGS) --locked --manifest-path crates/ztftp/Cargo.toml --target-dir target --bin ztftp
+endif
+ifneq ($(call tool_enabled,$(HTTP)),)
+	$(ENV) -u DESTDIR $(CARGO_RUN) build $(CARGO_PROFILE_ARGS) --locked --manifest-path crates/zhttp/Cargo.toml --target-dir target --bin zhttp
 endif
 ifneq ($(call tool_enabled,$(CLIPBOARD)),)
 	$(ENV) -u DESTDIR $(CARGO_RUN) build $(CARGO_PROFILE_ARGS) --locked --manifest-path crates/zclip/Cargo.toml --target-dir target --bin zcopy --bin zpaste
@@ -639,6 +655,16 @@ ifneq ($(call tool_enabled,$(NOTIFY)),)
 	$(INSTALL) -m 755 "$(BUILD_TARGET_DIR)/zntfy" "$(MAC_BUNDLE)/Contents/MacOS/zntfy"
 else
 	$(RM) "$(MAC_BUNDLE)/Contents/MacOS/zntfy"
+endif
+ifneq ($(or $(call tool_enabled,$(TFTP_SERVER)),$(call tool_enabled,$(TFTP_CLIENT))),)
+	$(INSTALL) -m 755 "$(BUILD_TARGET_DIR)/ztftp" "$(MAC_BUNDLE)/Contents/MacOS/ztftp"
+else
+	$(RM) "$(MAC_BUNDLE)/Contents/MacOS/ztftp"
+endif
+ifneq ($(call tool_enabled,$(HTTP)),)
+	$(INSTALL) -m 755 "$(BUILD_TARGET_DIR)/zhttp" "$(MAC_BUNDLE)/Contents/MacOS/zhttp"
+else
+	$(RM) "$(MAC_BUNDLE)/Contents/MacOS/zhttp"
 endif
 ifneq ($(call tool_enabled,$(CLIPBOARD)),)
 	$(INSTALL) -m 755 "$(BUILD_TARGET_DIR)/zcopy" "$(MAC_BUNDLE)/Contents/MacOS/zcopy"
@@ -676,6 +702,20 @@ ifneq ($(call tool_enabled,$(NOTIFY)),)
 	chmod 755 "$(MAC_ZNTFY_CLI_PATH)"
 else
 	$(RM) "$(MAC_ZNTFY_CLI_PATH)"
+endif
+ifneq ($(or $(call tool_enabled,$(TFTP_SERVER)),$(call tool_enabled,$(TFTP_CLIENT))),)
+	$(RM) "$(MAC_ZTFTP_CLI_PATH)"
+	sed 's|@MAC_RUNTIME_BUNDLE@|$(MAC_RUNTIME_BUNDLE)|g' resources/macos/ztftp-cli.in > "$(MAC_ZTFTP_CLI_PATH)"
+	chmod 755 "$(MAC_ZTFTP_CLI_PATH)"
+else
+	$(RM) "$(MAC_ZTFTP_CLI_PATH)"
+endif
+ifneq ($(call tool_enabled,$(HTTP)),)
+	$(RM) "$(MAC_ZHTTP_CLI_PATH)"
+	sed 's|@MAC_RUNTIME_BUNDLE@|$(MAC_RUNTIME_BUNDLE)|g' resources/macos/zhttp-cli.in > "$(MAC_ZHTTP_CLI_PATH)"
+	chmod 755 "$(MAC_ZHTTP_CLI_PATH)"
+else
+	$(RM) "$(MAC_ZHTTP_CLI_PATH)"
 endif
 ifneq ($(call tool_enabled,$(CLIPBOARD)),)
 	$(RM) "$(MAC_CLI_DIR)/zcopy" "$(MAC_CLI_DIR)/zpaste"
@@ -740,10 +780,14 @@ uninstall-binary:
 	$(RM) "$(MAC_ZOSH_CLI_PATH)"
 	$(RM) "$(MAC_ZOSH_SERVER_PATH)"
 	$(RM) "$(MAC_ZNTFY_CLI_PATH)"
+	$(RM) "$(MAC_ZTFTP_CLI_PATH)"
+	$(RM) "$(MAC_ZHTTP_CLI_PATH)"
 	$(RM) "$(MAC_CLI_DIR)/zcopy" "$(MAC_CLI_DIR)/zpaste"
 	$(RM) "$(MAC_CLI_DIR)/mosh-server"
 	$(RM) "$(MAC_BUNDLE)/Contents/MacOS/zetta"
 	$(RM) "$(MAC_BUNDLE)/Contents/MacOS/zntfy"
+	$(RM) "$(MAC_BUNDLE)/Contents/MacOS/ztftp"
+	$(RM) "$(MAC_BUNDLE)/Contents/MacOS/zhttp"
 	$(RM) "$(MAC_BUNDLE)/Contents/MacOS/zcopy" "$(MAC_BUNDLE)/Contents/MacOS/zpaste"
 	$(RM) "$(MAC_BUNDLE)/Contents/MacOS/zmux"
 	$(RM) "$(MAC_BUNDLE)/Contents/MacOS/zosh"
@@ -759,6 +803,12 @@ build:
 	$(ENV) -u DESTDIR $(CARGO_RUN) build $(CARGO_PROFILE_ARGS) --locked --no-default-features --features "$(BUILD_FEATURES)"
 ifneq ($(call tool_enabled,$(NOTIFY)),)
 	$(ENV) -u DESTDIR $(CARGO_RUN) build $(CARGO_PROFILE_ARGS) --locked --manifest-path crates/zntfy/Cargo.toml --target-dir target --bin zntfy
+endif
+ifneq ($(or $(call tool_enabled,$(TFTP_SERVER)),$(call tool_enabled,$(TFTP_CLIENT))),)
+	$(ENV) -u DESTDIR $(CARGO_RUN) build $(CARGO_PROFILE_ARGS) --locked --manifest-path crates/ztftp/Cargo.toml --target-dir target --bin ztftp
+endif
+ifneq ($(call tool_enabled,$(HTTP)),)
+	$(ENV) -u DESTDIR $(CARGO_RUN) build $(CARGO_PROFILE_ARGS) --locked --manifest-path crates/zhttp/Cargo.toml --target-dir target --bin zhttp
 endif
 ifneq ($(call tool_enabled,$(CLIPBOARD)),)
 	$(ENV) -u DESTDIR $(CARGO_RUN) build $(CARGO_PROFILE_ARGS) --locked --manifest-path crates/zclip/Cargo.toml --target-dir target --bin zcopy --bin zpaste
@@ -792,6 +842,16 @@ ifneq ($(call tool_enabled,$(NOTIFY)),)
 	$(INSTALL) -Dm755 "$(BUILD_TARGET_DIR)/zntfy" $(BINDIR)/zntfy
 else
 	$(RM) $(BINDIR)/zntfy
+endif
+ifneq ($(or $(call tool_enabled,$(TFTP_SERVER)),$(call tool_enabled,$(TFTP_CLIENT))),)
+	$(INSTALL) -Dm755 "$(BUILD_TARGET_DIR)/ztftp" $(BINDIR)/ztftp
+else
+	$(RM) $(BINDIR)/ztftp
+endif
+ifneq ($(call tool_enabled,$(HTTP)),)
+	$(INSTALL) -Dm755 "$(BUILD_TARGET_DIR)/zhttp" $(BINDIR)/zhttp
+else
+	$(RM) $(BINDIR)/zhttp
 endif
 ifneq ($(call tool_enabled,$(CLIPBOARD)),)
 	$(INSTALL) -Dm755 "$(BUILD_TARGET_DIR)/zcopy" $(BINDIR)/zcopy
@@ -851,6 +911,18 @@ ifneq ($(call tool_enabled,$(NOTIFY)),)
 else
 	$(RM) "$(LINUX_USER_ZNTFY_PATH)"
 endif
+ifneq ($(or $(call tool_enabled,$(TFTP_SERVER)),$(call tool_enabled,$(TFTP_CLIENT))),)
+	$(RM) "$(LINUX_USER_ZTFTP_PATH)"
+	ln -s "$(BINDIR)/ztftp" "$(LINUX_USER_ZTFTP_PATH)"
+else
+	$(RM) "$(LINUX_USER_ZTFTP_PATH)"
+endif
+ifneq ($(call tool_enabled,$(HTTP)),)
+	$(RM) "$(LINUX_USER_ZHTTP_PATH)"
+	ln -s "$(BINDIR)/zhttp" "$(LINUX_USER_ZHTTP_PATH)"
+else
+	$(RM) "$(LINUX_USER_ZHTTP_PATH)"
+endif
 ifneq ($(call tool_enabled,$(CLIPBOARD)),)
 	$(RM) "$(LINUX_USER_BIN_DIR)/zcopy" "$(LINUX_USER_BIN_DIR)/zpaste"
 	ln -s "$(BINDIR)/zcopy" "$(LINUX_USER_BIN_DIR)/zcopy"
@@ -875,8 +947,8 @@ install-capabilities:
 				echo "$(SETCAP) is required to grant cap_net_bind_service (install libcap2-bin on Ubuntu)" >&2; \
 				exit 1; \
 			}; \
-			$(SETCAP) cap_net_bind_service=+ep "$(BINDIR)/zetta" || { \
-				echo "Could not grant cap_net_bind_service to $(BINDIR)/zetta" >&2; \
+			$(SETCAP) cap_net_bind_service=+ep "$(BINDIR)/zetta" cap_net_bind_service=+ep "$(BINDIR)/ztftp" || { \
+				echo "Could not grant cap_net_bind_service to $(BINDIR)/zetta and $(BINDIR)/ztftp" >&2; \
 				exit 1; \
 			}; \
 		fi; \
@@ -922,6 +994,8 @@ uninstall-binary:
 	$(RM) $(BINDIR)/mosh-server
 	$(RM) $(BINDIR)/zwt
 	$(RM) $(BINDIR)/zntfy
+	$(RM) $(BINDIR)/ztftp
+	$(RM) $(BINDIR)/zhttp
 	$(RM) $(BINDIR)/zcopy $(BINDIR)/zpaste
 ifneq ($(LINUX_USER_INSTALL),)
 	$(RM) "$(LINUX_USER_CLI_PATH)"
@@ -929,6 +1003,8 @@ ifneq ($(LINUX_USER_INSTALL),)
 	$(RM) "$(LINUX_USER_ZOSH_PATH)"
 	$(RM) "$(LINUX_USER_ZWT_PATH)"
 	$(RM) "$(LINUX_USER_ZNTFY_PATH)"
+	$(RM) "$(LINUX_USER_ZTFTP_PATH)"
+	$(RM) "$(LINUX_USER_ZHTTP_PATH)"
 	$(RM) "$(LINUX_USER_BIN_DIR)/zcopy" "$(LINUX_USER_BIN_DIR)/zpaste"
 endif
 	$(MAKE) uninstall-user-path
@@ -978,8 +1054,8 @@ endif
 # directory would have each overwrite the other's binary. `zmux` here is the
 # standalone daemon, so it does not read Zetta's configuration for identity
 # paths — the trade `crates/zmux` exists to make for a constrained host.
-KNOWN_TOOLS := zmux zosh zosh-server zcopy zpaste zwt zntfy
-TOOLS ?= zmux zosh zosh-server zcopy zpaste
+KNOWN_TOOLS := zmux zosh zosh-server zcopy zpaste zwt zntfy ztftp zhttp
+TOOLS ?= zmux zosh zosh-server zcopy zpaste ztftp zhttp
 ifeq ($(OS),Windows_NT)
 TOOLS_BINDIR ?=
 EXE := .exe
@@ -1006,6 +1082,10 @@ TOOL_CRATE_zpaste := crates/zclip
 TOOL_BINS_zpaste := zpaste
 TOOL_CRATE_zwt := crates/zwt
 TOOL_BINS_zwt := zwt
+TOOL_CRATE_zhttp := crates/zhttp
+TOOL_BINS_zhttp := zhttp
+TOOL_CRATE_ztftp := crates/ztftp
+TOOL_BINS_ztftp := ztftp
 TOOL_CRATE_zntfy := crates/zntfy
 TOOL_BINS_zntfy := zntfy
 

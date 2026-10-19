@@ -1,5 +1,4 @@
 use std::ffi::OsString;
-use std::io::{self, Read as _, Write as _};
 use std::path::PathBuf;
 
 use anyhow::{Context as _, Result};
@@ -67,7 +66,7 @@ pub(crate) fn parse_http_args(
         args.first().is_some_and(|argument| argument == "server"),
         "usage: zetta http server [OPTIONS]; run `zetta http server --help` for details"
     );
-    let (options, remaining) = parse_http_server_flags(&args[1..])?;
+    let (options, remaining) = zhttp::cli::parse_http_server_flags(&args[1..])?;
     let (root, port, config_path) = parse_server_options(&remaining, "HTTP")?;
     Ok(CliServiceCommand::Http(HttpServerCommand {
         root,
@@ -75,51 +74,6 @@ pub(crate) fn parse_http_args(
         config_path,
         options,
     }))
-}
-
-/// Takes the HTTP-only flags out of `args`, leaving the options it shares with
-/// the TFTP server for [`parse_server_options`].
-#[cfg(feature = "http-server")]
-fn parse_http_server_flags(args: &[OsString]) -> Result<(crate::HttpServerOptions, Vec<OsString>)> {
-    let mut options = crate::HttpServerOptions::default();
-    let mut remaining = Vec::with_capacity(args.len());
-    let mut arguments = args.iter();
-    while let Some(argument) = arguments.next() {
-        match argument.to_string_lossy().as_ref() {
-            "--serve-dotfiles" | "-d" => {
-                anyhow::ensure!(
-                    !options.serve_dotfiles,
-                    "--serve-dotfiles may only be specified once"
-                );
-                options.serve_dotfiles = true;
-            }
-            "--allow-any-host" | "-A" => {
-                anyhow::ensure!(
-                    !options.allow_any_host,
-                    "--allow-any-host may only be specified once"
-                );
-                options.allow_any_host = true;
-            }
-            "--allow-host" | "-a" => {
-                let name = arguments
-                    .next()
-                    .context("--allow-host requires a host name or address")?;
-                let name = crate::normalize_allowed_host(&name.to_string_lossy())
-                    .map_err(anyhow::Error::msg)?;
-                if !options.allowed_hosts.contains(&name) {
-                    options.allowed_hosts.push(name);
-                }
-            }
-            "--root" | "-r" | "--port" | "-p" | "--config" | "-c" => {
-                // Keep a shared option's value with it, so a value that looks
-                // like one of the flags above is not taken for it.
-                remaining.push(argument.clone());
-                remaining.extend(arguments.next().cloned());
-            }
-            _ => remaining.push(argument.clone()),
-        }
-    }
-    Ok((options, remaining))
 }
 
 #[cfg(feature = "http-server")]
@@ -135,15 +89,28 @@ impl HttpServerCommand {
         })
     }
 
+    fn proxy_args(&self) -> Result<Vec<OsString>> {
+        let mut args = vec![
+            OsString::from("server"),
+            OsString::from("--root"),
+            self.root.as_os_str().to_owned(),
+            OsString::from("--port"),
+            OsString::from(self.resolved_port()?.to_string()),
+        ];
+        if self.options.serve_dotfiles {
+            args.push(OsString::from("--serve-dotfiles"));
+        }
+        for host in &self.options.allowed_hosts {
+            args.extend([OsString::from("--allow-host"), OsString::from(host)]);
+        }
+        if self.options.allow_any_host {
+            args.push(OsString::from("--allow-any-host"));
+        }
+        Ok(args)
+    }
+
     pub(super) fn run(&self) -> Result<()> {
-        let port = self.resolved_port()?;
-        let server = crate::start_http_server(&self.root, port, self.options.clone())?;
-        eprintln!(
-            "Serving {} at http://{}; press Ctrl-C to stop.",
-            server.root.display(),
-            server.address
-        );
-        stream_server_logs(server.reader, server.writer)
+        crate::http_server::run_http_proxy(&self.proxy_args()?)
     }
 }
 
@@ -270,44 +237,23 @@ impl TftpServerCommand {
         })
     }
 
-    pub(super) fn run(&self) -> Result<()> {
+    fn proxy_args(&self) -> Result<Vec<OsString>> {
         let port = self.resolved_port()?;
-        let server = crate::start_server(&self.root, port, self.writable)?;
-        eprintln!(
-            "Serving {} with TFTP at {} ({}); press Ctrl-C to stop.",
-            server.root.display(),
-            server.address,
-            if self.writable {
-                "uploads enabled"
-            } else {
-                "read only"
-            }
-        );
-        stream_server_logs(server.reader, server.writer)
-    }
-}
-
-fn stream_server_logs(
-    mut reader: Box<dyn io::Read + Send>,
-    _control: Box<dyn io::Write + Send>,
-) -> Result<()> {
-    let mut stdout = io::stdout().lock();
-    let mut buffer = [0; 4096];
-    loop {
-        match reader.read(&mut buffer) {
-            Ok(0) => return Ok(()),
-            Ok(count) => {
-                if let Err(error) = stdout.write_all(&buffer[..count]) {
-                    if error.kind() == io::ErrorKind::BrokenPipe {
-                        return Ok(());
-                    }
-                    return Err(error).context("writing server log output");
-                }
-                stdout.flush().context("flushing server log output")?;
-            }
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
-            Err(error) => return Err(error).context("reading server log output"),
+        let mut args = vec![
+            OsString::from("server"),
+            OsString::from("--root"),
+            self.root.as_os_str().to_owned(),
+            OsString::from("--port"),
+            OsString::from(port.to_string()),
+        ];
+        if self.writable {
+            args.push(OsString::from("--writable"));
         }
+        Ok(args)
+    }
+
+    pub(super) fn run(&self) -> Result<()> {
+        crate::tftp::run_tftp_proxy(&self.proxy_args()?)
     }
 }
 

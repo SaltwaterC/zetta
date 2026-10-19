@@ -358,10 +358,7 @@ function zwt --description 'Zetta Git worktree workflow'
 end
 # ZETTA_WORKTREE_INTEGRATION_END
 
-function ztftp --wraps 'zetta tftp' --description 'Zetta TFTP client'
-    zetta tftp $argv
-end
-
+functions -e ztftp
 function zntfy --wraps 'zetta notify' --description 'Zetta desktop notifications'
     zetta notify $argv
 end
@@ -419,7 +416,7 @@ function __zetta_lazy_complete
     complete -C (commandline -cp)
 end
 if not set -q __zetta_completions_loaded
-    set -g __zetta_completion_commands zetta zosh zvi ztftp zntfy
+    set -g __zetta_completion_commands zetta zosh zvi ztftp zhttp zntfy
 # ZETTA_WORKTREE_INTEGRATION_BEGIN
     set -a __zetta_completion_commands zwt
 # ZETTA_WORKTREE_INTEGRATION_END

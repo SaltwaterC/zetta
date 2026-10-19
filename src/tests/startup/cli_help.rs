@@ -321,11 +321,17 @@ fn tftp_subcommand_is_parsed_without_starting_the_application() {
 
     assert_eq!(
         args.tftp_command,
-        Some(TftpCommand::Get {
-            host: "localhost".to_owned(),
-            remote: "boot.bin".to_owned(),
-            local: PathBuf::from("download.bin"),
-            port: 1069,
+        Some(TftpCommand {
+            args: [
+                "get",
+                "--port",
+                "1069",
+                "localhost",
+                "boot.bin",
+                "download.bin"
+            ]
+            .map(OsString::from)
+            .to_vec()
         })
     );
 }

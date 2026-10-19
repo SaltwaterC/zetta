@@ -155,6 +155,7 @@ fn supported_shells_generate_completion_and_tftp_shortcut() {
     ] {
         let script = shell.eager_script();
         assert!(script.contains("ztftp"));
+        assert!(script.contains("zhttp"));
         assert!(script.contains("tftp"));
         assert!(script.contains("serial"));
         assert!(script.contains("http"));
@@ -3066,6 +3067,8 @@ fn fish_script_emits_long_option_candidates_for_every_command_context() {
         "pane_wait",
         "overlay",
         "ztftp",
+        "zhttp",
+        "zhttp-server",
         "zntfy",
         "zcopy",
         "zpaste",
@@ -3369,6 +3372,17 @@ fn fish_displays_long_option_candidates_and_supports_short_option_values() {
             &["general", "ruler", "find", "font"][..],
         ),
         ("ztftp ", &["--port", "--help"][..]),
+        (
+            "zhttp server ",
+            &[
+                "--root",
+                "--port",
+                "--serve-dotfiles",
+                "--allow-host",
+                "--allow-any-host",
+                "--help",
+            ][..],
+        ),
         (
             "zntfy ",
             &["--app-name", "--icon", "--sound", "--timeout", "--help"][..],

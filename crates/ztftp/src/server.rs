@@ -1,3 +1,4 @@
+//! TFTP server lifecycle, file transfers, and pane-compatible log streams.
 use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
@@ -25,17 +26,17 @@ const SERVER_POLL_INTERVAL: Duration = Duration::from_millis(200);
 const LOG_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const MAX_CONCURRENT_TRANSFERS: usize = 32;
 
-pub(crate) struct OpenTftpServer {
-    pub(crate) reader: Box<dyn Read + Send>,
-    pub(crate) writer: Box<dyn Write + Send>,
-    pub(crate) address: SocketAddr,
-    pub(crate) root: PathBuf,
+pub struct OpenTftpServer {
+    pub reader: Box<dyn Read + Send>,
+    pub writer: Box<dyn Write + Send>,
+    pub address: SocketAddr,
+    pub root: PathBuf,
 }
 
 /// Starts a TFTP server. `writable` enables uploads, which are anonymous and
 /// reachable by any host that can route to the port, so callers opt in
 /// explicitly rather than inheriting them.
-pub(crate) fn start_server(root: &Path, port: u16, writable: bool) -> Result<OpenTftpServer> {
+pub fn start_server(root: &Path, port: u16, writable: bool) -> Result<OpenTftpServer> {
     let root = fs::canonicalize(root)
         .with_context(|| format!("resolving TFTP server root {}", root.display()))?;
     anyhow::ensure!(root.is_dir(), "TFTP server root is not a directory");
@@ -762,5 +763,5 @@ fn dally_after_final_ack(
 }
 
 #[cfg(test)]
-#[path = "../tests/tftp/server.rs"]
+#[path = "tests/server.rs"]
 mod tests;

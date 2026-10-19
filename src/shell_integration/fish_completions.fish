@@ -704,6 +704,16 @@ function __zetta_long_options
                 --allow-host 'Also answer this host name or address' \
                 --allow-any-host 'Answer every Host name' \
                 --help 'Print help'
+        case zhttp
+            printf '%s\t%s\n' --help 'Print help'
+        case zhttp-server
+            printf '%s\t%s\n' \
+                --root 'Directory to serve' \
+                --port 'TCP port' \
+                --serve-dotfiles 'Serve dot-prefixed names' \
+                --allow-host 'Also answer this host name or address' \
+                --allow-any-host 'Answer every Host name' \
+                --help 'Print help'
         case tftp-server
             printf '%s\t%s\n' \
                 --root 'Directory to serve' \
@@ -1222,7 +1232,7 @@ complete -c zmux -l help -d 'Print help'
 complete -c zmux -l version -d 'Print version'
 complete -c zmux -a '(__zetta_long_options mux)'
 # ZETTA_ZMUX_INTEGRATION_END
-complete -c ztftp -f -a 'get put'
+complete -c ztftp -f -a 'get put server'
 complete -c ztftp -l port -r -d 'Server port'
 complete -c ztftp -l help -d 'Print help'
 complete -c ztftp -a '(__zetta_long_options ztftp)'
@@ -1263,3 +1273,21 @@ end
 # ZETTA_CLIPBOARD_INTEGRATION_END
 
 complete -c zetta -n '__zetta_at_subcommand init' -l completions -d 'Emit completion implementation'
+
+complete -c ztftp -n '__fish_seen_subcommand_from server' -l root -r -a '(__fish_complete_directories)' -d 'Directory to serve'
+complete -c ztftp -n '__fish_seen_subcommand_from server' -l writable -d 'Accept uploads into the served directory'
+
+complete -c zhttp -f
+complete -c zhttp -n 'not __fish_seen_subcommand_from server' -a server -d 'Serve static files over HTTP'
+complete -c zhttp -l help -d 'Print help'
+complete -c zhttp -n '__fish_seen_subcommand_from server' -l root -r -a '(__fish_complete_directories)' -d 'Directory to serve'
+complete -c zhttp -n '__fish_seen_subcommand_from server' -l port -r -d 'TCP port'
+complete -c zhttp -n '__fish_seen_subcommand_from server' -l serve-dotfiles -d 'Serve dot-prefixed names'
+complete -c zhttp -n '__fish_seen_subcommand_from server' -l allow-host -x -d 'Also answer this host name or address'
+complete -c zhttp -n '__fish_seen_subcommand_from server' -l allow-any-host -d 'Answer every Host name'
+
+complete -c zhttp -n 'not __fish_seen_subcommand_from server' -a '(__zetta_long_options zhttp)'
+complete -c zhttp -n '__fish_seen_subcommand_from server' -a '(__zetta_long_options zhttp-server)'
+complete -c zhttp -s r -r -a '(__fish_complete_directories)' -n '__fish_seen_subcommand_from server; and __zetta_short_option -r'
+complete -c zhttp -s p -r -n '__fish_seen_subcommand_from server; and __zetta_short_option -p'
+complete -c zhttp -s a -x -n '__fish_seen_subcommand_from server; and __zetta_short_option -a'

@@ -208,3 +208,64 @@ fn tftp_server_uses_the_configured_port_unless_the_cli_overrides_it() {
         1070
     );
 }
+
+#[cfg(feature = "tftp-server")]
+#[test]
+fn tftp_proxy_passes_resolved_port_root_and_upload_permission_to_helper() {
+    let directory = tempfile::tempdir().unwrap();
+    let config_path = directory.path().join("config.json");
+    std::fs::write(&config_path, r#"{"tftp_server_port":1069}"#).unwrap();
+    let command = TftpServerCommand {
+        root: PathBuf::from("firmware images"),
+        port: None,
+        config_path: Some(config_path),
+        writable: true,
+    };
+    assert_eq!(
+        command.proxy_args().unwrap(),
+        [
+            "server",
+            "--root",
+            "firmware images",
+            "--port",
+            "1069",
+            "--writable"
+        ]
+        .map(OsString::from)
+    );
+}
+
+#[cfg(feature = "http-server")]
+#[test]
+fn http_proxy_passes_configuration_and_all_access_policy_flags() {
+    let directory = tempfile::tempdir().unwrap();
+    let config_path = directory.path().join("config.json");
+    std::fs::write(&config_path, r#"{"http_server_port":8081}"#).unwrap();
+    let command = HttpServerCommand {
+        root: PathBuf::from("firmware images"),
+        port: None,
+        config_path: Some(config_path),
+        options: crate::HttpServerOptions {
+            serve_dotfiles: true,
+            allowed_hosts: vec!["builds.lan".into(), "fe80::1".into()],
+            allow_any_host: true,
+        },
+    };
+    assert_eq!(
+        command.proxy_args().unwrap(),
+        [
+            "server",
+            "--root",
+            "firmware images",
+            "--port",
+            "8081",
+            "--serve-dotfiles",
+            "--allow-host",
+            "builds.lan",
+            "--allow-host",
+            "fe80::1",
+            "--allow-any-host"
+        ]
+        .map(OsString::from)
+    );
+}

@@ -377,9 +377,10 @@ TFTP server does not request `cap_net_bind_service` during installation.
 
 When invoked through `sudo`, `make install` uses the existing build artifact
 and does not run Cargo again. A user-local install cannot grant the
-`cap_net_bind_service` capability needed by the TFTP server to bind UDP port
+`cap_net_bind_service` capability needed by the TFTP servers to bind UDP port
 69, so the TFTP server will not be able to bind that port without additional
-privileges. A system-wide install grants the capability when possible. Ubuntu
+privileges. A system-wide install grants the capability to both `zetta`
+(for server panes) and `ztftp` (for CLI servers) when possible. Ubuntu
 provides `setcap` in `libcap2-bin`.
 
 An unprivileged install builds first but cannot grant that capability. Enable

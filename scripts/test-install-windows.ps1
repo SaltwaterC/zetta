@@ -68,6 +68,8 @@ function Invoke-Installer([string]$Action = "InstallBinary", [bool]$ClipboardEna
         "-SourceZoshBinary", (Join-Path $sourceDirectory "zosh.exe"),
         "-SourceZoshServerBinary", (Join-Path $sourceDirectory "zosh-server.exe"),
         "-SourceNotifyBinary", (Join-Path $sourceDirectory "zntfy.exe"),
+        "-SourceTftpBinary", (Join-Path $sourceDirectory "ztftp.exe"),
+        "-SourceHttpBinary", (Join-Path $sourceDirectory "zhttp.exe"),
         "-InstallDirectory", $installDirectory
     )
     if ($ClipboardEnabled) {
@@ -95,6 +97,8 @@ function Set-SourceGeneration([string]$Generation) {
     Write-TestFile (Join-Path $sourceDirectory "zosh.exe") "zosh-$Generation"
     Write-TestFile (Join-Path $sourceDirectory "zosh-server.exe") "zosh-server-$Generation"
     Write-TestFile (Join-Path $sourceDirectory "zntfy.exe") "zntfy-$Generation"
+    Write-TestFile (Join-Path $sourceDirectory "ztftp.exe") "ztftp-$Generation"
+    Write-TestFile (Join-Path $sourceDirectory "zhttp.exe") "zhttp-$Generation"
     Write-TestFile (Join-Path $sourceDirectory "zcopy.exe") "zcopy-$Generation"
     Write-TestFile (Join-Path $sourceDirectory "zpaste.exe") "zpaste-$Generation"
     Write-TestFile (Join-Path $sourceDirectory "conpty.dll") "conpty-$Generation"
@@ -139,6 +143,8 @@ try {
     Assert-FileContents (Join-Path $installDirectory "zosh.exe") "zosh-first" "zosh was not installed"
     Assert-FileContents (Join-Path $installDirectory "zosh-server.exe") "zosh-server-first" "zosh-server was not installed"
     Assert-FileContents (Join-Path $installDirectory "zntfy.exe") "zntfy-first" "zntfy was not installed"
+    Assert-FileContents (Join-Path $installDirectory "ztftp.exe") "ztftp-first" "ztftp was not installed"
+    Assert-FileContents (Join-Path $installDirectory "zhttp.exe") "zhttp-first" "zhttp was not installed"
     Assert-FileContents (Join-Path $installDirectory "zcopy.exe") "zcopy-first" "zcopy was not installed"
     Assert-FileContents (Join-Path $installDirectory "zpaste.exe") "zpaste-first" "zpaste was not installed"
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $installDirectory "mosh-server.exe"))) "initial install left legacy mosh-server"
@@ -225,6 +231,8 @@ try {
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $installDirectory "zosh.exe"))) "uninstall left zosh"
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $installDirectory "zosh-server.exe"))) "uninstall left zosh-server"
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $installDirectory "zntfy.exe"))) "uninstall left zntfy"
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $installDirectory "ztftp.exe"))) "uninstall left ztftp"
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $installDirectory "zhttp.exe"))) "uninstall left zhttp"
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $installDirectory "zcopy.exe"))) "uninstall left zcopy"
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $installDirectory "zpaste.exe"))) "uninstall left zpaste"
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $installDirectory "mosh-server.exe"))) "uninstall left legacy mosh-server"

@@ -49,6 +49,15 @@ Closing the pane closes the device.
 
 ## TFTP server
 
+`ztftp` is a standalone client/server tool, built by `make build` and included
+in the default `make build-tools` selection. Build just this tool with
+`make build-tools TOOLS=ztftp`; it does not require the graphical application.
+`zetta tftp` proxies to the `ztftp` executable installed beside Zetta.
+
+Run `ztftp server --root firmware --port 1069` for a standalone server.
+Its default port is 69. The `zetta tftp server` proxy also accepts `--config`
+and resolves Zetta's configured port before starting the helper.
+
 Choose **Zetta: Start TFTP Server** from the command palette to serve files
 below Zetta's launch directory on the configured UDP port, which defaults to
 69. Zetta opens the server log in a new left/right pane, and each entry includes
@@ -103,6 +112,16 @@ sudo ufw allow in on loopback0 from 127.0.0.0/8 to 127.0.0.0/8
 ```
 
 ## HTTP server
+
+`zhttp server` runs the standalone HTTP server without the graphical application.
+It is included in `make build` and the default `make build-tools` selection;
+build only this tool with `make build-tools TOOLS=zhttp`. `zetta http` proxies
+to the `zhttp` executable installed beside Zetta.
+
+The standalone server defaults to TCP port 8000. `zetta http server` also accepts
+`--config` and resolves Zetta's configured port before starting the helper.
+Both commands accept `--root`, `--port`, `--serve-dotfiles`, `--allow-host`, and
+`--allow-any-host`. Shell integration provides completion for both commands.
 
 Choose **Zetta: Start HTTP Server** to serve static files from Zetta's launch
 directory on the configured TCP port, which defaults to 8000. For example:
@@ -172,8 +191,9 @@ zetta tftp get --port 1069 HOST REMOTE [LOCAL]
 
 The client uses octet mode and negotiates block-size and transfer-size options
 when supported by the server. Run `zetta tftp --help` for complete syntax.
-With [shell integration](shell-integration.md) enabled, `ztftp` is an
-equivalent shortcut and retains TFTP command completion.
+The standalone `ztftp get` and `ztftp put` commands use the same client
+options. [Shell integration](shell-integration.md) provides `ztftp` command
+completion.
 
 ## Desktop notifications
 

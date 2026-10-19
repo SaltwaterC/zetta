@@ -1000,7 +1000,11 @@ _zetta_tftp_complete() {
     operation=${COMP_WORDS[operation_index]}
     if [[ $operation == server ]]; then
         if [[ $current == -* || -z $current ]]; then
-            _zetta_compgen '--root --port --config --writable --help'
+            if (( operation_index == 1 )); then
+                _zetta_compgen '--root --port --writable --help'
+            else
+                _zetta_compgen '--root --port --config --writable --help'
+            fi
         fi
         return
     fi
@@ -1179,3 +1183,17 @@ complete -F _zpaste_complete zpaste
 # ZETTA_CLIPBOARD_INTEGRATION_BEGIN
 case "$OSTYPE" in darwin*) ;; *) complete -F _zcopy_complete pbcopy; complete -F _zpaste_complete pbpaste ;; esac
 # ZETTA_CLIPBOARD_INTEGRATION_END
+
+_zhttp_complete() {
+    local current=${COMP_WORDS[COMP_CWORD]} previous=${COMP_WORDS[COMP_CWORD-1]}
+    if (( COMP_CWORD == 1 )); then
+        _zetta_compgen 'server --help'
+    elif [[ $previous == --root || $previous == -r ]]; then
+        COMPREPLY=( $(compgen -d -- "$current") )
+    elif [[ $previous == --port || $previous == -p || $previous == --allow-host || $previous == -a ]]; then
+        COMPREPLY=()
+    else
+        _zetta_compgen '--root --port --serve-dotfiles --allow-host --allow-any-host --help'
+    fi
+}
+complete -F _zhttp_complete zhttp

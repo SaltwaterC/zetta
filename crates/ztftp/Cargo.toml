@@ -1,0 +1,33 @@
+[package]
+name = "ztftp"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "GPL-3.0-or-later"
+description = "Standalone TFTP client and server, also used by Zetta server panes"
+
+[lib]
+doctest = false
+
+[[bin]]
+name = "ztftp"
+path = "src/main.rs"
+required-features = ["tftp-client", "tftp-server"]
+
+[features]
+default = ["tftp-client", "tftp-server"]
+tftp-client = []
+tftp-server = ["dep:time"]
+
+[dependencies]
+anyhow = "1"
+time = { version = "0.3", features = ["formatting", "macros"], optional = true }
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints.clippy]
+manual_let_else = "deny"
+map_unwrap_or = "deny"
+redundant_closure = "deny"
+semicolon_if_nothing_returned = "deny"

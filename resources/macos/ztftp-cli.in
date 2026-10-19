@@ -1,0 +1,2 @@
+#!/bin/sh
+exec "@MAC_RUNTIME_BUNDLE@/Contents/MacOS/ztftp" "$@"

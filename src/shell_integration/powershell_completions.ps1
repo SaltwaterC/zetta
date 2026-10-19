@@ -273,8 +273,13 @@ $zettaCompletions = {
         } else {
             @(& $zettaSshTargets) + '--client', '--server', '--predict', '-a', '-n', '-o', '--predict-overwrite', '--no-predict-overwrite', '-k', '--keep-alive', '--scrollback', '--no-scrollback', '-4', '-s', '--forward-agent', '--no-forward-agent', '-6', '--family', '-p', '--port', '--bind-server', '--ssh', '--ssh-pty', '--no-ssh-pty', '--init', '--no-init', '--local', '--experimental-remote-ip', '-h', '--help', '-V', '--version', '--'
         }
+    } elseif ($commandName -eq 'zhttp') {
+        if ($words.Count -le 1) { 'server', '--help' }
+        else { '--root', '--port', '--serve-dotfiles', '--allow-host', '--allow-any-host', '--help' }
     } elseif ($commandName -eq 'ztftp') {
-        if ($words.Count -le 1) { 'get', 'put', '--help' } else { '--port', '--help' }
+        if ($words.Count -le 1) { 'get', 'put', 'server', '--help' }
+        elseif ($words -contains 'server') { '--root', '--port', '--writable', '--help' }
+        else { '--port', '--help' }
     } elseif ($commandName -eq 'zntfy') {
         if ($previous -in '--timeout', '-t') { 'default', 'never' }
         elseif ($previous -in '--sound', '-s') { $zettaSoundNames }
@@ -652,6 +657,7 @@ Register-ArgumentCompleter -Native -CommandName zosh -ScriptBlock $zettaCompleti
 Register-ArgumentCompleter -Native -CommandName zmux -ScriptBlock $zettaCompletions
 # ZETTA_ZMUX_INTEGRATION_END
 Register-ArgumentCompleter -CommandName ztftp -ScriptBlock $zettaCompletions
+Register-ArgumentCompleter -CommandName zhttp -ScriptBlock $zettaCompletions
 Register-ArgumentCompleter -CommandName zntfy -ScriptBlock $zettaCompletions
 # ZETTA_CLIPBOARD_INTEGRATION_BEGIN
 Register-ArgumentCompleter -CommandName zcopy -ScriptBlock $zettaCompletions

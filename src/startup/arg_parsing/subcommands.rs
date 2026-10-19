@@ -547,7 +547,7 @@ pub(super) fn parse_http_subcommand(arguments: &[OsString]) -> Result<StartupArg
     }
 }
 
-/// `zetta tftp server …`, and the `get`/`put` transfers a window runs.
+/// Parses the TFTP compatibility proxies without opening a window.
 pub(super) fn parse_tftp_subcommand(arguments: &[OsString]) -> Result<StartupArgs> {
     if arguments
         .first()
@@ -577,8 +577,8 @@ pub(super) fn parse_tftp_subcommand(arguments: &[OsString]) -> Result<StartupArg
         println!("{}", tftp_help());
         std::process::exit(0);
     }
-    // A transfer opens a window to run in, so it rides along with an ordinary
-    // application launch rather than being a mode of its own.
+    // The startup dispatcher runs this proxy before application launch or
+    // handoff to an existing window.
     Ok(StartupArgs {
         tftp_command: Some(parse_tftp_args(arguments.iter().cloned())?),
         ..StartupArgs::for_mode(StartupMode::Application)

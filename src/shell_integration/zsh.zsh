@@ -335,7 +335,7 @@ function zwt {
 }
 # ZETTA_WORKTREE_INTEGRATION_END
 
-ztftp() { zetta tftp "$@"; }
+unfunction ztftp 2>/dev/null
 zntfy() { zetta notify "$@"; }
 
 # ZETTA_CLIPBOARD_INTEGRATION_BEGIN
@@ -378,7 +378,7 @@ function __zetta_lazy_complete {
 function __zetta_register_lazy_completions {
     (( $+functions[compdef] )) || return 1
     if (( ${__zetta_completions_loaded:-0} == 0 )); then
-        compdef __zetta_lazy_complete zetta zosh zvi ztftp zntfy
+        compdef __zetta_lazy_complete zetta zosh zvi ztftp zhttp zntfy
         (( _zetta_vi_missing )) && compdef __zetta_lazy_complete vi
         (( _zetta_mosh_missing )) && compdef __zetta_lazy_complete mosh
 # ZETTA_WORKTREE_INTEGRATION_BEGIN

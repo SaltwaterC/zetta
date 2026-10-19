@@ -8,7 +8,8 @@ configuration's current state. Completing a value that contains spaces or
 quotes (such as a profile named `Project Shell` or a theme named `Gruvbox Light
 Hard`) inserts it as a single argument, so the completed line runs without
 manual quoting. The script also provides `zvi`, a shortcut for the built-in
-vi editor, `ztftp` for the TFTP client, and `zntfy` for desktop notifications.
+vi editor, completion for the standalone `ztftp` client and server, and `zntfy`
+for desktop notifications. It also completes the standalone `zhttp server` command.
 It adds completions for the standalone `zcopy` and `zpaste` clipboard tools.
 The top-level `attention` command completes its long notification options
 while retaining all short aliases.

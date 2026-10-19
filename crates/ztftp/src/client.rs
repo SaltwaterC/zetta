@@ -1,3 +1,4 @@
+//! TFTP client transfers and command parsing.
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::io::{self, Write as _};
@@ -6,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result};
 
-use crate::startup::format_help_table;
+use crate::format_help_table;
 
 use super::{
     DEFAULT_BLOCK_SIZE, DEFAULT_TFTP_PORT, MAX_BLOCK_SIZE, MAX_RETRIES, OP_ACK, OP_DATA, OP_ERROR,
@@ -16,7 +17,7 @@ use super::{
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum TftpCommand {
+pub enum TftpCommand {
     Get {
         host: String,
         remote: String,
@@ -32,7 +33,7 @@ pub(crate) enum TftpCommand {
 }
 
 impl TftpCommand {
-    pub(crate) fn run(&self) -> Result<()> {
+    pub fn run(&self) -> Result<()> {
         match self {
             Self::Get {
                 host,
@@ -57,11 +58,11 @@ impl TftpCommand {
     }
 }
 
-pub(crate) fn tftp_help() -> String {
+pub fn tftp_help() -> String {
     #[cfg(feature = "tftp-server")]
     {
         format!(
-            "Zetta TFTP tools\n\nUsage:\n  zetta tftp get [--port PORT] HOST REMOTE [LOCAL]\n  zetta tftp put [--port PORT] HOST LOCAL [REMOTE]\n  zetta tftp server [OPTIONS]\n\nCommands:\n{}\n\nClient options:\n{}\n\nRun `zetta tftp server --help` for server options.",
+            "Zetta TFTP tools\n\nUsage:\n  ztftp get [--port PORT] HOST REMOTE [LOCAL]\n  ztftp put [--port PORT] HOST LOCAL [REMOTE]\n  ztftp server [OPTIONS]\n\nCommands:\n{}\n\nClient options:\n{}\n\nRun `ztftp server --help` for server options.",
             format_help_table([
                 (
                     "get",
@@ -79,7 +80,7 @@ pub(crate) fn tftp_help() -> String {
     #[cfg(not(feature = "tftp-server"))]
     {
         format!(
-            "Zetta TFTP client\n\nUsage:\n  zetta tftp get [--port PORT] HOST REMOTE [LOCAL]\n  zetta tftp put [--port PORT] HOST LOCAL [REMOTE]\n\nCommands:\n{}\n\nOptions:\n{}",
+            "Zetta TFTP client\n\nUsage:\n  ztftp get [--port PORT] HOST REMOTE [LOCAL]\n  ztftp put [--port PORT] HOST LOCAL [REMOTE]\n\nCommands:\n{}\n\nOptions:\n{}",
             format_help_table([
                 (
                     "get",
@@ -95,7 +96,7 @@ pub(crate) fn tftp_help() -> String {
     }
 }
 
-pub(crate) fn parse_tftp_args(args: impl IntoIterator<Item = OsString>) -> Result<TftpCommand> {
+pub fn parse_tftp_args(args: impl IntoIterator<Item = OsString>) -> Result<TftpCommand> {
     let mut args = args.into_iter();
     let operation = args
         .next()
@@ -125,7 +126,7 @@ pub(crate) fn parse_tftp_args(args: impl IntoIterator<Item = OsString>) -> Resul
         "get" => {
             anyhow::ensure!(
                 (2..=3).contains(&positional.len()),
-                "usage: zetta tftp get [--port PORT] HOST REMOTE [LOCAL]"
+                "usage: ztftp get [--port PORT] HOST REMOTE [LOCAL]"
             );
             let host = utf8_argument(&positional[0], "HOST")?;
             let remote = utf8_argument(&positional[1], "REMOTE")?;
@@ -149,7 +150,7 @@ pub(crate) fn parse_tftp_args(args: impl IntoIterator<Item = OsString>) -> Resul
         "put" => {
             anyhow::ensure!(
                 (2..=3).contains(&positional.len()),
-                "usage: zetta tftp put [--port PORT] HOST LOCAL [REMOTE]"
+                "usage: ztftp put [--port PORT] HOST LOCAL [REMOTE]"
             );
             let host = utf8_argument(&positional[0], "HOST")?;
             let local = PathBuf::from(&positional[1]);
@@ -337,5 +338,5 @@ fn receive_from_peer(
 }
 
 #[cfg(test)]
-#[path = "../tests/tftp/client.rs"]
+#[path = "tests/client.rs"]
 mod tests;
