@@ -186,6 +186,7 @@ impl Zetta {
                     }
                 }
             });
+        let group = self.group_for_new_tab(origin, project.as_deref());
         let active_pane = self.tabs.get(self.active_tab).and_then(Tab::active_pane);
         let effective = project
             .as_ref()
@@ -200,6 +201,14 @@ impl Zetta {
             .filter(|_| inherit_working_directory)
             .filter(|pane| pane.profile.name.eq_ignore_ascii_case(&profile.name))
             .and_then(|pane| pane.wsl_working_directory(cx));
+        // A worktree group's tabs start in the worktree. Its project's
+        // configuration names the project root, which is the wrong checkout.
+        let working_directory_override = working_directory_override.or_else(|| {
+            group
+                .worktree_root()
+                .filter(|_| inherited_working_directory.is_none())
+                .map(Path::to_path_buf)
+        });
         let (working_directory, wsl_directory) = if working_directory_override
             .as_ref()
             .is_some_and(|_| !is_wsl_shell(&profile.command))
@@ -277,6 +286,7 @@ impl Zetta {
             editing_overlay_pane: None,
             overlay_buffer: None,
             overlay_style_picker: None,
+            group,
         });
         self.active_tab = self.tabs.len() - 1;
         if let Some(error) = pending_command_error
@@ -409,18 +419,16 @@ impl Zetta {
         }
         self.mux_panes.forget_tab(tab_id);
         self.forget_pane_controls(closed_pane_ids);
-        self.tabs.remove(index);
+        self.tab_groups.forget_tab(tab_id);
+        let closed_group = self.tabs.remove(index).group;
         self.retain_open_visible_terminals();
-        self.disable_tab_move_mode_if_unavailable(cx);
         if self.tabs.is_empty() {
+            self.disable_tab_move_mode_if_unavailable(cx);
             window.remove_window();
             return;
         }
-        if index < self.active_tab {
-            self.active_tab -= 1;
-        } else if self.active_tab >= self.tabs.len() {
-            self.active_tab = self.tabs.len() - 1;
-        }
+        self.settle_active_tab_after_removal(index, &closed_group);
+        self.disable_tab_move_mode_if_unavailable(cx);
         self.focus_active(window, cx);
     }
 }
@@ -499,8 +507,10 @@ impl Zetta {
         if self.tab_search.is_some() {
             self.dismiss_tab_search(window, cx);
         }
-        if !self.tabs.is_empty() {
-            self.active_tab = (self.active_tab + 1) % self.tabs.len();
+        if let Some(index) =
+            crate::tab_groups::cycle_in_view(&self.tabs_in_view(), self.active_tab, true)
+        {
+            self.active_tab = index;
             self.tab_overflow_selection_side = None;
             self.dismiss_tab_overflow_menus(cx);
             self.focus_active(window, cx);
@@ -516,8 +526,10 @@ impl Zetta {
         if self.tab_search.is_some() {
             self.dismiss_tab_search(window, cx);
         }
-        if !self.tabs.is_empty() {
-            self.active_tab = (self.active_tab + self.tabs.len() - 1) % self.tabs.len();
+        if let Some(index) =
+            crate::tab_groups::cycle_in_view(&self.tabs_in_view(), self.active_tab, false)
+        {
+            self.active_tab = index;
             self.tab_overflow_selection_side = None;
             self.dismiss_tab_overflow_menus(cx);
             self.focus_active(window, cx);
@@ -528,7 +540,7 @@ impl Zetta {
     /// it. Without this, wrapping past the edge of the tab bar while a keyboard-opened
     /// overflow menu is still showing leaves that (now stale) popover holding focus,
     /// so the terminal never gets it back.
-    pub(super) fn dismiss_tab_overflow_menus(&mut self, cx: &mut App) {
+    pub(crate) fn dismiss_tab_overflow_menus(&mut self, cx: &mut App) {
         if self.tab_overflow_keyboard_menu_edge.take().is_some() {
             self.tab_overflow_left_menu_handle.hide(cx);
             self.tab_overflow_right_menu_handle.hide(cx);
@@ -552,7 +564,7 @@ impl Zetta {
     }
 
     pub(crate) fn disable_tab_move_mode_if_unavailable(&mut self, cx: &mut App) {
-        if self.tabs.len() < 2 && self.tab_move_mode {
+        if self.tabs_in_view().len() < 2 && self.tab_move_mode {
             self.tab_move_mode = false;
             self.update_terminal_input_enabled(cx);
         }
@@ -564,7 +576,7 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.tabs.len() < 2 && !self.tab_move_mode {
+        if self.tabs_in_view().len() < 2 && !self.tab_move_mode {
             return;
         }
 
@@ -612,7 +624,9 @@ impl Zetta {
         let Some(source_id) = self.tabs.get(self.active_tab).map(|tab| tab.id) else {
             return;
         };
-        let enabled = tab_move_preserves_pinning(&self.tabs, self.active_tab, direction);
+        let filter = self.tab_group_filter().cloned();
+        let in_view = |tab: &Tab| filter.as_ref().is_none_or(|group| tab.group == *group);
+        let enabled = tab_move_preserves_pinning(&self.tabs, self.active_tab, direction, in_view);
         let Some(active_tab_index) = move_item_by_id(
             &mut self.tabs,
             source_id,
@@ -620,6 +634,7 @@ impl Zetta {
             source_id,
             enabled,
             |tab| tab.id,
+            in_view,
         ) else {
             return;
         };

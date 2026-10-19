@@ -564,6 +564,7 @@ impl TabState {
             editing_overlay_pane: None,
             overlay_buffer: None,
             overlay_style_picker: None,
+            group: Default::default(),
         })
     }
 }

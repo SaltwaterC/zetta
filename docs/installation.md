@@ -321,7 +321,11 @@ files described in [user-local shell PATH setup](#user-local-shell-path-setup),
 and `make uninstall` removes its managed PATH blocks. The desktop entry's
 **New Window** action invokes
 `zetta --new-window`; visible profiles are added as additional actions while
-Zetta is running. The primary launch keeps normal activate-or-reopen behavior.
+Zetta is running. Only the installed binary the entry launches updates those
+actions, so a development build run from the same account never rewrites them,
+and `make install-assets` repoints every command in the entry, actions
+included, at the installed binary. The primary launch keeps normal
+activate-or-reopen behavior.
 
 For a system-wide installation, run `sudo make install PREFIX=/usr`.
 

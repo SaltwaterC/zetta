@@ -95,7 +95,10 @@ layering rule: every module named here is a sibling under `src/`.
   profile, reconnect), the layout predicates the bar shares with the tab bar,
   and `title_bar_chrome_height`, which sizes the cached chrome boundary
 - `tab_bar_render.rs`: the measured tab row, individual tabs, and the bar
-  that hosts them
+  that hosts them. It draws the active tab group's tabs only, so its
+  positions index the view rather than `Zetta::tabs`
+- `sidebar_render.rs`: the project sidebar, a cached sibling of the tab body,
+  and its title-bar toggle
 - `tab_body_render.rs`: tab body composition (maximized-pane bar, minimized
   pane shelf, pane content wiring)
 - `pane_render.rs`: pane layout and resize-gutter rendering
@@ -155,6 +158,8 @@ layering rule: every module named here is a sibling under `src/`.
 - `multi_command_ui.rs`: multi-command prompt interaction, rendering, and its
   overlay
 - `close_confirmation_ui.rs`: the pinned-tab close confirmation
+- `worktree_ui.rs`: the sidebar's worktree operations, run in-process through
+  `zwt`'s library half, and the create/integrate/discard dialog
 - `script_open_ui.rs` (macOS): the confirmation before running a shell script
   Finder or `open` asked Zetta to open
 - `session_auth_ui.rs`: the session passphrase/secret prompt, its field model,
@@ -262,6 +267,13 @@ keyboard and the mouse came to do different things; do not add one.
   keymap, project files, the registry and the desktop-entry edits
 - `project_context.rs`: the active project for a window, project detection for
   a directory, and the theme/profile resolution that follows from it
+- `tab_groups.rs`: `TabGroup` (Main, a project, or one of its worktrees),
+  which tabs the view shows, the selection rules for closing and switching
+  groups, and placing a tab that arrives from a session by its active pane's
+  detected directory. Hidden tabs stay in `Zetta::tabs`; the module docs say
+  why
+- `sidebar.rs`: the sidebar's state, its per-frame entry list, and the
+  tab-group palette commands
 - `project_cli.rs`: `zetta project` argument parsing and its non-open commands
 - `project_commands.rs`: registered project commands and their name/command/
   environment validation
@@ -384,6 +396,8 @@ without that feature, so no call site needs a feature predicate:
 - `cli_service_stubs.rs`: disabled-build fallbacks for CLI-service actions
 - `remote_clipboard_ui_stub.rs`: disabled-build surface for the tab permission
   action
+- `worktree_ui_stub.rs`: the sidebar's worktree surface without the `worktree`
+  feature, where no worktree is ever listed and the dialog type has no values
 - `remote_pane_transport/zosh_stream_disabled.rs`: the Mosh pane surface for a
   build without the bundled Zosh client, where the type has no values at all
 
@@ -414,7 +428,8 @@ without that feature, so no call site needs a feature predicate:
 
 - `windows_integration.rs`: the Windows Terminal handoff ABI and console
   handover; gated to Windows at its `mod` declaration
-- `linux_desktop.rs`: the managed user desktop entry and its profile actions
+- `linux_desktop.rs`: the managed user desktop entry and its profile actions;
+  only the executable the entry launches may rewrite it
 - `shell_integration.rs`: the shell integration scripts, their placeholder
   substitution (including the completion trees), and shell detection
 - `worktree_detection.rs`: linked-worktree detection for a pane's shell

@@ -49,8 +49,35 @@ pub(crate) const PROFILE_SHORTCUT_SYMBOLS: [&str; 10] =
 pub(crate) const PROFILE_SHORTCUT_KEYS: [&str; 10] =
     ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"];
 
-/// Converts a user-facing number-row alias back to GPUI's normalized keymap
-/// spelling for storage and keymap loading.
+/// The bracket keys of the tab-group shortcuts, and the symbols they type
+/// with Shift, in the same arrangement as the number row's.
+pub(crate) const TAB_GROUP_SHORTCUT_KEYS: [&str; 2] = ["[", "]"];
+
+pub(crate) const TAB_GROUP_SHORTCUT_SYMBOLS: [&str; 2] = ["{", "}"];
+
+/// Every key whose `Ctrl+Shift` chord has two spellings, paired with the
+/// symbol it types.
+///
+/// GPUI's Linux keyboard drops Shift from a key that types punctuation and
+/// names the key by what it typed, so `Ctrl+Shift+1` arrives as `ctrl-!` and
+/// `Ctrl+Shift+[` as `ctrl-{`; the Windows and macOS mappers bind the same
+/// spelling to the same key. Zetta binds that internal spelling and shows the
+/// chord the user presses — `ctrl-shift-1`, `ctrl-shift-[` — everywhere else:
+/// the keymap file, the settings editor and every shortcut label.
+fn shifted_key_aliases() -> impl Iterator<Item = (&'static str, &'static str)> {
+    PROFILE_SHORTCUT_KEYS
+        .into_iter()
+        .zip(PROFILE_SHORTCUT_SYMBOLS)
+        .chain(
+            TAB_GROUP_SHORTCUT_KEYS
+                .into_iter()
+                .zip(TAB_GROUP_SHORTCUT_SYMBOLS),
+        )
+}
+
+/// Converts a keystroke to the spelling the keymap file stores and the user
+/// sees: lower case, `-`-separated, and `ctrl-shift-KEY` for a key in
+/// [`shifted_key_aliases`], whichever spelling it arrived in.
 pub(crate) fn keymap_keystroke_storage(keystroke: &str) -> String {
     let normalized = keystroke.trim().to_ascii_lowercase();
     // A trailing `+` is the literal plus key in GPUI's `ctrl-+` spelling,
@@ -61,25 +88,59 @@ pub(crate) fn keymap_keystroke_storage(keystroke: &str) -> String {
     } else {
         normalized.replace('+', "-")
     };
-    let key_index = normalized
-        .strip_prefix("ctrl+shift+")
-        .or_else(|| normalized.strip_prefix("ctrl-shift-"))
+    let key = normalized
+        .strip_prefix("ctrl-shift-")
         .and_then(|key| {
-            PROFILE_SHORTCUT_KEYS
-                .iter()
-                .position(|candidate| *candidate == key)
+            shifted_key_aliases()
+                .find(|(candidate, _)| *candidate == key)
+                .map(|(key, _)| key)
         })
         .or_else(|| {
             normalized.strip_prefix("ctrl-").and_then(|symbol| {
-                PROFILE_SHORTCUT_SYMBOLS
-                    .iter()
-                    .position(|candidate| *candidate == symbol)
+                shifted_key_aliases()
+                    .find(|(_, candidate)| *candidate == symbol)
+                    .map(|(key, _)| key)
             })
         });
-    if let Some(key_index) = key_index {
-        return format!("ctrl-shift-{}", PROFILE_SHORTCUT_KEYS[key_index]);
+    if let Some(key) = key {
+        return format!("ctrl-shift-{key}");
     }
     normalized
+}
+
+/// Converts a keystroke from the keymap file to the spelling GPUI binds:
+/// [`keymap_keystroke_storage`], except that a `ctrl-shift-KEY` alias becomes
+/// the `ctrl-SYMBOL` the key event carries. Without it a user's
+/// `ctrl-shift-1` would be bound as written and never match on Linux.
+pub(crate) fn keymap_keystroke_binding(keystroke: &str) -> String {
+    let stored = keymap_keystroke_storage(keystroke);
+    stored
+        .strip_prefix("ctrl-shift-")
+        .and_then(|key| shifted_key_aliases().find(|(candidate, _)| *candidate == key))
+        .map_or(stored.clone(), |(_, symbol)| format!("ctrl-{symbol}"))
+}
+
+/// The keystrokes a shortcut label shows for `keystrokes`: the
+/// `ctrl-shift-KEY` chord for a key bound by its shifted symbol, so a label
+/// reads the way the keymap file does.
+pub(crate) fn public_keystrokes(
+    keystrokes: &[gpui::KeybindingKeystroke],
+) -> Rc<[gpui::KeybindingKeystroke]> {
+    keystrokes
+        .iter()
+        .map(|keystroke| {
+            let inner = keystroke.inner();
+            let ctrl_only = inner.modifiers == gpui::Modifiers::control();
+            ctrl_only
+                .then(|| shifted_key_aliases().find(|(_, symbol)| *symbol == inner.key))
+                .flatten()
+                .and_then(|(key, _)| gpui::Keystroke::parse(&format!("ctrl-shift-{key}")).ok())
+                .map_or_else(
+                    || keystroke.clone(),
+                    gpui::KeybindingKeystroke::from_keystroke,
+                )
+        })
+        .collect()
 }
 
 pub(crate) fn keymap_keystroke_display(keystroke: &str) -> String {
@@ -253,6 +314,10 @@ pub(crate) const TOGGLE_PANE_MOVE_MODE_KEYBINDING: &str = "alt-shift-m";
 
 pub(crate) const TOGGLE_TAB_MOVE_MODE_KEYBINDING: &str = "ctrl-shift-g";
 
+/// Not `ctrl-shift-k`, which is retired, nor `ctrl-shift-u`, which IBus takes
+/// for Unicode entry before the window sees it.
+pub(crate) const TOGGLE_SIDEBAR_KEYBINDING: &str = "ctrl-shift-z";
+
 pub(crate) const TOGGLE_SILENT_MODE_KEYBINDING: &str = "ctrl-shift-s";
 
 pub(crate) const APPLICATION_MENU_KEYBINDING: &str = "alt-space";
@@ -423,6 +488,41 @@ pub(crate) fn pane_move_mode_keybinding() -> KeyBinding {
     )
 }
 
+/// `Ctrl+Shift+[` and `Ctrl+Shift+]`, bound by the symbols they type the way
+/// the number row's profile shortcuts are; see [`shifted_key_aliases`].
+pub(crate) fn tab_group_keybindings(
+    keyboard_mapper: &dyn PlatformKeyboardMapper,
+) -> [KeyBinding; 2] {
+    let context = Some(
+        KeyBindingContextPredicate::parse("Zetta > Terminal")
+            .expect("built-in keybinding context must be valid")
+            .into(),
+    );
+    let binding = |symbol: &str, action: Box<dyn Action>| {
+        KeyBinding::load(
+            &format!("ctrl-{symbol}"),
+            action,
+            context.clone(),
+            true,
+            None,
+            keyboard_mapper,
+        )
+        .expect("built-in tab group keystroke must be valid")
+    };
+    [
+        binding(TAB_GROUP_SHORTCUT_SYMBOLS[0], Box::new(PreviousTabGroup)),
+        binding(TAB_GROUP_SHORTCUT_SYMBOLS[1], Box::new(NextTabGroup)),
+    ]
+}
+
+pub(crate) fn toggle_sidebar_keybinding() -> KeyBinding {
+    KeyBinding::new(
+        TOGGLE_SIDEBAR_KEYBINDING,
+        ToggleSidebar,
+        Some("Zetta > Terminal"),
+    )
+}
+
 pub(crate) fn tab_move_mode_keybinding() -> KeyBinding {
     KeyBinding::new(
         TOGGLE_TAB_MOVE_MODE_KEYBINDING,
@@ -545,6 +645,7 @@ fn default_keybindings_for_mode(
         pane_resize_mode_keybinding(),
         pane_move_mode_keybinding(),
         tab_move_mode_keybinding(),
+        toggle_sidebar_keybinding(),
         select_all_keybinding(),
         edit_scrollback_keybinding(),
         KeyBinding::new(
@@ -667,6 +768,7 @@ fn default_keybindings_for_mode(
     bindings.extend(focus_pane_keybindings());
     bindings.extend(minimized_pane_keybindings());
     bindings.extend(stacked_pane_keybindings());
+    bindings.extend(tab_group_keybindings(keyboard_mapper));
     bindings.extend(pane_resize_keybindings());
     bindings.extend(pane_move_keybindings());
     bindings.extend(tab_move_keybindings());
@@ -740,7 +842,7 @@ pub(crate) fn bind_keybindings(
     let Some(content) = source.0.as_deref() else {
         return;
     };
-    let content = normalize_keymap_key_names(content);
+    let content = keymap_contents_for_binding(content);
 
     // Parse user keymap to detect rebindings and create unbind key bindings
     let user_keymap = match KeymapFile::parse(&content) {

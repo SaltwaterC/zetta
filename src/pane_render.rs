@@ -302,7 +302,10 @@ impl Zetta {
         owns_window_bottom: bool,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let edges = PaneWindowEdges::all().with_bottom(owns_window_bottom);
+        // The sidebar, when shown, is what meets the window's left edge.
+        let edges = PaneWindowEdges::all()
+            .with_bottom(owns_window_bottom)
+            .with_left(!self.sidebar_visible());
         let corner_radii = edges.client_corner_radii(window, context.corner_radius);
         div()
             .when(self.pane_resize_mode, |layout| {
@@ -1021,6 +1024,11 @@ impl PaneWindowEdges {
 
     const fn with_bottom(mut self, bottom: bool) -> Self {
         self.bottom = bottom;
+        self
+    }
+
+    const fn with_left(mut self, left: bool) -> Self {
+        self.left = left;
         self
     }
 

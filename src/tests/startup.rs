@@ -75,9 +75,7 @@ fn linux_desktop_entry_matches_app_id() {
         desktop_entry
             .contains("[Desktop Action new-window]\nName=New Window\nExec=zetta --new-window\n")
     );
-    assert!(makefile.contains(
-        "-e \"1,/^\\[Desktop Action / s|^Exec=[^[:space:]]*\\(.*\\)$$|Exec=$(BINDIR)/zetta\\1|\""
-    ));
+    assert!(makefile.contains("-e \"s|^Exec=[^[:space:]]*\\(.*\\)$$|Exec=$(BINDIR)/zetta\\1|\""));
     assert!(makefile.contains("desktop_source=\"$$desktop_entry\""));
     assert!(makefile.contains("ZETTA MANAGED PROFILE GROUPS BEGIN"));
     assert!(

@@ -149,6 +149,9 @@ impl Zetta {
         {
             return None;
         }
+        if let Some(prompt) = self.worktree_prompt.as_mut() {
+            return prompt.text_field_mut();
+        }
         if let Some(prompt) = self.session_authentication.as_mut() {
             if prompt.working {
                 return None;

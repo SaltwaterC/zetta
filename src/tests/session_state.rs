@@ -51,6 +51,7 @@ fn populated_tab() -> Tab {
         editing_overlay_pane: None,
         overlay_buffer: None,
         overlay_style_picker: None,
+        group: Default::default(),
     };
     tab.layout
         .split(10, SplitAxis::Vertical, 11, SplitPosition::After);

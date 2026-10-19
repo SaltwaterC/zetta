@@ -114,6 +114,121 @@ fn shifted_bracket_events_match_the_stacked_cycle_aliases() {
     assert_eq!(bindings[2].match_keystrokes(&[next]), Some(false));
 }
 
+/// The key event GPUI's Linux keyboard produces for `Ctrl+Shift+KEY` when KEY
+/// types punctuation: Shift dropped, and the key named by what it typed.
+fn linux_shifted_event(symbol: &str) -> gpui::Keystroke {
+    gpui::Keystroke {
+        modifiers: gpui::Modifiers::control(),
+        key: symbol.to_owned(),
+        key_char: Some(symbol.to_owned()),
+    }
+}
+
+#[test]
+fn tab_group_shortcuts_are_bound_once_by_their_shifted_symbols() {
+    let keyboard_mapper = gpui::DummyKeyboardMapper;
+    let defaults = default_keybindings(0, &keyboard_mapper);
+    for (symbol, action) in [("{", PreviousTabGroup.name()), ("}", NextTabGroup.name())] {
+        let event = linux_shifted_event(symbol);
+        let matching = defaults
+            .iter()
+            .filter(|binding| binding.match_keystrokes(std::slice::from_ref(&event)) == Some(false))
+            .map(|binding| binding.action().name())
+            .collect::<Vec<_>>();
+        assert_eq!(matching, [action], "ctrl-{symbol}");
+    }
+    assert_eq!(
+        defaults
+            .iter()
+            .filter(|binding| binding.action().name() == NextTabGroup.name())
+            .count(),
+        1,
+        "one built-in binding, not one per spelling"
+    );
+}
+
+#[test]
+fn shifted_bracket_and_number_row_chords_are_stored_by_their_physical_keys() {
+    for (spelling, stored) in [
+        ("ctrl-{", "ctrl-shift-["),
+        ("ctrl-}", "ctrl-shift-]"),
+        ("Ctrl+Shift+[", "ctrl-shift-["),
+        ("ctrl-shift-]", "ctrl-shift-]"),
+        ("ctrl-!", "ctrl-shift-1"),
+        ("Ctrl+Shift+0", "ctrl-shift-0"),
+        // Not aliases: no Shift, or a key that has no shifted alias.
+        ("ctrl-[", "ctrl-["),
+        ("ctrl-shift-a", "ctrl-shift-a"),
+        ("alt-{", "alt-{"),
+    ] {
+        assert_eq!(keymap_keystroke_storage(spelling), stored, "{spelling}");
+        assert_eq!(keymap_keystroke_display(spelling), stored, "{spelling}");
+    }
+}
+
+#[test]
+fn shifted_bracket_and_number_row_chords_are_bound_by_their_symbols() {
+    for (spelling, bound) in [
+        ("ctrl-shift-[", "ctrl-{"),
+        ("Ctrl+Shift+]", "ctrl-}"),
+        ("ctrl-{", "ctrl-{"),
+        ("ctrl-shift-1", "ctrl-!"),
+        ("ctrl-shift-0", "ctrl-)"),
+        ("ctrl-[", "ctrl-["),
+        ("ctrl-shift-a", "ctrl-shift-a"),
+        ("ctrl-+", "ctrl-+"),
+    ] {
+        assert_eq!(keymap_keystroke_binding(spelling), bound, "{spelling}");
+    }
+}
+
+#[test]
+fn a_users_public_shifted_chord_matches_the_key_event_once_loaded() {
+    let keymap = r#"[{"context":"Zetta > Terminal","bindings":{"ctrl-shift-]":"zetta::NextTab","Ctrl+Shift+1":"zetta::PreviousTab"}}]"#;
+    let loaded: Value = serde_json::from_str(&keymap_contents_for_binding(keymap)).unwrap();
+    let bindings = loaded[0]["bindings"].as_object().unwrap();
+    for (keystroke, symbol) in [("ctrl-}", "}"), ("ctrl-!", "!")] {
+        assert!(
+            bindings.contains_key(keystroke),
+            "{keystroke}: {bindings:?}"
+        );
+        let binding = KeyBinding::new(keystroke, NextTab, None);
+        assert_eq!(
+            binding.match_keystrokes(&[linux_shifted_event(symbol)]),
+            Some(false)
+        );
+    }
+    // What a keymap loaded as written would have bound instead.
+    let as_written = KeyBinding::new("ctrl-shift-]", NextTab, None);
+    assert_eq!(
+        as_written.match_keystrokes(&[linux_shifted_event("}")]),
+        None
+    );
+    // The file itself keeps the public spelling.
+    assert!(normalize_keymap_key_names(keymap).contains("\"ctrl-shift-]\""));
+}
+
+#[test]
+fn shortcut_labels_show_the_physical_chord() {
+    let keyboard_mapper = gpui::DummyKeyboardMapper;
+    let [previous, _] = tab_group_keybindings(&keyboard_mapper);
+    let label = public_keystrokes(previous.keystrokes());
+    assert_eq!(label.len(), 1);
+    assert_eq!(label[0].inner().unparse(), "ctrl-shift-[");
+
+    let profile = profile_keybindings(1, &keyboard_mapper)[0].clone();
+    assert_eq!(
+        public_keystrokes(profile.keystrokes())[0].inner().unparse(),
+        "ctrl-shift-1"
+    );
+
+    let plain = KeyBinding::new("ctrl-[", NextTab, None);
+    assert_eq!(
+        public_keystrokes(plain.keystrokes())[0].inner().unparse(),
+        "ctrl-["
+    );
+}
+
 #[test]
 fn tab_rename_and_configuration_reload_shortcuts_are_swapped() {
     assert_eq!(RENAME_TAB_KEYBINDING, "ctrl-shift-r");

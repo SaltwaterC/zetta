@@ -2,6 +2,7 @@
 //! Record only the outermost operation: many ANSI methods call other methods.
 
 use super::*;
+use crate::vte::ansi::SemanticPromptMark;
 
 impl<T: EventListener> Handler for Term<T> {
     /// A character to be displayed.
@@ -827,6 +828,7 @@ impl<T: EventListener> Handler for Term<T> {
                     let old_offset = self.grid.display_offset();
 
                     self.grid.clear_viewport();
+                    self.clear_screen_under_prompt();
 
                     // Compute number of lines scrolled by clearing the viewport.
                     let lines = self.grid.display_offset().saturating_sub(old_offset);
@@ -870,6 +872,7 @@ impl<T: EventListener> Handler for Term<T> {
     #[inline]
     fn reset_state(&mut self) {
         let _recording = self.reflow.record(|| move |term| term.reset_state());
+        self.prompt = None;
         if self.mode.contains(TermMode::ALT_SCREEN) {
             mem::swap(&mut self.grid, &mut self.inactive_grid);
         }
@@ -907,6 +910,12 @@ impl<T: EventListener> Handler for Term<T> {
             self.grid.cursor.point.line = cmp::max(self.grid.cursor.point.line - 1, Line(0));
             self.damage_cursor();
         }
+    }
+
+    #[inline]
+    fn semantic_prompt_mark(&mut self, mark: SemanticPromptMark) {
+        let _recording = self.reflow.record(|| move |term| term.semantic_prompt_mark(mark));
+        self.mark_prompt(mark);
     }
 
     #[inline]

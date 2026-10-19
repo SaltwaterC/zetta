@@ -19,6 +19,7 @@ use crate::worktree_copy::{
 };
 use anyhow::{Context as _, Result};
 
+mod application;
 mod args;
 mod commands;
 mod git;
@@ -27,6 +28,7 @@ mod help;
 // The module was one file before it was split by responsibility. These keep
 // every name reachable as `zwt::worktree_cli::…`, which is what `lib.rs`
 // re-exports to Zetta and to the `zwt` binary.
+pub use application::*;
 pub use args::*;
 use commands::*;
 use git::*;
@@ -138,6 +140,62 @@ fn run_at(
             run_sync(commit.as_deref(), current_directory, invocation)
         }
         WorktreeCommand::Config => run_config(current_directory),
+    }
+}
+
+/// What `new` created.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CreatedWorktree {
+    /// The `NAME` the worktree was created for, without the `wt/` prefix.
+    pub name: String,
+    pub path: PathBuf,
+    pub branch: String,
+    pub source_branch: String,
+}
+
+/// What `done` or `abort` removed, and the source worktree it left in place.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FinishedWorktree {
+    pub worktree: PathBuf,
+    pub branch: String,
+    pub source_branch: String,
+    pub source_path: PathBuf,
+}
+
+/// What `sync` did: continued a rebase that had stopped on a conflict, or
+/// rebased the worktree onto `target`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SyncedWorktree {
+    Continued {
+        branch: String,
+        source_branch: String,
+    },
+    Synchronized {
+        branch: String,
+        source_branch: String,
+        target: String,
+    },
+}
+
+impl std::fmt::Display for SyncedWorktree {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Continued {
+                branch,
+                source_branch,
+            } => write!(
+                formatter,
+                "Continued synchronization of {branch} with {source_branch}."
+            ),
+            Self::Synchronized {
+                branch,
+                source_branch,
+                target,
+            } => write!(
+                formatter,
+                "Synchronized {branch} with {source_branch} at {target}."
+            ),
+        }
     }
 }
 

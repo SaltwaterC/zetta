@@ -89,3 +89,12 @@ CSI 16 t dispatches to the default no-op `Handler::character_cell_size_pixels`, 
 - ANSI clear modes and attributes are `Copy`/`Clone`, and hyperlinks are `Clone`,
   so the engine can retain typed semantic operations during asynchronous history
   reflow without reparsing bytes or losing escape sequences split across batches.
+
+## Zetta patch: OSC 133 prompt marks
+
+`osc_dispatch` hands `OSC 133 ; A` and `OSC 133 ; C` to
+`ansi::Handler::semantic_prompt_mark` as a `SemanticPromptMark`; other OSC 133
+marks are logged and ignored. The method defaults to doing nothing, so other
+handlers are unaffected. `alacritty_terminal` uses it to keep a shell's prompt
+out of reflow. Regression test: `parse_osc133_prompt_and_command_marks` in
+`src/ansi.rs`.

@@ -192,3 +192,101 @@ fn replaces_the_desktop_entry_atomically() {
 
     assert_eq!(std::fs::read_to_string(path).unwrap(), "new");
 }
+
+/// A desktop entry whose main `Exec=` launches `launched`.
+fn entry_launching(launched: &Path) -> String {
+    include_str!("../../resources/linux/Zetta.desktop").replacen(
+        "\nExec=zetta\n",
+        &format!(
+            "\nExec={}\n",
+            quote_exec_argument(&launched.to_string_lossy())
+        ),
+        1,
+    )
+}
+
+#[test]
+fn an_entry_belongs_to_the_executable_it_launches() {
+    let directory = tempfile::tempdir().unwrap();
+    let installed = directory.path().join("installed zetta");
+    std::fs::write(&installed, "").unwrap();
+
+    assert!(entry_launches(&entry_launching(&installed), &installed));
+}
+
+#[test]
+fn a_symlinked_install_location_still_matches() {
+    let directory = tempfile::tempdir().unwrap();
+    let installed = directory.path().join("zetta");
+    let link = directory.path().join("link");
+    std::fs::write(&installed, "").unwrap();
+    std::os::unix::fs::symlink(&installed, &link).unwrap();
+
+    assert!(entry_launches(&entry_launching(&link), &installed));
+}
+
+#[test]
+fn another_build_does_not_own_the_entry() {
+    let directory = tempfile::tempdir().unwrap();
+    let installed = directory.path().join("installed");
+    let debug = directory.path().join("debug");
+    std::fs::write(&installed, "").unwrap();
+    std::fs::write(&debug, "").unwrap();
+
+    assert!(!entry_launches(&entry_launching(&installed), &debug));
+}
+
+#[test]
+fn an_executable_that_no_longer_exists_owns_nothing() {
+    let directory = tempfile::tempdir().unwrap();
+    let installed = directory.path().join("zetta");
+    std::fs::write(&installed, "").unwrap();
+    let entry = entry_launching(&installed);
+    let replaced = directory.path().join("zetta (deleted)");
+
+    assert!(!entry_launches(&entry, &replaced));
+}
+
+#[test]
+fn a_debug_build_leaves_the_installed_entry_alone() {
+    let home = tempfile::tempdir().unwrap();
+    let applications = home.path().join(".local/share/applications");
+    std::fs::create_dir_all(&applications).unwrap();
+    let entry = applications.join("Zetta.desktop");
+    let installed = home.path().join("installed");
+    std::fs::write(&installed, "").unwrap();
+    let original = entry_launching(&installed);
+    std::fs::write(&entry, &original).unwrap();
+
+    let debug = home.path().join("debug");
+    std::fs::write(&debug, "").unwrap();
+
+    let rewritten =
+        update_profile_actions_at(&entry, &debug, &[profile("Bash")], &HashSet::new()).unwrap();
+
+    assert!(!rewritten);
+
+    assert_eq!(std::fs::read_to_string(&entry).unwrap(), original);
+
+    // The installed binary, on the other hand, does update it.
+    assert!(
+        update_profile_actions_at(&entry, &installed, &[profile("Bash")], &HashSet::new()).unwrap()
+    );
+    assert!(
+        std::fs::read_to_string(entry)
+            .unwrap()
+            .contains("Name=Bash")
+    );
+}
+
+#[test]
+fn quoted_and_bare_main_programs_are_read() {
+    assert_eq!(
+        main_exec_program("[Desktop Entry]\nExec=/a/zetta --x\n\n[Desktop Action a]\nExec=/b\n"),
+        Some("/a/zetta".to_owned())
+    );
+    assert_eq!(
+        main_exec_program("[Desktop Entry]\nExec=\"/a b/zet\\\"ta\" --x\n\n[Desktop Action a]\n"),
+        Some("/a b/zet\"ta".to_owned())
+    );
+}

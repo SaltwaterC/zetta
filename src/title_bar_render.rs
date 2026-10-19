@@ -630,7 +630,7 @@ pub(crate) fn profile_shortcut_alias(_slot: usize, label: String) -> ProfileMenu
 ///
 /// Registered before `PopoverMenu`'s own dismissal listener so a menu reached
 /// through left/right navigation cannot restore focus to the menu it replaced.
-fn restore_focus_on_dismiss(
+pub(crate) fn restore_focus_on_dismiss(
     menu: &Entity<ui::ContextMenu>,
     handle: WeakEntity<Zetta>,
     window: &mut Window,
@@ -674,6 +674,9 @@ pub(crate) struct TitleBarLayout {
     /// window controls, the application label, and the window controls.
     pub(crate) right_title_bar_controls: AnyElement,
     pub(crate) show_title_bar_menus: bool,
+    /// The project sidebar's toggle, left of the application menu; `None`
+    /// when `hide_project_sidebar` turns the sidebar off.
+    pub(crate) sidebar_toggle: Option<AnyElement>,
     pub(crate) application_menu: AnyElement,
     pub(crate) profile_menu: AnyElement,
     pub(crate) show_title_bar_buttons: bool,
@@ -751,6 +754,7 @@ impl Zetta {
             colors.title_bar_background
         };
 
+        let view: Arc<[usize]> = self.tabs_in_view().into();
         let tab_bar = self
             .render_tab_bar(
                 TabBarChrome {
@@ -773,11 +777,18 @@ impl Zetta {
                     tab_close_button_on_left: window_close_button_on_left(self.button_layout),
                     no_mux: self.no_mux,
                     is_renaming_tab: self.is_renaming(),
-                    tab_count: self.tabs.len(),
-                    pinned_tab_count: pinned_tab_count(&self.tabs),
+                    tab_count: view.len(),
+                    pinned_tab_count: view
+                        .iter()
+                        .take_while(|index| self.tabs[**index].pinned)
+                        .count(),
                     is_renaming_pinned: self.is_renaming()
                         && active_tab.is_some_and(|tab| tab.pinned && tab.renaming_pane.is_none()),
-                    selected_tab_index: self.active_tab,
+                    selected_tab_index: view
+                        .iter()
+                        .position(|index| *index == self.active_tab)
+                        .unwrap_or_default(),
+                    view: view.clone(),
                     tab_move_mode_active: self.tab_move_mode,
                     overflow_selection: self.tab_overflow_selection_side,
                     border_color: colors.border,
@@ -821,6 +832,12 @@ impl Zetta {
                     self.launch_config.hide_title_bar_menus,
                     is_macos_fullscreen,
                 ),
+                sidebar_toggle: self.tab_groups_enabled().then(|| {
+                    crate::sidebar_render::sidebar_toggle_control(
+                        self.sidebar.open,
+                        show_title_bar_control_labels,
+                    )
+                }),
                 application_menu: self.render_application_menu(
                     show_title_bar_control_labels,
                     handle,
@@ -1290,6 +1307,7 @@ impl Zetta {
             compact_mode,
             is_macos_fullscreen,
             show_title_bar_menus,
+            sidebar_toggle,
             application_menu,
             profile_menu,
             show_title_bar_buttons,
@@ -1359,6 +1377,7 @@ impl Zetta {
             .when(reserve_compact_leading_controls, |controls| {
                 controls.min_w(COMPACT_LEADING_CONTROLS_RESERVE)
             })
+            .children(sidebar_toggle)
             .when(show_title_bar_menus, |controls| {
                 controls.child(application_menu).child(profile_menu)
             })

@@ -195,6 +195,7 @@ fn a_pane_that_fell_back_to_ssh_is_marked_in_its_corner(cx: &mut gpui::TestAppCo
                 editing_overlay_pane: None,
                 overlay_buffer: None,
                 overlay_style_picker: None,
+                group: Default::default(),
             });
             zetta.active_tab = zetta.tabs.len() - 1;
             pane_id

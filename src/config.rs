@@ -581,6 +581,7 @@ struct ConfigFile {
     hide_title_bar_labels: Setting<bool>,
     hide_title_bar_buttons: Setting<bool>,
     hide_title_bar_menus: Setting<bool>,
+    hide_project_sidebar: Setting<bool>,
     pane_controls_position: Setting<String>,
     pane_controls_hidden_by_default: Setting<bool>,
     http_server_port: Setting<u64>,
@@ -675,6 +676,9 @@ pub struct Config {
     pub hide_title_bar_labels: bool,
     pub hide_title_bar_buttons: bool,
     pub hide_title_bar_menus: bool,
+    /// Removes the project sidebar and its toggle, and with them tab groups:
+    /// every tab is shown in one tab bar, as before projects had groups.
+    pub hide_project_sidebar: bool,
     pub pane_controls_position: PaneControlsPosition,
     pub pane_controls_hidden_by_default: bool,
     pub http_server_port: u16,
@@ -715,6 +719,7 @@ impl Config {
             hide_title_bar_labels: false,
             hide_title_bar_buttons: false,
             hide_title_bar_menus: cfg!(target_os = "macos"),
+            hide_project_sidebar: false,
             pane_controls_position: PaneControlsPosition::default(),
             pane_controls_hidden_by_default: false,
             http_server_port: DEFAULT_HTTP_PORT,
@@ -849,6 +854,9 @@ impl Config {
         }
         if let Some(hidden) = file.hide_title_bar_menus.get() {
             self.hide_title_bar_menus = hidden;
+        }
+        if let Some(hidden) = file.hide_project_sidebar.get() {
+            self.hide_project_sidebar = hidden;
         }
         if let Some(position) = file.pane_controls_position.get() {
             self.pane_controls_position = PaneControlsPosition::parse(&position)?;

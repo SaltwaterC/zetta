@@ -118,6 +118,7 @@ impl ConfigSetting {
             Self::ShowTitleBarButtons => "Show title bar buttons",
             #[cfg(target_os = "macos")]
             Self::ShowTitleBarMenus => "Show title bar menus",
+            Self::ShowProjectSidebar => "Show project sidebar",
             Self::PaneControlsPosition => "Pane controls position",
             Self::ShowPaneControls => "Show pane controls on new panes",
             Self::SessionRetention => "Detached session retention",
@@ -179,6 +180,9 @@ impl ConfigSetting {
             }
             #[cfg(target_os = "macos")]
             Self::ShowTitleBarMenus => "Show the Menu and Profile menus in the title bar",
+            Self::ShowProjectSidebar => {
+                "Group tabs by project and worktree, switched from a sidebar toggled in the title bar"
+            }
             Self::PaneControlsPosition => "Which side of a pane its overlay controls sit on",
             Self::ShowPaneControls => "Whether a new pane starts with its overlay controls shown",
             Self::SessionRetention => {
@@ -280,6 +284,7 @@ pub(crate) fn configuration_layout(editor: &SettingsEditor) -> Vec<Configuration
         Row(R::ShowTitleBarMenus),
         #[cfg(target_os = "macos")]
         ConfigurationItem::FocusStatus,
+        Row(R::ShowProjectSidebar),
         Row(R::PaneControlsPosition),
         Row(R::ShowPaneControls),
         Heading(S::BackgroundSessions),

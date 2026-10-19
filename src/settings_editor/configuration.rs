@@ -63,6 +63,7 @@ pub struct ConfigurationForm {
     pub hide_title_bar_buttons: bool,
     #[cfg(target_os = "macos")]
     pub hide_title_bar_menus: bool,
+    pub hide_project_sidebar: bool,
     pub pane_controls_position: PaneControlsPosition,
     pub pane_controls_hidden_by_default: bool,
     /// The backend of every profile that does not name its own.
@@ -214,6 +215,7 @@ impl ConfigurationForm {
             hide_title_bar_buttons: false,
             #[cfg(target_os = "macos")]
             hide_title_bar_menus: false,
+            hide_project_sidebar: false,
             pane_controls_position: PaneControlsPosition::default(),
             pane_controls_hidden_by_default: false,
             console_backend: crate::config::ConsoleBackend::default(),

@@ -726,6 +726,56 @@ fn zsh_lifecycle_markers_carry_the_pane_nonce_and_children_do_not_inherit_it() {
 }
 
 #[test]
+fn zsh_marks_its_prompt_last_and_keeps_the_status_for_later_hooks() {
+    if cfg!(windows) {
+        return;
+    }
+    let mut command = clean_shell_command("zsh");
+    command.arg("-f");
+    let script = ShellIntegration::Zsh.eager_script();
+    // Loaded twice, as a reload does: the hooks must not be registered twice.
+    let driver = format!(
+        "{script}\n{script}\nTTY=/dev/stdout\nfalse\n__zetta_mark_prompt\nprint -rn -- \"status:$?;\"\n\
+         print -rn -- \"precmd:${{(j:,:)precmd_functions}};preexec:${{(j:,:)preexec_functions}};\"\n\
+         exit 0\n",
+    );
+    let Some(stdout) = run_integration_with_nonce(command, &driver) else {
+        return;
+    };
+    let hooks = |name: &str| {
+        let start = stdout.find(&format!("{name}:")).expect(name) + name.len() + 1;
+        stdout[start..]
+            .split(';')
+            .next()
+            .unwrap()
+            .split(',')
+            .collect::<Vec<_>>()
+    };
+
+    // The marks go to `$TTY`, which a shell without a terminal leaves empty.
+    assert!(stdout.contains("\x1b]133;A\x1b\\"), "{stdout:?}");
+    assert!(stdout.contains("\x1b]133;C\x1b\\"), "{stdout:?}");
+    assert!(stdout.contains("status:1;"), "{stdout:?}");
+    let precmd = hooks("precmd");
+    assert_eq!(precmd.last(), Some(&"__zetta_mark_prompt"), "{precmd:?}");
+    assert_eq!(
+        precmd
+            .iter()
+            .filter(|hook| **hook == "__zetta_mark_prompt")
+            .count(),
+        1
+    );
+    let preexec = hooks("preexec");
+    assert_eq!(
+        preexec
+            .iter()
+            .filter(|hook| **hook == "__zetta_mark_command")
+            .count(),
+        1
+    );
+}
+
+#[test]
 fn fish_lifecycle_markers_carry_the_pane_nonce_and_children_do_not_inherit_it() {
     if cfg!(windows) {
         return;

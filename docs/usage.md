@@ -54,6 +54,69 @@ split, theme, configuration, keymap, `--no-mux`, or replace-pane options. Plain
 `zetta` keeps its existing activate-or-reopen behavior, while the in-window
 **New Window** action preserves the active project's settings.
 
+## Project sidebar and tab groups
+
+The sidebar toggle, left of the title bar's **Menu** button, opens a sidebar
+that sorts the window's tabs into groups. Press `Ctrl-Shift-Z`, or run
+**zetta: toggle sidebar** from the command palette, to do the same.
+
+- **Main** holds the tabs that belong to no project, which is where every tab
+  starts out.
+- Each registered project has its own group, and each of the project's linked
+  Git worktrees has a group nested under the project.
+
+Clicking a row switches the tab bar to that group's tabs. Zetta returns to the
+tab you last used there, and opens a tab in the group if it has none yet.
+
+`Ctrl-Shift-]` moves to the next group and `Ctrl-Shift-[` to the previous one,
+in the sidebar's order and wrapping around, whether or not the sidebar is
+open. They stop only at Main and at groups that already have tabs, so cycling
+past a project never opens a shell in it. Reach an empty project from the
+sidebar or with **zetta: show project tabs** in the command palette. Tab
+cycling and tab moves stay inside the group you are looking at. Tabs in other
+groups keep running, and their notifications and attention badges still reach
+you.
+
+A tab joins the group you are viewing when you open it. Opening a project,
+from the palette or with `zetta project open`, puts its tab in that project's
+group. A worktree group's first tab starts in the worktree. The number on a
+row is how many tabs that group holds. Hover a row to get a button that opens
+a tab in that group. The **+** beside **Projects** opens the project settings,
+where projects are added and removed.
+
+Groups are not saved with a session. A tab that comes back, whether it was
+reattached, resumed, reopened after its window closed or joined from a shared
+session, is placed by where its active pane is. A tab inside a worktree goes to
+that worktree's group, a tab inside a project goes to the project's group, and
+any other tab goes to Main. So a project tab you `cd`'d out of comes back in
+Main. A worktree that `zwt` did not create is recognised only once the sidebar
+has listed it. Until the pane reports its directory, the tab waits in the group
+you are viewing. A remote pane always stays there, because its directory is on
+another host.
+
+### Managing worktrees from the sidebar
+
+The sidebar runs the same workflow as [`zwt`](#git-worktrees), without leaving
+the window:
+
+- **New worktree** creates one. It is the branch button on a hovered project
+  row, the project's right-click menu, or the **zetta: new worktree** command
+  while a project's tabs are shown. Name the worktree, then optionally list
+  comma-separated paths to copy into it, as `zwt new NAME --copy PATH` would.
+  The sidebar then switches to the new worktree's group.
+- A managed worktree's right-click menu offers **Sync with SOURCE**
+  (`zwt sync`), **Integrate into SOURCE…** (`zwt done`) and **Discard
+  Worktree…** (`zwt abort`). Integrating and discarding both ask for
+  confirmation first. Tabs still open in a removed worktree keep running and
+  move to the project's group.
+
+Worktrees that `zwt` did not create are listed too, but offer only **New Tab**.
+
+To remove the sidebar, its toggle and tab grouping altogether, set
+`hide_project_sidebar` to `true`, or switch off **Show project sidebar** in
+Settings > Configuration. Every tab then shows in a single tab bar. Each tab
+remembers its group, so switching the sidebar back on restores the grouping.
+
 ## Launching a command
 
 Run a command in the first tab with either form:
@@ -1084,6 +1147,8 @@ mode `Ctrl-Shift-B` shares the active tab, while in `--no-mux` mode it toggles
 | `Ctrl-Shift-1` … `Ctrl-Shift-9` | New tab with profile 1 … 9 |
 | `Ctrl-Shift-W` | Close tab |
 | `Ctrl-Shift-G`, then `Left` / `Right` | Toggle tab-move mode and move the active tab without wrapping |
+| `Ctrl-Shift-Z` | Show or hide the project sidebar |
+| `Ctrl-Shift-]` / `Ctrl-Shift-[` | Next / previous tab group: Main, projects and worktrees that have tabs |
 | `Ctrl-Shift-D` | Detach the active tab into the background |
 | `Ctrl-Shift-B` | Share and retain the active tab (normal daemon mode); toggle **Keep running** (`--no-mux`) |
 | `Ctrl-Shift-A` | Reconnect the most recently detached tab |

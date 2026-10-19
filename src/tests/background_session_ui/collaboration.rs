@@ -84,6 +84,7 @@ fn local_tab(tab_id: u64, pane_id: u64) -> Tab {
         editing_overlay_pane: None,
         overlay_buffer: None,
         overlay_style_picker: None,
+        group: Default::default(),
     }
 }
 

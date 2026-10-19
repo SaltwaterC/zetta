@@ -55,6 +55,38 @@ pub(super) fn run_new(
     current_directory: Option<&Path>,
     invocation: WorktreeInvocation,
 ) -> Result<()> {
+    let created = create_worktree_at(
+        name,
+        copy_paths,
+        current_directory,
+        invocation,
+        &mut |message| eprintln!("{message}"),
+    )?;
+    request_originating_worktree_name(Some(name));
+    if path_only {
+        println!("{}", created.path.display());
+    } else {
+        println!(
+            "Created worktree {} at {} on branch {} (based on {}).",
+            created.name,
+            created.path.display(),
+            created.branch,
+            created.source_branch
+        );
+    }
+    Ok(())
+}
+
+/// `new` without its output: creates the worktree and reports each phase to
+/// `progress` as it starts, the way the command line reports it on standard
+/// error.
+pub(super) fn create_worktree_at(
+    name: &str,
+    copy_paths: &[PathBuf],
+    current_directory: Option<&Path>,
+    invocation: WorktreeInvocation,
+    progress: &mut dyn FnMut(&str),
+) -> Result<CreatedWorktree> {
     let command = invocation.command();
     let repository = discover_repository(current_directory)?;
     anyhow::ensure!(
@@ -89,7 +121,10 @@ pub(super) fn run_new(
         destination.as_os_str().to_os_string(),
         os(source_branch),
     ];
-    eprintln!("Creating worktree at {}...", destination.display());
+    progress(&format!(
+        "Creating worktree at {}...",
+        destination.display()
+    ));
     let add_output = run_git(Some(&repository.current_worktree), &add_arguments)?;
     if !add_output.status.success() {
         remove_empty_directories(&created_directories);
@@ -99,7 +134,7 @@ pub(super) fn run_new(
     let metadata_key = metadata_key(&branch);
     #[cfg(feature = "recursive-submodules")]
     if !source_submodules.is_empty() {
-        eprintln!("Initializing submodules...");
+        progress("Initializing submodules...");
         if let Err(error) = initialize_submodules(
             &destination,
             &repository.current_worktree,
@@ -122,7 +157,7 @@ pub(super) fn run_new(
     }
 
     if !copy_paths.is_empty() {
-        eprintln!("Copying requested paths...");
+        progress("Copying requested paths...");
     }
     if let Err(error) = copy_worktree_paths(&repository.current_worktree, &destination, copy_paths)
     {
@@ -147,7 +182,7 @@ pub(super) fn run_new(
         os(&metadata_key),
         os(source_branch),
     ];
-    eprintln!("Recording worktree metadata...");
+    progress("Recording worktree metadata...");
     let metadata_output = run_git(Some(&repository.current_worktree), &metadata_arguments)?;
     if !metadata_output.status.success() {
         let rollback_errors = rollback_new_worktree(
@@ -168,19 +203,12 @@ pub(super) fn run_new(
         return Err(anyhow::anyhow!(message));
     }
 
-    request_originating_worktree_name(Some(name));
-    if path_only {
-        println!("{}", destination.display());
-    } else {
-        println!(
-            "Created worktree {} at {} on branch {} (based on {}).",
-            name,
-            destination.display(),
-            branch,
-            source_branch
-        );
-    }
-    Ok(())
+    Ok(CreatedWorktree {
+        name: name.to_owned(),
+        path: destination,
+        branch,
+        source_branch: source_branch.to_owned(),
+    })
 }
 
 pub(super) fn run_done(
@@ -188,6 +216,26 @@ pub(super) fn run_done(
     current_directory: Option<&Path>,
     invocation: WorktreeInvocation,
 ) -> Result<()> {
+    let finished = integrate_worktree_at(current_directory, invocation)?;
+    request_originating_worktree_name(None);
+    if path_only {
+        println!("{}", finished.source_path.display());
+    } else {
+        println!(
+            "Integrated {} into {} and removed the temporary worktree {}.",
+            finished.branch,
+            finished.source_branch,
+            finished.worktree.display()
+        );
+    }
+    Ok(())
+}
+
+/// `done` without its output.
+pub(super) fn integrate_worktree_at(
+    current_directory: Option<&Path>,
+    invocation: WorktreeInvocation,
+) -> Result<FinishedWorktree> {
     let command = invocation.command();
     let repository = discover_repository(current_directory)?;
     let current_branch = repository.current_branch.clone().context(format!(
@@ -286,18 +334,12 @@ pub(super) fn run_done(
         return Err(git_error("git config --unset-all", &unset_output));
     }
 
-    request_originating_worktree_name(None);
-    if path_only {
-        println!("{}", source_path.display());
-    } else {
-        println!(
-            "Integrated {} into {} and removed the temporary worktree {}.",
-            current_branch,
-            source_branch,
-            repository.current_worktree.display()
-        );
-    }
-    Ok(())
+    Ok(FinishedWorktree {
+        worktree: repository.current_worktree,
+        branch: current_branch,
+        source_branch,
+        source_path,
+    })
 }
 
 pub(super) fn run_abort(
@@ -305,6 +347,26 @@ pub(super) fn run_abort(
     current_directory: Option<&Path>,
     invocation: WorktreeInvocation,
 ) -> Result<()> {
+    let finished = discard_worktree_at(current_directory, invocation)?;
+    request_originating_worktree_name(None);
+    if path_only {
+        println!("{}", finished.source_path.display());
+    } else {
+        println!(
+            "Aborted {} and removed the temporary worktree {} without changing {}.",
+            finished.branch,
+            finished.worktree.display(),
+            finished.source_branch
+        );
+    }
+    Ok(())
+}
+
+/// `abort` without its output.
+pub(super) fn discard_worktree_at(
+    current_directory: Option<&Path>,
+    invocation: WorktreeInvocation,
+) -> Result<FinishedWorktree> {
     let command = invocation.command();
     let repository = discover_repository(current_directory)?;
     let current_branch = repository.current_branch.clone().context(format!(
@@ -363,18 +425,12 @@ pub(super) fn run_abort(
         return Err(git_error("git config --unset-all", &unset_output));
     }
 
-    request_originating_worktree_name(None);
-    if path_only {
-        println!("{}", source_path.display());
-    } else {
-        println!(
-            "Aborted {} and removed the temporary worktree {} without changing {}.",
-            current_branch,
-            repository.current_worktree.display(),
-            source_branch
-        );
-    }
-    Ok(())
+    Ok(FinishedWorktree {
+        worktree: repository.current_worktree,
+        branch: current_branch,
+        source_branch,
+        source_path,
+    })
 }
 
 pub(super) fn run_status(
@@ -449,6 +505,19 @@ pub(super) fn run_sync(
     current_directory: Option<&Path>,
     invocation: WorktreeInvocation,
 ) -> Result<()> {
+    println!(
+        "{}",
+        sync_worktree_at(requested_commit, current_directory, invocation)?
+    );
+    Ok(())
+}
+
+/// `sync` without its output.
+pub(super) fn sync_worktree_at(
+    requested_commit: Option<&str>,
+    current_directory: Option<&Path>,
+    invocation: WorktreeInvocation,
+) -> Result<SyncedWorktree> {
     let command = invocation.command();
     let repository = discover_repository(current_directory)?;
     let current_branch = repository.current_branch.clone().context(format!(
@@ -492,11 +561,10 @@ pub(super) fn run_sync(
         if has_unmerged_entries(&repository.current_worktree)? {
             return Err(autostash_conflict_after_success_error(invocation));
         }
-        println!(
-            "Continued synchronization of {} with {}.",
-            current_branch, source_branch
-        );
-        return Ok(());
+        return Ok(SyncedWorktree::Continued {
+            branch: current_branch,
+            source_branch,
+        });
     }
 
     let _source = source_worktree_without_cleanliness(&repository, &source_branch)?;
@@ -555,11 +623,11 @@ pub(super) fn run_sync(
         !rebase_in_progress(&repository.current_worktree)?,
         "the worktree rebase is still in progress; resolve conflicts, stage the resolutions with git add, and rerun {command} sync"
     );
-    println!(
-        "Synchronized {} with {} at {}.",
-        current_branch, source_branch, target
-    );
-    Ok(())
+    Ok(SyncedWorktree::Synchronized {
+        branch: current_branch,
+        source_branch,
+        target,
+    })
 }
 
 pub(super) const GLOBAL_GIT_CONFIGURATION: [(&str, &str); 5] = [

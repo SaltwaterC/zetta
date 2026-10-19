@@ -41,6 +41,7 @@ pub(crate) enum ConfigSetting {
     ShowTitleBarButtons,
     #[cfg(target_os = "macos")]
     ShowTitleBarMenus,
+    ShowProjectSidebar,
     PaneControlsPosition,
     ShowPaneControls,
     SessionRetention,
@@ -82,6 +83,7 @@ pub(crate) const ALL_SETTINGS: &[ConfigSetting] = &[
     ConfigSetting::ShowTitleBarButtons,
     #[cfg(target_os = "macos")]
     ConfigSetting::ShowTitleBarMenus,
+    ConfigSetting::ShowProjectSidebar,
     ConfigSetting::PaneControlsPosition,
     ConfigSetting::ShowPaneControls,
     ConfigSetting::SessionRetention,
@@ -458,6 +460,10 @@ impl ConfigSetting {
             Self::ShowTitleBarMenus => (
                 &["hide_title_bar_menus"],
                 switch!(hide_title_bar_menus, default true, shown_inverted true),
+            ),
+            Self::ShowProjectSidebar => (
+                &["hide_project_sidebar"],
+                switch!(hide_project_sidebar, default false, shown_inverted true),
             ),
             Self::PaneControlsPosition => (
                 &["pane_controls_position"],

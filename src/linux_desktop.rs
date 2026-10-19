@@ -33,7 +33,19 @@ pub(crate) fn update_profile_actions(
         return Ok(false);
     };
     let path = user_desktop_entry_path(Path::new(&home));
-    let metadata = match fs::symlink_metadata(&path) {
+    let Ok(executable) = env::current_exe() else {
+        return Ok(false);
+    };
+    update_profile_actions_at(&path, &executable, profiles, hidden_profiles)
+}
+
+fn update_profile_actions_at(
+    path: &Path,
+    executable: &Path,
+    profiles: &[Profile],
+    hidden_profiles: &HashSet<String>,
+) -> Result<bool> {
+    let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
         Err(_) => return Ok(false),
@@ -41,21 +53,82 @@ pub(crate) fn update_profile_actions(
     if !metadata.file_type().is_file() || !is_writable(&metadata) {
         return Ok(false);
     }
-    let Ok(contents) = fs::read_to_string(&path) else {
+    let Ok(contents) = fs::read_to_string(path) else {
         return Ok(false);
     };
-    let Ok(executable) = env::current_exe() else {
+    // The entry belongs to the installation it launches. A debug build, a
+    // build in a worktree or an upgraded-over process that merely shares the
+    // user's home must not rewrite it: it would replace the installed
+    // profile list with its own and point every profile action at itself.
+    if !entry_launches(&contents, executable) {
         return Ok(false);
-    };
+    }
     let Some(updated) =
-        render_managed_desktop_entry(&contents, &executable, profiles, hidden_profiles)
+        render_managed_desktop_entry(&contents, executable, profiles, hidden_profiles)
     else {
         return Ok(false);
     };
     if updated == contents {
         return Ok(false);
     }
-    replace_desktop_file(&path, &updated, &metadata.permissions()).map(|()| true)
+    replace_desktop_file(path, &updated, &metadata.permissions()).map(|()| true)
+}
+
+/// Whether the entry's main `Exec=` starts `executable`.
+///
+/// A bare program name is resolved through `PATH`, as a launcher would. Both
+/// sides are canonicalized so a symlinked install location still matches; one
+/// that cannot be resolved (a binary replaced while it runs reads as
+/// `... (deleted)`) matches nothing.
+fn entry_launches(contents: &str, executable: &Path) -> bool {
+    let Some(program) = main_exec_program(contents) else {
+        return false;
+    };
+    let program = Path::new(&program);
+    let program = if program.components().count() > 1 {
+        program.to_path_buf()
+    } else {
+        let Some(path) = env::var_os("PATH") else {
+            return false;
+        };
+        let Some(found) = env::split_paths(&path)
+            .filter(|directory| directory.is_absolute())
+            .map(|directory| directory.join(program))
+            .find(|candidate| candidate.is_file())
+        else {
+            return false;
+        };
+        found
+    };
+    matches!(
+        (fs::canonicalize(program), fs::canonicalize(executable)),
+        (Ok(launched), Ok(running)) if launched == running
+    )
+}
+
+/// The program of the main `Exec=` line, unquoted as `quote_exec_argument`
+/// quotes it.
+fn main_exec_program(contents: &str) -> Option<String> {
+    let desktop_entry = &contents[..contents.find("\n[Desktop Action ")? + 1];
+    let command = desktop_entry
+        .lines()
+        .find_map(|line| line.strip_prefix("Exec="))?;
+    let Some(quoted) = command.strip_prefix('"') else {
+        return command
+            .split_whitespace()
+            .next()
+            .map(str::to_owned)
+            .filter(|program| !program.is_empty());
+    };
+    let mut program = String::new();
+    let mut characters = quoted.chars();
+    loop {
+        match characters.next()? {
+            '"' => return Some(program),
+            '\\' => program.push(characters.next()?),
+            character => program.push(character),
+        }
+    }
 }
 
 fn user_desktop_entry_path(home: &Path) -> PathBuf {

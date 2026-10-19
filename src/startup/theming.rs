@@ -195,6 +195,20 @@ pub(crate) fn normalize_keymap_key_names(content: &str) -> String {
     let content = content
         .replace("page-up", "pageup")
         .replace("page-down", "pagedown");
+    rewrite_keymap_keystrokes(content, keymap_keystroke_storage)
+}
+
+/// The keymap as GPUI binds it: [`normalize_keymap_key_names`], with every
+/// `ctrl-shift-KEY` alias in the spelling the key event carries. Only for
+/// loading; the file and the settings editor keep the public spelling.
+pub(crate) fn keymap_contents_for_binding(content: &str) -> String {
+    rewrite_keymap_keystrokes(
+        normalize_keymap_key_names(content),
+        keymap_keystroke_binding,
+    )
+}
+
+fn rewrite_keymap_keystrokes(content: String, rewrite: fn(&str) -> String) -> String {
     let Ok(mut root) = serde_json::from_str::<Value>(&content) else {
         return content;
     };
@@ -209,7 +223,7 @@ pub(crate) fn normalize_keymap_key_names(content: &str) -> String {
         };
         let entries = std::mem::take(bindings);
         for (keystroke, action) in entries {
-            let normalized = keymap_keystroke_storage(&keystroke);
+            let normalized = rewrite(&keystroke);
             changed |= normalized != keystroke;
             bindings.insert(normalized, action);
         }
@@ -223,7 +237,7 @@ pub(crate) fn normalize_keymap_key_names(content: &str) -> String {
 }
 
 pub(crate) fn validate_keymap_contents(content: &str, cx: &mut App) -> Result<()> {
-    let content = normalize_keymap_key_names(content);
+    let content = keymap_contents_for_binding(content);
     match KeymapFile::load(&content, cx) {
         KeymapFileLoadResult::Success { .. } => Ok(()),
         KeymapFileLoadResult::SomeFailedToLoad { error_message, .. } => {

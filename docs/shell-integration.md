@@ -359,6 +359,21 @@ unauthenticated. The nonce protects against bytes printed into the pane, not
 against a program the pane runs — anything that can read the shell's
 environment can learn it.
 
+The Zsh integration also marks where each prompt starts and where each command
+starts, with the standard OSC 133 `A` and `C` sequences. Zsh draws its whole
+prompt again when the pane is resized, and it finds the old prompt by moving
+up as many rows as it drew it on. While the shell is at its prompt, Zetta
+therefore leaves the prompt's rows as they are when the pane changes width.
+Rows that no longer fit are cut off rather than wrapped onto another row, and
+wrapped rows are not joined back together. Output above the prompt still
+reflows. Without the marks, every narrowing left a copy of a full-width prompt
+line (one with a right-aligned `RPROMPT`, for instance) above the redrawn one.
+Fish 4 sends the same marks itself. The Bash and PowerShell integrations do
+not send them, because cutting off a prompt row is safe only for a shell that
+draws all of it again. The marks carry no
+nonce: text printed into the pane can forge one, but all it can do is stop the
+rows below it being rewrapped at the next resize.
+
 The startup files and commands are:
 
 - Bash: `~/.bashrc`

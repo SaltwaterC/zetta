@@ -12,7 +12,7 @@ fn palette_shortcut(
 ) -> Option<std::rc::Rc<[gpui::KeybindingKeystroke]>> {
     focus
         .and_then(|focus| window.highest_precedence_binding_for_action_in(action, focus))
-        .map(|binding| binding.keystrokes().to_vec().into())
+        .map(|binding| crate::startup::public_keystrokes(binding.keystrokes()))
 }
 
 impl Zetta {
@@ -47,6 +47,17 @@ impl Zetta {
             .filter(|action| action_available_in_launch_mode(action.name(), self.no_mux))
             .filter(|action| action.name() != ToggleCommandPalette.name())
             .filter(|action| action.name() != ApplyPaneSplitTemplate::name_for_type())
+            .filter(|action| {
+                self.tab_groups_enabled()
+                    || ![
+                        ToggleSidebar.name(),
+                        ShowMainTabs.name(),
+                        NextTabGroup.name(),
+                        PreviousTabGroup.name(),
+                        NewWorktree.name(),
+                    ]
+                    .contains(&action.name())
+            })
             // Actions the palette offers even where the focused element does
             // not register them, because they act on the tab or pane rather
             // than on what has focus.
@@ -80,6 +91,7 @@ impl Zetta {
                 }),
         );
         commands.extend(project_palette_commands(self.projects.registry.roots()));
+        commands.extend(self.tab_group_palette_commands());
         self.command_palette = Some(CommandPalette::new(commands));
         self.command_palette_focus.focus(window, cx);
         cx.notify();
@@ -189,6 +201,9 @@ impl Zetta {
             return;
         }
         if self.close_confirmation_key_down(event, window, cx) {
+            return;
+        }
+        if self.worktree_prompt_key_down(event, window, cx) {
             return;
         }
         if self.session_authentication_key_down(event, window, cx) {

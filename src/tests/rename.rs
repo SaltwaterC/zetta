@@ -42,6 +42,7 @@ fn tab(attention_id: u64, custom_title: Option<&str>) -> Tab {
         editing_overlay_pane: None,
         overlay_buffer: None,
         overlay_style_picker: None,
+        group: Default::default(),
     }
 }
 

@@ -47,6 +47,9 @@ enum TabMoveDirection {
 pub(crate) enum NewTabOrigin {
     CurrentSession,
     ProjectEntry,
+    /// Selecting a tab group that has no tabs yet. Like entering a project, it
+    /// must not inherit the directory of a pane in the group being left.
+    GroupEntry,
 }
 
 pub(crate) enum TerminalLaunch {
@@ -59,7 +62,7 @@ impl NewTabOrigin {
     fn inherits_working_directory(self, scope: WorkingDirectoryScope) -> bool {
         match self {
             Self::CurrentSession => scope.inherits_for_new_tab(),
-            Self::ProjectEntry => false,
+            Self::ProjectEntry | Self::GroupEntry => false,
         }
     }
 }
@@ -103,6 +106,25 @@ fn reorder_items_by_id<T>(
     items.iter().position(|item| item_id(item) == active_id)
 }
 
+/// The nearest item in `direction` from `index` that `in_view` keeps, which is
+/// the neighbour a move swaps with: the tab bar shows one group's tabs, and a
+/// tab moves past the ones it can see.
+fn adjacent_index_in_view<T>(
+    items: &[T],
+    index: usize,
+    direction: TabMoveDirection,
+    in_view: impl Fn(&T) -> bool,
+) -> Option<usize> {
+    match direction {
+        TabMoveDirection::Left => (0..index.min(items.len()))
+            .rev()
+            .find(|candidate| in_view(&items[*candidate])),
+        TabMoveDirection::Right => {
+            (index + 1..items.len()).find(|candidate| in_view(&items[*candidate]))
+        }
+    }
+}
+
 fn move_item_by_id<T>(
     items: &mut Vec<T>,
     source_id: u64,
@@ -110,22 +132,15 @@ fn move_item_by_id<T>(
     active_id: u64,
     enabled: bool,
     item_id: impl Fn(&T) -> u64,
+    in_view: impl Fn(&T) -> bool,
 ) -> Option<usize> {
     if !enabled {
         return None;
     }
 
     let source_index = items.iter().position(|item| item_id(item) == source_id)?;
-    let target_id = match direction {
-        TabMoveDirection::Left => source_index
-            .checked_sub(1)
-            .and_then(|target_index| items.get(target_index))
-            .map(&item_id),
-        TabMoveDirection::Right => source_index
-            .checked_add(1)
-            .and_then(|target_index| items.get(target_index))
-            .map(&item_id),
-    }?;
+    let target_id = adjacent_index_in_view(items, source_index, direction, in_view)
+        .map(|target_index| item_id(&items[target_index]))?;
     let position = match direction {
         TabMoveDirection::Left => TabDropPosition::Before(target_id),
         TabMoveDirection::Right => TabDropPosition::After(target_id),
@@ -162,15 +177,16 @@ pub(crate) fn tab_drop_preserves_pinning(
         .is_some_and(|tab| tab.pinned == source_pinned)
 }
 
-fn tab_move_preserves_pinning(tabs: &[Tab], index: usize, direction: TabMoveDirection) -> bool {
+fn tab_move_preserves_pinning(
+    tabs: &[Tab],
+    index: usize,
+    direction: TabMoveDirection,
+    in_view: impl Fn(&Tab) -> bool,
+) -> bool {
     let Some(tab) = tabs.get(index) else {
         return false;
     };
-    let target_index = match direction {
-        TabMoveDirection::Left => index.checked_sub(1),
-        TabMoveDirection::Right => index.checked_add(1),
-    };
-    target_index
+    adjacent_index_in_view(tabs, index, direction, in_view)
         .and_then(|target_index| tabs.get(target_index))
         .is_some_and(|target| target.pinned == tab.pinned)
 }
@@ -390,7 +406,7 @@ fn background_authentication_for_close(
     }
 }
 
-fn new_tab_profile(
+pub(crate) fn new_tab_profile(
     active_profile: Option<&Profile>,
     profiles: &[Profile],
     default_profile: usize,
@@ -497,6 +513,15 @@ pub(crate) struct Zetta {
     pub(crate) transient_notice: TransientNotice,
     pub(crate) key_passthrough: Option<crate::key_passthrough::KeyPassthrough>,
     pub(crate) tabs: Vec<Tab>,
+    /// What the window remembers about tab groups; see `tab_groups`.
+    pub(crate) tab_groups: crate::tab_groups::TabGroupState,
+    /// Whether the project sidebar is open, and what it has learned about
+    /// each project's worktrees; see `sidebar`.
+    pub(crate) sidebar: crate::sidebar::SidebarState,
+    /// The worktree dialog: naming a new worktree, or confirming that one is
+    /// integrated or discarded. See `worktree_ui`.
+    pub(crate) worktree_prompt: Option<crate::worktree_ui::WorktreePrompt>,
+    pub(crate) worktree_prompt_focus: gpui::FocusHandle,
     /// Paste access is local to this viewer and disappears with its tab.
     pub(crate) remote_clipboard_paste_tabs: HashSet<u64>,
     /// Tabs whose panes may not write the clipboard. Copy is allowed by
@@ -637,6 +662,7 @@ pub(crate) struct Zetta {
     pub(crate) multi_command_launches: BoundedLaunchQueue<QueuedTerminalLaunch>,
     /// Render boundaries created on first use; see `view_boundary`.
     pub(crate) title_bar_chrome_view: Option<Entity<ZettaSubview>>,
+    pub(crate) sidebar_view: Option<Entity<ZettaSubview>>,
     pub(crate) settings_surface_view: Option<Entity<ZettaSubview>>,
     pub(crate) tab_icon_picker_view: Option<Entity<ZettaSubview>>,
     pub(crate) settings_page_view: Option<Entity<ZettaSubview>>,
@@ -819,6 +845,7 @@ impl Zetta {
             self.remote_session_key_envelope = None;
         }
         self.close_tab_confirmation = None;
+        self.worktree_prompt = None;
         self.projects.trust_prompt = None;
         #[cfg(target_os = "macos")]
         self.script_open.clear();
@@ -1015,6 +1042,10 @@ impl Zetta {
             transient_notice: TransientNotice::default(),
             key_passthrough: None,
             tabs: Vec::new(),
+            tab_groups: Default::default(),
+            sidebar: Default::default(),
+            worktree_prompt: None,
+            worktree_prompt_focus: cx.focus_handle(),
             pending_grid_requests: HashMap::new(),
             launch_grid: None,
             remote_clipboard_paste_tabs: HashSet::new(),
@@ -1102,6 +1133,7 @@ impl Zetta {
             multi_command_launches: BoundedLaunchQueue::new(MAX_CONCURRENT_MULTI_COMMAND_SPAWNS),
             settings_focus: cx.focus_handle(),
             title_bar_chrome_view: None,
+            sidebar_view: None,
             settings_surface_view: None,
             tab_icon_picker_view: None,
             settings_page_view: None,

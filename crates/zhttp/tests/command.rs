@@ -16,26 +16,51 @@ impl Drop for ServerProcess {
     }
 }
 
+/// How many fresh ports to try before giving up on a bind race.
+const PORT_ATTEMPTS: usize = 20;
+
+/// Starts the server on a port the OS reported free a moment ago.
+///
+/// `--port 0` is refused by the CLI, so the port is picked here and handed
+/// over, which leaves a window between closing the reservation and the child
+/// binding it. Anything can take the port in that window — another test's
+/// listener, or the ephemeral source port of an outgoing connection — so a
+/// child that loses the race is retried on a fresh port rather than failing
+/// the test. Any other startup failure is still reported at once.
 fn start_server(root: &std::path::Path, options: &[&str]) -> ServerProcess {
-    let reservation = TcpListener::bind(("127.0.0.1", 0)).unwrap();
-    let port = reservation.local_addr().unwrap().port();
-    drop(reservation);
-    let mut child = Command::new(env!("CARGO_BIN_EXE_zhttp"))
-        .args(["server", "--port", &port.to_string(), "--root"])
-        .arg(root)
-        .args(options)
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let stderr = child.stderr.take().unwrap();
-    let process = ServerProcess { child, port };
-    let mut banner = String::new();
-    std::io::BufReader::new(stderr)
-        .read_line(&mut banner)
-        .unwrap();
-    assert!(banner.contains("Serving "), "{banner}");
-    process
+    let mut last_banner = String::new();
+    for _ in 0..PORT_ATTEMPTS {
+        // Reserved on the wildcard address the server binds, so a port held
+        // on any local address is never offered.
+        let reservation = TcpListener::bind(("0.0.0.0", 0)).unwrap();
+        let port = reservation.local_addr().unwrap().port();
+        drop(reservation);
+        let mut child = Command::new(env!("CARGO_BIN_EXE_zhttp"))
+            .args(["server", "--port", &port.to_string(), "--root"])
+            .arg(root)
+            .args(options)
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let stderr = child.stderr.take().unwrap();
+        let process = ServerProcess { child, port };
+        let mut banner = String::new();
+        std::io::BufReader::new(stderr)
+            .read_line(&mut banner)
+            .unwrap();
+        if banner.contains("Serving ") {
+            return process;
+        }
+        // The server's own prefix rather than the OS's wording, which is not
+        // "Address already in use" on Windows.
+        assert!(
+            banner.contains("binding HTTP server to TCP port"),
+            "{banner}"
+        );
+        last_banner = banner;
+    }
+    panic!("no free port after {PORT_ATTEMPTS} attempts: {last_banner}");
 }
 
 fn request(port: u16, path: &str, host: &str) -> String {

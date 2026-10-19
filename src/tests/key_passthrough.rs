@@ -119,6 +119,7 @@ fn shift_f9_arms_the_focused_terminal_and_escape_cancels(cx: &mut TestAppContext
             editing_overlay_pane: None,
             overlay_buffer: None,
             overlay_style_picker: None,
+            group: Default::default(),
         });
         zetta.active_tab = zetta.tabs.len() - 1;
         let builder = TerminalBuilder::new_display_only(

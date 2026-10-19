@@ -28,6 +28,10 @@ pub(crate) struct ProjectState {
     /// reports; see [`PaneRootAnchor`]. A root inserted any other way has no
     /// entry and is compared against its own spelling.
     pane_anchors: HashMap<u64, PaneRootAnchor>,
+    /// The tab group each detected pane's directory belongs to, so a tab
+    /// arriving from a session can be placed by a detection that ran while it
+    /// was away; see `Zetta::insert_tab_into_active_group`.
+    pane_groups: HashMap<u64, TabGroup>,
     detections: HashMap<u64, ProjectDetectionState>,
     next_detection_generation: u64,
     entered: HashSet<(u64, String)>,
@@ -49,6 +53,7 @@ impl ProjectState {
             configs: HashMap::new(),
             pane_roots: HashMap::new(),
             pane_anchors: HashMap::new(),
+            pane_groups: HashMap::new(),
             detections: HashMap::new(),
             next_detection_generation: 0,
             entered: HashSet::new(),
@@ -57,6 +62,11 @@ impl ProjectState {
             dismissed_offers: HashSet::new(),
             offer: None,
         }
+    }
+
+    /// The group the pane's last local detection placed its directory in.
+    pub(crate) fn group_for_pane(&self, pane_id: u64) -> Option<&TabGroup> {
+        self.pane_groups.get(&pane_id)
     }
 
     pub(crate) fn root_for_pane(&self, pane_id: u64) -> Option<&PathBuf> {
@@ -182,6 +192,7 @@ impl ProjectState {
 
     pub(crate) fn forget_pane(&mut self, pane_id: u64) {
         self.clear_pane_root(pane_id);
+        self.pane_groups.remove(&pane_id);
         self.detections.remove(&pane_id);
         if self
             .offer
@@ -238,6 +249,10 @@ struct ProjectDetectionResult {
     /// does not resolve it again on the GUI thread.
     offer_root: Option<PathBuf>,
     anchor: Option<PaneRootAnchor>,
+    /// The directory as the filesystem spells it, when it could be resolved.
+    canonical: Option<PathBuf>,
+    /// The root of the managed worktree the directory is in.
+    managed_worktree: Option<PathBuf>,
 }
 
 /// How a pane's reported directories map onto the canonical root its project
@@ -369,6 +384,10 @@ fn detect_project_for_directory(
             managed_worktree: None,
         }
     };
+    let managed_worktree = resolution
+        .managed_worktree
+        .as_ref()
+        .map(|worktree| worktree.root.clone());
     if let Some(root) = resolution.root {
         let config_root = resolution.config_root.unwrap_or_else(|| root.clone());
         let config = (!loaded_roots
@@ -387,6 +406,8 @@ fn detect_project_for_directory(
             config,
             offer_root: None,
             anchor,
+            canonical,
+            managed_worktree,
         };
     }
     let offer_root = is_directory
@@ -403,6 +424,8 @@ fn detect_project_for_directory(
         config: None,
         offer_root,
         anchor: None,
+        canonical,
+        managed_worktree: None,
     }
 }
 
@@ -729,6 +752,9 @@ impl Zetta {
             if has_local_context {
                 self.projects.forget_pane(pane_id);
             }
+            // A remote directory never places a tab, so it keeps the group it
+            // arrived in.
+            self.tab_groups.arrived(tab_id);
             return;
         }
         let Some(pane) = self.project_detection_pane(tab_id, pane_id) else {
@@ -746,6 +772,15 @@ impl Zetta {
                 .is_some_and(|argv| crate::ssh_image_paste::foreground_is_mosh_session(&argv))
         });
         if remote_foreground {
+            // Placed when the client exits, the tab would move under a user
+            // who has long since started working in it.
+            if self
+                .tabs
+                .iter()
+                .any(|tab| tab.id == tab_id && tab.active_pane == pane_id)
+            {
+                self.tab_groups.arrived(tab_id);
+            }
             if self.projects.leave_for_remote_foreground(pane_id) {
                 if self.is_active_pane(tab_id, pane_id) {
                     self.activate_current_project(window, cx);
@@ -959,6 +994,7 @@ impl Zetta {
     ) {
         if self.project_context_policy(tab_id).is_remote() {
             self.projects.forget_pane(pane_id);
+            self.tab_groups.arrived(tab_id);
             return;
         }
         let Some(state) = self.projects.detections.get(&pane_id) else {
@@ -974,6 +1010,17 @@ impl Zetta {
         let registered_root = result
             .registered_root
             .filter(|root| self.projects.registry.contains(root));
+        let group = crate::tab_groups::group_for_detected_directory(
+            &crate::tab_groups::DetectedDirectory {
+                reported: &directory,
+                canonical: result.canonical.as_deref(),
+                registered_root: registered_root.as_deref(),
+                managed_worktree: result.managed_worktree.as_deref(),
+            },
+            &self.sidebar.worktrees,
+        );
+        self.place_arriving_tab(tab_id, pane_id, &group);
+        self.projects.pane_groups.insert(pane_id, group);
         match registered_root {
             Some(registered_root) => {
                 let config_root = result
@@ -1355,6 +1402,21 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let group = TabGroup::Project(root.clone());
+        self.open_project_tab_in_group(root, working_directory, group, window, cx);
+    }
+
+    /// Opens a project tab into a chosen tab group. The group is carried across
+    /// the configuration load and applied in the same update that opens the
+    /// tab, so a tab opened by anything else in the meantime cannot take it.
+    pub(crate) fn open_project_tab_in_group(
+        &mut self,
+        root: PathBuf,
+        working_directory: Option<PathBuf>,
+        group: TabGroup,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if !self.projects.registry.contains(&root) {
             self.show_error_notice(
                 format!("{} is not a registered Zetta project", root.display()),
@@ -1382,16 +1444,14 @@ impl Zetta {
                     })
                     .await;
                 this.update_in(cx, |this, window, cx| match result {
-                    Ok(project) => match working_directory {
-                        Some(working_directory) => this
-                            .open_loaded_project_tab_with_working_directory(
-                                project,
-                                Some(working_directory),
-                                window,
-                                cx,
-                            ),
-                        None => this.open_loaded_project_tab(project, window, cx),
-                    },
+                    Ok(project) => this.with_next_tab_in_group(group, |this| {
+                        this.open_loaded_project_tab_with_working_directory(
+                            project,
+                            working_directory,
+                            window,
+                            cx,
+                        );
+                    }),
                     Err(error) => {
                         this.configuration_error = Some(format!(
                             "Could not open project {}: {error:#}",
@@ -1403,15 +1463,6 @@ impl Zetta {
                 .ok();
             })
             .detach();
-    }
-
-    pub(crate) fn open_loaded_project_tab(
-        &mut self,
-        project: ProjectConfig,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.open_loaded_project_tab_with_working_directory(project, None, window, cx);
     }
 
     pub(crate) fn open_loaded_project_tab_with_working_directory(
@@ -1493,6 +1544,7 @@ impl Zetta {
         }
         self.reschedule_project_detection(window, cx);
         self.activate_current_project(window, cx);
+        self.sidebar_registry_changed(cx);
         Ok(())
     }
 
@@ -1585,6 +1637,7 @@ impl Zetta {
                         }
                         this.projects.offer = None;
                         this.activate_current_project(window, cx);
+                        this.sidebar_registry_changed(cx);
                         reload_projects_in_other_windows(window.window_handle().window_id(), cx);
                     }
                     Err(error) => {

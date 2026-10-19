@@ -292,3 +292,17 @@ before scrolling wrapped content into history. This keeps an unsubmitted shell
 prompt visible when splitting a pane, including its cursor position; occupied
 rows below the cursor remain intact. Grid boundary tests and native PSReadLine
 tests in `console-server` cover this behavior.
+
+## Zetta patch: prompt rows stay out of reflow
+
+`term/prompt.rs` (Zetta-authored, tests in `src/tests/term/prompt.rs`) tracks
+the screen line an OSC 133 `A` mark says the shell's prompt starts on, until
+the `C` mark of the command it runs. While it is set, `Term::resize` truncates
+the prompt's rows to the new width and clears their wrap flags before the grid
+reflows, then puts the prompt back above the cursor. zsh redraws its prompt on
+`SIGWINCH` by moving up the rows it drew it on; reflow changed that count, and
+every narrowing left a stale copy of a full-width prompt line. The upstream
+files touched are `term/mod.rs` (the field, the resize hooks, the scroll and
+`swap_alt` updates), `term/handler.rs` (the mark, `clear_screen`,
+`reset_state`) and `term/reflow.rs` (the snapshot and the published fields, so
+off-thread history reflow treats the prompt the same way).

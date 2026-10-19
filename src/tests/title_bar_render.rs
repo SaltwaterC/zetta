@@ -346,6 +346,7 @@ impl Render for TitleBarLayoutHarness {
             left_window_controls,
             right_title_bar_controls,
             show_title_bar_menus: true,
+            sidebar_toggle: None,
             application_menu: div().h_full().w(px(48.)).flex_none().into_any_element(),
             profile_menu: div().h_full().w(px(32.)).flex_none().into_any_element(),
             show_title_bar_buttons: false,

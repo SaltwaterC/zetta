@@ -78,9 +78,9 @@ pub(crate) use cli_help::{command_help, format_help_table};
 #[cfg(test)]
 pub(crate) use keybindings::RENAME_TAB_KEYBINDING;
 pub(crate) use keybindings::{
-    KeymapSource, PROFILE_SHORTCUT_KEYS, bind_keybindings, keymap_keystroke_display,
-    keymap_keystroke_storage, load_keybindings, profile_keybindings, profile_shortcut_label,
-    read_keymap_source,
+    KeymapSource, PROFILE_SHORTCUT_KEYS, bind_keybindings, keymap_keystroke_binding,
+    keymap_keystroke_display, keymap_keystroke_storage, load_keybindings, profile_keybindings,
+    profile_shortcut_label, public_keystrokes, read_keymap_source,
 };
 #[cfg(target_os = "macos")]
 pub(crate) use keybindings::{

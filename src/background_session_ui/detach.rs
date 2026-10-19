@@ -627,10 +627,8 @@ impl Zetta {
             self.leave_shared_tab(tab_id, cx);
         }
         let tab = self.tabs.remove(index);
-        if index < self.active_tab {
-            self.active_tab -= 1;
-        } else if self.active_tab >= self.tabs.len() && !self.tabs.is_empty() {
-            self.active_tab = self.tabs.len() - 1;
+        if !self.tabs.is_empty() {
+            self.settle_active_tab_after_removal(index, &tab.group);
         }
         self.disable_tab_move_mode_if_unavailable(cx);
         let origin = HandoverOrigin::Tab {

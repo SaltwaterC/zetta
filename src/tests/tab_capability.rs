@@ -76,6 +76,7 @@ fn open_stand_in_tab(zetta: &gpui::Entity<Zetta>, cx: &mut gpui::VisualTestConte
             editing_overlay_pane: None,
             overlay_buffer: None,
             overlay_style_picker: None,
+            group: Default::default(),
         });
         zetta.active_tab = zetta.tabs.len() - 1;
         tab_id

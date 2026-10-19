@@ -239,6 +239,14 @@ if [[ ${__ZETTA_LIFECYCLE_TRACKING_VERSION:-0} != 3 ||
     fi
 fi
 
+# OSC 133 prompt marks: Zetta keeps a marked prompt's rows out of reflow, so
+# zsh's redraw on resize lands on them. Written to the terminal, not stdout.
+function __zetta_mark_prompt { local s=$?; [[ -n $TTY ]] && print -n '\e]133;A\e\\' >$TTY; return s }
+function __zetta_mark_command { local s=$?; [[ -n $TTY ]] && print -n '\e]133;C\e\\' >$TTY; return s }
+autoload -Uz add-zsh-hook
+add-zsh-hook precmd __zetta_mark_prompt
+add-zsh-hook preexec __zetta_mark_command
+
 if (( ! ${+EDITOR} )); then
     export EDITOR='zetta vi'
 fi

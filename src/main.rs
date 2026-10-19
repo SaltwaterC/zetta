@@ -288,7 +288,12 @@ actions!(
         ToggleSerialConsole,
         StartHttpServer,
         StartTftpServer,
-        TogglePerformanceOverlay
+        TogglePerformanceOverlay,
+        ToggleSidebar,
+        ShowMainTabs,
+        NextTabGroup,
+        PreviousTabGroup,
+        NewWorktree
     ]
 );
 
@@ -300,6 +305,7 @@ fn action_is_enabled_in_build(name: &str) -> bool {
         name if name == ToggleRemoteClipboardPaste.name() => cfg!(feature = "clipboard"),
         name if name == ToggleRemoteClipboardCopy.name() => cfg!(feature = "clipboard"),
         name if name == RequestFocusStatusAccess.name() => cfg!(target_os = "macos"),
+        name if name == NewWorktree.name() => cfg!(feature = "worktree"),
         _ => true,
     }
 }
@@ -363,6 +369,15 @@ struct SelectOverflowTab {
 #[action(namespace = zetta, no_json, no_register)]
 struct OpenProject {
     root: PathBuf,
+}
+
+/// Shows one tab group's tabs, from the sidebar or the command palette. Groups
+/// are named by filesystem paths, so like [`OpenProject`] this is never bound
+/// in a keymap.
+#[derive(Clone, Debug, PartialEq, Action)]
+#[action(namespace = zetta, no_json, no_register)]
+struct ActivateTabGroup {
+    group: TabGroup,
 }
 
 static PERFORMANCE_OVERLAY_COUNT: AtomicUsize = AtomicUsize::new(0);
@@ -465,10 +480,14 @@ mod remote_session_ui;
 mod remote_session_ui;
 #[cfg(target_os = "macos")]
 mod script_open_ui;
+mod sidebar;
+mod sidebar_render;
 mod stacked_panes;
 mod tab_bar_render;
 mod tab_capability;
+mod tab_groups;
 use tab_bar_render::*;
+use tab_groups::TabGroup;
 mod tab_body_render;
 mod title_bar_render;
 use title_bar_render::*;
@@ -481,6 +500,11 @@ use view_boundary::{ZettaSubview, overlay_boundary, overlay_boundary_root};
 mod project_context;
 mod startup;
 mod worktree_detection;
+#[cfg(feature = "worktree")]
+mod worktree_ui;
+#[cfg(not(feature = "worktree"))]
+#[path = "worktree_ui_stub.rs"]
+mod worktree_ui;
 use project_context::*;
 use shell_integration::*;
 #[cfg(windows)]

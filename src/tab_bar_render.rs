@@ -25,9 +25,14 @@ pub(crate) struct TabBarChrome {
     pub(crate) compact_leading_background: Hsla,
     pub(crate) tab_close_button_on_left: bool,
     pub(crate) is_renaming_tab: bool,
+    /// The indices into `Zetta::tabs` of the tabs in the active group, in
+    /// order. Every count and position below is within this list; an index a
+    /// tab is clicked or closed by is still the tab's own.
+    pub(crate) view: Arc<[usize]>,
     pub(crate) tab_count: usize,
     pub(crate) pinned_tab_count: usize,
     pub(crate) is_renaming_pinned: bool,
+    /// The active tab's position in `view`.
     pub(crate) selected_tab_index: usize,
     pub(crate) tab_move_mode_active: bool,
     pub(crate) no_mux: bool,
@@ -223,7 +228,11 @@ fn render_tabs_row(chrome: TabBarChrome) -> impl IntoElement {
 
 /// Everything a single tab needs that the enclosing measured row already knows.
 struct TabChrome<'a> {
+    /// The tab's index in `Zetta::tabs`, which clicks and closes act on.
     index: usize,
+    /// The tab's position in the group the bar shows, which its neighbours
+    /// and the selected tab are measured in.
+    position: usize,
     selected_tab_index: usize,
     selected: bool,
     next_selected: bool,
@@ -470,6 +479,7 @@ fn render_tab(
 ) -> AnyElement {
     let TabChrome {
         index,
+        position,
         selected_tab_index,
         selected,
         tab_count,
@@ -611,7 +621,7 @@ fn render_tab(
     let tab_element = if cx.has_active_drag() {
         let defer_after_surface = tab_drop_surface_needs_deferred_paint(
             compact_mode,
-            index,
+            position,
             selected_tab_index,
             true,
             compact_tab_bottom_left,
@@ -1272,6 +1282,8 @@ fn tab_bar_tab_elements(
         no_mux,
         compact_leading_background,
         tab_bar_background,
+        view,
+        selected_tab_index,
         ..
     } = chrome.clone();
     handle
@@ -1279,7 +1291,7 @@ fn tab_bar_tab_elements(
             let overflow_entries = |range: std::ops::Range<usize>| {
                 range
                     .filter_map(|index| {
-                        let absolute_index = pinned_count + index;
+                        let absolute_index = *view.get(pinned_count + index)?;
                         let tab = this.tabs.get(absolute_index)?;
                         Some(TabOverflowEntry {
                             index: absolute_index,
@@ -1292,15 +1304,15 @@ fn tab_bar_tab_elements(
             let left_overflow = overflow_entries(0..visible_range.start);
             let right_overflow = overflow_entries(visible_range.end..unpinned_count);
 
-            let visible_tabs: Vec<_> = this
-                .tabs
+            let visible_tabs: Vec<_> = view
                 .iter()
                 .enumerate()
-                .filter(|(index, _)| {
-                    *index < pinned_count
-                        || visible_range.contains(&index.saturating_sub(pinned_count))
+                .filter(|(position, _)| {
+                    *position < pinned_count
+                        || visible_range.contains(&position.saturating_sub(pinned_count))
                 })
-                .map(|(index, tab)| {
+                .filter_map(|(position, index)| Some((position, *index, this.tabs.get(*index)?)))
+                .map(|(position, index, tab)| {
                     let selected = index == this.active_tab;
                     // Resolved once per visible tab and carried through: the
                     // selected tab's neighbour lookups below want the same
@@ -1314,12 +1326,20 @@ fn tab_bar_tab_elements(
                     };
                     let theme = this.theme_for_tab_with_policy(tab, policy, cx);
                     let icon = this.resolved_tab_icon_with_policy(tab, policy);
-                    (index, tab, selected, theme, icon, remote_destination)
+                    (
+                        position,
+                        index,
+                        tab,
+                        selected,
+                        theme,
+                        icon,
+                        remote_destination,
+                    )
                 })
                 .collect();
             let first_visible_selected = visible_tabs
                 .first()
-                .is_some_and(|(_, _, sel, _, _, _)| *sel);
+                .is_some_and(|(_, _, _, sel, _, _, _)| *sel);
             let visible_tabs_for_neighbors = visible_tabs.clone();
             let tabs = visible_tabs
                 .into_iter()
@@ -1327,23 +1347,32 @@ fn tab_bar_tab_elements(
                 .map(
                     |(
                         visible_index,
-                        (index, tab, selected, tab_theme, resolved_icon, remote_destination),
+                        (
+                            position,
+                            index,
+                            tab,
+                            selected,
+                            tab_theme,
+                            resolved_icon,
+                            remote_destination,
+                        ),
                     )| {
                         let next_selected = visible_tabs_for_neighbors
                             .get(visible_index + 1)
-                            .is_some_and(|(_, _, next_sel, _, _, _)| *next_sel);
+                            .is_some_and(|(_, _, _, next_sel, _, _, _)| *next_sel);
                         let (left_transition_background, right_transition_background) = if selected
                         {
                             let left_background = visible_index
                                 .checked_sub(1)
                                 .and_then(|index| visible_tabs_for_neighbors.get(index))
-                                .map(|(_, _, _, theme, _, _)| {
+                                .map(|(_, _, _, _, theme, _, _)| {
                                     theme.colors().tab_inactive_background
                                 });
-                            let right_background =
-                                visible_tabs_for_neighbors.get(visible_index + 1).map(
-                                    |(_, _, _, theme, _, _)| theme.colors().tab_inactive_background,
-                                );
+                            let right_background = visible_tabs_for_neighbors
+                                .get(visible_index + 1)
+                                .map(|(_, _, _, _, theme, _, _)| {
+                                    theme.colors().tab_inactive_background
+                                });
                             // With no pinned tab or overflow trigger before it,
                             // the first visible tab sits directly beside the
                             // title-bar controls. Its rounded corner must reveal
@@ -1367,11 +1396,12 @@ fn tab_bar_tab_elements(
                         render_tab(
                             TabChrome {
                                 index,
-                                selected_tab_index: this.active_tab,
+                                position,
+                                selected_tab_index,
                                 selected,
                                 next_selected,
                                 tab_count,
-                                pinned: index < pinned_count,
+                                pinned: position < pinned_count,
                                 tab_move_mode_active,
                                 no_mux,
                                 remote_clipboard_paste: this

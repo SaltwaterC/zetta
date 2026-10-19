@@ -44,6 +44,7 @@ fn tab_pane_index_resolves_panes_without_scanning() {
         editing_overlay_pane: None,
         overlay_buffer: None,
         overlay_style_picker: None,
+        group: Default::default(),
     };
     for pane in &tab.panes {
         assert!(std::ptr::eq(tab.pane(pane.id).unwrap(), pane));
@@ -113,6 +114,7 @@ fn split_profile_comes_from_the_active_pane() {
         editing_overlay_pane: None,
         overlay_buffer: None,
         overlay_style_picker: None,
+        group: Default::default(),
     };
 
     let profile = tab.active_profile().unwrap();
@@ -161,6 +163,7 @@ fn closing_active_pane_restores_previous_focus() {
         editing_overlay_pane: None,
         overlay_buffer: None,
         overlay_style_picker: None,
+        group: Default::default(),
     };
 
     tab.remove_pane(3);
@@ -211,6 +214,7 @@ fn closing_inactive_pane_preserves_focus() {
         editing_overlay_pane: None,
         overlay_buffer: None,
         overlay_style_picker: None,
+        group: Default::default(),
     };
 
     tab.remove_pane(1);
@@ -271,6 +275,7 @@ fn pane_management_tab() -> Tab {
         editing_overlay_pane: None,
         overlay_buffer: None,
         overlay_style_picker: None,
+        group: Default::default(),
     }
 }
 

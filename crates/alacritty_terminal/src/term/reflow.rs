@@ -343,6 +343,7 @@ impl<T> Term<T> {
             damage: self.damage.clone(),
             config: self.config.clone(),
             reflow: PendingReflow::default(),
+            prompt: self.prompt,
         }
     }
 
@@ -423,7 +424,8 @@ impl<T> Term<T> {
             keyboard_mode_stack,
             inactive_keyboard_mode_stack,
             damage,
-            config
+            config,
+            prompt
         );
         self.mode.set(TermMode::VI, vi);
         self.damage.full = true;

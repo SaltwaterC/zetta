@@ -42,6 +42,7 @@ struct ZettaOverlays {
     remote_session: Option<AnyElement>,
     session_authentication: Option<AnyElement>,
     close_confirmation: Option<AnyElement>,
+    worktree_prompt: Option<AnyElement>,
     project_trust: Option<AnyElement>,
     script_open: Option<AnyElement>,
 }
@@ -175,6 +176,7 @@ impl Zetta {
             remote_session,
             session_authentication: modal_overlay(self.render_session_authentication_overlay(cx)),
             close_confirmation: modal_overlay(self.render_tab_close_confirmation_overlay(cx)),
+            worktree_prompt: modal_overlay(self.render_worktree_prompt_overlay(cx)),
             project_trust: modal_overlay(self.render_project_trust_overlay(cx)),
             script_open,
         }
@@ -291,6 +293,12 @@ impl Zetta {
     fn register_actions(content: gpui::Div, cx: &mut Context<Self>) -> gpui::Div {
         content
             .on_action(cx.listener(Self::new_tab))
+            .on_action(cx.listener(Self::toggle_sidebar))
+            .on_action(cx.listener(Self::show_main_tabs))
+            .on_action(cx.listener(Self::next_tab_group))
+            .on_action(cx.listener(Self::previous_tab_group))
+            .on_action(cx.listener(Self::activate_tab_group_action))
+            .on_action(cx.listener(Self::new_worktree))
             .on_action(cx.listener(Self::new_window))
             .on_action(cx.listener(Self::set_default_terminal))
             .on_action(cx.listener(Self::open_application_menu))
@@ -530,16 +538,40 @@ impl Zetta {
                 .flex_none()
                 .h(chrome_height),
         );
+        // The sidebar takes the window's bottom-left corner when it is shown,
+        // and is a cached sibling of the body for the reason the chrome is.
+        let sidebar = self.sidebar_visible().then(|| {
+            ZettaSubview::get_or_insert(
+                &mut self.sidebar_view,
+                crate::sidebar_render::render_sidebar_boundary,
+                &entity,
+                cx,
+            )
+            .cached(
+                gpui::StyleRefinement::default()
+                    .w(crate::sidebar::SIDEBAR_WIDTH)
+                    .flex_none()
+                    .h_full(),
+            )
+        });
         let body = self.render_tab_body(
             window,
-            frame.rounded_bottom_left,
+            frame.rounded_bottom_left && sidebar.is_none(),
             frame.rounded_bottom_right,
             frame.corner_radius,
             cx,
         );
         let column = div().size_full().flex().flex_col().child(chrome);
         self.render_feedback_banners(column, colors, &handle)
-            .child(div().flex_1().min_h_0().child(body))
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .flex_row()
+                    .children(sidebar)
+                    .child(div().flex_1().min_w_0().h_full().child(body)),
+            )
             .into_any_element()
     }
 
@@ -577,6 +609,9 @@ impl Zetta {
             .when(self.close_tab_confirmation.is_some(), |content| {
                 content.track_focus(&self.close_confirmation_focus)
             })
+            .when(self.worktree_prompt.is_some(), |content| {
+                content.track_focus(&self.worktree_prompt_focus)
+            })
             .when(
                 cfg!(feature = "zmux") && self.remote_session_picker.is_some(),
                 |content| content.track_focus(&self.remote_session_focus),
@@ -605,6 +640,7 @@ impl Zetta {
             overlays.serial_console,
             overlays.remote_session,
             overlays.session_authentication,
+            overlays.worktree_prompt,
             overlays.close_confirmation,
             overlays.project_trust,
             overlays.script_open,

@@ -223,10 +223,14 @@ fn fetch_github_recipients(
     parse_github_keys(&body).map_err(permanent_recipient_error)
 }
 
+/// GitHub throttles unauthenticated clients with 403 as well as 429, and
+/// `USER.keys` is public, so a 403 there is a rate limit rather than a
+/// statement about the configured account (an unknown one is a 404).
 fn is_retryable_github_status(status: reqwest::StatusCode) -> bool {
     matches!(
         status,
-        reqwest::StatusCode::REQUEST_TIMEOUT
+        reqwest::StatusCode::FORBIDDEN
+            | reqwest::StatusCode::REQUEST_TIMEOUT
             | reqwest::StatusCode::TOO_EARLY
             | reqwest::StatusCode::TOO_MANY_REQUESTS
     ) || status.is_server_error()

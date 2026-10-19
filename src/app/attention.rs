@@ -12,6 +12,7 @@ pub(crate) enum FocusSurface {
     ScriptOpen,
     ProjectTrust,
     CloseConfirmation,
+    WorktreePrompt,
     SessionAuthentication,
     RemoteSession,
     SerialConsole,
@@ -30,6 +31,7 @@ struct FocusSurfaceAvailability {
     script_open: bool,
     project_trust: bool,
     close_confirmation: bool,
+    worktree_prompt: bool,
     session_authentication: bool,
     remote_session: bool,
     serial_console: bool,
@@ -50,6 +52,8 @@ fn focus_surface(available: FocusSurfaceAvailability) -> Option<FocusSurface> {
         Some(FocusSurface::ProjectTrust)
     } else if available.close_confirmation {
         Some(FocusSurface::CloseConfirmation)
+    } else if available.worktree_prompt {
+        Some(FocusSurface::WorktreePrompt)
     } else if available.session_authentication {
         Some(FocusSurface::SessionAuthentication)
     } else if available.remote_session {
@@ -83,6 +87,7 @@ impl Zetta {
             script_open: self.script_open_is_open(),
             project_trust: self.projects.trust_prompt.is_some(),
             close_confirmation: self.close_tab_confirmation.is_some(),
+            worktree_prompt: self.worktree_prompt.is_some(),
             session_authentication: self.session_authentication.is_some(),
             remote_session: self.remote_session_picker.is_some(),
             serial_console: self.serial_console_is_open(),
@@ -117,6 +122,7 @@ impl Zetta {
                 }
             }
             FocusSurface::CloseConfirmation => self.close_confirmation_focus.focus(window, cx),
+            FocusSurface::WorktreePrompt => self.worktree_prompt_focus.focus(window, cx),
             FocusSurface::SessionAuthentication => {
                 self.session_authentication_focus.focus(window, cx);
             }

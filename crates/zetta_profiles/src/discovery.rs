@@ -181,21 +181,57 @@ const POSIX_PROFILE_CANDIDATES: &[(&str, &str)] = &[
     ("Nushell", "nu"),
 ];
 
+/// The Homebrew installations on this machine.
+///
+/// `HOMEBREW_PREFIX` is only set by `brew shellenv`, which a user typically
+/// runs from an interactive shell's rc file. A process started from a desktop
+/// launcher never sees it, so relying on it alone made the profile list depend
+/// on how Zetta was started. The candidates below do not need it.
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 fn homebrew_prefixes() -> Vec<PathBuf> {
-    let mut prefixes = env::var_os("HOMEBREW_PREFIX")
+    homebrew_prefixes_from(
+        env::var_os("HOMEBREW_PREFIX").as_deref(),
+        env::var_os("HOME").as_deref().map(Path::new),
+        env::var_os("PATH").as_deref(),
+    )
+}
+
+/// Every place a Homebrew prefix is conventionally found, in priority order,
+/// kept only where `bin/brew` exists.
+///
+/// In order: the environment's own answer, the prefix of any `brew` on `PATH`,
+/// the per-user prefixes Homebrew documents for installs without root
+/// (`~/.brew`, and `~/.linuxbrew` on Linux), then the default system prefixes.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn homebrew_prefixes_from(
+    environment_prefix: Option<&OsStr>,
+    home: Option<&Path>,
+    path: Option<&OsStr>,
+) -> Vec<PathBuf> {
+    let mut prefixes = environment_prefix
         .into_iter()
         .map(PathBuf::from)
         .collect::<Vec<_>>();
-
+    prefixes.extend(
+        path.into_iter()
+            .flat_map(env::split_paths)
+            .filter(|directory| directory.is_absolute() && directory.join("brew").is_file())
+            .filter_map(|directory| directory.parent().map(Path::to_path_buf)),
+    );
+    if let Some(home) = home.filter(|home| home.is_absolute()) {
+        prefixes.push(home.join(".brew"));
+        #[cfg(target_os = "linux")]
+        prefixes.push(home.join(".linuxbrew"));
+    }
     #[cfg(target_os = "macos")]
     prefixes.extend([PathBuf::from("/opt/homebrew"), PathBuf::from("/usr/local")]);
     #[cfg(target_os = "linux")]
     prefixes.push(PathBuf::from("/home/linuxbrew/.linuxbrew"));
 
-    prefixes.dedup();
+    let mut seen = HashSet::new();
     prefixes
         .into_iter()
+        .filter(|prefix| seen.insert(prefix.clone()))
         .filter(|prefix| prefix.join("bin/brew").is_file())
         .collect()
 }

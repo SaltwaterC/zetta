@@ -30,6 +30,7 @@ use crate::vte::ascii_run_char;
 pub mod cell;
 pub mod color;
 mod handler;
+mod prompt;
 mod reflow;
 pub mod search;
 pub use reflow::{ReflowListener, ReflowReader, ReflowSearchView};
@@ -403,6 +404,10 @@ pub struct Term<T> {
     config: Config,
 
     reflow: reflow::PendingReflow,
+
+    /// The screen line the shell's prompt starts on while it reads a command;
+    /// see `prompt.rs`.
+    prompt: Option<Line>,
 }
 
 impl<T> Drop for Term<T> {
@@ -534,6 +539,7 @@ impl<T> Term<T> {
             mode: Default::default(),
             hosted_output_mode: None,
             reflow: Default::default(),
+            prompt: None,
         }
     }
 
@@ -805,6 +811,8 @@ impl<T> Term<T> {
 
         debug!("New num_cols is {num_cols} and num_lines is {num_lines}");
 
+        let prompt_rows_above_cursor = self.detach_prompt_from_reflow(num_cols);
+
         if old_cols != num_cols {
             // A clear can leave a history-sized pool of spare rows. They have
             // the old width, so neither resize nor the next parser batch may
@@ -823,6 +831,7 @@ impl<T> Term<T> {
         let is_alt = self.mode.contains(TermMode::ALT_SCREEN);
         self.grid.resize(!is_alt, num_lines, num_cols);
         self.inactive_grid.resize(is_alt, num_lines, num_cols);
+        self.reattach_prompt(prompt_rows_above_cursor);
 
         // Invalidate selection and tabs only when necessary.
         if old_cols != num_cols {
@@ -900,6 +909,7 @@ impl<T> Term<T> {
         mem::swap(&mut self.grid, &mut self.inactive_grid);
         self.mode ^= TermMode::ALT_SCREEN;
         self.selection = None;
+        self.prompt = None;
         self.mark_fully_damaged();
     }
 
@@ -1010,6 +1020,7 @@ impl<T> Term<T> {
 
         // Scroll between origin and bottom
         self.grid.scroll_down(&region, lines);
+        self.scroll_prompt(&region, lines as i32);
         self.mark_fully_damaged();
     }
 
@@ -1029,6 +1040,7 @@ impl<T> Term<T> {
         self.selection = self.selection.take().and_then(|s| s.rotate(self, &region, lines as i32));
 
         self.grid.scroll_up(&region, lines);
+        self.scroll_prompt(&region, -(lines as i32));
 
         // Scroll vi mode cursor.
         let viewport_top = Line(-(self.grid.display_offset() as i32));

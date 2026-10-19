@@ -82,6 +82,7 @@ fn invalid_direct_recipients_are_rejected_before_a_github_lookup() {
 #[test]
 fn github_retryable_statuses_are_distinguished_from_configuration_responses() {
     for status in [
+        reqwest::StatusCode::FORBIDDEN,
         reqwest::StatusCode::REQUEST_TIMEOUT,
         reqwest::StatusCode::TOO_EARLY,
         reqwest::StatusCode::TOO_MANY_REQUESTS,

@@ -34,6 +34,63 @@ fn homebrew_shells_are_profiles_with_their_installed_program_paths() {
     );
 }
 
+/// A Homebrew prefix on disk: `bin/brew` and nothing else.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn fake_homebrew_prefix(prefix: &Path) {
+    fs::create_dir_all(prefix.join("bin")).unwrap();
+    fs::write(prefix.join("bin/brew"), "").unwrap();
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn a_per_user_homebrew_prefix_is_found_without_homebrew_prefix_set() {
+    let home = tempfile::tempdir().unwrap();
+    fake_homebrew_prefix(&home.path().join(".brew"));
+
+    // What a dock-launched process sees: no HOMEBREW_PREFIX, and a PATH that
+    // may not mention Homebrew at all.
+    let prefixes = homebrew_prefixes_from(None, Some(home.path()), None);
+
+    assert_eq!(prefixes, [home.path().join(".brew")]);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_user_linuxbrew_prefix_is_found_beside_the_dot_brew_one() {
+    let home = tempfile::tempdir().unwrap();
+    fake_homebrew_prefix(&home.path().join(".linuxbrew"));
+
+    let prefixes = homebrew_prefixes_from(None, Some(home.path()), None);
+
+    assert_eq!(prefixes, [home.path().join(".linuxbrew")]);
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn the_prefix_of_a_brew_on_path_is_found() {
+    let prefix = tempfile::tempdir().unwrap();
+    fake_homebrew_prefix(prefix.path());
+    let path = env::join_paths([Path::new("/nonexistent"), &prefix.path().join("bin")]).unwrap();
+
+    let prefixes = homebrew_prefixes_from(None, None, Some(&path));
+
+    assert_eq!(prefixes, [prefix.path().to_path_buf()]);
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn a_prefix_named_twice_is_listed_once_and_one_without_brew_not_at_all() {
+    let home = tempfile::tempdir().unwrap();
+    let prefix = home.path().join(".brew");
+    fake_homebrew_prefix(&prefix);
+    fs::create_dir_all(home.path().join(".linuxbrew/bin")).unwrap();
+    let path = env::join_paths([prefix.join("bin")]).unwrap();
+
+    let prefixes = homebrew_prefixes_from(Some(prefix.as_os_str()), Some(home.path()), Some(&path));
+
+    assert_eq!(prefixes, [prefix]);
+}
+
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 #[test]
 fn path_resolved_homebrew_shells_match_direct_discovery() {

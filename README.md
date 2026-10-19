@@ -76,6 +76,10 @@ environment they started with; create a new remote pane to apply this context.
 - Git worktree workflow with the standalone `zwt` command (also available as
   `zetta wt`), status, and conflict-resolution helpers; shell integration adds
   the `zwt` directory wrapper
+- A project sidebar (`Ctrl-Shift-Z`) that groups tabs into Main, each
+  registered project, and each project's worktrees. From it you can create,
+  sync, integrate and discard worktrees without `zwt`. See
+  [Using Zetta](docs/usage.md#project-sidebar-and-tab-groups)
 - In-memory tab attention badges from `zetta attention`, with optional
   cross-platform desktop notifications that click back to the issuing visible
   tab

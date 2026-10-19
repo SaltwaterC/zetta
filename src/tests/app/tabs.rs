@@ -40,6 +40,7 @@ fn pin_test_tab(id: u64, pinned: bool) -> Tab {
         editing_overlay_pane: None,
         overlay_buffer: None,
         overlay_style_picker: None,
+        group: Default::default(),
     }
 }
 
@@ -51,13 +52,29 @@ fn tab_ids(tabs: &[Tab]) -> Vec<u64> {
 fn tab_move_mode_moves_adjacent_tabs_without_wrapping() {
     let mut ids = vec![1, 2, 3, 4];
     assert_eq!(
-        move_item_by_id(&mut ids, 3, TabMoveDirection::Left, 3, true, |id| *id),
+        move_item_by_id(
+            &mut ids,
+            3,
+            TabMoveDirection::Left,
+            3,
+            true,
+            |id| *id,
+            |_| true
+        ),
         Some(1)
     );
     assert_eq!(ids, vec![1, 3, 2, 4]);
 
     assert_eq!(
-        move_item_by_id(&mut ids, 3, TabMoveDirection::Right, 3, true, |id| *id),
+        move_item_by_id(
+            &mut ids,
+            3,
+            TabMoveDirection::Right,
+            3,
+            true,
+            |id| *id,
+            |_| true
+        ),
         Some(2)
     );
     assert_eq!(ids, vec![1, 2, 3, 4]);
@@ -67,15 +84,39 @@ fn tab_move_mode_moves_adjacent_tabs_without_wrapping() {
 fn tab_move_mode_stops_at_boundaries_and_when_disabled() {
     let mut ids = vec![1, 2, 3];
     assert_eq!(
-        move_item_by_id(&mut ids, 1, TabMoveDirection::Left, 1, true, |id| *id),
+        move_item_by_id(
+            &mut ids,
+            1,
+            TabMoveDirection::Left,
+            1,
+            true,
+            |id| *id,
+            |_| true
+        ),
         None
     );
     assert_eq!(
-        move_item_by_id(&mut ids, 3, TabMoveDirection::Right, 3, true, |id| *id),
+        move_item_by_id(
+            &mut ids,
+            3,
+            TabMoveDirection::Right,
+            3,
+            true,
+            |id| *id,
+            |_| true
+        ),
         None
     );
     assert_eq!(
-        move_item_by_id(&mut ids, 2, TabMoveDirection::Right, 2, false, |id| *id),
+        move_item_by_id(
+            &mut ids,
+            2,
+            TabMoveDirection::Right,
+            2,
+            false,
+            |id| *id,
+            |_| true
+        ),
         None
     );
     assert_eq!(ids, vec![1, 2, 3]);
@@ -121,21 +162,29 @@ fn tab_move_and_drag_boundaries_preserve_the_pinned_prefix() {
         pin_test_tab(3, false),
         pin_test_tab(4, false),
     ];
-    assert!(tab_move_preserves_pinning(&tabs, 1, TabMoveDirection::Left));
+    assert!(tab_move_preserves_pinning(
+        &tabs,
+        1,
+        TabMoveDirection::Left,
+        |_| true
+    ));
     assert!(!tab_move_preserves_pinning(
         &tabs,
         1,
-        TabMoveDirection::Right
+        TabMoveDirection::Right,
+        |_| true
     ));
     assert!(!tab_move_preserves_pinning(
         &tabs,
         2,
-        TabMoveDirection::Left
+        TabMoveDirection::Left,
+        |_| true
     ));
     assert!(tab_move_preserves_pinning(
         &tabs,
         2,
-        TabMoveDirection::Right
+        TabMoveDirection::Right,
+        |_| true
     ));
     assert!(tab_drop_preserves_pinning(
         &tabs,
@@ -162,7 +211,15 @@ fn tab_move_and_drag_boundaries_preserve_the_pinned_prefix() {
 #[test]
 fn tab_move_mode_preserves_the_logical_active_tab() {
     let mut ids = vec![1, 2, 3, 4];
-    let active_index = move_item_by_id(&mut ids, 2, TabMoveDirection::Right, 2, true, |id| *id);
+    let active_index = move_item_by_id(
+        &mut ids,
+        2,
+        TabMoveDirection::Right,
+        2,
+        true,
+        |id| *id,
+        |_| true,
+    );
     assert_eq!(ids, vec![1, 3, 2, 4]);
     assert_eq!(active_index, Some(2));
 }

@@ -102,6 +102,7 @@ fn background_session_is_reaped_after_its_final_pane_exits() {
         editing_overlay_pane: None,
         overlay_buffer: None,
         overlay_style_picker: None,
+        group: Default::default(),
     };
     let mut sessions = BackgroundSessionRunner::default();
     sessions.detach(tab, None);
@@ -206,6 +207,7 @@ fn attached_tab_with_a_stacked_command() -> Tab {
         editing_overlay_pane: None,
         overlay_buffer: None,
         overlay_style_picker: None,
+        group: Default::default(),
     }
 }
 

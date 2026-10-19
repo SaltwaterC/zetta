@@ -105,6 +105,27 @@ fn registered_main_projects_resolve_managed_worktree_aliases_and_local_configs()
     assert_eq!(detection.registered_root, Some(main.clone()));
     assert!(detection.config.unwrap().is_ok());
     assert!(detection.offer_root.is_none());
+    // A tab arriving from a session in the worktree returns to its group.
+    let canonical_linked = fs::canonicalize(&linked).unwrap();
+    assert_eq!(
+        detection.managed_worktree.as_deref(),
+        Some(canonical_linked.as_path())
+    );
+    assert_eq!(
+        crate::tab_groups::group_for_detected_directory(
+            &crate::tab_groups::DetectedDirectory {
+                reported: &child,
+                canonical: detection.canonical.as_deref(),
+                registered_root: detection.registered_root.as_deref(),
+                managed_worktree: detection.managed_worktree.as_deref(),
+            },
+            &HashMap::new(),
+        ),
+        TabGroup::Worktree {
+            project: main.clone(),
+            root: canonical_linked,
+        }
+    );
     // The worktree sits beside the main repository, so only the anchor the
     // detection learned keeps a `cd` around the worktree inside the project.
     let anchor = detection.anchor.unwrap();

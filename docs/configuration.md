@@ -378,7 +378,10 @@ preserves unrelated configuration, and can be run repeatedly.
 Zetta detects common shells. On macOS and Linux, shells installed by Homebrew
 are also detected as separate profiles (for example, `Bash (Homebrew)`), even
 when the graphical application was not launched with Homebrew's `bin`
-directory in its `PATH`. Use the exact resolved Homebrew name in configuration,
+directory in its `PATH` or with `HOMEBREW_PREFIX` set. Besides
+`HOMEBREW_PREFIX` and any `brew` on `PATH`, Zetta looks in `~/.brew` (and
+`~/.linuxbrew` on Linux) and the default system prefix, so a dock-launched
+Zetta lists the same shells as one started from a terminal. Use the exact resolved Homebrew name in configuration,
 the settings editor, and CLI arguments; for example, configure Fish as
 `Fish (Homebrew)`, not `Fish`:
 
@@ -589,9 +592,12 @@ defaults. Key names accept both `pageup`/`pagedown` and the common
 default shortcut table.
 
 The Settings > Keymap editor and keymap JSON use physical-key aliases:
-`Ctrl+Shift+1` through `Ctrl+Shift+9`, plus `Ctrl+Shift+0` for profile 10. The
+`Ctrl+Shift+1` through `Ctrl+Shift+9`, plus `Ctrl+Shift+0` for profile 10, and
+`Ctrl+Shift+[` and `Ctrl+Shift+]` for the previous and next tab group. The
 recorder produces the aliases too, so the display and examples stay stable
-across keyboard layouts. Older normalized key names remain accepted for
+across keyboard layouts. The keymap file is read the same way: an alias you
+write there is bound to the key the chord actually sends, so `ctrl-shift-]`
+works even though the keyboard reports that chord as `ctrl-}`. Older normalized key names remain accepted for
 backward compatibility, but are not written by the editor. Set
 `"use_key_equivalents": true` on that keymap section, as demonstrated in
 `keymap.example.json`.
@@ -608,7 +614,9 @@ Entering or leaving the project rebinds them, so the accelerator shown in the
 Profile menu is always the one that works.
 
 Zetta normalizes these physical keys on Linux so the shortcuts work with
-layouts whose shifted characters differ. On Windows and macOS, shortcuts
+layouts whose shifted characters differ. The bracket aliases are the
+exception: they follow the typed `{` and `}`, which most layouts that have
+the bracket keys share. On Windows and macOS, shortcuts
 follow the active keyboard mapping and are rebuilt when the layout changes.
 `Ctrl-Alt` number-row fallbacks are not built in because they collide with
 AltGr on layouts that use it.
@@ -632,6 +640,7 @@ with MesloLGS NF as the font. Common appearance settings include:
   "hide_title_bar_labels": false,
   "hide_title_bar_buttons": false,
   "hide_title_bar_menus": true,
+  "hide_project_sidebar": false,
   "pane_controls_position": "right",
   "pane_controls_hidden_by_default": false,
   "max_scroll_history_lines": 2147483647,
@@ -656,6 +665,10 @@ in tab menus and the command palette instead. `hide_title_bar_menus` is read on
 macOS only, where it defaults to `true` and hides the Menu and Profile menus
 from the title bar. It is ignored on other platforms and is not shown in their
 settings editor.
+`hide_project_sidebar` defaults to `false`. Set it to `true` to remove the
+project sidebar and its title-bar toggle, and with them tab groups: every tab
+is shown in one tab bar and new tabs are not grouped by project. Tabs keep the
+group they had, so turning the sidebar back on restores the grouping.
 `pane_controls_position` accepts `"left"` or `"right"` and defaults to
 `"right"`. It controls the pane overlay buttons independently of the system
 window-button layout so they do not move over a left-aligned prompt unless you

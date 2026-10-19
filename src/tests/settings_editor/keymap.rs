@@ -157,14 +157,14 @@ fn keymap_single_rebind_is_preserved_others_dropped() {
         .iter_mut()
         .find(|binding| binding.keystroke.text == "ctrl-shift-t")
         .unwrap();
-    binding.keystroke.text = "ctrl-shift-z".to_owned();
+    binding.keystroke.text = "alt-shift-z".to_owned();
 
     let output: Value = serde_json::from_str(&form.to_json().unwrap()).unwrap();
     let sections = output.as_array().unwrap();
     assert_eq!(sections.len(), 1);
     let bindings = sections[0]["bindings"].as_object().unwrap();
     assert_eq!(bindings.len(), 1);
-    assert_eq!(bindings["ctrl-shift-z"], "zetta::NewTab");
+    assert_eq!(bindings["alt-shift-z"], "zetta::NewTab");
 }
 
 #[test]
@@ -206,6 +206,8 @@ fn keymap_template_exposes_all_builtin_shortcuts() {
         ("alt-shift-l", "zetta::RotatePaneLayout"),
         ("alt-shift-k", "zetta::RotatePaneLayoutCounterClockwise"),
         ("ctrl-shift-g", "zetta::ToggleTabMoveMode"),
+        ("ctrl-shift-[", "zetta::PreviousTabGroup"),
+        ("ctrl-shift-]", "zetta::NextTabGroup"),
         ("alt-shift-a", "terminal_view::SelectAll"),
         ("ctrl-shift-s", "zetta::ToggleSilentMode"),
         ("ctrl-shift-m", "zetta::ToggleMultiCommand"),

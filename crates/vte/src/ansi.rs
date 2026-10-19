@@ -30,7 +30,7 @@ use log::debug;
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
-use crate::{Params, ParamsIter, ascii_run_char, control_bits};
+use crate::{ascii_run_char, control_bits, Params, ParamsIter};
 
 /// Maximum time before a synchronized update is aborted.
 const SYNC_UPDATE_TIMEOUT: Duration = Duration::from_millis(150);
@@ -488,6 +488,15 @@ pub trait Timeout: Default {
     fn pending_timeout(&self) -> bool;
 }
 
+/// An OSC 133 (FinalTerm) shell integration mark.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SemanticPromptMark {
+    /// `OSC 133 ; A`: the shell is about to print its prompt.
+    PromptStart,
+    /// `OSC 133 ; C`: the shell has read a command and is running it.
+    CommandStart,
+}
+
 /// Type that handles actions from the parser.
 ///
 /// XXX Should probably not provide default impls for everything, but it makes
@@ -720,6 +729,10 @@ pub trait Handler {
 
     /// Set hyperlink.
     fn set_hyperlink(&mut self, _: Option<Hyperlink>) {}
+
+    /// OSC 133 shell integration mark: where a shell's prompt starts, or that
+    /// the command it read has started running.
+    fn semantic_prompt_mark(&mut self, _: SemanticPromptMark) {}
 
     /// Set mouse cursor icon.
     fn set_mouse_cursor_icon(&mut self, _: CursorIcon) {}
@@ -1501,6 +1514,15 @@ where
                     Ok(cursor_icon) => self.handler.set_mouse_cursor_icon(cursor_icon),
                     Err(_) => debug!("[osc 22] unrecognized cursor icon shape: {shape:?}"),
                 }
+            },
+
+            // Shell integration prompt and command boundaries.
+            b"133" if params.len() >= 2 => match params[1] {
+                b"A" => self.handler.semantic_prompt_mark(SemanticPromptMark::PromptStart),
+                b"C" => self.handler.semantic_prompt_mark(SemanticPromptMark::CommandStart),
+                // The end of the prompt and a command's exit status say
+                // nothing a handler needs yet.
+                _ => debug!("[osc 133] ignored mark: {:?}", String::from_utf8_lossy(params[1])),
             },
 
             // Set cursor style.
@@ -2385,6 +2407,28 @@ mod tests {
         parser.advance(&mut handler, bytes);
 
         assert_eq!(handler.color, Some(Rgb { r: 0xF0, g: 0xF0, b: 0xF0 }));
+    }
+
+    #[test]
+    fn parse_osc133_prompt_and_command_marks() {
+        #[derive(Default)]
+        struct Marks(Vec<SemanticPromptMark>);
+
+        impl Handler for Marks {
+            fn semantic_prompt_mark(&mut self, mark: SemanticPromptMark) {
+                self.0.push(mark);
+            }
+        }
+
+        let bytes: &[u8] =
+            b"\x1b]133;A\x1b\\\x1b]133;B\x07\x1b]133;C;\x07\x1b]133;D;0\x07\x1b]133\x07";
+
+        let mut parser = Processor::<TestSyncHandler>::new();
+        let mut handler = Marks::default();
+
+        parser.advance(&mut handler, bytes);
+
+        assert_eq!(handler.0, [SemanticPromptMark::PromptStart, SemanticPromptMark::CommandStart]);
     }
 
     #[test]
