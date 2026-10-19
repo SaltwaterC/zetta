@@ -375,8 +375,15 @@ Disabled tools are omitted from the command palette, default keybindings, and
 their implementation is not compiled into the binary. A build without the
 TFTP server does not request `cap_net_bind_service` during installation.
 
-When invoked through `sudo`, `make install` uses the existing build artifact
-and does not run Cargo again. A user-local install cannot grant the
+When invoked through `sudo`, `make install` uses the existing build artifacts
+and does not run Cargo again. Build with the same profile and capability flags
+first: for example, `make build RELEASE=1` followed by
+`sudo make install RELEASE=1 PREFIX=/usr`. The installer checks every enabled
+executable before copying files, so an incomplete build fails before replacing
+installed binaries. Plain `make` builds debug executables; it does not refresh
+`target/release`.
+
+A user-local install cannot grant the
 `cap_net_bind_service` capability needed by the TFTP servers to bind UDP port
 69, so the TFTP server will not be able to bind that port without additional
 privileges. A system-wide install grants the capability to both `zetta`

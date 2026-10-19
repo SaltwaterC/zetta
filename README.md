@@ -251,6 +251,9 @@ as well. Linux system dependencies and platform-specific build and desktop
 installation instructions are in the [installation guide](docs/installation.md).
 `make build` uses an incremental development build; use `RELEASE=1` for an
 optimized release build.
+Build the same profile and capability flags before a system install, for example
+`make build RELEASE=1` followed by `sudo make install RELEASE=1`. The sudo
+installer checks that every enabled executable exists before copying files.
 
 `make test` runs at reduced CPU priority so interactive applications stay
 responsive: BelowNormal on Windows and niceness 10 on Unix. The Windows Cargo

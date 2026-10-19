@@ -361,6 +361,7 @@ test:
 
 ifneq ($(OS),Windows_NT)
 	$(MAKE) test-zosh-interop
+	sh scripts/test-build-wiring.sh
 endif
 
 # The scrolling workload is kept out of ordinary validation. Always optimize it
@@ -580,6 +581,49 @@ define run_zmux_upgrade
 	fi
 endef
 
+# Unix builds and installers must agree on the complete enabled binary set.
+UNIX_INSTALL_BINARIES := zetta \
+	$(if $(filter notifications,$(BUILD_FEATURES)),zntfy) \
+	$(if $(filter tftp-server tftp-client,$(BUILD_FEATURES)),ztftp) \
+	$(if $(filter http-server,$(BUILD_FEATURES)),zhttp) \
+	$(if $(filter clipboard,$(BUILD_FEATURES)),zcopy zpaste) \
+	$(if $(filter zmux,$(BUILD_FEATURES)),zmux) \
+	$(if $(filter zosh-client,$(BUILD_FEATURES)),zosh) \
+	$(if $(filter zosh-server,$(BUILD_FEATURES)),zosh-server) \
+	$(if $(filter worktree,$(BUILD_FEATURES)),zwt)
+
+ifneq ($(OS),Windows_NT)
+build:
+	$(ENV) -u DESTDIR $(CARGO_RUN) build $(CARGO_PROFILE_ARGS) --locked --no-default-features --features "$(BUILD_FEATURES)"
+ifneq ($(call tool_enabled,$(NOTIFY)),)
+	$(ENV) -u DESTDIR $(CARGO_RUN) build $(CARGO_PROFILE_ARGS) --locked --manifest-path crates/zntfy/Cargo.toml --target-dir target --bin zntfy
+endif
+ifneq ($(or $(call tool_enabled,$(TFTP_SERVER)),$(call tool_enabled,$(TFTP_CLIENT))),)
+	$(ENV) -u DESTDIR $(CARGO_RUN) build $(CARGO_PROFILE_ARGS) --locked --manifest-path crates/ztftp/Cargo.toml --target-dir target --bin ztftp
+endif
+ifneq ($(call tool_enabled,$(HTTP)),)
+	$(ENV) -u DESTDIR $(CARGO_RUN) build $(CARGO_PROFILE_ARGS) --locked --manifest-path crates/zhttp/Cargo.toml --target-dir target --bin zhttp
+endif
+ifneq ($(call tool_enabled,$(CLIPBOARD)),)
+	$(ENV) -u DESTDIR $(CARGO_RUN) build $(CARGO_PROFILE_ARGS) --locked --manifest-path crates/zclip/Cargo.toml --target-dir target --bin zcopy --bin zpaste
+endif
+	$(MAKE) check-build-binaries
+
+.PHONY: check-build-binaries
+check-build-binaries:
+	@missing=0; \
+	for binary in $(UNIX_INSTALL_BINARIES); do \
+		if [ ! -x "$(BUILD_TARGET_DIR)/$$binary" ]; then \
+			echo "Missing executable: $(BUILD_TARGET_DIR)/$$binary" >&2; \
+			missing=1; \
+		fi; \
+	done; \
+	if [ "$$missing" -ne 0 ]; then \
+		echo "Run 'make build$(if $(filter release,$(BUILD_PROFILE)), RELEASE=1,)' without sudo first, using the same capability flags as installation." >&2; \
+		exit 1; \
+	fi
+endif
+
 ifeq ($(OS),Windows_NT)
 build:
 	cmd.exe /d /c scripts\build-windows.cmd $(CARGO_PROFILE_ARGS)
@@ -610,27 +654,9 @@ uninstall-assets:
 
 refresh-desktop-caches:
 else ifeq ($(UNAME_S),Darwin)
-build:
-	$(ENV) -u DESTDIR $(CARGO_RUN) build $(CARGO_PROFILE_ARGS) --locked --no-default-features --features "$(BUILD_FEATURES)"
-ifneq ($(call tool_enabled,$(NOTIFY)),)
-	$(ENV) -u DESTDIR $(CARGO_RUN) build $(CARGO_PROFILE_ARGS) --locked --manifest-path crates/zntfy/Cargo.toml --target-dir target --bin zntfy
-endif
-ifneq ($(or $(call tool_enabled,$(TFTP_SERVER)),$(call tool_enabled,$(TFTP_CLIENT))),)
-	$(ENV) -u DESTDIR $(CARGO_RUN) build $(CARGO_PROFILE_ARGS) --locked --manifest-path crates/ztftp/Cargo.toml --target-dir target --bin ztftp
-endif
-ifneq ($(call tool_enabled,$(HTTP)),)
-	$(ENV) -u DESTDIR $(CARGO_RUN) build $(CARGO_PROFILE_ARGS) --locked --manifest-path crates/zhttp/Cargo.toml --target-dir target --bin zhttp
-endif
-ifneq ($(call tool_enabled,$(CLIPBOARD)),)
-	$(ENV) -u DESTDIR $(CARGO_RUN) build $(CARGO_PROFILE_ARGS) --locked --manifest-path crates/zclip/Cargo.toml --target-dir target --bin zcopy --bin zpaste
-endif
-
 install:
 	@if [ "$$(id -u)" -eq 0 ]; then \
-		test -x "$(BUILD_TARGET_DIR)/zetta" || { \
-			echo "$(BUILD_TARGET_DIR)/zetta is missing; run 'make build$(if $(filter release,$(BUILD_PROFILE)), RELEASE=1,)' without sudo first" >&2; \
-			exit 1; \
-		}; \
+		$(MAKE) check-build-binaries; \
 	else \
 		$(MAKE) build; \
 	fi
@@ -648,7 +674,7 @@ ifeq ($(DESTDIR),)
 endif
 endif
 
-install-binary:
+install-binary: check-build-binaries
 	mkdir -p "$(MAC_BUNDLE)/Contents/MacOS" "$(BINDIR)"
 	$(INSTALL) -m 755 "$(BUILD_TARGET_DIR)/zetta" "$(MAC_BUNDLE)/Contents/MacOS/zetta"
 ifneq ($(call tool_enabled,$(NOTIFY)),)
@@ -799,27 +825,9 @@ uninstall-assets:
 
 refresh-desktop-caches:
 else
-build:
-	$(ENV) -u DESTDIR $(CARGO_RUN) build $(CARGO_PROFILE_ARGS) --locked --no-default-features --features "$(BUILD_FEATURES)"
-ifneq ($(call tool_enabled,$(NOTIFY)),)
-	$(ENV) -u DESTDIR $(CARGO_RUN) build $(CARGO_PROFILE_ARGS) --locked --manifest-path crates/zntfy/Cargo.toml --target-dir target --bin zntfy
-endif
-ifneq ($(or $(call tool_enabled,$(TFTP_SERVER)),$(call tool_enabled,$(TFTP_CLIENT))),)
-	$(ENV) -u DESTDIR $(CARGO_RUN) build $(CARGO_PROFILE_ARGS) --locked --manifest-path crates/ztftp/Cargo.toml --target-dir target --bin ztftp
-endif
-ifneq ($(call tool_enabled,$(HTTP)),)
-	$(ENV) -u DESTDIR $(CARGO_RUN) build $(CARGO_PROFILE_ARGS) --locked --manifest-path crates/zhttp/Cargo.toml --target-dir target --bin zhttp
-endif
-ifneq ($(call tool_enabled,$(CLIPBOARD)),)
-	$(ENV) -u DESTDIR $(CARGO_RUN) build $(CARGO_PROFILE_ARGS) --locked --manifest-path crates/zclip/Cargo.toml --target-dir target --bin zcopy --bin zpaste
-endif
-
 install:
 	@if [ "$$(id -u)" -eq 0 ]; then \
-		test -x "$(BUILD_TARGET_DIR)/zetta" || { \
-			echo "$(BUILD_TARGET_DIR)/zetta is missing; run 'make build$(if $(filter release,$(BUILD_PROFILE)), RELEASE=1,)' without sudo first" >&2; \
-			exit 1; \
-		}; \
+		$(MAKE) check-build-binaries; \
 	else \
 		$(MAKE) build; \
 	fi
@@ -836,7 +844,7 @@ ifeq ($(DESTDIR),)
 endif
 endif
 
-install-binary:
+install-binary: check-build-binaries
 	$(INSTALL) -Dm755 "$(BUILD_TARGET_DIR)/zetta" $(BINDIR)/zetta
 ifneq ($(call tool_enabled,$(NOTIFY)),)
 	$(INSTALL) -Dm755 "$(BUILD_TARGET_DIR)/zntfy" $(BINDIR)/zntfy
