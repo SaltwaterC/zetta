@@ -16,6 +16,24 @@ fn proxy_arguments_preserve_all_notification_options() {
     assert_eq!(parse_notify_args(arguments).unwrap(), request);
 }
 
+#[test]
+fn proxy_arguments_never_read_notification_text_as_an_option() {
+    let request = NotificationRequest {
+        summary: "--help".to_owned(),
+        body: Some("-t".to_owned()),
+        app_name: None,
+        icon: None,
+        sound: None,
+        timeout: None,
+    };
+    let arguments = notification_reexec_args(&request);
+    assert!(!requests_notify_help(&arguments));
+    assert_eq!(parse_notify_args(arguments).unwrap(), request);
+    assert!(requests_notify_help(
+        &["-t", "never", "--help"].map(OsString::from)
+    ));
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn hosted_notification_reparses_the_proxy_arguments() {

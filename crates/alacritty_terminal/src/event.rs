@@ -4,6 +4,7 @@ use std::process::ExitStatus;
 use std::sync::Arc;
 
 use crate::term::ClipboardType;
+use crate::term::notification::DesktopNotification;
 use crate::vte::ansi::Rgb;
 
 /// Terminal event.
@@ -42,6 +43,9 @@ pub enum Event {
     /// Write some text to the PTY.
     PtyWrite(String),
 
+    /// A reply containing raw eight-bit C1 controls, which are not UTF-8 text.
+    PtyWriteRaw(Vec<u8>),
+
     /// Request to write the text area size.
     TextAreaSizeRequest(Arc<dyn Fn(WindowSize) -> String + Sync + Send + 'static>),
 
@@ -58,6 +62,9 @@ pub enum Event {
 
     /// Terminal bell ring.
     Bell,
+
+    /// An application asked for a desktop notification (OSC 99).
+    DesktopNotification(DesktopNotification),
 
     /// Shutdown request.
     Exit,
@@ -87,12 +94,16 @@ impl Debug for Event {
             },
             Event::ColorRequest(index, _) => write!(f, "ColorRequest({index})"),
             Event::PtyWrite(text) => write!(f, "PtyWrite({text})"),
+            Event::PtyWriteRaw(bytes) => write!(f, "PtyWriteRaw({bytes:?})"),
             Event::Title(title) => write!(f, "Title({title})"),
             Event::CursorBlinkingChange => write!(f, "CursorBlinkingChange"),
             Event::MouseCursorDirty => write!(f, "MouseCursorDirty"),
             Event::ResetTitle => write!(f, "ResetTitle"),
             Event::Wakeup => write!(f, "Wakeup"),
             Event::Bell => write!(f, "Bell"),
+            Event::DesktopNotification(notification) => {
+                write!(f, "DesktopNotification({notification:?})")
+            },
             Event::Exit => write!(f, "Exit"),
             Event::ChildExit(status) => write!(f, "ChildExit({status:?})"),
             Event::ChildExitStatusUnavailable => f.write_str("ChildExitStatusUnavailable"),

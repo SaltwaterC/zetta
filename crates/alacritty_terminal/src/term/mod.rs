@@ -28,9 +28,16 @@ use crate::vte::ansi::{
 use crate::vte::ascii_run_char;
 
 pub mod cell;
+mod char_edit;
 pub mod color;
+mod grapheme;
 mod handler;
+mod line_size;
+mod margins;
+mod modes;
+pub mod notification;
 mod prompt;
+mod protocol;
 mod reflow;
 pub mod search;
 pub use reflow::{ReflowListener, ReflowReader, ReflowSearchView};
@@ -119,9 +126,18 @@ fn defer_history_drop(history: DetachedHistory) {
     }
 }
 
+/// The DA1 reply: a VT420-class terminal (matching DECSCL's level 64) listing
+/// only what is implemented: selective erase, national replacement sets,
+/// horizontal scrolling, ANSI color and rectangular editing. No 132-column
+/// switch, printer, sixel, user-defined keys or DEC locator.
+///
+/// Public because a frontend may need to recognize its own reply, as Windows
+/// ConPTY startup does.
+pub const PRIMARY_DEVICE_ATTRIBUTES: &str = "\x1b[?64;6;9;21;22;28c";
+
 bitflags! {
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-    pub struct TermMode: u32 {
+    pub struct TermMode: u64 {
         const NONE                    = 0;
         const SHOW_CURSOR             = 1;
         const APP_CURSOR              = 1 << 1;
@@ -149,13 +165,28 @@ bitflags! {
         const WIN32_INPUT             = 1 << 23;
         /// Backend-owned C0 LF semantics, independent of ANSI LNM and IND.
         const LF_IMPLIES_CR           = 1 << 24;
+        const REVERSE_WRAP            = 1 << 25;
+        const REVERSE_WRAP_ALL        = 1 << 26;
+        const REVERSE_VIDEO           = 1 << 27;
+        /// KAM: the frontend drops keyboard input until the mode is reset.
+        const KEYBOARD_LOCKED         = 1 << 28;
+        /// SRM reset: the frontend echoes keyboard input into the grid.
+        const LOCAL_ECHO              = 1 << 29;
+        /// DECBKM: the backarrow key sends BS rather than DEL.
+        const BACKARROW_SENDS_BS      = 1 << 30;
+        /// xterm 1036/1039 reset: Alt (Meta) does not prefix the key with ESC.
+        const ALT_ESC_DISABLED        = 1 << 31;
+        /// xterm 1034: without ESC prefixing, Alt (Meta) sets the eighth bit.
+        const META_SETS_EIGHTH_BIT    = 1 << 32;
+        /// xterm 1016: SGR mouse reports carry pixel rather than cell positions.
+        const SGR_PIXEL_MOUSE         = 1 << 33;
         const MOUSE_MODE              = Self::MOUSE_REPORT_CLICK.bits() | Self::MOUSE_MOTION.bits() | Self::MOUSE_DRAG.bits();
         const KITTY_KEYBOARD_PROTOCOL = Self::DISAMBIGUATE_ESC_CODES.bits()
                                       | Self::REPORT_EVENT_TYPES.bits()
                                       | Self::REPORT_ALTERNATE_KEYS.bits()
                                       | Self::REPORT_ALL_KEYS_AS_ESC.bits()
                                       | Self::REPORT_ASSOCIATED_TEXT.bits();
-         const ANY                    = u32::MAX;
+         const ANY                    = u64::MAX;
     }
 }
 
@@ -375,6 +406,9 @@ pub struct Term<T> {
     /// Range going from top to bottom of the terminal, indexed from the top of the viewport.
     scroll_region: Range<Line>,
 
+    horizontal_margin: Option<Range<Column>>,
+    protocol: protocol::State,
+
     /// Modified terminal colors.
     colors: Colors,
 
@@ -408,6 +442,15 @@ pub struct Term<T> {
     /// The screen line the shell's prompt starts on while it reads a command;
     /// see `prompt.rs`.
     prompt: Option<Line>,
+
+    /// Whether the last scalar printed was a Prepend; see `grapheme.rs`.
+    prepend_pending: bool,
+
+    /// Whether a row of the screen may be double width or height. While none is, printing need
+    /// not look up the cursor row's size; see `line_size.rs`. It may say so of a screen with
+    /// none, never the reverse: binary output turns rows doubled by chance, and leaving it set
+    /// once they had scrolled away put that lookup back on every printed run.
+    doubled_rows: bool,
 }
 
 impl<T> Drop for Term<T> {
@@ -439,6 +482,11 @@ pub struct Config {
 
     /// OSC52 support mode.
     pub osc52: Osc52,
+
+    /// Whether OSC 99 desktop notifications are assembled and reported. Set
+    /// only by a frontend that can deliver them: with it unset, a query is not
+    /// answered, so an application does not wait on a capability it lacks.
+    pub desktop_notifications: bool,
 }
 
 impl Default for Config {
@@ -450,6 +498,7 @@ impl Default for Config {
             vi_mode_cursor_style: Default::default(),
             kitty_keyboard: Default::default(),
             osc52: Default::default(),
+            desktop_notifications: false,
         }
     }
 }
@@ -521,6 +570,8 @@ impl<T> Term<T> {
         Term {
             inactive_grid,
             scroll_region,
+            horizontal_margin: None,
+            protocol: protocol::State::default(),
             event_proxy,
             damage,
             config,
@@ -540,6 +591,8 @@ impl<T> Term<T> {
             hosted_output_mode: None,
             reflow: Default::default(),
             prompt: None,
+            prepend_pending: false,
+            doubled_rows: false,
         }
     }
 
@@ -794,7 +847,10 @@ impl<T> Term<T> {
     }
 
     /// Resize terminal to new dimensions.
-    pub fn resize<S: Dimensions>(&mut self, size: S) {
+    pub fn resize<S: Dimensions>(&mut self, size: S)
+    where
+        T: EventListener,
+    {
         let columns = size.columns();
         let lines = size.screen_lines();
         let _recording = self.reflow.record_resize(columns, lines);
@@ -809,6 +865,7 @@ impl<T> Term<T> {
             return;
         }
 
+        self.protocol.alternate_resized |= self.mode.contains(TermMode::ALT_SCREEN);
         debug!("New num_cols is {num_cols} and num_lines is {num_lines}");
 
         let prompt_rows_above_cursor = self.detach_prompt_from_reflow(num_cols);
@@ -831,6 +888,8 @@ impl<T> Term<T> {
         let is_alt = self.mode.contains(TermMode::ALT_SCREEN);
         self.grid.resize(!is_alt, num_lines, num_cols);
         self.inactive_grid.resize(is_alt, num_lines, num_cols);
+        // Rows can come back from history.
+        self.recheck_doubled_rows();
         self.reattach_prompt(prompt_rows_above_cursor);
 
         // Invalidate selection and tabs only when necessary.
@@ -855,9 +914,13 @@ impl<T> Term<T> {
 
         // Reset scrolling region.
         self.scroll_region = Line(0)..Line(self.screen_lines() as i32);
+        if self.horizontal_margin.is_some() {
+            self.horizontal_margin = Some(Column(0)..Column(num_cols));
+        }
 
         // Resize damage information.
         self.damage.resize(num_cols, num_lines);
+        self.report_in_band_size();
     }
 
     /// Current title, shared by VT title sequences and hosted console APIs.
@@ -896,17 +959,31 @@ impl<T> Term<T> {
 
             // Drop information about the primary screens saved cursor.
             self.grid.saved_cursor = self.grid.cursor.clone();
+            self.grid.saved_cursor.origin = self.mode.contains(TermMode::ORIGIN);
+            self.grid.saved_cursor.active_charset = self.active_charset;
+            self.protocol.alternate_resized = false;
 
-            // Reset alternate screen contents.
+            // Reset alternate screen contents and margins on entry. Margins
+            // selected by the alternate application remain global on exit.
             self.inactive_grid.reset_region(..);
+            self.scroll_region = Line(0)..Line(self.screen_lines() as i32);
+            if self.horizontal_margin.is_some() {
+                self.horizontal_margin = Some(Column(0)..Column(self.columns()));
+            }
         }
 
+        self.swap_screen_buffers();
+    }
+
+    /// Switch buffers without saving cursors or clearing the alternate page (DECSET 47).
+    fn swap_screen_buffers(&mut self) {
         mem::swap(&mut self.keyboard_mode_stack, &mut self.inactive_keyboard_mode_stack);
         let keyboard_mode =
             self.keyboard_mode_stack.last().copied().unwrap_or(KeyboardModes::NO_MODE).into();
         self.set_keyboard_mode(keyboard_mode, KeyboardModesApplyBehavior::Replace);
 
         mem::swap(&mut self.grid, &mut self.inactive_grid);
+        self.recheck_doubled_rows();
         self.mode ^= TermMode::ALT_SCREEN;
         self.selection = None;
         self.prompt = None;
@@ -1000,8 +1077,14 @@ impl<T> Term<T> {
     /// Text moves down; clear at bottom
     /// Expects origin to be in scroll range.
     #[inline]
-    fn scroll_down_relative(&mut self, origin: Line, mut lines: usize) {
+    fn scroll_down_relative(&mut self, origin: Line, mut lines: usize)
+    where
+        T: EventListener,
+    {
         trace!("Scrolling down relative: origin={origin}, lines={lines}");
+        if self.scroll_rectangle(origin, lines, true) {
+            return;
+        }
 
         lines = cmp::min(lines, (self.scroll_region.end - self.scroll_region.start).0 as usize);
         lines = cmp::min(lines, (self.scroll_region.end - origin).0 as usize);
@@ -1020,6 +1103,9 @@ impl<T> Term<T> {
 
         // Scroll between origin and bottom
         self.grid.scroll_down(&region, lines);
+        if self.doubled_rows {
+            self.recheck_doubled_rows();
+        }
         self.scroll_prompt(&region, lines as i32);
         self.mark_fully_damaged();
     }
@@ -1029,8 +1115,14 @@ impl<T> Term<T> {
     /// Text moves up; clear at top
     /// Expects origin to be in scroll range.
     #[inline]
-    fn scroll_up_relative(&mut self, origin: Line, mut lines: usize) {
+    fn scroll_up_relative(&mut self, origin: Line, mut lines: usize)
+    where
+        T: EventListener,
+    {
         trace!("Scrolling up relative: origin={origin}, lines={lines}");
+        if self.scroll_rectangle(origin, lines, false) {
+            return;
+        }
 
         lines = cmp::min(lines, (self.scroll_region.end - self.scroll_region.start).0 as usize);
 
@@ -1040,6 +1132,9 @@ impl<T> Term<T> {
         self.selection = self.selection.take().and_then(|s| s.rotate(self, &region, lines as i32));
 
         self.grid.scroll_up(&region, lines);
+        if self.doubled_rows {
+            self.recheck_doubled_rows();
+        }
         self.scroll_prompt(&region, -(lines as i32));
 
         // Scroll vi mode cursor.
@@ -1174,7 +1269,7 @@ impl<T> Term<T> {
             },
             Direction::Left if flags.intersects(Flags::WIDE_CHAR | Flags::WIDE_CHAR_SPACER) => {
                 if flags.contains(Flags::WIDE_CHAR_SPACER) {
-                    point.column -= 1;
+                    point.column.0 = point.column.0.saturating_sub(1);
                 }
 
                 let prev = point.sub(self, Boundary::Grid, 1);
@@ -1237,7 +1332,7 @@ impl<T> Term<T> {
             self.grid.cursor.point.line += 1;
         }
 
-        self.grid.cursor.point.column = Column(0);
+        self.grid.cursor.point.column = self.horizontal_bounds().start;
         self.grid.cursor.input_needs_wrap = false;
         self.damage_cursor();
     }
@@ -1245,10 +1340,18 @@ impl<T> Term<T> {
     /// Write `c` to the cell at the cursor position.
     #[inline(always)]
     fn write_at_cursor(&mut self, c: char) {
-        let c = self.grid.cursor.charsets[self.active_charset].map(c);
+        // Read before taken: taking would store to the state for every character.
+        let charset = match self.protocol.single_shift {
+            Some(_) => self.protocol.single_shift.take().unwrap_or(self.active_charset),
+            None => self.active_charset,
+        };
+        // `map` is a jump table now that there are national sets; nearly every
+        // character is printed in ASCII.
+        let charset = self.grid.cursor.charsets[charset];
+        let c = if charset == StandardCharset::Ascii { c } else { charset.map(c) };
         let fg = self.grid.cursor.template.fg;
         let bg = self.grid.cursor.template.bg;
-        let flags = self.grid.cursor.template.flags;
+        let flags = self.grid.cursor.template.flags | Flags::DRAWN;
         let extra = self.grid.cursor.template.extra.clone();
 
         let mut cursor_cell = self.grid.cursor_cell();
@@ -1296,11 +1399,12 @@ impl<T> Term<T> {
         // reading them first.
         let template = &self.grid.cursor.template;
         if start.0 >= self.grid[point.line].occ && template.extra.is_none() {
-            let (fg, bg, flags) = (template.fg, template.bg, template.flags);
+            let (fg, bg, flags) = (template.fg, template.bg, template.flags | Flags::DRAWN);
             // The unoccupied suffix is uniform. If its attributes already match, writing
             // characters alone is enough; otherwise set the attributes for the whole segment.
+            // Characters alone are written with no flag but `DRAWN`.
             let blank = &self.grid[point.line][start];
-            if blank.fg == fg && blank.bg == bg && blank.flags == flags {
+            if blank.fg == fg && blank.bg == bg && (blank.flags | flags) == Flags::DRAWN {
                 self.grid[point.line].write_ascii_characters(start, text);
                 return;
             }
@@ -1328,7 +1432,7 @@ impl<T> Term<T> {
 
         let template = &self.grid.cursor.template;
         let (fg, bg, flags, extra) =
-            (template.fg, template.bg, template.flags, template.extra.clone());
+            (template.fg, template.bg, template.flags | Flags::DRAWN, template.extra.clone());
         for (cell, &byte) in self.grid[point.line][start..end].iter_mut().zip(text) {
             cell.c = ascii_run_char(byte);
             cell.fg = fg;
@@ -1462,7 +1566,7 @@ impl RenderableCursor {
         let vi_mode = term.mode().contains(TermMode::VI);
         let mut point = if vi_mode { term.vi_mode_cursor.point } else { term.grid.cursor.point };
         if term.grid[point].flags.contains(Flags::WIDE_CHAR_SPACER) {
-            point.column -= 1;
+            point.column.0 = point.column.0.saturating_sub(1);
         }
 
         // Cursor shape.
@@ -2074,10 +2178,14 @@ mod tests {
             ("replacement over a wide character", "漢字漢字漢\x1b[1;2H".as_bytes(), "\x7fb\x7f"),
             ("replacement in insert mode", b"hello\r\x1b[4h", "a\x7fb"),
             ("replacement in line drawing", b"\x1b(0", "q\x7fq"),
+            ("replacement in a long run", b"", "abcdefghijklmnopqrstuvwxyz\x7f0123456789ABCDEF"),
         ];
 
-        for (name, setup, text) in cases {
-            let size = TermSize::new(10, 5);
+        // Eighty columns as well, for segments long enough that a run without a replacement is
+        // written unmapped.
+        for ((name, setup, text), columns) in cases.iter().flat_map(|case| [(case, 10), (case, 80)])
+        {
+            let size = TermSize::new(columns, 5);
             let start = || {
                 let mut term = Term::new(Config::default(), &size, VoidListener);
                 Processor::<StdSyncHandler>::new().advance(&mut term, setup);
@@ -2091,11 +2199,14 @@ mod tests {
             }
             bulk.input_ascii(text.as_bytes());
 
-            assert!(bulk.grid == per_character.grid, "{name}: grids differ");
-            assert_eq!(bulk.grid.cursor.point, per_character.grid.cursor.point, "{name}: cursor");
+            assert!(bulk.grid == per_character.grid, "{name}, {columns}: grids differ");
+            assert_eq!(
+                bulk.grid.cursor.point, per_character.grid.cursor.point,
+                "{name}, {columns}: cursor"
+            );
             assert_eq!(
                 bulk.grid.cursor.input_needs_wrap, per_character.grid.cursor.input_needs_wrap,
-                "{name}: pending wrap",
+                "{name}, {columns}: pending wrap",
             );
         }
     }

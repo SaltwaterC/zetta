@@ -1,0 +1,11 @@
+[package]
+name = "zetta-shitty-adapter"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+alacritty_terminal = { path = "../../crates/alacritty_terminal" }
+serde_json = "1"

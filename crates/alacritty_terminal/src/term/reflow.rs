@@ -333,6 +333,8 @@ impl<T> Term<T> {
             mode: self.mode,
             hosted_output_mode: self.hosted_output_mode,
             scroll_region: self.scroll_region.clone(),
+            horizontal_margin: self.horizontal_margin.clone(),
+            protocol: self.protocol.clone(),
             colors: self.colors,
             cursor_style: self.cursor_style,
             event_proxy,
@@ -344,6 +346,8 @@ impl<T> Term<T> {
             config: self.config.clone(),
             reflow: PendingReflow::default(),
             prompt: self.prompt,
+            prepend_pending: self.prepend_pending,
+            doubled_rows: self.doubled_rows,
         }
     }
 
@@ -428,6 +432,7 @@ impl<T> Term<T> {
             prompt
         );
         self.mode.set(TermMode::VI, vi);
+        self.recheck_doubled_rows();
         self.damage.full = true;
         true
     }

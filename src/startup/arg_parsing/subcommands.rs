@@ -614,10 +614,7 @@ pub(super) fn parse_notify_subcommand(arguments: &[OsString]) -> Result<StartupA
     }
     #[cfg(feature = "notifications")]
     {
-        if arguments
-            .iter()
-            .any(|argument| matches!(argument.to_string_lossy().as_ref(), "--help" | "-h"))
-        {
+        if requests_notify_help(arguments) {
             println!("{}", notify_help());
             std::process::exit(0);
         }

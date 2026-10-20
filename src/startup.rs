@@ -11,7 +11,7 @@ use crate::cli_services::{http_server_help, parse_http_args};
 #[cfg(notify_cleanup_enabled)]
 use crate::cli_services::{notify_cleanup_help, parse_notify_cleanup_args};
 #[cfg(feature = "notifications")]
-use crate::cli_services::{notify_help, parse_notify_args};
+use crate::cli_services::{notify_help, parse_notify_args, requests_notify_help};
 #[cfg(feature = "serial-console")]
 use crate::cli_services::{parse_serial_args, serial_help};
 #[cfg(feature = "tftp-server")]
@@ -594,6 +594,10 @@ fn start_application(application: gpui::Application, launch: ApplicationLaunch) 
         .with_open_url_handler(control_tx.clone())
         .run(move |cx: &mut App| {
             log::debug!("startup platform ready: {:?}", startup_started.elapsed());
+            // Before any terminal is configured: OSC 99 is answered only by a
+            // build that can show what it is sent.
+            #[cfg(feature = "notifications")]
+            terminal::enable_desktop_notifications();
             #[cfg(windows)]
             {
                 cx.set_app_identity(ZETTA_APP_ID, "Zetta");

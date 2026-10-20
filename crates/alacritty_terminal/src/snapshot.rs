@@ -71,6 +71,8 @@ pub const RENDERED_FLAGS: Flags = Flags::from_bits_truncate(
         | Flags::ITALIC.bits()
         | Flags::DIM.bits()
         | Flags::HIDDEN.bits()
+        | Flags::BLINK.bits()
+        | Flags::OVERLINE.bits()
         | Flags::STRIKEOUT.bits()
         | Flags::ALL_UNDERLINES.bits(),
 );
@@ -94,7 +96,9 @@ fn painted_length(row: &Row<Cell>) -> usize {
     while length > text {
         let cell = &row[Column(length - 1)];
         let paints = cell.bg != Color::Named(NamedColor::Background)
-            || cell.flags.intersects(Flags::INVERSE | Flags::ALL_UNDERLINES | Flags::STRIKEOUT);
+            || cell.flags.intersects(
+                Flags::INVERSE | Flags::ALL_UNDERLINES | Flags::STRIKEOUT | Flags::OVERLINE,
+            );
         if paints {
             break;
         }
@@ -333,6 +337,12 @@ fn write_sgr(out: &mut Vec<u8>, style: &Style) {
         } else {
             b";4".as_slice()
         });
+    }
+    if style.flags.contains(Flags::BLINK) {
+        out.extend_from_slice(b";5");
+    }
+    if style.flags.contains(Flags::OVERLINE) {
+        out.extend_from_slice(b";53");
     }
     if style.flags.contains(Flags::INVERSE) {
         out.extend_from_slice(b";7");

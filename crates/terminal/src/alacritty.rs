@@ -27,7 +27,7 @@ use crate::{
 use alacritty_terminal::{
     event::{Event as AlacTermEvent, EventListener, Notify, WindowSize},
     event_loop::{EventLoop, Msg, Notifier},
-    grid::{Dimensions, Grid, GridIterator, Row, Scroll as AlacScroll},
+    grid::{Dimensions, Grid, GridIterator, LineSize, Row, Scroll as AlacScroll},
     index::{Boundary, Column, Direction as AlacDirection, Line, Point as AlacPoint},
     selection::{
         Selection as AlacSelection, SelectionRange as AlacSelectionRange,
@@ -290,8 +290,25 @@ pub(super) fn pty_term_config(
         scrolling_history,
         default_cursor_style: alacritty_cursor_style(cursor_shape),
         semantic_escape_chars: semantic_escape_chars(),
+        desktop_notifications: desktop_notifications_enabled(),
         ..Config::default()
     }
+}
+
+/// Whether the embedding application can show a desktop notification. It is
+/// a property of the process (the build, and the platform's notifier), not of
+/// one terminal, so it is set once rather than threaded through every config.
+static DESKTOP_NOTIFICATIONS: AtomicBool = AtomicBool::new(false);
+
+/// Lets terminals configured from now on accept OSC 99 and answer its query
+/// with [`Event::DesktopNotification`](crate::Event::DesktopNotification) as
+/// the delivery. Call it only when the application will show them.
+pub fn enable_desktop_notifications() {
+    DESKTOP_NOTIFICATIONS.store(true, Ordering::Relaxed);
+}
+
+pub(super) fn desktop_notifications_enabled() -> bool {
+    DESKTOP_NOTIFICATIONS.load(Ordering::Relaxed)
 }
 
 pub(super) fn set_default_cursor_style(
@@ -502,6 +519,7 @@ impl From<AlacTermEvent> for TerminalBackendEvent {
             AlacTermEvent::ClipboardFrame(frame) => Self::ClipboardFrame(frame),
             AlacTermEvent::ColorRequest(index, format) => Self::ColorRequest(index, format),
             AlacTermEvent::PtyWrite(output) => Self::PtyWrite(output),
+            AlacTermEvent::PtyWriteRaw(bytes) => Self::PtyWriteRaw(bytes),
             AlacTermEvent::TextAreaSizeRequest(format) => {
                 Self::TextAreaSizeRequest(Arc::new(move |bounds, scale_factor| {
                     format(window_size_from_terminal_bounds(bounds, scale_factor))
@@ -514,6 +532,9 @@ impl From<AlacTermEvent> for TerminalBackendEvent {
             AlacTermEvent::CursorBlinkingChange => Self::CursorBlinkingChange,
             AlacTermEvent::Wakeup => Self::Wakeup,
             AlacTermEvent::Bell => Self::Bell,
+            AlacTermEvent::DesktopNotification(notification) => {
+                Self::DesktopNotification(notification)
+            }
             AlacTermEvent::Exit => Self::Exit,
             AlacTermEvent::ChildExit(status) => Self::ChildExit(status),
             AlacTermEvent::ChildExitStatusUnavailable => Self::ChildExitStatusUnavailable,
@@ -527,7 +548,7 @@ impl EventListener for ZedListener {
     fn send_event(&self, event: AlacTermEvent) {
         #[cfg(windows)]
         if let AlacTermEvent::PtyWrite(reply) = &event
-            && reply == "\x1b[?6c"
+            && reply == alacritty_terminal::term::PRIMARY_DEVICE_ATTRIBUTES
             && let Some(sender) = self.startup_reply.sender.get()
             && !self.startup_reply.sent.swap(true, Ordering::AcqRel)
         {
@@ -668,8 +689,12 @@ impl From<Hyperlink> for AlacHyperlink {
     }
 }
 
-fn terminal_cell_from_alacritty(cell: &AlacCell) -> Cell {
-    Cell { cell: cell.clone() }
+fn terminal_cell_from_alacritty(cell: &AlacCell, reverse: bool) -> Cell {
+    let mut cell = cell.clone();
+    if reverse {
+        cell.flags.toggle(Flags::INVERSE);
+    }
+    Cell { cell }
 }
 
 impl Cell {
@@ -762,8 +787,8 @@ impl Cell {
 }
 
 impl<'a> RenderableCells<'a> {
-    pub(super) fn new(cells: GridIterator<'a, AlacCell>) -> Self {
-        Self { cells }
+    pub(super) fn new(cells: GridIterator<'a, AlacCell>, reverse: bool) -> Self {
+        Self { cells, reverse }
     }
 }
 
@@ -773,7 +798,7 @@ impl Iterator for RenderableCells<'_> {
     fn next(&mut self) -> Option<Self::Item> {
         self.cells.next().map(|cell| IndexedCell {
             point: terminal_point_from_alacritty(cell.point),
-            cell: terminal_cell_from_alacritty(cell.cell),
+            cell: terminal_cell_from_alacritty(cell.cell, self.reverse),
         })
     }
 
@@ -782,171 +807,55 @@ impl Iterator for RenderableCells<'_> {
     }
 }
 
+/// Each frontend mode and the engine mode it mirrors.
+const MODE_PAIRS: [(Modes, TermMode); 24] = [
+    (Modes::APP_CURSOR, TermMode::APP_CURSOR),
+    (Modes::APP_KEYPAD, TermMode::APP_KEYPAD),
+    (Modes::SHOW_CURSOR, TermMode::SHOW_CURSOR),
+    (Modes::LINE_WRAP, TermMode::LINE_WRAP),
+    (Modes::ORIGIN, TermMode::ORIGIN),
+    (Modes::INSERT, TermMode::INSERT),
+    (Modes::LINE_FEED_NEW_LINE, TermMode::LINE_FEED_NEW_LINE),
+    (Modes::FOCUS_IN_OUT, TermMode::FOCUS_IN_OUT),
+    (Modes::ALTERNATE_SCROLL, TermMode::ALTERNATE_SCROLL),
+    (Modes::BRACKETED_PASTE, TermMode::BRACKETED_PASTE),
+    (Modes::SGR_MOUSE, TermMode::SGR_MOUSE),
+    (Modes::UTF8_MOUSE, TermMode::UTF8_MOUSE),
+    (Modes::ALT_SCREEN, TermMode::ALT_SCREEN),
+    (Modes::MOUSE_REPORT_CLICK, TermMode::MOUSE_REPORT_CLICK),
+    (Modes::MOUSE_DRAG, TermMode::MOUSE_DRAG),
+    (Modes::MOUSE_MOTION, TermMode::MOUSE_MOTION),
+    (Modes::VI, TermMode::VI),
+    (Modes::WIN32_INPUT, TermMode::WIN32_INPUT),
+    (Modes::KEYBOARD_LOCKED, TermMode::KEYBOARD_LOCKED),
+    (Modes::LOCAL_ECHO, TermMode::LOCAL_ECHO),
+    (Modes::BACKARROW_SENDS_BS, TermMode::BACKARROW_SENDS_BS),
+    (Modes::ALT_ESC_DISABLED, TermMode::ALT_ESC_DISABLED),
+    (Modes::META_SETS_EIGHTH_BIT, TermMode::META_SETS_EIGHTH_BIT),
+    (Modes::SGR_PIXEL_MOUSE, TermMode::SGR_PIXEL_MOUSE),
+];
+
 impl Modes {
     #[cfg(test)]
     fn to_alacritty(self) -> TermMode {
         let mut mode = TermMode::empty();
-        add_alacritty_mode(&mut mode, self, Self::APP_CURSOR, TermMode::APP_CURSOR);
-        add_alacritty_mode(&mut mode, self, Self::APP_KEYPAD, TermMode::APP_KEYPAD);
-        add_alacritty_mode(&mut mode, self, Self::SHOW_CURSOR, TermMode::SHOW_CURSOR);
-        add_alacritty_mode(&mut mode, self, Self::LINE_WRAP, TermMode::LINE_WRAP);
-        add_alacritty_mode(&mut mode, self, Self::ORIGIN, TermMode::ORIGIN);
-        add_alacritty_mode(&mut mode, self, Self::INSERT, TermMode::INSERT);
-        add_alacritty_mode(
-            &mut mode,
-            self,
-            Self::LINE_FEED_NEW_LINE,
-            TermMode::LINE_FEED_NEW_LINE,
-        );
-        add_alacritty_mode(&mut mode, self, Self::FOCUS_IN_OUT, TermMode::FOCUS_IN_OUT);
-        add_alacritty_mode(
-            &mut mode,
-            self,
-            Self::ALTERNATE_SCROLL,
-            TermMode::ALTERNATE_SCROLL,
-        );
-        add_alacritty_mode(
-            &mut mode,
-            self,
-            Self::BRACKETED_PASTE,
-            TermMode::BRACKETED_PASTE,
-        );
-        add_alacritty_mode(&mut mode, self, Self::SGR_MOUSE, TermMode::SGR_MOUSE);
-        add_alacritty_mode(&mut mode, self, Self::UTF8_MOUSE, TermMode::UTF8_MOUSE);
-        add_alacritty_mode(&mut mode, self, Self::ALT_SCREEN, TermMode::ALT_SCREEN);
-        add_alacritty_mode(
-            &mut mode,
-            self,
-            Self::MOUSE_REPORT_CLICK,
-            TermMode::MOUSE_REPORT_CLICK,
-        );
-        add_alacritty_mode(&mut mode, self, Self::MOUSE_DRAG, TermMode::MOUSE_DRAG);
-        add_alacritty_mode(&mut mode, self, Self::MOUSE_MOTION, TermMode::MOUSE_MOTION);
-        add_alacritty_mode(&mut mode, self, Self::VI, TermMode::VI);
-        add_alacritty_mode(&mut mode, self, Self::WIN32_INPUT, TermMode::WIN32_INPUT);
+        for (terminal_mode, alacritty_mode) in MODE_PAIRS {
+            if self.contains(terminal_mode) {
+                mode.insert(alacritty_mode);
+            }
+        }
         mode
     }
 }
 
 fn terminal_modes_from_alacritty(mode: TermMode) -> Modes {
     let mut terminal_modes = Modes::empty();
-    add_terminal_mode(
-        &mut terminal_modes,
-        mode,
-        TermMode::APP_CURSOR,
-        Modes::APP_CURSOR,
-    );
-    add_terminal_mode(
-        &mut terminal_modes,
-        mode,
-        TermMode::APP_KEYPAD,
-        Modes::APP_KEYPAD,
-    );
-    add_terminal_mode(
-        &mut terminal_modes,
-        mode,
-        TermMode::SHOW_CURSOR,
-        Modes::SHOW_CURSOR,
-    );
-    add_terminal_mode(
-        &mut terminal_modes,
-        mode,
-        TermMode::LINE_WRAP,
-        Modes::LINE_WRAP,
-    );
-    add_terminal_mode(&mut terminal_modes, mode, TermMode::ORIGIN, Modes::ORIGIN);
-    add_terminal_mode(&mut terminal_modes, mode, TermMode::INSERT, Modes::INSERT);
-    add_terminal_mode(
-        &mut terminal_modes,
-        mode,
-        TermMode::LINE_FEED_NEW_LINE,
-        Modes::LINE_FEED_NEW_LINE,
-    );
-    add_terminal_mode(
-        &mut terminal_modes,
-        mode,
-        TermMode::FOCUS_IN_OUT,
-        Modes::FOCUS_IN_OUT,
-    );
-    add_terminal_mode(
-        &mut terminal_modes,
-        mode,
-        TermMode::ALTERNATE_SCROLL,
-        Modes::ALTERNATE_SCROLL,
-    );
-    add_terminal_mode(
-        &mut terminal_modes,
-        mode,
-        TermMode::BRACKETED_PASTE,
-        Modes::BRACKETED_PASTE,
-    );
-    add_terminal_mode(
-        &mut terminal_modes,
-        mode,
-        TermMode::SGR_MOUSE,
-        Modes::SGR_MOUSE,
-    );
-    add_terminal_mode(
-        &mut terminal_modes,
-        mode,
-        TermMode::UTF8_MOUSE,
-        Modes::UTF8_MOUSE,
-    );
-    add_terminal_mode(
-        &mut terminal_modes,
-        mode,
-        TermMode::ALT_SCREEN,
-        Modes::ALT_SCREEN,
-    );
-    add_terminal_mode(
-        &mut terminal_modes,
-        mode,
-        TermMode::MOUSE_REPORT_CLICK,
-        Modes::MOUSE_REPORT_CLICK,
-    );
-    add_terminal_mode(
-        &mut terminal_modes,
-        mode,
-        TermMode::MOUSE_DRAG,
-        Modes::MOUSE_DRAG,
-    );
-    add_terminal_mode(
-        &mut terminal_modes,
-        mode,
-        TermMode::MOUSE_MOTION,
-        Modes::MOUSE_MOTION,
-    );
-    add_terminal_mode(&mut terminal_modes, mode, TermMode::VI, Modes::VI);
-    add_terminal_mode(
-        &mut terminal_modes,
-        mode,
-        TermMode::WIN32_INPUT,
-        Modes::WIN32_INPUT,
-    );
+    for (terminal_mode, alacritty_mode) in MODE_PAIRS {
+        if mode.contains(alacritty_mode) {
+            terminal_modes.insert(terminal_mode);
+        }
+    }
     terminal_modes
-}
-
-fn add_terminal_mode(
-    terminal_modes: &mut Modes,
-    alacritty_modes: TermMode,
-    alacritty_mode: TermMode,
-    terminal_mode: Modes,
-) {
-    if alacritty_modes.contains(alacritty_mode) {
-        terminal_modes.insert(terminal_mode);
-    }
-}
-
-#[cfg(test)]
-fn add_alacritty_mode(
-    alacritty_modes: &mut TermMode,
-    terminal_modes: Modes,
-    terminal_mode: Modes,
-    alacritty_mode: TermMode,
-) {
-    if terminal_modes.contains(terminal_mode) {
-        alacritty_modes.insert(alacritty_mode);
-    }
 }
 
 impl Cursor {
@@ -1001,6 +910,12 @@ fn terminal_selection_range_from_alacritty(range: AlacSelectionRange) -> Selecti
         end: terminal_point_from_alacritty(range.end),
         is_block: range.is_block,
     }
+}
+
+/// RIS on the user's behalf. The application is not told; like a hardware
+/// reset, the shell redraws its prompt on the next input.
+pub(super) fn reset_terminal(term: &mut Term<ZedListener>) {
+    alacritty_terminal::vte::ansi::Handler::reset_state(term);
 }
 
 pub(super) fn clear_saved_screen(term: &mut Term<ZedListener>) {
@@ -1118,9 +1033,10 @@ pub(super) fn make_content<T: alacritty_terminal::event::EventListener>(
     cells.clear();
     cells.reserve(content.display_iter.size_hint().0);
 
+    let reverse = content.mode.contains(TermMode::REVERSE_VIDEO);
     cells.extend(content.display_iter.map(|ic| IndexedCell {
         point: terminal_point_from_alacritty(ic.point),
-        cell: terminal_cell_from_alacritty(ic.cell),
+        cell: terminal_cell_from_alacritty(ic.cell, reverse),
     }));
 
     let grid = term.grid();
@@ -1134,8 +1050,18 @@ pub(super) fn make_content<T: alacritty_terminal::event::EventListener>(
             .take_while(|cell| cell.point.line >= bottom_line)
             .any(|cell| cell.cell.character() != ' ');
 
+    let display_offset = content.display_offset as i32;
+    let line_sizes = (0..term.screen_lines() as i32)
+        .map(|row| row - display_offset)
+        .filter_map(|line| {
+            let size = grid[Line(line)].line_size();
+            (size != LineSize::Single).then_some((line, size))
+        })
+        .collect();
+
     Content {
         cells,
+        line_sizes,
         mode: terminal_modes_from_alacritty(content.mode),
         total_lines: grid.total_lines(),
         display_offset: grid.display_offset(),
@@ -1529,9 +1455,10 @@ mod tests {
         }
 
         // A later query keeps the normal route instead of being duplicated or lost.
-        listener.send_event(AlacTermEvent::PtyWrite("\x1b[?6c".into()));
+        let da1 = alacritty_terminal::term::PRIMARY_DEVICE_ATTRIBUTES;
+        listener.send_event(AlacTermEvent::PtyWrite(da1.into()));
         assert!(matches!(events_rx.try_recv(),
-            Ok(PtyEvent::Event(TerminalBackendEvent::PtyWrite(reply))) if reply == "\x1b[?6c"));
+            Ok(PtyEvent::Event(TerminalBackendEvent::PtyWrite(reply))) if reply == da1));
     }
 
     #[test]
@@ -1758,12 +1685,22 @@ mod tests {
         let mut cell = AlacCell::default();
         cell.push_zerowidth('a');
 
-        let converted = terminal_cell_from_alacritty(&cell);
+        let converted = terminal_cell_from_alacritty(&cell, false);
 
         match (&cell.extra, &converted.cell.extra) {
             (Some(extra), Some(converted_extra)) => assert!(Arc::ptr_eq(extra, converted_extra)),
             _ => panic!("expected extra storage on both cells"),
         }
+    }
+
+    #[test]
+    fn screen_reverse_xors_rendition_without_changing_stored_cells() {
+        let mut cell = AlacCell::default();
+        assert!(terminal_cell_from_alacritty(&cell, true).is_inverse());
+        assert!(!cell.flags.contains(Flags::INVERSE));
+        cell.flags.insert(Flags::INVERSE);
+        assert!(!terminal_cell_from_alacritty(&cell, true).is_inverse());
+        assert!(terminal_cell_from_alacritty(&cell, false).is_inverse());
     }
 
     #[test]
@@ -1796,6 +1733,19 @@ mod tests {
         assert!(alacritty_modes.contains(TermMode::WIN32_INPUT));
         assert!(alacritty_modes.contains(TermMode::VI));
         assert!(!alacritty_modes.contains(TermMode::MOUSE_REPORT_CLICK));
+    }
+
+    #[test]
+    fn every_mode_pair_round_trips_on_its_own() {
+        for (terminal_mode, alacritty_mode) in MODE_PAIRS {
+            assert_eq!(terminal_modes_from_alacritty(alacritty_mode), terminal_mode);
+            assert_eq!(terminal_mode.to_alacritty(), alacritty_mode);
+        }
+        let all = MODE_PAIRS.iter().fold(Modes::empty(), |all, (mode, _)| {
+            assert!(!all.intersects(*mode), "{mode:?} is paired twice");
+            all | *mode
+        });
+        assert_eq!(terminal_modes_from_alacritty(all.to_alacritty()), all);
     }
 
     #[test]

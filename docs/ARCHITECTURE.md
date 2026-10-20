@@ -24,7 +24,9 @@ layering rule: every module named here is a sibling under `src/`.
   focus, broadcast, and what a terminal's exit does to its pane),
   `app/pane_templates.rs` (applying a pane template, and `--replace-pane`),
   `app/window_actions.rs` (window actions and application-menu navigation),
-  and `app/attention.rs` (routing an attention ID to the tab that owns it)
+  `app/attention.rs` (routing an attention ID to the tab that owns it), and
+  `app/desktop_notifications.rs` (showing a pane's OSC 99 notifications
+  through `zntfy`)
 - `startup.rs`: `run()`'s startup-mode dispatch, the handoff-to-a-running-process
   sequence, the GUI launch (`ApplicationLaunch`), window/process lifecycle, and
   theme resolution (`resolve_profile_theme`); a module directory —

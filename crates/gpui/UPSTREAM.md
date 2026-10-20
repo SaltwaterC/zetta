@@ -42,6 +42,18 @@ Retain these Zetta patches when synchronizing:
   and device loss — run after paint. Measured at −10.6% mean and −11.2% median
   draw time, 7 of 8 paired runs (8 of 8 on the median).
 
+- `Window::with_text_scale`, which stretches the bounds of every glyph, emoji,
+  underline and strikethrough painted inside it away from one origin. It is how
+  the terminal draws DEC double-width and double-height lines: a row's text is
+  shaped and painted at its ordinary size and stretched as it goes into the
+  scene. Stretching bounds rather than setting a sprite transformation means
+  no renderer has to support it — polychrome sprites and underlines have no
+  transformation at all — and a terminal row's stretch is always axis-aligned.
+  Glyphs are rasterized at the part of the stretch that is the same both ways
+  (`Window::text_scale_glyph`), so a double-height line is drawn from a raster
+  at twice the font size rather than a magnified one; only double width's
+  horizontal half is stretched.
+
 - `Platform::read_from_primary_async` and `App::read_from_primary_async`, the
   primary-selection counterpart of upstream's `read_from_clipboard_async`, with
   the same synchronous default. Linux overrides both so a paste from another

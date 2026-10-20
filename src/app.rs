@@ -9,6 +9,7 @@
 //! - `pane_templates.rs` — applying a template, and `--replace-pane`.
 //! - `window_actions.rs` — window actions and application-menu navigation.
 //! - `attention.rs` — routing an attention ID to the tab that owns it.
+//! - `desktop_notifications.rs` — showing the notifications a pane asks for.
 
 use super::*;
 use crate::background_session_ui::HandoverOrigin;
@@ -1231,6 +1232,8 @@ impl Drop for Zetta {
 }
 
 mod attention;
+#[cfg(feature = "notifications")]
+mod desktop_notifications;
 mod pane_templates;
 mod panes;
 mod tabs;

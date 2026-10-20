@@ -19,7 +19,7 @@ mod storage;
 mod tests;
 mod text;
 
-pub use self::row::Row;
+pub use self::row::{LineSize, Row};
 use self::storage::Storage;
 pub use self::text::RowText;
 
@@ -61,6 +61,10 @@ pub trait GridCell: Sized + Clone {
         Self::reset_all(cells, template);
     }
 
+    /// Clear a retained cell whose wide continuation was cut off by truncation.
+    /// Nonterminal grid cells have no wide-character representation to repair.
+    fn clear_truncated_wide(&mut self) {}
+
     fn flags(&self) -> &Flags;
     fn flags_mut(&mut self) -> &mut Flags;
 
@@ -98,6 +102,10 @@ pub struct Cursor<T> {
 
     /// Currently configured graphic character sets.
     pub charsets: Charsets,
+
+    /// Origin mode and invoked character set captured by DECSC.
+    pub origin: bool,
+    pub active_charset: CharsetIndex,
 
     /// Tracks if the next call to input will need to first handle wrapping.
     ///

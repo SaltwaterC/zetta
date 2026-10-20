@@ -5,6 +5,46 @@ use super::*;
 use crate::vte::ansi::SemanticPromptMark;
 
 impl<T: EventListener> Handler for Term<T> {
+    fn vt52_mode(&self) -> bool {
+        self.protocol.level == 52
+    }
+    fn csi_extension(
+        &mut self,
+        params: &crate::vte::Params,
+        intermediates: &[u8],
+        action: char,
+    ) -> bool {
+        self.dispatch_csi_extension(params, intermediates, action)
+    }
+
+    fn esc_extension(&mut self, intermediates: &[u8], byte: u8) -> bool {
+        self.dispatch_esc_extension(intermediates, byte)
+    }
+
+    fn dcs_sequence(
+        &mut self,
+        params: &crate::vte::Params,
+        intermediates: &[u8],
+        action: char,
+        data: &[u8],
+    ) {
+        self.handle_dcs(params, intermediates, action, data);
+    }
+
+    fn soft_reset(&mut self) {
+        let _recording = self.reflow.record(|| move |term| term.soft_reset());
+        self.apply_soft_reset();
+    }
+
+    fn set_horizontal_margins(&mut self, left: usize, right: usize) -> bool {
+        let _recording = self.reflow.record(|| {
+            move |term| {
+                term.set_horizontal_margins(left, right);
+            }
+        });
+        self.horizontal_margins(left, right)
+    }
+
     /// A character to be displayed.
     #[inline(never)]
     fn input(&mut self, c: char) {
@@ -15,6 +55,13 @@ impl<T: EventListener> Handler for Term<T> {
             None => return,
         };
 
+        if self.extend_grapheme(c) {
+            return;
+        }
+
+        // Prepend characters start a cluster despite having no standalone
+        // glyph width; the following base determines its presentation.
+        let width = if width == 0 && grapheme::is_prepend(c) { 1 } else { width };
         // Handle zero-width characters.
         if width == 0 {
             // Get previous column.
@@ -29,7 +76,21 @@ impl<T: EventListener> Handler for Term<T> {
                 column.0 = column.saturating_sub(1);
             }
 
-            self.grid[line][column].push_zerowidth(c);
+            if self.grid[line][column].zerowidth().map_or(0, <[char]>::len) < 23 {
+                self.grid[line][column].push_zerowidth(c);
+            }
+            return;
+        }
+
+        // A two-cell glyph cannot have a trailing spacer in a one-column
+        // grid. Keep its scalar in one cell after wrapping, so a narrow pane
+        // remains usable without advancing the cursor beyond its only column.
+        if width > 1 && self.columns() == 1 {
+            if self.mode.contains(TermMode::LINE_WRAP) {
+                self.wrapline();
+                self.write_at_cursor(c);
+            }
+            self.grid.cursor.input_needs_wrap = true;
             return;
         }
 
@@ -37,17 +98,12 @@ impl<T: EventListener> Handler for Term<T> {
         if self.grid.cursor.input_needs_wrap {
             self.wrapline();
         }
+        self.clamp_cursor_to_line_size();
 
         // If in insert mode, first shift cells to the right.
-        let columns = self.columns();
+        let columns = self.input_right_edge();
         if self.mode.contains(TermMode::INSERT) && self.grid.cursor.point.column + width < columns {
-            let line = self.grid.cursor.point.line;
-            let col = self.grid.cursor.point.column;
-            let row = &mut self.grid[line][..];
-
-            for col in (col.0..(columns - width)).rev() {
-                row.swap(col + width, col);
-            }
+            self.insert_blank_cells(width);
         }
 
         if width == 1 {
@@ -86,6 +142,15 @@ impl<T: EventListener> Handler for Term<T> {
         }
     }
 
+    fn repeat_char(&mut self, c: char, count: u16) {
+        if UnicodeWidthChar::width(c).unwrap_or(0) == 0 {
+            return;
+        }
+        for _ in 0..count {
+            self.input(c);
+        }
+    }
+
     /// Zetta patch: a run of plain text is written a row segment at a time.
     /// Upstream called `input` per character, which made it the largest cost of
     /// reading ordinary output, and of binary output the replacement characters
@@ -98,6 +163,7 @@ impl<T: EventListener> Handler for Term<T> {
         // on the last column. All three are rare; take the per-character path.
         if self.mode.contains(TermMode::INSERT)
             || !self.mode.contains(TermMode::LINE_WRAP)
+            || self.protocol.single_shift.is_some()
             || self.grid.cursor.charsets[self.active_charset] != StandardCharset::Ascii
         {
             for &byte in run {
@@ -106,13 +172,22 @@ impl<T: EventListener> Handler for Term<T> {
             return;
         }
 
-        // Every character of a run, U+FFFD included, is one cell wide.
-        let columns = self.columns();
+        // Every character of a run, U+FFFD included, is one cell wide. ASCII
+        // joins nothing but a Prepend printed just before it; see `grapheme.rs`.
         let mut bytes = run;
+        if self.prepend_pending
+            && let Some((&first, rest)) = bytes.split_first()
+            && self.extend_grapheme(crate::vte::ascii_run_char(first))
+        {
+            bytes = rest;
+        }
         while !bytes.is_empty() {
             if self.grid.cursor.input_needs_wrap {
                 self.wrapline();
             }
+            // Each row the run reaches may be a different size.
+            self.clamp_cursor_to_line_size();
+            let columns = self.input_right_edge();
 
             let column = self.grid.cursor.point.column.0;
             let count = bytes.len().min(columns - column);
@@ -133,12 +208,20 @@ impl<T: EventListener> Handler for Term<T> {
     fn decaln(&mut self) {
         let _recording = self.reflow.record(|| move |term| term.decaln());
         trace!("Decalnning");
+        self.scroll_region = Line(0)..Line(self.screen_lines() as i32);
+        if self.horizontal_margin.is_some() {
+            self.horizontal_margin = Some(Column(0)..Column(self.columns()));
+        }
+        self.mode.remove(TermMode::ORIGIN);
+        self.goto(0, 0);
 
         for line in (0..self.screen_lines()).map(Line::from) {
+            self.reset_line_size(line);
             for column in 0..self.columns() {
                 let cell = &mut self.grid[line][Column(column)];
                 *cell = Cell::default();
                 cell.c = 'E';
+                cell.flags.insert(Flags::DRAWN);
             }
         }
 
@@ -160,7 +243,12 @@ impl<T: EventListener> Handler for Term<T> {
 
         self.damage_cursor();
         self.grid.cursor.point.line = cmp::max(cmp::min(line + y_offset, max_y), Line(0));
-        self.grid.cursor.point.column = cmp::min(col, self.last_column());
+        let horizontal = if self.mode.contains(TermMode::ORIGIN) {
+            self.horizontal_bounds()
+        } else {
+            Column(0)..Column(self.columns())
+        };
+        self.grid.cursor.point.column = (horizontal.start + col).min(horizontal.end - 1);
         self.damage_cursor();
         self.grid.cursor.input_needs_wrap = false;
     }
@@ -169,43 +257,24 @@ impl<T: EventListener> Handler for Term<T> {
     fn goto_line(&mut self, line: i32) {
         let _recording = self.reflow.record(|| move |term| term.goto_line(line));
         trace!("Going to line: {line}");
-        self.goto(line, self.grid.cursor.point.column.0)
+        let offset =
+            if self.mode.contains(TermMode::ORIGIN) { self.horizontal_bounds().start.0 } else { 0 };
+        self.goto(line, self.grid.cursor.point.column.0.saturating_sub(offset))
     }
 
     #[inline]
     fn goto_col(&mut self, col: usize) {
         let _recording = self.reflow.record(|| move |term| term.goto_col(col));
         trace!("Going to column: {col}");
-        self.goto(self.grid.cursor.point.line.0, col)
+        let offset =
+            if self.mode.contains(TermMode::ORIGIN) { self.scroll_region.start.0 } else { 0 };
+        self.goto(self.grid.cursor.point.line.0 - offset, col)
     }
 
     #[inline]
     fn insert_blank(&mut self, count: usize) {
         let _recording = self.reflow.record(|| move |term| term.insert_blank(count));
-        let cursor = &self.grid.cursor;
-        let bg = cursor.template.bg;
-
-        // Ensure inserting within terminal bounds
-        let count = cmp::min(count, self.columns() - cursor.point.column.0);
-
-        let source = cursor.point.column;
-        let destination = cursor.point.column.0 + count;
-        let num_cells = self.columns() - destination;
-
-        let line = cursor.point.line;
-        self.damage.damage_line(line.0 as usize, 0, self.columns() - 1);
-
-        let row = &mut self.grid[line][..];
-
-        for offset in (0..num_cells).rev() {
-            row.swap(destination + offset, source.0 + offset);
-        }
-
-        // Cells were just moved out toward the end of the line;
-        // fill in between source and dest with blanks.
-        for cell in &mut row[source.0..destination] {
-            *cell = bg.into();
-        }
+        self.insert_blank_cells(count);
     }
 
     #[inline]
@@ -213,9 +282,7 @@ impl<T: EventListener> Handler for Term<T> {
         let _recording = self.reflow.record(|| move |term| term.move_up(lines));
         trace!("Moving up: {lines}");
 
-        let line = self.grid.cursor.point.line - lines;
-        let column = self.grid.cursor.point.column;
-        self.goto(line.0, column.0)
+        self.move_vertical(-(lines.min(i32::MAX as usize) as i32));
     }
 
     #[inline]
@@ -223,16 +290,19 @@ impl<T: EventListener> Handler for Term<T> {
         let _recording = self.reflow.record(|| move |term| term.move_down(lines));
         trace!("Moving down: {lines}");
 
-        let line = self.grid.cursor.point.line + lines;
-        let column = self.grid.cursor.point.column;
-        self.goto(line.0, column.0)
+        self.move_vertical(lines.min(i32::MAX as usize) as i32);
     }
 
     #[inline]
     fn move_forward(&mut self, cols: usize) {
         let _recording = self.reflow.record(|| move |term| term.move_forward(cols));
         trace!("Moving forward: {cols}");
-        let last_column = cmp::min(self.grid.cursor.point.column + cols, self.last_column());
+        let right = if self.horizontal_bounds().contains(&self.grid.cursor.point.column) {
+            self.horizontal_bounds().end - 1
+        } else {
+            self.last_column()
+        };
+        let last_column = cmp::min(self.grid.cursor.point.column + cols, right);
 
         let cursor_line = self.grid.cursor.point.line.0 as usize;
         self.damage.damage_line(cursor_line, self.grid.cursor.point.column.0, last_column.0);
@@ -245,7 +315,18 @@ impl<T: EventListener> Handler for Term<T> {
     fn move_backward(&mut self, cols: usize) {
         let _recording = self.reflow.record(|| move |term| term.move_backward(cols));
         trace!("Moving backward: {cols}");
-        let column = self.grid.cursor.point.column.saturating_sub(cols);
+        if self.mode.contains(TermMode::LINE_WRAP)
+            && self.mode.intersects(TermMode::REVERSE_WRAP | TermMode::REVERSE_WRAP_ALL)
+        {
+            self.move_backward_wrapping(cols);
+            return;
+        }
+        let left = if self.horizontal_bounds().contains(&self.grid.cursor.point.column) {
+            self.horizontal_bounds().start.0
+        } else {
+            0
+        };
+        let column = self.grid.cursor.point.column.saturating_sub(cols).max(left);
 
         let cursor_line = self.grid.cursor.point.line.0 as usize;
         self.damage.damage_line(cursor_line, column, self.grid.cursor.point.column.0);
@@ -259,14 +340,13 @@ impl<T: EventListener> Handler for Term<T> {
         match intermediate {
             None => {
                 trace!("Reporting primary device attributes");
-                let text = String::from("\x1b[?6c");
-                self.event_proxy.send_event(Event::PtyWrite(text));
+                self.write_reply(String::from(PRIMARY_DEVICE_ATTRIBUTES));
             },
             Some('>') => {
                 trace!("Reporting secondary device attributes");
                 let version = version_number(env!("CARGO_PKG_VERSION"));
                 let text = format!("\x1b[>0;{version};1c");
-                self.event_proxy.send_event(Event::PtyWrite(text));
+                self.write_reply(text);
             },
             _ => debug!("Unsupported device attributes intermediate"),
         }
@@ -282,7 +362,7 @@ impl<T: EventListener> Handler for Term<T> {
         let current_mode =
             self.keyboard_mode_stack.last().unwrap_or(&KeyboardModes::NO_MODE).bits();
         let text = format!("\x1b[?{current_mode}u");
-        self.event_proxy.send_event(Event::PtyWrite(text));
+        self.write_reply(text);
     }
 
     #[inline]
@@ -339,12 +419,12 @@ impl<T: EventListener> Handler for Term<T> {
         match arg {
             5 => {
                 let text = String::from("\x1b[0n");
-                self.event_proxy.send_event(Event::PtyWrite(text));
+                self.write_reply(text);
             },
             6 => {
-                let pos = self.grid.cursor.point;
+                let pos = self.report_cursor_position();
                 let text = format!("\x1b[{};{}R", pos.line + 1, pos.column + 1);
-                self.event_proxy.send_event(Event::PtyWrite(text));
+                self.write_reply(text);
             },
             _ => debug!("unknown device status query: {arg}"),
         };
@@ -355,8 +435,8 @@ impl<T: EventListener> Handler for Term<T> {
         let _recording = self.reflow.record(|| move |term| term.move_down_and_cr(lines));
         trace!("Moving down and cr: {lines}");
 
-        let line = self.grid.cursor.point.line + lines;
-        self.goto(line.0, 0)
+        self.move_down(lines);
+        self.carriage_return();
     }
 
     #[inline]
@@ -364,17 +444,20 @@ impl<T: EventListener> Handler for Term<T> {
         let _recording = self.reflow.record(|| move |term| term.move_up_and_cr(lines));
         trace!("Moving up and cr: {lines}");
 
-        let line = self.grid.cursor.point.line - lines;
-        self.goto(line.0, 0)
+        self.move_up(lines);
+        self.carriage_return();
     }
 
     /// Insert tab at cursor position.
     #[inline]
     fn put_tab(&mut self, mut count: u16) {
         let _recording = self.reflow.record(|| move |term| term.put_tab(count));
-        // A tab after the last column is the same as a linebreak.
+        // HT does not trigger delayed autowrap unless the xterm workaround
+        // is enabled, and must not cancel a pending wrap for the next glyph.
         if self.grid.cursor.input_needs_wrap {
-            self.wrapline();
+            if self.protocol.tab_wrap {
+                self.wrapline();
+            }
             return;
         }
 
@@ -407,7 +490,24 @@ impl<T: EventListener> Handler for Term<T> {
         let _recording = self.reflow.record(|| move |term| term.backspace());
         trace!("Backspace");
 
-        if self.grid.cursor.point.column > Column(0) {
+        if self.grid.cursor.input_needs_wrap {
+            self.grid.cursor.input_needs_wrap = false;
+            if self.mode.intersects(TermMode::REVERSE_WRAP | TermMode::REVERSE_WRAP_ALL) {
+                return;
+            }
+        }
+        if self.mode.contains(TermMode::LINE_WRAP)
+            && self.mode.intersects(TermMode::REVERSE_WRAP | TermMode::REVERSE_WRAP_ALL)
+        {
+            self.move_backward_wrapping(1);
+            return;
+        }
+        let left = if self.grid.cursor.point.column >= self.horizontal_bounds().start {
+            self.horizontal_bounds().start
+        } else {
+            Column(0)
+        };
+        if self.grid.cursor.point.column > left {
             let line = self.grid.cursor.point.line.0 as usize;
             let column = self.grid.cursor.point.column.0;
             self.grid.cursor.point.column -= 1;
@@ -421,7 +521,8 @@ impl<T: EventListener> Handler for Term<T> {
     fn carriage_return(&mut self) {
         let _recording = self.reflow.record(|| move |term| term.carriage_return());
         trace!("Carriage return");
-        let new_col = 0;
+        let left = self.horizontal_bounds().start.0;
+        let new_col = if self.grid.cursor.point.column >= left { left } else { 0 };
         let line = self.grid.cursor.point.line.0 as usize;
         self.damage.damage_line(line, new_col, self.grid.cursor.point.column.0);
         self.grid.cursor.point.column = Column(new_col);
@@ -433,9 +534,14 @@ impl<T: EventListener> Handler for Term<T> {
     fn linefeed(&mut self) {
         let _recording = self.reflow.record(|| move |term| term.linefeed());
         trace!("Linefeed");
+        // Like xterm's CursorDown, every line feed (LF, VT, FF, IND) cancels
+        // a deferred wrap: the next graphic lands in the last column below.
+        self.grid.cursor.input_needs_wrap = false;
         let next = self.grid.cursor.point.line + 1;
         if next == self.scroll_region.end {
-            self.scroll_up(1);
+            if self.horizontal_bounds().contains(&self.grid.cursor.point.column) {
+                self.scroll_up(1);
+            }
         } else if next < self.screen_lines() {
             self.damage_cursor();
             self.grid.cursor.point.line += 1;
@@ -446,7 +552,7 @@ impl<T: EventListener> Handler for Term<T> {
     fn linefeed_with_mode(&mut self) {
         let _recording = self.reflow.record(|| move |term| term.linefeed_with_mode());
         self.linefeed();
-        if self.mode.contains(TermMode::LF_IMPLIES_CR) {
+        if self.mode.intersects(TermMode::LF_IMPLIES_CR | TermMode::LINE_FEED_NEW_LINE) {
             self.carriage_return();
         }
     }
@@ -525,6 +631,7 @@ impl<T: EventListener> Handler for Term<T> {
         let origin = self.grid.cursor.point.line;
         if self.scroll_region.contains(&origin) {
             self.scroll_down_relative(origin, lines);
+            self.carriage_return();
         }
     }
 
@@ -538,83 +645,40 @@ impl<T: EventListener> Handler for Term<T> {
 
         if lines > 0 && self.scroll_region.contains(&origin) {
             self.scroll_up_relative(origin, lines);
+            self.carriage_return();
         }
     }
 
     #[inline]
     fn erase_chars(&mut self, count: usize) {
         let _recording = self.reflow.record(|| move |term| term.erase_chars(count));
-        let cursor = &self.grid.cursor;
-
-        trace!("Erasing chars: count={}, col={}", count, cursor.point.column);
-
-        let start = cursor.point.column;
-        let end = cmp::min(start + count, Column(self.columns()));
-
-        // Cleared cells have current background color set.
-        let bg = self.grid.cursor.template.bg;
-        let line = cursor.point.line;
-        self.damage.damage_line(line.0 as usize, start.0, end.0);
-        let row = &mut self.grid[line];
-        for cell in &mut row[start..end] {
-            *cell = bg.into();
+        trace!("Erasing chars: count={}, col={}", count, self.grid.cursor.point.column);
+        if !self.erase_guarded_chars(count) {
+            self.erase_chars_cells(count);
         }
     }
 
     #[inline]
     fn delete_chars(&mut self, count: usize) {
         let _recording = self.reflow.record(|| move |term| term.delete_chars(count));
-        let columns = self.columns();
-        let cursor = &self.grid.cursor;
-        let bg = cursor.template.bg;
-
-        // Ensure deleting within terminal bounds.
-        let count = cmp::min(count, columns);
-
-        let start = cursor.point.column.0;
-        let end = cmp::min(start + count, columns - 1);
-        let num_cells = columns - end;
-
-        let line = cursor.point.line;
-        self.damage.damage_line(line.0 as usize, 0, self.columns() - 1);
-        let row = &mut self.grid[line][..];
-
-        for offset in 0..num_cells {
-            row.swap(start + offset, end + offset);
-        }
-
-        // Clear last `count` cells in the row. If deleting 1 char, need to delete
-        // 1 cell.
-        let end = columns - count;
-        for cell in &mut row[end..] {
-            *cell = bg.into();
-        }
+        self.delete_chars_cells(count);
     }
 
     #[inline]
     fn move_backward_tabs(&mut self, count: u16) {
         let _recording = self.reflow.record(|| move |term| term.move_backward_tabs(count));
-        trace!("Moving backward {count} tabs");
-
-        let old_col = self.grid.cursor.point.column.0;
+        let left =
+            if self.mode.contains(TermMode::ORIGIN) { self.horizontal_bounds().start.0 } else { 0 };
+        self.damage_cursor();
         for _ in 0..count {
-            let mut col = self.grid.cursor.point.column;
-
-            if col == 0 {
-                break;
+            let mut column = self.grid.cursor.point.column.0.saturating_sub(1).max(left);
+            while column > left && !self.tabs[Column(column)] {
+                column -= 1;
             }
-
-            for i in (0..(col.0)).rev() {
-                if self.tabs[index::Column(i)] {
-                    col = index::Column(i);
-                    break;
-                }
-            }
-            self.grid.cursor.point.column = col;
+            self.grid.cursor.point.column = Column(column);
         }
-
-        let line = self.grid.cursor.point.line.0 as usize;
-        self.damage.damage_line(line, self.grid.cursor.point.column.0, old_col);
+        self.grid.cursor.input_needs_wrap = false;
+        self.damage_cursor();
     }
 
     #[inline]
@@ -651,6 +715,8 @@ impl<T: EventListener> Handler for Term<T> {
         trace!("Saving cursor position");
 
         self.grid.saved_cursor = self.grid.cursor.clone();
+        self.grid.saved_cursor.origin = self.mode.contains(TermMode::ORIGIN);
+        self.grid.saved_cursor.active_charset = self.active_charset;
     }
 
     #[inline]
@@ -660,6 +726,8 @@ impl<T: EventListener> Handler for Term<T> {
 
         self.damage_cursor();
         self.grid.cursor = self.grid.saved_cursor.clone();
+        self.mode.set(TermMode::ORIGIN, self.grid.cursor.origin);
+        self.active_charset = self.grid.cursor.active_charset;
         self.damage_cursor();
     }
 
@@ -667,23 +735,30 @@ impl<T: EventListener> Handler for Term<T> {
     fn clear_line(&mut self, mode: ansi::LineClearMode) {
         let _recording = self.reflow.record(|| move |term| term.clear_line(mode));
         trace!("Clearing line: {mode:?}");
+        // Every EL cancels a deferred wrap. At the last column EL 0 erases
+        // that column, as in xterm, Ghostty and xterm.js.
+        self.grid.cursor.input_needs_wrap = false;
+        if self.erase_guarded_line(mode) {
+            return;
+        }
 
         let cursor = &self.grid.cursor;
-        let bg = cursor.template.bg;
+        let blank = cursor.template.erased();
         let point = cursor.point;
 
         let (left, right) = match mode {
-            ansi::LineClearMode::Right if cursor.input_needs_wrap => return,
             ansi::LineClearMode::Right => (point.column, Column(self.columns())),
             ansi::LineClearMode::Left => (Column(0), point.column + 1),
             ansi::LineClearMode::All => (Column(0), Column(self.columns())),
         };
 
+        self.clear_edit_boundary(point.line, left.0);
+        self.clear_edit_boundary(point.line, right.0);
         self.damage.damage_line(point.line.0 as usize, left.0, right.0 - 1);
 
         let row = &mut self.grid[point.line];
         for cell in &mut row[left..right] {
-            *cell = bg.into();
+            *cell = blank.clone();
         }
 
         let range = self.grid.cursor.point.line..=self.grid.cursor.point.line;
@@ -785,7 +860,10 @@ impl<T: EventListener> Handler for Term<T> {
     fn clear_screen(&mut self, mode: ansi::ClearMode) {
         let _recording = self.reflow.record(|| move |term| term.clear_screen(mode));
         trace!("Clearing screen: {mode:?}");
-        let bg = self.grid.cursor.template.bg;
+        if self.erase_guarded_screen(mode) {
+            return;
+        }
+        let blank = self.grid.cursor.template.erased();
 
         let screen_lines = self.screen_lines();
 
@@ -794,15 +872,20 @@ impl<T: EventListener> Handler for Term<T> {
                 let cursor = self.grid.cursor.point;
 
                 // If clearing more than one line.
-                if cursor.line > 1 {
+                if cursor.line > 0 {
                     // Fully clear all lines before the current line.
                     self.grid.reset_region(..cursor.line);
                 }
 
                 // Clear up to the current column in the current line.
                 let end = cmp::min(cursor.column + 1, Column(self.columns()));
+                if end.0 == self.columns() {
+                    self.reset_line_size(cursor.line);
+                }
+                self.clear_edit_boundary(cursor.line, 0);
+                self.clear_edit_boundary(cursor.line, end.0);
                 for cell in &mut self.grid[cursor.line][..end] {
-                    *cell = bg.into();
+                    *cell = blank.clone();
                 }
 
                 let range = Line(0)..=cursor.line;
@@ -810,8 +893,12 @@ impl<T: EventListener> Handler for Term<T> {
             },
             ansi::ClearMode::Below => {
                 let cursor = self.grid.cursor.point;
+                if cursor.column == 0 {
+                    self.reset_line_size(cursor.line);
+                }
+                self.clear_edit_boundary(cursor.line, cursor.column.0);
                 for cell in &mut self.grid[cursor.line][cursor.column..] {
-                    *cell = bg.into();
+                    *cell = blank.clone();
                 }
 
                 if (cursor.line.0 as usize) < screen_lines - 1 {
@@ -881,6 +968,8 @@ impl<T: EventListener> Handler for Term<T> {
         self.grid.reset();
         self.inactive_grid.reset();
         self.scroll_region = Line(0)..Line(self.screen_lines() as i32);
+        self.horizontal_margin = None;
+        self.protocol = protocol::State::default();
         self.tabs = TabStops::new(self.columns());
         self.title_stack = Vec::new();
         self.title = None;
@@ -902,9 +991,12 @@ impl<T: EventListener> Handler for Term<T> {
     fn reverse_index(&mut self) {
         let _recording = self.reflow.record(|| move |term| term.reverse_index());
         trace!("Reversing index");
+        self.grid.cursor.input_needs_wrap = false;
         // If cursor is at the top.
         if self.grid.cursor.point.line == self.scroll_region.start {
-            self.scroll_down(1);
+            if self.horizontal_bounds().contains(&self.grid.cursor.point.column) {
+                self.scroll_down(1);
+            }
         } else {
             self.damage_cursor();
             self.grid.cursor.point.line = cmp::max(self.grid.cursor.point.line - 1, Line(0));
@@ -928,299 +1020,58 @@ impl<T: EventListener> Handler for Term<T> {
         self.grid.cursor.template.set_hyperlink(hyperlink.map(|e| e.into()));
     }
 
+    #[inline]
+    fn desktop_notification(&mut self, metadata: &[u8], payload: &[u8], terminator: &str) {
+        self.handle_desktop_notification(metadata, payload, terminator);
+    }
+
     /// Set a terminal attribute.
     #[inline]
     fn terminal_attribute(&mut self, attr: Attr) {
         let _recording = self.reflow.record(|| move |term| term.terminal_attribute(attr));
         trace!("Setting attribute: {attr:?}");
-        let cursor = &mut self.grid.cursor;
-        match attr {
-            Attr::Foreground(color) => cursor.template.fg = color,
-            Attr::Background(color) => cursor.template.bg = color,
-            Attr::UnderlineColor(color) => cursor.template.set_underline_color(color),
-            Attr::Reset => {
-                cursor.template.fg = Color::Named(NamedColor::Foreground);
-                cursor.template.bg = Color::Named(NamedColor::Background);
-                cursor.template.flags = Flags::empty();
-                cursor.template.set_underline_color(None);
-            },
-            Attr::Reverse => cursor.template.flags.insert(Flags::INVERSE),
-            Attr::CancelReverse => cursor.template.flags.remove(Flags::INVERSE),
-            Attr::Bold => cursor.template.flags.insert(Flags::BOLD),
-            Attr::CancelBold => cursor.template.flags.remove(Flags::BOLD),
-            Attr::Dim => cursor.template.flags.insert(Flags::DIM),
-            Attr::CancelBoldDim => cursor.template.flags.remove(Flags::BOLD | Flags::DIM),
-            Attr::Italic => cursor.template.flags.insert(Flags::ITALIC),
-            Attr::CancelItalic => cursor.template.flags.remove(Flags::ITALIC),
-            Attr::Underline => {
-                cursor.template.flags.remove(Flags::ALL_UNDERLINES);
-                cursor.template.flags.insert(Flags::UNDERLINE);
-            },
-            Attr::DoubleUnderline => {
-                cursor.template.flags.remove(Flags::ALL_UNDERLINES);
-                cursor.template.flags.insert(Flags::DOUBLE_UNDERLINE);
-            },
-            Attr::Undercurl => {
-                cursor.template.flags.remove(Flags::ALL_UNDERLINES);
-                cursor.template.flags.insert(Flags::UNDERCURL);
-            },
-            Attr::DottedUnderline => {
-                cursor.template.flags.remove(Flags::ALL_UNDERLINES);
-                cursor.template.flags.insert(Flags::DOTTED_UNDERLINE);
-            },
-            Attr::DashedUnderline => {
-                cursor.template.flags.remove(Flags::ALL_UNDERLINES);
-                cursor.template.flags.insert(Flags::DASHED_UNDERLINE);
-            },
-            Attr::CancelUnderline => cursor.template.flags.remove(Flags::ALL_UNDERLINES),
-            Attr::Hidden => cursor.template.flags.insert(Flags::HIDDEN),
-            Attr::CancelHidden => cursor.template.flags.remove(Flags::HIDDEN),
-            Attr::Strike => cursor.template.flags.insert(Flags::STRIKEOUT),
-            Attr::CancelStrike => cursor.template.flags.remove(Flags::STRIKEOUT),
-            _ => {
-                debug!("Term got unhandled attr: {attr:?}");
-            },
-        }
+        self.grid.cursor.template.apply_attribute(attr);
     }
 
     #[inline]
     fn set_private_mode(&mut self, mode: PrivateMode) {
         let _recording = self.reflow.record(|| move |term| term.set_private_mode(mode));
-        let mode = match mode {
-            PrivateMode::Named(mode) => mode,
-            PrivateMode::Unknown(9001) => {
-                self.mode.insert(TermMode::WIN32_INPUT);
-                return;
-            },
-            PrivateMode::Unknown(mode) => {
-                debug!("Ignoring unknown mode {mode} in set_private_mode");
-                return;
-            },
-        };
-
-        trace!("Setting private mode: {mode:?}");
-        match mode {
-            NamedPrivateMode::UrgencyHints => self.mode.insert(TermMode::URGENCY_HINTS),
-            NamedPrivateMode::SwapScreenAndSetRestoreCursor => {
-                if !self.mode.contains(TermMode::ALT_SCREEN) {
-                    self.swap_alt();
-                }
-            },
-            NamedPrivateMode::ShowCursor => self.mode.insert(TermMode::SHOW_CURSOR),
-            NamedPrivateMode::CursorKeys => self.mode.insert(TermMode::APP_CURSOR),
-            // Mouse protocols are mutually exclusive.
-            NamedPrivateMode::ReportMouseClicks => {
-                self.mode.remove(TermMode::MOUSE_MODE);
-                self.mode.insert(TermMode::MOUSE_REPORT_CLICK);
-                self.event_proxy.send_event(Event::MouseCursorDirty);
-            },
-            NamedPrivateMode::ReportCellMouseMotion => {
-                self.mode.remove(TermMode::MOUSE_MODE);
-                self.mode.insert(TermMode::MOUSE_DRAG);
-                self.event_proxy.send_event(Event::MouseCursorDirty);
-            },
-            NamedPrivateMode::ReportAllMouseMotion => {
-                self.mode.remove(TermMode::MOUSE_MODE);
-                self.mode.insert(TermMode::MOUSE_MOTION);
-                self.event_proxy.send_event(Event::MouseCursorDirty);
-            },
-            NamedPrivateMode::ReportFocusInOut => self.mode.insert(TermMode::FOCUS_IN_OUT),
-            NamedPrivateMode::BracketedPaste => self.mode.insert(TermMode::BRACKETED_PASTE),
-            // Mouse encodings are mutually exclusive.
-            NamedPrivateMode::SgrMouse => {
-                self.mode.remove(TermMode::UTF8_MOUSE);
-                self.mode.insert(TermMode::SGR_MOUSE);
-            },
-            NamedPrivateMode::Utf8Mouse => {
-                self.mode.remove(TermMode::SGR_MOUSE);
-                self.mode.insert(TermMode::UTF8_MOUSE);
-            },
-            NamedPrivateMode::AlternateScroll => self.mode.insert(TermMode::ALTERNATE_SCROLL),
-            NamedPrivateMode::LineWrap => self.mode.insert(TermMode::LINE_WRAP),
-            NamedPrivateMode::Origin => {
-                self.mode.insert(TermMode::ORIGIN);
-                self.goto(0, 0);
-            },
-            NamedPrivateMode::ColumnMode => self.deccolm(),
-            NamedPrivateMode::BlinkingCursor => {
-                let style = self.cursor_style.get_or_insert(self.config.default_cursor_style);
-                style.blinking = true;
-                self.event_proxy.send_event(Event::CursorBlinkingChange);
-            },
-            NamedPrivateMode::SyncUpdate => (),
-        }
+        self.set_private_mode_inner(mode);
     }
 
     #[inline]
     fn unset_private_mode(&mut self, mode: PrivateMode) {
         let _recording = self.reflow.record(|| move |term| term.unset_private_mode(mode));
-        let mode = match mode {
-            PrivateMode::Named(mode) => mode,
-            PrivateMode::Unknown(9001) => {
-                self.mode.remove(TermMode::WIN32_INPUT);
-                return;
-            },
-            PrivateMode::Unknown(mode) => {
-                debug!("Ignoring unknown mode {mode} in unset_private_mode");
-                return;
-            },
-        };
-
-        trace!("Unsetting private mode: {mode:?}");
-        match mode {
-            NamedPrivateMode::UrgencyHints => self.mode.remove(TermMode::URGENCY_HINTS),
-            NamedPrivateMode::SwapScreenAndSetRestoreCursor => {
-                if self.mode.contains(TermMode::ALT_SCREEN) {
-                    self.swap_alt();
-                }
-            },
-            NamedPrivateMode::ShowCursor => self.mode.remove(TermMode::SHOW_CURSOR),
-            NamedPrivateMode::CursorKeys => self.mode.remove(TermMode::APP_CURSOR),
-            NamedPrivateMode::ReportMouseClicks => {
-                self.mode.remove(TermMode::MOUSE_REPORT_CLICK);
-                self.event_proxy.send_event(Event::MouseCursorDirty);
-            },
-            NamedPrivateMode::ReportCellMouseMotion => {
-                self.mode.remove(TermMode::MOUSE_DRAG);
-                self.event_proxy.send_event(Event::MouseCursorDirty);
-            },
-            NamedPrivateMode::ReportAllMouseMotion => {
-                self.mode.remove(TermMode::MOUSE_MOTION);
-                self.event_proxy.send_event(Event::MouseCursorDirty);
-            },
-            NamedPrivateMode::ReportFocusInOut => self.mode.remove(TermMode::FOCUS_IN_OUT),
-            NamedPrivateMode::BracketedPaste => self.mode.remove(TermMode::BRACKETED_PASTE),
-            NamedPrivateMode::SgrMouse => self.mode.remove(TermMode::SGR_MOUSE),
-            NamedPrivateMode::Utf8Mouse => self.mode.remove(TermMode::UTF8_MOUSE),
-            NamedPrivateMode::AlternateScroll => self.mode.remove(TermMode::ALTERNATE_SCROLL),
-            NamedPrivateMode::LineWrap => self.mode.remove(TermMode::LINE_WRAP),
-            NamedPrivateMode::Origin => self.mode.remove(TermMode::ORIGIN),
-            NamedPrivateMode::ColumnMode => self.deccolm(),
-            NamedPrivateMode::BlinkingCursor => {
-                let style = self.cursor_style.get_or_insert(self.config.default_cursor_style);
-                style.blinking = false;
-                self.event_proxy.send_event(Event::CursorBlinkingChange);
-            },
-            NamedPrivateMode::SyncUpdate => (),
-        }
+        self.unset_private_mode_inner(mode);
     }
 
     #[inline]
     fn report_private_mode(&mut self, mode: PrivateMode) {
-        trace!("Reporting private mode {mode:?}");
-        let state = match mode {
-            PrivateMode::Named(mode) => match mode {
-                NamedPrivateMode::CursorKeys => self.mode.contains(TermMode::APP_CURSOR).into(),
-                NamedPrivateMode::Origin => self.mode.contains(TermMode::ORIGIN).into(),
-                NamedPrivateMode::LineWrap => self.mode.contains(TermMode::LINE_WRAP).into(),
-                NamedPrivateMode::BlinkingCursor => {
-                    let style = self.cursor_style.get_or_insert(self.config.default_cursor_style);
-                    style.blinking.into()
-                },
-                NamedPrivateMode::ShowCursor => self.mode.contains(TermMode::SHOW_CURSOR).into(),
-                NamedPrivateMode::ReportMouseClicks => {
-                    self.mode.contains(TermMode::MOUSE_REPORT_CLICK).into()
-                },
-                NamedPrivateMode::ReportCellMouseMotion => {
-                    self.mode.contains(TermMode::MOUSE_DRAG).into()
-                },
-                NamedPrivateMode::ReportAllMouseMotion => {
-                    self.mode.contains(TermMode::MOUSE_MOTION).into()
-                },
-                NamedPrivateMode::ReportFocusInOut => {
-                    self.mode.contains(TermMode::FOCUS_IN_OUT).into()
-                },
-                NamedPrivateMode::Utf8Mouse => self.mode.contains(TermMode::UTF8_MOUSE).into(),
-                NamedPrivateMode::SgrMouse => self.mode.contains(TermMode::SGR_MOUSE).into(),
-                NamedPrivateMode::AlternateScroll => {
-                    self.mode.contains(TermMode::ALTERNATE_SCROLL).into()
-                },
-                NamedPrivateMode::UrgencyHints => {
-                    self.mode.contains(TermMode::URGENCY_HINTS).into()
-                },
-                NamedPrivateMode::SwapScreenAndSetRestoreCursor => {
-                    self.mode.contains(TermMode::ALT_SCREEN).into()
-                },
-                NamedPrivateMode::BracketedPaste => {
-                    self.mode.contains(TermMode::BRACKETED_PASTE).into()
-                },
-                NamedPrivateMode::SyncUpdate => ModeState::Reset,
-                NamedPrivateMode::ColumnMode => ModeState::NotSupported,
-            },
-            PrivateMode::Unknown(_) => ModeState::NotSupported,
-        };
-
-        self.event_proxy.send_event(Event::PtyWrite(format!(
-            "\x1b[?{};{}$y",
-            mode.raw(),
-            state as u8,
-        )));
+        self.report_private_mode_inner(mode);
     }
 
     #[inline]
     fn set_mode(&mut self, mode: ansi::Mode) {
         let _recording = self.reflow.record(|| move |term| term.set_mode(mode));
-        let mode = match mode {
-            ansi::Mode::Named(mode) => mode,
-            ansi::Mode::Unknown(mode) => {
-                debug!("Ignoring unknown mode {mode} in set_mode");
-                return;
-            },
-        };
-
-        trace!("Setting public mode: {mode:?}");
-        match mode {
-            NamedMode::Insert => self.mode.insert(TermMode::INSERT),
-            NamedMode::LineFeedNewLine => self.mode.insert(TermMode::LINE_FEED_NEW_LINE),
-        }
+        self.set_mode_inner(mode);
     }
 
     #[inline]
     fn unset_mode(&mut self, mode: ansi::Mode) {
         let _recording = self.reflow.record(|| move |term| term.unset_mode(mode));
-        let mode = match mode {
-            ansi::Mode::Named(mode) => mode,
-            ansi::Mode::Unknown(mode) => {
-                debug!("Ignoring unknown mode {mode} in unset_mode");
-                return;
-            },
-        };
-
-        trace!("Setting public mode: {mode:?}");
-        match mode {
-            NamedMode::Insert => {
-                self.mode.remove(TermMode::INSERT);
-                self.mark_fully_damaged();
-            },
-            NamedMode::LineFeedNewLine => self.mode.remove(TermMode::LINE_FEED_NEW_LINE),
-        }
+        self.unset_mode_inner(mode);
     }
 
     #[inline]
     fn report_mode(&mut self, mode: ansi::Mode) {
-        trace!("Reporting mode {mode:?}");
-        let state = match mode {
-            ansi::Mode::Named(mode) => match mode {
-                NamedMode::Insert => self.mode.contains(TermMode::INSERT).into(),
-                NamedMode::LineFeedNewLine => {
-                    self.mode.contains(TermMode::LINE_FEED_NEW_LINE).into()
-                },
-            },
-            ansi::Mode::Unknown(_) => ModeState::NotSupported,
-        };
-
-        self.event_proxy.send_event(Event::PtyWrite(format!(
-            "\x1b[{};{}$y",
-            mode.raw(),
-            state as u8,
-        )));
+        self.report_mode_inner(mode);
     }
 
     #[inline]
     fn set_scrolling_region(&mut self, top: usize, bottom: Option<usize>) {
         let _recording = self.reflow.record(|| move |term| term.set_scrolling_region(top, bottom));
         // Fallback to the last line as default.
-        let bottom = bottom.unwrap_or_else(|| self.screen_lines());
+        let bottom = bottom.unwrap_or_else(|| self.screen_lines()).min(self.screen_lines());
 
         if top >= bottom {
             debug!("Invalid scrolling region: ({top};{bottom})");
@@ -1260,6 +1111,11 @@ impl<T: EventListener> Handler for Term<T> {
     fn configure_charset(&mut self, index: CharsetIndex, charset: StandardCharset) {
         let _recording = self.reflow.record(|| move |term| term.configure_charset(index, charset));
         trace!("Configuring charset {index:?} as {charset:?}");
+        // Without DECNRCM a national designation selects ASCII.
+        let charset = match charset {
+            StandardCharset::National(_) if !self.protocol.nrcs => StandardCharset::Ascii,
+            charset => charset,
+        };
         self.grid.cursor.charsets[index] = charset;
     }
 
@@ -1352,24 +1208,6 @@ impl<T: EventListener> Handler for Term<T> {
     #[inline]
     fn text_area_size_chars(&mut self) {
         let text = format!("\x1b[8;{};{}t", self.screen_lines(), self.columns());
-        self.event_proxy.send_event(Event::PtyWrite(text));
-    }
-}
-
-/// The state of the [`Mode`] and [`PrivateMode`].
-#[repr(u8)]
-#[derive(Debug, Clone, Copy)]
-enum ModeState {
-    /// The mode is not supported.
-    NotSupported = 0,
-    /// The mode is currently set.
-    Set = 1,
-    /// The mode is currently not set.
-    Reset = 2,
-}
-
-impl From<bool> for ModeState {
-    fn from(value: bool) -> Self {
-        if value { Self::Set } else { Self::Reset }
+        self.write_reply(text);
     }
 }

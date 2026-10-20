@@ -210,7 +210,7 @@ fn notification_target_from_worker_environment() -> Result<NotificationTarget> {
 
 pub fn notify_help() -> String {
     format!(
-        "Show a desktop notification\n\nUsage: zntfy [OPTIONS] SUMMARY [BODY]\n\nSUMMARY is the notification's title; BODY is optional additional text.\n\nOptions:\n{}\n\nShows the notification through the desktop's native notification system: D-Bus\non Linux and BSD, Notification Center on macOS, and toast notifications on\nWindows. Without --icon, Zetta's own icon is shown; it is bundled in the\nbinary, so it is always available. --app-name has no effect on macOS and\n--timeout is ignored by some macOS notification centers; every other option\nbehaves the same on all platforms.\n\n--sound zetta-default, zetta-ok, zetta-alarm, and zetta-gong are bundled tones\nthat Zetta plays directly, so they always sound the same regardless of the\nhost's sound theme or configuration. Any other value is passed through as a\nplatform-specific system sound name (for example a freedesktop sound-theme\nname on Linux, a system sound name on macOS, or a toast sound identifier on\nWindows) and is only played if the platform recognizes it.",
+        "Show a desktop notification\n\nUsage: zntfy [OPTIONS] [--] SUMMARY [BODY]\n\nSUMMARY is the notification's title; BODY is optional additional text. Put\n`--` before them when either may begin with `-`; nothing after it is an option.\n\nOptions:\n{}\n\nShows the notification through the desktop's native notification system: D-Bus\non Linux and BSD, Notification Center on macOS, and toast notifications on\nWindows. Without --icon, Zetta's own icon is shown; it is bundled in the\nbinary, so it is always available. --app-name has no effect on macOS and\n--timeout is ignored by some macOS notification centers; every other option\nbehaves the same on all platforms.\n\n--sound zetta-default, zetta-ok, zetta-alarm, and zetta-gong are bundled tones\nthat Zetta plays directly, so they always sound the same regardless of the\nhost's sound theme or configuration. Any other value is passed through as a\nplatform-specific system sound name (for example a freedesktop sound-theme\nname on Linux, a system sound name on macOS, or a toast sound identifier on\nWindows) and is only played if the platform recognizes it.",
         format_help_table([
             (
                 "-a, --app-name NAME",
@@ -282,13 +282,17 @@ pub fn parse_notify_args(args: impl IntoIterator<Item = OsString>) -> Result<Not
                 timeout = Some(parse_notification_timeout(&value)?);
             }
             "--help" | "-h" => anyhow::bail!("{}", notify_help()),
+            "--" => {
+                positional.extend(&mut arguments);
+                break;
+            }
             option if option.starts_with('-') => anyhow::bail!("unknown notify option {option:?}"),
             _ => positional.push(argument),
         }
     }
     anyhow::ensure!(
         (1..=2).contains(&positional.len()),
-        "usage: zntfy [OPTIONS] SUMMARY [BODY]; run `zntfy --help` for details"
+        "usage: zntfy [OPTIONS] [--] SUMMARY [BODY]; run `zntfy --help` for details"
     );
     let summary = positional[0].to_string_lossy().into_owned();
     anyhow::ensure!(!summary.is_empty(), "SUMMARY must not be empty");
@@ -797,6 +801,8 @@ pub fn notification_reexec_args(command: &NotificationRequest) -> Vec<OsString> 
             NotificationTimeout::Milliseconds(milliseconds) => milliseconds.to_string(),
         }));
     }
+    // The text is often a program's, so it must never be read as an option.
+    args.push(OsString::from("--"));
     args.push(OsString::from(&command.summary));
     if let Some(body) = &command.body {
         args.push(OsString::from(body));
@@ -1259,12 +1265,17 @@ pub fn run_command_line(command: &CommandLine) -> Result<()> {
     }
 }
 
+/// Whether `--help` appears as an option: after `--` it is notification text.
+pub fn requests_help(arguments: &[OsString]) -> bool {
+    arguments
+        .iter()
+        .take_while(|argument| *argument != "--")
+        .any(|argument| matches!(argument.to_string_lossy().as_ref(), "--help" | "-h"))
+}
+
 pub fn standalone_main() {
     let arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
-    if arguments
-        .iter()
-        .any(|argument| matches!(argument.to_string_lossy().as_ref(), "--help" | "-h"))
-    {
+    if requests_help(&arguments) {
         if arguments
             .first()
             .is_some_and(|argument| argument == "cleanup")

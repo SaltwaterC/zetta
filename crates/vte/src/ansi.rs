@@ -239,11 +239,22 @@ fn parse_number(input: &[u8]) -> Option<u8> {
     Some(num)
 }
 
+#[derive(Debug)]
+struct DcsRequest {
+    params: Params,
+    intermediates: alloc::vec::Vec<u8>,
+    action: char,
+    data: alloc::vec::Vec<u8>,
+    escaped: bool,
+    overflow: bool,
+}
+
 /// Internal state for VTE processor.
 #[derive(Debug, Default)]
 struct ProcessorState<T: Timeout> {
     /// Last processed character for repetition.
     preceding_char: Option<char>,
+    dcs: Option<DcsRequest>,
 
     /// State for synchronized terminal updates.
     sync_state: SyncState<T>,
@@ -502,6 +513,35 @@ pub enum SemanticPromptMark {
 /// XXX Should probably not provide default impls for everything, but it makes
 /// writing specific handler impls for tests far easier.
 pub trait Handler {
+    /// Whether escape commands follow the legacy VT52 syntax.
+    fn vt52_mode(&self) -> bool {
+        false
+    }
+
+    /// Optional extension dispatch; returning false retains standard handling.
+    fn csi_extension(&mut self, _params: &Params, _intermediates: &[u8], _action: char) -> bool {
+        false
+    }
+    fn esc_extension(&mut self, _intermediates: &[u8], _byte: u8) -> bool {
+        false
+    }
+
+    /// A bounded, terminated device-control string. Cancelled strings are not dispatched.
+    fn dcs_sequence(
+        &mut self,
+        _params: &Params,
+        _intermediates: &[u8],
+        _action: char,
+        _data: &[u8],
+    ) {
+    }
+    fn soft_reset(&mut self) {}
+
+    /// Set left and right margins when DECLRMM is enabled; otherwise DECSC applies.
+    fn set_horizontal_margins(&mut self, _left: usize, _right: usize) -> bool {
+        false
+    }
+
     /// OSC to set window title.
     fn set_title(&mut self, _: Option<String>) {}
 
@@ -524,6 +564,13 @@ pub trait Handler {
     fn input_ascii(&mut self, run: &[u8]) {
         for &byte in run {
             self.input(ascii_run_char(byte));
+        }
+    }
+
+    /// Repeat the previous scalar. Engines can reject nonspacing characters.
+    fn repeat_char(&mut self, c: char, count: u16) {
+        for _ in 0..count {
+            self.input(c);
         }
     }
 
@@ -730,6 +777,10 @@ pub trait Handler {
     /// Set hyperlink.
     fn set_hyperlink(&mut self, _: Option<Hyperlink>) {}
 
+    /// One OSC 99 desktop notification chunk: its raw `key=value` metadata, its
+    /// payload, and the terminator a reply should use.
+    fn desktop_notification(&mut self, _metadata: &[u8], _payload: &[u8], _terminator: &str) {}
+
     /// OSC 133 shell integration mark: where a shell's prompt starts, or that
     /// the command it read has started running.
     fn semantic_prompt_mark(&mut self, _: SemanticPromptMark) {}
@@ -929,7 +980,8 @@ pub enum PrivateMode {
 }
 
 impl PrivateMode {
-    fn new(mode: u16) -> Self {
+    /// Decode a DEC mode number, preserving unsupported values.
+    pub fn new(mode: u16) -> Self {
         match mode {
             1 => Self::Named(NamedPrivateMode::CursorKeys),
             3 => Self::Named(NamedPrivateMode::ColumnMode),
@@ -1212,6 +1264,8 @@ pub enum Attr {
     CancelHidden,
     /// Cancel strikeout.
     CancelStrike,
+    Overline,
+    CancelOverline,
     /// Set indexed foreground color.
     Foreground(Color),
     /// Set indexed background color.
@@ -1237,6 +1291,111 @@ pub enum StandardCharset {
     #[default]
     Ascii,
     SpecialCharacterAndLineDrawing,
+    /// VT100 United Kingdom set: ASCII with `#` replaced by `£`.
+    British,
+    /// A VT220/VT510 national replacement character set (NRCS).
+    National(NationalCharset),
+}
+
+/// The national replacement character sets of the VT220 and VT510. Each
+/// replaces a few ASCII graphics; Greek, Hebrew and Russian replace letters.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NationalCharset {
+    Dutch,
+    Finnish,
+    French,
+    FrenchCanadian,
+    German,
+    Italian,
+    NorwegianDanish,
+    Portuguese,
+    Spanish,
+    Swedish,
+    Swiss,
+    SerboCroatian,
+    Turkish,
+    Greek,
+    Hebrew,
+    Russian,
+}
+
+impl StandardCharset {
+    /// The set an SCS final byte designates, with any intermediate between the
+    /// G-set designator and the final (`%`, `"` or `&` in VT510 designations).
+    pub fn from_designation(intermediates: &[u8], last: u8) -> Option<Self> {
+        use NationalCharset::{
+            Dutch, Finnish, French, FrenchCanadian, German, Greek, Hebrew, Italian,
+            NorwegianDanish, Portuguese, Russian, SerboCroatian, Spanish, Swedish, Swiss, Turkish,
+        };
+        let national = match (intermediates, last) {
+            ([], b'B') => return Some(Self::Ascii),
+            ([], b'0') => return Some(Self::SpecialCharacterAndLineDrawing),
+            ([], b'A') => return Some(Self::British),
+            ([], b'4') => Dutch,
+            ([], b'C' | b'5') => Finnish,
+            ([], b'R' | b'f') => French,
+            ([], b'Q' | b'9') => FrenchCanadian,
+            ([], b'K') => German,
+            ([], b'Y') => Italian,
+            ([], b'E' | b'6' | b'`') => NorwegianDanish,
+            ([b'%'], b'6') => Portuguese,
+            ([], b'Z') => Spanish,
+            ([], b'H' | b'7') => Swedish,
+            ([], b'=') => Swiss,
+            ([b'%'], b'3') => SerboCroatian,
+            ([b'%'], b'2') => Turkish,
+            ([b'"'], b'>') => Greek,
+            ([b'%'], b'=') => Hebrew,
+            ([b'&'], b'5') => Russian,
+            _ => return None,
+        };
+        Some(Self::National(national))
+    }
+}
+
+impl NationalCharset {
+    /// Replaced ASCII graphics, in the order of [`Self::replacements`].
+    fn sources(self) -> &'static str {
+        match self {
+            Self::Greek => "abcdefghijklmnopqrstuvwx",
+            Self::Hebrew => "`abcdefghijklmnopqrstuvwxyz",
+            Self::Russian => "`abcdefghijklmnopqrstuvwxyz{|}~",
+            Self::Turkish => "&@[\\]^`{|}~",
+            _ => "#@[\\]^_`{|}~",
+        }
+    }
+
+    /// The replacement for each source, `#` meaning the source is kept.
+    fn replacements(self) -> &'static str {
+        match self {
+            Self::Dutch => "£¾ĳ½|###¨ƒ¼´",
+            Self::Finnish => "##ÄÖÅÜ#éäöåü",
+            Self::French => "£à°ç§###éùè¨",
+            Self::FrenchCanadian => "#àâçêî#ôéùèû",
+            Self::German => "#§ÄÖÜ###äöüß",
+            Self::Italian => "£§°çé##ùàòèì",
+            Self::NorwegianDanish => "#ÄÆØÅÜ#äæøåü",
+            Self::Portuguese => "##ÃÇÕ###ãçõ#",
+            Self::Spanish => "£§¡Ñ¿###°ñç#",
+            Self::Swedish => "#ÉÄÖÅÜ#éäöåü",
+            Self::Swiss => "ùàéçêîèôäöüû",
+            Self::SerboCroatian => "#ŽŠĐĆČ#žšđćč",
+            Self::Turkish => "ğİŞÖÇÜĞşöçü",
+            Self::Greek => "ΑΒΓΔΕΖΗΘΙΚΛΜΝΧΟΠΡΣΤΥΦΞΨΩ",
+            Self::Hebrew => "אבגדהוזחטיךכלםמןנסעףפץצקרשת",
+            Self::Russian => "ЮАБЦДЕФГХИЙКЛМНОПЯРСТУЖВЬЫЗШЭЩЧ",
+        }
+    }
+
+    fn map(self, c: char) -> char {
+        let Some(index) = self.sources().chars().position(|source| source == c) else {
+            return c;
+        };
+        match self.replacements().chars().nth(index) {
+            Some('#') | None => c,
+            Some(replacement) => replacement,
+        }
+    }
 }
 
 impl StandardCharset {
@@ -1246,6 +1405,9 @@ impl StandardCharset {
     pub fn map(self, c: char) -> char {
         match self {
             StandardCharset::Ascii => c,
+            StandardCharset::British if c == '#' => '£',
+            StandardCharset::British => c,
+            StandardCharset::National(national) => national.map(c),
             StandardCharset::SpecialCharacterAndLineDrawing => match c {
                 '_' => ' ',
                 '`' => '◆',
@@ -1285,6 +1447,18 @@ impl StandardCharset {
     }
 }
 
+/// Append URI bytes as text. A URI is ASCII (RFC 3986), so bytes that are not
+/// UTF-8 are percent-encoded: the link keeps addressing the same resource
+/// instead of being dropped or altered by replacement characters.
+fn push_uri_text(uri: &mut String, bytes: &[u8]) {
+    for chunk in bytes.utf8_chunks() {
+        uri.push_str(chunk.valid());
+        for byte in chunk.invalid() {
+            let _ = write!(uri, "%{byte:02X}");
+        }
+    }
+}
+
 /// SCP control's first parameter which determines character path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ScpCharPath {
@@ -1320,6 +1494,13 @@ where
     H: Handler + 'a,
     T: Timeout,
 {
+    fn vt52_mode(&self) -> bool {
+        self.handler.vt52_mode()
+    }
+    fn vt52_cursor_position(&mut self, row: u8, column: u8) {
+        self.handler.goto(i32::from(row), usize::from(column));
+    }
+
     #[inline]
     fn print(&mut self, c: char) {
         self.handler.input(c);
@@ -1364,20 +1545,45 @@ where
 
     #[inline]
     fn hook(&mut self, params: &Params, intermediates: &[u8], ignore: bool, action: char) {
-        debug!(
-            "[unhandled hook] params={:?}, ints: {:?}, ignore: {:?}, action: {:?}",
-            params, intermediates, ignore, action
-        );
+        self.state.dcs = (!ignore).then(|| DcsRequest {
+            params: params.clone(),
+            intermediates: intermediates.to_vec(),
+            action,
+            data: Vec::new(),
+            escaped: false,
+            overflow: false,
+        });
     }
 
-    #[inline]
     fn put(&mut self, byte: u8) {
-        debug!("[unhandled put] byte={:?}", byte);
+        if byte < 0x20 {
+            return;
+        }
+        if let Some(request) = &mut self.state.dcs {
+            if request.data.len() < 4093 {
+                request.data.push(byte);
+            } else {
+                request.overflow = true;
+            }
+        }
     }
 
-    #[inline]
-    fn unhook(&mut self) {
-        debug!("[unhandled unhook]");
+    fn dcs_end(&mut self, byte: u8) {
+        if byte == 0x1B {
+            if let Some(request) = &mut self.state.dcs {
+                request.escaped = true;
+            }
+        } else {
+            match (self.state.dcs.take(), byte) {
+                (Some(request), 0x9C) if !request.overflow => self.handler.dcs_sequence(
+                    &request.params,
+                    &request.intermediates,
+                    request.action,
+                    &request.data,
+                ),
+                _ => (),
+            }
+        }
     }
 
     #[inline]
@@ -1385,6 +1591,11 @@ where
         let terminator = if bell_terminated { "\x07" } else { "\x1b\\" };
 
         fn unhandled(params: &[&[u8]]) {
+            // Zetta patch: binary output ends hundreds of unknown OSCs a second,
+            // and formatting each byte cost more than parsing them.
+            if !log::log_enabled!(log::Level::Debug) {
+                return;
+            }
             let mut buf = String::new();
             for items in params {
                 buf.push('[');
@@ -1419,7 +1630,7 @@ where
 
             // Set color index.
             b"4" => {
-                if params.len() <= 1 || params.len() % 2 == 0 {
+                if params.len() <= 1 || params.len().is_multiple_of(2) {
                     unhandled(params);
                     return;
                 }
@@ -1451,10 +1662,12 @@ where
                 // NOTE: The escape sequence is of form 'OSC 8 ; params ; URI ST', where
                 // URI is URL-encoded. However `;` is a special character and might be
                 // passed as is, thus we need to rebuild the URI.
-                let mut uri = str::from_utf8(params[2]).unwrap_or_default().to_string();
-                for param in params[3..].iter() {
-                    uri.push(';');
-                    uri.push_str(str::from_utf8(param).unwrap_or_default());
+                let mut uri = String::new();
+                for (index, param) in params[2..].iter().enumerate() {
+                    if index != 0 {
+                        uri.push(';');
+                    }
+                    push_uri_text(&mut uri, param);
                 }
 
                 // The OSC 8 escape sequence must be stopped when getting an empty `uri`.
@@ -1556,6 +1769,14 @@ where
                 }
             },
 
+            // Desktop notification. The payload is free text, so any `;` in it
+            // was split as a parameter separator and is restored here.
+            b"99" => {
+                let metadata = params.get(1).copied().unwrap_or_default();
+                let payload = params.get(2..).unwrap_or_default().join(&b';');
+                self.handler.desktop_notification(metadata, &payload, terminator);
+            },
+
             // Reset color index.
             b"104" => {
                 // Reset all color indexes when no parameters are given.
@@ -1611,6 +1832,9 @@ where
             return;
         }
 
+        if self.handler.csi_extension(params, intermediates, action) {
+            return;
+        }
         let mut params_iter = params.iter();
         let handler = &mut self.handler;
 
@@ -1620,14 +1844,14 @@ where
         };
 
         match (action, intermediates) {
+            ('p', [b'!']) => handler.soft_reset(),
             ('@', []) => handler.insert_blank(next_param_or(1) as usize),
-            ('A', []) => handler.move_up(next_param_or(1) as usize),
+            // VPB is CUU's ECMA-48 counterpart, as VPR is CUD's.
+            ('A', []) | ('k', []) => handler.move_up(next_param_or(1) as usize),
             ('B', []) | ('e', []) => handler.move_down(next_param_or(1) as usize),
             ('b', []) => {
                 if let Some(c) = self.state.preceding_char {
-                    for _ in 0..next_param_or(1) {
-                        handler.input(c);
-                    }
+                    handler.repeat_char(c, next_param_or(1));
                 } else {
                     debug!("tried to repeat with no preceding char");
                 }
@@ -1636,7 +1860,8 @@ where
             ('c', intermediates) if next_param_or(0) == 0 => {
                 handler.identify_terminal(intermediates.first().map(|&i| i as char))
             },
-            ('D', []) => handler.move_backward(next_param_or(1) as usize),
+            // HPB is CUB's ECMA-48 counterpart, as HPR is CUF's.
+            ('D', []) | ('j', []) => handler.move_backward(next_param_or(1) as usize),
             ('d', []) => handler.goto_line(next_param_or(1) as i32 - 1),
             ('E', []) => handler.move_down_and_cr(next_param_or(1) as usize),
             ('F', []) => handler.move_up_and_cr(next_param_or(1) as usize),
@@ -1798,7 +2023,13 @@ where
                 handler.set_scrolling_region(top, bottom);
             },
             ('S', []) => handler.scroll_up(next_param_or(1) as usize),
-            ('s', []) => handler.save_cursor_position(),
+            ('s', []) => {
+                let left = next_param_or(1) as usize;
+                let right = next_param_or(0) as usize;
+                if !handler.set_horizontal_margins(left, right) {
+                    handler.save_cursor_position();
+                }
+            },
             ('T', []) => handler.scroll_down(next_param_or(1) as usize),
             ('t', []) => match next_param_or(1) as usize {
                 14 => handler.text_area_size_pixels(),
@@ -1836,6 +2067,17 @@ where
 
     #[inline]
     fn esc_dispatch(&mut self, intermediates: &[u8], _ignore: bool, byte: u8) {
+        match self.state.dcs.take_if(|request| request.escaped) {
+            Some(request) if byte == b'\\' && intermediates.is_empty() && !request.overflow => {
+                self.handler.dcs_sequence(
+                    &request.params,
+                    &request.intermediates,
+                    request.action,
+                    &request.data,
+                );
+            },
+            _ => (),
+        }
         macro_rules! unhandled {
             () => {{
                 debug!(
@@ -1845,8 +2087,11 @@ where
             }};
         }
 
+        if self.handler.esc_extension(intermediates, byte) {
+            return;
+        }
         macro_rules! configure_charset {
-            ($charset:path, $intermediates:expr) => {{
+            ($charset:expr, $intermediates:expr) => {{
                 let index: CharsetIndex = match $intermediates {
                     [b'('] => CharsetIndex::G0,
                     [b')'] => CharsetIndex::G1,
@@ -1861,8 +2106,15 @@ where
             }};
         }
 
+        if let Some((&designator @ (b'(' | b')' | b'*' | b'+'), rest)) = intermediates.split_first()
+        {
+            if let Some(charset) = StandardCharset::from_designation(rest, byte) {
+                configure_charset!(charset, [designator]);
+                return;
+            }
+        }
+
         match (byte, intermediates) {
-            (b'B', intermediates) => configure_charset!(StandardCharset::Ascii, intermediates),
             (b'D', []) => self.handler.linefeed(),
             (b'E', []) => {
                 self.handler.linefeed();
@@ -1872,9 +2124,6 @@ where
             (b'M', []) => self.handler.reverse_index(),
             (b'Z', []) => self.handler.identify_terminal(None),
             (b'c', []) => self.handler.reset_state(),
-            (b'0', intermediates) => {
-                configure_charset!(StandardCharset::SpecialCharacterAndLineDrawing, intermediates)
-            },
             (b'7', []) => self.handler.save_cursor_position(),
             (b'8', [b'#']) => self.handler.decaln(),
             (b'8', []) => self.handler.restore_cursor_position(),
@@ -1892,8 +2141,9 @@ where
     }
 }
 
+/// Apply SGR parameters, also used by rectangular attribute changes.
 #[inline]
-fn attrs_from_sgr_parameters<H: Handler>(handler: &mut H, params: &mut ParamsIter<'_>) {
+pub fn attrs_from_sgr_parameters<H: Handler>(handler: &mut H, params: &mut ParamsIter<'_>) {
     while let Some(param) = params.next() {
         let attr = match param {
             [0] => Some(Attr::Reset),
@@ -1905,17 +2155,19 @@ fn attrs_from_sgr_parameters<H: Handler>(handler: &mut H, params: &mut ParamsIte
             [4, 3] => Some(Attr::Undercurl),
             [4, 4] => Some(Attr::DottedUnderline),
             [4, 5] => Some(Attr::DashedUnderline),
-            [4, ..] => Some(Attr::Underline),
+            [4] | [4, 1] => Some(Attr::Underline),
             [5] => Some(Attr::BlinkSlow),
             [6] => Some(Attr::BlinkFast),
             [7] => Some(Attr::Reverse),
             [8] => Some(Attr::Hidden),
             [9] => Some(Attr::Strike),
-            [21] => Some(Attr::CancelBold),
+            [21] => Some(Attr::DoubleUnderline),
             [22] => Some(Attr::CancelBoldDim),
             [23] => Some(Attr::CancelItalic),
             [24] => Some(Attr::CancelUnderline),
             [25] => Some(Attr::CancelBlink),
+            [53] => Some(Attr::Overline),
+            [55] => Some(Attr::CancelOverline),
             [27] => Some(Attr::CancelReverse),
             [28] => Some(Attr::CancelHidden),
             [29] => Some(Attr::CancelStrike),
@@ -2125,9 +2377,28 @@ mod tests {
         identity_reported: bool,
         color: Option<Rgb>,
         reset_colors: Vec<usize>,
+        moves: Vec<(char, usize)>,
+        hyperlink: Option<Hyperlink>,
+        notifications: Vec<(Vec<u8>, Vec<u8>, String)>,
     }
 
     impl Handler for MockHandler {
+        fn move_up(&mut self, lines: usize) {
+            self.moves.push(('A', lines));
+        }
+
+        fn move_backward(&mut self, columns: usize) {
+            self.moves.push(('D', columns));
+        }
+
+        fn set_hyperlink(&mut self, hyperlink: Option<Hyperlink>) {
+            self.hyperlink = hyperlink;
+        }
+
+        fn desktop_notification(&mut self, metadata: &[u8], payload: &[u8], terminator: &str) {
+            self.notifications.push((metadata.to_vec(), payload.to_vec(), terminator.to_owned()));
+        }
+
         fn terminal_attribute(&mut self, attr: Attr) {
             self.attr = Some(attr);
         }
@@ -2167,8 +2438,72 @@ mod tests {
                 identity_reported: false,
                 color: None,
                 reset_colors: Vec::new(),
+                moves: Vec::new(),
+                hyperlink: None,
+                notifications: Vec::new(),
             }
         }
+    }
+
+    #[test]
+    fn vertical_and_horizontal_position_backward_move_like_cuu_and_cub() {
+        let mut parser = Processor::<TestSyncHandler>::new();
+        let mut handler = MockHandler::default();
+
+        parser.advance(&mut handler, b"\x1b[3k\x1b[j\x1b[2A\x1b[D");
+
+        assert_eq!(handler.moves, [('A', 3), ('D', 1), ('A', 2), ('D', 1)]);
+    }
+
+    #[test]
+    fn national_sets_are_designated_with_their_intermediates() {
+        let designated = |bytes: &[u8]| {
+            let mut parser = Processor::<TestSyncHandler>::new();
+            let mut handler = MockHandler::default();
+            parser.advance(&mut handler, bytes);
+            (handler.index, handler.charset)
+        };
+
+        use NationalCharset::*;
+        let national = StandardCharset::National;
+        assert_eq!(designated(b"\x1b(K"), (CharsetIndex::G0, national(German)));
+        assert_eq!(designated(b"\x1b+%6"), (CharsetIndex::G3, national(Portuguese)));
+        assert_eq!(designated(b"\x1b*\">"), (CharsetIndex::G2, national(Greek)));
+        assert_eq!(designated(b"\x1b)A"), (CharsetIndex::G1, StandardCharset::British));
+        // `#` is not a designator: ESC # 6 is DECDWL.
+        assert_eq!(designated(b"\x1b#6"), (CharsetIndex::G0, StandardCharset::Ascii));
+
+        assert_eq!(StandardCharset::British.map('#'), '£');
+        assert_eq!(national(German).map('['), 'Ä');
+        assert_eq!(national(German).map('#'), '#');
+    }
+
+    #[test]
+    fn hyperlink_uris_percent_encode_invalid_utf8_and_keep_semicolons() {
+        let mut parser = Processor::<TestSyncHandler>::new();
+        let mut handler = MockHandler::default();
+
+        parser.advance(&mut handler, b"\x1b]8;id=x;https://e/a;b\xc2x%\x1b\\");
+
+        let hyperlink = handler.hyperlink.expect("the link is kept");
+        assert_eq!(hyperlink.id.as_deref(), Some("x"));
+        assert_eq!(hyperlink.uri, "https://e/a;b%C2x%");
+    }
+
+    #[test]
+    fn notification_payloads_keep_their_semicolons_and_terminator() {
+        let mut parser = Processor::<TestSyncHandler>::new();
+        let mut handler = MockHandler::default();
+
+        parser.advance(&mut handler, b"\x1b]99;i=a:d=0;x;y\x07\x1b]99\x1b\\");
+
+        assert_eq!(
+            handler.notifications,
+            [
+                (b"i=a:d=0".to_vec(), b"x;y".to_vec(), "\x07".to_owned()),
+                (Vec::new(), Vec::new(), "\x1b\\".to_owned()),
+            ]
+        );
     }
 
     /// Ground dispatch skips `execute` for every control `IGNORED_EXECUTES` names, so the two

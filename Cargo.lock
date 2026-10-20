@@ -246,6 +246,7 @@ dependencies = [
  "rustix-openpty",
  "serde",
  "signal-hook 0.4.4",
+ "unicode-segmentation",
  "unicode-width 0.2.2",
  "vte",
  "windows-sys 0.59.0",

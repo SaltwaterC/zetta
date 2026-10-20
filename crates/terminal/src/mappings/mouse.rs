@@ -1,20 +1,55 @@
-use std::cmp::{self, min};
+use std::cmp;
 use std::iter::repeat_n;
 
 /// Most of the code, and specifically the constants, in this are copied from Alacritty,
 /// with modifications for our circumstances
 use gpui::{Modifiers, MouseButton, Pixels, Point as GpuiPoint, ScrollWheelEvent, px};
 
-use crate::{Modes, Point, SelectionSide, TerminalBounds};
+use crate::{LineSize, Modes, Point, SelectionSide, TerminalBounds};
 
 enum MouseFormat {
     Sgr,
+    SgrPixels,
     Normal(bool),
+}
+
+/// Where a mouse event happened, as a grid cell and as a 1-based device pixel
+/// in the text area for SGR-Pixels (xterm 1016) reports.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct MousePosition {
+    pub cell: Point,
+    pub pixel: (u32, u32),
+}
+
+impl MousePosition {
+    /// `position` is relative to the text area's origin. Pixels are clamped to
+    /// the text area, as cells are, so a drag outside it reports its edge.
+    pub(crate) fn new(
+        position: GpuiPoint<Pixels>,
+        bounds: TerminalBounds,
+        display_offset: usize,
+        line_sizes: &[(i32, LineSize)],
+        scale_factor: f32,
+    ) -> Self {
+        let device = |logical: Pixels, extent: Pixels| {
+            let extent = (f32::from(extent) * scale_factor).max(1.0);
+            (f32::from(logical) * scale_factor).clamp(0.0, extent - 1.0) as u32 + 1
+        };
+        Self {
+            cell: grid_point(position, bounds, display_offset, line_sizes),
+            pixel: (
+                device(position.x, bounds.bounds.size.width),
+                device(position.y, bounds.bounds.size.height),
+            ),
+        }
+    }
 }
 
 impl MouseFormat {
     fn from_mode(mode: Modes) -> Self {
-        if mode.contains(Modes::SGR_MOUSE) {
+        if mode.contains(Modes::SGR_PIXEL_MOUSE) {
+            MouseFormat::SgrPixels
+        } else if mode.contains(Modes::SGR_MOUSE) {
             MouseFormat::Sgr
         } else if mode.contains(Modes::UTF8_MOUSE) {
             MouseFormat::Normal(true)
@@ -77,7 +112,7 @@ impl MouseButtonCode {
 }
 
 pub(crate) fn scroll_report(
-    point: Point,
+    point: MousePosition,
     scroll_lines: i32,
     e: &ScrollWheelEvent,
     mode: Modes,
@@ -109,7 +144,7 @@ pub(crate) fn alt_scroll(scroll_lines: i32) -> Vec<u8> {
 }
 
 pub(crate) fn mouse_button_report(
-    point: Point,
+    point: MousePosition,
     button: gpui::MouseButton,
     modifiers: Modifiers,
     pressed: bool,
@@ -130,7 +165,7 @@ pub(crate) fn mouse_button_report(
 }
 
 pub(crate) fn mouse_moved_report(
-    point: Point,
+    point: MousePosition,
     button: Option<MouseButton>,
     modifiers: Modifiers,
     mode: Modes,
@@ -153,54 +188,67 @@ pub(crate) fn grid_point(
     pos: GpuiPoint<Pixels>,
     cur_size: TerminalBounds,
     display_offset: usize,
+    line_sizes: &[(i32, LineSize)],
 ) -> Point {
-    grid_point_and_side(pos, cur_size, display_offset).0
+    grid_point_and_side(pos, cur_size, display_offset, line_sizes).0
 }
 
+/// The cell under `pos`. Zetta patch: a row in `line_sizes` (see
+/// `Content::line_sizes`) draws each cell two columns wide.
 pub(crate) fn grid_point_and_side(
     pos: GpuiPoint<Pixels>,
     cur_size: TerminalBounds,
     display_offset: usize,
+    line_sizes: &[(i32, LineSize)],
 ) -> (Point, SelectionSide) {
-    let mut column = (pos.x / cur_size.cell_width) as usize;
-    let cell_x = cmp::max(px(0.), pos.x) % cur_size.cell_width;
-    let half_cell_width = cur_size.cell_width / 2.0;
-    let mut side = if cell_x > half_cell_width {
+    let mut line = (pos.y / cur_size.line_height) as i32;
+    let bottommost_line = i32::try_from(cur_size.num_lines().saturating_sub(1)).unwrap_or(i32::MAX);
+    let line_side = if line > bottommost_line {
+        line = bottommost_line;
+        Some(SelectionSide::Right)
+    } else if line < 0 {
+        Some(SelectionSide::Left)
+    } else {
+        None
+    };
+    let display_offset = i32::try_from(display_offset).unwrap_or(i32::MAX);
+    let line = line.saturating_sub(display_offset);
+
+    let line_size = line_sizes
+        .iter()
+        .find(|(doubled, _)| *doubled == line)
+        .map_or(LineSize::Single, |(_, size)| *size);
+    let cell_width = match line_size {
+        LineSize::Single => cur_size.cell_width,
+        _ => cur_size.cell_width * 2.0,
+    };
+    let mut column = (pos.x / cell_width) as usize;
+    let cell_x = cmp::max(px(0.), pos.x) % cell_width;
+    let mut side = if cell_x > cell_width / 2.0 {
         SelectionSide::Right
     } else {
         SelectionSide::Left
     };
 
-    let last_column = cur_size.num_columns().saturating_sub(1);
+    let last_column = line_size
+        .visible_columns(cur_size.num_columns())
+        .saturating_sub(1);
     if column > last_column {
         column = last_column;
         side = SelectionSide::Right;
     }
-    let column = min(column, last_column);
-    let mut line = (pos.y / cur_size.line_height) as i32;
-    let bottommost_line = i32::try_from(cur_size.num_lines().saturating_sub(1)).unwrap_or(i32::MAX);
-    if line > bottommost_line {
-        line = bottommost_line;
-        side = SelectionSide::Right;
-    } else if line < 0 {
-        side = SelectionSide::Left;
-    }
-
-    let display_offset = i32::try_from(display_offset).unwrap_or(i32::MAX);
-    (
-        Point::new(line.saturating_sub(display_offset), column),
-        side,
-    )
+    (Point::new(line, column), line_side.unwrap_or(side))
 }
 
 ///Generate the bytes to send to the terminal, from the cell location, a mouse event, and the terminal mode
 fn mouse_report(
-    point: Point,
+    position: MousePosition,
     button: MouseButtonCode,
     pressed: bool,
     modifiers: Modifiers,
     format: MouseFormat,
 ) -> Option<Vec<u8>> {
+    let point = position.cell;
     if point.line < 0 {
         return None;
     }
@@ -218,7 +266,15 @@ fn mouse_report(
 
     match format {
         MouseFormat::Sgr => {
-            Some(sgr_mouse_report(point, button as u8 + mods, pressed).into_bytes())
+            let (column, line) = (point.column + 1, point.line as usize + 1);
+            Some(sgr_mouse_report((column, line), button as u8 + mods, pressed).into_bytes())
+        }
+        MouseFormat::SgrPixels => {
+            let (x, y) = position.pixel;
+            Some(
+                sgr_mouse_report((x as usize, y as usize), button as u8 + mods, pressed)
+                    .into_bytes(),
+            )
         }
         MouseFormat::Normal(utf8) => {
             if pressed {
@@ -261,18 +317,10 @@ fn normal_mouse_report(point: Point, button: u8, utf8: bool) -> Option<Vec<u8>> 
     Some(msg)
 }
 
-fn sgr_mouse_report(point: Point, button: u8, pressed: bool) -> String {
+/// `(x, y)` is 1-based: a cell for SGR, a device pixel for SGR-Pixels.
+fn sgr_mouse_report((x, y): (usize, usize), button: u8, pressed: bool) -> String {
     let c = if pressed { 'M' } else { 'm' };
-
-    let msg = format!(
-        "\x1b[<{};{};{}{}",
-        button,
-        point.column + 1,
-        point.line + 1,
-        c
-    );
-
-    msg
+    format!("\x1b[<{button};{x};{y}{c}")
 }
 
 #[cfg(test)]
@@ -282,7 +330,10 @@ mod tests {
 
     #[test]
     fn scroll_report_repeats_for_negative_scroll_lines() {
-        let grid_point = Point::new(0, 0);
+        let grid_point = MousePosition {
+            cell: Point::new(0, 0),
+            pixel: (1, 1),
+        };
 
         let scroll_event = ScrollWheelEvent {
             delta: ScrollDelta::Lines(point(0., -1.)),
@@ -300,7 +351,10 @@ mod tests {
 
     #[test]
     fn scroll_report_repeats_for_positive_scroll_lines() {
-        let grid_point = Point::new(0, 0);
+        let grid_point = MousePosition {
+            cell: Point::new(0, 0),
+            pixel: (1, 1),
+        };
 
         let scroll_event = ScrollWheelEvent {
             delta: ScrollDelta::Lines(point(0., 1.)),
@@ -314,5 +368,55 @@ mod tests {
             .collect();
 
         assert_eq!(reports.len(), 3);
+    }
+
+    #[test]
+    fn sgr_pixel_reports_use_device_pixels_and_replace_cells() {
+        let bounds = TerminalBounds::new(
+            px(10.),
+            px(5.),
+            gpui::Bounds::new(point(px(0.), px(0.)), gpui::size(px(80.), px(20.))),
+        );
+        let position = MousePosition::new(point(px(12.25), px(7.5)), bounds, 0, &[], 2.0);
+        assert_eq!((position.cell.column, position.cell.line), (2, 0));
+        assert_eq!(position.pixel, (25, 16));
+
+        let press = |mode| {
+            mouse_button_report(
+                position,
+                MouseButton::Left,
+                Modifiers::default(),
+                true,
+                mode,
+            )
+        };
+        assert_eq!(
+            press(Modes::MOUSE_REPORT_CLICK | Modes::SGR_PIXEL_MOUSE).unwrap(),
+            b"\x1b[<0;25;16M"
+        );
+        assert_eq!(
+            press(Modes::MOUSE_REPORT_CLICK | Modes::SGR_MOUSE).unwrap(),
+            b"\x1b[<0;3;1M"
+        );
+
+        // A drag past the text area reports its last pixel, as cells clamp.
+        let outside = MousePosition::new(point(px(-3.), px(400.)), bounds, 0, &[], 2.0);
+        assert_eq!(outside.pixel, (1, 40));
+    }
+
+    #[test]
+    fn a_doubled_row_maps_two_columns_to_each_cell_and_hides_its_second_half() {
+        let bounds = TerminalBounds::new(
+            px(10.),
+            px(5.),
+            gpui::Bounds::new(point(px(0.), px(0.)), gpui::size(px(80.), px(20.))),
+        );
+        // Scrolled back one line, the second screen row is grid line 0.
+        let doubled = [(0, LineSize::DoubleWidth)];
+        let at = |x, y| grid_point_and_side(point(px(x), px(y)), bounds, 1, &doubled);
+        assert_eq!(at(12.0, 15.0), (Point::new(0, 1), SelectionSide::Left));
+        assert_eq!(at(18.0, 15.0), (Point::new(0, 1), SelectionSide::Right));
+        assert_eq!(at(79.0, 15.0), (Point::new(0, 7), SelectionSide::Right));
+        assert_eq!(at(79.0, 5.0), (Point::new(-1, 15), SelectionSide::Right));
     }
 }

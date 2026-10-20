@@ -1134,6 +1134,19 @@ enum InputModality {
     Touch,
 }
 
+/// Zetta patch: see [`Window::with_text_scale`].
+#[derive(Clone, Copy, Debug)]
+struct TextScale {
+    origin: Point<Pixels>,
+    scale: Size<f32>,
+}
+
+/// Zetta patch: a sprite measurement under the stretch [`Window::with_text_scale`]
+/// leaves after rasterizing.
+fn stretch_device_pixels(pixels: DevicePixels, by: f32) -> ScaledPixels {
+    ScaledPixels(pixels.0 as f32 * by)
+}
+
 /// Holds the state for a specific window.
 pub struct Window {
     pub(crate) handle: AnyWindowHandle,
@@ -1159,6 +1172,9 @@ pub struct Window {
     /// nothing at all, and the two things that drop atlas tiles — the renderer's
     /// incremental recovery and device loss — both run after paint.
     glyph_sprites: FxHashMap<RenderGlyphParams, GlyphSprite>,
+    /// Zetta patch: the stretch applied to text painted inside
+    /// [`Window::with_text_scale`].
+    text_scale: Option<TextScale>,
     text_system: Arc<WindowTextSystem>,
     text_rendering_mode: Rc<Cell<TextRenderingMode>>,
     rem_size: Pixels,
@@ -1861,6 +1877,7 @@ impl Window {
             is_minimizable,
             sprite_atlas,
             glyph_sprites: FxHashMap::default(),
+            text_scale: None,
             text_system,
             text_rendering_mode: cx.text_rendering_mode.clone(),
             rem_size: px(16.),
@@ -3607,6 +3624,70 @@ impl Window {
         }
     }
 
+    /// Zetta patch: paints the text drawn by `f` — glyphs, emoji, underlines and
+    /// strikethroughs — stretched by `scale` away from `origin`, as a terminal
+    /// draws a DEC double-width or double-height line. Each primitive's bounds
+    /// are stretched and its texture sampled across them, so no renderer needs
+    /// to support it; the content mask still clips in the stretched space. This
+    /// method should only be called as part of the paint phase of element drawing.
+    pub fn with_text_scale<R>(
+        &mut self,
+        origin: Point<Pixels>,
+        scale: Size<f32>,
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        self.invalidator.debug_assert_paint();
+        let previous = self.text_scale.replace(TextScale { origin, scale });
+        let result = f(self);
+        self.text_scale = previous;
+        result
+    }
+
+    /// Where a glyph painted at `origin` goes under the current text scale, the
+    /// font size to rasterize it at, and the stretch left for its sprite. A
+    /// glyph is rasterized at as much of the stretch as is the same both ways,
+    /// so a uniform one draws it sharp rather than magnifying a smaller raster.
+    fn text_scale_glyph(
+        &self,
+        origin: Point<Pixels>,
+        font_size: Pixels,
+    ) -> (Point<Pixels>, Pixels, Size<f32>) {
+        let Some(TextScale {
+            origin: from,
+            scale,
+        }) = self.text_scale
+        else {
+            return (origin, font_size, size(1., 1.));
+        };
+        let uniform = scale.width.min(scale.height).max(1.);
+        let origin = point(
+            from.x + (origin.x - from.x) * scale.width,
+            from.y + (origin.y - from.y) * scale.height,
+        );
+        let residual = size(scale.width / uniform, scale.height / uniform);
+        (origin, font_size * uniform, residual)
+    }
+
+    fn scale_text_bounds(&self, bounds: Bounds<ScaledPixels>) -> Bounds<ScaledPixels> {
+        let Some(TextScale { origin, scale }) = self.text_scale else {
+            return bounds;
+        };
+        let origin = origin.scale(self.scale_factor());
+        let stretch = |at: ScaledPixels, from: ScaledPixels, by: f32| {
+            ScaledPixels(from.0 + (at.0 - from.0) * by)
+        };
+        Bounds {
+            origin: point(
+                stretch(bounds.origin.x, origin.x, scale.width),
+                stretch(bounds.origin.y, origin.y, scale.height),
+            ),
+            size: size(
+                ScaledPixels(bounds.size.width.0 * scale.width),
+                ScaledPixels(bounds.size.height.0 * scale.height),
+            ),
+        }
+    }
+
     /// Updates the global element offset relative to the current offset. This is used to implement
     /// scrolling. This method should only be called during the prepaint phase of element drawing.
     pub fn with_element_offset<R>(
@@ -4241,10 +4322,10 @@ impl Window {
         } else {
             thickness
         };
-        let bounds = Bounds {
+        let bounds = self.scale_text_bounds(Bounds {
             origin: origin.map(|c| ScaledPixels(round_to_device_pixel(c.0, scale_factor))),
             size: size(self.snap_stroke(width), height),
-        };
+        });
         let element_opacity = self.element_opacity();
 
         self.next_frame.scene.insert_primitive(Underline {
@@ -4271,10 +4352,10 @@ impl Window {
 
         let scale_factor = self.scale_factor();
         let height = style.thickness;
-        let bounds = Bounds {
+        let bounds = self.scale_text_bounds(Bounds {
             origin: origin.map(|c| ScaledPixels(round_to_device_pixel(c.0, scale_factor))),
             size: size(self.snap_stroke(width), self.snap_stroke(height)),
-        };
+        });
         let opacity = self.element_opacity();
 
         self.next_frame.scene.insert_primitive(Underline {
@@ -4308,6 +4389,7 @@ impl Window {
 
         let element_opacity = self.element_opacity();
         let scale_factor = self.scale_factor();
+        let (origin, font_size, stretch) = self.text_scale_glyph(origin, font_size);
         let glyph_origin = origin.scale(scale_factor);
 
         let quantized_origin = Point::new(
@@ -4336,8 +4418,15 @@ impl Window {
 
         if let Some((raster_origin, tile)) = self.glyph_sprite(params)? {
             let bounds = Bounds {
-                origin: integer_origin + raster_origin.map(Into::into),
-                size: tile.bounds.size.map(Into::into),
+                origin: integer_origin
+                    + point(
+                        stretch_device_pixels(raster_origin.x, stretch.width),
+                        stretch_device_pixels(raster_origin.y, stretch.height),
+                    ),
+                size: size(
+                    stretch_device_pixels(tile.bounds.size.width, stretch.width),
+                    stretch_device_pixels(tile.bounds.size.height, stretch.height),
+                ),
             };
             let content_mask = self.snapped_content_mask();
 
@@ -4431,6 +4520,7 @@ impl Window {
         self.invalidator.debug_assert_paint();
 
         let scale_factor = self.scale_factor();
+        let (origin, font_size, stretch) = self.text_scale_glyph(origin, font_size);
         let glyph_origin = origin.scale(scale_factor);
         let integer_origin = glyph_origin.map(|c| ScaledPixels(round_half_toward_zero(c.0)));
         let params = RenderGlyphParams {
@@ -4446,8 +4536,15 @@ impl Window {
 
         if let Some((raster_origin, tile)) = self.glyph_sprite(params)? {
             let bounds = Bounds {
-                origin: integer_origin + raster_origin.map(Into::into),
-                size: tile.bounds.size.map(Into::into),
+                origin: integer_origin
+                    + point(
+                        stretch_device_pixels(raster_origin.x, stretch.width),
+                        stretch_device_pixels(raster_origin.y, stretch.height),
+                    ),
+                size: size(
+                    stretch_device_pixels(tile.bounds.size.width, stretch.width),
+                    stretch_device_pixels(tile.bounds.size.height, stretch.height),
+                ),
             };
             let content_mask = self.snapped_content_mask();
             let opacity = self.element_opacity();
@@ -7789,5 +7886,106 @@ mod tests {
             })
             .unwrap();
         assert_eq!(b_focus_count.get(), 1);
+    }
+}
+
+#[cfg(test)]
+mod text_scale_tests {
+    use std::{cell::RefCell, rc::Rc};
+
+    use crate::{
+        AppContext as _, Context, IntoElement, ParentElement as _, Pixels, Point, Render,
+        ScaledPixels, Size, Styled, TestAppContext, UnderlineStyle, Window, canvas, div, point, px,
+        size,
+    };
+
+    /// Paints one underline under a 2x horizontal, 3x vertical stretch from
+    /// (10, 4), and one after it with no stretch.
+    struct StretchedUnderline;
+
+    impl Render for StretchedUnderline {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().child(
+                canvas(
+                    |_, _, _| {},
+                    |_, _, window, _| {
+                        let style = UnderlineStyle {
+                            thickness: px(1.),
+                            ..Default::default()
+                        };
+                        window.with_text_scale(point(px(10.), px(4.)), size(2., 3.), |window| {
+                            window.paint_underline(point(px(20.), px(6.)), px(8.), &style)
+                        });
+                        window.paint_underline(point(px(20.), px(6.)), px(8.), &style);
+                    },
+                )
+                .size_full(),
+            )
+        }
+    }
+
+    /// Records where a glyph at (20, 6) at 10px goes under each stretch from
+    /// (10, 4), and with none.
+    struct GlyphPlacements(Rc<RefCell<Vec<(Point<Pixels>, Pixels, Size<f32>)>>>);
+
+    impl Render for GlyphPlacements {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let placements = self.0.clone();
+            div().size_full().child(
+                canvas(
+                    |_, _, _| {},
+                    move |_, _, window, _| {
+                        let mut placements = placements.borrow_mut();
+                        for scale in [size(2., 1.), size(2., 2.)] {
+                            window.with_text_scale(point(px(10.), px(4.)), scale, |window| {
+                                placements
+                                    .push(window.text_scale_glyph(point(px(20.), px(6.)), px(10.)));
+                            });
+                        }
+                        placements.push(window.text_scale_glyph(point(px(20.), px(6.)), px(10.)));
+                    },
+                )
+                .size_full(),
+            )
+        }
+    }
+
+    #[test]
+    fn a_uniform_stretch_rasterizes_glyphs_larger_rather_than_magnifying_them() {
+        let mut cx = TestAppContext::single();
+        let placements = Rc::new(RefCell::new(Vec::new()));
+        let window = cx.add_window({
+            let placements = placements.clone();
+            |_, _| GlyphPlacements(placements)
+        });
+        placements.borrow_mut().clear();
+        cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear(cx))
+            .unwrap();
+        assert_eq!(
+            *placements.borrow(),
+            [
+                (point(px(30.), px(6.)), px(10.), size(2., 1.)),
+                (point(px(30.), px(8.)), px(20.), size(1., 1.)),
+                (point(px(20.), px(6.)), px(10.), size(1., 1.)),
+            ]
+        );
+    }
+
+    #[test]
+    fn text_scale_stretches_text_bounds_away_from_its_origin_and_then_ends() {
+        let mut cx = TestAppContext::single();
+        let window = cx.add_window(|_, _| StretchedUnderline);
+        cx.update_window(window.into(), |_, window, cx| {
+            window.draw(cx).clear(cx);
+            let underlines = &window.rendered_frame.scene.underlines;
+            let scale = window.scale_factor();
+            let scaled = |pixels: f32| ScaledPixels(pixels * scale);
+            assert_eq!(underlines.len(), 2);
+            assert_eq!(underlines[0].bounds.origin, point(scaled(30.), scaled(10.)));
+            assert_eq!(underlines[0].bounds.size.width, scaled(16.));
+            assert_eq!(underlines[1].bounds.origin, point(scaled(20.), scaled(6.)));
+            assert_eq!(underlines[1].bounds.size.width, scaled(8.));
+        })
+        .unwrap();
     }
 }

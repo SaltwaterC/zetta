@@ -77,7 +77,8 @@ ZETTA_CRATE_DIRS := \
 	crates/wslx \
 	crates/zmux \
 	crates/zosh \
-	crates/zosh/server
+	crates/zosh/server \
+	tools/shitty-adapter
 # These standalone test workspaces have checked-in lockfiles. The other local
 # platform crates are included in formatting coverage but do not have an
 # independent locked test graph.
@@ -363,6 +364,13 @@ ifneq ($(OS),Windows_NT)
 	$(MAKE) test-zosh-interop
 	sh scripts/test-build-wiring.sh
 endif
+
+.PHONY: test-shitty
+# Opt-in imported terminal conformance suite; assertions may expose known gaps.
+PYTHON ?= python3
+SHITTY_ARGS ?=
+test-shitty:
+	CARGO="$(CARGO)" $(PYTHON) scripts/shitty/run.py $(SHITTY_ARGS)
 
 # The scrolling workload is kept out of ordinary validation. Always optimize it
 # and retain the same priority and resource limits as the normal test runner.

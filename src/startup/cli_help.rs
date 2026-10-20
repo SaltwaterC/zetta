@@ -169,7 +169,7 @@ pub(crate) fn help_text(profiles: &[Profile]) -> String {
         usage.push("zetta tftp <COMMAND>");
     }
     if cfg!(feature = "notifications") {
-        usage.push("zetta notify [OPTIONS] SUMMARY [BODY]");
+        usage.push("zetta notify [OPTIONS] [--] SUMMARY [BODY]");
     }
     if cfg!(notify_cleanup_enabled) {
         usage.push("zetta notify cleanup [OPTIONS]");

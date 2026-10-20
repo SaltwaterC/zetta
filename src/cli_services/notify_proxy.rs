@@ -15,7 +15,7 @@ use crate::startup::format_help_table;
 
 pub(crate) fn notify_help() -> String {
     format!(
-        "Show a desktop notification\n\nUsage: zetta notify [OPTIONS] SUMMARY [BODY]\n\nSUMMARY is the notification's title; BODY is optional additional text.\n\nOptions:\n{}\n\nThe notification is delivered by the sibling `zntfy` executable. It uses D-Bus\non Linux and BSD, Notification Center on macOS, and toast notifications on\nWindows. Without --icon, Zetta's bundled icon is shown. --app-name has no\neffect on macOS and --timeout is ignored by some macOS notification centers.\n\n--sound zetta-default, zetta-ok, zetta-alarm, and zetta-gong are bundled tones.\nOther values are passed through as platform-specific system sound names.",
+        "Show a desktop notification\n\nUsage: zetta notify [OPTIONS] [--] SUMMARY [BODY]\n\nSUMMARY is the notification's title; BODY is optional additional text. Put\n`--` before them when either may begin with `-`; nothing after it is an option.\n\nOptions:\n{}\n\nThe notification is delivered by the sibling `zntfy` executable. It uses D-Bus\non Linux and BSD, Notification Center on macOS, and toast notifications on\nWindows. Without --icon, Zetta's bundled icon is shown. --app-name has no\neffect on macOS and --timeout is ignored by some macOS notification centers.\n\n--sound zetta-default, zetta-ok, zetta-alarm, and zetta-gong are bundled tones.\nOther values are passed through as platform-specific system sound names.",
         format_help_table([
             (
                 "-a, --app-name NAME",
@@ -36,6 +36,15 @@ pub(crate) fn notify_help() -> String {
             ("-h, --help", "Print help"),
         ])
     )
+}
+
+/// Whether `--help` appears as an option: after `--` it is notification text.
+/// Mirrors `zntfy::requests_help`, which is only linked on macOS.
+pub(crate) fn requests_notify_help(arguments: &[OsString]) -> bool {
+    arguments
+        .iter()
+        .take_while(|argument| *argument != "--")
+        .any(|argument| matches!(argument.to_string_lossy().as_ref(), "--help" | "-h"))
 }
 
 pub(crate) fn parse_notify_args(
@@ -89,13 +98,17 @@ pub(crate) fn parse_notify_args(
                 timeout = Some(parse_notification_timeout(&value)?);
             }
             "--help" | "-h" => anyhow::bail!("{}", notify_help()),
+            "--" => {
+                positional.extend(&mut arguments);
+                break;
+            }
             option if option.starts_with('-') => anyhow::bail!("unknown notify option {option:?}"),
             _ => positional.push(argument),
         }
     }
     anyhow::ensure!(
         (1..=2).contains(&positional.len()),
-        "usage: zetta notify [OPTIONS] SUMMARY [BODY]; run `zetta notify --help` for details"
+        "usage: zetta notify [OPTIONS] [--] SUMMARY [BODY]; run `zetta notify --help` for details"
     );
     let summary = positional[0].to_string_lossy().into_owned();
     anyhow::ensure!(!summary.is_empty(), "SUMMARY must not be empty");
@@ -192,6 +205,8 @@ pub(crate) fn notification_reexec_args(notification: &NotificationRequest) -> Ve
             NotificationTimeout::Milliseconds(milliseconds) => milliseconds.to_string(),
         }));
     }
+    // The text is often a program's, so it must never be read as an option.
+    args.push(OsString::from("--"));
     args.push(OsString::from(&notification.summary));
     if let Some(body) = &notification.body {
         args.push(OsString::from(body));

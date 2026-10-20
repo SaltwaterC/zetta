@@ -140,6 +140,17 @@ Retain these Zetta-specific behaviors when synchronizing:
   so a window that closes when its child exits used to stay open for up to that
   long; the exit now reaches the UI at once.
   `only_the_events_nothing_follows_end_the_terminal` pins the classification.
+- carry each visible row's DEC line size in `Content::line_sizes` (only rows
+  that are not single size), and map a mouse position on a doubled row to its
+  grid cell at twice the cell width (`mappings/mouse.rs`);
+- pass OSC 99 desktop notifications on as `Event::DesktopNotification`. A pty
+  terminal enables the protocol only after the application calls
+  `enable_desktop_notifications`, which a build without notification support
+  never does;
+- honour KAM by dropping keyboard input while the keyboard is locked, and SRM
+  by echoing what is sent locally. The `Reset` action sends the terminal a full
+  reset (RIS), which is the user's way to unlock a keyboard a program left
+  locked.
 
 `Content::selection_text` was removed after auditing the local public API
 consumers. Zed's agent UI and full terminal view use the upstream field, but

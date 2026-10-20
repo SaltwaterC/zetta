@@ -23,7 +23,9 @@ pub(crate) use notify_proxy::macos_notification_target_for_response;
 #[cfg(notify_cleanup_enabled)]
 pub(crate) use notify_proxy::{notify_cleanup_help, parse_notify_cleanup_args};
 #[cfg(feature = "notifications")]
-pub(crate) use notify_proxy::{notify_help, parse_notify_args, run_notification_proxy};
+pub(crate) use notify_proxy::{
+    notify_help, parse_notify_args, requests_notify_help, run_notification_proxy,
+};
 
 #[cfg(feature = "clipboard")]
 mod clipboard;

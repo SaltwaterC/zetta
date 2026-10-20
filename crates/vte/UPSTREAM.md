@@ -98,3 +98,20 @@ marks are logged and ignored. The method defaults to doing nothing, so other
 handlers are unaffected. `alacritty_terminal` uses it to keep a shell's prompt
 out of reflow. Regression test: `parse_osc133_prompt_and_command_marks` in
 `src/ansi.rs`.
+
+## Zetta patch: OSC 99 desktop notifications
+
+`osc_dispatch` hands `OSC 99 ; metadata ; payload` to
+`ansi::Handler::desktop_notification` with the metadata, the payload and the
+terminator to echo in a reply. The payload is rejoined on `;`, which the
+protocol allows in a title or body, so splitting it into parameters loses
+nothing. Assembling chunks, decoding and replying to queries belong to the
+handler (`alacritty_terminal`'s `term/notification.rs`); the default does
+nothing. Regression test: `notification_payloads_keep_their_semicolons_and_terminator`
+in `src/ansi.rs`.
+
+## Zetta patch: unhandled OSC logging
+
+`osc_dispatch` formats an unhandled OSC for its debug log only when debug
+logging is enabled. Binary output ends hundreds of chance OSCs a second, and
+formatting each one's bytes cost more than parsing them.

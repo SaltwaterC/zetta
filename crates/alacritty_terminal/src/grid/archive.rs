@@ -116,6 +116,11 @@ impl<T: GridCell + Default + PartialEq> CompactRows<T> {
         };
         let mut offsets = Vec::with_capacity(rows.len());
         for row in rows {
+            // A doubled row is rare enough that its chunk can stay as rows rather than spend
+            // encoding space on every row's size.
+            if row.line_size() != super::LineSize::Single {
+                return None;
+            }
             let offset = u32::try_from(encoder.bytes.len()).ok()?;
             if offset > OFFSET_MASK {
                 return None;

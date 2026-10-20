@@ -43,6 +43,15 @@ repaint and narrow-layout regressions with that presentation.
 The match counter wraps below the query in narrow panes instead of squeezing
 the input to zero width; a windowed layout test covers large match counts.
 
+`src/line_size.rs`, a Zetta-authored module (tests in `src/tests/line_size.rs`),
+draws DEC double-width and double-height rows. Layout stays in grid columns:
+the element leaves a doubled row's hidden second half out of layout, doubles
+cell positions and widths as it paints, and paints the row's text through
+gpui's `Window::with_text_scale` (see `../gpui/UPSTREAM.md`). The cursor, the
+selection and the highlighted ranges follow the same scale. The view drops
+typed and committed text while the terminal reports a locked keyboard (KAM),
+and its context menu offers **Reset**.
+
 Files belonging only to Zed's uncompiled workspace view are reference material,
 not a source of automatic imports. See `../UPSTREAM_AUDIT.md` for decisions on
 such changes.

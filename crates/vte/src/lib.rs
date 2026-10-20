@@ -84,6 +84,8 @@ pub struct Parser<const OSC_RAW_BUF_SIZE: usize = MAX_OSC_RAW> {
     ignoring: bool,
     partial_utf8: [u8; 4],
     partial_utf8_len: usize,
+    /// ISO-8859-1 input selected by ESC % @; UTF-8 remains the default.
+    latin1: bool,
 }
 
 impl Parser {
@@ -197,6 +199,22 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
             State::EscapeIntermediate => self.advance_esc_intermediate(performer, byte),
             State::OscString => self.advance_osc_string(performer, byte),
             State::SosPmApcString => self.anywhere(performer, byte),
+            State::Vt52Row => {
+                if byte >= 0x20 {
+                    self.state = State::Vt52Column(byte);
+                } else {
+                    self.state = State::Ground;
+                    self.anywhere(performer, byte);
+                }
+            },
+            State::Vt52Column(row) => {
+                self.state = State::Ground;
+                if byte >= 0x20 {
+                    performer.vt52_cursor_position(row - 0x20, byte - 0x20);
+                } else {
+                    self.anywhere(performer, byte);
+                }
+            },
             State::Ground => unreachable!(),
         }
     }
@@ -226,7 +244,7 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
                 self.state = State::CsiParam
             },
             0x40..=0x7E => self.action_csi_dispatch(performer, byte),
-            _ => self.anywhere(performer, byte),
+            _ => self.anywhere_in_sequence(performer, byte),
         }
     }
 
@@ -237,7 +255,7 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
             0x20..=0x3F => (),
             0x40..=0x7E => self.state = State::Ground,
             0x7F => (),
-            _ => self.anywhere(performer, byte),
+            _ => self.anywhere_in_sequence(performer, byte),
         }
     }
 
@@ -248,7 +266,7 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
             0x20..=0x2F => self.action_collect(byte),
             0x30..=0x3F => self.state = State::CsiIgnore,
             0x40..=0x7E => self.action_csi_dispatch(performer, byte),
-            _ => self.anywhere(performer, byte),
+            _ => self.anywhere_in_sequence(performer, byte),
         }
     }
 
@@ -266,7 +284,7 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
             0x3C..=0x3F => self.state = State::CsiIgnore,
             0x40..=0x7E => self.action_csi_dispatch(performer, byte),
             0x7F => (),
-            _ => self.anywhere(performer, byte),
+            _ => self.anywhere_in_sequence(performer, byte),
         }
     }
 
@@ -296,7 +314,7 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
             },
             0x40..=0x7E => self.action_hook(performer, byte),
             0x7F => (),
-            _ => self.anywhere(performer, byte),
+            _ => self.anywhere_in_sequence(performer, byte),
         }
     }
 
@@ -308,7 +326,7 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
             0x30..=0x3F => self.state = State::DcsIgnore,
             0x40..=0x7E => self.action_hook(performer, byte),
             0x7F => (),
-            _ => self.anywhere(performer, byte),
+            _ => self.anywhere_in_sequence(performer, byte),
         }
     }
 
@@ -326,7 +344,7 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
             0x3C..=0x3F => self.state = State::DcsIgnore,
             0x40..=0x7E => self.action_hook(performer, byte),
             0x7F => (),
-            _ => self.anywhere(performer, byte),
+            _ => self.anywhere_in_sequence(performer, byte),
         }
     }
 
@@ -335,18 +353,18 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
         match byte {
             0x00..=0x17 | 0x19 | 0x1C..=0x7E => performer.put(byte),
             0x18 | 0x1A => {
-                performer.unhook();
+                performer.dcs_end(byte);
                 performer.execute(byte);
                 self.state = State::Ground
             },
             0x1B => {
-                performer.unhook();
+                performer.dcs_end(byte);
                 self.reset_params();
                 self.state = State::Escape
             },
             0x7F => (),
             0x9C => {
-                performer.unhook();
+                performer.dcs_end(byte);
                 self.state = State::Ground
             },
             _ => (),
@@ -355,6 +373,16 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
 
     #[inline(always)]
     fn advance_esc<P: Perform>(&mut self, performer: &mut P, byte: u8) {
+        if performer.vt52_mode() && byte >= 0x20 {
+            if byte == b'c' {
+                self.latin1 = false;
+            }
+            self.state = if byte == b'Y' { State::Vt52Row } else { State::Ground };
+            if byte != b'Y' {
+                performer.esc_dispatch(&[], false, byte);
+            }
+            return;
+        }
         match byte {
             0x00..=0x17 | 0x19 | 0x1C..=0x1F => performer.execute(byte),
             0x20..=0x2F => {
@@ -397,6 +425,9 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
             },
             0x5E..=0x5F => self.state = State::SosPmApcString,
             0x60..=0x7E => {
+                if byte == b'c' {
+                    self.latin1 = false;
+                }
                 performer.esc_dispatch(self.intermediates(), self.ignoring, byte);
                 self.state = State::Ground
             },
@@ -405,7 +436,8 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
                 performer.execute(byte);
                 self.state = State::Ground
             },
-            0x1B => (),
+            0x1B => performer.dcs_end(0x18),
+            0x80..=0x9F => self.anywhere_in_sequence(performer, byte),
             _ => (),
         }
     }
@@ -416,16 +448,28 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
             0x00..=0x17 | 0x19 | 0x1C..=0x1F => performer.execute(byte),
             0x20..=0x2F => self.action_collect(byte),
             0x30..=0x7E => {
+                if !self.ignoring && self.intermediates() == b"%" {
+                    match byte {
+                        b'@' => self.latin1 = true,
+                        b'G' | b'8' => self.latin1 = false,
+                        _ => (),
+                    }
+                }
                 performer.esc_dispatch(self.intermediates(), self.ignoring, byte);
                 self.state = State::Ground
             },
             0x7F => (),
-            _ => self.anywhere(performer, byte),
+            _ => self.anywhere_in_sequence(performer, byte),
         }
     }
 
     #[inline(always)]
     fn advance_osc_string<P: Perform>(&mut self, performer: &mut P, byte: u8) {
+        if self.latin1 && byte == 0x9C {
+            self.osc_end(performer, byte);
+            self.state = State::Ground;
+            return;
+        }
         match byte {
             0x00..=0x06 | 0x08..=0x17 | 0x19 | 0x1C..=0x1F => (),
             0x07 => {
@@ -455,8 +499,29 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
         }
     }
 
+    /// A C1 control inside an escape, control sequence or DCS header aborts it
+    /// and takes effect, as in DEC's "anywhere" transitions. In UTF-8 mode no
+    /// character can start inside a sequence, so the byte cannot be a UTF-8
+    /// continuation there; string payloads keep using [`Self::anywhere`].
+    #[inline]
+    fn anywhere_in_sequence<P: Perform>(&mut self, performer: &mut P, byte: u8) {
+        if (0x80..=0x9F).contains(&byte) {
+            self.state = State::Ground;
+            self.reset_params();
+            self.advance_esc(performer, byte - 0x40);
+            return;
+        }
+        self.anywhere(performer, byte);
+    }
+
     #[inline(always)]
     fn anywhere<P: Perform>(&mut self, performer: &mut P, byte: u8) {
+        if self.latin1 && (0x80..=0x9F).contains(&byte) {
+            self.state = State::Ground;
+            self.reset_params();
+            self.advance_esc(performer, byte - 0x40);
+            return;
+        }
         match byte {
             0x18 | 0x1A => {
                 performer.execute(byte);
@@ -523,6 +588,30 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
             self.params.push(self.param);
             self.param = 0;
         }
+    }
+
+    /// In eight-bit mode C1 controls use their ESC equivalents; printable GR
+    /// bytes are Latin-1 scalars. ASCII runs retain the normal bulk dispatcher.
+    fn advance_latin1<P: Perform>(&mut self, performer: &mut P, bytes: &[u8]) -> usize {
+        let count =
+            bytes.iter().position(|byte| *byte == 0x1B || *byte >= 0x80).unwrap_or(bytes.len());
+        if count != 0 {
+            Self::ground_dispatch(performer, core::str::from_utf8(&bytes[..count]).unwrap());
+            return count;
+        }
+        let byte = bytes[0];
+        match byte {
+            0x1B => {
+                self.reset_params();
+                self.state = State::Escape;
+            },
+            0x80..=0x9F => {
+                self.reset_params();
+                self.advance_esc(performer, byte - 0x40);
+            },
+            _ => performer.print(char::from(byte)),
+        }
+        1
     }
 
     /// Advance inside the parameter without terminating it.
@@ -637,6 +726,9 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
     /// bytes between two escapes once per invalid sequence among them.
     #[inline]
     fn advance_ground<P: Perform>(&mut self, performer: &mut P, bytes: &[u8]) -> usize {
+        if self.latin1 {
+            return self.advance_latin1(performer, bytes);
+        }
         // Find the next escape character.
         let num_bytes = bytes.len();
         let plain_chars = memchr::memchr(0x1B, bytes).unwrap_or(num_bytes);
@@ -834,7 +926,7 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
                     performer.print(c);
 
                     self.partial_utf8_len = 0;
-                    return valid_bytes - old_bytes;
+                    return c.len_utf8() - old_bytes;
                 }
 
                 match err.error_len() {
@@ -1065,6 +1157,8 @@ enum State {
     EscapeIntermediate,
     OscString,
     SosPmApcString,
+    Vt52Row,
+    Vt52Column(u8),
     #[default]
     Ground,
 }
@@ -1080,6 +1174,12 @@ enum State {
 /// referenced if something isn't clear. If the site disappears at some point in
 /// the future, consider checking archive.org.
 pub trait Perform {
+    /// Legacy VT52 addressing uses two printable bytes instead of CSI parameters.
+    fn vt52_mode(&self) -> bool {
+        false
+    }
+    fn vt52_cursor_position(&mut self, _row: u8, _column: u8) {}
+
     /// Draw a character to the screen and update states.
     fn print(&mut self, _c: char) {}
 
@@ -1130,6 +1230,12 @@ pub trait Perform {
     /// The previously selected handler should be notified that the DCS has
     /// terminated.
     fn unhook(&mut self) {}
+
+    /// DCS termination byte (ST, ESC, CAN or SUB), for clients which must
+    /// distinguish a completed request from cancellation. ESC awaits `\`.
+    fn dcs_end(&mut self, _byte: u8) {
+        self.unhook();
+    }
 
     /// Dispatch an operating system command.
     fn osc_dispatch(&mut self, _params: &[&[u8]], _bell_terminated: bool) {}
@@ -2086,6 +2192,26 @@ mod tests {
         assert_eq!(dispatcher.dispatched[8], Sequence::Execute(158));
         assert_eq!(dispatcher.dispatched[9], Sequence::Execute(159));
         assert_eq!(dispatcher.dispatched[10], Sequence::Print('a'));
+    }
+
+    #[test]
+    fn c1_controls_abandon_an_unfinished_sequence_and_act() {
+        let mut dispatcher = Dispatcher::default();
+        let mut parser = Parser::new();
+
+        // A CSI restarts the sequence; an IND acts as `ESC D`, in a CSI's
+        // parameters, after its intermediate, and inside a DCS header.
+        parser.advance(&mut dispatcher, b"\x1b[1\x9b2A\x1b[3 \x84\x1bP1$\x84x");
+
+        assert_eq!(
+            dispatcher.dispatched,
+            [
+                Sequence::Csi(vec![vec![2]], vec![], false, 'A'),
+                Sequence::Esc(vec![], false, b'D'),
+                Sequence::Esc(vec![], false, b'D'),
+                Sequence::Print('x'),
+            ]
+        );
     }
 
     #[test]

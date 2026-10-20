@@ -25,6 +25,7 @@ use std::mem;
 use std::{cell::RefCell, fmt::Debug, rc::Rc, sync::Arc, sync::OnceLock};
 
 use crate::grid_fit::{PhysicalCellSize, TerminalFont, snap_to_rows};
+use crate::line_size::{DoubledRows, row_bounds};
 use crate::{BlockContext, BlockProperties, ContentMode, TerminalMode, TerminalView};
 
 #[derive(Clone, Copy)]
@@ -36,6 +37,8 @@ enum ViewCursorShape {
 }
 
 struct CursorLayout {
+    /// Zetta patch: the display row, whose size its glyph is drawn at.
+    row: i32,
     origin: GpuiPoint<Pixels>,
     width: Pixels,
     height: Pixels,
@@ -46,6 +49,7 @@ struct CursorLayout {
 
 impl CursorLayout {
     fn new(
+        row: i32,
         origin: GpuiPoint<Pixels>,
         width: Pixels,
         height: Pixels,
@@ -54,6 +58,7 @@ impl CursorLayout {
         block_text: Option<ShapedLine>,
     ) -> Self {
         Self {
+            row,
             origin,
             width,
             height,
@@ -119,6 +124,8 @@ pub struct LayoutState {
     block_below_cursor_element: Option<AnyElement>,
     base_text_style: TextStyle,
     content_mode: ContentMode,
+    /// Zetta patch: see `line_size.rs`.
+    doubled_rows: DoubledRows,
 }
 
 /// Helper struct for converting terminal cursor points to displayed cursor points.
@@ -318,13 +325,16 @@ impl BlockElementLayoutRect {
         }
     }
 
+    /// `column_scale` is how many columns a cell of this row spans (see
+    /// `line_size.rs`).
     pub fn paint(
         &self,
         origin: GpuiPoint<Pixels>,
         dimensions: &TerminalBounds,
+        column_scale: f32,
         window: &mut Window,
     ) {
-        let subcell_width = dimensions.cell_width / BLOCK_SUBCELL_COLUMNS as f32;
+        let subcell_width = dimensions.cell_width * column_scale / BLOCK_SUBCELL_COLUMNS as f32;
         let subcell_height = dimensions.line_height / BLOCK_SUBCELL_LINES as f32;
         let left = origin.x + self.point.column as f32 * subcell_width;
         let top = origin.y + self.point.line as f32 * subcell_height;
@@ -355,21 +365,25 @@ impl LayoutRect {
         }
     }
 
+    /// `column_scale` is how many columns a cell of this row spans (see
+    /// `line_size.rs`).
     pub fn paint(
         &self,
         origin: GpuiPoint<Pixels>,
         dimensions: &TerminalBounds,
+        column_scale: f32,
         window: &mut Window,
     ) {
+        let cell_width = dimensions.cell_width * column_scale;
         let position = {
             let layout_point = self.point;
             point(
-                (origin.x + layout_point.column as f32 * dimensions.cell_width).floor(),
+                (origin.x + layout_point.column as f32 * cell_width).floor(),
                 origin.y + layout_point.line as f32 * dimensions.line_height,
             )
         };
         let size = point(
-            (dimensions.cell_width * self.num_of_cells as f32).ceil(),
+            (cell_width * self.num_of_cells as f32).ceil(),
             dimensions.line_height,
         )
         .into();
@@ -908,11 +922,12 @@ impl TerminalElement {
     fn cursor_position(
         cursor_point: DisplayCursor,
         size: TerminalBounds,
+        column_scale: f32,
     ) -> Option<GpuiPoint<Pixels>> {
         if cursor_point.line() < size.num_lines() as i32 {
             // When on pixel boundaries round the origin down
             Some(point(
-                (cursor_point.col() as f32 * size.cell_width()).floor(),
+                (cursor_point.col() as f32 * size.cell_width() * column_scale).floor(),
                 (cursor_point.line() as f32 * size.line_height()).floor(),
             ))
         } else {
@@ -1728,8 +1743,10 @@ impl Element for TerminalElement {
 
                 let Content {
                     cells,
+                    line_sizes,
                     mode,
                     display_offset,
+                    columns,
                     cursor_char,
                     selection,
                     cursor,
@@ -1737,6 +1754,15 @@ impl Element for TerminalElement {
                 } = &self.terminal.read(cx).last_content;
                 let mode = *mode;
                 let display_offset = *display_offset;
+                let doubled_rows = DoubledRows::new(line_sizes, display_offset);
+                // A doubled row shows only its first half; see `line_size.rs`.
+                let shown_cells = cells.iter().filter(|cell| {
+                    doubled_rows.shows(
+                        cell.point.line + display_offset as i32,
+                        cell.point.column,
+                        *columns,
+                    )
+                });
 
                 // searches, highlights to a single range representations
                 let mut relative_highlighted_ranges = Vec::new();
@@ -1782,7 +1808,7 @@ impl Element for TerminalElement {
                     // Fast path: terminal fully visible, no clipping needed.
                     // Avoid grouping/allocation overhead by streaming cells directly.
                     TerminalElement::layout_grid(
-                        cells.iter(),
+                        shown_cells,
                         0,
                         &text_style,
                         hover_match
@@ -1807,8 +1833,7 @@ impl Element for TerminalElement {
                         // Group cells by line and filter to only the visible screen rows.
                         // skip() and take() work on enumerated line groups (screen position),
                         // making this work regardless of the actual cell.point.line values.
-                        cells
-                            .iter()
+                        shown_cells
                             .chunk_by(|c| c.point.line)
                             .into_iter()
                             .skip(rows_above_viewport)
@@ -1826,7 +1851,14 @@ impl Element for TerminalElement {
 
                 // Layout cursor. Rectangle is used for IME, so we should lay it out even
                 // if we don't end up showing it.
-                let cursor_point = DisplayCursor::from(cursor.point, display_offset);
+                let mut cursor_point = DisplayCursor::from(cursor.point, display_offset);
+                let cursor_scale = doubled_rows.column_scale(cursor_point.line());
+                cursor_point.col = cursor_point.col.min(
+                    doubled_rows
+                        .size(cursor_point.line())
+                        .visible_columns(*columns)
+                        .saturating_sub(1),
+                );
 
                 // A cursor resting on a blank cell is the common case, and there
                 // neither the width nor the painted glyph depends on the shaped
@@ -1853,13 +1885,15 @@ impl Element for TerminalElement {
                 let cursor_width = match &cursor_text {
                     Some(cursor_text) => cursor_text.width.max(dimensions.cell_width()),
                     None => dimensions.cell_width(),
-                };
+                } * cursor_scale;
 
-                let ime_cursor_bounds = TerminalElement::cursor_position(cursor_point, dimensions)
-                    .map(|cursor_position| Bounds {
-                        origin: cursor_position,
-                        size: size(cursor_width.ceil(), dimensions.line_height),
-                    });
+                let ime_cursor_bounds =
+                    TerminalElement::cursor_position(cursor_point, dimensions, cursor_scale).map(
+                        |cursor_position| Bounds {
+                            origin: cursor_position,
+                            size: size(cursor_width.ceil(), dimensions.line_height),
+                        },
+                    );
 
                 let cursor = if let CursorShape::Hidden = cursor.shape {
                     None
@@ -1878,6 +1912,7 @@ impl Element for TerminalElement {
                         };
 
                         CursorLayout::new(
+                            cursor_point.line(),
                             bounds.origin,
                             bounds.size.width,
                             bounds.size.height,
@@ -1936,6 +1971,7 @@ impl Element for TerminalElement {
                     block_below_cursor_element,
                     base_text_style: text_style,
                     content_mode,
+                    doubled_rows,
                 }
             },
         )
@@ -2026,7 +2062,8 @@ impl Element for TerminalElement {
                     });
 
                     paint_grid_layer(&layout.rects, bounds, window, |rect, window| {
-                        rect.paint(origin, &layout.dimensions, window)
+                        let scale = layout.doubled_rows.column_scale(rect.point.line);
+                        rect.paint(origin, &layout.dimensions, scale, window)
                     });
 
                     for (relative_highlighted_range, color) in &layout.relative_highlighted_ranges {
@@ -2061,7 +2098,11 @@ impl Element for TerminalElement {
                         &layout.block_element_rects,
                         bounds,
                         window,
-                        |rect, window| rect.paint(origin, &layout.dimensions, window),
+                        |rect, window| {
+                            let row = rect.point.line.div_euclid(BLOCK_SUBCELL_LINES);
+                            let scale = layout.doubled_rows.column_scale(row);
+                            rect.paint(origin, &layout.dimensions, scale, window)
+                        },
                     );
 
                     if let Some(text_to_mark) = &marked_text_cloned
@@ -2112,7 +2153,18 @@ impl Element for TerminalElement {
                         && marked_text_cloned.is_none()
                         && let Some(mut cursor) = original_cursor
                     {
-                        cursor.paint(origin, window, cx);
+                        let row = row_bounds(
+                            origin,
+                            cursor.row,
+                            layout.dimensions.line_height,
+                            bounds.size.width,
+                        );
+                        let anchor = origin.x + cursor.origin.x;
+                        layout
+                            .doubled_rows
+                            .paint_text(cursor.row, anchor, row, window, |window| {
+                                cursor.paint(origin, window, cx)
+                            });
                     }
 
                     if let Some(mut element) = block_below_cursor_element {
@@ -2167,7 +2219,18 @@ fn paint_batched_text_runs(
     }
     window.paint_layer(bounds, |window| {
         for batch in &layout.batched_text_runs {
-            batch.paint(base_font, origin, &layout.dimensions, window, cx);
+            let row = batch.start_point.line;
+            let row_bounds = row_bounds(
+                origin,
+                row,
+                layout.dimensions.line_height,
+                bounds.size.width,
+            );
+            layout
+                .doubled_rows
+                .paint_text(row, origin.x, row_bounds, window, |window| {
+                    batch.paint(base_font, origin, &layout.dimensions, window, cx)
+                });
         }
     });
 }
@@ -2429,9 +2492,11 @@ fn to_highlighted_range_lines(
             line_end = unclamped_end_column + 1; // +1 for inclusive
         }
 
+        let cell_width =
+            layout.dimensions.cell_width * layout.doubled_rows.column_scale(line as i32);
         highlighted_range_lines.push(HighlightedRangeLine {
-            start_x: origin.x + line_start as f32 * layout.dimensions.cell_width,
-            end_x: origin.x + line_end as f32 * layout.dimensions.cell_width,
+            start_x: origin.x + line_start as f32 * cell_width,
+            end_x: origin.x + line_end as f32 * cell_width,
         });
     }
 

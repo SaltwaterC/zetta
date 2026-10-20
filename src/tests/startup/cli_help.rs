@@ -222,7 +222,7 @@ fn help_text_uses_title_case_and_lists_built_in_features() {
     #[cfg(feature = "notifications")]
     {
         assert!(help.contains("Desktop notifications"));
-        assert!(help.contains("zetta notify [OPTIONS] SUMMARY [BODY]"));
+        assert!(help.contains("zetta notify [OPTIONS] [--] SUMMARY [BODY]"));
         assert!(help.contains("Show a desktop notification"));
     }
     #[cfg(not(feature = "notifications"))]

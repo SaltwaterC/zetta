@@ -7,12 +7,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::grid::{self, GridCell};
 use crate::index::Column;
-use crate::vte::ansi::{Color, Hyperlink as VteHyperlink, NamedColor};
+use crate::vte::ansi::{Attr, Color, Hyperlink as VteHyperlink, NamedColor};
 
 bitflags! {
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
     #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-    pub struct Flags: u16 {
+    #[repr(transparent)]
+    pub struct Flags: u32 {
         const INVERSE                   = 0b0000_0000_0000_0001;
         const BOLD                      = 0b0000_0000_0000_0010;
         const ITALIC                    = 0b0000_0000_0000_0100;
@@ -30,6 +31,12 @@ bitflags! {
         const UNDERCURL                 = 0b0001_0000_0000_0000;
         const DOTTED_UNDERLINE          = 0b0010_0000_0000_0000;
         const DASHED_UNDERLINE          = 0b0100_0000_0000_0000;
+        const BLINK                     = 1 << 15;
+        const OVERLINE                  = 1 << 16;
+        const PROTECTED                 = 1 << 17;
+        const GUARDED                   = 1 << 18;
+        /// Explicitly written, including spaces; distinct from erased cells.
+        const DRAWN                     = 1 << 19;
         const ALL_UNDERLINES            = Self::UNDERLINE.bits() | Self::DOUBLE_UNDERLINE.bits()
                                         | Self::UNDERCURL.bits() | Self::DOTTED_UNDERLINE.bits()
                                         | Self::DASHED_UNDERLINE.bits();
@@ -109,9 +116,9 @@ impl<T: Copy> ResetDiscriminant<T> for T {
     }
 }
 
-impl ResetDiscriminant<Color> for Cell {
-    fn discriminant(&self) -> Color {
-        self.bg
+impl ResetDiscriminant<(Color, Color)> for Cell {
+    fn discriminant(&self) -> (Color, Color) {
+        (self.fg, self.bg)
     }
 }
 
@@ -129,13 +136,18 @@ pub struct CellExtra {
 }
 
 /// Content and attributes of a single cell in the terminal grid.
+///
+/// Zetta patch: `c` and `flags` are laid out side by side, within one aligned eight bytes, so
+/// writing a character and its `DRAWN` flag, or resetting both, is one store: plain output is
+/// bound by stores to cells.
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[repr(C)]
 pub struct Cell {
     pub c: char,
+    pub flags: Flags,
     pub fg: Color,
     pub bg: Color,
-    pub flags: Flags,
     pub extra: Option<Arc<CellExtra>>,
 }
 
@@ -169,7 +181,7 @@ impl Cell {
     /// Remove all wide char data from a cell.
     #[inline(never)]
     pub fn clear_wide(&mut self) {
-        self.flags.remove(Flags::WIDE_CHAR);
+        self.flags.remove(Flags::WIDE_CHAR | Flags::WIDE_CHAR_SPACER | Flags::DRAWN);
         if let Some(extra) = self.extra.as_mut() {
             Arc::make_mut(extra).zerowidth = Vec::new();
         }
@@ -239,6 +251,13 @@ impl GridCell for Cell {
     }
 
     #[inline]
+    fn clear_truncated_wide(&mut self) {
+        if self.flags.contains(Flags::WIDE_CHAR) {
+            self.clear_wide();
+        }
+    }
+
+    #[inline]
     fn flags(&self) -> &Flags {
         &self.flags
     }
@@ -250,14 +269,14 @@ impl GridCell for Cell {
 
     #[inline]
     fn reset(&mut self, template: &Self) {
-        *self = Cell { bg: template.bg, ..Cell::default() };
+        *self = template.erased();
     }
 
     /// Every scrolled-in line resets a whole row, and storing a cell field by field made that a
     /// fifth of the time spent on plain text. Copying one blank cell whole is two wide stores.
     #[inline]
     fn reset_all(cells: &mut [Self], template: &Self) {
-        let blank = Cell { bg: template.bg, ..Cell::default() };
+        let blank = template.erased();
         for cell in cells {
             cell.extra = None;
             // SAFETY: `extra` is the only field that owns anything, and it was just dropped.
@@ -265,10 +284,15 @@ impl GridCell for Cell {
         }
     }
 
+    /// A row that only ever had characters written since its last full reset holds erased cells
+    /// but for their characters and `DRAWN`, and an erased cell has no flags, so the flags are
+    /// set rather than read.
     #[inline]
     fn reset_characters(cells: &mut [Self], _template: &Self) {
         for cell in cells {
+            debug_assert!(cell.flags.difference(Flags::DRAWN).is_empty());
             cell.c = ' ';
+            cell.flags = Flags::empty();
         }
     }
 
@@ -336,6 +360,86 @@ impl LineLength for grid::Row<Cell> {
     }
 }
 
+// `Cell::write_drawn_ascii` writes `c` and `flags` as one eight-byte value.
+const _: () = assert!(
+    std::mem::offset_of!(Cell, c) == 0
+        && std::mem::offset_of!(Cell, flags) == 4
+        && std::mem::size_of::<Flags>() == 4
+        && std::mem::align_of::<Cell>() >= 8
+);
+
+impl Cell {
+    /// Writes `c` and sets the flags to exactly `DRAWN`, as plain output does to a blank cell.
+    /// Two stores per cell would bind that loop to its stores, so they are made one.
+    #[inline(always)]
+    pub(crate) fn write_drawn_ascii(&mut self, c: char) {
+        let mut bytes = [0; 8];
+        bytes[..4].copy_from_slice(&u32::from(c).to_ne_bytes());
+        bytes[4..].copy_from_slice(&Flags::DRAWN.bits().to_ne_bytes());
+        // SAFETY: the assertion above places `c` and the `repr(transparent)` `u32` of `flags` in
+        // the cell's first eight bytes, which are aligned for a `u64`. A `char` read back from
+        // them is `c`, and any `u32` is valid flags.
+        unsafe { std::ptr::from_mut(self).cast::<u64>().write(u64::from_ne_bytes(bytes)) };
+    }
+
+    /// Apply SGR without changing layout metadata or the rest of a grapheme.
+    pub(crate) fn apply_attribute(&mut self, attr: Attr) {
+        match attr {
+            Attr::Foreground(color) => self.fg = color,
+            Attr::Background(color) => self.bg = color,
+            Attr::UnderlineColor(color) => self.set_underline_color(color),
+            Attr::Reset => {
+                self.fg = Color::Named(NamedColor::Foreground);
+                self.bg = Color::Named(NamedColor::Background);
+                self.flags &= Flags::PROTECTED | Flags::GUARDED;
+                self.set_underline_color(None);
+            },
+            Attr::Reverse => self.flags.insert(Flags::INVERSE),
+            Attr::CancelReverse => self.flags.remove(Flags::INVERSE),
+            Attr::Bold => self.flags.insert(Flags::BOLD),
+            Attr::CancelBold => self.flags.remove(Flags::BOLD),
+            Attr::Dim => self.flags.insert(Flags::DIM),
+            Attr::CancelBoldDim => self.flags.remove(Flags::BOLD | Flags::DIM),
+            Attr::Italic => self.flags.insert(Flags::ITALIC),
+            Attr::CancelItalic => self.flags.remove(Flags::ITALIC),
+            Attr::Underline => {
+                self.flags.remove(Flags::ALL_UNDERLINES);
+                self.flags.insert(Flags::UNDERLINE);
+            },
+            Attr::DoubleUnderline => {
+                self.flags.remove(Flags::ALL_UNDERLINES);
+                self.flags.insert(Flags::DOUBLE_UNDERLINE);
+            },
+            Attr::Undercurl => {
+                self.flags.remove(Flags::ALL_UNDERLINES);
+                self.flags.insert(Flags::UNDERCURL);
+            },
+            Attr::DottedUnderline => {
+                self.flags.remove(Flags::ALL_UNDERLINES);
+                self.flags.insert(Flags::DOTTED_UNDERLINE);
+            },
+            Attr::DashedUnderline => {
+                self.flags.remove(Flags::ALL_UNDERLINES);
+                self.flags.insert(Flags::DASHED_UNDERLINE);
+            },
+            Attr::CancelUnderline => self.flags.remove(Flags::ALL_UNDERLINES),
+            Attr::Hidden => self.flags.insert(Flags::HIDDEN),
+            Attr::CancelHidden => self.flags.remove(Flags::HIDDEN),
+            Attr::BlinkSlow | Attr::BlinkFast => self.flags.insert(Flags::BLINK),
+            Attr::CancelBlink => self.flags.remove(Flags::BLINK),
+            Attr::Overline => self.flags.insert(Flags::OVERLINE),
+            Attr::CancelOverline => self.flags.remove(Flags::OVERLINE),
+            Attr::Strike => self.flags.insert(Flags::STRIKEOUT),
+            Attr::CancelStrike => self.flags.remove(Flags::STRIKEOUT),
+        }
+    }
+
+    /// A freshly erased cell retains the current foreground and background.
+    pub(crate) fn erased(&self) -> Self {
+        Self { fg: self.fg, bg: self.bg, ..Self::default() }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -391,7 +495,7 @@ mod tests {
         Cell::reset_all(&mut together, &template);
 
         assert_eq!(together, each);
-        assert!(together.iter().all(|cell| *cell == Cell { bg: template.bg, ..Cell::default() }));
+        assert!(together.iter().all(|cell| *cell == template.erased()));
         // Both resets dropped their reference to the shared extra.
         assert_eq!(Arc::strong_count(&shared), 1);
     }

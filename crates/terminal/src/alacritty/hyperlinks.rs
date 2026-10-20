@@ -1734,7 +1734,7 @@ mod tests {
         fn width(c: char) -> usize {
             match c {
                 // Fullwidth unicode characters used in tests
-                '例' | '🏃' | '🦀' | '🔥' => 2,
+                '例' | '🏃' | '🦀' | '🔥' | '🚣' => 2,
                 '\t' => 8, // it's really 0-8, use the max always
                 _ => 1,
             }

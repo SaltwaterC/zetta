@@ -5,6 +5,55 @@ That revision remains the current upstream `master` as of 2026-08-29.
 
 Retain these Zetta changes when synchronizing:
 
+- imported terminal-conformance regressions: one-column wide-character input
+  never writes a continuation outside the grid, and one-column reflow discards
+  unrepresentable wide cells instead of endlessly wrapping them. Non-reflow
+  truncation also clears a cut-off wide leader. `term/char_edit.rs` repairs only
+  the endpoints of character edits, including insert-mode text and partial
+  line/display erasure, so wide-cell pairs remain complete without a row scan.
+  Delete counts clamp to the space after the cursor, pending wrap is cancelled
+  by character edits, and display erasure above row two includes row one.
+  Rendering and selection defensively clamp a stale spacer at column zero.
+  Regressions live in `src/tests/term/char_edit.rs`. `term/grapheme.rs` keeps
+  a grapheme cluster in one cell across parser batches and resizes it when a
+  later scalar (a variation selector, a ZWJ sequence) changes its width. A
+  cluster widened at the right edge wraps exactly as wide input does, leaving
+  a `LEADING_WIDE_CHAR_SPACER`, so the row still reads as one continuous line.
+  Regressions live in `src/tests/term/grapheme.rs`. Segmenting every printed
+  scalar cost binary output two fifths of its parse time, so `build.rs`
+  derives each scalar's join classes from the linked `unicode-segmentation`
+  into a table `grapheme.rs` reads, and only pairs the classes cannot settle
+  are segmented; a mark after a lone scalar is settled by them too. Below
+  U+0300 nothing but © and ® joins, so Latin text skips the table. One
+  behaviour follows: a Prepend (GB9b) joins the scalar printed right after
+  it, not one printed beside it once the cursor has moved.
+  `join_classes_agree_with_the_segmenter` and
+  `may_join_is_false_only_of_pairs_that_split` check the table and the
+  shortcuts against the segmenter for every scalar.
+
+- DEC line sizes (`ESC # 3` to `ESC # 6`): `grid::LineSize` is per-row
+  metadata on `Row`, so it scrolls with its row and survives erasing within
+  it. `Row::reset` and DECALN return a row to single size, as does an erase in
+  display that clears the whole row. A doubled row holds only its first
+  `columns / 2` cells, so input and the right margin clamp to that
+  (`term/line_size.rs`, `Term::input_right_edge`). A doubled row is never
+  archived compactly, since the archive has no field for it. Tests live in
+  `src/tests/term/line_size.rs`. `Term::doubled_rows` says whether a row of
+  the screen may be doubled, and printing looks up the cursor row's size only
+  then. It is rechecked after a scroll while set, since a doubled row scrolls
+  away, and after anything that replaces the screen's rows: a resize, a
+  screen swap, a published reflow. Left set, binary output that doubled a row
+  by chance kept that lookup on every printed run
+  (`doubled_rows_are_tracked_while_on_screen`).
+
+- OSC 99 desktop notifications (`term/notification.rs`, a Zetta-authored module
+  with tests in `src/tests/term/notification.rs`). It assembles kitty's chunked,
+  optionally base64 notifications and bounds their size and number, answers
+  `p=?` queries, and hands a finished one to the frontend as
+  `Event::DesktopNotification`. It is enabled by `Config::desktop_notifications`,
+  which defaults to off, so a build that cannot show a notification ignores the
+  protocol rather than advertising it.
+
 - the inline Unix PTY tests continue reading output while waiting for a zsh
   foreground job or child exit. macOS can wait for terminal output to drain
   at either point, so polling only the process group or exit status deadlocks
@@ -225,6 +274,15 @@ Retain these Zetta changes when synchronizing:
   and serialization omits it. Alternating optimized Windows parser runs
   improved from 493â€“495 to 739â€“747 MiB/s. Row tests cover all mutable accessors,
   replacement characters, changed backgrounds and imported row suffixes.
+- `Cell` is `repr(C)` with `c` and `flags` (a `u32`, for `DRAWN` and the
+  attributes conformance added) side by side, so `Cell::write_drawn_ascii`
+  writes a plain character and its `DRAWN` flag in one eight-byte store and
+  `reset_characters` clears both in one: plain output is bound by those
+  stores. Writing `c` alone dropped `DRAWN`, and two stores cost a third of
+  plain-text throughput. A run of 32 bytes or more without a replacement
+  character is written unmapped (`write_long_ascii`), since mapping U+FFFD
+  inside the loop cost a screen-wide line a tenth of its throughput;
+  `input_ascii_matches_input_per_character` runs at 80 columns to reach it.
 - `Storage::shrink_lines` hands every row it removes to the recycled-row pool,
   past `RECYCLED_ROWS_LIMIT` (`RecycledRows::keep_all`): they are rows the
   storage held a moment before, so a pane never holds more rows than it did. A

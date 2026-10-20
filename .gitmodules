@@ -4,3 +4,6 @@
 [submodule "busy-v"]
 	path = busy-v
 	url = https://github.com/SaltwaterC/busy-v.git
+[submodule "shitty"]
+	path = shitty
+	url = https://github.com/SaltwaterC/shitty

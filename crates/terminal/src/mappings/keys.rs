@@ -56,6 +56,31 @@ pub(crate) fn to_esc_str(
 
     let modifiers = TerminalModifiers::new(keystroke);
 
+    if matches!(keystroke.key.as_ref(), "backspace" | "back") {
+        // DECBKM chooses BS or DEL for the backarrow key; Ctrl sends the other.
+        let erase = match modifiers {
+            TerminalModifiers::None | TerminalModifiers::Shift => Some(backarrow(mode, false)),
+            TerminalModifiers::Ctrl => Some(backarrow(mode, true)),
+            TerminalModifiers::Alt => return Some(with_meta(backarrow(mode, false), mode)),
+            _ => None,
+        };
+        if let Some(erase) = erase {
+            return Some(Cow::Borrowed(erase));
+        }
+    }
+    if modifiers == TerminalModifiers::Alt {
+        // `space` is GPUI's symbolic key name. It must be encoded as the
+        // space character, not the letters in that name, when sent as Meta.
+        let text = match keystroke.key.as_ref() {
+            "enter" => Some("\x0d"),
+            "space" if !cfg!(target_os = "macos") || option_as_meta => Some(" "),
+            _ => None,
+        };
+        if let Some(text) = text {
+            return Some(with_meta(text, mode));
+        }
+    }
+
     // Manual Bindings including modifiers
     let manual_esc_str: Option<&'static str> = match (keystroke.key.as_ref(), &modifiers) {
         //Basic special keys
@@ -63,18 +88,8 @@ pub(crate) fn to_esc_str(
         ("escape", TerminalModifiers::None) => Some("\x1b"),
         ("enter", TerminalModifiers::None) => Some("\x0d"),
         ("enter", TerminalModifiers::Shift) => Some("\x0a"),
-        ("enter", TerminalModifiers::Alt) => Some("\x1b\x0d"),
-        ("backspace", TerminalModifiers::None) => Some("\x7f"),
         //Interesting escape codes
         ("tab", TerminalModifiers::Shift) => Some("\x1b[Z"),
-        ("backspace", TerminalModifiers::Ctrl) => Some("\x08"),
-        ("backspace", TerminalModifiers::Alt) => Some("\x1b\x7f"),
-        ("backspace", TerminalModifiers::Shift) => Some("\x7f"),
-        // `space` is GPUI's symbolic key name. It must be encoded as the
-        // space character, not the letters in that name, when sent as Meta.
-        ("space", TerminalModifiers::Alt) if !cfg!(target_os = "macos") || option_as_meta => {
-            Some("\x1b ")
-        }
         ("space", TerminalModifiers::Ctrl) => Some("\x00"),
         ("home", TerminalModifiers::None) if mode.contains(Modes::APP_CURSOR) => Some("\x1bOH"),
         ("home", TerminalModifiers::None) if !mode.contains(Modes::APP_CURSOR) => Some("\x1b[H"),
@@ -88,7 +103,6 @@ pub(crate) fn to_esc_str(
         ("right", TerminalModifiers::None) if !mode.contains(Modes::APP_CURSOR) => Some("\x1b[C"),
         ("left", TerminalModifiers::None) if mode.contains(Modes::APP_CURSOR) => Some("\x1bOD"),
         ("left", TerminalModifiers::None) if !mode.contains(Modes::APP_CURSOR) => Some("\x1b[D"),
-        ("back", TerminalModifiers::None) => Some("\x7f"),
         ("insert", TerminalModifiers::None) => Some("\x1b[2~"),
         ("delete", TerminalModifiers::None) => Some("\x1b[3~"),
         ("pageup", TerminalModifiers::None) => Some("\x1b[5~"),
@@ -230,19 +244,46 @@ pub(crate) fn to_esc_str(
     {
         let key = keystroke.key.chars().next().unwrap();
 
-        if modifiers == TerminalModifiers::Alt {
-            return Some(Cow::Owned(format!("\x1b{key}")));
+        let text = if modifiers == TerminalModifiers::Alt {
+            key
         } else if keystroke.modifiers.shift {
-            return Some(Cow::Owned(format!("\x1b{}", key.to_ascii_uppercase())));
+            key.to_ascii_uppercase()
         } else if keystroke.modifiers.control && key.is_ascii_lowercase() {
-            return Some(Cow::Owned(format!(
-                "\x1b{}",
-                (key as u8 - b'a' + 1) as char
-            )));
-        }
+            (key as u8 - b'a' + 1) as char
+        } else {
+            return None;
+        };
+        return Some(with_meta(text.encode_utf8(&mut [0; 4]), mode));
     }
 
     None
+}
+
+/// The backarrow key's code: DEL, or BS under DECBKM. `inverted` (Ctrl) sends
+/// the other one.
+fn backarrow(mode: Modes, inverted: bool) -> &'static str {
+    if mode.contains(Modes::BACKARROW_SENDS_BS) != inverted {
+        "\x08"
+    } else {
+        "\x7f"
+    }
+}
+
+/// Encodes a key pressed with Alt treated as Meta. Meta prefixes ESC unless an
+/// application reset xterm's metaSendsEscape (1036/1039); then eightBitInput
+/// (1034) sets the eighth bit of a single ASCII byte, sent as that Latin-1
+/// character in UTF-8, and otherwise the key is sent unchanged.
+fn with_meta(text: &str, mode: Modes) -> Cow<'static, str> {
+    if !mode.contains(Modes::ALT_ESC_DISABLED) {
+        return Cow::Owned(format!("\x1b{text}"));
+    }
+    if mode.contains(Modes::META_SETS_EIGHTH_BIT)
+        && let [byte] = text.as_bytes()
+        && byte.is_ascii()
+    {
+        return Cow::Owned(char::from(byte | 0x80).to_string());
+    }
+    Cow::Owned(text.to_owned())
 }
 
 #[cfg(windows)]
@@ -577,6 +618,36 @@ mod test {
                 format!("\x1b{}", esc_code)
             );
         }
+    }
+
+    #[test]
+    fn backarrow_mode_chooses_between_delete_and_backspace() {
+        let key =
+            |keystroke: &str, mode| to_esc_str(&Keystroke::parse(keystroke).unwrap(), mode, true);
+        assert_eq!(key("backspace", Modes::NONE), Some("\x7f".into()));
+        assert_eq!(key("ctrl-backspace", Modes::NONE), Some("\x08".into()));
+        assert_eq!(key("alt-backspace", Modes::NONE), Some("\x1b\x7f".into()));
+        let mode = Modes::BACKARROW_SENDS_BS;
+        assert_eq!(key("backspace", mode), Some("\x08".into()));
+        assert_eq!(key("shift-backspace", mode), Some("\x08".into()));
+        assert_eq!(key("ctrl-backspace", mode), Some("\x7f".into()));
+    }
+
+    #[test]
+    fn meta_modes_choose_between_escape_eighth_bit_and_nothing() {
+        let key =
+            |keystroke: &str, mode| to_esc_str(&Keystroke::parse(keystroke).unwrap(), mode, true);
+        // 1036 reset, 1034 set: the meta key sets the eighth bit of an ASCII byte.
+        let eighth_bit = Modes::ALT_ESC_DISABLED | Modes::META_SETS_EIGHTH_BIT;
+        assert_eq!(key("alt-a", eighth_bit), Some("\u{e1}".into()));
+        assert_eq!(key("alt-enter", eighth_bit), Some("\u{8d}".into()));
+        // Neither: the key arrives as if alt were not held.
+        assert_eq!(key("alt-a", Modes::ALT_ESC_DISABLED), Some("a".into()));
+        // 1036 set wins over 1034.
+        assert_eq!(
+            key("alt-a", Modes::META_SETS_EIGHTH_BIT),
+            Some("\x1ba".into())
+        );
     }
 
     #[test]

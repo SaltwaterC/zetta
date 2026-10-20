@@ -73,8 +73,8 @@ use futures::{
 
 use itertools::Itertools as _;
 use mappings::mouse::{
-    alt_scroll, grid_point, grid_point_and_side, mouse_button_report, mouse_moved_report,
-    scroll_report,
+    MousePosition, alt_scroll, grid_point, grid_point_and_side, mouse_button_report,
+    mouse_moved_report, scroll_report,
 };
 
 use async_channel::{Receiver, Sender};
@@ -141,18 +141,23 @@ use crate::alacritty::{
     AlacrittyCell, AlacrittyGridIterator, AlacrittyHyperlink, AlacrittyPty, AlacrittyTerm,
     AlacrittyTermConfig, AlacrittyTermLock, HyperlinkMatch, PtyIo, PtySender, RegexSearches,
     ReplayBarrier, SearchMatcher, WakeupGate, ZedListener, append_text_to_term, apply_config,
-    clear_current_line, clear_saved_screen, content_text, display_offset, display_only_term_config,
-    find_from_terminal_point, full_content_range, last_non_empty_lines, make_content, new_term,
-    open_pty, open_pty_with_terminal, pty_options, pty_term_config, resize, screen_lines,
-    scroll_display, scroll_to_point, search_grid, set_default_cursor_style,
-    set_selection as set_term_selection, shrink_to_used, snapshot_content_text, spawn_event_loop,
-    toggle_vi_mode as toggle_term_vi_mode, total_lines, update_selection as update_term_selection,
-    update_selection_to_vi_cursor, update_vi_cursor_for_scroll, vi_goto_point, vi_motion,
+    clear_current_line, clear_saved_screen, content_text, desktop_notifications_enabled,
+    display_offset, display_only_term_config, find_from_terminal_point, full_content_range,
+    last_non_empty_lines, make_content, new_term, open_pty, open_pty_with_terminal, pty_options,
+    pty_term_config, reset_terminal, resize, screen_lines, scroll_display, scroll_to_point,
+    search_grid, set_default_cursor_style, set_selection as set_term_selection, shrink_to_used,
+    snapshot_content_text, spawn_event_loop, toggle_vi_mode as toggle_term_vi_mode, total_lines,
+    update_selection as update_term_selection, update_selection_to_vi_cursor,
+    update_vi_cursor_for_scroll, vi_goto_point, vi_motion,
 };
 use crate::mappings::colors::to_vte_rgb;
 use crate::mappings::keys::to_esc_str;
 
-pub use crate::alacritty::SearchRanges;
+pub use crate::alacritty::{SearchRanges, enable_desktop_notifications};
+pub use alacritty_terminal::grid::LineSize;
+pub use alacritty_terminal::term::notification::{
+    DesktopNotification, NotificationExpiry, NotificationOccasion,
+};
 /// The current-directory-free program search ConPTY launches with, for
 /// callers that start a process of their own.
 #[cfg(windows)]
@@ -494,6 +499,7 @@ pub struct Cell {
 }
 
 pub struct RenderableCells<'a> {
+    reverse: bool,
     cells: AlacrittyGridIterator<'a>,
 }
 
@@ -535,6 +541,18 @@ impl Modes {
     pub const MOUSE_MOTION: Self = Self(1 << 15);
     pub const VI: Self = Self(1 << 16);
     pub const WIN32_INPUT: Self = Self(1 << 17);
+    /// KAM: keyboard input is dropped until the application unlocks it.
+    pub const KEYBOARD_LOCKED: Self = Self(1 << 18);
+    /// SRM reset: keyboard input is echoed into the grid as well as sent.
+    pub const LOCAL_ECHO: Self = Self(1 << 19);
+    /// DECBKM: the backarrow key sends BS rather than DEL.
+    pub const BACKARROW_SENDS_BS: Self = Self(1 << 20);
+    /// xterm 1036/1039 reset: Alt (Meta) does not prefix ESC.
+    pub const ALT_ESC_DISABLED: Self = Self(1 << 21);
+    /// xterm 1034: without ESC prefixing, Alt (Meta) sets the eighth bit.
+    pub const META_SETS_EIGHTH_BIT: Self = Self(1 << 22);
+    /// xterm 1016: SGR mouse reports carry pixel positions.
+    pub const SGR_PIXEL_MOUSE: Self = Self(1 << 23);
     pub const MOUSE_MODE: Self =
         Self(Self::MOUSE_REPORT_CLICK.0 | Self::MOUSE_DRAG.0 | Self::MOUSE_MOTION.0);
 
@@ -652,6 +670,9 @@ impl SelectionRange {
 #[derive(Clone)]
 pub struct Content {
     pub cells: Vec<IndexedCell>,
+    /// Zetta patch: the rows this snapshot shows that are not single width, by
+    /// the same line as `cells`, in order. Most screens have none.
+    pub line_sizes: Vec<(i32, LineSize)>,
     pub mode: Modes,
     pub total_lines: usize,
     pub display_offset: usize,
@@ -689,6 +710,7 @@ impl Default for Content {
     fn default() -> Self {
         Content {
             cells: Default::default(),
+            line_sizes: Default::default(),
             mode: Default::default(),
             total_lines: Default::default(),
             display_offset: Default::default(),
@@ -776,6 +798,8 @@ actions!(
     [
         /// Clears the terminal screen.
         Clear,
+        /// Fully resets the terminal (RIS): screen, modes and a locked keyboard.
+        Reset,
         /// Copies selected text to the clipboard.
         Copy,
         /// Pastes from the clipboard.
@@ -852,6 +876,10 @@ pub enum Event {
     BreadcrumbsChanged,
     CloseTerminal,
     Bell,
+    /// The application asked for a desktop notification (OSC 99). Only a
+    /// terminal configured after [`enable_desktop_notifications`] reports one;
+    /// whether and where to show it is the embedder's decision.
+    DesktopNotification(DesktopNotification),
     Wakeup,
     /// Reports a failure to prepare or transfer an image requested by Paste.
     /// No fallback input is sent when this event is emitted.
@@ -1365,6 +1393,7 @@ enum InternalEvent {
     /// pixels as the constructor's placeholder bounds.
     InitializeSize,
     Clear,
+    Reset,
     // FocusNextMatch,
     Scroll(Scroll),
     ScrollToPoint(Point),
@@ -1422,12 +1451,14 @@ pub(crate) enum TerminalBackendEvent {
     ClipboardFrame(zclip::protocol::Frame),
     ColorRequest(usize, ColorFormatter),
     PtyWrite(String),
+    PtyWriteRaw(Vec<u8>),
     TextAreaSizeRequest(TextAreaSizeFormatter),
     ResizeRequest { rows: usize, columns: usize },
     CursorBlinkingChange,
     Wakeup,
     PasteError(String),
     Bell,
+    DesktopNotification(DesktopNotification),
     Exit,
     ChildExit(ExitStatus),
     ChildExitStatusUnavailable,
@@ -1838,6 +1869,7 @@ impl fmt::Debug for TerminalBackendEvent {
             Self::ClipboardFrame(_) => f.write_str("ClipboardFrame"),
             Self::ColorRequest(index, _) => write!(f, "ColorRequest({index})"),
             Self::PtyWrite(output) => write!(f, "PtyWrite({output})"),
+            Self::PtyWriteRaw(bytes) => write!(f, "PtyWriteRaw({bytes:?})"),
             Self::TextAreaSizeRequest(_) => f.write_str("TextAreaSizeRequest"),
             Self::ResizeRequest { rows, columns } => {
                 write!(f, "ResizeRequest({columns}x{rows})")
@@ -1846,6 +1878,9 @@ impl fmt::Debug for TerminalBackendEvent {
             Self::Wakeup => f.write_str("Wakeup"),
             Self::PasteError(error) => write!(f, "PasteError({error})"),
             Self::Bell => f.write_str("Bell"),
+            Self::DesktopNotification(notification) => {
+                write!(f, "DesktopNotification({notification:?})")
+            }
             Self::Exit => f.write_str("Exit"),
             Self::ChildExit(status) => write!(f, "ChildExit({status})"),
             Self::ChildExitStatusUnavailable => f.write_str("ChildExitStatusUnavailable"),
@@ -2532,6 +2567,7 @@ impl TerminalBuilder {
             wakeup_gate,
             term_config: config,
             output_processor: Processor::<StdSyncHandler>::new(),
+            echo_processor: Processor::<StdSyncHandler>::new(),
             output_clipboard_scanner: zclip::protocol::Scanner::default(),
             remote_clipboard: clipboard_channel::RemoteClipboard::default(),
             title_override: None,
@@ -2892,6 +2928,8 @@ impl TerminalBuilder {
         // Codex can copy their own selections through OSC 52, as in a local
         // PTY. Ordinary display-only logs retain their disabled clipboard.
         self.terminal.term_config.osc52 = alacritty_terminal::term::Osc52::OnlyCopy;
+        // Its notifications are its program's, as they would be from a local pty.
+        self.terminal.term_config.desktop_notifications = desktop_notifications_enabled();
         apply_config(&self.terminal.term, &self.terminal.term_config);
         self
     }
@@ -3433,6 +3471,7 @@ impl TerminalBuilder {
                 wakeup_gate,
                 term_config: config,
                 output_processor,
+                echo_processor: Processor::<StdSyncHandler>::new(),
                 output_clipboard_scanner: zclip::protocol::Scanner::default(),
                 remote_clipboard: clipboard_channel::RemoteClipboard::default(),
                 title_override: terminal_title_override,
@@ -3757,6 +3796,9 @@ pub struct Terminal {
     wakeup_gate: WakeupGate,
     term_config: AlacrittyTermConfig,
     output_processor: Processor<StdSyncHandler>,
+    /// Parses keyboard input echoed into the grid while SRM is reset. Separate
+    /// from `output_processor` so an echo never lands inside an output sequence.
+    echo_processor: Processor<StdSyncHandler>,
     output_clipboard_scanner: zclip::protocol::Scanner,
     remote_clipboard: clipboard_channel::RemoteClipboard,
     events: VecDeque<InternalEvent>,
@@ -4221,6 +4263,7 @@ impl Terminal {
                 self.handle_remote_clipboard_frame(frame, cx);
             }
             TerminalBackendEvent::PtyWrite(out) => self.write_to_pty(out.into_bytes()),
+            TerminalBackendEvent::PtyWriteRaw(bytes) => self.write_to_pty(bytes),
             TerminalBackendEvent::TextAreaSizeRequest(format) => self.write_to_pty(
                 format(self.last_content.terminal_bounds, self.display_scale_factor).into_bytes(),
             ),
@@ -4235,6 +4278,9 @@ impl Terminal {
             TerminalBackendEvent::Bell => {
                 self.wakeup_gate.end_bell();
                 cx.emit(Event::Bell);
+            }
+            TerminalBackendEvent::DesktopNotification(notification) => {
+                cx.emit(Event::DesktopNotification(notification));
             }
             TerminalBackendEvent::Exit => {
                 self.register_terminal_exit(None, TerminalExitSource::StatusUnavailable, cx)
@@ -4364,6 +4410,13 @@ impl Terminal {
                 self.reset_cwd_history();
                 cx.emit(Event::Wakeup);
             }
+            InternalEvent::Reset => {
+                trace!("Resetting");
+                reset_terminal(term);
+                self.echo_processor = Processor::<StdSyncHandler>::new();
+                self.reset_cwd_history();
+                cx.emit(Event::Wakeup);
+            }
             InternalEvent::Scroll(scroll) => {
                 self.reflow_search_scrolled();
                 trace!("Scrolling: scroll={scroll:?}");
@@ -4395,6 +4448,7 @@ impl Terminal {
                     *position,
                     self.last_content.terminal_bounds,
                     display_offset(term),
+                    &self.last_content.line_sizes,
                 );
 
                 if update_term_selection(term, point, side) {
@@ -4433,6 +4487,7 @@ impl Terminal {
                     *position,
                     self.last_content.terminal_bounds,
                     display_offset(term),
+                    &self.last_content.line_sizes,
                 );
                 let path_style = self.hyperlink_path_style();
 
@@ -4746,6 +4801,12 @@ impl Terminal {
         self.events.push_back(InternalEvent::Clear)
     }
 
+    /// A full reset (RIS) requested by the user, which also recovers a pane an
+    /// application left unusable, such as with the keyboard locked by KAM.
+    pub fn reset(&mut self) {
+        self.events.push_back(InternalEvent::Reset)
+    }
+
     pub fn shrink_to_used(&mut self) {
         shrink_to_used(&mut self.term.lock());
     }
@@ -4976,7 +5037,29 @@ impl Terminal {
 
     pub fn input(&mut self, input: impl Into<Cow<'static, [u8]>>) {
         let input: Cow<'static, [u8]> = input.into();
+        self.echo_locally(&input);
         self.queue_input(InputCommand::Bytes(input.into_owned()));
+    }
+
+    /// Whether KAM has locked the keyboard. Keys and typed text are dropped
+    /// until the application resets KAM or the terminal is reset.
+    pub fn keyboard_locked(&self) -> bool {
+        self.last_content.mode.contains(Modes::KEYBOARD_LOCKED)
+    }
+
+    /// With SRM reset (local echo), what the user sends is also shown, as a
+    /// VT100 does: it is parsed into the grid like output, so control keys act.
+    fn echo_locally(&mut self, input: &[u8]) {
+        if !self.last_content.mode.contains(Modes::LOCAL_ECHO) {
+            return;
+        }
+        let mut term = self.term.lock();
+        self.echo_processor.advance(&mut *term, input);
+        drop(term);
+        self.content_dirty = true;
+        self.events_tx
+            .unbounded_send(PtyEvent::Event(TerminalBackendEvent::Wakeup))
+            .ok();
     }
 
     fn queue_input(&mut self, input: InputCommand) {
@@ -5538,6 +5621,11 @@ impl Terminal {
             return true;
         }
 
+        // A locked keyboard (KAM) consumes keys without sending them.
+        if self.keyboard_locked() {
+            return true;
+        }
+
         // Keep default terminal behavior
         let esc = to_esc_str(keystroke, self.last_content.mode, option_as_meta);
         if let Some(esc) = esc {
@@ -5675,7 +5763,12 @@ impl Terminal {
     pub fn with_renderable_cells<R>(&self, f: impl for<'a> FnOnce(RenderableCells<'a>) -> R) -> R {
         let term = self.term.lock_unfair();
         let content = term.renderable_content();
-        f(RenderableCells::new(content.display_iter))
+        f(RenderableCells::new(
+            content.display_iter,
+            content
+                .mode
+                .contains(alacritty_terminal::term::TermMode::REVERSE_VIDEO),
+        ))
     }
 
     pub fn get_content(&self) -> String {
@@ -5739,6 +5832,17 @@ impl Terminal {
     /// re-run grid layout and text shaping for the whole viewport on every
     /// sample, so each branch reports whether it actually changed something the
     /// next frame would draw differently.
+    /// A mouse report position; `position` is relative to the text area.
+    fn mouse_position(&self, position: gpui::Point<Pixels>) -> MousePosition {
+        MousePosition::new(
+            position,
+            self.last_content.terminal_bounds,
+            self.last_content.display_offset,
+            &self.last_content.line_sizes,
+            self.display_scale_factor,
+        )
+    }
+
     pub fn mouse_move(&mut self, e: &MouseMoveEvent, cx: &mut Context<Self>) {
         let position = e.position - self.last_content.terminal_bounds.bounds.origin;
         let needs_redraw = if self.mouse_mode(e.modifiers.shift) {
@@ -5753,11 +5857,14 @@ impl Terminal {
                     position,
                     self.last_content.terminal_bounds,
                     self.last_content.display_offset,
+                    &self.last_content.line_sizes,
                 );
 
-                if self.mouse_changed(point, side) {
+                // SGR-Pixels reports motion within a cell too.
+                let cell_changed = self.mouse_changed(point, side);
+                if cell_changed || self.last_content.mode.contains(Modes::SGR_PIXEL_MOUSE) {
                     let bytes = mouse_moved_report(
-                        point,
+                        self.mouse_position(position),
                         e.pressed_button,
                         e.modifiers,
                         self.last_content.mode,
@@ -5829,6 +5936,7 @@ impl Terminal {
             position,
             self.last_content.terminal_bounds,
             self.last_content.display_offset,
+            &self.last_content.line_sizes,
         );
         let selection = Selection::new(SelectionType::Semantic, point, side);
         self.events
@@ -5846,6 +5954,7 @@ impl Terminal {
             position,
             self.last_content.terminal_bounds,
             self.last_content.display_offset,
+            &self.last_content.line_sizes,
         );
         let hyperlink =
             self.find_hyperlink_at_point_with_path_style(point, self.hyperlink_path_style())?;
@@ -5946,6 +6055,7 @@ impl Terminal {
                     position,
                     self.last_content.terminal_bounds,
                     self.last_content.display_offset,
+                    &self.last_content.line_sizes,
                 );
 
                 if !hyperlink.range.contains(point) {
@@ -6010,6 +6120,7 @@ impl Terminal {
             position,
             self.last_content.terminal_bounds,
             self.last_content.display_offset,
+            &self.last_content.line_sizes,
         );
 
         if e.button == MouseButton::Left
@@ -6025,8 +6136,13 @@ impl Terminal {
         }
 
         if self.mouse_mode(e.modifiers.shift) {
-            let bytes =
-                mouse_button_report(point, e.button, e.modifiers, true, self.last_content.mode);
+            let bytes = mouse_button_report(
+                self.mouse_position(position),
+                e.button,
+                e.modifiers,
+                true,
+                self.last_content.mode,
+            );
 
             if let Some(bytes) = bytes {
                 self.write_to_pty(bytes);
@@ -6039,6 +6155,7 @@ impl Terminal {
                         position,
                         self.last_content.terminal_bounds,
                         self.last_content.display_offset,
+                        &self.last_content.line_sizes,
                     );
 
                     let selection_type = match e.click_count {
@@ -6095,6 +6212,7 @@ impl Terminal {
                 position,
                 self.last_content.terminal_bounds,
                 self.last_content.display_offset,
+                &self.last_content.line_sizes,
             );
 
             if self
@@ -6118,14 +6236,13 @@ impl Terminal {
         }
 
         if self.mouse_mode(e.modifiers.shift) {
-            let point = grid_point(
-                position,
-                self.last_content.terminal_bounds,
-                self.last_content.display_offset,
+            let bytes = mouse_button_report(
+                self.mouse_position(position),
+                e.button,
+                e.modifiers,
+                false,
+                self.last_content.mode,
             );
-
-            let bytes =
-                mouse_button_report(point, e.button, e.modifiers, false, self.last_content.mode);
 
             if let Some(bytes) = bytes {
                 self.write_to_pty(bytes);
@@ -6165,11 +6282,8 @@ impl Terminal {
             && scroll_lines != 0
         {
             if mouse_mode {
-                let point = grid_point(
-                    e.position - self.last_content.terminal_bounds.bounds.origin,
-                    self.last_content.terminal_bounds,
-                    self.last_content.display_offset,
-                );
+                let point = self
+                    .mouse_position(e.position - self.last_content.terminal_bounds.bounds.origin);
 
                 if let Some(scrolls) = scroll_report(point, scroll_lines, e, self.last_content.mode)
                 {
@@ -13628,6 +13742,53 @@ mod tests {
             input_log.is_empty(),
             "init command should not be written after the child has exited, got {input_log:?}"
         );
+    }
+
+    #[gpui::test]
+    fn a_locked_keyboard_drops_keys_and_local_echo_shows_what_is_sent(cx: &mut TestAppContext) {
+        let terminal = cx.new(|cx| {
+            TerminalBuilder::new_display_only(
+                SettingsCursorShape::default(),
+                AlternateScroll::On,
+                None,
+                0,
+                cx.background_executor(),
+                PathStyle::local(),
+            )
+            .subscribe(cx)
+        });
+        fn refresh(terminal: &mut Terminal) {
+            let term = terminal.term.lock_unfair();
+            let content = make_content(&term, &mut terminal.last_content);
+            drop(term);
+            terminal.last_content = content;
+        }
+
+        terminal.update(cx, |terminal, cx| {
+            terminal.write_output(b"\x1b[2h", cx);
+            refresh(terminal);
+            assert!(terminal.keyboard_locked());
+            // Consumed, so no binding acts on it either, and nothing is sent.
+            assert!(terminal.try_keystroke(&Keystroke::parse("a").unwrap(), false));
+            assert!(terminal.take_input_log().is_empty());
+
+            terminal.write_output(b"\x1b[2l\x1b[12l", cx);
+            refresh(terminal);
+            assert!(!terminal.keyboard_locked());
+            terminal.input(b"hi\r\n!".to_vec());
+            assert_eq!(terminal.take_input_log(), [b"hi\r\n!".to_vec()]);
+            let term = terminal.term.lock_unfair();
+            let row = |line| -> String {
+                (0..2)
+                    .map(|column| {
+                        term.grid()[alacritty_terminal::index::Line(line)]
+                            [alacritty_terminal::index::Column(column)]
+                        .c
+                    })
+                    .collect()
+            };
+            assert_eq!([row(0), row(1)], ["hi", "! "]);
+        });
     }
 
     #[gpui::test]

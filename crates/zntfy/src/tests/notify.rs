@@ -96,6 +96,18 @@ fn notify_requires_a_summary_and_rejects_invalid_options() {
 }
 
 #[test]
+fn text_after_double_dash_is_never_an_option() {
+    let arguments = ["-t", "never", "--", "--help", "cleanup"].map(OsString::from);
+    assert!(!requests_help(&arguments));
+    let command = parse_notify_args(arguments).unwrap();
+    assert_eq!(command.summary, "--help");
+    assert_eq!(command.body.as_deref(), Some("cleanup"));
+    assert_eq!(command.timeout, Some(NotificationTimeout::Never));
+    assert!(requests_help(&["--icon", "x", "-h"].map(OsString::from)));
+    assert!(parse_notify_args(["--", "a", "b", "c"].map(OsString::from)).is_err());
+}
+
+#[test]
 fn notification_targets_require_two_positive_numeric_ids() {
     assert_eq!(
         parse_notification_target("42", "7"),
@@ -176,6 +188,7 @@ fn worker_notification_timeout_reparses_the_workers_own_argv() {
             "/path/to/zntfy",
             "--timeout",
             "5000",
+            "--",
             "Build finished",
         ])),
         Some(Some(NotificationTimeout::Milliseconds(5000)))
@@ -310,6 +323,7 @@ fn notification_worker_reexec_replays_explicit_notify_arguments() {
             "zetta-ok",
             "--timeout",
             "5000",
+            "--",
             "Build finished",
             "All tests passed",
         ]

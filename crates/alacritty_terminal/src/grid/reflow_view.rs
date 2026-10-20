@@ -31,9 +31,9 @@ impl GridCell for MappedCell {
     }
 }
 
-impl ResetDiscriminant<Color> for MappedCell {
-    fn discriminant(&self) -> Color {
-        self.cell.bg
+impl ResetDiscriminant<(Color, Color)> for MappedCell {
+    fn discriminant(&self) -> (Color, Color) {
+        (self.cell.fg, self.cell.bg)
     }
 }
 
@@ -79,7 +79,7 @@ impl Grid<Cell> {
             display_offset: 0,
             max_scroll_limit: usize::MAX - count,
         };
-        window.resize::<Color>(true, count, columns);
+        window.resize::<(Color, Color)>(true, count, columns);
         window.lines = lines;
         window.raw.set_visible_lines(lines);
         window.display_offset = window.history_size();

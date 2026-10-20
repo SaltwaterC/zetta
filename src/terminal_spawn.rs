@@ -1118,6 +1118,10 @@ impl Zetta {
                     TerminalEvent::ResizeRequested { rows, columns } => {
                         this.request_pane_grid(tab_id, pane_id, *columns, *rows, window, cx);
                     }
+                    #[cfg(feature = "notifications")]
+                    TerminalEvent::DesktopNotification(notification) => {
+                        this.show_desktop_notification(tab_id, pane_id, notification, window, cx);
+                    }
                     // The title bar reports the active pane's grid size, and
                     // it renders inside a cached boundary that only a notify
                     // on `Zetta` busts. Terminal output must not reach here;

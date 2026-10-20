@@ -596,6 +596,8 @@ impl<T: Clone> Storage<T> {
                 row.grow(columns);
             } else {
                 row.shrink(columns);
+                // Truncating without reflow can cut off a wide glyph's spacer.
+                row[crate::index::Column(columns - 1)].clear_truncated_wide();
             }
         };
 

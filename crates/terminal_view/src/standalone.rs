@@ -1,6 +1,7 @@
 mod blink_manager;
 mod clipboard;
 mod grid_fit;
+mod line_size;
 mod scrollback_temp;
 mod search_overlay;
 mod terminal_element;
@@ -27,7 +28,7 @@ use serde::Deserialize;
 use settings_content::{TerminalBell, TerminalBlink};
 use terminal::{
     Clear, Copy, Event, HoveredWord, MaybeNavigationTarget, Modes, Paste, PasteText, PasteTrimmed,
-    ScrollLineDown, ScrollLineUp, ScrollPageDown, ScrollPageUp, ScrollToBottom, ScrollToTop,
+    Reset, ScrollLineDown, ScrollLineUp, ScrollPageDown, ScrollPageUp, ScrollToBottom, ScrollToTop,
     ShowCharacterPalette, Terminal, TerminalBounds, ToggleViMode, console_palette_for_theme,
     link_policy::display_safe_link_text,
     paste_order::{PasteOrder, PasteTicket},
@@ -341,7 +342,8 @@ impl TerminalView {
                 | Event::LocalGridSizeChanged
                 | Event::TrackingReady { .. }
                 | Event::CommandStarted { .. }
-                | Event::CommandFinished { .. } => {}
+                | Event::CommandFinished { .. }
+                | Event::DesktopNotification(_) => {}
                 Event::TitleChanged => cx.emit(TerminalViewEvent::TitleChanged),
                 Event::PasteError(error) => cx.emit(TerminalViewEvent::PasteError(error.clone())),
                 Event::CloseTerminal => cx.emit(TerminalViewEvent::Close),
@@ -641,7 +643,7 @@ impl TerminalView {
     }
 
     pub(crate) fn commit_text(&mut self, text: &str, cx: &mut Context<Self>) {
-        if self.input_enabled && !text.is_empty() {
+        if self.input_enabled && !text.is_empty() && !self.terminal.read(cx).keyboard_locked() {
             self.terminal
                 .update(cx, |terminal, _| terminal.input(text.as_bytes().to_vec()));
             if let Some(event) = enabled_input_event(self.emit_input_events, || {
@@ -664,8 +666,11 @@ impl TerminalView {
                 self.process_keystroke(keystroke, cx);
             }
             TerminalInput::Text(text) => {
-                self.terminal
-                    .update(cx, |terminal, _| terminal.input(text.as_bytes().to_vec()));
+                self.terminal.update(cx, |terminal, _| {
+                    if !terminal.keyboard_locked() {
+                        terminal.input(text.as_bytes().to_vec())
+                    }
+                });
             }
             TerminalInput::Paste(text) => {
                 self.terminal.update(cx, |terminal, _| terminal.paste(text));
@@ -1001,6 +1006,12 @@ impl TerminalView {
         cx.notify();
     }
 
+    fn reset(&mut self, _: &Reset, _: &mut Window, cx: &mut Context<Self>) {
+        self.scroll_top = px(0.);
+        self.terminal.update(cx, |terminal, _| terminal.reset());
+        cx.notify();
+    }
+
     fn select_all(&mut self, _: &SelectAll, _: &mut Window, cx: &mut Context<Self>) {
         self.terminal
             .update(cx, |terminal, _| terminal.select_all());
@@ -1034,7 +1045,8 @@ impl TerminalView {
                 .action("Save Pane Output", Box::new(SavePaneOutput))
                 .separator()
                 .action("Clear Clipboard", Box::new(ClearClipboard))
-                .action("Clear", Box::new(Clear));
+                .action("Clear", Box::new(Clear))
+                .action("Reset", Box::new(Reset));
             let menu = pane_customization_context_menu_entries()
                 .into_iter()
                 .fold(menu, |menu, (label, action)| menu.action(label, action));
@@ -1125,7 +1137,7 @@ impl TerminalView {
     }
 
     fn send_text(&mut self, text: &SendText, _: &mut Window, cx: &mut Context<Self>) {
-        if !self.input_enabled {
+        if !self.input_enabled || self.terminal.read(cx).keyboard_locked() {
             return;
         }
         self.terminal.update(cx, |terminal, _| {
@@ -1208,6 +1220,7 @@ impl Render for TerminalView {
             .on_action(cx.listener(Self::paste_text))
             .on_action(cx.listener(Self::paste_trimmed))
             .on_action(cx.listener(Self::clear))
+            .on_action(cx.listener(Self::reset))
             .on_action(cx.listener(Self::select_all))
             .on_action(cx.listener(Self::clear_clipboard))
             .on_action(cx.listener(Self::scroll_line_up))

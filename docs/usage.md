@@ -447,6 +447,21 @@ visible as tabs displaced from either end enter the corresponding overflow
 menu. Selecting a tab from either overflow menu brings it into the visible
 range, anchored on the side from which it was selected, before it can be moved.
 
+### Notifications from programs
+
+In builds with desktop notifications, a program can show one itself with the
+OSC 99 escape sequence that kitty defined, for example
+`printf '\e]99;;Build finished\e\\'`. A notification goes out through the same
+`zntfy` helper as `zetta attention --notify`. Clicking it activates the
+issuing tab, and the tab's Silent mode is honoured. A program's `o=` condition
+is checked against the issuing pane: `unfocused` shows nothing while that pane
+has keyboard focus, and `invisible` shows nothing while it is on screen.
+Titles, bodies, base64 payloads, chunking and the app name (`f=`) are
+supported, and `w=` sets the timeout. A notification the program abandons
+before finishing it can be closed (`p=close`). One already shown cannot be
+withdrawn, so a `p=?` query does not offer `close`. At most four notifications
+are delivered at once; a program that prints them faster loses the excess.
+
 ## Panes
 
 Splits inherit the active pane's working directory and selected profile. Use
@@ -591,6 +606,12 @@ these shortcuts to operate it:
   selected minimized pane.
 
 The same actions are available from the command palette.
+
+**Reset** in a pane's right-click context menu, or `terminal: reset` in the
+command palette, fully resets the pane's terminal, as `ESC c` does. It is
+the way out when a program leaves the keyboard locked (KAM), which discards
+everything typed into the pane. It also clears other modes a program forgot
+to turn off, such as local echo (SRM) and mouse reporting.
 
 ## Multi-command prompt
 

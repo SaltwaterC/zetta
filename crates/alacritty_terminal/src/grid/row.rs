@@ -9,13 +9,43 @@ use serde::{Deserialize, Serialize};
 
 use crate::grid::GridCell;
 use crate::index::Column;
-use crate::term::cell::ResetDiscriminant;
+use crate::term::cell::{Flags, ResetDiscriminant};
+
+/// Zetta patch: a row's DEC line size (DECSWL, DECDWL, DECDHL). It belongs to the row rather than
+/// its cells: erasing within the row keeps it, the row carries it when it scrolls, and only a
+/// reset of the whole row returns it to single width.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub enum LineSize {
+    #[default]
+    Single,
+    DoubleWidth,
+    /// The top half of a double-height line; it is also double width.
+    DoubleHeightTop,
+    /// The bottom half of a double-height line; it is also double width.
+    DoubleHeightBottom,
+}
+
+impl LineSize {
+    /// The columns a row of `columns` cells shows at this size: every size but single width
+    /// draws each cell two columns wide, so only the first half of the row is visible.
+    #[inline]
+    pub fn visible_columns(self, columns: usize) -> usize {
+        match self {
+            Self::Single => columns,
+            _ => (columns / 2).max(1),
+        }
+    }
+}
 
 /// A row in the grid.
 #[derive(Default, Clone, Debug)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct Row<T> {
     inner: Vec<T>,
+
+    #[cfg_attr(feature = "serde", serde(default))]
+    line_size: LineSize,
 
     /// Maximum number of occupied entries.
     ///
@@ -30,7 +60,7 @@ pub struct Row<T> {
 
 impl<T: PartialEq> PartialEq for Row<T> {
     fn eq(&self, other: &Self) -> bool {
-        self.inner == other.inner
+        self.inner == other.inner && self.line_size == other.line_size
     }
 }
 
@@ -56,7 +86,7 @@ impl<T: Default> Row<T> {
             inner.set_len(columns);
         }
 
-        Row { inner, occ: 0, characters_only: false }
+        Row { inner, line_size: LineSize::Single, occ: 0, characters_only: false }
     }
 
     /// Increase the number of columns in the row.
@@ -120,6 +150,7 @@ impl<T: Default> Row<T> {
 
         self.occ = 0;
         self.characters_only = characters_only;
+        self.line_size = LineSize::Single;
     }
 }
 
@@ -127,7 +158,17 @@ impl<T: Default> Row<T> {
 impl<T> Row<T> {
     #[inline]
     pub fn from_vec(vec: Vec<T>, occ: usize) -> Row<T> {
-        Row { inner: vec, occ, characters_only: false }
+        Row { inner: vec, line_size: LineSize::Single, occ, characters_only: false }
+    }
+
+    #[inline]
+    pub fn line_size(&self) -> LineSize {
+        self.line_size
+    }
+
+    #[inline]
+    pub fn set_line_size(&mut self, line_size: LineSize) {
+        self.line_size = line_size;
     }
 
     #[inline]
@@ -218,12 +259,39 @@ impl<T> Index<Column> for Row<T> {
 
 impl Row<crate::term::cell::Cell> {
     /// Write characters without exposing attributes to a caller that could change them.
+    ///
+    /// The cells must be blank, as the template erased them, and hold no attribute the template
+    /// does not, so their flags are set rather than read: this loop is bound by its stores.
     #[inline]
     pub(crate) fn write_ascii_characters(&mut self, start: Column, text: &[u8]) {
         let end = start.0 + text.len();
         self.occ = max(self.occ, end);
-        for (cell, &byte) in self.inner[start.0..end].iter_mut().zip(text) {
-            cell.c = crate::vte::ascii_run_char(byte);
+        let cells = &mut self.inner[start.0..end];
+        debug_assert!(cells.iter().all(|cell| cell.flags.difference(Flags::DRAWN).is_empty()));
+        if text.len() >= 32 {
+            write_long_ascii(cells, text);
+            return;
+        }
+        for (cell, &byte) in cells.iter_mut().zip(text) {
+            cell.write_drawn_ascii(crate::vte::ascii_run_char(byte));
+        }
+    }
+}
+
+/// `Row::write_ascii_characters` for a run long enough to search first. Only undecodable output
+/// puts U+FFFD in a run, and mapping it in the loop cost a screen-wide line of plain text a tenth
+/// of its throughput, so a run without one is not mapped. Searching a short run costs more than
+/// mapping it, and so does inlining this beside the loop that maps it.
+#[inline(never)]
+fn write_long_ascii(cells: &mut [crate::term::cell::Cell], text: &[u8]) {
+    let replacement = crate::vte::ASCII_REPLACEMENT;
+    if text.iter().fold(false, |found, &byte| found | (byte == replacement)) {
+        for (cell, &byte) in cells.iter_mut().zip(text) {
+            cell.write_drawn_ascii(crate::vte::ascii_run_char(byte));
+        }
+    } else {
+        for (cell, &byte) in cells.iter_mut().zip(text) {
+            cell.write_drawn_ascii(char::from(byte));
         }
     }
 }
@@ -378,7 +446,9 @@ mod tests {
 
     #[test]
     fn partially_reset_imported_rows_do_not_claim_untouched_attributes() {
-        let styled = Cell { fg: Color::Named(NamedColor::Red), ..Cell::default() };
+        // Styled outside the reset discriminant and the flags plain writes assume are clear.
+        let mut styled = Cell::default();
+        styled.set_underline_color(Some(Color::Named(NamedColor::Red)));
         let mut row = Row::from_vec(vec![styled.clone(); 8], 4);
         row.reset(&Cell::default());
         assert!(!row.characters_only);

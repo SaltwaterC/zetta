@@ -325,6 +325,23 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
             let i = row_count - index - 1;
             trailing_empty_rows =
                 if i < rows_below_cursor && row.is_clear() { trailing_empty_rows + 1 } else { 0 };
+            // No row of a one-column grid can hold a wide glyph and its
+            // spacer. Remove those cells before reflow; otherwise the wide
+            // glyph is pushed into the next row forever without consuming it.
+            if columns == 1 {
+                for cell in &mut row[..] {
+                    if cell.flags().intersects(
+                        Flags::WIDE_CHAR
+                            | Flags::WIDE_CHAR_SPACER
+                            | Flags::LEADING_WIDE_CHAR_SPACER,
+                    ) {
+                        let wrap = *cell.flags() & Flags::WRAPLINE;
+                        *cell = T::default();
+                        cell.flags_mut().insert(wrap);
+                    }
+                }
+            }
+
             // Append lines left over from the previous row.
             if let Some(buffered) = buffered.take() {
                 // Add a column for every cell added before the cursor, if it goes beyond the new

@@ -212,6 +212,9 @@ mod host {
                     break;
                 }
                 Event::BackendShutdown | Event::ChildExitStatusUnavailable => break,
+                Event::PtyWriteRaw(reply) => {
+                    let _ = input.send(Msg::Input(reply.into()));
+                }
                 Event::PtyWrite(reply) => {
                     let _ = input.send(Msg::Input(reply.into_bytes().into()));
                 }

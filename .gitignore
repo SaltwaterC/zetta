@@ -4,3 +4,6 @@ artifacts/
 .DS_Store
 .opencode/
 Screenshot*
+
+# Imported conformance harness Python bytecode.
+__pycache__/

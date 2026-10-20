@@ -267,6 +267,13 @@ Tests default to two crate suites at once, four compiler jobs per Cargo process,
 and eight test threads per suite. Override `TEST_CRATE_JOBS`, `TEST_BUILD_JOBS`,
 or `TEST_THREADS` on the Make command line when needed.
 
+Run imported terminal conformance checks with `make test-shitty`. This builds a
+headless adapter against Zetta's terminal engine and runs shell-relevant tests
+and recorded Bash, Zsh, and Vim sessions from the `shitty` submodule. Failures
+remain visible; unsupported harness operations are reported as skips. See the
+[conformance runner guide](docs/terminal-conformance.md) for selecting tests,
+JSON reports, and coverage limits.
+
 Run the terminal's opt-in long-line scrolling benchmark with `make test-scroll`.
 It uses an optimized build and the same reduced priority and resource limits.
 The default suite retains a short scrolling regression and tests shell exit
@@ -308,6 +315,10 @@ emulators; a notifications-enabled `zetta notify` proxies to it.
 Notifications issued from a Zetta terminal can be clicked to activate their
 issuing window and visible tab; closed, dormant, or background-only tabs are
 left alone. Plain `zetta notify` outside Zetta remains fire-and-forget.
+Text after `--` is never read as an option, so `zetta notify -- "$message"` is
+safe whatever the message begins with. Programs can also show notifications
+themselves with kitty's OSC 99 escape sequence; see
+[Using Zetta](docs/usage.md#notifications-from-programs).
 On macOS, `zntfy` in a packaged Zetta app submits through the app's main
 executable so notifications retain Zetta's icon and click-to-tab routing.
 An unbundled development build uses the script host and cannot route clicks.
