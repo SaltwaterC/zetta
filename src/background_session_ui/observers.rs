@@ -414,13 +414,22 @@ impl Zetta {
         cx.subscribe_in(
             &terminal,
             window,
-            move |this, _, event: &TerminalEvent, _, _| {
+            move |this, _, event: &TerminalEvent, window, cx| {
                 if let Some(command) = restorable_command_change(event) {
                     this.update_active_command(tab_id, pane_id, command);
                 }
                 if let Some(identity) = run_identity {
                     run_registry.observe_terminal_event(identity, event);
                 }
+                // The spawn path is not the only way a pane gets here: a
+                // reattached, restored or joined pane's notifications are its
+                // program's, exactly as they would be from a pane spawned here.
+                #[cfg(feature = "notifications")]
+                if let TerminalEvent::DesktopNotification(notification) = event {
+                    this.show_desktop_notification(tab_id, pane_id, notification, window, cx);
+                }
+                #[cfg(not(feature = "notifications"))]
+                let _ = (window, cx);
             },
         )
         .detach();
@@ -593,3 +602,7 @@ fn server_input_stops_server(
 ) -> bool {
     (is_http_server || is_tftp_server) && byte_stream_pane::ctrl_c_interrupts_byte_stream(input)
 }
+
+#[cfg(all(test, feature = "notifications"))]
+#[path = "../tests/background_session_ui/observers.rs"]
+mod tests;

@@ -5,21 +5,12 @@
 //! sibling `zntfy` with the tab's attention ID as the target, so a click focuses
 //! the tab and the tab's silent mode is honoured exactly as for `zetta notify`.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
-
 use terminal::{DesktopNotification, NotificationExpiry, NotificationOccasion};
 
 use super::*;
-use crate::cli_services::{
-    NotificationRequest, NotificationTarget, NotificationTimeout, run_notification_proxy,
-};
-
-/// Helper processes started and not yet finished. Every notification costs a
-/// process, so a program printing them in a loop must not be able to start
-/// processes without limit; past this, notifications are dropped.
-const MAX_DELIVERIES_IN_FLIGHT: usize = 4;
-
-static DELIVERIES_IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
+use crate::cli_services::{NotificationRequest, NotificationTarget, NotificationTimeout};
+#[cfg(not(test))]
+use delivery::deliver;
 
 /// How much of a pane the user can currently see.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -39,6 +30,63 @@ pub(crate) fn occasion_allows(occasion: NotificationOccasion, exposure: PaneExpo
         NotificationOccasion::Unfocused => exposure != PaneExposure::Focused,
         NotificationOccasion::Invisible => exposure == PaneExposure::Hidden,
     }
+}
+
+/// Hands a notification to `zntfy` off the window's thread: the helper asks
+/// this process for the tab's silent mode, which is answered on the window's
+/// thread, so it must not be waited for there.
+#[cfg(not(test))]
+mod delivery {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use crate::cli_services::{NotificationRequest, NotificationTarget, run_notification_proxy};
+
+    /// Helper processes started and not yet finished. Every notification costs a
+    /// process, so a program printing them in a loop must not be able to start
+    /// processes without limit; past this, notifications are dropped.
+    const MAX_DELIVERIES_IN_FLIGHT: usize = 4;
+
+    static DELIVERIES_IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
+
+    pub(super) fn deliver(request: NotificationRequest, target: NotificationTarget) {
+        if DELIVERIES_IN_FLIGHT.fetch_add(1, Ordering::AcqRel) >= MAX_DELIVERIES_IN_FLIGHT {
+            DELIVERIES_IN_FLIGHT.fetch_sub(1, Ordering::AcqRel);
+            log::warn!("dropping a desktop notification: too many still being delivered");
+            return;
+        }
+        let delivery = std::thread::Builder::new()
+            .name("zetta-notification".to_owned())
+            .spawn(move || {
+                if let Err(error) = run_notification_proxy(&request, Some(target)) {
+                    log::warn!("desktop notification failed: {error:#}");
+                }
+                DELIVERIES_IN_FLIGHT.fetch_sub(1, Ordering::AcqRel);
+            });
+        if let Err(error) = delivery {
+            DELIVERIES_IN_FLIGHT.fetch_sub(1, Ordering::AcqRel);
+            log::warn!("desktop notification failed to start: {error}");
+        }
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static DELIVERED: std::cell::RefCell<Vec<(NotificationRequest, NotificationTarget)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Tests record what would have been shown rather than putting it on the
+/// desktop of whoever runs them.
+#[cfg(test)]
+fn deliver(request: NotificationRequest, target: NotificationTarget) {
+    DELIVERED.with(|delivered| delivered.borrow_mut().push((request, target)));
+}
+
+/// What this thread's tests have delivered since the last call.
+#[cfg(test)]
+pub(crate) fn take_delivered_desktop_notifications()
+-> Vec<(NotificationRequest, NotificationTarget)> {
+    DELIVERED.with(|delivered| std::mem::take(&mut *delivered.borrow_mut()))
 }
 
 pub(crate) fn notification_request(notification: &DesktopNotification) -> NotificationRequest {
@@ -74,30 +122,13 @@ impl Zetta {
         let Some(attention_id) = self.attention_id_for_tab(tab_id) else {
             return;
         };
-        if DELIVERIES_IN_FLIGHT.fetch_add(1, Ordering::AcqRel) >= MAX_DELIVERIES_IN_FLIGHT {
-            DELIVERIES_IN_FLIGHT.fetch_sub(1, Ordering::AcqRel);
-            log::warn!("dropping a desktop notification: too many still being delivered");
-            return;
-        }
-        let request = notification_request(notification);
-        let target = NotificationTarget {
-            process_id: std::process::id(),
-            attention_id,
-        };
-        // The helper asks this process for the tab's silent mode, which is
-        // answered on the window's thread, so it must not be waited for there.
-        let delivery = std::thread::Builder::new()
-            .name("zetta-notification".to_owned())
-            .spawn(move || {
-                if let Err(error) = run_notification_proxy(&request, Some(target)) {
-                    log::warn!("desktop notification failed: {error:#}");
-                }
-                DELIVERIES_IN_FLIGHT.fetch_sub(1, Ordering::AcqRel);
-            });
-        if let Err(error) = delivery {
-            DELIVERIES_IN_FLIGHT.fetch_sub(1, Ordering::AcqRel);
-            log::warn!("desktop notification failed to start: {error}");
-        }
+        deliver(
+            notification_request(notification),
+            NotificationTarget {
+                process_id: std::process::id(),
+                attention_id,
+            },
+        );
     }
 
     fn pane_exposure(&self, tab_id: u64, pane_id: u64, window: &Window, cx: &App) -> PaneExposure {

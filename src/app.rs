@@ -1243,6 +1243,8 @@ impl Drop for Zetta {
 mod attention;
 #[cfg(feature = "notifications")]
 mod desktop_notifications;
+#[cfg(all(test, feature = "notifications"))]
+pub(crate) use desktop_notifications::take_delivered_desktop_notifications;
 mod pane_templates;
 mod panes;
 mod tabs;
