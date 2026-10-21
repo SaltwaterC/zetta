@@ -33,6 +33,7 @@ fn worktree_group(project: &str, name: &str) -> TabGroup {
 }
 
 struct Fixture {
+    custom: Vec<String>,
     roots: Vec<PathBuf>,
     listings: HashMap<PathBuf, ProjectWorktrees>,
     collapsed: HashSet<PathBuf>,
@@ -46,6 +47,7 @@ impl Fixture {
             *counts.entry(group).or_default() += 1;
         }
         sidebar_entries(&SidebarSources {
+            custom: &self.custom,
             roots: &self.roots,
             listings: &self.listings,
             collapsed: &self.collapsed,
@@ -62,6 +64,7 @@ fn groups_of(entries: &[SidebarEntry]) -> Vec<TabGroup> {
 #[test]
 fn main_comes_first_then_each_project_with_its_worktrees() {
     let fixture = Fixture {
+        custom: Vec::new(),
         roots: vec![root("api"), root("web")],
         listings: HashMap::from([(
             root("api"),
@@ -125,6 +128,7 @@ fn main_comes_first_then_each_project_with_its_worktrees() {
 #[test]
 fn a_collapsed_project_hides_its_worktrees_except_the_active_one() {
     let fixture = Fixture {
+        custom: Vec::new(),
         roots: vec![root("api")],
         listings: HashMap::from([(
             root("api"),
@@ -154,6 +158,7 @@ fn a_collapsed_project_hides_its_worktrees_except_the_active_one() {
 #[test]
 fn a_worktree_with_tabs_is_listed_before_the_listing_arrives() {
     let fixture = Fixture {
+        custom: Vec::new(),
         roots: vec![root("api")],
         listings: HashMap::new(),
         collapsed: HashSet::new(),
@@ -189,6 +194,7 @@ fn a_worktree_with_tabs_is_listed_before_the_listing_arrives() {
 #[test]
 fn groups_the_registry_no_longer_lists_stay_reachable_in_a_stable_order() {
     let fixture = Fixture {
+        custom: Vec::new(),
         roots: vec![root("api")],
         listings: HashMap::new(),
         collapsed: HashSet::new(),
@@ -214,6 +220,7 @@ fn groups_the_registry_no_longer_lists_stay_reachable_in_a_stable_order() {
 #[test]
 fn a_project_that_is_not_a_repository_offers_no_worktree() {
     let fixture = Fixture {
+        custom: Vec::new(),
         roots: vec![root("notes")],
         listings: HashMap::from([(
             root("notes"),
@@ -312,4 +319,48 @@ fn cycling_with_nowhere_else_to_go_stays_put() {
 
     assert_eq!(adjacent_tab_group(&entries, &TabGroup::Main, true), None);
     assert_eq!(adjacent_tab_group(&entries, &TabGroup::Main, false), None);
+}
+
+#[test]
+fn named_groups_follow_main_in_creation_order_before_any_project() {
+    let fixture = Fixture {
+        custom: vec!["scratch".to_owned(), "deploys".to_owned()],
+        roots: vec![root("api")],
+        listings: HashMap::new(),
+        collapsed: HashSet::new(),
+        groups: vec![
+            TabGroup::Custom("deploys".to_owned()),
+            TabGroup::Custom("deploys".to_owned()),
+        ],
+    };
+
+    let entries = fixture.entries(&TabGroup::Custom("deploys".to_owned()));
+
+    assert_eq!(
+        groups_of(&entries),
+        [
+            TabGroup::Main,
+            TabGroup::Custom("scratch".to_owned()),
+            TabGroup::Custom("deploys".to_owned()),
+            TabGroup::Project(root("api")),
+        ],
+        "not sorted by name, and never among the unlisted groups"
+    );
+    assert_eq!(
+        entries[1],
+        SidebarEntry::Custom {
+            name: "scratch".to_owned(),
+            tab_count: 0,
+            active: false,
+        },
+        "an empty named group stays listed"
+    );
+    assert_eq!(
+        entries[2],
+        SidebarEntry::Custom {
+            name: "deploys".to_owned(),
+            tab_count: 2,
+            active: true,
+        }
+    );
 }

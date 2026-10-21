@@ -523,6 +523,9 @@ pub(crate) struct Zetta {
     /// integrated or discarded. See `worktree_ui`.
     pub(crate) worktree_prompt: Option<crate::worktree_ui::WorktreePrompt>,
     pub(crate) worktree_prompt_focus: gpui::FocusHandle,
+    /// The dialog naming a new tab group or renaming one. See `tab_group_ui`.
+    pub(crate) tab_group_prompt: Option<crate::tab_group_ui::TabGroupPrompt>,
+    pub(crate) tab_group_prompt_focus: gpui::FocusHandle,
     /// Paste access is local to this viewer and disappears with its tab.
     pub(crate) remote_clipboard_paste_tabs: HashSet<u64>,
     /// Tabs whose panes may not write the clipboard. Copy is allowed by
@@ -828,6 +831,9 @@ impl Zetta {
             self.finish_background_session_change(cx);
         }
         self.active_tab = 0;
+        // Named groups belong to the window, and a reopened one gets its tabs
+        // back by directory, so they would come back empty.
+        self.tab_groups = Default::default();
         self.tab_move_mode = false;
         self.command_palette = None;
         self.multi_command = None;
@@ -847,6 +853,7 @@ impl Zetta {
         }
         self.close_tab_confirmation = None;
         self.worktree_prompt = None;
+        self.tab_group_prompt = None;
         self.projects.trust_prompt = None;
         #[cfg(target_os = "macos")]
         self.script_open.clear();
@@ -1047,6 +1054,8 @@ impl Zetta {
             sidebar: Default::default(),
             worktree_prompt: None,
             worktree_prompt_focus: cx.focus_handle(),
+            tab_group_prompt: None,
+            tab_group_prompt_focus: cx.focus_handle(),
             pending_grid_requests: HashMap::new(),
             launch_grid: None,
             remote_clipboard_paste_tabs: HashSet::new(),

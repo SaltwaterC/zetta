@@ -77,6 +77,13 @@ impl TerminalFont {
     }
 }
 
+/// The font and size a terminal nothing has zoomed draws its text in, for
+/// chrome that should read at the same size as the terminal beside it.
+pub fn standalone_terminal_font(cx: &App) -> (Font, Pixels) {
+    let font = TerminalFont::from_settings(cx);
+    (font.font(), font.standalone_size)
+}
+
 /// A process-local override for comparable terminal workloads on any display.
 /// Dimensions are backing pixels, independent of the window's logical scale.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -1,9 +1,13 @@
 //! Tab groups: which of the window's tabs the tab bar shows.
 //!
-//! Every tab belongs to one group — Main, a registered project, or one of a
-//! project's worktrees — and the tab bar, tab cycling and tab moves work on
-//! the active group's tabs only. The sidebar is how the user moves between
-//! groups.
+//! Every tab belongs to one group — Main, a group the user named, a registered
+//! project, or one of a project's worktrees — and the tab bar, tab cycling and
+//! tab moves work on the active group's tabs only. The sidebar is how the user
+//! moves between groups.
+//!
+//! A named group is this window's alone and lasts as long as the window does:
+//! the registry gives projects and worktrees a life outside it, but nothing
+//! records a name, for the same reason given below for tabs.
 //!
 //! Hidden tabs stay in `Zetta::tabs`. Everything that reaches a tab from
 //! outside the tab bar — terminal events and exits, attention routing, shared
@@ -24,7 +28,8 @@
 //! as opaque JSON, and growing it would lock out every running Zetta that
 //! cannot parse the new field. So a tab inside a worktree returns to that
 //! worktree's group, one inside a project to the project's, and anything else
-//! to Main — which is also where a project tab the user `cd`'d out of returns.
+//! to Main — which is also where a project tab the user `cd`'d out of returns,
+//! and where a tab from a named group returns.
 //! A pane whose directory has been detected already is placed at once; one
 //! that has not keeps the group the user is in until its first detection lands
 //! ([`TabGroupState::arriving`]), and detections after that leave it alone.
@@ -43,6 +48,9 @@ pub(crate) enum TabGroup {
     /// The tabs that belong to no project: what the window held before groups.
     #[default]
     Main,
+    /// A group the user created and named, listed under Main. The name is the
+    /// identity, so names are unique within a window.
+    Custom(String),
     /// A registered project, by its registry root.
     Project(PathBuf),
     /// A linked worktree of a registered project.
@@ -57,7 +65,7 @@ impl TabGroup {
     )]
     pub(crate) fn project_root(&self) -> Option<&Path> {
         match self {
-            Self::Main => None,
+            Self::Main | Self::Custom(_) => None,
             Self::Project(root) | Self::Worktree { project: root, .. } => Some(root),
         }
     }
@@ -66,13 +74,14 @@ impl TabGroup {
     pub(crate) fn worktree_root(&self) -> Option<&Path> {
         match self {
             Self::Worktree { root, .. } => Some(root),
-            Self::Main | Self::Project(_) => None,
+            Self::Main | Self::Custom(_) | Self::Project(_) => None,
         }
     }
 
     pub(crate) fn label(&self) -> String {
         match self {
             Self::Main => "Main".to_owned(),
+            Self::Custom(name) => name.clone(),
             Self::Project(root) => project_display_name(root).to_owned(),
             Self::Worktree { root, .. } => project_display_name(root).to_owned(),
         }
@@ -139,6 +148,66 @@ pub(crate) fn active_index_after_removal<T>(
         .or(fallback.filter(|index| *index < items.len()))
         .or_else(|| (0..items.len()).find(|index| *group_of(&items[*index]) == TabGroup::Main))
         .unwrap_or_else(|| removed_index.min(items.len() - 1))
+}
+
+/// What clicking a group's row in the sidebar does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum GroupEntry {
+    /// The active tab is already in the group: nothing changes, beyond
+    /// returning focus to the terminal.
+    AlreadyThere,
+    /// The group has tabs; the one at this index becomes active.
+    Switch(usize),
+    /// The group has no tabs, so entering it opens its first.
+    OpenFirstTab,
+}
+
+/// What entering `group` does, given the active index and the tab the group
+/// remembers as last active there. A remembered tab that has since left the
+/// group is ignored for the group's first tab.
+pub(crate) fn group_entry<T>(
+    items: &[T],
+    active: usize,
+    remembered: Option<usize>,
+    group: &TabGroup,
+    group_of: impl Fn(&T) -> &TabGroup,
+) -> GroupEntry {
+    let in_group = |index: &usize| {
+        items
+            .get(*index)
+            .is_some_and(|item| group_of(item) == group)
+    };
+    if in_group(&active) {
+        return GroupEntry::AlreadyThere;
+    }
+    remembered
+        .filter(in_group)
+        .or_else(|| (0..items.len()).find(in_group))
+        .map_or(GroupEntry::OpenFirstTab, GroupEntry::Switch)
+}
+
+/// The name a new or renamed group is given, trimmed, or why it cannot have
+/// it. `renaming` is the group's current name, which it may keep.
+///
+/// Names are compared ignoring case, so the sidebar never shows two rows a
+/// reader could not tell apart, and Main's name is taken.
+pub(crate) fn validate_tab_group_name(
+    existing: &[String],
+    name: &str,
+    renaming: Option<&str>,
+) -> Result<String, String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("Enter a name for the tab group.".to_owned());
+    }
+    let folded = name.to_lowercase();
+    let taken = |other: &str| {
+        other.to_lowercase() == folded && renaming.is_none_or(|current| current != other)
+    };
+    if taken("Main") || existing.iter().any(|other| taken(other)) {
+        return Err(format!("A tab group named {name} already exists."));
+    }
+    Ok(name.to_owned())
 }
 
 /// What a detection learned about a pane's directory, for
@@ -230,6 +299,9 @@ pub(crate) struct TabGroupState {
     /// Tabs that arrived before their active pane's directory was detected,
     /// waiting for that detection to say which group they belong to.
     arriving: HashSet<u64>,
+    /// The names of the groups the user created, in the order they were
+    /// created, which is the order the sidebar lists them in.
+    custom: Vec<String>,
 }
 
 impl TabGroupState {
@@ -250,6 +322,31 @@ impl TabGroupState {
     /// Stops waiting to place `tab_id`, returning whether it was waiting.
     pub(crate) fn arrived(&mut self, tab_id: u64) -> bool {
         self.arriving.remove(&tab_id)
+    }
+
+    pub(crate) fn custom_groups(&self) -> &[String] {
+        &self.custom
+    }
+
+    /// Adds a group named `name`, which the caller has validated.
+    pub(crate) fn add_custom(&mut self, name: String) {
+        self.custom.push(name);
+    }
+
+    /// Renames a group in place, keeping its position and the tab it
+    /// remembers. Tabs carry their group, so the caller moves those.
+    pub(crate) fn rename_custom(&mut self, from: &str, to: String) {
+        if let Some(name) = self.custom.iter_mut().find(|name| *name == from) {
+            *name = to.clone();
+        }
+        if let Some(tab_id) = self.remembered.remove(&TabGroup::Custom(from.to_owned())) {
+            self.remembered.insert(TabGroup::Custom(to), tab_id);
+        }
+    }
+
+    pub(crate) fn remove_custom(&mut self, name: &str) {
+        self.custom.retain(|other| other != name);
+        self.remembered.remove(&TabGroup::Custom(name.to_owned()));
     }
 }
 
@@ -382,36 +479,39 @@ impl Zetta {
         if !self.tab_groups_enabled() {
             return;
         }
+        let remembered = self
+            .tab_groups
+            .remembered(&group)
+            .and_then(|tab_id| self.tabs.iter().position(|tab| tab.id == tab_id));
+        let entry = group_entry(&self.tabs, self.active_tab, remembered, &group, |tab| {
+            &tab.group
+        });
+        if entry == GroupEntry::AlreadyThere {
+            self.focus_active(window, cx);
+            return;
+        }
         if let Some(tab) = self.tabs.get(self.active_tab) {
-            if tab.group == group {
-                self.focus_active(window, cx);
-                return;
-            }
             self.tab_groups.remember(tab.group.clone(), tab.id);
         }
         if self.tab_search.is_some() {
             self.dismiss_tab_search(window, cx);
         }
-        let remembered = self
-            .tab_groups
-            .remembered(&group)
-            .and_then(|tab_id| self.tabs.iter().position(|tab| tab.id == tab_id))
-            .filter(|index| self.tabs[*index].group == group);
-        let first = || self.tabs.iter().position(|tab| tab.group == group);
-        if let Some(index) = remembered.or_else(first) {
-            self.active_tab = index;
-            self.tab_overflow_selection_side = None;
-            self.dismiss_tab_overflow_menus(cx);
-            self.disable_tab_move_mode_if_unavailable(cx);
-            self.focus_active(window, cx);
-            cx.notify();
-            return;
+        match entry {
+            GroupEntry::AlreadyThere => {}
+            GroupEntry::Switch(index) => {
+                self.active_tab = index;
+                self.tab_overflow_selection_side = None;
+                self.dismiss_tab_overflow_menus(cx);
+                self.disable_tab_move_mode_if_unavailable(cx);
+                self.focus_active(window, cx);
+                cx.notify();
+            }
+            GroupEntry::OpenFirstTab => self.open_first_tab_in_group(group, window, cx),
         }
-        self.open_first_tab_in_group(group, window, cx);
     }
 
     /// Opens another tab in `group`, which becomes the active group: the
-    /// sidebar's "New Tab" on a row that is not the one the user is in.
+    /// "New Tab" entry of a sidebar row's context menu.
     pub(crate) fn open_new_tab_in_group(
         &mut self,
         group: TabGroup,
@@ -427,7 +527,7 @@ impl Zetta {
         self.open_first_tab_in_group(group, window, cx);
     }
 
-    /// A group with no tabs gets one: a plain tab for Main, a project tab
+    /// A group with no tabs gets one: a plain tab for Main or a named group, a project tab
     /// for a project, and a project tab in the worktree for a worktree.
     fn open_first_tab_in_group(
         &mut self,
@@ -436,7 +536,7 @@ impl Zetta {
         cx: &mut Context<Self>,
     ) {
         match &group {
-            TabGroup::Main => {
+            TabGroup::Main | TabGroup::Custom(_) => {
                 let Some(profile) = new_tab_profile(
                     None,
                     &self.profiles,
@@ -469,12 +569,9 @@ impl Zetta {
         }
     }
 
-    /// Moves every tab of `from` into `to`, for a worktree that no longer
-    /// exists. Its tabs keep running; they only stop being listed under it.
-    #[cfg_attr(
-        not(feature = "worktree"),
-        allow(dead_code, reason = "only a removed worktree regroups its tabs")
-    )]
+    /// Moves every tab of `from` into `to`, for a group that no longer
+    /// exists or has a new name. Its tabs keep running; they only stop being
+    /// listed under it.
     pub(crate) fn regroup_tabs(&mut self, from: &TabGroup, to: TabGroup, cx: &mut Context<Self>) {
         let mut moved = false;
         for tab in self.tabs.iter_mut().filter(|tab| tab.group == *from) {
@@ -485,6 +582,33 @@ impl Zetta {
         if moved {
             cx.notify();
         }
+    }
+
+    /// Creates a group named `name`, which the caller has validated, and
+    /// enters it — which opens its first tab.
+    pub(crate) fn create_tab_group(
+        &mut self,
+        name: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.tab_groups.add_custom(name.clone());
+        self.activate_tab_group(TabGroup::Custom(name), window, cx);
+    }
+
+    /// Renames a group, which the caller has validated, taking its tabs along.
+    pub(crate) fn rename_tab_group(&mut self, from: &str, to: String, cx: &mut Context<Self>) {
+        self.tab_groups.rename_custom(from, to.clone());
+        self.regroup_tabs(&TabGroup::Custom(from.to_owned()), TabGroup::Custom(to), cx);
+        cx.notify();
+    }
+
+    /// Removes a group. Its tabs keep running and move to Main, like a removed
+    /// worktree's move to its project.
+    pub(crate) fn remove_tab_group(&mut self, name: &str, cx: &mut Context<Self>) {
+        self.tab_groups.remove_custom(name);
+        self.regroup_tabs(&TabGroup::Custom(name.to_owned()), TabGroup::Main, cx);
+        cx.notify();
     }
 
     /// How many tabs each group holds, for the sidebar's counts.

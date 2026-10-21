@@ -43,6 +43,7 @@ struct ZettaOverlays {
     session_authentication: Option<AnyElement>,
     close_confirmation: Option<AnyElement>,
     worktree_prompt: Option<AnyElement>,
+    tab_group_prompt: Option<AnyElement>,
     project_trust: Option<AnyElement>,
     script_open: Option<AnyElement>,
 }
@@ -177,6 +178,7 @@ impl Zetta {
             session_authentication: modal_overlay(self.render_session_authentication_overlay(cx)),
             close_confirmation: modal_overlay(self.render_tab_close_confirmation_overlay(cx)),
             worktree_prompt: modal_overlay(self.render_worktree_prompt_overlay(cx)),
+            tab_group_prompt: modal_overlay(self.render_tab_group_prompt_overlay(cx)),
             project_trust: modal_overlay(self.render_project_trust_overlay(cx)),
             script_open,
         }
@@ -298,7 +300,10 @@ impl Zetta {
             .on_action(cx.listener(Self::next_tab_group))
             .on_action(cx.listener(Self::previous_tab_group))
             .on_action(cx.listener(Self::activate_tab_group_action))
+            .on_action(cx.listener(Self::remove_tab_group_action))
             .on_action(cx.listener(Self::new_worktree))
+            .on_action(cx.listener(Self::new_tab_group))
+            .on_action(cx.listener(Self::new_project))
             .on_action(cx.listener(Self::new_window))
             .on_action(cx.listener(Self::set_default_terminal))
             .on_action(cx.listener(Self::open_application_menu))
@@ -612,6 +617,9 @@ impl Zetta {
             .when(self.worktree_prompt.is_some(), |content| {
                 content.track_focus(&self.worktree_prompt_focus)
             })
+            .when(self.tab_group_prompt.is_some(), |content| {
+                content.track_focus(&self.tab_group_prompt_focus)
+            })
             .when(
                 cfg!(feature = "zmux") && self.remote_session_picker.is_some(),
                 |content| content.track_focus(&self.remote_session_focus),
@@ -640,6 +648,7 @@ impl Zetta {
             overlays.serial_console,
             overlays.remote_session,
             overlays.session_authentication,
+            overlays.tab_group_prompt,
             overlays.worktree_prompt,
             overlays.close_confirmation,
             overlays.project_trust,

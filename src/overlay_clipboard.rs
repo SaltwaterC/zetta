@@ -152,6 +152,9 @@ impl Zetta {
         if let Some(prompt) = self.worktree_prompt.as_mut() {
             return prompt.text_field_mut();
         }
+        if let Some(prompt) = self.tab_group_prompt.as_mut() {
+            return Some(&mut prompt.name);
+        }
         if let Some(prompt) = self.session_authentication.as_mut() {
             if prompt.working {
                 return None;

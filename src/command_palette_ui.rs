@@ -54,6 +54,7 @@ impl Zetta {
                         ShowMainTabs.name(),
                         NextTabGroup.name(),
                         PreviousTabGroup.name(),
+                        NewTabGroup.name(),
                         NewWorktree.name(),
                     ]
                     .contains(&action.name())
@@ -204,6 +205,9 @@ impl Zetta {
             return;
         }
         if self.worktree_prompt_key_down(event, window, cx) {
+            return;
+        }
+        if self.tab_group_prompt_key_down(event, window, cx) {
             return;
         }
         if self.session_authentication_key_down(event, window, cx) {

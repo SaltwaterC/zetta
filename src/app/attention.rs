@@ -13,6 +13,7 @@ pub(crate) enum FocusSurface {
     ProjectTrust,
     CloseConfirmation,
     WorktreePrompt,
+    TabGroupPrompt,
     SessionAuthentication,
     RemoteSession,
     SerialConsole,
@@ -32,6 +33,7 @@ struct FocusSurfaceAvailability {
     project_trust: bool,
     close_confirmation: bool,
     worktree_prompt: bool,
+    tab_group_prompt: bool,
     session_authentication: bool,
     remote_session: bool,
     serial_console: bool,
@@ -54,6 +56,8 @@ fn focus_surface(available: FocusSurfaceAvailability) -> Option<FocusSurface> {
         Some(FocusSurface::CloseConfirmation)
     } else if available.worktree_prompt {
         Some(FocusSurface::WorktreePrompt)
+    } else if available.tab_group_prompt {
+        Some(FocusSurface::TabGroupPrompt)
     } else if available.session_authentication {
         Some(FocusSurface::SessionAuthentication)
     } else if available.remote_session {
@@ -88,6 +92,7 @@ impl Zetta {
             project_trust: self.projects.trust_prompt.is_some(),
             close_confirmation: self.close_tab_confirmation.is_some(),
             worktree_prompt: self.worktree_prompt.is_some(),
+            tab_group_prompt: self.tab_group_prompt.is_some(),
             session_authentication: self.session_authentication.is_some(),
             remote_session: self.remote_session_picker.is_some(),
             serial_console: self.serial_console_is_open(),
@@ -123,6 +128,7 @@ impl Zetta {
             }
             FocusSurface::CloseConfirmation => self.close_confirmation_focus.focus(window, cx),
             FocusSurface::WorktreePrompt => self.worktree_prompt_focus.focus(window, cx),
+            FocusSurface::TabGroupPrompt => self.tab_group_prompt_focus.focus(window, cx),
             FocusSurface::SessionAuthentication => {
                 self.session_authentication_focus.focus(window, cx);
             }

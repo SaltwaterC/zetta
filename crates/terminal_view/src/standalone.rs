@@ -9,6 +9,7 @@ mod terminal_scrollbar;
 
 pub use grid_fit::{
     PhysicalCellSize, TerminalCellMetrics, element_size_for_grid, grid_for_element_size,
+    standalone_terminal_font,
 };
 pub use scrollback_temp::{
     claim_for_editor as claim_scrollback_for_editor, remove_managed as remove_scrollback_file,

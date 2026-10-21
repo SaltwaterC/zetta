@@ -14,8 +14,9 @@ use super::*;
 use crate::sidebar::{SidebarEntry, SidebarSources, SidebarWorktree, sidebar_entries};
 use crate::tab_groups::TabGroup;
 use crate::worktree_ui::WorktreeFinish;
-use gpui::ClickEvent;
+use gpui::{ClickEvent, Font};
 use std::rc::Rc;
+use terminal_view::standalone_terminal_font;
 use ui::ListItem;
 
 /// What every row is drawn with.
@@ -23,6 +24,10 @@ use ui::ListItem;
 struct SidebarRowContext<'a> {
     colors: &'a ThemeColors,
     handle: &'a WeakEntity<Zetta>,
+    /// The terminal's font and size, so a row reads at the size of the
+    /// terminal beside it rather than the smaller UI font.
+    font: &'a Font,
+    font_size: Pixels,
 }
 
 /// A row action: runs `f` on `Zetta` when the row's menu entry or button
@@ -97,14 +102,18 @@ impl Zetta {
         let theme = self.window_theme(cx);
         let colors = theme.colors();
         let handle = cx.entity().downgrade();
+        let (font, font_size) = standalone_terminal_font(cx);
         let context = SidebarRowContext {
             colors,
             handle: &handle,
+            font: &font,
+            font_size,
         };
         let counts = self.tab_group_counts();
         let active = self.active_tab_group();
         let roots = self.projects.registry.roots();
         let entries = sidebar_entries(&SidebarSources {
+            custom: self.tab_groups.custom_groups(),
             roots,
             listings: &self.sidebar.worktrees,
             collapsed: &self.sidebar.collapsed,
@@ -113,19 +122,28 @@ impl Zetta {
         });
 
         let mut rows = Vec::with_capacity(entries.len() + 3);
+        let mut projects_header = false;
         let mut unlisted_header = false;
         for (position, entry) in entries.iter().enumerate() {
+            // Everything after Main and the named groups is under Projects.
+            if !projects_header
+                && !matches!(
+                    entry,
+                    SidebarEntry::Main { .. } | SidebarEntry::Custom { .. }
+                )
+            {
+                projects_header = true;
+                push_projects_header(&mut rows, roots.is_empty(), context);
+            }
             match entry {
                 SidebarEntry::Main { tab_count, active } => {
                     rows.push(main_row(*tab_count, *active, context));
-                    rows.push(projects_header(context));
-                    if roots.is_empty() {
-                        rows.push(sidebar_hint(
-                            "Add a project to give its tabs and worktrees a group of their own.",
-                            colors,
-                        ));
-                    }
                 }
+                SidebarEntry::Custom {
+                    name,
+                    tab_count,
+                    active,
+                } => rows.push(custom_row(position, name, *tab_count, *active, context)),
                 SidebarEntry::Project { .. } => rows.push(project_row(position, entry, context)),
                 SidebarEntry::Worktree {
                     project,
@@ -149,11 +167,14 @@ impl Zetta {
                 } => {
                     if !unlisted_header {
                         unlisted_header = true;
-                        rows.push(section_header("Other", None, colors));
+                        rows.push(section_header("Other", None, context));
                     }
                     rows.push(unlisted_row(position, group, *tab_count, *active, context));
                 }
             }
+        }
+        if !projects_header {
+            push_projects_header(&mut rows, roots.is_empty(), context);
         }
 
         v_flex()
@@ -189,13 +210,16 @@ fn tab_count_label(tab_count: usize) -> Option<AnyElement> {
     })
 }
 
-fn row_label(label: impl Into<SharedString>) -> impl IntoElement {
+fn row_label(label: impl Into<SharedString>, context: SidebarRowContext<'_>) -> impl IntoElement {
     div()
         .min_w_0()
         .overflow_hidden()
         .text_ellipsis()
         .whitespace_nowrap()
-        .child(Label::new(label).size(LabelSize::Small))
+        .font(context.font.clone())
+        .text_size(context.font_size)
+        .text_color(context.colors.text)
+        .child(label.into())
 }
 
 fn row_button(
@@ -212,10 +236,19 @@ fn row_button(
         .on_click(on_click)
 }
 
+/// Muted text in the terminal's font and size, like the rows around it.
+fn sidebar_text(text: &'static str, context: SidebarRowContext<'_>) -> gpui::Div {
+    div()
+        .font(context.font.clone())
+        .text_size(context.font_size)
+        .text_color(context.colors.text_muted)
+        .child(text)
+}
+
 fn section_header(
     title: &'static str,
     action: Option<AnyElement>,
-    colors: &ThemeColors,
+    context: SidebarRowContext<'_>,
 ) -> AnyElement {
     h_flex()
         .w_full()
@@ -223,23 +256,31 @@ fn section_header(
         .pb_0p5()
         .px_1p5()
         .justify_between()
-        .child(
-            Label::new(title)
-                .size(LabelSize::XSmall)
-                .color(Color::Custom(colors.text_muted)),
-        )
+        .child(sidebar_text(title, context))
         .children(action)
         .into_any_element()
 }
 
-fn sidebar_hint(text: &'static str, colors: &ThemeColors) -> AnyElement {
-    div()
+fn sidebar_hint(text: &'static str, context: SidebarRowContext<'_>) -> AnyElement {
+    sidebar_text(text, context)
         .px_1p5()
         .py_1()
-        .text_xs()
-        .text_color(colors.text_muted)
-        .child(text)
         .into_any_element()
+}
+
+/// The Projects header, and under it a hint while there are none.
+fn push_projects_header(
+    rows: &mut Vec<AnyElement>,
+    no_projects: bool,
+    context: SidebarRowContext<'_>,
+) {
+    rows.push(projects_header(context));
+    if no_projects {
+        rows.push(sidebar_hint(
+            "Add a project to give its tabs and worktrees a group of their own.",
+            context,
+        ));
+    }
 }
 
 fn projects_header(context: SidebarRowContext<'_>) -> AnyElement {
@@ -254,7 +295,7 @@ fn projects_header(context: SidebarRowContext<'_>) -> AnyElement {
             )
             .into_any_element(),
         ),
-        context.colors,
+        context,
     )
 }
 
@@ -283,16 +324,20 @@ fn main_row(tab_count: usize, active: bool, context: SidebarRowContext<'_>) -> A
     let row = ListItem::new("sidebar-main")
         .toggle_state(active)
         .start_slot(Icon::new(IconName::Terminal).size(IconSize::Small))
-        .child(row_label("Main"))
-        .end_slot::<AnyElement>(tab_count_label(tab_count))
-        .end_slot_on_hover(row_button(
-            "sidebar-main-new-tab",
-            IconName::Plus,
-            "New tab in Main",
-            on_zetta_click(handle, |this, window, cx| {
-                this.open_new_tab_in_group(TabGroup::Main, window, cx);
-            }),
-        ))
+        .child(row_label("Main", context))
+        // Always shown, like the Projects header's button, rather than
+        // swapped in on hover: it is the only pointer route to a new group.
+        .end_slot(
+            h_flex()
+                .gap_1()
+                .children(tab_count_label(tab_count))
+                .child(row_button(
+                    "sidebar-new-tab-group",
+                    IconName::Plus,
+                    "New tab group",
+                    |_, window, cx| window.dispatch_action(Box::new(NewTabGroup), cx),
+                )),
+        )
         .tooltip(Tooltip::text("The tabs that belong to no project"))
         .on_click(on_zetta_click(handle, |this, window, cx| {
             this.activate_tab_group(TabGroup::Main, window, cx);
@@ -307,6 +352,73 @@ fn main_row(tab_count: usize, active: bool, context: SidebarRowContext<'_>) -> A
             }),
         )
     })
+}
+
+fn custom_row(
+    position: usize,
+    name: &str,
+    tab_count: usize,
+    active: bool,
+    context: SidebarRowContext<'_>,
+) -> AnyElement {
+    let handle = context.handle;
+    let group = TabGroup::Custom(name.to_owned());
+    let row = ListItem::new(("sidebar-custom", position))
+        .toggle_state(active)
+        .start_slot(Icon::new(IconName::Blocks).size(IconSize::Small))
+        .child(row_label(name.to_owned(), context))
+        .end_slot::<AnyElement>(tab_count_label(tab_count))
+        .end_slot_on_hover({
+            let name = name.to_owned();
+            row_button(
+                ("sidebar-custom-remove", position),
+                IconName::Close,
+                "Remove group (its tabs move to Main)",
+                on_zetta_click(handle, move |this, _, cx| {
+                    this.remove_tab_group(&name, cx);
+                }),
+            )
+        })
+        .on_click({
+            let group = group.clone();
+            on_zetta_click(handle, move |this, window, cx| {
+                this.activate_tab_group(group.clone(), window, cx);
+            })
+        });
+    let menu_handle = handle.clone();
+    let name = name.to_owned();
+    with_row_menu(
+        ("sidebar-custom-menu", position),
+        row,
+        handle,
+        move |menu| {
+            let group = group.clone();
+            let rename = name.clone();
+            let remove = name.clone();
+            menu.entry(
+                "New Tab",
+                None,
+                on_zetta(&menu_handle, move |this, window, cx| {
+                    this.open_new_tab_in_group(group.clone(), window, cx);
+                }),
+            )
+            .entry(
+                "Rename…",
+                None,
+                on_zetta(&menu_handle, move |this, window, cx| {
+                    this.prompt_rename_tab_group(rename.clone(), window, cx);
+                }),
+            )
+            .separator()
+            .entry(
+                "Remove Group",
+                None,
+                on_zetta(&menu_handle, move |this, _, cx| {
+                    this.remove_tab_group(&remove, cx);
+                }),
+            )
+        },
+    )
 }
 
 fn project_row(
@@ -335,30 +447,17 @@ fn project_row(
         Some(reason) => format!("{}\n{reason}", root.display()).into(),
         None => root.display().to_string().into(),
     };
-    let hover_actions = h_flex()
-        .gap_0p5()
-        .when(can_create_worktree, |actions| {
-            let root = root.clone();
-            actions.child(row_button(
-                ("sidebar-project-new-worktree", position),
-                IconName::GitBranchPlus,
-                "New worktree",
-                on_zetta_click(handle, move |this, window, cx| {
-                    this.prompt_new_worktree(root.clone(), window, cx);
-                }),
-            ))
-        })
-        .child({
-            let group = group.clone();
-            row_button(
-                ("sidebar-project-new-tab", position),
-                IconName::Plus,
-                "New tab in this project",
-                on_zetta_click(handle, move |this, window, cx| {
-                    this.open_new_tab_in_group(group.clone(), window, cx);
-                }),
-            )
-        });
+    let new_worktree = can_create_worktree.then(|| {
+        let root = root.clone();
+        row_button(
+            ("sidebar-project-new-worktree", position),
+            IconName::GitBranchPlus,
+            "New worktree",
+            on_zetta_click(handle, move |this, window, cx| {
+                this.prompt_new_worktree(root.clone(), window, cx);
+            }),
+        )
+    });
     let row = ListItem::new(("sidebar-project", position))
         .toggle_state(*active)
         .when(*has_worktrees, |row| {
@@ -377,9 +476,9 @@ fn project_row(
             .size(IconSize::Small)
             .when(*loading, |icon| icon.color(Color::Muted)),
         )
-        .child(row_label(label.clone()))
+        .child(row_label(label.clone(), context))
         .end_slot::<AnyElement>(tab_count_label(*tab_count))
-        .end_slot_on_hover(hover_actions)
+        .when_some(new_worktree, |row, button| row.end_slot_on_hover(button))
         .tooltip(Tooltip::text(tooltip))
         .on_click({
             let group = group.clone();
@@ -478,19 +577,8 @@ fn worktree_row(
         .indent_level(1)
         .toggle_state(active)
         .start_slot(Icon::new(IconName::GitWorktree).size(IconSize::Small))
-        .child(row_label(worktree.label.clone()))
+        .child(row_label(worktree.label.clone(), context))
         .end_slot::<AnyElement>(tab_count_label(tab_count))
-        .end_slot_on_hover({
-            let group = group.clone();
-            row_button(
-                ("sidebar-worktree-new-tab", position),
-                IconName::Plus,
-                "New tab in this worktree",
-                on_zetta_click(handle, move |this, window, cx| {
-                    this.open_new_tab_in_group(group.clone(), window, cx);
-                }),
-            )
-        })
         .tooltip(Tooltip::text(tooltip))
         .on_click({
             let group = group.clone();
@@ -559,6 +647,7 @@ fn unlisted_row(
 ) -> AnyElement {
     let tooltip: SharedString = match group {
         TabGroup::Main => "Main".into(),
+        TabGroup::Custom(name) => name.clone().into(),
         TabGroup::Project(root) => {
             format!("{}\nNo longer a registered project", root.display()).into()
         }
@@ -572,12 +661,13 @@ fn unlisted_row(
         .start_slot(
             Icon::new(match group {
                 TabGroup::Worktree { .. } => IconName::GitWorktree,
+                TabGroup::Custom(_) => IconName::Blocks,
                 TabGroup::Main | TabGroup::Project(_) => IconName::Folder,
             })
             .size(IconSize::Small)
             .color(Color::Muted),
         )
-        .child(row_label(group.label()))
+        .child(row_label(group.label(), context))
         .end_slot::<AnyElement>(tab_count_label(tab_count))
         .tooltip(Tooltip::text(tooltip))
         .on_click(on_zetta_click(context.handle, move |this, window, cx| {

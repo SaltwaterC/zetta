@@ -293,6 +293,8 @@ actions!(
         ShowMainTabs,
         NextTabGroup,
         PreviousTabGroup,
+        NewTabGroup,
+        NewProject,
         NewWorktree
     ]
 );
@@ -378,6 +380,15 @@ struct OpenProject {
 #[action(namespace = zetta, no_json, no_register)]
 struct ActivateTabGroup {
     group: TabGroup,
+}
+
+/// Removes a named tab group, from the command palette. Names are the user's
+/// and live only as long as the window, so like [`ActivateTabGroup`] this is
+/// never bound in a keymap.
+#[derive(Clone, Debug, PartialEq, Action)]
+#[action(namespace = zetta, no_json, no_register)]
+struct RemoveTabGroup {
+    name: String,
 }
 
 static PERFORMANCE_OVERLAY_COUNT: AtomicUsize = AtomicUsize::new(0);
@@ -485,6 +496,7 @@ mod sidebar_render;
 mod stacked_panes;
 mod tab_bar_render;
 mod tab_capability;
+mod tab_group_ui;
 mod tab_groups;
 use tab_bar_render::*;
 use tab_groups::TabGroup;

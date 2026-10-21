@@ -329,6 +329,23 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.add_project(false, window, cx);
+    }
+
+    /// **zetta: new project**: the settings page's Add project, from anywhere,
+    /// then straight into the project's tab group.
+    pub(crate) fn new_project(
+        &mut self,
+        _: &NewProject,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.add_project(true, window, cx);
+    }
+
+    /// Asks for a directory and registers it as a project. With `enter`, the
+    /// project's tab group is then entered, which opens its first tab.
+    fn add_project(&mut self, enter: bool, window: &mut Window, cx: &mut Context<Self>) {
         let selection = gpui_platform::prompt_for_paths_in(
             cx,
             self.project_prompt_directory(cx),
@@ -376,18 +393,25 @@ impl Zetta {
                     .await;
                 this.update_in(cx, |this, window, cx| match result {
                     Ok((registry, config)) => {
+                        let root = config.root.clone();
                         this.projects.registry = registry;
                         this.projects.insert_config(config);
                         this.refresh_settings_project_roots(cx);
                         this.reschedule_project_detection(window, cx);
+                        this.sidebar_registry_changed(cx);
                         reload_projects_in_other_windows(window.window_handle().window_id(), cx);
+                        if enter {
+                            this.activate_tab_group(TabGroup::Project(root), window, cx);
+                        }
                     }
                     Err(error) => {
+                        let message = format!("Could not add project: {error:#}");
                         if let Some(editor) = this.settings_editor.as_mut() {
-                            editor.message =
-                                Some((Tone::Error, format!("Could not add project: {error:#}")));
+                            editor.message = Some((Tone::Error, message));
+                            cx.notify();
+                        } else {
+                            this.show_error_notice(message, cx);
                         }
-                        cx.notify();
                     }
                 })
                 .ok();

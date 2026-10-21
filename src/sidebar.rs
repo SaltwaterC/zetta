@@ -1,5 +1,6 @@
-//! The project sidebar: Main, the registered projects, and each project's
-//! worktrees, listed as the tab groups the tab bar switches between.
+//! The project sidebar: Main, the groups the user named, the registered
+//! projects, and each project's worktrees, listed as the tab groups the tab
+//! bar switches between.
 //!
 //! What a group *is* belongs to `tab_groups`; this module owns what the
 //! sidebar shows of them: whether it is open, which projects are collapsed,
@@ -87,6 +88,12 @@ pub(crate) enum SidebarEntry {
         tab_count: usize,
         active: bool,
     },
+    /// A group the user named, listed under Main.
+    Custom {
+        name: String,
+        tab_count: usize,
+        active: bool,
+    },
     Project {
         root: PathBuf,
         label: String,
@@ -121,6 +128,7 @@ impl SidebarEntry {
     pub(crate) fn group(&self) -> TabGroup {
         match self {
             Self::Main { .. } => TabGroup::Main,
+            Self::Custom { name, .. } => TabGroup::Custom(name.clone()),
             Self::Project { root, .. } => TabGroup::Project(root.clone()),
             Self::Worktree {
                 project, worktree, ..
@@ -135,6 +143,7 @@ impl SidebarEntry {
     pub(crate) fn tab_count(&self) -> usize {
         match self {
             Self::Main { tab_count, .. }
+            | Self::Custom { tab_count, .. }
             | Self::Project { tab_count, .. }
             | Self::Worktree { tab_count, .. }
             | Self::Unlisted { tab_count, .. } => *tab_count,
@@ -173,6 +182,7 @@ pub(crate) fn adjacent_tab_group(
 
 /// The inputs one frame's entry list is built from.
 pub(crate) struct SidebarSources<'a> {
+    pub(crate) custom: &'a [String],
     pub(crate) roots: &'a [PathBuf],
     pub(crate) listings: &'a HashMap<PathBuf, ProjectWorktrees>,
     pub(crate) collapsed: &'a HashSet<PathBuf>,
@@ -180,8 +190,9 @@ pub(crate) struct SidebarSources<'a> {
     pub(crate) active: &'a TabGroup,
 }
 
-/// Main, then each registered project followed by its worktrees, then any
-/// group with open tabs that none of those accounts for.
+/// Main, then the groups the user named, then each registered project
+/// followed by its worktrees, then any group with open tabs that none of those
+/// accounts for.
 ///
 /// A worktree group with open tabs is listed under its project even when the
 /// last listing does not include it — the listing may not have arrived yet,
@@ -189,6 +200,7 @@ pub(crate) struct SidebarSources<'a> {
 /// what the user is looking for.
 pub(crate) fn sidebar_entries(sources: &SidebarSources<'_>) -> Vec<SidebarEntry> {
     let SidebarSources {
+        custom,
         roots,
         listings,
         collapsed,
@@ -202,6 +214,15 @@ pub(crate) fn sidebar_entries(sources: &SidebarSources<'_>) -> Vec<SidebarEntry>
         active: *active == TabGroup::Main,
     }];
     listed.insert(TabGroup::Main);
+    for name in custom {
+        let group = TabGroup::Custom(name.clone());
+        entries.push(SidebarEntry::Custom {
+            name: name.clone(),
+            tab_count: count(&group),
+            active: *active == group,
+        });
+        listed.insert(group);
+    }
     for root in roots {
         let group = TabGroup::Project(root.clone());
         let listing = listings.get(root);
@@ -306,6 +327,15 @@ impl Zetta {
         self.activate_tab_group(action.group.clone(), window, cx);
     }
 
+    pub(crate) fn remove_tab_group_action(
+        &mut self,
+        action: &RemoveTabGroup,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.remove_tab_group(&action.name, cx);
+    }
+
     pub(crate) fn show_main_tabs(
         &mut self,
         _: &ShowMainTabs,
@@ -343,6 +373,7 @@ impl Zetta {
         let target = {
             let counts = self.tab_group_counts();
             let entries = sidebar_entries(&SidebarSources {
+                custom: self.tab_groups.custom_groups(),
                 roots: self.projects.registry.roots(),
                 listings: &self.sidebar.worktrees,
                 collapsed: &HashSet::new(),
@@ -384,8 +415,9 @@ impl Zetta {
         }
     }
 
-    /// The sidebar's palette commands: one per group the user can move to,
-    /// so the sidebar has a keyboard route that does not need it open.
+    /// The sidebar's palette commands: one per group the user can move to, and
+    /// one per named group to remove it, so the sidebar has a keyboard route
+    /// that does not need it open.
     pub(crate) fn tab_group_palette_commands(&self) -> Vec<PaletteCommand> {
         if !self.tab_groups_enabled() {
             return Vec::new();
@@ -393,6 +425,7 @@ impl Zetta {
         let counts = self.tab_group_counts();
         let active = self.active_tab_group();
         let entries = sidebar_entries(&SidebarSources {
+            custom: self.tab_groups.custom_groups(),
             roots: self.projects.registry.roots(),
             listings: &self.sidebar.worktrees,
             collapsed: &HashSet::new(),
@@ -406,6 +439,7 @@ impl Zetta {
                 let group = entry.group();
                 let name = match &group {
                     TabGroup::Main => unreachable!("Main has its own action"),
+                    TabGroup::Custom(name) => format!("zetta: show tab group: {name}"),
                     TabGroup::Project(root) => format!(
                         "zetta: show project tabs: {} ({})",
                         group.label(),
@@ -424,6 +458,16 @@ impl Zetta {
                     action: Box::new(ActivateTabGroup { group }),
                 }
             })
+            .chain(
+                self.tab_groups
+                    .custom_groups()
+                    .iter()
+                    .map(|name| PaletteCommand {
+                        name: format!("zetta: remove tab group: {name}"),
+                        shortcut: None,
+                        action: Box::new(RemoveTabGroup { name: name.clone() }),
+                    }),
+            )
             .collect()
     }
 }

@@ -62,11 +62,20 @@ that sorts the window's tabs into groups. Press `Ctrl-Shift-Z`, or run
 
 - **Main** holds the tabs that belong to no project, which is where every tab
   starts out.
+- Tab groups you create are listed under Main, in the order you created them.
+  The **+** on the Main row, or **zetta: new tab group** in the command
+  palette, asks for a name and opens the new group with a tab in it. Names
+  must not be blank, and no two groups may share a name, ignoring case. Hover
+  a group and click its **×** to remove it, or run **zetta: remove tab
+  group**; its right-click menu also renames it. Removing a group does not
+  close its tabs: they move to Main.
 - Each registered project has its own group, and each of the project's linked
   Git worktrees has a group nested under the project.
 
 Clicking a row switches the tab bar to that group's tabs. Zetta returns to the
 tab you last used there, and opens a tab in the group if it has none yet.
+Clicking the group you are already in does nothing. To open another tab in it,
+use the tab bar's **+**.
 
 `Ctrl-Shift-]` moves to the next group and `Ctrl-Shift-[` to the previous one,
 in the sidebar's order and wrapping around, whether or not the sidebar is
@@ -80,16 +89,19 @@ you.
 A tab joins the group you are viewing when you open it. Opening a project,
 from the palette or with `zetta project open`, puts its tab in that project's
 group. A worktree group's first tab starts in the worktree. The number on a
-row is how many tabs that group holds. Hover a row to get a button that opens
-a tab in that group. The **+** beside **Projects** opens the project settings,
-where projects are added and removed.
+row is how many tabs that group holds. A row's right-click menu opens a tab in
+that group without leaving the one you are in. The **+** beside **Projects**
+opens the project settings, where projects are added and removed. **zetta: new
+project** in the command palette adds one directly: pick its directory, and
+Zetta registers it and opens its group.
 
 Groups are not saved with a session. A tab that comes back, whether it was
 reattached, resumed, reopened after its window closed or joined from a shared
 session, is placed by where its active pane is. A tab inside a worktree goes to
 that worktree's group, a tab inside a project goes to the project's group, and
 any other tab goes to Main. So a project tab you `cd`'d out of comes back in
-Main. A worktree that `zwt` did not create is recognised only once the sidebar
+Main, and so does a tab from a group you created. Those groups themselves
+belong to the window and last until it closes. A worktree that `zwt` did not create is recognised only once the sidebar
 has listed it. Until the pane reports its directory, the tab waits in the group
 you are viewing. A remote pane always stays there, because its directory is on
 another host.

@@ -137,6 +137,71 @@ fn closing_without_groups_keeps_the_ungrouped_selection() {
 }
 
 #[test]
+fn entering_an_empty_group_opens_its_first_tab() {
+    let groups = [TabGroup::Main, project("api")];
+
+    assert_eq!(
+        group_entry(&groups, 0, None, &project("web"), |group| group),
+        GroupEntry::OpenFirstTab
+    );
+    assert_eq!(
+        group_entry(&groups, 0, Some(1), &project("web"), |group| group),
+        GroupEntry::OpenFirstTab,
+        "a remembered tab that has left the group does not count as one of its tabs"
+    );
+    let empty: [TabGroup; 0] = [];
+    assert_eq!(
+        group_entry(&empty, 0, None, &TabGroup::Main, |group| group),
+        GroupEntry::OpenFirstTab
+    );
+}
+
+#[test]
+fn entering_the_group_the_user_is_in_opens_nothing() {
+    let groups = [TabGroup::Main, project("api"), project("api")];
+
+    assert_eq!(
+        group_entry(&groups, 1, None, &project("api"), |group| group),
+        GroupEntry::AlreadyThere
+    );
+    assert_eq!(
+        group_entry(&groups, 2, Some(1), &project("api"), |group| group),
+        GroupEntry::AlreadyThere,
+        "not even a switch back to the remembered tab"
+    );
+}
+
+#[test]
+fn entering_a_group_with_tabs_returns_to_one_rather_than_opening_another() {
+    let groups = [
+        TabGroup::Main,
+        project("api"),
+        worktree("api", "fix"),
+        project("api"),
+    ];
+
+    assert_eq!(
+        group_entry(&groups, 0, Some(3), &project("api"), |group| group),
+        GroupEntry::Switch(3),
+        "the tab it was last on"
+    );
+    assert_eq!(
+        group_entry(&groups, 0, None, &project("api"), |group| group),
+        GroupEntry::Switch(1),
+        "else its first"
+    );
+    assert_eq!(
+        group_entry(&groups, 1, Some(2), &project("api"), |group| group),
+        GroupEntry::AlreadyThere
+    );
+    assert_eq!(
+        group_entry(&groups, 1, Some(2), &TabGroup::Main, |group| group),
+        GroupEntry::Switch(0),
+        "a remembered tab from another group is ignored"
+    );
+}
+
+#[test]
 fn a_group_remembers_its_tab_until_the_tab_closes() {
     let mut state = TabGroupState::default();
     state.remember(project("api"), 7);
@@ -321,4 +386,64 @@ fn a_tab_waits_to_be_placed_only_until_it_arrives_or_closes() {
     assert!(!state.arrived(7));
     state.forget_tab(8);
     assert!(!state.arrived(8));
+}
+
+#[test]
+fn a_tab_group_name_must_not_be_blank() {
+    assert!(validate_tab_group_name(&[], "", None).is_err());
+    assert!(validate_tab_group_name(&[], "   ", None).is_err());
+    assert_eq!(
+        validate_tab_group_name(&[], "  scratch ", None),
+        Ok("scratch".to_owned()),
+        "surrounding whitespace is not part of the name"
+    );
+}
+
+#[test]
+fn a_tab_group_name_must_not_be_taken_ignoring_case() {
+    let existing = ["Scratch".to_owned(), "Deploys".to_owned()];
+
+    assert!(validate_tab_group_name(&existing, "scratch", None).is_err());
+    assert!(validate_tab_group_name(&existing, "main", None).is_err());
+    assert!(validate_tab_group_name(&existing, "Ünïcode", None).is_ok());
+    assert!(validate_tab_group_name(&["ÜNÏCODE".to_owned()], "ünïcode", None).is_err());
+    assert_eq!(
+        validate_tab_group_name(&existing, "scratch", Some("Scratch")),
+        Ok("scratch".to_owned()),
+        "a rename may change only the case of its own name"
+    );
+    assert!(validate_tab_group_name(&existing, "deploys", Some("Scratch")).is_err());
+}
+
+#[test]
+fn renaming_a_tab_group_keeps_its_place_and_remembered_tab() {
+    let mut state = TabGroupState::default();
+    state.add_custom("one".to_owned());
+    state.add_custom("two".to_owned());
+    state.remember(TabGroup::Custom("one".to_owned()), 9);
+
+    state.rename_custom("one", "first".to_owned());
+
+    assert_eq!(state.custom_groups(), ["first", "two"]);
+    assert_eq!(
+        state.remembered(&TabGroup::Custom("first".to_owned())),
+        Some(9)
+    );
+    assert_eq!(state.remembered(&TabGroup::Custom("one".to_owned())), None);
+
+    state.remove_custom("first");
+    assert_eq!(state.custom_groups(), ["two"]);
+    assert_eq!(
+        state.remembered(&TabGroup::Custom("first".to_owned())),
+        None
+    );
+}
+
+#[test]
+fn a_named_group_is_not_a_project() {
+    let group = TabGroup::Custom("scratch".to_owned());
+
+    assert_eq!(group.label(), "scratch");
+    assert_eq!(group.project_root(), None);
+    assert_eq!(group.worktree_root(), None);
 }
