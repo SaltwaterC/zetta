@@ -748,9 +748,13 @@ impl Zetta {
 
     /// A normal launch must not silently turn a failed daemon handoff into an
     /// in-process background session. Put the tab back where it was so the
-    /// user can retry after fixing the daemon. Its readers were stopped for
-    /// the handover, so what was typed at it since is dropped rather than held
-    /// for a backend that is not coming.
+    /// user can retry after fixing the daemon.
+    ///
+    /// Its readers were stopped for the handover, so putting it back is not
+    /// enough: every pane is taken back from the multiplexer, which still has
+    /// them all. Input typed meanwhile is held for that, and dropped only for a
+    /// pane nothing will read again — a stacked task terminal, or a tab whose
+    /// window is going away.
     fn recover_refused_handover(
         &mut self,
         tab: Tab,
@@ -759,17 +763,18 @@ impl Zetta {
         window: Option<&mut Window>,
         cx: &mut Context<Self>,
     ) {
-        for terminal in tab.panes.iter().flat_map(|pane| {
-            pane.terminal.iter().chain(
-                pane.stack
-                    .entries
-                    .iter()
-                    .filter_map(|entry| entry.terminal.as_ref()),
-            )
-        }) {
+        let stacked = tab
+            .panes
+            .iter()
+            .flat_map(|pane| pane.stack.entries.iter())
+            .filter_map(|entry| entry.terminal.as_ref());
+        for terminal in stacked {
             terminal.update(cx, |terminal, _| terminal.discard_held_input());
         }
-        let HandoverOrigin::Tab { index, shared } = origin else {
+        let (HandoverOrigin::Tab { index, shared }, Some(window)) = (origin, window) else {
+            for terminal in tab.panes.iter().filter_map(|pane| pane.terminal.as_ref()) {
+                terminal.update(cx, |terminal, _| terminal.discard_held_input());
+            }
             log::warn!(
                 "could not hand tab {} to the multiplexer as its window closed: {error:#}",
                 tab.id
@@ -786,9 +791,6 @@ impl Zetta {
         let insertion_index = index.min(self.tabs.len());
         self.tabs.insert(insertion_index, tab);
         self.active_tab = insertion_index;
-        let Some(window) = window else {
-            return;
-        };
         if shared
             && let Some(runtime) = self
                 .mux_panes
@@ -797,7 +799,147 @@ impl Zetta {
         {
             self.rebind_shared_session(tab_id, runtime, window, cx);
         }
+        self.reattach_stranded_panes(tab_id, window, cx);
         self.focus_active(window, cx);
+    }
+
+    /// Takes back from the multiplexer every pane of a returned tab that its
+    /// handover left with nothing reading it.
+    ///
+    /// A detach stops each pane's reader before it asks the daemon anything,
+    /// and moving a tab to the background stops its shared relays before that,
+    /// so a refusal at either point leaves panes whose output is frozen, whose
+    /// input goes nowhere, and whose programs carry on unseen. Putting the tab
+    /// back on screen does not change any of that.
+    ///
+    /// The daemon releases nothing it refuses, so each pane is still held by
+    /// this process — or, if it became shared meanwhile, still in its shared
+    /// set — and an ordinary attach hands it back in whichever form it is in.
+    pub(super) fn reattach_stranded_panes(
+        &mut self,
+        tab_id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (Some(runtime), Some(session_id)) = (
+            self.mux_panes
+                .runtime_for_tab(tab_id)
+                .or_else(|| self.mux.clone()),
+            self.mux_panes.session_id(tab_id),
+        ) else {
+            return;
+        };
+        let stranded = self
+            .tabs
+            .iter()
+            .find(|tab| tab.id == tab_id)
+            .into_iter()
+            .flat_map(|tab| tab.panes.iter())
+            .filter_map(|pane| {
+                let terminal = pane.terminal.clone()?;
+                let mux_pane_id = self.mux_panes.mux_pane_id(pane.id)?;
+                let ids = MuxPaneIds {
+                    tab_id,
+                    pane_id: pane.id,
+                    session_id,
+                    mux_pane_id,
+                };
+                terminal.read(cx).awaits_reader().then_some((ids, terminal))
+            })
+            .collect::<Vec<_>>();
+        for (ids, terminal) in stranded {
+            let client = runtime.client().clone();
+            let secret = runtime.session_secret();
+            let runtime = runtime.clone();
+            cx.spawn_in(window, async move |this, cx| {
+                let attached = cx
+                    .background_spawn(async move {
+                        client.attach_with_secret(
+                            ids.session_id,
+                            Some(ids.mux_pane_id),
+                            secret.as_ref(),
+                        )
+                    })
+                    .await;
+                this.update_in(cx, |this, window, cx| {
+                    this.adopt_stranded_pane(ids, terminal, attached, &runtime, window, cx);
+                })
+                .ok();
+            })
+            .detach();
+        }
+    }
+
+    /// Connects a stranded pane's terminal to what the multiplexer handed
+    /// back for it, the way a grant or a revoke would have.
+    fn adopt_stranded_pane(
+        &mut self,
+        ids: MuxPaneIds,
+        terminal: Entity<Terminal>,
+        attached: anyhow::Result<zmux::client::AttachOutcome>,
+        runtime: &MuxRuntime,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let failure = match attached {
+            Ok(zmux::client::AttachOutcome::Attached { mut pane, .. }) => {
+                // The daemon never read this pane — a refused detach releases
+                // nothing — so all it retained is the screen checkpointed when
+                // the session was offered, which is older than the grid this
+                // terminal kept. Replaying it would paint that older screen
+                // over the current one.
+                pane.replay.clear();
+                let attachment_client_id = pane.attachment_client_id().clone();
+                let adopted = self
+                    .pty_adoption_options(ids.tab_id, ids.pane_id, cx)
+                    .is_some_and(|options| {
+                        self.complete_grant_conversion(
+                            ids,
+                            pane,
+                            attachment_client_id.clone(),
+                            terminal.clone(),
+                            options,
+                            runtime,
+                            window,
+                            cx,
+                        )
+                    });
+                if adopted {
+                    return;
+                }
+                // Held again, and shown nowhere: the daemon has to read it.
+                let client = runtime.client().clone();
+                cx.background_spawn(async move {
+                    super::shared_panes::give_pane_back(
+                        &client,
+                        ids.session_id,
+                        ids.mux_pane_id,
+                        &attachment_client_id,
+                    );
+                })
+                .detach();
+                None
+            }
+            Ok(zmux::client::AttachOutcome::SharedAttached { pane, .. }) => {
+                self.complete_revoke_conversion(ids, pane, terminal.clone(), runtime, window, cx);
+                return;
+            }
+            Ok(
+                zmux::client::AttachOutcome::AuthenticationRequired
+                | zmux::client::AttachOutcome::AuthenticationFailed,
+            ) => Some(anyhow::anyhow!("the session asked for its secret")),
+            Err(error) => Some(error),
+        };
+        terminal.update(cx, |terminal, _| terminal.discard_held_input());
+        if let Some(error) = failure {
+            self.show_error_notice(
+                format!(
+                    "Could not take a pane of the refused session back from the multiplexer; it \
+                     no longer updates: {error:#}"
+                ),
+                cx,
+            );
+        }
     }
 
     /// The commit of an offer or a withdrawal.

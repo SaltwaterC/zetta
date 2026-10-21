@@ -264,10 +264,17 @@ pub struct SharedPane {
     /// performed while it is held.
     reader_handoffs: Arc<Mutex<VecDeque<SharedReaderHandoff>>>,
     /// Set by the reader when its connection broke and no replacement was
-    /// waiting, cleared when one is installed. A window's recovery is told
-    /// by the daemon and supplies the replacement itself; a holder without
+    /// waiting, cleared when one is installed. A window's recovery is usually
+    /// told by the daemon and supplies the replacement itself; a holder without
     /// that subscription — `zmux relay-pane` — has only this to go on.
     stream_lost: Arc<AtomicBool>,
+    /// Signalled by the reader each time [`Self::stream_lost`] becomes set.
+    ///
+    /// The daemon's [`Event::SharedStreamFailed`] is not enough on its own:
+    /// it comes from the serve loop of the daemon that owned the connection,
+    /// and a daemon that replaced itself took every relay with it and has no
+    /// serve loop left to report from. Bounded at one, like `size_signal`.
+    lost_signal: (async_channel::Sender<()>, async_channel::Receiver<()>),
     /// Output produced while the pane was detached or shared, to be replayed
     /// into a fresh terminal before it is shown.
     pub replay: Vec<u8>,
@@ -354,6 +361,7 @@ impl SharedPane {
             pending_size_frame: self.pending_size_frame.clone(),
             reader_handoffs: self.reader_handoffs.clone(),
             stream_lost: self.stream_lost.clone(),
+            lost_signal: self.lost_signal.0.clone(),
             reconnect_replay: VecDeque::new(),
         }
     }
@@ -362,6 +370,25 @@ impl SharedPane {
     /// [`Self::replace_connection_from`] for what repairs it.
     pub fn stream_lost(&self) -> bool {
         self.stream_lost.load(Ordering::Acquire)
+    }
+
+    /// Resolves each time the stream breaks with nothing to replace it, so a
+    /// holder can wait for that instead of polling [`Self::stream_lost`].
+    pub fn stream_lost_signal(&self) -> async_channel::Receiver<()> {
+        self.lost_signal.1.clone()
+    }
+
+    /// Whether a replacement is queued that the reader has not installed yet.
+    ///
+    /// The reader installs one only once its current connection fails, so a
+    /// failure reported while one waits is already answered: attaching another
+    /// would leave two queued, and the writer on the one nobody reads.
+    pub fn replacement_pending(&self) -> bool {
+        !self
+            .reader_handoffs
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_empty()
     }
 
     /// Replaces a failed relay while the terminal's reader remains alive. The
@@ -513,6 +540,7 @@ impl SharedPane {
             pending_size_frame: Arc::new(Mutex::new(None)),
             reader_handoffs: Arc::new(Mutex::new(VecDeque::new())),
             stream_lost: Arc::new(AtomicBool::new(false)),
+            lost_signal: async_channel::bounded(1),
             replay,
         }
     }
@@ -538,6 +566,7 @@ pub struct SharedReader {
     pending_size_frame: Arc<Mutex<Option<(SessionRevision, u16, u16)>>>,
     reader_handoffs: Arc<Mutex<VecDeque<SharedReaderHandoff>>>,
     stream_lost: Arc<AtomicBool>,
+    lost_signal: async_channel::Sender<()>,
     reconnect_replay: VecDeque<u8>,
 }
 
@@ -677,9 +706,14 @@ impl SharedReader {
     /// Either way the caller is told `WouldBlock`, so a holder waiting for a
     /// replacement keeps polling; this is how one that has to make its own
     /// replacement finds out it must.
+    ///
+    /// Signals only the transition: the reader keeps failing on the same dead
+    /// connection until a replacement arrives, and that is one loss, not one
+    /// per read.
     fn note_failure(&self, error: &anyhow::Error) {
-        if !is_would_block(error) {
-            self.stream_lost.store(true, Ordering::Release);
+        if !is_would_block(error) && !self.stream_lost.swap(true, Ordering::AcqRel) {
+            // Full means a signal is already pending, which says the same thing.
+            let _ = self.lost_signal.try_send(());
         }
     }
 }

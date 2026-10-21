@@ -7081,6 +7081,48 @@ fn connect_claiming(daemon: &TestDaemon, client_process_id: u32, request: Reques
     connection
 }
 
+/// A window whose detach the daemon refused has already stopped reading its
+/// panes, and takes them back with an ordinary attach — without the secret,
+/// which it never kept. Holding the pane is what lets it: once the session
+/// really is in the background the same process is only its owner, and
+/// asking for it back needs the secret again.
+#[test]
+fn the_holder_of_a_protected_pane_takes_it_back_without_the_secret() {
+    let daemon = TestDaemon::start();
+    let client = daemon.client();
+    let pane = client
+        .spawn(spawn_request(None, "printf ready; sleep 60"))
+        .unwrap();
+    let descriptor = std::fs::File::from(pane.descriptor);
+    read_until(&descriptor, "ready");
+    share_session(&client, pane.session_id, pane.pane_id);
+    drop(descriptor);
+
+    let outcome = client
+        .attach(pane.session_id, Some(pane.pane_id), None)
+        .unwrap();
+    let AttachOutcome::Attached { pane: again, .. } = outcome else {
+        panic!("the process holding the pane was asked for the secret");
+    };
+    drop(std::fs::File::from(again.descriptor));
+
+    client
+        .detach(
+            pane.session_id,
+            summary(pane.session_id, pane.pane_id),
+            serde_json::Value::Null,
+            None,
+            Vec::new(),
+        )
+        .unwrap();
+    assert!(matches!(
+        client
+            .attach(pane.session_id, Some(pane.pane_id), None)
+            .unwrap(),
+        AttachOutcome::AuthenticationRequired
+    ));
+}
+
 /// Naming the window that is handing a protected pane over is not being it.
 ///
 /// The holder answering its own revoke re-attaches without the secret, which

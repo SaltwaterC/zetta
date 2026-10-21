@@ -5506,6 +5506,21 @@ impl Terminal {
         matches!(self.terminal_type, TerminalType::Pty { .. })
     }
 
+    /// Whether this terminal's child is still running but nothing feeds the
+    /// grid: no pty loop and no byte stream.
+    ///
+    /// The state a handover leaves between retiring one reader and attaching
+    /// the next, and so the state a *refused* handover has to repair. Either
+    /// shape of pane can be in it: one built on a pty, and one built as a byte
+    /// stream, which is display-only underneath. A child that has ended is
+    /// not, although its pty has been released too.
+    pub fn awaits_reader(&self) -> bool {
+        !self.child_process_ended
+            && self.byte_stream.is_none()
+            && self.subprocess.is_none()
+            && !matches!(&self.terminal_type, TerminalType::Pty { io: Some(_), .. })
+    }
+
     pub fn write_init_command_after_startup(
         &mut self,
         input: impl Into<Cow<'static, [u8]>>,

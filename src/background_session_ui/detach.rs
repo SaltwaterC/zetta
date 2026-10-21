@@ -609,6 +609,16 @@ impl Zetta {
         if self.refuse_during_session_handover(tab_id, cx) {
             return;
         }
+        // Refused here rather than by the handover, which says the same but
+        // only after the panes below have been dropped: a remote pane's link
+        // cannot be taken back the way a local pane's terminal can.
+        if self.mux_panes.is_remote_tab(tab_id) {
+            self.show_notice(
+                "Remote sessions are live-only and cannot be kept as local background sessions.",
+                cx,
+            );
+            return;
+        }
         self.set_tab_remote_clipboard_paste(tab_id, false, cx);
         self.remote_clipboard_paste_tabs.remove(&tab_id);
         self.remote_clipboard_copy_blocked_tabs.remove(&tab_id);
@@ -638,19 +648,23 @@ impl Zetta {
         };
         if let Some(tab) = self.store_background_tab(tab, authentication, origin, Some(window), cx)
         {
-            // Refused before anything was stopped, so the tab is exactly as it
-            // was: put it back where it was, still shared if it was.
+            // Refused before any pty loop was stopped, but after the shared
+            // relays were: put the tab back where it was, still shared if it
+            // was, and take those panes back from the multiplexer.
             let insertion_index = index.min(self.tabs.len());
             self.tabs.insert(insertion_index, tab);
             self.active_tab = insertion_index;
             #[cfg(feature = "zmux")]
-            if shared_tab
-                && let Some(runtime) = self
-                    .mux_panes
-                    .runtime_for_tab(tab_id)
-                    .or_else(|| self.mux.clone())
             {
-                self.rebind_shared_session(tab_id, runtime, window, cx);
+                if shared_tab
+                    && let Some(runtime) = self
+                        .mux_panes
+                        .runtime_for_tab(tab_id)
+                        .or_else(|| self.mux.clone())
+                {
+                    self.rebind_shared_session(tab_id, runtime, window, cx);
+                }
+                self.reattach_stranded_panes(tab_id, window, cx);
             }
         }
         self.finish_background_session_change(cx);

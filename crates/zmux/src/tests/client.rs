@@ -841,6 +841,63 @@ fn a_shared_reader_moves_to_a_queued_replacement_instead_of_ending_on_shared_clo
     assert_eq!(received, b"beforereplayedlive");
 }
 
+/// The stall this pins: a daemon replacing itself closes every relay, and the
+/// replacement has no serve loop left to report the failure from. A window
+/// that waited for that report kept a pane frozen on a dead connection, so the
+/// reader has to say itself — once per loss, however often it retries.
+#[cfg(unix)]
+#[test]
+fn a_shared_reader_signals_a_lost_stream_once_until_a_replacement_is_installed() {
+    use std::io::Read as _;
+
+    let (initial_server, initial_client) = Stream::pair().unwrap();
+    let shared =
+        SharedPane::from_connection(1, 2, 3, Connection::new(initial_client), Vec::new(), None);
+    let lost = shared.stream_lost_signal();
+    let mut reader = shared.reader();
+    drop(initial_server);
+
+    let mut byte = [0; 1];
+    assert_eq!(
+        reader.read(&mut byte).unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+    assert!(shared.stream_lost());
+    assert!(lost.try_recv().is_ok());
+    // Drained in between, so a signal per retry would show up here rather
+    // than collapse into the one already pending.
+    for _ in 0..2 {
+        assert_eq!(
+            reader.read(&mut byte).unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    }
+    assert!(lost.try_recv().is_err(), "one loss is one signal");
+
+    let (replacement_server, replacement_client) = Stream::pair().unwrap();
+    let replacement = SharedPane::from_connection(
+        1,
+        2,
+        3,
+        Connection::new(replacement_client),
+        b"x".to_vec(),
+        None,
+    );
+    shared.replace_connection_from(&replacement).unwrap();
+    assert!(shared.replacement_pending());
+    reader.read_exact(&mut byte).unwrap();
+    assert!(!shared.replacement_pending());
+    assert!(!shared.stream_lost());
+
+    // The replacement breaking is a new loss, and is signalled again.
+    drop(replacement_server);
+    assert_eq!(
+        reader.read(&mut byte).unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+    assert!(lost.try_recv().is_ok());
+}
+
 /// A holder that applies no grid can let go of a size frame it never matched,
 /// and the stream then carries on with what was queued behind it.
 #[cfg(unix)]

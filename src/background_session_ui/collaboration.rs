@@ -81,6 +81,11 @@ struct SharedSessionBinding {
     /// applied from several places at once, so without this the same pane is
     /// attached twice when two of them see it missing before either finishes.
     attaching: HashSet<u64>,
+    /// The stable ids whose broken stream this window is replacing. A stream
+    /// can be reported broken twice — by the daemon, and by the pane's own
+    /// reader — and answering both attaches a second replacement that nothing
+    /// reads.
+    reattaching: HashSet<u64>,
     /// How to reach the daemon for this session. Kept here because a snapshot
     /// is applied from callers that have no connection of their own — a
     /// committed spawn, a conflict response — and every one of them may have to
@@ -206,6 +211,7 @@ impl SharedSessionCoordinator {
                 publication_scheduled: false,
                 watch_id: None,
                 attaching: HashSet::new(),
+                reattaching: HashSet::new(),
                 connection: None,
             },
         );
@@ -311,6 +317,20 @@ impl SharedSessionCoordinator {
     pub(crate) fn end_attach(&mut self, key: &SharedSessionKey, mux_pane_id: u64) {
         if let Some(session) = self.sessions.get_mut(key) {
             session.attaching.remove(&mux_pane_id);
+        }
+    }
+
+    /// Claims a pane's stream replacement, or reports that another task is
+    /// already replacing it. Released by [`Self::end_reattach`].
+    fn begin_reattach(&mut self, key: &SharedSessionKey, mux_pane_id: u64) -> bool {
+        self.sessions
+            .get_mut(key)
+            .is_some_and(|session| session.reattaching.insert(mux_pane_id))
+    }
+
+    fn end_reattach(&mut self, key: &SharedSessionKey, mux_pane_id: u64) {
+        if let Some(session) = self.sessions.get_mut(key) {
+            session.reattaching.remove(&mux_pane_id);
         }
     }
 
@@ -1692,6 +1712,35 @@ impl Zetta {
             .is_some_and(|local_pane_id| self.shared_panes.contains_key(&local_pane_id))
     }
 
+    /// Whether the pane already has a replacement stream its reader has not
+    /// installed yet, which answers any failure reported in the meantime.
+    fn shared_stream_replacement_pending(&self, key: &SharedSessionKey, mux_pane_id: u64) -> bool {
+        self.shared_collaboration
+            .local_pane_id(key, mux_pane_id)
+            .and_then(|local_pane_id| self.shared_panes.get(&local_pane_id))
+            .is_some_and(|entry| entry.pane.replacement_pending())
+    }
+
+    /// Replaces a stream the pane's own reader found broken.
+    ///
+    /// The daemon's `SharedStreamFailed` is what usually starts this, but only
+    /// the daemon that served the stream can send it. One that replaced itself
+    /// closed every relay on the way and has no record of them, so without
+    /// this the pane waits forever on a connection that no longer exists:
+    /// output stops, input goes nowhere, and the program carries on unseen.
+    pub(crate) fn reattach_lost_shared_stream(
+        &mut self,
+        key: &SharedSessionKey,
+        mux_pane_id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Task<()> {
+        let Some(connection) = self.shared_collaboration.connection(key) else {
+            return Task::ready(());
+        };
+        self.handle_shared_stream_failure(key, mux_pane_id, connection, window, cx)
+    }
+
     fn handle_shared_stream_failure(
         &mut self,
         key: &SharedSessionKey,
@@ -1701,7 +1750,10 @@ impl Zetta {
         cx: &mut Context<Self>,
     ) -> Task<()> {
         let session_id = key.session_id;
-        if !self.shared_stream_is_replaceable(key, pane_id) {
+        if !self.shared_stream_is_replaceable(key, pane_id)
+            || self.shared_stream_replacement_pending(key, pane_id)
+            || !self.shared_collaboration.begin_reattach(key, pane_id)
+        {
             return Task::ready(());
         }
         log::warn!("shared stream for session {session_id} pane {pane_id} failed; reattaching it");
@@ -1771,6 +1823,10 @@ impl Zetta {
                 // `continue` above.
                 break;
             }
+            this.update(cx, |this, _| {
+                this.shared_collaboration.end_reattach(&key, pane_id);
+            })
+            .ok();
         })
     }
 

@@ -18,6 +18,22 @@ use std::sync::{
 const SHARED_SIZE_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const SHARED_SIZE_REPORT_DEBOUNCE: Duration = Duration::from_millis(100);
 
+/// How long a pane whose reader found its stream broken waits before each
+/// attempt to replace the stream itself.
+///
+/// The first wait leaves room for the daemon's own `SharedStreamFailed`, which
+/// is the usual route and must not be raced into a second replacement. The
+/// later ones outlast a daemon replacing itself on a loaded machine, which is
+/// the case nothing else recovers from; their sum is close to the minute the
+/// subscription itself waits for a replacement.
+const LOST_STREAM_REATTACH_DELAYS: [Duration; 5] = [
+    Duration::from_millis(500),
+    Duration::from_secs(2),
+    Duration::from_secs(5),
+    Duration::from_secs(10),
+    Duration::from_secs(20),
+];
+
 /// Tells the multiplexer this window cannot show a pane it was handed.
 ///
 /// Both handovers reach a point where the multiplexer has stopped reading the
@@ -28,8 +44,11 @@ const SHARED_SIZE_REPORT_DEBOUNCE: Duration = Duration::from_millis(100);
 /// finds itself there has to say so, or the pane's pty fills and the program
 /// on the far end of it stops reading input for every viewer.
 ///
+/// A refused detach reaches the same point when a pane it takes back cannot be
+/// shown after all.
+///
 /// Blocking, and called from a background task for that reason.
-fn give_pane_back(
+pub(super) fn give_pane_back(
     client: &zmux::client::Client,
     session_id: u64,
     mux_pane_id: u64,
@@ -200,6 +219,7 @@ impl Zetta {
     ) {
         let executor = cx.background_executor().clone();
         let size_arrived = pane.size_arrived();
+        let stream_lost = pane.stream_lost_signal();
         cx.spawn_in(window, async move |this, cx| {
             // The daemon advertises the grid this stream attached at. Apply
             // that client-only viewport once the tab has real layout bounds;
@@ -257,7 +277,9 @@ impl Zetta {
                 // wakes the thread that draws twice a second.
                 let exited = Box::pin(exit_rx.recv());
                 let resized = Box::pin(size_arrived.recv());
-                match futures::future::select(exited, resized).await {
+                let lost = Box::pin(stream_lost.recv());
+                let woken = futures::future::select(resized, lost);
+                match futures::future::select(exited, woken).await {
                     futures::future::Either::Left((report, _)) => {
                         let Ok(report) = report else { return };
                         this.update_in(cx, |this, _window, cx| {
@@ -266,14 +288,84 @@ impl Zetta {
                         .ok();
                         return;
                     }
-                    futures::future::Either::Right((arrived, _)) => {
+                    futures::future::Either::Right((
+                        futures::future::Either::Left((arrived, _)),
+                        _,
+                    )) => {
                         if arrived.is_err() {
                             return;
                         }
                         pending_initial_viewport = pane.take_initial_viewport();
                         pending_size = pane.take_revisioned_sizes().last().copied();
                     }
+                    futures::future::Either::Right((
+                        futures::future::Either::Right((lost, _)),
+                        _,
+                    )) => {
+                        if lost.is_err() {
+                            return;
+                        }
+                        // Off this loop: the replacement's first frame may be a
+                        // size, and this loop is what applies it.
+                        this.update_in(cx, |this, window, cx| {
+                            this.recover_lost_shared_stream(
+                                tab_id,
+                                pane_id,
+                                pane.clone(),
+                                window,
+                                cx,
+                            );
+                        })
+                        .ok();
+                    }
                 }
+            }
+        })
+        .detach();
+    }
+
+    /// Replaces a shared pane's stream once its reader has found it broken and
+    /// nothing else has replaced it.
+    ///
+    /// Each attempt first checks that the stream is still lost and has no
+    /// replacement queued, so the daemon's report, when there is one, is the
+    /// route that answers it. Gives up quietly once the pane is no longer this
+    /// window's shared pane: closed, handed over, or taken back exclusively.
+    fn recover_lost_shared_stream(
+        &self,
+        tab_id: u64,
+        pane_id: u64,
+        pane: Arc<zmux::client::SharedPane>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let executor = cx.background_executor().clone();
+        cx.spawn_in(window, async move |this, cx| {
+            for delay in LOST_STREAM_REATTACH_DELAYS {
+                executor.timer(delay).await;
+                if !pane.stream_lost() || pane.replacement_pending() {
+                    return;
+                }
+                let attempt = this
+                    .update_in(cx, |this, window, cx| {
+                        let key = this.mux_panes.shared_key(tab_id)?;
+                        let entry = this
+                            .shared_panes
+                            .get(&pane_id)
+                            .filter(|entry| Arc::ptr_eq(&entry.pane, &pane))?;
+                        let mux_pane_id = entry.mux_pane_id;
+                        Some(this.reattach_lost_shared_stream(&key, mux_pane_id, window, cx))
+                    })
+                    .ok()
+                    .flatten();
+                let Some(attempt) = attempt else { return };
+                attempt.await;
+            }
+            if pane.stream_lost() && !pane.replacement_pending() {
+                log::warn!(
+                    "gave up replacing the lost stream of shared pane {}",
+                    pane.pane_id()
+                );
             }
         })
         .detach();
@@ -509,25 +601,8 @@ impl Zetta {
         else {
             return;
         };
-        let Some(profile) = self
-            .tabs
-            .iter()
-            .find(|tab| tab.id == tab_id)
-            .and_then(|tab| tab.pane(pane_id))
-            .map(|pane| pane.profile.clone())
-        else {
+        let Some(options) = self.pty_adoption_options(tab_id, pane_id, cx) else {
             return;
-        };
-        let settings = TerminalSpawnSettings::current(cx);
-        let options = terminal::AttachedOptions {
-            shell: profile.command.clone(),
-            env: HashMap::default(),
-            cursor_shape: settings.cursor_shape,
-            alternate_scroll: settings.alternate_scroll,
-            max_scroll_history_lines: settings.max_scroll_history_lines,
-            path_hyperlink_regexes: Vec::new(),
-            path_hyperlink_timeout_ms: settings.path_hyperlink_timeout_ms,
-            window_id: cx.entity_id().as_u64(),
         };
         let client = runtime.client().clone();
         cx.spawn_in(window, async move |this, cx| {
@@ -594,6 +669,33 @@ impl Zetta {
         .detach();
     }
 
+    /// How an existing pane's terminal is configured to read a pty the
+    /// multiplexer hands it: the pane's own profile, at today's settings.
+    pub(super) fn pty_adoption_options(
+        &self,
+        tab_id: u64,
+        pane_id: u64,
+        cx: &Context<Self>,
+    ) -> Option<terminal::AttachedOptions> {
+        let profile = self
+            .tabs
+            .iter()
+            .find(|tab| tab.id == tab_id)
+            .and_then(|tab| tab.pane(pane_id))
+            .map(|pane| pane.profile.clone())?;
+        let settings = TerminalSpawnSettings::current(cx);
+        Some(terminal::AttachedOptions {
+            shell: profile.command.clone(),
+            env: HashMap::default(),
+            cursor_shape: settings.cursor_shape,
+            alternate_scroll: settings.alternate_scroll,
+            max_scroll_history_lines: settings.max_scroll_history_lines,
+            path_hyperlink_regexes: Vec::new(),
+            path_hyperlink_timeout_ms: settings.path_hyperlink_timeout_ms,
+            window_id: cx.entity_id().as_u64(),
+        })
+    }
+
     /// Finishes taking a pane back: its terminal now reads the pty itself.
     ///
     /// Returns whether the terminal took the descriptor. It has to be said in
@@ -605,7 +707,7 @@ impl Zetta {
         reason = "the pane's ids already travel as one bundle; the rest are the \
                   handover's own four values plus the GPUI window and context"
     )]
-    fn complete_grant_conversion(
+    pub(super) fn complete_grant_conversion(
         &mut self,
         ids: MuxPaneIds,
         attached: zmux::client::AttachedPane,
@@ -779,8 +881,9 @@ impl Zetta {
     }
 
     /// Finishes the revoke handover: the pane's terminal now reads the
-    /// multiplexer's relay, and the pane is registered as shared.
-    fn complete_revoke_conversion(
+    /// multiplexer's relay, and the pane is registered as shared. Also how a
+    /// refused detach takes back a pane that is shared.
+    pub(super) fn complete_revoke_conversion(
         &mut self,
         ids: MuxPaneIds,
         pane: zmux::client::SharedPane,

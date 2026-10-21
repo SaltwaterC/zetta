@@ -1951,33 +1951,6 @@ pub(super) fn detach(
         session.shared_state = Some(state);
         normalize_shared_state(daemon, session)?;
     }
-    for pane in &mut session.panes {
-        // Only this client lets go. Clearing every attachment evicted whichever
-        // *other* windows were sharing the pane — silently, since they learn
-        // nothing until their relay stops — and let this client's snapshot
-        // overwrite a screen those windows were still driving. A pane the
-        // detaching client was not holding is simply left alone.
-        match pane.attachment {
-            Attachment::Exclusive(holder) | Attachment::Revoking { holder }
-                if holder == client_process_id =>
-            {
-                pane.attachment = Attachment::None;
-                pane.attachment_client_id = None;
-                #[cfg(windows)]
-                pane.pty.resume_reader();
-            }
-            // A shared viewer detaching the session gives up the session, not
-            // the relay; its own connection closing is what removes it from the
-            // shared set.
-            Attachment::Shared(_) => continue,
-            Attachment::None => {}
-            // Held by somebody else, so not this client's to release.
-            _ => continue,
-        }
-        if let Some(snapshot) = snapshots.remove(&pane.id) {
-            seed_retained_screen(pane, snapshot);
-        }
-    }
     #[cfg(feature = "session-persistence")]
     let persisted = daemon.persistence.enabled().then(|| PersistedSession {
         id: session.id,
@@ -2016,6 +1989,38 @@ pub(super) fn detach(
     #[cfg(feature = "session-persistence")]
     if let Some(persisted) = persisted {
         persist_session(daemon, &persisted, &seal_for(session))?;
+    }
+    // Released only once nothing can refuse the detach any more. The client
+    // has stopped reading its panes and takes them back when it is refused,
+    // and a pane already released here would have been drained in between:
+    // its output read into the daemon's grid instead of the window's, and
+    // lost from the screen the window carries on with.
+    for pane in &mut session.panes {
+        // Only this client lets go. Clearing every attachment evicted whichever
+        // *other* windows were sharing the pane — silently, since they learn
+        // nothing until their relay stops — and let this client's snapshot
+        // overwrite a screen those windows were still driving. A pane the
+        // detaching client was not holding is simply left alone.
+        match pane.attachment {
+            Attachment::Exclusive(holder) | Attachment::Revoking { holder }
+                if holder == client_process_id =>
+            {
+                pane.attachment = Attachment::None;
+                pane.attachment_client_id = None;
+                #[cfg(windows)]
+                pane.pty.resume_reader();
+            }
+            // A shared viewer detaching the session gives up the session, not
+            // the relay; its own connection closing is what removes it from the
+            // shared set.
+            Attachment::Shared(_) => continue,
+            Attachment::None => {}
+            // Held by somebody else, so not this client's to release.
+            _ => continue,
+        }
+        if let Some(snapshot) = snapshots.remove(&pane.id) {
+            seed_retained_screen(pane, snapshot);
+        }
     }
     drop(sessions);
 

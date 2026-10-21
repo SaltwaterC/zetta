@@ -239,7 +239,9 @@ fn authorize_attach<'a>(
         }
 
         let authentication = session.authentication.as_ref().filter(|_| {
-            !verified_process_id.is_some_and(|holder| answers_handover(session, holder))
+            !verified_process_id.is_some_and(|holder| {
+                answers_handover(session, holder) || session_is_held_by(session, holder)
+            })
         });
         let authorized = authentication.is_none_or(|authentication| {
             proof
@@ -300,6 +302,13 @@ fn out_of_scope_refusal(session_id: u64, owner: u32) -> Response {
 /// now, and was sent `Event::Revoke` a moment ago. Challenging it would make a
 /// protected session impossible to share — the handover carries no secret,
 /// because the user typed it into whichever *other* window is joining.
+///
+/// A process that still holds one of the session's panes is let through for the
+/// same reason. The session is on its screen, not in the background, which is
+/// what the secret protects; and a window whose detach the daemon refused has
+/// already stopped reading its panes, and has to take them back without a
+/// secret it never kept. The owner of a backgrounded session is deliberately
+/// not exempt: reconnecting is exactly what the secret is asked for.
 ///
 /// Only ever asked about a process the transport vouched for — see
 /// [`Attacher::verified_process_id`]. Asked about a claimed one, it let any
