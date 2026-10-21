@@ -271,8 +271,8 @@ keyboard and the mouse came to do different things; do not add one.
   a directory, and the theme/profile resolution that follows from it
 - `tab_groups.rs`: `TabGroup` (Main, a project, or one of its worktrees),
   which tabs the view shows, the selection rules for closing and switching
-  groups, and placing a tab that arrives from a session by its active pane's
-  detected directory. Hidden tabs stay in `Zetta::tabs`; the module docs say
+  groups, and placing a tab that arrives from a session only when all its pane
+  directories agree on a group. Hidden tabs stay in `Zetta::tabs`; the module docs say
   why
 - `sidebar.rs`: the sidebar's state, its per-frame entry list, and the
   tab-group palette commands

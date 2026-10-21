@@ -987,7 +987,7 @@ impl Zetta {
             cx,
         );
         self.report_transport_fallbacks(pane_streams.fallbacks(), cx);
-        self.active_tab = self.insert_tab_into_active_group(tab);
+        self.active_tab = self.insert_tab_into_active_group(tab, cx);
         // The pane views were built before the tab was inserted. Wire them up
         // now that it is: without the view subscription, the terminal's
         // `CloseTerminal` (a shell that ended in a restored tab) would never

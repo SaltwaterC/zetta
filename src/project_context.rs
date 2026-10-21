@@ -29,8 +29,8 @@ pub(crate) struct ProjectState {
     /// entry and is compared against its own spelling.
     pane_anchors: HashMap<u64, PaneRootAnchor>,
     /// The tab group each detected pane's directory belongs to, so a tab
-    /// arriving from a session can be placed by a detection that ran while it
-    /// was away; see `Zetta::insert_tab_into_active_group`.
+    /// arriving from a session can be placed by its saved directories or a
+    /// detection that ran while it was away; see `Zetta::insert_tab_into_active_group`.
     pane_groups: HashMap<u64, TabGroup>,
     detections: HashMap<u64, ProjectDetectionState>,
     next_detection_generation: u64,
@@ -64,9 +64,13 @@ impl ProjectState {
         }
     }
 
-    /// The group the pane's last local detection placed its directory in.
+    /// The group resolved from the pane's saved directory or last local detection.
     pub(crate) fn group_for_pane(&self, pane_id: u64) -> Option<&TabGroup> {
         self.pane_groups.get(&pane_id)
+    }
+
+    pub(crate) fn set_group_for_pane(&mut self, pane_id: u64, group: TabGroup) {
+        self.pane_groups.insert(pane_id, group);
     }
 
     pub(crate) fn root_for_pane(&self, pane_id: u64) -> Option<&PathBuf> {
@@ -1019,8 +1023,8 @@ impl Zetta {
             },
             &self.sidebar.worktrees,
         );
-        self.place_arriving_tab(tab_id, pane_id, &group);
-        self.projects.pane_groups.insert(pane_id, group);
+        self.projects.set_group_for_pane(pane_id, group);
+        self.place_arriving_tab(tab_id, cx);
         match registered_root {
             Some(registered_root) => {
                 let config_root = result

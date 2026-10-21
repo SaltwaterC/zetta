@@ -2,7 +2,7 @@
 //!
 //! A restored pane's working directory, project binding, profile and theme all
 //! start with the saved directory. Local restores resolve its registered project
-//! and current configuration before constructing views; remote restores never
+//! and tab group before constructing views; remote restores never
 //! resolve remote paths against local projects. Explicit session themes retain
 //! precedence. `RestoredPaneMetadata` carries the context across ID reassignment.
 
@@ -88,15 +88,32 @@ impl Zetta {
                     dark_theme: None,
                     icon: ProfileIcon::default(),
                 });
-            let project_root = if policy.is_remote() {
-                None
+            let (project_root, group) = if policy.is_remote() {
+                (None, None)
             } else {
                 match working_directory.as_deref() {
-                    Some(directory) => resolve_registered_project_config_root(
-                        &restored_project_directory(&profile, directory),
-                        &self.projects.registry,
-                    ),
-                    None => destination_root.clone(),
+                    Some(directory) => {
+                        let directory = restored_project_directory(&profile, directory);
+                        let canonical = std::fs::canonicalize(&directory).ok();
+                        let resolution = resolve_registered_project_canonical(
+                            canonical.as_deref().unwrap_or(&directory),
+                            &self.projects.registry,
+                        );
+                        let group = crate::tab_groups::group_for_detected_directory(
+                            &crate::tab_groups::DetectedDirectory {
+                                reported: &directory,
+                                canonical: canonical.as_deref(),
+                                registered_root: resolution.root.as_deref(),
+                                managed_worktree: resolution
+                                    .managed_worktree
+                                    .as_ref()
+                                    .map(|worktree| worktree.root.as_path()),
+                            },
+                            &self.sidebar.worktrees,
+                        );
+                        (resolution.config_root, Some(group))
+                    }
+                    None => (destination_root.clone(), None),
                 }
             };
             metadata.panes.insert(
@@ -105,6 +122,7 @@ impl Zetta {
                     #[cfg(feature = "zmux")]
                     working_directory,
                     project_root,
+                    group,
                 },
             );
         }
@@ -180,11 +198,25 @@ impl Zetta {
     pub(super) fn bind_restored_projects(&mut self, tab: &Tab, metadata: &RestoredPaneMetadata) {
         let mut roots = HashSet::new();
         for pane in &tab.panes {
+            if let Some(group) = metadata
+                .panes
+                .get(&pane.routing_id)
+                .and_then(|info| info.group.as_ref())
+            {
+                self.projects.set_group_for_pane(pane.id, group.clone());
+            }
             if let Some(root) = metadata.project_root(pane.routing_id) {
                 self.projects.pane_roots.insert(pane.id, root.clone());
                 roots.insert(root.clone());
             }
             for entry in &pane.stack.entries {
+                if let Some(group) = metadata
+                    .panes
+                    .get(&entry.routing_id)
+                    .and_then(|info| info.group.as_ref())
+                {
+                    self.projects.set_group_for_pane(entry.id, group.clone());
+                }
                 if let Some(root) = metadata.project_root(entry.routing_id) {
                     self.projects.pane_roots.insert(entry.id, root.clone());
                     roots.insert(root.clone());
@@ -362,7 +394,7 @@ impl Zetta {
                 base.into_iter().chain(stacked)
             })
             .collect::<Vec<_>>();
-        self.active_tab = self.insert_tab_into_active_group(tab);
+        self.active_tab = self.insert_tab_into_active_group(tab, cx);
 
         for (pane_id, stack_id, terminal, theme_override, tab_theme_override, profile, project) in
             panes

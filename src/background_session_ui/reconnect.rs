@@ -479,7 +479,7 @@ impl Zetta {
         for terminal in std::mem::take(&mut self.visible_terminals) {
             terminal.update(cx, |terminal, cx| terminal.set_ui_visible(false, cx));
         }
-        self.active_tab = self.insert_tab_into_active_group(tab);
+        self.active_tab = self.insert_tab_into_active_group(tab, cx);
         self.mux_panes.adopt_session(tab_id, session_id);
         cx.notify();
 

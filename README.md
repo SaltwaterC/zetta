@@ -82,7 +82,10 @@ environment they started with; create a new remote pane to apply this context.
 - A project sidebar (`Ctrl-Shift-Z`) that groups tabs into Main, tab groups
   you name, each registered project, and each project's worktrees. From it you can create,
   sync, integrate and discard worktrees without `zwt`. See
-  [Using Zetta](docs/usage.md#project-sidebar-and-tab-groups)
+  [Using Zetta](docs/usage.md#project-sidebar-and-tab-groups).
+  Reattached tabs return to a project or worktree group only when every pane's
+  directory belongs to it; subdirectories count, and mixed directories stay in Main.
+  Restoring into a project or worktree automatically opens the sidebar.
 - In-memory tab attention badges from `zetta attention`, with optional
   cross-platform desktop notifications that click back to the issuing visible
   tab

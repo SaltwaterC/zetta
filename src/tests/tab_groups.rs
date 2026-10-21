@@ -389,6 +389,38 @@ fn a_tab_waits_to_be_placed_only_until_it_arrives_or_closes() {
 }
 
 #[test]
+fn every_directory_must_agree_before_a_tab_restores_to_a_project() {
+    let api = project("api");
+    let web = project("web");
+    let fix = worktree("api", "fix");
+    assert_eq!(
+        common_tab_group([Some(&api), Some(&api)]),
+        Some(api.clone())
+    );
+    assert_eq!(
+        common_tab_group([Some(&fix), Some(&fix)]),
+        Some(fix.clone())
+    );
+    for groups in [
+        [Some(&api), Some(&web)],
+        [Some(&web), Some(&api)],
+        [Some(&api), Some(&fix)],
+        [Some(&api), Some(&TabGroup::Main)],
+        [Some(&TabGroup::Main), Some(&api)],
+    ] {
+        assert_eq!(common_tab_group(groups), Some(TabGroup::Main));
+    }
+    assert_eq!(common_tab_group([Some(&api), None]), None);
+    assert_eq!(common_tab_group([None, Some(&api)]), None);
+    assert_eq!(common_tab_group([None, None]), None);
+    // A known outside directory rules out a project even before the others arrive.
+    assert_eq!(
+        common_tab_group([None, Some(&TabGroup::Main)]),
+        Some(TabGroup::Main)
+    );
+}
+
+#[test]
 fn a_tab_group_name_must_not_be_blank() {
     assert!(validate_tab_group_name(&[], "", None).is_err());
     assert!(validate_tab_group_name(&[], "   ", None).is_err());

@@ -23,19 +23,23 @@
 //!
 //! A tab arriving from elsewhere — reattached from the multiplexer, resumed
 //! from disk, joined from a shared session, reopened after its window closed —
-//! is placed by where its active pane is, not by the group it was in, because
-//! nothing outside this window stores groups: a tab's state goes to the daemon
+//! is placed by where all its panes are, because nothing outside this window
+//! stores groups: a tab's state goes to the daemon
 //! as opaque JSON, and growing it would lock out every running Zetta that
-//! cannot parse the new field. So a tab inside a worktree returns to that
-//! worktree's group, one inside a project to the project's, and anything else
-//! to Main — which is also where a project tab the user `cd`'d out of returns,
-//! and where a tab from a named group returns.
-//! A pane whose directory has been detected already is placed at once; one
-//! that has not keeps the group the user is in until its first detection lands
-//! ([`TabGroupState::arriving`]), and detections after that leave it alone.
+//! cannot parse the new field. A tab whose panes all resolve to the same
+//! worktree returns to that group, or to a project when all resolve to that
+//! project. Mixed directories return to Main, which is also where a project
+//! tab the user `cd`'d out of returns. A tab from a named group follows the
+//! same directory rule.
+//! Saved directories resolved on restore, or earlier detections, place a tab
+//! at once. Unknown directories keep it in Main until all panes are known
+//! ([`TabGroupState::arriving`]); detections after placement leave it alone.
+//! Restoring into a project or worktree reveals the sidebar, enabling grouping
+//! for this window even when the saved configuration hid it.
 //!
 //! `hide_project_sidebar` turns the whole thing off: every tab is in view,
-//! cycling covers all of them, and new tabs join Main. Tabs keep the group
+//! cycling covers all of them, and new tabs join Main, until a project restore
+//! enables it again. Tabs keep the group
 //! they had, so turning the sidebar back on restores the grouping.
 
 use super::*;
@@ -59,10 +63,6 @@ pub(crate) enum TabGroup {
 
 impl TabGroup {
     /// The registered project this group belongs to.
-    #[cfg_attr(
-        not(feature = "worktree"),
-        allow(dead_code, reason = "only worktree_ui.rs asks which project is active")
-    )]
     pub(crate) fn project_root(&self) -> Option<&Path> {
         match self {
             Self::Main | Self::Custom(_) => None,
@@ -225,7 +225,7 @@ pub(crate) struct DetectedDirectory<'a> {
     pub(crate) managed_worktree: Option<&'a Path>,
 }
 
-/// The group a tab whose active pane is in `directory` belongs to.
+/// The group a pane in `directory` belongs to.
 ///
 /// A managed worktree knows its project from its own metadata. Any other
 /// linked worktree is recognised only from the sidebar's listings, which the
@@ -286,6 +286,41 @@ pub(crate) fn group_for_detected_directory(
         .map_or(TabGroup::Main, |root| TabGroup::Project(root.to_path_buf()))
 }
 
+/// Places a tab only when every directory belongs to the same group. A known
+/// mismatch settles it in Main; otherwise unknown directories defer placement.
+pub(crate) fn common_tab_group<'a>(
+    groups: impl IntoIterator<Item = Option<&'a TabGroup>>,
+) -> Option<TabGroup> {
+    let mut common = None;
+    let mut unknown = false;
+    for group in groups {
+        let Some(group) = group else {
+            unknown = true;
+            continue;
+        };
+        if *group == TabGroup::Main || common.is_some_and(|common| common != group) {
+            return Some(TabGroup::Main);
+        }
+        common = Some(group);
+    }
+    if unknown {
+        None
+    } else {
+        Some(common.cloned().unwrap_or_default())
+    }
+}
+
+fn group_for_arriving_tab(tab: &Tab, projects: &ProjectState) -> Option<TabGroup> {
+    common_tab_group(tab.panes.iter().flat_map(|pane| {
+        std::iter::once(projects.group_for_pane(pane.id)).chain(
+            pane.stack
+                .entries
+                .iter()
+                .map(|entry| projects.group_for_pane(entry.id)),
+        )
+    }))
+}
+
 /// What the window remembers about groups between selections.
 #[derive(Debug, Default)]
 pub(crate) struct TabGroupState {
@@ -296,8 +331,7 @@ pub(crate) struct TabGroupState {
     /// chose one. Set and consumed within the same synchronous call, so a tab
     /// opened by anything else cannot take it.
     opening: Option<TabGroup>,
-    /// Tabs that arrived before their active pane's directory was detected,
-    /// waiting for that detection to say which group they belong to.
+    /// Tabs waiting for enough pane directories to determine a common group.
     arriving: HashSet<u64>,
     /// The names of the groups the user created, in the order they were
     /// created, which is the order the sidebar lists them in.
@@ -415,35 +449,38 @@ impl Zetta {
     }
 
     /// Inserts a tab arriving from elsewhere — a reconnected session, a shared
-    /// tab — in pin order, into the group its active pane's directory belongs
-    /// to; see the module docs. Until that is known, the group the user is
-    /// looking at.
-    pub(crate) fn insert_tab_into_active_group(&mut self, mut tab: Tab) -> usize {
-        tab.group = if !self.tab_groups_enabled() {
-            TabGroup::Main
-        } else if let Some(group) = self.projects.group_for_pane(tab.active_pane) {
-            group.clone()
+    /// tab — in pin order, into the group all its directories belong to;
+    /// see the module docs. Until that is known, Main.
+    pub(crate) fn insert_tab_into_active_group(
+        &mut self,
+        mut tab: Tab,
+        cx: &mut Context<Self>,
+    ) -> usize {
+        tab.group = if let Some(group) = group_for_arriving_tab(&tab, &self.projects) {
+            group
         } else {
             self.tab_groups.arriving.insert(tab.id);
-            self.active_tab_group()
+            TabGroup::Main
         };
+        self.reveal_restored_tab_group(&tab.group, cx);
         insert_tab_in_pin_order(&mut self.tabs, tab)
     }
 
-    /// Moves a tab still waiting to be placed into `group`, once a detection
-    /// of its active pane has reported which group that is. A detection of any
-    /// other pane, or of a tab already placed, changes nothing.
-    pub(crate) fn place_arriving_tab(&mut self, tab_id: u64, pane_id: u64, group: &TabGroup) {
-        let Some(index) = self
-            .tabs
-            .iter()
-            .position(|tab| tab.id == tab_id && tab.active_pane == pane_id)
-        else {
+    /// Reconsiders a waiting tab after a pane detection. One pane alone cannot
+    /// place a multi-pane tab; detections after placement leave it alone.
+    pub(crate) fn place_arriving_tab(&mut self, tab_id: u64, cx: &mut Context<Self>) {
+        if !self.tab_groups.arriving.contains(&tab_id) {
+            return;
+        }
+        let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) else {
             return;
         };
-        if self.tab_groups.arriving.remove(&tab_id) {
-            self.tabs[index].group = group.clone();
-        }
+        let Some(group) = group_for_arriving_tab(tab, &self.projects) else {
+            return;
+        };
+        self.tab_groups.arriving.remove(&tab_id);
+        tab.group = group.clone();
+        self.reveal_restored_tab_group(&group, cx);
     }
 
     /// Settles `active_tab` once the tab at `removed_index`, which belonged to

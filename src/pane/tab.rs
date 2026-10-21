@@ -124,8 +124,8 @@ pub(crate) struct Tab {
     /// opacity.
     pub(crate) overlay_style_picker: Option<OverlayStylePicker>,
     /// Which tab group the tab bar lists this tab under; see `tab_groups`.
-    /// Not part of the session blob: a session reattached later joins the
-    /// group the user is looking at then.
+    /// Not part of the session blob: reattachment resolves the group from the
+    /// directories of all its panes.
     pub(crate) group: crate::tab_groups::TabGroup,
 }
 

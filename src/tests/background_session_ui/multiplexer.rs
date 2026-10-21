@@ -298,6 +298,226 @@ fn disk_restore_metadata_joins_by_mux_id_but_keeps_routing_ids() {
 }
 
 #[gpui::test]
+fn reattached_tabs_are_grouped_before_terminal_metadata_arrives(cx: &mut gpui::TestAppContext) {
+    cx.update(|cx| {
+        theme_settings::init(
+            theme::LoadThemes::All(Box::new(crate::zetta_assets::ZettaAssets)),
+            cx,
+        );
+        let registry = ThemeRegistry::global(cx);
+        theme_settings::load_bundled_themes(&registry);
+        theme::GlobalTheme::update_theme(cx, registry.get("One Light").unwrap());
+        terminal::terminal_settings::TerminalSettings::init(cx);
+    });
+    let (zetta, cx) = cx.add_window_view(|window, cx| {
+        let mut config = Config::defaults(None, None);
+        config.profiles.clear();
+        Zetta::new(
+            config,
+            None,
+            crate::ZettaLaunchOptions {
+                no_mux: true,
+                ..Default::default()
+            },
+            window,
+            cx,
+        )
+    });
+    let temporary = tempfile::tempdir().unwrap();
+    let project = temporary.path().join("project");
+    let worktree = project.join(".worktrees/fix");
+    std::fs::create_dir_all(project.join(".zetta")).unwrap();
+    std::fs::create_dir_all(&worktree).unwrap();
+    std::fs::create_dir_all(project.join("src")).unwrap();
+    std::fs::create_dir_all(worktree.join("src")).unwrap();
+    std::fs::write(ProjectConfig::path_for(&project), "{}").unwrap();
+    let project = std::fs::canonicalize(project).unwrap();
+    let worktree = std::fs::canonicalize(worktree).unwrap();
+    let elsewhere = std::fs::canonicalize(temporary.path()).unwrap();
+    zetta.update_in(cx, |zetta, _, cx| {
+        zetta.projects.registry =
+            ProjectRegistry::load_from(temporary.path().join("registry.json")).unwrap();
+        zetta.projects.registry.add(&project).unwrap();
+        zetta.sidebar.worktrees.insert(
+            project.clone(),
+            crate::sidebar::ProjectWorktrees {
+                worktrees: vec![crate::sidebar::SidebarWorktree {
+                    path: worktree.clone(),
+                    label: "fix".into(),
+                    branch: None,
+                    source_branch: None,
+                }],
+                ..Default::default()
+            },
+        );
+        let project_group = crate::tab_groups::TabGroup::Project(project.clone());
+        let worktree_group = crate::tab_groups::TabGroup::Worktree {
+            project: project.clone(),
+            root: worktree.clone(),
+        };
+        zetta.next_pane_id = 100;
+        // Keep the destination in a different group from every known local
+        // directory, so inheriting it cannot make an assertion pass by chance.
+        let mut destination = tab_state(vec![pane_state(99, None)])
+            .into_tab(99, |_| publication_profile())
+            .unwrap();
+        destination.group = crate::tab_groups::TabGroup::Custom("destination".into());
+        zetta.tabs.push(destination);
+        for hidden_by_setting in [false, true] {
+            for (first_directory, directory, policy, expected) in [
+                (
+                    Some(project.clone()),
+                    Some(project.join("src")),
+                    ProjectContextPolicy::Local,
+                    project_group.clone(),
+                ),
+                (
+                    Some(worktree.clone()),
+                    Some(worktree.join("src")),
+                    ProjectContextPolicy::Local,
+                    worktree_group.clone(),
+                ),
+                (
+                    Some(elsewhere.clone()),
+                    Some(elsewhere.clone()),
+                    ProjectContextPolicy::Local,
+                    Default::default(),
+                ),
+                (
+                    Some(elsewhere.clone()),
+                    Some(project.clone()),
+                    ProjectContextPolicy::Local,
+                    Default::default(),
+                ),
+                (
+                    None,
+                    Some(project.clone()),
+                    ProjectContextPolicy::Local,
+                    Default::default(),
+                ),
+                (
+                    Some(project.clone()),
+                    None,
+                    ProjectContextPolicy::Local,
+                    Default::default(),
+                ),
+                (None, None, ProjectContextPolicy::Local, Default::default()),
+                (
+                    Some(project.clone()),
+                    Some(project.clone()),
+                    ProjectContextPolicy::Remote,
+                    Default::default(),
+                ),
+            ] {
+                zetta.active_tab = 0;
+                zetta.launch_config.hide_project_sidebar = hidden_by_setting;
+                zetta.sidebar.open = false;
+                zetta.sidebar.collapsed.insert(project.clone());
+                let mut state = tab_state(vec![pane_state(2, Some(1)), pane_state(1, Some(2))]);
+                state.active_pane = 1;
+                state.layout = LayoutState::Split {
+                    axis: AxisState::Vertical,
+                    first_ratio: 500,
+                    first: Box::new(LayoutState::Pane { pane_id: 2 }),
+                    second: Box::new(LayoutState::Pane { pane_id: 1 }),
+                };
+                let mut summary = summary(vec![1, 2], BackgroundPaneLayout::Pane { pane_id: 2 }, 2);
+                summary.panes[0].working_directory = first_directory;
+                summary.panes[1].working_directory = directory;
+                let waiting_for_other_pane = summary.panes[0].working_directory.is_none()
+                    && summary.panes[1].working_directory.is_some()
+                    && !policy.is_remote();
+                let metadata =
+                    zetta.prepare_restored_panes(restored_pane_metadata(&state, &summary), policy);
+                let mut tab = state
+                    .into_tab(zetta.tabs.len() as u64, |_| publication_profile())
+                    .unwrap();
+                tab.reassign_ids(tab.id, &mut zetta.next_pane_id);
+                assert!(tab.panes.iter().all(|pane| pane.terminal.is_none()));
+                zetta.bind_restored_projects(&tab, &metadata);
+                let index = zetta.insert_tab_into_active_group(tab, cx);
+                zetta.active_tab = index;
+                assert_eq!(zetta.tabs[index].group, expected);
+                assert_eq!(zetta.active_tab_group(), expected);
+                assert_eq!(zetta.sidebar_visible(), expected.project_root().is_some());
+                if expected.project_root().is_none() {
+                    assert_eq!(zetta.launch_config.hide_project_sidebar, hidden_by_setting);
+                } else {
+                    assert!(!zetta.sidebar.collapsed.contains(&project));
+                }
+                if expected != crate::tab_groups::TabGroup::Main {
+                    // A subsequent detection must not move an already placed tab.
+                    zetta
+                        .projects
+                        .set_group_for_pane(zetta.tabs[index].active_pane, Default::default());
+                    zetta.sidebar.open = false;
+                    zetta.place_arriving_tab(zetta.tabs[index].id, cx);
+                    assert_eq!(zetta.tabs[index].group, expected);
+                    assert!(
+                        !zetta.sidebar_visible(),
+                        "later detections must respect closing the sidebar"
+                    );
+                }
+                if waiting_for_other_pane {
+                    zetta.place_arriving_tab(zetta.tabs[index].id, cx);
+                    assert_eq!(zetta.tabs[index].group, crate::tab_groups::TabGroup::Main);
+                    zetta
+                        .projects
+                        .set_group_for_pane(zetta.tabs[index].panes[0].id, project_group.clone());
+                    zetta.place_arriving_tab(zetta.tabs[index].id, cx);
+                    assert_eq!(zetta.tabs[index].group, project_group);
+                    assert!(zetta.sidebar_visible());
+                }
+            }
+        }
+        assert_stacked_directories_affect_restored_group(zetta, &project, cx);
+    });
+}
+
+fn assert_stacked_directories_affect_restored_group(
+    zetta: &mut Zetta,
+    project: &Path,
+    cx: &mut Context<Zetta>,
+) {
+    for directory in [
+        Some(project.to_path_buf()),
+        Some(project.parent().unwrap().to_path_buf()),
+        None,
+    ] {
+        zetta.active_tab = 0;
+        let profile = publication_profile();
+        let tab_id = zetta.tabs.len() as u64;
+        let mut tab = tab_state(vec![pane_state(1, None)])
+            .into_tab(tab_id, |_| profile.clone())
+            .unwrap();
+        tab.panes[0]
+            .stack
+            .entries
+            .push(crate::pane::StackedPane::new(
+                2,
+                "task".into(),
+                profile,
+                directory.clone(),
+                None,
+            ));
+        let panes = vec![
+            (1, "System".into(), Some(project.to_path_buf())),
+            (2, "System".into(), directory.clone()),
+        ];
+        let metadata = zetta.prepare_restored_panes(panes, ProjectContextPolicy::Local);
+        tab.reassign_ids(tab.id, &mut zetta.next_pane_id);
+        zetta.bind_restored_projects(&tab, &metadata);
+        let index = zetta.insert_tab_into_active_group(tab, cx);
+        let expected = if directory.as_deref() == Some(project) {
+            crate::tab_groups::TabGroup::Project(project.to_path_buf())
+        } else {
+            crate::tab_groups::TabGroup::Main
+        };
+        assert_eq!(zetta.tabs[index].group, expected);
+    }
+}
+
+#[gpui::test]
 fn detach_publication_preserves_layout_cwd_and_project_theme(cx: &mut gpui::TestAppContext) {
     cx.update(|cx| {
         theme_settings::init(

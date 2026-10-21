@@ -97,14 +97,18 @@ Zetta registers it and opens its group.
 
 Groups are not saved with a session. A tab that comes back, whether it was
 reattached, resumed, reopened after its window closed or joined from a shared
-session, is placed by where its active pane is. A tab inside a worktree goes to
-that worktree's group, a tab inside a project goes to the project's group, and
-any other tab goes to Main. So a project tab you `cd`'d out of comes back in
-Main, and so does a tab from a group you created. Those groups themselves
-belong to the window and last until it closes. A worktree that `zwt` did not create is recognised only once the sidebar
-has listed it. Until the pane reports its directory, the tab waits in the group
-you are viewing. A remote pane always stays there, because its directory is on
-another host.
+session, is placed from the saved directories of all its panes, including
+stacked commands. Every directory must belong to the same project or worktree
+for the tab to return to that group; subdirectories count. Mixed directories
+go to Main. A tab with unknown directories waits in Main until detection can
+place the whole tab. Once placed, later directory changes do not move it.
+Restoring into a project or worktree opens the sidebar and expands that
+project. If the sidebar was disabled, this enables it for the current window
+without changing the saved configuration.
+Named groups belong to the window and last until it closes; their tabs return
+according to the same directory rule. A worktree that `zwt` did not create is
+recognised only once the sidebar has listed it. Remote tabs return to Main,
+because their directories belong to another host.
 
 ### Managing worktrees from the sidebar
 

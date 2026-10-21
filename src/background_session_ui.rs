@@ -20,7 +20,7 @@ use super::*;
 pub(crate) mod collaboration;
 #[cfg(feature = "zmux")]
 use crate::mux::{MuxPaneIds, SharedPaneEntry};
-use crate::project::resolve_registered_project_config_root;
+use crate::project::resolve_registered_project_canonical;
 use crate::rename::resolve_tab_title;
 use crate::worktree_detection::terminal_event_requires_worktree_detection;
 
@@ -113,6 +113,7 @@ struct RestoredPaneInfo {
     #[cfg(feature = "zmux")]
     working_directory: Option<PathBuf>,
     project_root: Option<PathBuf>,
+    group: Option<crate::tab_groups::TabGroup>,
 }
 
 impl RestoredPaneMetadata {
