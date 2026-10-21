@@ -35,6 +35,7 @@ struct FakeDaemon {
     refuse_close: Option<u64>,
     refuse_share: bool,
     refuse_detach: bool,
+    pending_close: Option<crate::mux::PendingPaneClose>,
 }
 
 impl FakeDaemon {
@@ -47,6 +48,12 @@ impl FakeDaemon {
     }
 
     fn wait_for_gate(&self) {
+        if let Some(close) = &self.pending_close {
+            assert!(
+                matches!(close.peek(), Some(Ok(Ok(())))),
+                "publication reached the daemon before the close was acknowledged"
+            );
+        }
         if let Some(gate) = &self.gate {
             gate.wait();
         }
@@ -147,6 +154,7 @@ fn detach_work(
         panes,
         publication: publication(),
         authentication: None,
+        pending_closes: Vec::new(),
     }
 }
 
@@ -163,7 +171,50 @@ fn offer_work(
         checkpoints,
         publication: publication(),
         authentication: None,
+        pending_closes: Vec::new(),
     }
+}
+
+#[test]
+fn session_publication_observes_pending_pane_closes_before_contacting_the_daemon() {
+    let (completed, pending) = oneshot::channel();
+    let pending = pending.shared();
+    let daemon = Arc::new(FakeDaemon {
+        pending_close: Some(pending.clone()),
+        ..Default::default()
+    });
+    completed.send(Ok(())).unwrap();
+    let mut detach = detach_work(&daemon, Vec::new(), Vec::new());
+    detach.pending_closes.push(pending);
+    detach.run().result.unwrap();
+    assert_eq!(daemon.calls(), ["detach []"]);
+
+    let (completed, pending) = oneshot::channel();
+    let pending = pending.shared();
+    let daemon = Arc::new(FakeDaemon {
+        pending_close: Some(pending.clone()),
+        ..Default::default()
+    });
+    completed.send(Ok(())).unwrap();
+    let mut offer = offer_work(&daemon, false, Vec::new());
+    offer.pending_closes.push(pending);
+    offer.run().published.unwrap();
+    assert_eq!(daemon.calls(), ["share false"]);
+}
+
+#[test]
+fn a_failed_pane_close_refuses_detach_and_offer_before_publication() {
+    let daemon = Arc::new(FakeDaemon::default());
+    let (completed, pending) = oneshot::channel();
+    completed.send(Err("close refused".to_owned())).unwrap();
+    let pending = pending.shared();
+    let mut detach = detach_work(&daemon, Vec::new(), Vec::new());
+    detach.pending_closes.push(pending.clone());
+    assert!(detach.run().result.is_err());
+    let mut offer = offer_work(&daemon, true, Vec::new());
+    offer.pending_closes.push(pending);
+    assert!(offer.run().published.is_err());
+    assert!(daemon.calls().is_empty());
 }
 
 fn init(cx: &mut gpui::TestAppContext) {

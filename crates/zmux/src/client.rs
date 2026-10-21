@@ -2707,6 +2707,19 @@ impl Client {
         }
     }
 
+    /// Permanently removes a pane this client holds exclusively.
+    pub fn discard_pane(&self, session_id: u64, pane_id: u64) -> Result<()> {
+        let mut connection = self.open(Request::DiscardPane {
+            session_id,
+            pane_id,
+        })?;
+        match self.receive(&mut connection)?.0 {
+            Response::Ok => Ok(()),
+            Response::Error { message } => anyhow::bail!("{message}"),
+            other => anyhow::bail!("unexpected response to discard pane: {other:?}"),
+        }
+    }
+
     /// Starts delivering pane exits and revokes to registered reporters.
     ///
     /// Both registries belong to the one subscription: the same thread that

@@ -1462,6 +1462,12 @@ pub enum Request {
     /// fills. This hands the pane back so it is either drained or, if the
     /// session was never meant to outlive its window, ended.
     ClosePane { session_id: u64, pane_id: u64 },
+    /// Permanently removes an exclusively held pane after an explicit close.
+    ///
+    /// Unlike `ClosePane`, this removes the daemon-owned PTY even when sibling
+    /// panes or a kept session remain. Older daemons reject this request, so no
+    /// protocol version change is needed.
+    DiscardPane { session_id: u64, pane_id: u64 },
     /// Stops the daemon once it is holding nothing.
     Shutdown,
     /// Replaces the daemon with a fresh image of itself, keeping every session.

@@ -111,9 +111,9 @@ another host.
 The sidebar runs the same workflow as [`zwt`](#git-worktrees), without leaving
 the window:
 
-- **New worktree** creates one. It is the branch button on a hovered project
-  row, the project's right-click menu, or the **zetta: new worktree** command
-  while a project's tabs are shown. Name the worktree, then optionally list
+- **New worktree** creates one. It is the branch button on a project's row,
+  the project's right-click menu, or the **zetta: new worktree** command while
+  a project's tabs are shown. Name the worktree, then optionally list
   comma-separated paths to copy into it, as `zwt new NAME --copy PATH` would.
   The sidebar then switches to the new worktree's group.
 - A managed worktree's right-click menu offers **Sync with SOURCE**

@@ -78,7 +78,7 @@ pub(crate) struct PaneCheckpointData {
 
 impl HandoverDaemon for zmux::client::Client {
     fn close_pane(&self, session_id: u64, mux_pane_id: u64) -> anyhow::Result<()> {
-        zmux::client::Client::close_pane(self, session_id, mux_pane_id)
+        zmux::client::Client::discard_pane(self, session_id, mux_pane_id)
     }
 
     fn send_snapshot(&self, session_id: u64, checkpoint: PaneCheckpointData) -> anyhow::Result<()> {
@@ -169,6 +169,7 @@ pub(crate) struct DetachWork {
     pub(crate) panes: Vec<PaneRetirement>,
     pub(crate) publication: SessionPublication,
     pub(crate) authentication: Option<SessionAuthentication>,
+    pub(crate) pending_closes: Vec<crate::mux::PendingPaneClose>,
 }
 
 /// What a detach did. `released_stacked` is reported whatever the result, so a
@@ -189,6 +190,7 @@ impl DetachWork {
             panes,
             publication,
             authentication,
+            pending_closes,
         } = self;
         let mut released_stacked = Vec::new();
         let snapshots = std::thread::scope(|scope| {
@@ -203,6 +205,7 @@ impl DetachWork {
             released.and(snapshots)
         });
         let result = snapshots.and_then(|snapshots| {
+            finish_pending_closes(pending_closes)?;
             daemon.detach(
                 session_id,
                 publication,
@@ -215,6 +218,18 @@ impl DetachWork {
             result,
         }
     }
+}
+
+/// Runs only on the handover worker. A failure leaves the tab in the window
+/// rather than publishing a layout the daemon would expand with a closed pane.
+fn finish_pending_closes(closes: Vec<crate::mux::PendingPaneClose>) -> anyhow::Result<()> {
+    for close in closes {
+        futures::executor::block_on(close)
+            .context("waiting for a closed daemon pane to be removed")?
+            .map_err(anyhow::Error::msg)
+            .context("removing a closed daemon pane before session publication")?;
+    }
+    Ok(())
 }
 
 /// Stops and closes each stacked pane, in order, until one fails.
@@ -273,6 +288,7 @@ pub(crate) struct OfferWork {
     pub(crate) checkpoints: Vec<PaneCheckpoint>,
     pub(crate) publication: SessionPublication,
     pub(crate) authentication: Option<SessionAuthentication>,
+    pub(crate) pending_closes: Vec<crate::mux::PendingPaneClose>,
 }
 
 /// What offering a session did. `binding` is present only for an offer the
@@ -302,8 +318,10 @@ impl OfferWork {
             checkpoints,
             publication,
             authentication,
+            pending_closes,
         } = self;
-        let published = checkpoint_panes(&*daemon, session_id, checkpoints)
+        let published = finish_pending_closes(pending_closes)
+            .and_then(|()| checkpoint_panes(&*daemon, session_id, checkpoints))
             .and_then(|()| daemon.share(session_id, publication, authentication.as_ref(), offered));
         let binding = (published.is_ok() && offered)
             .then(|| fetch_shared_binding(&*daemon, &reports, session_id));

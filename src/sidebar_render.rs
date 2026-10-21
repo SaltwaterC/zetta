@@ -28,6 +28,9 @@ struct SidebarRowContext<'a> {
     /// terminal beside it rather than the smaller UI font.
     font: &'a Font,
     font_size: Pixels,
+    /// The width of a row button, which every row reserves whether it has a
+    /// button or not, so the tab counts beside them line up in one column.
+    button_width: Pixels,
 }
 
 /// A row action: runs `f` on `Zetta` when the row's menu entry or button
@@ -89,7 +92,13 @@ pub(crate) fn render_sidebar_boundary(
     cx: &mut Context<Zetta>,
 ) -> AnyElement {
     let frame = WindowFrameGeometry::new(window, cx);
-    zetta.render_sidebar(frame.rounded_bottom_left, frame.corner_radius, cx)
+    let button_width = IconSize::Small.square(window, cx);
+    zetta.render_sidebar(
+        frame.rounded_bottom_left,
+        frame.corner_radius,
+        button_width,
+        cx,
+    )
 }
 
 impl Zetta {
@@ -97,6 +106,7 @@ impl Zetta {
         &self,
         rounded_bottom_left: bool,
         corner_radius: Pixels,
+        button_width: Pixels,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = self.window_theme(cx);
@@ -108,6 +118,7 @@ impl Zetta {
             handle: &handle,
             font: &font,
             font_size,
+            button_width,
         };
         let counts = self.tab_group_counts();
         let active = self.active_tab_group();
@@ -199,6 +210,22 @@ impl Zetta {
             )
             .into_any_element()
     }
+}
+
+/// A row's end slot: its tab count, then its button, in a column every row
+/// reserves so the counts line up whichever rows have a button.
+fn row_end_slot(
+    tab_count: usize,
+    button: Option<AnyElement>,
+    context: SidebarRowContext<'_>,
+) -> impl IntoElement {
+    h_flex().gap_1().children(tab_count_label(tab_count)).child(
+        h_flex()
+            .flex_none()
+            .w(context.button_width)
+            .justify_center()
+            .children(button),
+    )
 }
 
 fn tab_count_label(tab_count: usize) -> Option<AnyElement> {
@@ -327,17 +354,19 @@ fn main_row(tab_count: usize, active: bool, context: SidebarRowContext<'_>) -> A
         .child(row_label("Main", context))
         // Always shown, like the Projects header's button, rather than
         // swapped in on hover: it is the only pointer route to a new group.
-        .end_slot(
-            h_flex()
-                .gap_1()
-                .children(tab_count_label(tab_count))
-                .child(row_button(
+        .end_slot(row_end_slot(
+            tab_count,
+            Some(
+                row_button(
                     "sidebar-new-tab-group",
                     IconName::Plus,
                     "New tab group",
                     |_, window, cx| window.dispatch_action(Box::new(NewTabGroup), cx),
-                )),
-        )
+                )
+                .into_any_element(),
+            ),
+            context,
+        ))
         .tooltip(Tooltip::text("The tabs that belong to no project"))
         .on_click(on_zetta_click(handle, |this, window, cx| {
             this.activate_tab_group(TabGroup::Main, window, cx);
@@ -367,18 +396,26 @@ fn custom_row(
         .toggle_state(active)
         .start_slot(Icon::new(IconName::Blocks).size(IconSize::Small))
         .child(row_label(name.to_owned(), context))
-        .end_slot::<AnyElement>(tab_count_label(tab_count))
-        .end_slot_on_hover({
-            let name = name.to_owned();
-            row_button(
-                ("sidebar-custom-remove", position),
-                IconName::Close,
-                "Remove group (its tabs move to Main)",
-                on_zetta_click(handle, move |this, _, cx| {
-                    this.remove_tab_group(&name, cx);
-                }),
-            )
-        })
+        // Shown on hover, but in the reserved column rather than in place of
+        // the count, so the count stays where every other row has it.
+        .end_slot(row_end_slot(
+            tab_count,
+            Some({
+                let name = name.to_owned();
+                div()
+                    .visible_on_hover("list_item")
+                    .child(row_button(
+                        ("sidebar-custom-remove", position),
+                        IconName::Close,
+                        "Remove group (its tabs move to Main)",
+                        on_zetta_click(handle, move |this, _, cx| {
+                            this.remove_tab_group(&name, cx);
+                        }),
+                    ))
+                    .into_any_element()
+            }),
+            context,
+        ))
         .on_click({
             let group = group.clone();
             on_zetta_click(handle, move |this, window, cx| {
@@ -457,6 +494,7 @@ fn project_row(
                 this.prompt_new_worktree(root.clone(), window, cx);
             }),
         )
+        .into_any_element()
     });
     let row = ListItem::new(("sidebar-project", position))
         .toggle_state(*active)
@@ -477,8 +515,7 @@ fn project_row(
             .when(*loading, |icon| icon.color(Color::Muted)),
         )
         .child(row_label(label.clone(), context))
-        .end_slot::<AnyElement>(tab_count_label(*tab_count))
-        .when_some(new_worktree, |row, button| row.end_slot_on_hover(button))
+        .end_slot(row_end_slot(*tab_count, new_worktree, context))
         .tooltip(Tooltip::text(tooltip))
         .on_click({
             let group = group.clone();
@@ -578,7 +615,7 @@ fn worktree_row(
         .toggle_state(active)
         .start_slot(Icon::new(IconName::GitWorktree).size(IconSize::Small))
         .child(row_label(worktree.label.clone(), context))
-        .end_slot::<AnyElement>(tab_count_label(tab_count))
+        .end_slot(row_end_slot(tab_count, None, context))
         .tooltip(Tooltip::text(tooltip))
         .on_click({
             let group = group.clone();
@@ -668,7 +705,7 @@ fn unlisted_row(
             .color(Color::Muted),
         )
         .child(row_label(group.label(), context))
-        .end_slot::<AnyElement>(tab_count_label(tab_count))
+        .end_slot(row_end_slot(tab_count, None, context))
         .tooltip(Tooltip::text(tooltip))
         .on_click(on_zetta_click(context.handle, move |this, window, cx| {
             this.activate_tab_group(group.clone(), window, cx);

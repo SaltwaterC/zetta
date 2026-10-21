@@ -332,7 +332,8 @@ keyboard and the mouse came to do different things; do not add one.
   `zosh::PaneSession`. Read its module docs before changing what a Mosh pane
   does and does not register
 - `mux.rs`: `MuxRuntime`, the `zmux` client connection shared by every pane in
-  the process, and its retention/recovery state
+  the process, and its retention/recovery state; `mux/panes.rs` owns the local
+  pane/tab mappings and the pending pane removals session handoffs await
 - `mux_identity.rs`: identity-file resolution for multiplexer commands
 - `process_control.rs`: the per-process control socket. Every
   `zetta <subcommand>` that has to reach a running window goes through here;

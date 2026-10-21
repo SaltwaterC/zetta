@@ -5,6 +5,9 @@
 
 #![cfg(unix)]
 
+#[path = "daemon/exclusive_panes.rs"]
+mod exclusive_panes;
+
 use std::{
     collections::HashMap,
     io::{Read, Write as _},
@@ -7023,6 +7026,10 @@ fn protected_controls_reject_a_claimed_owner_without_peer_authority() {
             .to_string(),
         client
             .close_pane(pane.session_id, pane.pane_id)
+            .unwrap_err()
+            .to_string(),
+        client
+            .discard_pane(pane.session_id, pane.pane_id)
             .unwrap_err()
             .to_string(),
         client

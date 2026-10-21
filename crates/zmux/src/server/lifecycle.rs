@@ -2599,6 +2599,7 @@ pub(super) fn attestation_needed(
         Request::Resize { session_id, .. }
         | Request::SetConsolePalette { session_id, .. }
         | Request::ClosePane { session_id, .. }
+        | Request::DiscardPane { session_id, .. }
         | Request::Kill { session_id }
         | Request::SetSessionScope { session_id, .. }
         | Request::Forget { session_id } => Some(*session_id),

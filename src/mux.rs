@@ -22,6 +22,9 @@
 //! construction intact. A future mutex that does guard an invariant a panic can
 //! break should use `unwrap` instead, and say so at the lock.
 
+mod panes;
+pub(crate) use panes::{MuxPanes, PendingPaneClose};
+
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex, atomic::AtomicU64},
@@ -30,6 +33,7 @@ use std::{
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result};
+use futures::FutureExt as _;
 use gpui::AppContext as _;
 use terminal::{ConsolePalette, PtyControl, PtyHandover, PtyProvider, PtySpawnRequest};
 #[cfg(feature = "session-persistence")]
@@ -770,25 +774,6 @@ impl SharedSessionKey {
     }
 }
 
-/// Where each visible pane's terminal lives in the multiplexer.
-///
-/// Kept beside the tabs rather than inside them because a pane's identity in
-/// the multiplexer outlives the `TerminalPane` that displays it: the same
-/// terminal is shown by a new pane after a session is attached in another
-/// window.
-#[derive(Default)]
-pub(crate) struct MuxPanes {
-    /// Local pane id to the pane id its multiplexer knows it by. Keyed by the
-    /// local id only: a multiplexer pane id is unique within one daemon, and a
-    /// window can hold panes of several — its own, and every remote host it
-    /// has a tab on — whose numbering all starts at 1. A reverse map keyed by
-    /// that number let recording a remote pane silently unmap the local pane
-    /// that shared its number; see [`Self::local_pane_id_among`].
-    panes: HashMap<u64, u64>,
-    sessions: HashMap<u64, MuxSession>,
-    runtimes: HashMap<u64, MuxRuntime>,
-}
-
 /// The four ids a multiplexed pane is addressed by: the tab and pane this
 /// window knows it as, and the session and pane the multiplexer knows it as.
 ///
@@ -815,114 +800,6 @@ pub(crate) struct SharedPaneEntry {
     pub(crate) mux_pane_id: u64,
     pub(crate) runtime: MuxRuntime,
     pub(crate) size_report_generation: Arc<AtomicU64>,
-}
-
-impl MuxPanes {
-    /// The session a tab's panes belong to, creating one if this is the tab's
-    /// first pane.
-    pub(crate) fn session_for_tab(&mut self, tab_id: u64) -> MuxSession {
-        self.sessions.entry(tab_id).or_default().clone()
-    }
-
-    pub(crate) fn adopt_session(&mut self, tab_id: u64, session_id: u64) {
-        self.sessions
-            .insert(tab_id, MuxSession::from_id(session_id));
-    }
-
-    pub(crate) fn adopt_session_with_runtime(
-        &mut self,
-        tab_id: u64,
-        session_id: u64,
-        runtime: MuxRuntime,
-    ) {
-        self.adopt_session(tab_id, session_id);
-        self.runtimes.insert(tab_id, runtime);
-    }
-
-    pub(crate) fn runtime_for_tab(&self, tab_id: u64) -> Option<MuxRuntime> {
-        self.runtimes.get(&tab_id).cloned()
-    }
-
-    pub(crate) fn is_remote_tab(&self, tab_id: u64) -> bool {
-        self.runtimes
-            .get(&tab_id)
-            .is_some_and(MuxRuntime::is_remote)
-    }
-
-    /// The SSH destination a tab's session lives behind, for a tab attached to
-    /// a remote multiplexer. `None` for a local tab, so this answers both
-    /// "is it remote" and "which host" in one lookup.
-    pub(crate) fn remote_tab_destination(&self, tab_id: u64) -> Option<&str> {
-        self.runtimes
-            .get(&tab_id)
-            .and_then(MuxRuntime::remote_destination)
-    }
-
-    pub(crate) fn session_id(&self, tab_id: u64) -> Option<u64> {
-        self.sessions.get(&tab_id)?.id()
-    }
-
-    /// A tab's session as a key that says which daemon it belongs to. A tab
-    /// with no runtime of its own is on this window's local daemon.
-    pub(crate) fn shared_key(&self, tab_id: u64) -> Option<SharedSessionKey> {
-        Some(SharedSessionKey {
-            daemon: self
-                .runtimes
-                .get(&tab_id)
-                .map_or(MuxDaemon::Local, MuxRuntime::daemon),
-            session_id: self.session_id(tab_id)?,
-        })
-    }
-
-    /// Whether a tab in this window is already showing this session.
-    ///
-    /// The reconnect picker needs this: attaching a session the same *process*
-    /// already holds is not a join, because the multiplexer recognises its own
-    /// holder and hands the terminal straight back — so it would open a second
-    /// tab reading the same pty as the first. Two readers of one terminal split
-    /// its output between them arbitrarily.
-    pub(crate) fn holds_session(&self, session_id: u64) -> bool {
-        self.sessions.iter().any(|(tab_id, session)| {
-            self.runtimes
-                .get(tab_id)
-                .is_none_or(|runtime| !runtime.is_remote())
-                && session.id() == Some(session_id)
-        })
-    }
-
-    pub(crate) fn record(&mut self, pane_id: u64, mux_pane_id: u64) {
-        self.panes.insert(pane_id, mux_pane_id);
-    }
-
-    pub(crate) fn mux_pane_id(&self, pane_id: u64) -> Option<u64> {
-        self.panes.get(&pane_id).copied()
-    }
-
-    /// The local pane, among `pane_ids`, that its multiplexer knows as
-    /// `mux_pane_id`. Asked of one tab's panes, never of the window: the same
-    /// multiplexer pane id names a different pane on every daemon.
-    pub(crate) fn local_pane_id_among(
-        &self,
-        pane_ids: impl IntoIterator<Item = u64>,
-        mux_pane_id: u64,
-    ) -> Option<u64> {
-        pane_ids
-            .into_iter()
-            .find(|pane_id| self.mux_pane_id(*pane_id) == Some(mux_pane_id))
-    }
-
-    pub(crate) fn ids(&self) -> &HashMap<u64, u64> {
-        &self.panes
-    }
-
-    pub(crate) fn forget_pane(&mut self, pane_id: u64) {
-        self.panes.remove(&pane_id);
-    }
-
-    pub(crate) fn forget_tab(&mut self, tab_id: u64) {
-        self.sessions.remove(&tab_id);
-        self.runtimes.remove(&tab_id);
-    }
 }
 
 #[cfg(test)]
@@ -1285,14 +1162,14 @@ impl crate::Zetta {
         }
     }
 
-    /// Hands a closed pane back to the multiplexer.
+    /// Removes a closed exclusive pane from its multiplexer session.
     ///
     /// Dropping the terminal is not enough to tell the multiplexer anything: it
-    /// holds its own descriptor for the pane, so the pane stays marked as taken
-    /// by this process, nothing drains it, and the program blocks as soon as the
-    /// terminal's buffer fills — until this window exits and the multiplexer's
-    /// liveness sweep notices. Saying so explicitly is what stops a closed pane
-    /// from leaving a wedged shell behind.
+    /// holds its own descriptor for the pane. Merely releasing that descriptor
+    /// also leaves the pane in a session that still has a sibling or was kept,
+    /// so a later restore would put the closed pane back into the layout.
+    /// Explicit closure removes it; shared panes follow their canonical close
+    /// or leave operation instead.
     pub(crate) fn release_mux_pane(&mut self, tab_id: u64, pane_id: u64, cx: &mut gpui::App) {
         let Some(mux_pane_id) = self.mux_panes.mux_pane_id(pane_id) else {
             return;
@@ -1327,11 +1204,19 @@ impl crate::Zetta {
             return;
         };
         // Off the main thread: closing a pane must not wait on the multiplexer's
-        // sessions lock, and nothing here depends on the answer.
+        // sessions lock. A later detach or offer waits for its acknowledgement
+        // before publishing the layout that no longer includes this pane.
+        let (completion, pending) = futures::channel::oneshot::channel();
+        self.mux_panes
+            .record_pending_close(tab_id, pending.shared());
         cx.background_spawn(async move {
-            if let Err(error) = runtime.client().close_pane(session_id, mux_pane_id) {
-                log::debug!("could not release pane {mux_pane_id} to the multiplexer: {error:#}");
+            let result = runtime.client().discard_pane(session_id, mux_pane_id);
+            if let Err(error) = &result {
+                log::warn!(
+                    "could not remove closed pane {mux_pane_id} from the multiplexer: {error:#}"
+                );
             }
+            let _ = completion.send(result.map_err(|error| format!("{error:#}")));
         })
         .detach();
     }

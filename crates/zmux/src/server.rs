@@ -1742,6 +1742,7 @@ fn spawn_connection(daemon: Arc<Daemon>, stream: Stream, token: String, accepted
 mod agent_pipe;
 mod attachment;
 mod dispatch;
+mod exclusive_panes;
 mod image_store;
 mod ipc_limits;
 mod lifecycle;
@@ -1760,6 +1761,7 @@ mod workers;
 // globs keep that one namespace rather than spelling out a hundred imports.
 use attachment::*;
 use dispatch::*;
+use exclusive_panes::*;
 use image_store::*;
 use ipc_limits::*;
 use lifecycle::*;

@@ -741,6 +741,7 @@ impl Zetta {
                 panes,
                 publication: handover::SessionPublication { summary, state },
                 authentication: authentication.cloned(),
+                pending_closes: self.mux_panes.pending_closes(tab.id),
             },
             stacked: stacked_mappings,
         }))

@@ -494,6 +494,28 @@ pub(super) fn serve(
                 }),
             }
         }
+        Request::DiscardPane {
+            session_id,
+            pane_id,
+        } => {
+            anyhow::ensure!(
+                !stream_only,
+                "stream-only clients close panes through shared collaboration"
+            );
+            match discard_pane(
+                daemon,
+                session_id,
+                pane_id,
+                envelope.client_process_id,
+                peer_process_id,
+                session_secret.as_deref(),
+            ) {
+                Ok(()) => connection.send(&Response::Ok),
+                Err(error) => connection.send(&Response::Error {
+                    message: format!("{error:#}"),
+                }),
+            }
+        }
         Request::Kill { session_id } => match kill(
             daemon,
             session_id,
