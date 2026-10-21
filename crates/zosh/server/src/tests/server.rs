@@ -552,16 +552,18 @@ fn an_idle_session_sleeps_instead_of_polling_and_still_answers_at_once() {
     client.set_pending(UserInstruction::encode_message(&[UserInstruction::resize(
         80, 24,
     )]));
-    assert!(
-        pump(
-            &mut client,
-            &socket,
-            server_addr,
-            Duration::from_millis(1500)
-        )
-        .is_some(),
-        "the session never answered its client"
-    );
+    // Attaching includes starting `cat` on a pty, which a loaded machine can
+    // take seconds over; nothing is timed until the session has answered.
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while pump(&mut client, &socket, server_addr, Duration::from_millis(50)).is_none() {
+        assert!(
+            Instant::now() < deadline,
+            "the session never answered its client"
+        );
+    }
+    // Let the attach exchange — the first screen and its acknowledgements —
+    // finish before the idle second is counted.
+    pump(&mut client, &socket, server_addr, Duration::from_secs(1));
 
     // Attached, acknowledged and quiet: the old loop made about two hundred
     // passes a second here.
