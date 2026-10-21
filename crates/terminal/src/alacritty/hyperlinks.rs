@@ -17,7 +17,7 @@ use std::{
 use url::Url;
 use util::paths::{PathStyle, UrlExt};
 
-use crate::Range;
+use crate::{Range, SpacedPathReading};
 
 const URL_REGEX: &str = r#"(ipfs:|ipns:|magnet:|mailto:|gemini://|gopher://|https://|http://|news:|file://|git://|ssh:|ftp://|zed://)[^\u{0000}-\u{001F}\u{007F}-\u{009F}<>"\s{-}\^⟨⟩`']+"#;
 const WIDE_CHAR_SPACERS: Flags =
@@ -35,6 +35,9 @@ pub(crate) struct HyperlinkMatch {
     pub(crate) text: String,
     pub(crate) is_url: bool,
     pub(crate) range: Range,
+    /// Longer readings of a path that run across single spaces, longest
+    /// first; see `spaced_paths`.
+    pub(crate) spaced_readings: Vec<SpacedPathReading>,
 }
 
 impl From<(String, bool, Match)> for HyperlinkMatch {
@@ -43,6 +46,7 @@ impl From<(String, bool, Match)> for HyperlinkMatch {
             text,
             is_url,
             range: Range::from_alacritty(range),
+            spaced_readings: Vec::new(),
         }
     }
 }
@@ -134,15 +138,17 @@ pub(crate) fn find_from_grid_point<T: EventListener>(
         if let Some((url, url_match)) = url_match {
             Some((url, true, url_match))
         } else {
-            path_match(
+            let (path, path_match, spaced_readings) = path_match(
                 term,
                 line_start,
                 line_end,
                 point,
                 &regex_searches.path_hyperlink_regexes,
                 regex_searches.path_hyperlink_timeout,
-            )
-            .map(|(path, path_match)| (path, false, path_match))
+            )?;
+            let mut found = normalize_found_word((path, false, path_match), path_style);
+            found.spaced_readings = spaced_readings;
+            return Some(found);
         }
     };
 
@@ -181,6 +187,7 @@ fn normalize_hyperlink_match(
                         text: path.to_string_lossy().into_owned(),
                         is_url: false,
                         range,
+                        spaced_readings: Vec::new(),
                     };
                 } else if let Some(path) = try_osc8_url_to_path(url)
                     && path_style.is_posix()
@@ -189,6 +196,7 @@ fn normalize_hyperlink_match(
                         text: path,
                         is_url: false,
                         range,
+                        spaced_readings: Vec::new(),
                     };
                 }
             }
@@ -200,12 +208,14 @@ fn normalize_hyperlink_match(
                 text: path.to_string(),
                 is_url: false,
                 range,
+                spaced_readings: Vec::new(),
             }
         } else {
             HyperlinkMatch {
                 text: maybe_url_or_path,
                 is_url: true,
                 range,
+                spaced_readings: Vec::new(),
             }
         }
     } else {
@@ -213,6 +223,7 @@ fn normalize_hyperlink_match(
             text: maybe_url_or_path,
             is_url: false,
             range,
+            spaced_readings: Vec::new(),
         }
     }
 }
@@ -318,17 +329,17 @@ fn path_match<T>(
     hovered: AlacPoint,
     path_hyperlink_regexes: &[Regex],
     path_hyperlink_timeout: Duration,
-) -> Option<(String, Match)> {
+) -> Option<(String, Match, Vec<SpacedPathReading>)> {
     if path_hyperlink_regexes.is_empty() || path_hyperlink_timeout.as_millis() == 0 {
         return None;
     }
-    if let Some(found) = super::wrapped_paths::find(
+    if let Some((path, path_match)) = super::wrapped_paths::find(
         term,
         hovered,
         path_hyperlink_regexes,
         path_hyperlink_timeout,
     ) {
-        return Some(found);
+        return Some((path, path_match, Vec::new()));
     }
     debug_assert!(line_start <= hovered);
     debug_assert!(line_end >= hovered);
@@ -377,34 +388,89 @@ fn path_match<T>(
         path_hyperlink_regexes,
         path_hyperlink_timeout,
     )?;
-    let link_match = {
-        let advance_point_by_str = |mut point: AlacPoint, s: &str| {
-            for _ in s.chars() {
-                point = term
-                    .expand_wide(point, AlacDirection::Right)
-                    .add(term, Boundary::Grid, 1);
-            }
-
-            // There does not appear to be an alacritty api that is
-            // "move to start of current wide char", so we have to do it ourselves.
-            let flags = term.grid().index(point).flags;
-            if flags.contains(Flags::LEADING_WIDE_CHAR_SPACER) {
-                AlacPoint::new(point.line + 1, Column(0))
-            } else if flags.contains(Flags::WIDE_CHAR_SPACER) {
-                AlacPoint::new(point.line, point.column - 1)
-            } else {
-                point
-            }
-        };
-
-        let link_start = advance_point_by_str(line_start, &line[..link_range.start]);
-        let link_end = advance_point_by_str(link_start, &line[link_range]);
-        link_start
-            ..=term
-                .expand_wide(link_end, AlacDirection::Left)
-                .sub(term, Boundary::Grid, 1)
+    let link_start = advance_point_by_str(term, line_start, &line[..link_range.start]);
+    let link_end = advance_point_by_str(term, link_start, &line[link_range.clone()]);
+    let link_match = link_start..=last_point_before(term, link_end);
+    if !link_match.contains(&hovered) {
+        return None;
+    }
+    // A pattern that rewrote the path, such as Python's `File "…", line N`,
+    // already says where it ends.
+    let spaced_readings = if path == line[link_range.clone()] {
+        spaced_path_readings(term, line_start, line, link_range)
+    } else {
+        Vec::new()
     };
-    link_match.contains(&hovered).then_some((path, link_match))
+    Some((path, link_match, spaced_readings))
+}
+
+/// The point `s` occupies up to, starting at `point`.
+fn advance_point_by_str<T>(term: &Term<T>, mut point: AlacPoint, s: &str) -> AlacPoint {
+    for _ in s.chars() {
+        point = term
+            .expand_wide(point, AlacDirection::Right)
+            .add(term, Boundary::Grid, 1);
+    }
+
+    // There does not appear to be an alacritty api that is
+    // "move to start of current wide char", so we have to do it ourselves.
+    let flags = term.grid().index(point).flags;
+    if flags.contains(Flags::LEADING_WIDE_CHAR_SPACER) {
+        AlacPoint::new(point.line + 1, Column(0))
+    } else if flags.contains(Flags::WIDE_CHAR_SPACER) {
+        AlacPoint::new(point.line, point.column - 1)
+    } else {
+        point
+    }
+}
+
+/// The last cell of text that ends just before `end`.
+fn last_point_before<T>(term: &Term<T>, end: AlacPoint) -> AlacPoint {
+    term.expand_wide(end, AlacDirection::Left)
+        .sub(term, Boundary::Grid, 1)
+}
+
+/// `link`'s readings across single spaces, mapped back onto the grid.
+fn spaced_path_readings<T>(
+    term: &Term<T>,
+    line_start: AlacPoint,
+    line: &str,
+    link: StdRange<usize>,
+) -> Vec<SpacedPathReading> {
+    let Some(boundaries) = super::spaced_paths::boundaries(line, link) else {
+        return Vec::new();
+    };
+    // Walk the line once, in offset order, rather than once per boundary.
+    let mut offsets: Vec<usize> = boundaries
+        .starts
+        .iter()
+        .chain(&boundaries.ends)
+        .copied()
+        .collect();
+    offsets.sort_unstable();
+    offsets.dedup();
+    let mut points = Vec::with_capacity(offsets.len());
+    let (mut offset, mut point) = (0, line_start);
+    for &next in &offsets {
+        point = advance_point_by_str(term, point, &line[offset..next]);
+        offset = next;
+        points.push(point);
+    }
+    let point_at = |offset: usize| {
+        points[offsets
+            .binary_search(&offset)
+            .expect("every boundary is mapped")]
+    };
+    boundaries
+        .readings()
+        .into_iter()
+        .map(|reading| SpacedPathReading {
+            range: Range::from_alacritty(
+                point_at(reading.start)..=last_point_before(term, point_at(reading.end)),
+            ),
+            maybe_path: line[reading].to_owned(),
+        })
+        .collect()
 }
 
 /// Match path text independently of how an application placed it on the grid.

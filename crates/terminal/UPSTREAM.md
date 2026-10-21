@@ -11,6 +11,15 @@ Retain these Zetta-specific behaviors when synchronizing:
   have no terminal wrap flag; keep byte-to-cell mappings for the reconstructed
   target so hovering any fragment returns the complete path and highlight.
   Inference scans at most sixteen adjacent rows and never probes the filesystem;
+- offer the readings of a hovered path match that join it with neighbouring
+  tokens across single spaces (`alacritty/spaced_paths.rs`), carried on
+  `HyperlinkMatch` and `PathLikeTarget` as `spaced_readings`, longest first and
+  at most sixteen tokens long. Hovering stays free of filesystem I/O: the view
+  stats the readings off the foreground thread, opens the longest that exists,
+  and widens the hovered link through `Terminal::widen_hovered_word`. A WSL
+  pane's links keep their Linux spelling and carry `PathLikeTarget::host_root`
+  (`\\wsl.localhost\<distribution>`, from the profile's `--distribution`), under
+  which the view checks and reveals them;
 - allow scrollback up to Alacritty's signed line-coordinate range instead of
   Zed's 100,000-line product limit;
 - expose PTY metadata, startup signaling, process tracking, and shell markers

@@ -1026,6 +1026,26 @@ pub struct PathLikeTarget {
     pub terminal_dir: Option<PathBuf>,
     /// Syntax of paths emitted by the terminal shell.
     pub path_style: PathStyle,
+    /// Longer readings of `maybe_path` that run across single spaces, longest
+    /// first, for a name like `Q3 report.xlsx` that the path patterns split.
+    /// Text alone cannot choose between them; the view opens the longest one
+    /// that exists, and `maybe_path` when none does.
+    pub spaced_readings: Vec<SpacedPathReading>,
+    /// Where this machine reaches the shell's `/`, when the shell names its
+    /// files by paths this machine does not: `\\wsl.localhost\<distribution>`
+    /// for a WSL shell. The view checks and reveals a printed path under it,
+    /// while the editor still receives the path as the shell spelled it.
+    pub host_root: Option<PathBuf>,
+}
+
+/// A reading of a path-like target that joins it with its neighbours across
+/// single spaces.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SpacedPathReading {
+    /// The joined text, in the same form as [`PathLikeTarget::maybe_path`].
+    pub maybe_path: String,
+    /// The cells the joined text occupies.
+    pub range: Range,
 }
 
 /// A string inside terminal, potentially useful as a URI that can be opened.
@@ -1036,6 +1056,19 @@ pub enum MaybeNavigationTarget {
     /// File system path, absolute or relative, existing or not.
     /// Might have line and column number(s) attached as `file.rs:1:23`
     PathLike(PathLikeTarget),
+}
+
+/// Whether `hovered` was widened to one of `target`'s spaced readings, so that
+/// moving onto another fragment of the same name keeps the widened link rather
+/// than flashing back to the fragment while the view checks it again.
+fn is_spaced_reading_of(hovered: &HoveredWord, target: &MaybeNavigationTarget) -> bool {
+    let MaybeNavigationTarget::PathLike(target) = target else {
+        return false;
+    };
+    target
+        .spaced_readings
+        .iter()
+        .any(|reading| reading.maybe_path == hovered.word && reading.range == hovered.word_match)
 }
 
 fn editor_invocation_command(
@@ -1292,6 +1325,31 @@ fn native_zetta_command_for_cygwin_with_shell(
     })
 }
 
+/// Where Windows reaches a WSL shell's `/`, for a shell that names its
+/// distribution. A bare `wsl.exe` starts the default one, whose name would
+/// take another `wsl.exe` to learn, so its links stay unresolved here.
+#[cfg(windows)]
+fn wsl_host_root(shell: &Shell) -> Option<PathBuf> {
+    if !matches!(posix_host(shell), Some(PosixHost::Wsl)) {
+        return None;
+    }
+    let Shell::WithArguments { args, .. } = shell else {
+        return None;
+    };
+    let distribution = args
+        .windows(2)
+        .find(|pair| matches!(pair[0].as_str(), "--distribution" | "-d"))
+        .map(|pair| pair[1].as_str())?;
+    if distribution.is_empty()
+        || distribution
+            .chars()
+            .any(|character| character.is_control() || matches!(character, '/' | '\\'))
+    {
+        return None;
+    }
+    Some(PathBuf::from(format!(r"\\wsl.localhost\{distribution}")))
+}
+
 #[cfg(windows)]
 fn wsl_editor_working_directory(shell: &Shell, directory: Option<&str>) -> Option<PathBuf> {
     if !matches!(posix_host(shell), Some(PosixHost::Wsl)) {
@@ -1336,6 +1394,22 @@ fn cygwin_path_to_windows(root: &Path, directory: &str) -> Option<PathBuf> {
     let mut path = root.to_path_buf();
     path.extend(parts);
     Some(path)
+}
+
+#[cfg(windows)]
+fn cygwin_spaced_readings(
+    shell: &Shell,
+    readings: Vec<SpacedPathReading>,
+) -> Vec<SpacedPathReading> {
+    readings
+        .into_iter()
+        .map(|mut reading| {
+            if let Some(path) = cygwin_path_like_to_windows(shell, &reading.maybe_path) {
+                reading.maybe_path = path;
+            }
+            reading
+        })
+        .collect()
 }
 
 #[cfg(windows)]
@@ -4527,9 +4601,14 @@ impl Terminal {
             text: maybe_url_or_path,
             is_url,
             range,
+            spaced_readings,
         } = hyperlink;
+        #[cfg(windows)]
+        let spaced_readings = cygwin_spaced_readings(&self.template.shell, spaced_readings);
         let prev_hovered_word = self.last_content.last_hovered_word.take();
-        let terminal_dir = self.cwd_at_line(range.start().line, history_size);
+        let (terminal_dir, path_style) =
+            self.link_directory_at_line(range.start().line, history_size);
+        let host_root = self.link_host_root();
         let target_path = if !is_url {
             #[cfg(windows)]
             {
@@ -4553,7 +4632,9 @@ impl Terminal {
                 MaybeNavigationTarget::PathLike(PathLikeTarget {
                     maybe_path: decoded_path,
                     terminal_dir,
-                    path_style: self.path_style,
+                    path_style,
+                    spaced_readings: Vec::new(),
+                    host_root,
                 })
             } else {
                 MaybeNavigationTarget::Url(target_path)
@@ -4562,7 +4643,9 @@ impl Terminal {
             MaybeNavigationTarget::PathLike(PathLikeTarget {
                 maybe_path: target_path,
                 terminal_dir,
-                path_style: self.path_style,
+                path_style,
+                spaced_readings,
+                host_root,
             })
         };
 
@@ -4608,14 +4691,10 @@ impl Terminal {
         cx: &mut Context<Self>,
     ) {
         if let Some(prev_word) = prev_word
-            && prev_word.word == word
-            && prev_word.word_match == word_match
+            && ((prev_word.word == word && prev_word.word_match == word_match)
+                || is_spaced_reading_of(&prev_word, &navigation_target))
         {
-            self.last_content.last_hovered_word = Some(HoveredWord {
-                word,
-                word_match,
-                id: prev_word.id,
-            });
+            self.last_content.last_hovered_word = Some(prev_word);
             return;
         }
 
@@ -4626,6 +4705,32 @@ impl Terminal {
         });
         cx.emit(Event::NewNavigationTarget(Some(navigation_target)));
         cx.notify()
+    }
+
+    /// Widens the hovered link, while it is still the one `id` names, to a
+    /// longer reading of it the view found on disk. `fragment` is where the
+    /// hovered match was when the reading was taken: output that has scrolled
+    /// the view since moves the reading by as many lines.
+    pub fn widen_hovered_word(
+        &mut self,
+        id: usize,
+        fragment: Range,
+        reading: SpacedPathReading,
+    ) -> bool {
+        let Some(hovered) = self
+            .last_content
+            .last_hovered_word
+            .as_mut()
+            .filter(|hovered| hovered.id == id)
+        else {
+            return false;
+        };
+        let shift = hovered.word_match.start().line - fragment.start().line;
+        let shifted = |point: Point| Point::new(point.line + shift, point.column);
+        hovered.word = reading.maybe_path;
+        hovered.word_match =
+            Range::new(shifted(reading.range.start()), shifted(reading.range.end()));
+        true
     }
 
     fn next_link_id(&mut self) -> usize {
@@ -5968,15 +6073,47 @@ impl Terminal {
         } else {
             hyperlink.text
         };
+        let spaced_readings = hyperlink.spaced_readings;
         #[cfg(windows)]
-        let maybe_path =
-            cygwin_path_like_to_windows(&self.template.shell, &maybe_path).unwrap_or(maybe_path);
+        let (maybe_path, spaced_readings) = (
+            cygwin_path_like_to_windows(&self.template.shell, &maybe_path).unwrap_or(maybe_path),
+            cygwin_spaced_readings(&self.template.shell, spaced_readings),
+        );
 
         Some(PathLikeTarget {
             maybe_path,
             terminal_dir: self.editor_path_working_directory_at_line(match_line, history_size),
             path_style: self.editor_path_style(),
+            spaced_readings,
+            host_root: self.link_host_root(),
         })
+    }
+
+    /// The directory a clicked path printed on `line` is resolved against, and
+    /// the syntax it is in. A WSL shell reports Linux directories, which only
+    /// mean something under [`PathLikeTarget::host_root`], so its links keep
+    /// that spelling, as they do for the editor.
+    fn link_directory_at_line(
+        &self,
+        line: i32,
+        history_size: usize,
+    ) -> (Option<PathBuf>, PathStyle) {
+        #[cfg(windows)]
+        if matches!(posix_host(&self.template.shell), Some(PosixHost::Wsl)) {
+            return (
+                self.editor_path_working_directory_at_line(line, history_size),
+                PathStyle::Unix,
+            );
+        }
+        (self.cwd_at_line(line, history_size), self.path_style)
+    }
+
+    /// See [`PathLikeTarget::host_root`].
+    fn link_host_root(&self) -> Option<PathBuf> {
+        #[cfg(windows)]
+        return wsl_host_root(&self.template.shell);
+        #[cfg(not(windows))]
+        None
     }
 
     /// The directory a path printed on `line` should be resolved against.
@@ -11178,6 +11315,40 @@ mod tests {
         }
     }
 
+    /// Explorer reaches a WSL distribution's files through its UNC share, which
+    /// needs the distribution's name; discovered profiles pass it explicitly.
+    #[cfg(windows)]
+    #[test]
+    fn wsl_links_are_reached_through_the_named_distribution() {
+        let wsl = |args: &[&str]| Shell::WithArguments {
+            program: r"C:\Windows\System32\wsl.exe".to_owned(),
+            args: args.iter().map(|arg| (*arg).to_owned()).collect(),
+            title_override: None,
+        };
+        assert_eq!(
+            wsl_host_root(&wsl(&["--distribution", "Ubuntu"])),
+            Some(PathBuf::from(r"\\wsl.localhost\Ubuntu"))
+        );
+        assert_eq!(
+            wsl_host_root(&wsl(&["--cd", "~", "-d", "Debian"])),
+            Some(PathBuf::from(r"\\wsl.localhost\Debian"))
+        );
+        // The default distribution's name is not in the command line.
+        assert_eq!(wsl_host_root(&wsl(&[])), None);
+        assert_eq!(
+            wsl_host_root(&Shell::Program(r"C:\Windows\System32\wsl.exe".to_owned())),
+            None
+        );
+        assert_eq!(wsl_host_root(&wsl(&["--distribution", r"..\C$"])), None);
+        assert_eq!(wsl_host_root(&wsl(&["--distribution", ""])), None);
+        let not_wsl = Shell::WithArguments {
+            program: "pwsh.exe".to_owned(),
+            args: vec!["-d".to_owned(), "Ubuntu".to_owned()],
+            title_override: None,
+        };
+        assert_eq!(wsl_host_root(&not_wsl), None);
+    }
+
     #[cfg(windows)]
     #[test]
     fn windows_posix_host_shells_invoke_the_native_zetta_executable() {
@@ -12032,6 +12203,81 @@ mod tests {
                 "a sub-threshold click jitter should not start a selection"
             );
             assert!(terminal.selection_phase == SelectionPhase::Ended);
+        });
+    }
+
+    /// A hovered fragment of a spaced name is widened to the whole name once
+    /// the view finds it on disk, and moving onto another fragment of that
+    /// name keeps the widened link instead of flashing back to the fragment.
+    #[gpui::test]
+    async fn a_widened_spaced_name_survives_moving_between_its_fragments(cx: &mut TestAppContext) {
+        let terminal = init_ctrl_click_hyperlink_test(cx, b"/tmp/Q3 report.xlsx\r\n");
+
+        terminal.update(cx, |terminal, cx| {
+            terminal.hyperlink_regex_searches = RegexSearches::new(
+                &TerminalSettings::get_global(cx).path_hyperlink_regexes,
+                100,
+            );
+            let history_size = terminal.term.lock().history_size();
+            let report = terminal
+                .find_hyperlink_at_point(Point::new(0, 10))
+                .expect("the fragment is a path");
+            assert_eq!(report.text, "report.xlsx");
+            let whole = report
+                .spaced_readings
+                .iter()
+                .find(|reading| reading.maybe_path == "/tmp/Q3 report.xlsx")
+                .expect("the whole name is a reading")
+                .clone();
+            let fragment = report.range;
+            terminal.process_hyperlink(report, false, history_size, cx);
+            let id = terminal.last_content.last_hovered_word.as_ref().unwrap().id;
+
+            assert!(!terminal.widen_hovered_word(id + 1, fragment, whole.clone()));
+            assert!(terminal.widen_hovered_word(id, fragment, whole.clone()));
+            let hovered = terminal.last_content.last_hovered_word.clone().unwrap();
+            assert_eq!(hovered.word, whole.maybe_path);
+            assert_eq!(hovered.word_match, whole.range);
+
+            let q3 = terminal
+                .find_hyperlink_at_point(Point::new(0, 2))
+                .expect("the other fragment is a path");
+            assert_eq!(q3.text, "/tmp/Q3");
+            terminal.process_hyperlink(q3, false, history_size, cx);
+            assert_eq!(terminal.last_content.last_hovered_word, Some(hovered));
+        });
+    }
+
+    /// Output that scrolls the view between the hover and the disk check moves
+    /// the hovered match; the reading has to move with it.
+    #[gpui::test]
+    async fn a_widened_reading_follows_the_hovered_match_when_output_scrolls(
+        cx: &mut TestAppContext,
+    ) {
+        let terminal = init_ctrl_click_hyperlink_test(cx, b"");
+
+        terminal.update(cx, |terminal, _| {
+            terminal.last_content.last_hovered_word = Some(HoveredWord {
+                word: "report.xlsx".to_owned(),
+                word_match: Range::new(Point::new(3, 8), Point::new(3, 18)),
+                id: 4,
+            });
+            let reading = SpacedPathReading {
+                maybe_path: "/tmp/Q3 report.xlsx".to_owned(),
+                range: Range::new(Point::new(5, 0), Point::new(5, 18)),
+            };
+            let fragment = Range::new(Point::new(5, 8), Point::new(5, 18));
+
+            assert!(terminal.widen_hovered_word(4, fragment, reading));
+            assert_eq!(
+                terminal
+                    .last_content
+                    .last_hovered_word
+                    .as_ref()
+                    .unwrap()
+                    .word_match,
+                Range::new(Point::new(3, 0), Point::new(3, 18))
+            );
         });
     }
 

@@ -1,8 +1,7 @@
 use super::*;
 use gpui::Modifiers;
-use std::path::PathBuf;
 use terminal::{PathLikeTarget, is_hyperlink_modifier};
-use util::paths::{PathStyle, home_dir};
+use util::paths::PathStyle;
 
 #[derive(Clone, Default)]
 struct RecordedStreamInput(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
@@ -315,188 +314,6 @@ fn plain_right_click_is_forwarded_in_terminal_mouse_mode() {
 }
 
 #[test]
-fn relative_file_links_are_resolved_from_the_terminal_directory() {
-    let terminal_dir = std::env::temp_dir().join("zetta-link-test");
-    let target = PathLikeTarget {
-        maybe_path: "src/main.rs:12:4".to_owned(),
-        terminal_dir: Some(terminal_dir.clone()),
-        path_style: PathStyle::local(),
-    };
-
-    assert_eq!(
-        resolve_local_path(&target),
-        terminal_dir.join("src").join("main.rs")
-    );
-}
-
-#[test]
-fn local_home_paths_are_expanded_after_position_suffixes_are_parsed() {
-    let target = PathLikeTarget {
-        maybe_path: "~/source/zetta/src/main.rs:12:4".to_owned(),
-        terminal_dir: None,
-        path_style: PathStyle::local(),
-    };
-
-    assert_eq!(
-        resolve_local_path(&target),
-        home_dir().join("source/zetta/src/main.rs")
-    );
-}
-
-#[test]
-fn a_bare_local_home_path_is_expanded() {
-    let target = PathLikeTarget {
-        maybe_path: "~".to_owned(),
-        terminal_dir: None,
-        path_style: PathStyle::local(),
-    };
-
-    assert_eq!(resolve_local_path(&target), *home_dir());
-}
-
-#[test]
-fn non_home_prefixed_paths_are_not_tilde_expanded() {
-    for maybe_path in ["source/zetta", "~other-user/source/zetta", "project/~/file"] {
-        let target = PathLikeTarget {
-            maybe_path: maybe_path.to_owned(),
-            terminal_dir: None,
-            path_style: PathStyle::local(),
-        };
-
-        assert_eq!(resolve_local_path(&target), PathBuf::from(maybe_path));
-    }
-}
-
-#[cfg(windows)]
-#[test]
-fn wsl_home_paths_are_left_for_the_shell() {
-    let target = PathLikeTarget {
-        maybe_path: "~/source/zetta".to_owned(),
-        terminal_dir: None,
-        path_style: PathStyle::Unix,
-    };
-
-    assert_eq!(resolve_local_path(&target), PathBuf::from("~/source/zetta"));
-}
-
-#[cfg(windows)]
-#[test]
-fn wsl_relative_file_links_preserve_the_linux_working_directory() {
-    let target = PathLikeTarget {
-        maybe_path: "ssh/sshd_config".to_owned(),
-        terminal_dir: Some(PathBuf::from("/etc")),
-        path_style: PathStyle::Unix,
-    };
-
-    assert_eq!(
-        resolve_local_path(&target),
-        PathBuf::from("/etc/ssh/sshd_config")
-    );
-}
-
-#[cfg(windows)]
-#[test]
-fn wsl_absolute_paths_do_not_require_a_reported_directory() {
-    for path in [
-        "/",
-        "/etc/hosts",
-        "/usr/local/bin/zsh",
-        "/opt/service/config.toml",
-        "/var/log/messages",
-        "/mnt/c/Users/saltw/Desktop/notes.txt",
-    ] {
-        let target = PathLikeTarget {
-            maybe_path: path.to_owned(),
-            terminal_dir: None,
-            path_style: PathStyle::Unix,
-        };
-        assert_eq!(resolve_local_path(&target), PathBuf::from(path));
-    }
-}
-
-#[cfg(windows)]
-#[test]
-fn wsl_relative_paths_without_a_reported_directory_are_left_for_the_shell() {
-    let target = PathLikeTarget {
-        maybe_path: "../etc/hosts".to_owned(),
-        terminal_dir: None,
-        path_style: PathStyle::Unix,
-    };
-
-    assert_eq!(resolve_local_path(&target), PathBuf::from("../etc/hosts"));
-}
-
-#[test]
-fn absolute_file_links_do_not_use_the_terminal_directory() {
-    let absolute_path = std::env::temp_dir().join("zetta-absolute-link.rs");
-    let target = PathLikeTarget {
-        maybe_path: absolute_path.to_string_lossy().into_owned(),
-        terminal_dir: Some(PathBuf::from("ignored")),
-        path_style: PathStyle::local(),
-    };
-
-    assert_eq!(resolve_local_path(&target), absolute_path);
-}
-
-#[test]
-fn mixed_windows_path_separators_are_normalized_for_the_shell() {
-    assert_eq!(
-        normalize_windows_path(PathBuf::from(
-            r"C:\Users\saltw\source\repos\zetta/README.md"
-        )),
-        PathBuf::from(r"C:\Users\saltw\source\repos\zetta\README.md")
-    );
-}
-
-#[test]
-fn windows_current_directory_components_are_removed_for_the_shell() {
-    assert_eq!(
-        normalize_windows_path(PathBuf::from(
-            r"C:\Users\saltw\source\repos\zetta/.\README.md"
-        )),
-        PathBuf::from(r"C:\Users\saltw\source\repos\zetta\README.md")
-    );
-    assert_eq!(
-        normalize_windows_path(PathBuf::from(r".\.\README.md")),
-        PathBuf::from("README.md")
-    );
-    assert_eq!(
-        normalize_windows_path(PathBuf::from(r"\\.\COM1")),
-        PathBuf::from(r"\\.\COM1")
-    );
-}
-
-#[test]
-fn directory_links_open_the_directory() {
-    let directory = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let target = PathLikeTarget {
-        maybe_path: directory.to_string_lossy().into_owned(),
-        terminal_dir: None,
-        path_style: PathStyle::local(),
-    };
-
-    assert_eq!(
-        local_path_open_action(&target),
-        LocalPathOpenAction::OpenDirectory(directory)
-    );
-}
-
-#[test]
-fn file_links_are_revealed_in_their_parent_directory() {
-    let file = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/standalone.rs");
-    let target = PathLikeTarget {
-        maybe_path: file.to_string_lossy().into_owned(),
-        terminal_dir: None,
-        path_style: PathStyle::local(),
-    };
-
-    assert_eq!(
-        local_path_open_action(&target),
-        LocalPathOpenAction::RevealFile(file)
-    );
-}
-
-#[test]
 fn control_is_a_hyperlink_modifier_on_every_platform() {
     assert!(is_hyperlink_modifier(&Modifiers {
         control: true,
@@ -642,6 +459,8 @@ async fn a_hover_tooltip_shows_format_characters_escaped(cx: &mut gpui::TestAppC
             maybe_path: "/tmp/\u{202E}gpj.sh".to_owned(),
             terminal_dir: None,
             path_style: PathStyle::local(),
+            spaced_readings: Vec::new(),
+            host_root: None,
         }))),
         cx,
     );
@@ -649,6 +468,79 @@ async fn a_hover_tooltip_shows_format_characters_escaped(cx: &mut gpui::TestAppC
         view.hover.as_ref().map(|hover| hover.tooltip.clone())
     });
     assert_eq!(tooltip.as_deref(), Some("/tmp/\\u{202E}gpj.sh"));
+}
+
+/// Hovering one fragment of a name with spaces in it widens the link to the
+/// whole name once a background check finds it on disk, so the underline and
+/// tooltip say what a click will open.
+#[gpui::test]
+async fn hovering_a_fragment_of_an_existing_spaced_name_widens_the_link(
+    cx: &mut gpui::TestAppContext,
+) {
+    let directory = std::env::temp_dir().join(format!("zetta-spaced-hover-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(directory.join("Q3 report.xlsx"), "").unwrap();
+    let fragment = terminal::Range::new(terminal::Point::new(0, 3), terminal::Point::new(0, 13));
+    let whole = terminal::Range::new(terminal::Point::new(0, 0), terminal::Point::new(0, 13));
+    let hover =
+        |view: &Entity<TerminalView>, readings: &[&str], cx: &mut gpui::VisualTestContext| {
+            view.update_in(cx, |view, _, cx| {
+                view.terminal.update(cx, |terminal, _| {
+                    terminal.last_content.last_hovered_word = Some(HoveredWord {
+                        word: "report.xlsx".to_owned(),
+                        word_match: fragment,
+                        id: 7,
+                    });
+                });
+            });
+            emit_terminal_event(
+                view,
+                Event::NewNavigationTarget(Some(MaybeNavigationTarget::PathLike(PathLikeTarget {
+                    maybe_path: "report.xlsx".to_owned(),
+                    terminal_dir: Some(directory.clone()),
+                    path_style: PathStyle::local(),
+                    spaced_readings: readings
+                        .iter()
+                        .map(|reading| terminal::SpacedPathReading {
+                            maybe_path: (*reading).to_owned(),
+                            range: whole,
+                        })
+                        .collect(),
+                    host_root: None,
+                }))),
+                cx,
+            );
+            view.read_with(cx, |view, cx| {
+                let hovered = view
+                    .terminal
+                    .read(cx)
+                    .last_content
+                    .last_hovered_word
+                    .clone();
+                let tooltip = view.hover.as_ref().map(|hover| hover.tooltip.clone());
+                (
+                    hovered.map(|hovered| (hovered.word, hovered.word_match)),
+                    tooltip,
+                )
+            })
+        };
+    let (view, cx) = link_test_view(cx);
+
+    assert_eq!(
+        hover(&view, &["Q3 report.xlsx"], cx),
+        (
+            Some(("Q3 report.xlsx".to_owned(), whole)),
+            Some("Q3 report.xlsx".to_owned())
+        )
+    );
+    assert_eq!(
+        hover(&view, &["Q4 report.xlsx"], cx),
+        (
+            Some(("report.xlsx".to_owned(), fragment)),
+            Some("report.xlsx".to_owned())
+        )
+    );
+    let _ = std::fs::remove_dir_all(&directory);
 }
 
 #[gpui::test]

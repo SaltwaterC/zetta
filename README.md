@@ -62,6 +62,9 @@ environment they started with; create a new remote pane to apply this context.
 - Ctrl-click file paths across terminal wraps and indented continuation rows
   drawn by applications such as Codex. Application-drawn wraps are inferred
   when matching text styles reach the right edge with at most two blank columns.
+  Names with spaces in them are clickable from any fragment: the link widens to
+  the longest space-joined reading that exists on disk. In a WSL pane, paths are
+  looked up and revealed through `\\wsl.localhost\<distribution>`.
 - Native command, path, and SSH-alias completion in a multi-command prompt
 - Stacked command panes that retain each command's PTY, output, and exit status
 - Typed settings and keymap editor, system-aware light/dark per-profile themes

@@ -15,6 +15,7 @@ use std::{
 
 mod hyperlinks;
 mod search;
+mod spaced_paths;
 mod wrapped_paths;
 
 use crate::{

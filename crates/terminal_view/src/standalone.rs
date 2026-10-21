@@ -2,6 +2,7 @@ mod blink_manager;
 mod clipboard;
 mod grid_fit;
 mod line_size;
+mod path_links;
 mod scrollback_temp;
 mod search_overlay;
 mod terminal_element;
@@ -16,7 +17,12 @@ pub use scrollback_temp::{
     start_cleanup_monitor as start_scrollback_cleanup_monitor,
 };
 
-use std::{cmp, ops::Range as StdRange, path::PathBuf, sync::Arc};
+use std::{
+    cmp,
+    ops::Range as StdRange,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use gpui::{
     Action, AnyElement, App, AppContext as _, ClipboardEntry, ClipboardItem, Context, Corners,
@@ -29,8 +35,9 @@ use serde::Deserialize;
 use settings_content::{TerminalBell, TerminalBlink};
 use terminal::{
     Clear, Copy, Event, HoveredWord, MaybeNavigationTarget, Modes, Paste, PasteText, PasteTrimmed,
-    Reset, ScrollLineDown, ScrollLineUp, ScrollPageDown, ScrollPageUp, ScrollToBottom, ScrollToTop,
-    ShowCharacterPalette, Terminal, TerminalBounds, ToggleViMode, console_palette_for_theme,
+    PathLikeTarget, Reset, ScrollLineDown, ScrollLineUp, ScrollPageDown, ScrollPageUp,
+    ScrollToBottom, ScrollToTop, ShowCharacterPalette, Terminal, TerminalBounds, ToggleViMode,
+    console_palette_for_theme,
     link_policy::display_safe_link_text,
     paste_order::{PasteOrder, PasteTicket},
     search_session::{SearchSession, SearchSessionStatus},
@@ -45,9 +52,13 @@ use ui::{
     prelude::*,
     scrollbars::{self, ScrollbarVisibility},
 };
-use util::paths::{PathStyle, PathWithPosition, home_dir};
+use util::paths::PathStyle;
 
 use blink_manager::BlinkManager;
+use path_links::{
+    LocalPathOpenAction, existing_spaced_reading, local_path_open_action, resolve_local_path,
+    with_existing_reading,
+};
 
 #[derive(Clone, Debug, Default, Deserialize, JsonSchema, PartialEq, Action)]
 #[action(namespace = terminal)]
@@ -360,6 +371,7 @@ impl TerminalView {
                             })
                         }
                         Some((MaybeNavigationTarget::PathLike(path), hovered_word)) => {
+                            view.widen_hover_to_existing_reading(path, &hovered_word, cx);
                             Some(HoverTarget {
                                 tooltip: display_safe_link_text(&path.maybe_path),
                                 hovered_word,
@@ -372,10 +384,7 @@ impl TerminalView {
                 Event::Open(MaybeNavigationTarget::Url(url)) => cx.open_url(url),
                 Event::ConfirmOpenUrl(url) => confirm_open_url(url.clone(), window, cx),
                 Event::Open(MaybeNavigationTarget::PathLike(target)) => {
-                    match local_path_open_action(target) {
-                        LocalPathOpenAction::OpenDirectory(path) => cx.open_with_system(&path),
-                        LocalPathOpenAction::RevealFile(path) => cx.reveal_path(&path),
-                    }
+                    view.open_path_like_target(target.clone(), cx);
                 }
             },
         );
@@ -434,10 +443,87 @@ impl TerminalView {
         }
     }
 
-    fn edit_path_like_target(&mut self, target: terminal::PathLikeTarget, cx: &mut Context<Self>) {
-        let path = resolve_local_path(&target);
+    /// Opens a clicked path with the system: a directory in the file manager,
+    /// anything else revealed in its parent.
+    fn open_path_like_target(&self, target: PathLikeTarget, cx: &mut Context<Self>) {
+        if target.spaced_readings.is_empty() {
+            open_local_path(local_path_open_action(&target), cx);
+            return;
+        }
+        let executor = cx.background_executor().clone();
+        cx.spawn(async move |_, cx| {
+            let action = executor
+                .spawn(async move { local_path_open_action(&with_existing_reading(target)) })
+                .await;
+            cx.update(|cx| open_local_path(action, cx));
+        })
+        .detach();
+    }
+
+    /// Widens the hovered link to the longest of its spaced readings that
+    /// exists, once a background check has found one. Until then, and when
+    /// none exists, the link stays the fragment the path patterns matched.
+    fn widen_hover_to_existing_reading(
+        &self,
+        target: &PathLikeTarget,
+        hovered: &HoveredWord,
+        cx: &mut Context<Self>,
+    ) {
+        if target.spaced_readings.is_empty() {
+            return;
+        }
+        let target = target.clone();
+        let (id, fragment) = (hovered.id, hovered.word_match);
+        let executor = cx.background_executor().clone();
+        cx.spawn(async move |this, cx| {
+            let Some(reading) = executor
+                .spawn(async move { existing_spaced_reading(&target).cloned() })
+                .await
+            else {
+                return;
+            };
+            this.update(cx, |view, cx| {
+                let tooltip = display_safe_link_text(&reading.maybe_path);
+                let widened = view.terminal.update(cx, |terminal, _| {
+                    terminal
+                        .widen_hovered_word(id, fragment, reading)
+                        .then(|| terminal.last_content.last_hovered_word.clone())
+                        .flatten()
+                });
+                if let Some(widened) = widened
+                    && let Some(hover) = view.hover.as_mut()
+                    && hover.hovered_word.id == id
+                {
+                    hover.tooltip = tooltip;
+                    hover.hovered_word = widened;
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn edit_path_like_target(&mut self, target: PathLikeTarget, cx: &mut Context<Self>) {
+        if target.spaced_readings.is_empty() {
+            self.edit_local_path(&resolve_local_path(&target), target.path_style, cx);
+            return;
+        }
+        let path_style = target.path_style;
+        let executor = cx.background_executor().clone();
+        cx.spawn(async move |this, cx| {
+            let path = executor
+                .spawn(async move { resolve_local_path(&with_existing_reading(target)) })
+                .await;
+            this.update(cx, |view, cx| view.edit_local_path(&path, path_style, cx))
+                .ok();
+        })
+        .detach();
+    }
+
+    fn edit_local_path(&mut self, path: &Path, path_style: PathStyle, cx: &mut Context<Self>) {
         let request = self.terminal.update(cx, |terminal, _| {
-            let command = terminal.editor_command_for_path(&path, target.path_style)?;
+            let command = terminal.editor_command_for_path(path, path_style)?;
             if terminal.editor_should_open_in_new_pane() {
                 Some(EditorRequest {
                     command,
@@ -1388,118 +1474,11 @@ fn trim_paste_text(text: &str) -> &str {
     text.trim()
 }
 
-#[derive(Debug, PartialEq, Eq)]
-enum LocalPathOpenAction {
-    OpenDirectory(PathBuf),
-    RevealFile(PathBuf),
-}
-
-fn local_path_open_action(target: &terminal::PathLikeTarget) -> LocalPathOpenAction {
-    let path = resolve_local_path(target);
-    if path.is_dir() {
-        LocalPathOpenAction::OpenDirectory(path)
-    } else {
-        LocalPathOpenAction::RevealFile(path)
+fn open_local_path(action: LocalPathOpenAction, cx: &App) {
+    match action {
+        LocalPathOpenAction::OpenDirectory(path) => cx.open_with_system(&path),
+        LocalPathOpenAction::RevealFile(path) => cx.reveal_path(&path),
     }
-}
-
-fn resolve_local_path(target: &terminal::PathLikeTarget) -> PathBuf {
-    let path = PathWithPosition::parse_str(&target.maybe_path).path;
-    let path = if target.path_style == PathStyle::local() {
-        expand_local_tilde_path(path)
-    } else {
-        path
-    };
-    if target.path_style.is_posix() {
-        return if is_posix_absolute_path(&path) || path.is_absolute() {
-            path
-        } else if let Some(terminal_dir) = target
-            .terminal_dir
-            .as_deref()
-            .filter(|directory| is_posix_absolute_path(directory))
-        {
-            join_posix_path(terminal_dir, &path)
-        } else {
-            // Keep the relative path for the WSL editor dispatcher. It
-            // resolves it against `pwd` before passing the Windows helper a
-            // converted absolute path, so it never falls back to C:\WINDOWS.
-            path
-        };
-    }
-
-    let path = normalize_local_path(path);
-    if path.is_absolute() {
-        path
-    } else if let Some(terminal_dir) = &target.terminal_dir {
-        terminal_dir.join(path)
-    } else {
-        path
-    }
-}
-
-fn expand_local_tilde_path(path: PathBuf) -> PathBuf {
-    let Some(path) = path.to_str() else {
-        return path;
-    };
-    let Some(remainder) = path.strip_prefix('~') else {
-        return path.into();
-    };
-    if remainder.is_empty() {
-        return home_dir().clone();
-    }
-
-    let Some(separator) = remainder.chars().next() else {
-        return path.into();
-    };
-    if !PathStyle::local().separators_ch().contains(&separator) {
-        return path.into();
-    }
-
-    home_dir().join(&remainder[separator.len_utf8()..])
-}
-
-fn is_posix_absolute_path(path: &std::path::Path) -> bool {
-    path.to_str().is_some_and(|path| path.starts_with('/'))
-}
-
-fn join_posix_path(directory: &std::path::Path, path: &std::path::Path) -> PathBuf {
-    let directory = directory.to_string_lossy();
-    let path = path.to_string_lossy();
-    PathBuf::from(format!(
-        "{}/{}",
-        directory.trim_end_matches('/'),
-        path.trim_start_matches('/')
-    ))
-}
-
-#[cfg(target_os = "windows")]
-fn normalize_local_path(path: PathBuf) -> PathBuf {
-    normalize_windows_path(path)
-}
-
-#[cfg(not(target_os = "windows"))]
-fn normalize_local_path(path: PathBuf) -> PathBuf {
-    path
-}
-
-#[cfg(any(target_os = "windows", test))]
-fn normalize_windows_path(path: PathBuf) -> PathBuf {
-    let mut path = path.to_string_lossy().replace('/', "\\");
-    if path.starts_with(r"\\.\") {
-        return PathBuf::from(path);
-    }
-    while path.contains("\\.\\") {
-        path = path.replace("\\.\\", "\\");
-    }
-    while let Some(remainder) = path.strip_prefix(".\\") {
-        path = remainder.to_owned();
-    }
-    if path == "." {
-        path.clear();
-    } else if path.ends_with("\\.") {
-        path.pop();
-    }
-    PathBuf::from(path)
 }
 
 #[cfg(test)]
