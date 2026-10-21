@@ -2,8 +2,8 @@
 //!
 //! Every tab belongs to one group — Main, a group the user named, a registered
 //! project, or one of a project's worktrees — and the tab bar, tab cycling and
-//! tab moves work on the active group's tabs only. The sidebar is how the user
-//! moves between groups.
+//! tab reordering work on the active group's tabs only. The sidebar is how the
+//! user moves between groups.
 //!
 //! A named group is this window's alone and lasts as long as the window does:
 //! the registry gives projects and worktrees a life outside it, but nothing

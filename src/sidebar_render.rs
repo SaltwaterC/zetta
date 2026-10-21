@@ -396,23 +396,19 @@ fn custom_row(
         .toggle_state(active)
         .start_slot(Icon::new(IconName::Blocks).size(IconSize::Small))
         .child(row_label(name.to_owned(), context))
-        // Shown on hover, but in the reserved column rather than in place of
-        // the count, so the count stays where every other row has it.
         .end_slot(row_end_slot(
             tab_count,
             Some({
                 let name = name.to_owned();
-                div()
-                    .visible_on_hover("list_item")
-                    .child(row_button(
-                        ("sidebar-custom-remove", position),
-                        IconName::Close,
-                        "Remove group (its tabs move to Main)",
-                        on_zetta_click(handle, move |this, _, cx| {
-                            this.remove_tab_group(&name, cx);
-                        }),
-                    ))
-                    .into_any_element()
+                row_button(
+                    ("sidebar-custom-remove", position),
+                    IconName::Close,
+                    "Remove group (its tabs move to Main)",
+                    on_zetta_click(handle, move |this, _, cx| {
+                        this.remove_tab_group(&name, cx);
+                    }),
+                )
+                .into_any_element()
             }),
             context,
         ))

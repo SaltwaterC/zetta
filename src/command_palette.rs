@@ -45,7 +45,17 @@ pub struct PaletteCommand {
 /// rows at the palette's maximum height.
 const PAGE_ROWS: usize = 8;
 
+/// The command surface also hosts a destination-only list, retaining its
+/// keyboard, clipboard, and focus handling while changing the labels it shows.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum PaletteKind {
+    #[default]
+    Commands,
+    TabGroupDestination,
+}
+
 pub struct CommandPalette {
+    pub(crate) kind: PaletteKind,
     pub query: TextField,
     pub selected: usize,
     pub commands: Vec<PaletteCommand>,
@@ -81,6 +91,7 @@ impl CommandPalette {
             .collect();
         let matches = (0..commands.len()).collect();
         Self {
+            kind: PaletteKind::Commands,
             query: TextField::default(),
             selected: 0,
             commands,

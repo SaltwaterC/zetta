@@ -1034,13 +1034,14 @@ fn with_tab_context_menu(
     let action_context = tab.active_view().map(|view| view.focus_handle(cx));
     ui::right_click_menu::<ui::ContextMenu>(("tab-context-menu", tab.id as usize))
         .menu(move |window, cx| {
-            menu_handle
+            let groups_enabled = menu_handle
                 .update(cx, |this, cx| {
                     this.active_tab = index;
                     this.tab_overflow_selection_side = None;
                     cx.notify();
+                    this.tab_groups_enabled()
                 })
-                .ok();
+                .unwrap_or(false);
             let action_context = action_context.clone();
             // This closure runs once per menu open, so both of the values it
             // hands the builder have to be cloned rather than moved.
@@ -1087,6 +1088,10 @@ fn with_tab_context_menu(
                         },
                     )
                     .action("Detach Tab", Box::new(DetachTab))
+                    .when(groups_enabled, |menu| {
+                        menu.separator()
+                            .action("Move Tab to Group…", Box::new(MoveTabToGroup))
+                    })
                     .when(tab_move_menu_entry_available(tab_count), |menu| {
                         menu.separator().action_checked(
                             "Tab Move Mode",

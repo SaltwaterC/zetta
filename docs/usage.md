@@ -65,9 +65,9 @@ that sorts the window's tabs into groups. Press `Ctrl-Shift-Z`, or run
 - Tab groups you create are listed under Main, in the order you created them.
   The **+** on the Main row, or **zetta: new tab group** in the command
   palette, asks for a name and opens the new group with a tab in it. Names
-  must not be blank, and no two groups may share a name, ignoring case. Hover
-  a group and click its **×** to remove it, or run **zetta: remove tab
-  group**; its right-click menu also renames it. Removing a group does not
+  must not be blank, and no two groups may share a name, ignoring case. A
+  group's **×** removes it, as does **zetta: remove tab group**; its
+  right-click menu also renames it. Removing a group does not
   close its tabs: they move to Main.
 - Each registered project has its own group, and each of the project's linked
   Git worktrees has a group nested under the project.
@@ -82,9 +82,16 @@ in the sidebar's order and wrapping around, whether or not the sidebar is
 open. They stop only at Main and at groups that already have tabs, so cycling
 past a project never opens a shell in it. Reach an empty project from the
 sidebar or with **zetta: show project tabs** in the command palette. Tab
-cycling and tab moves stay inside the group you are looking at. Tabs in other
-groups keep running, and their notifications and attention badges still reach
-you.
+cycling and tab reordering stay inside the group you are looking at. Tabs in
+other groups keep running, and their notifications and attention badges still
+reach you.
+
+To move an existing tab to another group, right-click it and choose **Move Tab
+to Group…**, or run **zetta: move tab to group** from the command palette.
+Search for a destination and select it with Enter or a click. Main, named tab
+groups, projects and worktrees are available, including empty groups and
+collapsed worktrees. The moved tab stays active in its destination; its panes,
+running commands, shell directories and pinning are preserved. Escape cancels.
 
 A tab joins the group you are viewing when you open it. Opening a project,
 from the palette or with `zetta project open`, puts its tab in that project's

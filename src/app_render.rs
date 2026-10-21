@@ -303,6 +303,8 @@ impl Zetta {
             .on_action(cx.listener(Self::remove_tab_group_action))
             .on_action(cx.listener(Self::new_worktree))
             .on_action(cx.listener(Self::new_tab_group))
+            .on_action(cx.listener(Self::move_tab_to_group))
+            .on_action(cx.listener(Self::move_tab_to_group_destination))
             .on_action(cx.listener(Self::new_project))
             .on_action(cx.listener(Self::new_window))
             .on_action(cx.listener(Self::set_default_terminal))

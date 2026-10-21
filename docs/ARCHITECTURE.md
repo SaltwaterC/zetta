@@ -147,6 +147,8 @@ layering rule: every module named here is a sibling under `src/`.
   incremental results, navigation, and per-terminal output/reflow invalidation
 - `tab_icon_picker.rs`: tab icon picker model, rendering, and the
   `Zetta` methods that drive it
+- `tab_group_move.rs`: moving an existing tab between groups and the searchable
+  destination picker used by its context menu and command palette
 - `pane_theme_picker.rs`: per-pane theme picker model and overlay
 - `pane_overlay.rs`: per-pane overlay text and style picker
 - `command_palette.rs`: palette model and matching, including

@@ -83,6 +83,7 @@ environment they started with; create a new remote pane to apply this context.
   you name, each registered project, and each project's worktrees. From it you can create,
   sync, integrate and discard worktrees without `zwt`. See
   [Using Zetta](docs/usage.md#project-sidebar-and-tab-groups).
+  Move existing tabs between groups from their context menu or the command palette.
   Reattached tabs return to a project or worktree group only when every pane's
   directory belongs to it; subdirectories count, and mixed directories stay in Main.
   Restoring into a project or worktree automatically opens the sidebar.

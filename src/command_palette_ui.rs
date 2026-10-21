@@ -1,4 +1,5 @@
 use super::*;
+use crate::command_palette::PaletteKind;
 use crate::command_palette::action_available_in_launch_mode;
 use crate::rename::set_tab_title;
 
@@ -55,6 +56,7 @@ impl Zetta {
                         NextTabGroup.name(),
                         PreviousTabGroup.name(),
                         NewTabGroup.name(),
+                        MoveTabToGroup.name(),
                         NewWorktree.name(),
                     ]
                     .contains(&action.name())
@@ -69,6 +71,10 @@ impl Zetta {
                 Box::new(ChangeTabTheme),
                 Box::new(SetPaneOverlay),
             ])
+            .chain(
+                self.tab_groups_enabled()
+                    .then_some(Box::new(MoveTabToGroup) as Box<dyn Action>),
+            )
             .collect::<Vec<_>>();
         let mut commands = actions
             .into_iter()
@@ -107,6 +113,15 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // A destination picker targets the tab it opened for. Rebuilding the
+        // command catalog here would replace its destinations with commands.
+        if self
+            .command_palette
+            .as_ref()
+            .is_some_and(|palette| palette.kind == PaletteKind::TabGroupDestination)
+        {
+            return;
+        }
         let Some(previous) = self.command_palette.take() else {
             return;
         };
@@ -471,7 +486,13 @@ impl Zetta {
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let palette = self.command_palette.as_ref()?;
-        let query = field_query_run(&palette.query, Some("Search commands…"), colors);
+        let (placeholder, empty_message, item_name) = match palette.kind {
+            PaletteKind::Commands => ("Search commands…", "No commands match", "command"),
+            PaletteKind::TabGroupDestination => {
+                ("Move tab to group…", "No other groups match", "group")
+            }
+        };
+        let query = field_query_run(&palette.query, Some(placeholder), colors);
         let result_count = palette.matches().len();
         let row_handle = handle.clone();
         let row_colors = colors.clone();
@@ -540,12 +561,12 @@ impl Zetta {
                 palette_section(colors)
                     .py_1()
                     .when(result_count == 0, |list| {
-                        list.child(empty_list_row("No commands match", colors))
+                        list.child(empty_list_row(empty_message, colors))
                     })
                     .when(result_count > 0, |list| list.child(rows)),
             )
             .child(palette_footer(colors).child(format!(
-                "{result_count} command{}",
+                "{result_count} {item_name}{}",
                 if result_count == 1 { "" } else { "s" }
             )));
         Some(modal(backdrop, panel))

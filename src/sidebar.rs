@@ -386,18 +386,7 @@ impl Zetta {
             return;
         }
         let active = self.active_tab_group();
-        let target = {
-            let counts = self.tab_group_counts();
-            let entries = sidebar_entries(&SidebarSources {
-                custom: self.tab_groups.custom_groups(),
-                roots: self.projects.registry.roots(),
-                listings: &self.sidebar.worktrees,
-                collapsed: &HashSet::new(),
-                counts: &counts,
-                active: &active,
-            });
-            adjacent_tab_group(&entries, &active, forward)
-        };
+        let target = adjacent_tab_group(&self.all_tab_group_entries(), &active, forward);
         if let Some(group) = target {
             self.activate_tab_group(group, window, cx);
         }
@@ -438,17 +427,7 @@ impl Zetta {
         if !self.tab_groups_enabled() {
             return Vec::new();
         }
-        let counts = self.tab_group_counts();
-        let active = self.active_tab_group();
-        let entries = sidebar_entries(&SidebarSources {
-            custom: self.tab_groups.custom_groups(),
-            roots: self.projects.registry.roots(),
-            listings: &self.sidebar.worktrees,
-            collapsed: &HashSet::new(),
-            counts: &counts,
-            active: &active,
-        });
-        entries
+        self.all_tab_group_entries()
             .iter()
             .filter(|entry| !matches!(entry, SidebarEntry::Main { .. }))
             .map(|entry| {
@@ -485,6 +464,19 @@ impl Zetta {
                     }),
             )
             .collect()
+    }
+
+    /// Every group, including empty groups and worktrees hidden by a collapsed
+    /// project. Keyboard navigation and destination pickers must reach them too.
+    pub(crate) fn all_tab_group_entries(&self) -> Vec<SidebarEntry> {
+        sidebar_entries(&SidebarSources {
+            custom: self.tab_groups.custom_groups(),
+            roots: self.projects.registry.roots(),
+            listings: &self.sidebar.worktrees,
+            collapsed: &HashSet::new(),
+            counts: &self.tab_group_counts(),
+            active: &self.active_tab_group(),
+        })
     }
 }
 

@@ -294,6 +294,7 @@ actions!(
         NextTabGroup,
         PreviousTabGroup,
         NewTabGroup,
+        MoveTabToGroup,
         NewProject,
         NewWorktree
     ]
@@ -389,6 +390,15 @@ struct ActivateTabGroup {
 #[action(namespace = zetta, no_json, no_register)]
 struct RemoveTabGroup {
     name: String,
+}
+
+/// Moves the tab selected when the destination picker opened. Window-local
+/// groups and tab IDs cannot be bound in a keymap.
+#[derive(Clone, Debug, PartialEq, Action)]
+#[action(namespace = zetta, no_json, no_register)]
+struct MoveTabToGroupDestination {
+    tab_id: u64,
+    group: TabGroup,
 }
 
 static PERFORMANCE_OVERLAY_COUNT: AtomicUsize = AtomicUsize::new(0);
@@ -496,6 +506,7 @@ mod sidebar_render;
 mod stacked_panes;
 mod tab_bar_render;
 mod tab_capability;
+mod tab_group_move;
 mod tab_group_ui;
 mod tab_groups;
 use tab_bar_render::*;
