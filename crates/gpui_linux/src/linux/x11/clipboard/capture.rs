@@ -18,9 +18,9 @@ pub(super) struct CapturedSelection {
 }
 
 impl CapturedSelection {
-    pub(super) fn new(selection: Atom) -> Result<Self> {
+    pub(super) fn new(display: &str, selection: Atom) -> Result<Self> {
         let deadline = Instant::now() + CLIPBOARD_READ_DEADLINE;
-        let context = XContext::new()?;
+        let context = XContext::new(display)?;
         context
             .conn
             .xfixes_query_version(5, 0)

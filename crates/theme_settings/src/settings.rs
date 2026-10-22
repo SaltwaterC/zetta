@@ -67,6 +67,11 @@ pub struct ThemeSettings {
     /// The theme to use for the markdown preview.
     /// Falls back to the main editor theme if unset.
     pub markdown_preview_theme: Option<ThemeSelection>,
+    /// The font family used for Mermaid diagrams.
+    /// Falls back to the UI font family if unset.
+    mermaid_font_family: Option<SharedString>,
+    /// The font weight for headings in the markdown preview.
+    markdown_preview_heading_font_weight: FontWeight,
     /// The line height for buffers, and the terminal.
     ///
     /// Changing this may affect the spacing of some UI elements.
@@ -324,6 +329,19 @@ impl ThemeSettings {
         self.markdown_preview_code_font_family
             .as_ref()
             .unwrap_or(&self.buffer_font.family)
+    }
+
+    /// Returns the font family to use for Mermaid diagrams,
+    /// falling back to the UI font family when unset.
+    pub fn mermaid_font_family(&self) -> &SharedString {
+        self.mermaid_font_family
+            .as_ref()
+            .unwrap_or(&self.ui_font.family)
+    }
+
+    /// Returns the font weight to use for headings in the markdown preview.
+    pub fn markdown_preview_heading_font_weight(&self) -> FontWeight {
+        self.markdown_preview_heading_font_weight
     }
 
     /// Returns the markdown preview font size.
@@ -608,6 +626,8 @@ impl Default for ThemeSettings {
             markdown_preview_code_font_family: None,
             markdown_preview_font_size: None,
             markdown_preview_theme: None,
+            mermaid_font_family: None,
+            markdown_preview_heading_font_weight: FontWeight::SEMIBOLD,
             theme: ThemeSelection::Dynamic {
                 mode: ThemeAppearanceMode::System,
                 light: ThemeName(settings_content::DEFAULT_LIGHT_THEME.into()),
@@ -641,5 +661,105 @@ impl ThemeSettings {
         let mut settings = cx.global::<Self>().clone();
         update(&mut settings);
         cx.set_global(settings);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn theme_with_colors(colors: ::settings_content::ThemeColorsContent) -> Theme {
+        crate::refine_theme(&crate::ThemeContent {
+            name: "Test".into(),
+            appearance: ::theme::AppearanceContent::Dark,
+            style: ::settings_content::ThemeStyleContent {
+                colors,
+                ..Default::default()
+            },
+        })
+    }
+
+    fn style_with_colors(
+        colors: ::settings_content::ThemeColorsContent,
+    ) -> ::settings_content::ThemeStyleContent {
+        ::settings_content::ThemeStyleContent {
+            colors,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn code_lens_foreground_from_theme_survives_text_muted_override() {
+        let magenta = ::theme::try_parse_color("#ff00ff").unwrap();
+        let green = ::theme::try_parse_color("#00ff00").unwrap();
+        let mut test_theme = theme_with_colors(::settings_content::ThemeColorsContent {
+            editor_code_lens_foreground: Some("#ff00ff".into()),
+            ..Default::default()
+        });
+
+        ThemeSettings::modify_theme(
+            &mut test_theme,
+            &style_with_colors(::settings_content::ThemeColorsContent {
+                text_muted: Some("#00ff00".into()),
+                ..Default::default()
+            }),
+        );
+
+        assert_eq!(
+            test_theme.styles.colors.editor_code_lens_foreground,
+            Some(magenta)
+        );
+        assert_eq!(test_theme.styles.colors.text_muted, green);
+    }
+
+    #[test]
+    fn code_lens_foreground_from_earlier_override_survives_later_muted_override() {
+        let magenta = ::theme::try_parse_color("#ff00ff").unwrap();
+        let green = ::theme::try_parse_color("#00ff00").unwrap();
+        let mut test_theme = theme_with_colors(Default::default());
+
+        ThemeSettings::modify_theme(
+            &mut test_theme,
+            &style_with_colors(::settings_content::ThemeColorsContent {
+                editor_code_lens_foreground: Some("#ff00ff".into()),
+                ..Default::default()
+            }),
+        );
+        ThemeSettings::modify_theme(
+            &mut test_theme,
+            &style_with_colors(::settings_content::ThemeColorsContent {
+                text_muted: Some("#00ff00".into()),
+                ..Default::default()
+            }),
+        );
+
+        assert_eq!(
+            test_theme.styles.colors.editor_code_lens_foreground,
+            Some(magenta)
+        );
+        assert_eq!(test_theme.styles.colors.text_muted, green);
+    }
+
+    #[test]
+    fn code_lens_foreground_follows_effective_text_muted_without_explicit_color() {
+        let green = ::theme::try_parse_color("#00ff00").unwrap();
+        let mut test_theme = theme_with_colors(Default::default());
+
+        ThemeSettings::modify_theme(
+            &mut test_theme,
+            &style_with_colors(::settings_content::ThemeColorsContent {
+                text_muted: Some("#00ff00".into()),
+                ..Default::default()
+            }),
+        );
+
+        assert_eq!(test_theme.styles.colors.editor_code_lens_foreground, None);
+        assert_eq!(
+            test_theme
+                .styles
+                .colors
+                .color(::theme::ThemeColorField::EditorCodeLensForeground),
+            green
+        );
     }
 }

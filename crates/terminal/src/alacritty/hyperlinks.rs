@@ -579,6 +579,38 @@ mod tests {
         assert_eq!(results, expected);
     }
 
+    /// Upstream `63b29c2edd` pins the shipped regexes against the examples the
+    /// settings documentation gives; Zetta's defaults are `TerminalSettings`'s
+    /// own rather than Zed's default settings file.
+    #[test]
+    fn test_default_path_hyperlink_regexes() -> anyhow::Result<()> {
+        let settings = TerminalSettings::default();
+        let searches = RegexSearches::new(
+            &settings.path_hyperlink_regexes,
+            settings.path_hyperlink_timeout_ms,
+        );
+        let examples = [
+            (r#"File "src/main.py", line 42"#, "src/main.py", Some("42")),
+            ("src/main.rs:42", "src/main.rs:42", None),
+        ];
+        assert_eq!(searches.path_hyperlink_regexes.len(), examples.len());
+        assert_eq!(
+            searches.path_hyperlink_regexes.len(),
+            settings.path_hyperlink_regexes.len()
+        );
+        for (regex, (input, path, line)) in searches.path_hyperlink_regexes.iter().zip(examples) {
+            let captures = regex
+                .captures(input)
+                .ok_or_else(|| anyhow::anyhow!("Default regex does not match {input}"))?;
+            assert_eq!(
+                captures.name("path").map(|capture| capture.as_str()),
+                Some(path)
+            );
+            assert_eq!(captures.name("line").map(|capture| capture.as_str()), line);
+        }
+        Ok(())
+    }
+
     #[test]
     fn test_url_regex() {
         re_test(

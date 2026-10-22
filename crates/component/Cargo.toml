@@ -27,6 +27,7 @@ nonminimal_bool = "allow"
 
 [lib]
 path = "src/component.rs"
+test = false
 
 [dependencies]
 collections = { version = "0.1.0", path = "../../zed/crates/collections" }

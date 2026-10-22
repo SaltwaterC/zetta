@@ -1,7 +1,7 @@
 use super::*;
 use gpui::{
-    Context, Modifiers, Render, ScrollDelta, ScrollWheelEvent, TestAppContext, TouchPhase, point,
-    px, size,
+    Context, Modifiers, Render, ScrollDelta, ScrollEvent, ScrollSource, TestAppContext, TouchPhase,
+    point, px, size,
 };
 
 #[test]
@@ -39,7 +39,7 @@ impl Render for BackdropHarness {
                     .id("underneath")
                     .absolute()
                     .inset_0()
-                    .on_scroll_wheel(cx.listener(|this, _, _, _| this.scrolls_underneath += 1))
+                    .on_scroll(cx.listener(|this, _, _, _| this.scrolls_underneath += 1))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, _, _, _| this.clicks_underneath += 1),
@@ -83,11 +83,12 @@ fn the_backdrop_keeps_the_wheel_and_clicks_from_the_terminal_underneath(cx: &mut
     let (view, cx, dismissed) = open_backdrop(|| BackdropClick::Swallow, cx);
     let outside = point(px(10.), px(10.));
 
-    cx.simulate_event(ScrollWheelEvent {
+    cx.simulate_event(ScrollEvent {
         position: outside,
         delta: ScrollDelta::Pixels(point(px(0.), px(-40.))),
         modifiers: Modifiers::default(),
         touch_phase: TouchPhase::Moved,
+        source: ScrollSource::Pointer,
     });
     cx.simulate_click(outside, Modifiers::default());
 

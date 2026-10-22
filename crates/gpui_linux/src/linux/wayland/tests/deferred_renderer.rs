@@ -17,11 +17,11 @@ struct RecordingAtlas {
 impl PlatformAtlas for RecordingAtlas {
     fn get_or_insert_with<'a>(
         &self,
-        key: &AtlasKey,
+        key: AtlasKey,
         build: &mut dyn FnMut() -> anyhow::Result<Option<(Size<DevicePixels>, Cow<'a, [u8]>)>>,
     ) -> anyhow::Result<Option<AtlasTile>> {
         build()?;
-        self.inserted.borrow_mut().push(key.clone());
+        self.inserted.borrow_mut().push(key);
         Ok(Some(tile()))
     }
 
@@ -91,10 +91,10 @@ fn painting_into_an_unbound_atlas_binds_it_first() {
     let calls = RefCell::new(0);
 
     let first = atlas
-        .get_or_insert_with(&key(), &mut build_counting(&calls))
+        .get_or_insert_with(key(), &mut build_counting(&calls))
         .unwrap();
     let second = atlas
-        .get_or_insert_with(&key(), &mut build_counting(&calls))
+        .get_or_insert_with(key(), &mut build_counting(&calls))
         .unwrap();
 
     assert_eq!(first, Some(tile()));
@@ -109,7 +109,7 @@ fn painting_fails_when_no_renderer_can_be_created() {
     *atlas.create.borrow_mut() = Some(Box::new(|| anyhow::bail!("no GPU")));
     let calls = RefCell::new(0);
 
-    let painted = atlas.get_or_insert_with(&key(), &mut build_counting(&calls));
+    let painted = atlas.get_or_insert_with(key(), &mut build_counting(&calls));
     atlas.remove(&key());
 
     assert!(painted.is_err());
@@ -124,7 +124,7 @@ fn a_bound_atlas_forwards_to_the_renderers() {
     let calls = RefCell::new(0);
 
     let tile = atlas
-        .get_or_insert_with(&key(), &mut build_counting(&calls))
+        .get_or_insert_with(key(), &mut build_counting(&calls))
         .unwrap();
     atlas.remove(&key());
 

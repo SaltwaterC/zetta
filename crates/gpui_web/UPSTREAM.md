@@ -1,7 +1,7 @@
 # Zetta gpui_web fork
 
 This crate is synchronized with `zed/crates/gpui_web` at Zed revision
-`2890c340e07a4c4c7e6778e99a49f5414115b250`.
+`544780422affd11699fb531c49af5cc6e82a3fd7` (2026-10-21).
 
 **No Zetta patches. Do not add any.** This fork exists only so that the `gpui`
 fork can be wired in: this crate sits between Zetta and `gpui`, and Cargo
@@ -18,7 +18,9 @@ mechanical adjustments the move requires:
   `zed/Cargo.toml`. Dependencies that are themselves forked point at `../<name>`;
   the rest point into `../../zed/crates/<name>`.
 - `publish` is `false`.
-- `include_bytes!` font paths point at `../../../zed/assets/fonts/...`.
+- `include_bytes!` paths in `examples/` point into `../../../zed/assets/...`.
+  The crate itself no longer bundles fonts: upstream dropped them from
+  `platform.rs`.
 
 If this crate ever stops sitting between Zetta and `gpui` — because Zetta drops
 the dependency, or because upstream drops its own `gpui` dependency — delete the

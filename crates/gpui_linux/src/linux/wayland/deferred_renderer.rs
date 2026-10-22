@@ -148,10 +148,12 @@ impl DeferredRenderer {
         }
     }
 
-    pub(super) fn destroy(&mut self) {
-        if let Some(renderer) = &mut self.renderer {
-            renderer.destroy();
-        }
+    /// Drops the renderer, or what would have created it, when the window closes. Its GPU objects
+    /// use the Wayland connection, which a display mode switch tears down once no window is open,
+    /// so none of them may outlive the window. Later calls find nothing to create.
+    pub(super) fn release(&mut self) {
+        self.pending = None;
+        self.renderer = None;
     }
 }
 
@@ -160,7 +162,7 @@ pub(super) fn prewarm_instance(display: *mut c_void) -> Option<JoinHandle<wgpu::
     let display = RawDisplay(NonNull::new(display)?);
     std::thread::Builder::new()
         .name("wgpu instance".to_owned())
-        .spawn(move || WgpuContext::instance(Box::new(display)))
+        .spawn(move || WgpuContext::instance(Some(Box::new(display))))
         .map_err(|error| log::warn!("could not start creating the wgpu instance early: {error}"))
         .ok()
 }
@@ -240,7 +242,7 @@ impl DeferredAtlas {
 impl PlatformAtlas for DeferredAtlas {
     fn get_or_insert_with<'a>(
         &self,
-        key: &AtlasKey,
+        key: AtlasKey,
         build: &mut dyn FnMut() -> anyhow::Result<Option<(Size<DevicePixels>, Cow<'a, [u8]>)>>,
     ) -> anyhow::Result<Option<AtlasTile>> {
         if self.atlas.get().is_none()

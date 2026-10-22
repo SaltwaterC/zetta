@@ -1,7 +1,7 @@
 # Zetta assets fork
 
 This crate is synchronized with `zed/crates/assets` at Zed revision
-`2890c340e07a4c4c7e6778e99a49f5414115b250`.
+`544780422affd11699fb531c49af5cc6e82a3fd7` (2026-10-21).
 
 **No Zetta patches. Do not add any.** This fork exists only so that the `gpui`
 fork can be wired in: this crate sits between Zetta and `gpui`, and Cargo
@@ -18,9 +18,12 @@ mechanical adjustments the move requires:
   `zed/Cargo.toml`. Dependencies that are themselves forked point at `../<name>`;
   the rest point into `../../zed/crates/<name>`.
 - `publish` is `false`.
-- the `rust_embed` `#[folder]` attribute points at `../../zed/assets`,
-  because it is resolved relative to the manifest and the asset directory did
-  not move with the crate.
+- upstream's `util::fs_embed!` takes `crate_relative = "../../zed/assets"`
+  and `root_relative = "zed/assets"`, because both are resolved from where the
+  crate and the build live, and the asset directory did not move with the
+  crate. In a debug build `fs_embed!` reads the files from the checkout at
+  runtime rather than embedding them; the root manifest enables `util`'s
+  `debug-embed` feature so a debug Zetta still carries them.
 
 If this crate ever stops sitting between Zetta and `gpui` — because Zetta drops
 the dependency, or because upstream drops its own `gpui` dependency — delete the

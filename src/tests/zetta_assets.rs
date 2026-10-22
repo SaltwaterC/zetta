@@ -43,3 +43,60 @@ fn bundled_profile_icons_load_from_embedded_assets() {
         assert!(ZettaAssets.load(path).unwrap().is_some(), "missing {path}");
     }
 }
+
+/// The derive excludes `assets/fonts`, so a font missing from
+/// `UNCOMPRESSED_FONTS` would not be embedded at all.
+#[test]
+fn every_bundled_font_is_served_uncompressed() {
+    fn ttf_files(directory: &std::path::Path, found: &mut Vec<String>) {
+        for entry in std::fs::read_dir(directory).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                ttf_files(&path, found);
+            } else if path.extension().is_some_and(|extension| extension == "ttf") {
+                found.push(path.to_str().unwrap().to_owned());
+            }
+        }
+    }
+    let assets = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets");
+    let mut on_disk = Vec::new();
+    ttf_files(&assets.join("fonts"), &mut on_disk);
+    let mut on_disk: Vec<String> = on_disk
+        .iter()
+        .map(|path| {
+            std::path::Path::new(path)
+                .strip_prefix(&assets)
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .replace('\\', "/")
+        })
+        .collect();
+    on_disk.sort();
+    let mut served: Vec<&str> = UNCOMPRESSED_FONTS.iter().map(|(path, _)| *path).collect();
+    served.sort();
+    assert_eq!(served, on_disk);
+
+    for path in served {
+        let loaded = ZettaAssets.load(path).unwrap().unwrap();
+        assert!(matches!(loaded, Cow::Borrowed(_)), "{path} was copied");
+        assert_eq!(
+            *loaded,
+            std::fs::read(assets.join(path)).unwrap()[..],
+            "{path}"
+        );
+    }
+}
+
+#[test]
+fn embedded_fonts_include_zeds_and_zettas() {
+    let fonts = ZettaAssets.embedded_fonts().unwrap();
+    let listed = ZettaAssets
+        .list("fonts/")
+        .unwrap()
+        .into_iter()
+        .filter(|path| path.ends_with(".ttf"))
+        .count();
+    assert_eq!(fonts.len(), listed);
+    assert!(listed > UNCOMPRESSED_FONTS.len(), "Zed's fonts are missing");
+}

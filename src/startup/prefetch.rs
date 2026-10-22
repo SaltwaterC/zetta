@@ -3,7 +3,8 @@
 //!
 //! Parsing the bundled themes and the user's themes, and asking GNOME for the
 //! window-button layout, used to take about 13 ms of the main thread before the
-//! first window could spawn its terminal. Connecting to the compositor and
+//! first window could spawn its terminal. Since Zed's assets are embedded
+//! compressed, reading the embedded fonts inflates Zed's ~1.5 MiB of them too. Connecting to the compositor and
 //! scanning the system's fonts takes the platform about 9 ms, and none of this
 //! work has to wait for it. Each piece is joined where it used to run, so a
 //! thread that could not be started, or that panicked, leaves the work to be done
@@ -11,14 +12,20 @@
 
 use super::*;
 
+use std::borrow::Cow;
 use std::thread::{self, JoinHandle};
 
 use theme::ThemeFamily;
 
-/// The parsed themes a launch registers, being prepared on other threads.
+/// An embedded font's bytes, as `TextSystem::add_fonts` takes them.
+type FontBytes = Cow<'static, [u8]>;
+
+/// The parsed themes and the fonts a launch registers, being prepared on other
+/// threads.
 pub(super) struct StartupPrefetch {
     bundled_themes: Option<JoinHandle<Vec<ThemeFamily>>>,
     user_themes: Option<JoinHandle<Result<Vec<ThemeFamily>>>>,
+    fonts: Option<JoinHandle<Result<Vec<FontBytes>>>>,
 }
 
 impl StartupPrefetch {
@@ -31,6 +38,7 @@ impl StartupPrefetch {
                 theme_settings::parse_bundled_themes(&ZettaAssets)
             }),
             user_themes: spawn("user theme prefetch", prepare_user_themes),
+            fonts: spawn("font prefetch", || ZettaAssets.embedded_fonts()),
         }
     }
 
@@ -45,6 +53,14 @@ impl StartupPrefetch {
             .take()
             .and_then(join)
             .unwrap_or_else(prepare_user_themes)
+    }
+
+    /// The embedded fonts, or read here when the thread is not there.
+    pub(super) fn fonts(&mut self) -> Result<Vec<FontBytes>> {
+        self.fonts
+            .take()
+            .and_then(join)
+            .unwrap_or_else(|| ZettaAssets.embedded_fonts())
     }
 }
 

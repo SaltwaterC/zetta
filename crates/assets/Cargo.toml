@@ -8,6 +8,8 @@ license = "GPL-3.0-or-later"
 
 [lib]
 path = "src/assets.rs"
+test = false
+doctest = false
 
 # Resolved from `zed/Cargo.toml`'s `[workspace.lints]`, which a fork outside
 # that workspace cannot inherit. Keep it in step when syncing.
@@ -31,4 +33,4 @@ nonminimal_bool = "allow"
 [dependencies]
 anyhow = "1.0.86"
 gpui = { path = "../gpui", default-features = false }
-rust-embed = { version = "8.11", features = ["include-exclude"] }
+util = { path = "../../zed/crates/util" }

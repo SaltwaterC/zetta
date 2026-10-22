@@ -1,7 +1,7 @@
 # Zetta theme_settings fork
 
 This crate is synchronized with `zed/crates/theme_settings` at Zed revision
-`2890c340e07a4c4c7e6778e99a49f5414115b250`.
+`544780422affd11699fb531c49af5cc6e82a3fd7` (2026-10-21).
 
 Retain these Zetta patches when synchronizing:
 
@@ -17,6 +17,8 @@ Retain these Zetta patches when synchronizing:
 - The settings-file writers (`set_theme`, `set_icon_theme`, `set_mode`) are
   removed. They wrote back into Zed's settings file, which Zetta does not have.
 - Value types come from `settings_content` rather than `settings`'s re-exports.
+  Upstream's tests are carried, with `::settings::` spelled
+  `::settings_content::` for the same reason.
 - `parse_bundled_themes` parses and refines every bundled theme without touching
   GPUI, and `init_with_bundled_themes` takes them already parsed;
   `load_bundled_themes` and `init` are unchanged in effect. Parsing them is about

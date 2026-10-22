@@ -542,7 +542,7 @@ impl Zetta {
         .with_sizing_behavior(ListSizingBehavior::Infer)
         .max_h(PALETTE_LIST_MAX_HEIGHT)
         .track_scroll(&palette.scroll)
-        .on_scroll_wheel(|_, _, cx| cx.stop_propagation());
+        .on_scroll(|_, _, cx| cx.stop_propagation());
         let dismiss_handle = handle.clone();
         let backdrop = modal_backdrop(
             "command-palette-backdrop",

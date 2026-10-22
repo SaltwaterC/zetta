@@ -3,7 +3,7 @@ use std::iter::repeat_n;
 
 /// Most of the code, and specifically the constants, in this are copied from Alacritty,
 /// with modifications for our circumstances
-use gpui::{Modifiers, MouseButton, Pixels, Point as GpuiPoint, ScrollWheelEvent, px};
+use gpui::{Modifiers, MouseButton, Pixels, Point as GpuiPoint, ScrollEvent, px};
 
 use crate::{LineSize, Modes, Point, SelectionSide, TerminalBounds};
 
@@ -93,7 +93,7 @@ impl MouseButtonCode {
         }
     }
 
-    fn from_scroll(e: &ScrollWheelEvent) -> Self {
+    fn from_scroll(e: &ScrollEvent) -> Self {
         let is_positive = match e.delta {
             gpui::ScrollDelta::Pixels(pixels) => pixels.y > px(0.),
             gpui::ScrollDelta::Lines(lines) => lines.y > 0.,
@@ -114,7 +114,7 @@ impl MouseButtonCode {
 pub(crate) fn scroll_report(
     point: MousePosition,
     scroll_lines: i32,
-    e: &ScrollWheelEvent,
+    e: &ScrollEvent,
     mode: Modes,
 ) -> Option<impl Iterator<Item = Vec<u8>>> {
     if mode.intersects(Modes::MOUSE_MODE) {
@@ -335,7 +335,7 @@ mod tests {
             pixel: (1, 1),
         };
 
-        let scroll_event = ScrollWheelEvent {
+        let scroll_event = ScrollEvent {
             delta: ScrollDelta::Lines(point(0., -1.)),
             touch_phase: TouchPhase::Moved,
             ..Default::default()
@@ -356,7 +356,7 @@ mod tests {
             pixel: (1, 1),
         };
 
-        let scroll_event = ScrollWheelEvent {
+        let scroll_event = ScrollEvent {
             delta: ScrollDelta::Lines(point(0., 1.)),
             touch_phase: TouchPhase::Moved,
             ..Default::default()

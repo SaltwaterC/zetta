@@ -25,10 +25,14 @@ too_many_arguments = "allow"
 large_enum_variant = "allow"
 nonminimal_bool = "allow"
 
+[lib]
+test = false
+doctest = false
+
 [dependencies]
 gpui = { path = "../gpui", default-features = false }
-schemars = { version = "1.0", features = ["indexmap2"] }
-serde = { version = "1.0.221", features = ["derive", "rc"] }
+schemars = { version = "1.0", default-features = false, features = ["std", "indexmap2"] }
+serde = { version = "1.0", features = ["rc"] }
 util = { path = "../../zed/crates/util" }
 
 [package.metadata.cargo-shear]

@@ -30,18 +30,17 @@ name = "ui"
 path = "src/ui.rs"
 
 [dependencies]
-chrono = { version = "0.4", features = ["serde"] }
+chrono = { version = "0.4", default-features = false, features = ["std", "serde"] }
 component = { path = "../component" }
 documented = "0.10"
 gpui = { path = "../gpui", default-features = false }
 gpui_macros = { path = "../gpui_macros" }
 icons = { path = "../../zed/crates/icons" }
 itertools = "0.14.0"
-log = { version = "0.4.16", features = ["kv_unstable_serde", "serde"] }
+log = { version = "0.4", default-features = false, features = ["std"] }
 menu = { path = "../menu" }
-num-format = "0.4.4"
-schemars = { version = "1.0", features = ["indexmap2"] }
-serde = { version = "1.0.221", features = ["derive", "rc"] }
+schemars = { version = "1.0", default-features = false, features = ["std", "indexmap2"] }
+serde = { version = "1.0", features = ["rc"] }
 smallvec = { version = "1.6", features = ["union", "const_new"] }
 strum = { version = "0.28", features = ["derive"] }
 theme = { path = "../theme" }
@@ -58,4 +57,3 @@ ignored = ["log"]
 
 [features]
 default = []
-derive_inspector_reflection = []

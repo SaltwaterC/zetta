@@ -1,7 +1,7 @@
 # Zetta release_channel fork
 
 This crate is synchronized with `zed/crates/release_channel` at Zed revision
-`2890c340e07a4c4c7e6778e99a49f5414115b250`.
+`544780422affd11699fb531c49af5cc6e82a3fd7` (2026-10-21).
 
 **No Zetta patches. Do not add any.** This fork exists only so that the `gpui`
 fork can be wired in: this crate sits between Zetta and `gpui`, and Cargo

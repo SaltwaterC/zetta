@@ -1,7 +1,7 @@
 # Zetta terminal fork
 
 The source baseline is `zed/crates/terminal` at Zed revision
-`2890c340e07a4c4c7e6778e99a49f5414115b250`. The local crate uses a
+`544780422affd11699fb531c49af5cc6e82a3fd7` (synchronized 2026-10-21). The local crate uses a
 standalone manifest and is not a drop-in copy of Zed's workspace terminal.
 
 Retain these Zetta-specific behaviors when synchronizing:
@@ -65,7 +65,21 @@ Retain these Zetta-specific behaviors when synchronizing:
   (`Terminal::release_pty_resources`), so an exited pane that stays open does
   not hold the pty master, the poller and the loop's buffers. Note that
   `PtyIo`'s `JoinHandle` is what owns them: the loop thread returns its
-  `EventLoop` instead of dropping it;
+  `EventLoop` instead of dropping it. Both `vte` parsers on `Terminal`
+  (`output_processor`, `echo_processor`) are `Option`s created on first use,
+  because `Processor::new` reserves a 2 MiB synchronized-update buffer that a
+  pty pane, whose output is parsed on the loop thread, never needs. Releasing
+  the pty drops both and `Reset` drops the echo parser; upstream's
+  `650a8d1bed` releases only its one output parser. A provider replay takes
+  the output parser and hands it back, so parser state survives it. Pinned by
+  `test_exited_terminal_drops_its_parse_buffers`;
+- parse a `path:row:column` target whose path is POSIX text — a Cygwin or WSL
+  path seen on a Windows host — with `posix_path_position`, not with
+  `PathWithPosition::parse_str` directly. Since the 2026-10-21 sync `parse_str`
+  rebuilds the path with `Path::with_file_name`, which on Windows joins the
+  file name with `\`; the Cygwin translation then refused the path, and
+  `windows_posix_host_shells_invoke_the_native_zetta_executable` caught it.
+  `terminal_view`'s path links use the same function for POSIX path styles;
 - resolve path targets against the working directory that was current when the
   line was printed (`cwd_history`/`cwd_at_line`), rather than the one current
   when the click happens;

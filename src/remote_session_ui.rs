@@ -1928,7 +1928,7 @@ fn remote_session_rows(
     .with_sizing_behavior(ListSizingBehavior::Infer)
     .max_h(px(280.))
     .track_scroll(picker_scroll)
-    .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+    .on_scroll(|_, _, cx| cx.stop_propagation())
 }
 
 /// The host suggestions under the target field, from the user's SSH
@@ -1993,7 +1993,7 @@ fn remote_session_suggestion_rows(
     .with_sizing_behavior(ListSizingBehavior::Infer)
     .max_h(REMOTE_SESSION_SUGGESTION_VIEWPORT_HEIGHT)
     .track_scroll(suggestion_scroll)
-    .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+    .on_scroll(|_, _, cx| cx.stop_propagation())
 }
 
 fn remote_session_suggestion_list(

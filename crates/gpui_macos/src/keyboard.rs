@@ -2,7 +2,8 @@ use collections::HashMap;
 use std::ffi::{CStr, c_void};
 
 use core_foundation::data::{CFDataGetBytePtr, CFDataRef};
-use objc::{msg_send, runtime::Object, sel, sel_impl};
+use objc2::{msg_send, runtime::AnyObject};
+use objc2_foundation::NSString;
 
 use gpui::{KeybindingKeystroke, Keystroke, PlatformKeyboardLayout, PlatformKeyboardMapper};
 
@@ -113,12 +114,10 @@ impl MacKeyboardLayout {
 #[path = "tests/keyboard.rs"]
 mod tests;
 
-unsafe fn input_source_property(source: *mut Object, property: *const c_void) -> Option<String> {
-    let value: *mut Object = unsafe { TISGetInputSourceProperty(source, property) };
-    if value.is_null() {
-        return None;
-    }
-    let value: *const std::os::raw::c_char = msg_send![value, UTF8String];
+unsafe fn input_source_property(source: *mut AnyObject, property: *const c_void) -> Option<String> {
+    let value = unsafe { TISGetInputSourceProperty(source, property) };
+    let value = unsafe { value.cast::<NSString>().as_ref() }?;
+    let value = value.UTF8String();
     if value.is_null() {
         return None;
     }

@@ -1,7 +1,12 @@
 use super::*;
 
+/// The isolated X server these tests run against.
+fn display() -> String {
+    std::env::var("DISPLAY").expect("DISPLAY names the isolated X server")
+}
+
 fn owner(text: &str) -> Arc<Inner> {
-    let owner = Arc::new(Inner::new().unwrap());
+    let owner = Arc::new(Inner::new(&display()).unwrap());
     owner
         .write(
             vec![ClipboardData {
@@ -19,7 +24,7 @@ fn owner(text: &str) -> Arc<Inner> {
 fn captured(owner: &Arc<Inner>) -> ClipboardReader {
     ClipboardReader {
         inner: owner.clone(),
-        captured: CapturedSelection::new(owner.atoms.CLIPBOARD).unwrap(),
+        captured: CapturedSelection::new(&display(), owner.atoms.CLIPBOARD).unwrap(),
     }
 }
 

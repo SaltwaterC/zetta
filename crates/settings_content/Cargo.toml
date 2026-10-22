@@ -34,12 +34,12 @@ default = []
 [dependencies]
 anyhow = "1.0.86"
 collections = { version = "0.1.0", path = "../../zed/crates/collections" }
-derive_more = { version = "2.1.1", features = ["add", "add_assign", "deref", "deref_mut", "display", "from", "from_str", "mul", "mul_assign", "not"] }
+derive_more = { version = "2.1", features = ["deref", "deref_mut", "from", "from_str"] }
 gpui = { path = "../gpui", default-features = false }
 language_model_core = { path = "../../zed/crates/language_model_core" }
-log = { version = "0.4.16", features = ["kv_unstable_serde", "serde"] }
-schemars = { version = "1.0", features = ["indexmap2"] }
-serde = { version = "1.0.221", features = ["derive", "rc"] }
+log = { version = "0.4", default-features = false, features = ["std"] }
+schemars = { version = "1.0", default-features = false, features = ["std", "indexmap2"] }
+serde = { version = "1.0", features = ["rc"] }
 serde_json = { version = "1.0.144", features = ["preserve_order", "raw_value"] }
 serde_json_lenient = { version = "0.2", features = ["preserve_order", "raw_value"] }
 serde_path_to_error = "0.1.17"

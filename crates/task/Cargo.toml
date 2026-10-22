@@ -38,14 +38,14 @@ nonminimal_bool = "allow"
 [dependencies]
 anyhow = "1.0.86"
 collections = { version = "0.1.0", path = "../../zed/crates/collections" }
-futures = "0.3.32"
+futures = "0.3.34"
 gpui = { path = "../gpui", default-features = false }
 hex = "0.4.3"
-log = { version = "0.4.16", features = ["kv_unstable_serde", "serde"] }
+log = { version = "0.4", default-features = false, features = ["std"] }
 parking_lot = "0.12.1"
 proto = { path = "../../zed/crates/proto" }
-schemars = { version = "1.0", features = ["indexmap2"] }
-serde = { version = "1.0.221", features = ["derive", "rc"] }
+schemars = { version = "1.0", default-features = false, features = ["std", "indexmap2"] }
+serde = { version = "1.0", features = ["rc"] }
 serde_json = { version = "1.0.144", features = ["preserve_order", "raw_value"] }
 serde_json_lenient = { version = "0.2", features = ["preserve_order", "raw_value"] }
 sha2 = "0.10"

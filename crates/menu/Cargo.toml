@@ -28,6 +28,7 @@ nonminimal_bool = "allow"
 [lib]
 path = "src/menu.rs"
 doctest = false
+test = false
 
 [dependencies]
 gpui = { path = "../gpui", default-features = false }

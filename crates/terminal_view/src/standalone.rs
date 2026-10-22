@@ -28,7 +28,7 @@ use gpui::{
     Action, AnyElement, App, AppContext as _, ClipboardEntry, ClipboardItem, Context, Corners,
     DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, KeyContext, KeyDownEvent,
     Keystroke, MouseButton, MouseDownEvent, Pixels, Point, PromptButton, PromptLevel, Render,
-    ScrollWheelEvent, Subscription, Window, actions, anchored, deferred, div, px,
+    ScrollEvent, Subscription, Window, actions, anchored, deferred, div, px,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -1053,6 +1053,15 @@ impl TerminalView {
 
         self.has_bell = false;
         self.blink_manager.update(cx, BlinkManager::pause);
+        // Windows reports AltGr as ctrl-alt; the character it composes arrives
+        // through the input handler, so encoding the chord here would send it
+        // as a meta sequence instead.
+        if event.prefer_character_input
+            && event.keystroke.key_char.is_some()
+            && !self.terminal.read(cx).vi_mode_enabled()
+        {
+            return;
+        }
         if self.process_keystroke(&event.keystroke, cx) {
             if let Some(event) = enabled_input_event(self.emit_input_events, || {
                 TerminalViewEvent::Input(TerminalInput::Keystroke(event.keystroke.clone()))
@@ -1163,7 +1172,7 @@ impl TerminalView {
         cx.notify();
     }
 
-    fn scroll_wheel(&mut self, event: &ScrollWheelEvent, cx: &mut Context<Self>) {
+    fn scroll_wheel(&mut self, event: &ScrollEvent, cx: &mut Context<Self>) {
         self.terminal.update(cx, |terminal, cx| {
             terminal.scroll_wheel(
                 event,

@@ -357,7 +357,7 @@ where
         .max_h(DROPDOWN_OPTIONS_MAX_HEIGHT)
         .p_1()
         .debug_selector(move || options_region_selector.clone())
-        .child(option_rows.on_scroll_wheel(|_, _, cx| cx.stop_propagation()));
+        .child(option_rows.on_scroll(|_, _, cx| cx.stop_propagation()));
 
     deferred(
         anchored()

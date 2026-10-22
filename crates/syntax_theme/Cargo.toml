@@ -36,7 +36,7 @@ doctest = false
 
 [dependencies]
 gpui = { path = "../gpui", default-features = false }
-serde = { version = "1.0.221", features = ["derive", "rc"], optional = true }
+serde = { version = "1.0", features = ["rc"], optional = true }
 serde_json = { version = "1.0.144", features = ["preserve_order", "raw_value"], optional = true }
 
 [dev-dependencies]

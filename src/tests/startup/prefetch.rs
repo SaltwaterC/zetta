@@ -14,6 +14,7 @@ fn the_prefetched_bundled_themes_are_the_ones_parsed_in_place() {
             theme_settings::parse_bundled_themes(&ZettaAssets)
         }),
         user_themes: None,
+        fonts: None,
     };
 
     let prefetched = prefetch.bundled_themes().unwrap();
@@ -31,10 +32,27 @@ fn the_prefetched_user_themes_are_handed_over() {
     let mut prefetch = StartupPrefetch {
         bundled_themes: None,
         user_themes: spawn("test user theme prefetch", || Ok(Vec::new())),
+        fonts: None,
     };
 
     assert!(prefetch.user_themes().unwrap().is_empty());
     assert!(prefetch.bundled_themes().is_none());
+}
+
+#[test]
+fn the_prefetched_fonts_are_the_ones_read_in_place() {
+    let mut prefetch = StartupPrefetch {
+        bundled_themes: None,
+        user_themes: None,
+        fonts: spawn("test font prefetch", || ZettaAssets.embedded_fonts()),
+    };
+
+    let prefetched = prefetch.fonts().unwrap();
+
+    assert!(!prefetched.is_empty());
+    assert_eq!(prefetched, ZettaAssets.embedded_fonts().unwrap());
+    // Without the thread, the fonts are read here.
+    assert_eq!(prefetch.fonts().unwrap(), prefetched);
 }
 
 #[test]

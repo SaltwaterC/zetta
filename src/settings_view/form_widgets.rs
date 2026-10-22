@@ -80,7 +80,7 @@ impl SettingsFormWidgets {
                 )
                 .size_full(),
             )
-            .on_scroll_wheel(move |event, window, cx| {
+            .on_scroll(move |event, window, cx| {
                 let delta = event.delta.pixel_delta(window.line_height());
                 let offset = wheel_scroll.offset();
                 let minimum = -wheel_scroll.max_offset().y;

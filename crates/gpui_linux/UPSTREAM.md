@@ -1,7 +1,7 @@
 # Zetta GPUI Linux fork
 
 This crate is synchronized with `zed/crates/gpui_linux` at Zed revision
-`2890c340e07a4c4c7e6778e99a49f5414115b250`. Zetta owns the fork so Linux
+`544780422affd11699fb531c49af5cc6e82a3fd7` (2026-10-21). Zetta owns the fork so Linux
 platform fixes can be carried without modifying the upstream submodule.
 
 Retain these Zetta patches when synchronizing:
@@ -10,8 +10,14 @@ Retain these Zetta patches when synchronizing:
 - keep eligible Wayland press serials distinct from other protocol serials and
   choose them by observation order, so mouse-triggered selections and popup
   grabs remain valid across 32-bit serial wraparound;
-- diagnose foreground tasks that block the Wayland event loop for more than
-  two seconds and include the underlying event-loop error on termination;
+- diagnose foreground tasks that block the event loop for more than two
+  seconds (`linux/main_task_watchdog.rs`) and include the underlying
+  event-loop error on termination. Upstream's `f37989fbdf` moved runnable
+  dispatch into `LinuxCommon::register_sources` for every backend, so the
+  watchdog now wraps that one place and covers X11 as well as Wayland;
+- convert a `wl_keyboard` key through `wayland_keycode_to_xkb`, which drops
+  keycodes that overflow the xkb offset, such as the `XKB_KEYCODE_INVALID`
+  WSLg sends for a laptop's Fn key, instead of panicking on the addition;
 - invalidate stale programmatic resizes when compositor configures supersede
   them, while preserving the upstream Wayland frame-callback lifecycle;
 - use physical-key ASCII mappings for number-row accelerators and provide a
@@ -24,8 +30,13 @@ Retain these Zetta patches when synchronizing:
 - route compositor-issued activation tokens through a local pending-token
   helper consumed by the next Wayland window activation, keeping this behavior
   in Zetta's platform fork rather than changing GPUI's upstream trait;
-- omit Zed's platform notification API because Zetta owns notifications at the
-  application layer;
+- omit Zed's platform notification API (`linux/system_notifications.rs` and
+  the `LinuxPlatform` notification methods) because Zetta owns notifications
+  at the application layer;
+- omit Wayland outbound drag (`c7aea6cbbd`: `start_external_drag`,
+  `ExternalDrag`, the `DataSourceKind` user data on `wl_data_source`). Zetta
+  has no drag source, and inbound file drops, including `87a1ea30e8`'s stale
+  read generation, are upstream's;
 - implement `read_from_clipboard_async` and `read_from_primary_async`. Cached
   and self-owned reads answer at once, as the synchronous read does. Otherwise
   Wayland sends `receive` and flushes on the GUI thread, for the offer current
@@ -39,7 +50,10 @@ Retain these Zetta patches when synchronizing:
   on the foreground, but never waits there for an external owner's payload.
   Both end a read once the owner goes quiet (`PIPE_READ_TIMEOUT`, X11's
   `LONG_TIMEOUT_DUR`) or after `CLIPBOARD_READ_DEADLINE` overall, which X11's
-  synchronous read now honours too. Native ownership regressions live in
+  synchronous read now honours too. `DisplayConnection` dispatches both to the
+  live connection; the headless connection answers empty. The captured X11
+  connection opens the client's own display (`XContext::new(display)`), as
+  upstream's reader now does. Native ownership regressions live in
   `src/tests/linux/x11/clipboard_capture.rs`; run the ignored
   `captured_selection_tests` with `--features test-support -- --ignored
   --test-threads=1` against an isolated X server.
@@ -66,7 +80,18 @@ Retain these Zetta patches when synchronizing:
   the adapter on a surface of its own that it drops before `WgpuRenderer::new`
   creates the renderer's, because `gpui_wgpu` cannot be patched to accept an
   instance. That moved the first renderer from about 95 ms after launch to
-  about 80. X11 still creates its renderer with the window.
+  about 80. X11 still creates its renderer with the window. The window's
+  `Drop` calls `DeferredRenderer::release`, which drops the renderer or what
+  would have created it, where upstream takes its `Option<WgpuRenderer>`: its
+  GPU objects use the Wayland connection, which a display-mode switch tears
+  down once no window is open.
+- connect to the display server when the platform is created
+  (`LinuxPlatform::connect_early`, called by `current_platform_with_path_prompt`),
+  as the platform did before upstream's `f37989fbdf` moved connecting into
+  `run`. The connection starts the wgpu instance prewarm, so it overlaps what
+  Zetta does before `run` instead of following it; the first renderer, which
+  waits for that instance, comes ~9 ms sooner. A `set_initial_windowing` made
+  afterwards still applies: `run` then connects again in that mode.
 - a client-driven resize asked for before a Wayland window's first configure
   is remembered, and that configure adopts it when it names no size
   (`first_configure_size`). A configure invalidates every queued resize, so

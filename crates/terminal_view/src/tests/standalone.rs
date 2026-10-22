@@ -193,6 +193,78 @@ async fn normal_drag_in_mouse_mode_leaves_ctrl_c_with_the_application(
     );
 }
 
+/// AltGr arrives from Windows as ctrl-alt with the composed character, which
+/// the input handler delivers; encoding the chord as well would send a meta
+/// sequence in place of the character.
+#[gpui::test]
+async fn altgr_character_input_is_not_encoded_as_a_meta_sequence(cx: &mut gpui::TestAppContext) {
+    cx.update(|cx| {
+        theme_settings::init(theme::LoadThemes::JustBase, cx);
+        TerminalSettings::override_global(
+            TerminalSettings {
+                option_as_meta: true,
+                ..TerminalSettings::default()
+            },
+            cx,
+        );
+    });
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        let terminal = cx.new(|cx| {
+            terminal::TerminalBuilder::new_display_only(
+                terminal::terminal_settings::CursorShape::Block,
+                terminal::terminal_settings::AlternateScroll::On,
+                None,
+                0,
+                cx.background_executor(),
+                PathStyle::local(),
+            )
+            .subscribe(cx)
+        });
+        let mut view = TerminalView::new(terminal, window, cx);
+        view.set_emit_input_events(true);
+        view.focus_handle.focus(window, cx);
+        view
+    });
+    let keystrokes = std::rc::Rc::new(std::cell::Cell::new(0));
+    let received = keystrokes.clone();
+    cx.update(|_, cx| {
+        cx.subscribe(&view, move |_, event, _| {
+            if let TerminalViewEvent::Input(TerminalInput::Keystroke(_)) = event {
+                received.set(received.get() + 1);
+            }
+        })
+        .detach();
+    });
+    cx.run_until_parked();
+
+    let mut altgr_a = Keystroke::parse("ctrl-alt-a").unwrap();
+    altgr_a.key_char = Some("ą".to_owned());
+    let mut press = |prefer_character_input| {
+        cx.update(|window, cx| {
+            window.dispatch_event(
+                gpui::PlatformInput::KeyDown(KeyDownEvent {
+                    keystroke: altgr_a.clone(),
+                    is_held: false,
+                    prefer_character_input,
+                }),
+                cx,
+            );
+        });
+    };
+    press(true);
+    assert_eq!(
+        keystrokes.get(),
+        0,
+        "AltGr input is left to the input handler"
+    );
+    press(false);
+    assert_eq!(
+        keystrokes.get(),
+        1,
+        "a real ctrl-alt chord is still encoded"
+    );
+}
+
 #[test]
 fn pane_customization_context_menu_entries_have_stable_order() {
     let entries = pane_customization_context_menu_entries();

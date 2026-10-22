@@ -9,6 +9,9 @@ fn performance_metrics_report_fps_percentiles_and_slow_frames() {
         invalidations: 1,
         draw_start,
         draw_end: draw_start + Duration::from_millis(milliseconds),
+        refresh_interval: None,
+        signal_at: None,
+        phases: gpui::DrawPhases::default(),
     };
     let metrics = PerformanceMetrics::from_timings(
         &[timing(5), timing(10), timing(20)],

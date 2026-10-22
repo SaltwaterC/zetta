@@ -52,6 +52,7 @@ mod clipboard_channel;
 mod hosted_console;
 pub mod link_policy;
 pub mod paste_order;
+pub mod posix_path_position;
 mod pty_info;
 mod reader_handover;
 mod replay;
@@ -131,7 +132,7 @@ pub use vte::ansi::{Color, NamedColor, Rgb};
 use gpui::{
     App, AppContext as _, BackgroundExecutor, Bounds, ClipboardItem, Context, EventEmitter, Hsla,
     Keystroke, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
-    Point as GpuiPoint, Priority, Rgba, ScrollWheelEvent, Size, Task, TouchPhase, Window, actions,
+    Point as GpuiPoint, Priority, Rgba, ScrollEvent, Size, Task, TouchPhase, Window, actions,
     black, px,
 };
 
@@ -1107,7 +1108,7 @@ fn wsl_editor_path_argument(path: &str, path_style: PathStyle) -> Option<String>
         return Some(format!("\"$(wslpath -w {path})\""));
     }
 
-    if path_style.is_posix() && !PathStyle::Windows.is_absolute(path) {
+    if path_style.is_posix() && !PathStyle::Windows.is_absolute(Path::new(path)) {
         return wsl_relative_editor_path_argument(path);
     }
 
@@ -1146,7 +1147,7 @@ fn cygwin_editor_path_argument(
         });
     }
 
-    if path_style.is_posix() && !PathStyle::Windows.is_absolute(path) {
+    if path_style.is_posix() && !PathStyle::Windows.is_absolute(Path::new(path)) {
         if path == "~" {
             return Some(match shell_kind {
                 ShellKind::Nushell => "(cygpath -w $env.HOME)".to_owned(),
@@ -1418,7 +1419,7 @@ fn cygwin_path_like_to_windows(shell: &Shell, value: &str) -> Option<String> {
         return None;
     }
     let root = cygwin_root_from_program(&shell.program())?;
-    let value = PathWithPosition::parse_str(value);
+    let value = posix_path_position::parse_posix_path_with_position(value);
     let path = value.path.to_str()?;
     let path = cygwin_path_to_windows(&root, path)?;
     Some(
@@ -2371,7 +2372,7 @@ struct ProvidedPtyRequest<'a> {
     working_directory: Option<PathBuf>,
     env: HashMap<String, String>,
     term: &'a Arc<AlacrittyTermLock>,
-    output_processor: &'a mut Processor<StdSyncHandler>,
+    output_processor: &'a mut Option<Processor<StdSyncHandler>>,
     console_palette: ConsolePalette,
     defer_replay: bool,
     /// The grid the child should start at, when the caller knows it.
@@ -2467,7 +2468,9 @@ fn open_provided_pty(request: ProvidedPtyRequest) -> Result<OpenedProvidedPty> {
     let (pty, child_events) =
         alacritty_terminal::tty::attach(handover.conout, handover.conin, handover.child_pid)?;
     if !defer_replay && !handover.replay.is_empty() {
-        output_processor.advance(&mut *term.lock(), &handover.replay);
+        output_processor
+            .get_or_insert_with(Processor::new)
+            .advance(&mut *term.lock(), &handover.replay);
     }
     // Ordinary Windows handovers are replayed immediately because ConPTY has
     // already been attached. Fresh-shell restores keep the bytes pending so
@@ -2640,8 +2643,8 @@ impl TerminalBuilder {
             content_snapshot_gate: None,
             wakeup_gate,
             term_config: config,
-            output_processor: Processor::<StdSyncHandler>::new(),
-            echo_processor: Processor::<StdSyncHandler>::new(),
+            output_processor: None,
+            echo_processor: None,
             output_clipboard_scanner: zclip::protocol::Scanner::default(),
             remote_clipboard: clipboard_channel::RemoteClipboard::default(),
             title_override: None,
@@ -3308,7 +3311,7 @@ impl TerminalBuilder {
             let builder_events_tx = events_tx.clone();
             let wakeup_gate = WakeupGate::new();
             let listener = ZedListener::new(events_tx.clone(), wakeup_gate.clone());
-            let mut output_processor = Processor::<StdSyncHandler>::new();
+            let mut output_processor = None;
             // Set by the multiplexer-backed branch below: an attached child's
             // exit status can only come from the process that owns it.
             let mut child_events = None;
@@ -3545,7 +3548,7 @@ impl TerminalBuilder {
                 wakeup_gate,
                 term_config: config,
                 output_processor,
-                echo_processor: Processor::<StdSyncHandler>::new(),
+                echo_processor: None,
                 output_clipboard_scanner: zclip::protocol::Scanner::default(),
                 remote_clipboard: clipboard_channel::RemoteClipboard::default(),
                 title_override: terminal_title_override,
@@ -3869,10 +3872,16 @@ pub struct Terminal {
     content_snapshot_gate: Option<tests::ContentSnapshotGate>,
     wakeup_gate: WakeupGate,
     term_config: AlacrittyTermConfig,
-    output_processor: Processor<StdSyncHandler>,
+    /// Parses bytes injected into the grid rather than read from the pty
+    /// (display-only and byte-stream output, provider replay). Created on first
+    /// use and dropped with the pty: `Processor::new` reserves a 2 MiB
+    /// synchronized-update buffer, which an exited pane kept for as long as it
+    /// stayed open (upstream `650a8d1bed`).
+    output_processor: Option<Processor<StdSyncHandler>>,
     /// Parses keyboard input echoed into the grid while SRM is reset. Separate
     /// from `output_processor` so an echo never lands inside an output sequence.
-    echo_processor: Processor<StdSyncHandler>,
+    /// Created on first use, like `output_processor`, since few panes ever echo.
+    echo_processor: Option<Processor<StdSyncHandler>>,
     output_clipboard_scanner: zclip::protocol::Scanner,
     remote_clipboard: clipboard_channel::RemoteClipboard,
     events: VecDeque<InternalEvent>,
@@ -4487,7 +4496,7 @@ impl Terminal {
             InternalEvent::Reset => {
                 trace!("Resetting");
                 reset_terminal(term);
-                self.echo_processor = Processor::<StdSyncHandler>::new();
+                self.echo_processor = None;
                 self.reset_cwd_history();
                 cx.emit(Event::Wakeup);
             }
@@ -4798,7 +4807,9 @@ impl Terminal {
             return;
         }
         let mut term = self.term.lock();
-        self.output_processor.advance(&mut *term, &converted);
+        self.output_processor
+            .get_or_insert_with(Processor::new)
+            .advance(&mut *term, &converted);
         drop(term);
         self.content_dirty = true;
         self.detect_init_command_startup_marker();
@@ -5159,7 +5170,9 @@ impl Terminal {
             return;
         }
         let mut term = self.term.lock();
-        self.echo_processor.advance(&mut *term, input);
+        self.echo_processor
+            .get_or_insert_with(Processor::new)
+            .advance(&mut *term, input);
         drop(term);
         self.content_dirty = true;
         self.events_tx
@@ -6426,7 +6439,7 @@ impl Terminal {
     }
 
     ///Scroll the terminal
-    pub fn scroll_wheel(&mut self, e: &ScrollWheelEvent, scroll_multiplier: f32) {
+    pub fn scroll_wheel(&mut self, e: &ScrollEvent, scroll_multiplier: f32) {
         let mouse_mode = self.mouse_mode(e.shift);
         let scroll_multiplier = if mouse_mode { 1. } else { scroll_multiplier };
 
@@ -6461,11 +6474,7 @@ impl Terminal {
         self.schedule_find_hyperlink(window.modifiers(), window.mouse_position());
     }
 
-    fn determine_scroll_lines(
-        &mut self,
-        e: &ScrollWheelEvent,
-        scroll_multiplier: f32,
-    ) -> Option<i32> {
+    fn determine_scroll_lines(&mut self, e: &ScrollEvent, scroll_multiplier: f32) -> Option<i32> {
         let line_height = self.last_content.terminal_bounds.line_height;
         match e.touch_phase {
             /* Reset scroll state on started */
@@ -6978,6 +6987,10 @@ impl Terminal {
         if let Some(pty_tx) = pty_tx.take() {
             pty_tx.shutdown();
         }
+        // The pane outlives its child, so give back the parse buffers' 2 MiB
+        // reservations; a later injected write or echo builds a new one.
+        self.output_processor = None;
+        self.echo_processor = None;
         // The loop's own control, which holds a reference to its poller. A
         // control the multiplexer provided is somebody else's and is left alone.
         if self.pty_control_is_local {
@@ -14981,6 +14994,40 @@ mod tests {
         });
     }
 
+    /// `Processor::new` reserves a 2 MiB synchronized-update buffer. A pty
+    /// pane parses its child's output on the event loop, so its own parsers
+    /// exist only for injected output and local echo: neither is built until
+    /// used, and both go with the pty when the child ends (upstream
+    /// `650a8d1bed`, extended here to the echo parser).
+    #[gpui::test]
+    async fn test_exited_terminal_drops_its_parse_buffers(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+
+        let (terminal, completion_rx) = build_test_terminal(cx, "echo", &["captured"]).await;
+        completion_rx
+            .recv()
+            .await
+            .expect("Should receive exit status");
+        assert_content_eventually(&terminal, "captured", cx).await;
+
+        terminal.update(cx, |terminal, cx| {
+            assert!(
+                terminal.output_processor.is_none() && terminal.echo_processor.is_none(),
+                "a pty pane that injected nothing should hold no parse buffer"
+            );
+            terminal.write_output(b"injected before release\n", cx);
+            assert!(terminal.output_processor.is_some());
+            terminal.release_pty_resources();
+            assert!(
+                terminal.output_processor.is_none(),
+                "releasing the pty should drop the parse buffer"
+            );
+            terminal.write_output(b"injected after release\n", cx);
+            assert!(terminal.output_processor.is_some());
+        });
+        assert_content_eventually(&terminal, "injected after release", cx).await;
+    }
+
     #[cfg(unix)]
     #[gpui::test]
     async fn test_kill_active_task_on_completed_task_is_noop(cx: &mut TestAppContext) {
@@ -15018,8 +15065,8 @@ mod tests {
     mod perf {
         use super::super::*;
         use gpui::{
-            Entity, ScrollDelta, ScrollWheelEvent, TestAppContext, VisualContext,
-            VisualTestContext, point,
+            Entity, ScrollDelta, ScrollEvent, TestAppContext, VisualContext, VisualTestContext,
+            point,
         };
         use util::default;
         use util_macros::perf;
@@ -15088,7 +15135,7 @@ mod tests {
                     );
 
                     terminal.scroll_wheel(
-                        &ScrollWheelEvent {
+                        &ScrollEvent {
                             position,
                             delta: ScrollDelta::Lines(GpuiPoint::new(0.0, lines as f32)),
                             ..default()

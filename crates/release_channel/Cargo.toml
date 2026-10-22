@@ -25,6 +25,9 @@ too_many_arguments = "allow"
 large_enum_variant = "allow"
 nonminimal_bool = "allow"
 
+[lib]
+doctest = false
+
 [dependencies]
 gpui = { path = "../gpui", default-features = false }
 semver = { version = "1.0", features = ["serde"] }

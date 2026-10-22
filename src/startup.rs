@@ -658,7 +658,11 @@ fn initialize_zetta_settings(launch: &mut ApplicationLaunch, cx: &mut App) {
         .user_themes()
         .map(|families| register_user_themes(families, cx))
         .log_err();
-    ZettaAssets.load_fonts(cx).log_err();
+    launch
+        .prefetch
+        .fonts()
+        .and_then(|fonts| cx.text_system().add_fonts(fonts))
+        .log_err();
     apply_config_settings(&launch.config, cx).expect("failed to apply Zetta configuration");
     load_keybindings(&launch.keymap_path, launch.profile_count, launch.no_mux, cx);
     #[cfg(target_os = "macos")]

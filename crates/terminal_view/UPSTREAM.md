@@ -2,7 +2,7 @@
 
 The renderer's source baseline is the compiled portions of
 `zed/crates/terminal_view` at Zed revision
-`2890c340e07a4c4c7e6778e99a49f5414115b250`. Zed's workspace-only files are
+`544780422affd11699fb531c49af5cc6e82a3fd7` (synchronized 2026-10-21). Zed's workspace-only files are
 not a synchronization source for this crate.
 
 This fork intentionally builds `src/standalone.rs` rather than Zed's workspace
@@ -51,6 +51,13 @@ gpui's `Window::with_text_scale` (see `../gpui/UPSTREAM.md`). The cursor, the
 selection and the highlighted ranges follow the same scale. The view drops
 typed and committed text while the terminal reports a locked keyboard (KAM),
 and its context menu offers **Reset**.
+
+A key-down that the platform marks `prefer_character_input` with a composed
+character (Windows AltGr, reported as ctrl-alt) is left to the input handler
+outside vi mode, as upstream's `620efaa5c7` does in the workspace view; Zetta's
+guard sits after the scrollback-search and vi `/` handling, so search editing
+is unchanged. Pinned by
+`altgr_character_input_is_not_encoded_as_a_meta_sequence`.
 
 Files belonging only to Zed's uncompiled workspace view are reference material,
 not a source of automatic imports. See `../UPSTREAM_AUDIT.md` for decisions on

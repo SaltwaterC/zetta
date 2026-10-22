@@ -1,6 +1,9 @@
 mod dispatcher;
+mod display_connection;
 mod headless;
 mod keyboard;
+#[cfg(any(feature = "wayland", feature = "x11"))]
+mod main_task_watchdog;
 mod platform;
 #[cfg(any(feature = "wayland", feature = "x11"))]
 mod text_system;
@@ -13,8 +16,11 @@ mod x11;
 mod xdg_desktop_portal;
 
 pub use dispatcher::*;
+pub(crate) use display_connection::{Backend, DisplayConnection, select_backend};
 pub(crate) use headless::*;
 pub(crate) use keyboard::*;
+#[cfg(any(feature = "wayland", feature = "x11"))]
+pub(crate) use main_task_watchdog::MainTaskWatchdog;
 pub(crate) use platform::*;
 #[cfg(any(feature = "wayland", feature = "x11"))]
 pub(crate) use text_system::*;
@@ -61,50 +67,44 @@ pub type DirectoryPathPrompt = Rc<
     ) -> futures::channel::oneshot::Receiver<gpui::Result<Option<Vec<PathBuf>>>>,
 >;
 
+use gpui::WindowingModes;
+
 /// Returns the default platform implementation for the current OS.
+///
+/// A windowed platform connects to the display server the process environment names, or starts
+/// headless when it names none, and can switch between those modes later. A headless platform
+/// stays headless.
 pub fn current_platform(headless: bool) -> Rc<dyn gpui::Platform> {
     current_platform_with_path_prompt(headless).0
 }
 
-/// Returns the default platform implementation for the current OS, together with
-/// its [`DirectoryPathPrompt`].
+/// [`current_platform`], together with its [`DirectoryPathPrompt`].
 pub fn current_platform_with_path_prompt(
     headless: bool,
 ) -> (Rc<dyn gpui::Platform>, DirectoryPathPrompt) {
-    #[cfg(feature = "x11")]
-    use anyhow::Context as _;
+    let platform = LinuxPlatform::new(default_modes(headless));
+    // Zetta patch: see `LinuxPlatform::connect_early`.
+    platform.connect_early();
+    with_path_prompt(platform)
+}
 
-    if headless {
-        return with_path_prompt(LinuxPlatform {
-            inner: HeadlessClient::new(),
-        });
-    }
-
-    match gpui::guess_compositor() {
-        #[cfg(feature = "wayland")]
-        "Wayland" => with_path_prompt(LinuxPlatform {
-            inner: WaylandClient::new(),
-        }),
-
-        #[cfg(feature = "x11")]
-        "X11" => with_path_prompt(LinuxPlatform {
-            inner: X11Client::new()
-                .context("Failed to initialize X11 client.")
-                .unwrap(),
-        }),
-
-        "Headless" => with_path_prompt(LinuxPlatform {
-            inner: HeadlessClient::new(),
-        }),
-        _ => unreachable!(
-            r#"At least one of the "wayland" or "x11" features must be enabled on gpui_linux or gpui_platform."#
-        ),
+fn default_modes(headless: bool) -> WindowingModes {
+    if headless || std::env::var_os("ZED_HEADLESS").is_some() {
+        WindowingModes::HEADLESS
+    } else {
+        WindowingModes::all()
     }
 }
 
-fn with_path_prompt<P: LinuxClient + 'static>(
-    platform: LinuxPlatform<P>,
-) -> (Rc<dyn gpui::Platform>, DirectoryPathPrompt) {
+/// Returns a platform that may switch among `allowed_modes`.
+///
+/// It starts windowed in the process's own environment, or headless if that names no allowed
+/// display server. Set another initial mode with [`gpui::Application::with_windowing`].
+pub fn linux_platform(allowed_modes: WindowingModes) -> Rc<dyn gpui::Platform> {
+    Rc::new(LinuxPlatform::new(allowed_modes))
+}
+
+fn with_path_prompt(platform: LinuxPlatform) -> (Rc<dyn gpui::Platform>, DirectoryPathPrompt) {
     let platform = Rc::new(platform);
     // Weak, because the application owns the platform and the prompt is kept in a thread-local.
     // Owning it from there kept the platform alive until thread-local teardown, where dropping
@@ -126,9 +126,7 @@ mod tests {
 
     #[test]
     fn the_path_prompt_does_not_keep_the_platform_alive() {
-        let (platform, prompt) = with_path_prompt(LinuxPlatform {
-            inner: HeadlessClient::new(),
-        });
+        let (platform, prompt) = with_path_prompt(LinuxPlatform::new(WindowingModes::HEADLESS));
         let weak = Rc::downgrade(&platform);
 
         drop(platform);

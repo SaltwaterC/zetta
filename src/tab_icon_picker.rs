@@ -777,5 +777,5 @@ fn tab_icon_grid(grid: TabIconGrid) -> gpui::UniformList {
     .w_full()
     .h_full()
     .track_scroll(&scroll_handle)
-    .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+    .on_scroll(|_, _, cx| cx.stop_propagation())
 }

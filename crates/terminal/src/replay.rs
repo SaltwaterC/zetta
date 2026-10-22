@@ -142,7 +142,7 @@ impl Terminal {
         // into it. Sealed history, if startup produced any, is shared by Clone.
         let mut prepared = PreparedReplay {
             term: term.clone(),
-            processor: mem::replace(&mut self.output_processor, Processor::new()),
+            processor: self.output_processor.take().unwrap_or_default(),
         };
         self.replay_job.updates = Some(Vec::new());
         let (finished, ready) = async_channel::bounded(1);
@@ -178,7 +178,7 @@ impl Terminal {
                     // No foreground event can interleave the generation check
                     // and this swap. Destroy the replaced grid off-thread too.
                     let old = mem::replace(&mut *terminal.term.lock(), prepared.term);
-                    terminal.output_processor = prepared.processor;
+                    terminal.output_processor = Some(prepared.processor);
                     terminal.replay_job.updates = None;
                     terminal.replay_job.ready = None;
                     terminal.replay_job.events.append(&mut terminal.events);

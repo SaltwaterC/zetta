@@ -1,17 +1,20 @@
 # Zetta GPUI fork
 
 This crate is synchronized with `zed/crates/gpui` at Zed revision
-`2890c340e07a4c4c7e6778e99a49f5414115b250`. Zetta owns the fork so rendering
+`544780422affd11699fb531c49af5cc6e82a3fd7` (2026-10-21). Zetta owns the fork so rendering
 fixes can be carried without modifying the upstream submodule.
 
 Retain these Zetta patches when synchronizing:
 
 - sort the three sprite vectors in `Scene::finish` with `sort_unstable_by_key`
-  rather than `sort_by_key`. A sprite's `(order, tile_id)` key is fully
-  discriminating for paint — two sprites sharing an order and an atlas tile draw
-  the same texture inside the same layer — so their relative order cannot be
-  observed, while a stable sort both compares more and allocates a scratch
-  buffer of half the slice. At a screenful of terminal glyphs that buffer is
+  rather than `sort_by_key`, keeping upstream's key. Upstream's `b4ecc45422`
+  changed that key from `(order, tile_id)` to `(order, texture_id.index)`, so
+  `batches` splits sprites only where the atlas texture changes, and Zetta
+  takes the new key. Within one order and texture an unstable sort may reorder
+  sprites, which is observable only where two of them overlap inside one
+  layer; the old key, sorted either way, already put such sprites in tile
+  order rather than paint order, so this is no change for Zetta. A stable sort
+  both compares more and allocates a scratch buffer of half the slice. At a screenful of terminal glyphs that buffer is
   large enough to reach the allocator's mmap threshold once per frame, which
   showed up as kernel page-zeroing in the profile. The other five vectors stay
   stable on purpose: every primitive inside one `push_layer` shares that layer's
@@ -29,6 +32,10 @@ Retain these Zetta patches when synchronizing:
   and `Bounds::intersects` is strict about touching edges, so no run's layer
   intersected its neighbour and all of them already resolved to the same order.
   Measured at −24.6% mean draw time and −14.3% process CPU, 8 of 8 paired runs.
+  Upstream's later `paint_line` takes a `paint_underline` callback so a caller
+  can record underlines (`Window::painted_underlines`); `paint_line_glyphs`
+  takes the same callback, and `paint_in_layer` passes
+  `Window::paint_underline`.
 
 - `Window::glyph_sprites`, a per-frame memo of the glyph lookup that
   `paint_glyph` and `paint_emoji` both do, reached through `Window::glyph_sprite`.
@@ -52,7 +59,9 @@ Retain these Zetta patches when synchronizing:
   Glyphs are rasterized at the part of the stretch that is the same both ways
   (`Window::text_scale_glyph`), so a double-height line is drawn from a raster
   at twice the font size rather than a magnified one; only double width's
-  horizontal half is stretched.
+  horizontal half is stretched. Upstream now builds every underline through
+  `Window::underline`, so the stretch for underlines and strikethroughs is
+  applied there (`scale_text_bounds`), once for every path that paints one.
 
 - `Platform::read_from_primary_async` and `App::read_from_primary_async`, the
   primary-selection counterpart of upstream's `read_from_clipboard_async`, with

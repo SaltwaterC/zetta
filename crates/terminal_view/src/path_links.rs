@@ -82,7 +82,13 @@ fn host_path(target: &PathLikeTarget, maybe_path: &str) -> Option<PathBuf> {
 /// Resolves `maybe_path`, `target`'s text or one of its readings, against
 /// `target`'s directory and path style.
 fn resolve_local_path_text(target: &PathLikeTarget, maybe_path: &str) -> PathBuf {
-    let path = PathWithPosition::parse_str(maybe_path).path;
+    // A POSIX path keeps the separators it was written with, which
+    // `parse_str` rewrites on a Windows host; see `posix_path_position`.
+    let path = if target.path_style.is_posix() {
+        terminal::posix_path_position::parse_posix_path_with_position(maybe_path).path
+    } else {
+        PathWithPosition::parse_str(maybe_path).path
+    };
     let path = if target.path_style == PathStyle::local() {
         expand_local_tilde_path(path)
     } else {
