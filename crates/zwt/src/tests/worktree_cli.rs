@@ -35,7 +35,16 @@ impl Drop for EnvironmentGuard {
 impl GitFixture {
     pub(super) fn new() -> Self {
         let tempdir = TempDir::new().unwrap();
-        let root = tempdir.path().join("project with space");
+        // Spelled as git reports it: macOS's temporary directory is under
+        // `/var`, a symlink to `/private/var`, and a path compared after its
+        // worktree is removed can no longer be canonicalized to match. Not on
+        // Windows, where canonicalizing yields a `\\?\` path.
+        let tempdir_path = if cfg!(unix) {
+            fs::canonicalize(tempdir.path()).unwrap()
+        } else {
+            tempdir.path().to_path_buf()
+        };
+        let root = tempdir_path.join("project with space");
         fs::create_dir(&root).unwrap();
         let global_config = tempdir.path().join("global-config");
         let fixture = Self {

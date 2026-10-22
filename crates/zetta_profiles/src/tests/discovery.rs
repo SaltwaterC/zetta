@@ -49,7 +49,7 @@ fn a_per_user_homebrew_prefix_is_found_without_homebrew_prefix_set() {
 
     // What a dock-launched process sees: no HOMEBREW_PREFIX, and a PATH that
     // may not mention Homebrew at all.
-    let prefixes = homebrew_prefixes_from(None, Some(home.path()), None);
+    let prefixes = homebrew_prefixes_from(None, Some(home.path()), None, &[]);
 
     assert_eq!(prefixes, [home.path().join(".brew")]);
 }
@@ -60,7 +60,7 @@ fn a_user_linuxbrew_prefix_is_found_beside_the_dot_brew_one() {
     let home = tempfile::tempdir().unwrap();
     fake_homebrew_prefix(&home.path().join(".linuxbrew"));
 
-    let prefixes = homebrew_prefixes_from(None, Some(home.path()), None);
+    let prefixes = homebrew_prefixes_from(None, Some(home.path()), None, &[]);
 
     assert_eq!(prefixes, [home.path().join(".linuxbrew")]);
 }
@@ -72,7 +72,7 @@ fn the_prefix_of_a_brew_on_path_is_found() {
     fake_homebrew_prefix(prefix.path());
     let path = env::join_paths([Path::new("/nonexistent"), &prefix.path().join("bin")]).unwrap();
 
-    let prefixes = homebrew_prefixes_from(None, None, Some(&path));
+    let prefixes = homebrew_prefixes_from(None, None, Some(&path), &[]);
 
     assert_eq!(prefixes, [prefix.path().to_path_buf()]);
 }
@@ -86,9 +86,36 @@ fn a_prefix_named_twice_is_listed_once_and_one_without_brew_not_at_all() {
     fs::create_dir_all(home.path().join(".linuxbrew/bin")).unwrap();
     let path = env::join_paths([prefix.join("bin")]).unwrap();
 
-    let prefixes = homebrew_prefixes_from(Some(prefix.as_os_str()), Some(home.path()), Some(&path));
+    let prefixes = homebrew_prefixes_from(
+        Some(prefix.as_os_str()),
+        Some(home.path()),
+        Some(&path),
+        &[],
+    );
 
     assert_eq!(prefixes, [prefix]);
+}
+
+/// A system prefix comes after the per-user ones, and only once it has a `brew`.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn a_system_prefix_is_found_after_the_per_user_ones() {
+    let home = tempfile::tempdir().unwrap();
+    fake_homebrew_prefix(&home.path().join(".brew"));
+    let system = tempfile::tempdir().unwrap();
+    let installed = system.path().join("installed");
+    fake_homebrew_prefix(&installed);
+    let empty = system.path().join("empty");
+    fs::create_dir_all(&empty).unwrap();
+
+    let prefixes = homebrew_prefixes_from(
+        None,
+        Some(home.path()),
+        None,
+        &[empty.to_str().unwrap(), installed.to_str().unwrap()],
+    );
+
+    assert_eq!(prefixes, [home.path().join(".brew"), installed]);
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]

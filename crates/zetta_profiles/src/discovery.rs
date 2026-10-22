@@ -193,20 +193,29 @@ fn homebrew_prefixes() -> Vec<PathBuf> {
         env::var_os("HOMEBREW_PREFIX").as_deref(),
         env::var_os("HOME").as_deref().map(Path::new),
         env::var_os("PATH").as_deref(),
+        SYSTEM_HOMEBREW_PREFIXES,
     )
 }
+
+/// The default prefixes of a system-wide Homebrew install.
+#[cfg(target_os = "macos")]
+const SYSTEM_HOMEBREW_PREFIXES: &[&str] = &["/opt/homebrew", "/usr/local"];
+#[cfg(target_os = "linux")]
+const SYSTEM_HOMEBREW_PREFIXES: &[&str] = &["/home/linuxbrew/.linuxbrew"];
 
 /// Every place a Homebrew prefix is conventionally found, in priority order,
 /// kept only where `bin/brew` exists.
 ///
 /// In order: the environment's own answer, the prefix of any `brew` on `PATH`,
 /// the per-user prefixes Homebrew documents for installs without root
-/// (`~/.brew`, and `~/.linuxbrew` on Linux), then the default system prefixes.
+/// (`~/.brew`, and `~/.linuxbrew` on Linux), then the `system` prefixes, which
+/// are a parameter so that tests do not see the host's own installation.
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 fn homebrew_prefixes_from(
     environment_prefix: Option<&OsStr>,
     home: Option<&Path>,
     path: Option<&OsStr>,
+    system: &[&str],
 ) -> Vec<PathBuf> {
     let mut prefixes = environment_prefix
         .into_iter()
@@ -223,10 +232,7 @@ fn homebrew_prefixes_from(
         #[cfg(target_os = "linux")]
         prefixes.push(home.join(".linuxbrew"));
     }
-    #[cfg(target_os = "macos")]
-    prefixes.extend([PathBuf::from("/opt/homebrew"), PathBuf::from("/usr/local")]);
-    #[cfg(target_os = "linux")]
-    prefixes.push(PathBuf::from("/home/linuxbrew/.linuxbrew"));
+    prefixes.extend(system.iter().map(PathBuf::from));
 
     let mut seen = HashSet::new();
     prefixes
