@@ -376,9 +376,12 @@ fn unix_agent_socket_refuses_a_peer_that_is_not_its_owner() {
     let listener = create_listener_for(event_tx, owner + 1).unwrap();
 
     let mut client = UnixStream::connect(&listener.path).unwrap();
-    client
-        .set_read_timeout(Some(Duration::from_secs(2)))
-        .unwrap();
+    // macOS refuses `SO_RCVTIMEO` with `EINVAL` on a socket whose peer has
+    // already closed it, which is the refusal arriving first; the read below
+    // then returns at once without needing the timeout.
+    if let Err(error) = client.set_read_timeout(Some(Duration::from_secs(2))) {
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{error}");
+    }
     // A frame it would otherwise forward; written before the refusal can
     // close the socket, so a failed write is as good as the closed read.
     let _ = client.write_all(&frame(&[11]));
