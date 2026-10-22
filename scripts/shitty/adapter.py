@@ -36,8 +36,11 @@ class Snapshot(Observation):
 def observation_type(base, names):
     # dataclasses.asdict/fields see exactly the observations the engine supplies.
     # Missing frontend metadata remains unavailable instead of acquiring defaults.
+    # An explicit __doc__ stops Python 3.9's dataclass from calling
+    # inspect.signature on a SimpleNamespace subclass, which has none.
     return make_dataclass(base.__name__, [(name, object) for name in names],
-                          bases=(base,), init=False, eq=False, repr=False)
+                          bases=(base,), namespace={"__doc__": base.__name__},
+                          init=False, eq=False, repr=False)
 
 
 class Zetta:
