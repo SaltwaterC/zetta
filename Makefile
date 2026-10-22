@@ -367,7 +367,13 @@ endif
 
 .PHONY: test-shitty
 # Opt-in imported terminal conformance suite; assertions may expose known gaps.
+# python3 on Windows is the Microsoft Store shim, which fails unless Python was
+# installed from the Store; the python.org installer provides `python` instead.
+ifeq ($(OS),Windows_NT)
+PYTHON ?= python
+else
 PYTHON ?= python3
+endif
 SHITTY_ARGS ?=
 test-shitty:
 	CARGO="$(CARGO)" $(PYTHON) scripts/shitty/run.py $(SHITTY_ARGS)

@@ -12,6 +12,8 @@ make test-shitty
 ```
 
 Python 3.10 or newer and the repository's pinned Rust toolchain are required.
+On Windows the Makefile runs `python` rather than `python3`, which there is the
+Microsoft Store shim; override it with `make test-shitty PYTHON=py` if needed.
 The runner builds `tools/shitty-adapter` with its checked-in lockfile into
 `target/shitty-adapter`. This is a separate Cargo workspace so it avoids
 compiling the GUI and doesn't add a test protocol to the production binary.
