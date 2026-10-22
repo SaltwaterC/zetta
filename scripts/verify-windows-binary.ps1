@@ -186,7 +186,7 @@ if ($worktreeBinary) {
 $notifyHelp = $null
 if ($notifyBinary) {
     $notifyHelp = ((& $notifyBinary --help | Out-String).Trim() -replace "`r", "")
-    if ($LASTEXITCODE -ne 0 -or $notifyHelp -notmatch '(?m)^Usage: zntfy \[OPTIONS\] SUMMARY \[BODY\]$') {
+    if ($LASTEXITCODE -ne 0 -or $notifyHelp -notmatch '(?m)^Usage: zntfy \[OPTIONS\] \[--\] SUMMARY \[BODY\]$') {
         throw "$notifyBinary --help failed its CLI smoke test"
     }
 }

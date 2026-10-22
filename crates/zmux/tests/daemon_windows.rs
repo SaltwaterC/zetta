@@ -40,7 +40,8 @@ mod shared_input;
 
 struct TestDaemon {
     process: Child,
-    _directory: tempfile::TempDir,
+    /// Taken by `drop`, which removes it once the daemon has let go of it.
+    directory: Option<tempfile::TempDir>,
     config: PathBuf,
 }
 
@@ -50,13 +51,7 @@ impl TestDaemon {
     }
 
     fn start_binary(binary: &Path) -> Self {
-        // uds_windows has a short socket-name limit. Keeping the temporary
-        // directory beside this checkout also makes the test work on machines
-        // whose system temporary directory has a long user profile path.
-        let directory = tempfile::Builder::new()
-            .prefix("z")
-            .tempdir_in(env!("CARGO_MANIFEST_DIR"))
-            .expect("creating a short Windows test directory");
+        let directory = short_test_directory();
         let config = directory.path().to_path_buf();
         let process = Command::new(binary)
             .arg("--daemon")
@@ -69,7 +64,7 @@ impl TestDaemon {
 
         let daemon = Self {
             process,
-            _directory: directory,
+            directory: Some(directory),
             config,
         };
         daemon.wait_for_endpoint();
@@ -77,10 +72,7 @@ impl TestDaemon {
     }
 
     fn sessions_dir(&self) -> PathBuf {
-        self.config.join("Zetta").join(format!(
-            "sessions-debug-v{}",
-            zmux::messages::PROTOCOL_VERSION
-        ))
+        sessions_dir_under(&self.config)
     }
 
     fn wait_for_endpoint(&self) {
@@ -124,6 +116,82 @@ impl Drop for TestDaemon {
         let _ = self.process.kill();
         let _ = self.process.wait();
         let _ = zmux::pty_host::stop(&self.sessions_dir(), true);
+        if let Some(directory) = self.directory.take() {
+            remove_test_directory(directory);
+        }
+    }
+}
+
+/// Where a daemon given `config` as its `APPDATA` keeps its sessions.
+fn sessions_dir_under(config: &Path) -> PathBuf {
+    config.join("Zetta").join(format!(
+        "sessions-debug-v{}",
+        zmux::messages::PROTOCOL_VERSION
+    ))
+}
+
+/// The longest name of a socket a daemon binds in its sessions directory
+/// (`zmux::paths::forwarded_agent_socket`), which with the directory is what
+/// `uds_windows` has to fit in its `sun_path`.
+const LONGEST_SOCKET_NAME: &str = "forwarded-agent.sock";
+
+/// What `uds_windows` accepts: the path and its terminator in 108 bytes.
+const SOCKET_PATH_LIMIT: usize = 107;
+
+/// A private `APPDATA` for one daemon, in the system temporary directory.
+///
+/// Not in this checkout: a directory a test leaves there shows up as untracked
+/// work. The system temporary directory is also the shorter of the two in the
+/// default profile layout, where a Windows user name is at most 20 characters.
+/// A relocated `TMP` that leaves no room for the daemon's sockets is reported
+/// as such, rather than as a daemon that never became ready.
+fn short_test_directory() -> tempfile::TempDir {
+    let directory = tempfile::Builder::new()
+        .prefix("zmux")
+        .tempdir()
+        .expect("creating a Windows test directory");
+    let socket = sessions_dir_under(directory.path()).join(LONGEST_SOCKET_NAME);
+    assert!(
+        socket.as_os_str().len() <= SOCKET_PATH_LIMIT,
+        "{} is {} bytes, longer than the {SOCKET_PATH_LIMIT} a Windows socket path can be; \
+         point TMP at a shorter directory",
+        socket.display(),
+        socket.as_os_str().len()
+    );
+    directory
+}
+
+/// Removes a fixture's directory once nothing holds a file in it open.
+///
+/// `zmux::stop` returns when the daemon stops answering, not when it has
+/// exited, and the replacement an upgrade starts is not `process`, so nothing
+/// above waits for it. Until it exits its `zmux.lock`, opened with no sharing,
+/// cannot be deleted, and `TempDir` ignores a failed removal: that is what left
+/// `z*` directories behind. A directory still held after the deadline means a
+/// daemon outlived its test, which fails the test rather than passing quietly.
+fn remove_test_directory(directory: tempfile::TempDir) {
+    let path = directory.keep();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let error = match std::fs::remove_dir_all(&path) {
+            Ok(()) => return,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+            Err(error) => error,
+        };
+        if Instant::now() >= deadline {
+            let message = format!(
+                "{} was still in use 10s after its daemon was stopped: {error}",
+                path.display()
+            );
+            // A second panic while unwinding would abort the whole test binary.
+            if std::thread::panicking() {
+                eprintln!("{message}");
+            } else {
+                panic!("{message}");
+            }
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(50));
     }
 }
 
