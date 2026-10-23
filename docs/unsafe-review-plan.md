@@ -60,7 +60,7 @@ macOS cross-checks need the Apple SDK, so macOS code needs a run on a macOS host
 | P1.2 | Medium, UB | fixed | zetta_profiles | 1-byte heap overflow in the MSYS2 registry reader | S |
 | P1.3 | Medium | fixed | alacritty_terminal | Reclaimed pane signals a pid it already reaped | S |
 | P1.4 | Medium | fixed | alacritty_terminal | ConPTY `pause()` spins on a closed handle after a reader panic | S |
-| P2.1 | Medium | reported | zmux | Session owner identified by pid alone | M |
+| P2.1 | Medium | fixed | zmux | Session owner identified by pid alone | M |
 | P2.2 | Medium | reported | console-server | Client-sized allocations can abort the host process | S–M |
 | P2.3 | Medium–Low | reported | zmux (Windows) | `PeerChallenge` attestation can be answered by an impostor | M |
 | P3.1 | Low–Medium | reported | zosh | Wake pipes not close-on-exec atomically | S |
@@ -315,6 +315,37 @@ Whichever is chosen, it is compared on every authorization, not only at attach.
 refused, both for attach and for `Share`.
 
 **Validate:** the zmux suite; `make check-features`; a macOS host.
+
+**Done.** The owner is identified by (pid, start time). A pidfd covers only the
+peer and cannot cross the upgrade handover, and `LOCAL_PEERTOKEN` exists only
+on macOS. `process_status::ProcessIdentity` holds both values, and every
+comparison reads the start time again: `is(pid)` for "is this peer the owner",
+and `is_running()` for "has the owner gone". The start time comes from
+`/proc/<pid>/stat` field 22 on Linux, `proc_pidinfo(PROC_PIDTBSDINFO)` on macOS,
+`kern.proc.pid` on FreeBSD, and `GetProcessTimes` on Windows. Where the
+platform reports none, both sides read `None` and the comparison falls back to
+the pid, as before.
+
+- `session_identity_authorized`, `is_in_scope_for`,
+  `stranded_session_may_be_offered`, the scope-back in `set_session_scope`,
+  and `out_of_scope_refusal` all compare the identity. The recipient grants
+  used to pin a protected session consult the owner only while it is still
+  that process.
+- The handover carries `owner_started`. The Unix handover version is now 10
+  (still accepts 9 and 8); the Windows one is 5 (still accepts 4 and 3). An
+  image that predates the field hands over the pid alone, and its replacement
+  takes whichever process holds that pid at adoption. That is the same check
+  the older image made, so the upgrade itself opens no new hole.
+- Not covered: pane holders (`Attachment::Exclusive` and its relatives) are
+  still pids. They are live clients that the liveness reclaim drops, so the
+  window is the gap between a holder exiting and the reclaim noticing.
+
+`share_refuses_a_process_that_only_has_the_owners_pid`,
+`an_attach_is_out_of_scope_for_a_process_that_only_has_the_owners_pid` and
+`an_owner_is_its_process_not_whichever_one_now_has_its_pid` all fail when
+`ProcessIdentity::is` compares the pid alone. Run on Linux and on the macOS
+host; the Windows code was cross-checked only. The FreeBSD arm has not been
+compiled.
 
 ### P2.2 console-server allocations a client can size
 

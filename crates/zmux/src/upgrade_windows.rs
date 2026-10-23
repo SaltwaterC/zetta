@@ -45,7 +45,14 @@ use crate::messages::ClientId;
 /// 4 moved the handover from a file to a pipe, which `--resume-check` has to
 /// tell an older image about: one that cannot read the pipe refuses before the
 /// old daemon starts it, rather than after.
-pub const HANDOVER_VERSION: u32 = 4;
+///
+/// 5 added [`SessionHandover::owner_started`], which an older image would
+/// refuse as an unknown field.
+pub const HANDOVER_VERSION: u32 = 5;
+
+/// The last version before [`SessionHandover::owner_started`]. Its replacement
+/// identifies each owner by the process holding its PID when it is adopted.
+pub const PID_OWNER_HANDOVER_VERSION: u32 = 4;
 
 /// The last version a daemon wrote to a file. A daemon from before the pipe
 /// still upgrades *into* this image that way, so it is still read — the old
@@ -59,7 +66,12 @@ const MAX_HANDOVER_BYTES: u64 = 1 << 30;
 /// Whether this image can adopt a handover of `version`, which is what
 /// `--resume-check` answers.
 pub fn accepts_handover_version(version: u32) -> bool {
-    version == HANDOVER_VERSION || version == FILE_HANDOVER_VERSION
+    [
+        HANDOVER_VERSION,
+        PID_OWNER_HANDOVER_VERSION,
+        FILE_HANDOVER_VERSION,
+    ]
+    .contains(&version)
 }
 
 /// Where a replacement reads its handover from.
@@ -118,6 +130,9 @@ pub struct SessionHandover {
     pub offered: bool,
     #[serde(default)]
     pub owner: Option<u32>,
+    /// As [`crate::upgrade::SessionHandover::owner_started`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_started: Option<u64>,
     pub verifier: Option<String>,
     /// As [`crate::upgrade::SessionHandover::key_envelope`].
     #[serde(default, skip_serializing_if = "Option::is_none")]

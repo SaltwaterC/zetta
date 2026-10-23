@@ -49,6 +49,7 @@ use crate::{
     },
     paths::session_catalog_dir,
     private_fs::remove_stale_socket,
+    process_status::ProcessIdentity,
     protocol::{BackgroundPaneLayout, BackgroundSessionSummary},
     retention::Retention,
     transport::{
@@ -273,7 +274,10 @@ impl Session {
     /// `Attacher::verified_process_id`. A peer nobody could vouch for is in
     /// scope only where everyone is.
     fn is_in_scope_for(&self, client: Option<u32>) -> bool {
-        self.offered || self.owner.is_none_or(|owner| Some(owner) == client)
+        self.offered
+            || self
+                .owner
+                .is_none_or(|owner| client.is_some_and(|client| owner.is(client)))
     }
 }
 
@@ -479,8 +483,10 @@ struct Session {
     /// or `SetSessionScope` — so a session whose window is gone is still listed,
     /// killable and shareable, but not silently attachable.
     ///
-    /// `None` only for a session nobody has held yet.
-    owner: Option<u32>,
+    /// `None` only for a session nobody has held yet. An identity rather than a
+    /// PID, because it outlives the process it names: see
+    /// [`ProcessIdentity`].
+    owner: Option<ProcessIdentity>,
     /// The recipients this session's disk records are encrypted to while it is
     /// protected, chosen by its own clients rather than whoever configured the
     /// store last. `None` withholds a protected session from disk; see
@@ -1484,7 +1490,10 @@ fn catalog_summary(session: &Session) -> BackgroundSessionSummary {
     // Whose it is, so a process reading the one shared catalog can tell its own
     // sessions from another window's. An offered session is nobody's in
     // particular and carries no scope at all.
-    summary.scoped_to = (!session.offered).then_some(session.owner).flatten();
+    summary.scoped_to = (!session.offered)
+        .then_some(session.owner)
+        .flatten()
+        .map(|owner| owner.pid);
     summary
 }
 

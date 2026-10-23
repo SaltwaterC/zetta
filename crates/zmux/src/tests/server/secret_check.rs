@@ -123,8 +123,18 @@ pub(in crate::server) mod fixtures {
             panes: Vec::new(),
             keep: true,
             offered: false,
-            owner,
+            owner: owner.map(ProcessIdentity::of),
             sealed_to: None,
+        }
+    }
+
+    /// `owner` as a process that cycled through PIDs until it was given the
+    /// owner's would look: the same PID, started later.
+    pub(in crate::server) fn impostor_of(owner: ProcessIdentity) -> ProcessIdentity {
+        let started = owner.started.expect("this platform reports start times");
+        ProcessIdentity {
+            pid: owner.pid,
+            started: Some(started + 1),
         }
     }
 

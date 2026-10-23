@@ -48,6 +48,7 @@ fn handover() -> Handover {
             keep: true,
             offered: true,
             owner: None,
+            owner_started: None,
             verifier: Some("$argon2id$v=19$m=1,t=1,p=1$c2FsdA$aGFzaA".to_owned()),
             key_envelope: None,
             failed_authentications: 3,
@@ -161,6 +162,21 @@ fn a_session_offered_to_other_windows_is_still_offered_afterwards() {
 }
 
 #[test]
+fn a_backgrounded_sessions_owner_keeps_its_start_time() {
+    let mut scoped = handover();
+    scoped.sessions[0].offered = false;
+    scoped.sessions[0].owner = Some(4321);
+    scoped.sessions[0].owner_started = Some(987654);
+    let file = write_handover(&scoped).unwrap();
+    let restored = read_handover(file.into_raw_fd()).unwrap();
+
+    // Without it the replacement could only recognise the owner by its PID,
+    // which any process given that PID later would pass for.
+    assert_eq!(restored.sessions[0].owner, Some(4321));
+    assert_eq!(restored.sessions[0].owner_started, Some(987654));
+}
+
+#[test]
 fn a_panes_mode_and_size_survive_the_handover() {
     let file = write_handover(&handover()).unwrap();
     let restored = read_handover(file.into_raw_fd()).unwrap();
@@ -265,17 +281,32 @@ fn a_handover_from_before_the_lifetime_lock_is_still_adopted() {
     // field. Refusing it would make rebuilding the one thing an upgrade from
     // that daemon could not survive.
     let mut previous = serde_json::to_value(handover()).unwrap();
-    previous["version"] = PREVIOUS_HANDOVER_VERSION.into();
+    previous["version"] = LOCKLESS_HANDOVER_VERSION.into();
     previous.as_object_mut().unwrap().remove("lifetime_lock");
     let mut file = tempfile::tempfile().unwrap();
     std::io::Write::write_all(&mut file, &serde_json::to_vec(&previous).unwrap()).unwrap();
     std::io::Seek::rewind(&mut file).unwrap();
 
     let restored = read_handover(file.into_raw_fd()).unwrap();
-    assert_eq!(restored.version, PREVIOUS_HANDOVER_VERSION);
+    assert_eq!(restored.version, LOCKLESS_HANDOVER_VERSION);
     assert_eq!(restored.lifetime_lock, None);
-    assert!(accepts_handover_version(PREVIOUS_HANDOVER_VERSION));
+    assert!(accepts_handover_version(LOCKLESS_HANDOVER_VERSION));
     assert!(accepts_handover_version(HANDOVER_VERSION));
+}
+
+#[test]
+fn a_handover_from_before_owner_start_times_is_still_adopted() {
+    let mut previous = serde_json::to_value(handover()).unwrap();
+    previous["version"] = PID_OWNER_HANDOVER_VERSION.into();
+    previous["sessions"][0]["owner"] = 4321.into();
+    let mut file = tempfile::tempfile().unwrap();
+    std::io::Write::write_all(&mut file, &serde_json::to_vec(&previous).unwrap()).unwrap();
+    std::io::Seek::rewind(&mut file).unwrap();
+
+    let restored = read_handover(file.into_raw_fd()).unwrap();
+    assert_eq!(restored.sessions[0].owner, Some(4321));
+    assert_eq!(restored.sessions[0].owner_started, None);
+    assert!(accepts_handover_version(PID_OWNER_HANDOVER_VERSION));
 }
 
 #[test]

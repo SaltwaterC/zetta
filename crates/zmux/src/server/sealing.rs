@@ -122,7 +122,13 @@ pub(super) fn pin_protected(daemon: &Daemon, session: &mut Session, peer: Option
     }
     let mut grants = lock_grants(daemon);
     grants.forget_exited(crate::process_status::is_running);
-    if let Some(recipients) = grants.for_session(peer, session.owner) {
+    // The owner's own process only: grants are kept by PID, and a process that
+    // has since been given the owner's PID must not choose its seal.
+    let owner = session
+        .owner
+        .filter(|owner| owner.is_running())
+        .map(|owner| owner.pid);
+    if let Some(recipients) = grants.for_session(peer, owner) {
         session.sealed_to = Some(recipients);
     }
 }

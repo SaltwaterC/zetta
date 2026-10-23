@@ -23,7 +23,7 @@ fn session_owned_by(owner: u32, protected: bool) -> Session {
         panes: Vec::new(),
         keep: true,
         offered: false,
-        owner: Some(owner),
+        owner: Some(ProcessIdentity::of(owner)),
         sealed_to: None,
     }
 }
@@ -358,5 +358,104 @@ mod resume_authentication {
 
         assert!(error.to_string().contains("exceed"), "{error:#}");
         assert_eq!(probe.runs(), 0);
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+mod owner_identity {
+    use super::*;
+    use crate::server::secret_check::tests::fixtures::*;
+
+    #[test]
+    fn an_owner_is_its_process_not_whichever_one_now_has_its_pid() {
+        let process_id = std::process::id();
+        let mut session = session_owned_by(process_id, true);
+        assert!(session_control_authorized(
+            &session,
+            Some(process_id),
+            &SecretProof::NONE
+        ));
+
+        // What a same-user process that cycled through PIDs until it was given
+        // the owner's would present: the PID matches, the process does not.
+        session.owner = session.owner.map(impostor_of);
+        assert!(!session_control_authorized(
+            &session,
+            Some(process_id),
+            &SecretProof::NONE
+        ));
+        // And it is the owner that has gone, so the session is stranded rather
+        // than kept from everyone by a process that merely took its PID.
+        assert!(stranded_session_may_be_offered(&session, true, false));
+    }
+
+    /// Asks for session 1 to be reprotected under a new secret, as its owner's
+    /// window would, and returns what the daemon answered. Kept scoped rather
+    /// than offered, so the answer does not depend on it having live panes.
+    fn reprotect(daemon: &Arc<Daemon>, process_id: u32) -> Response {
+        let (ours, theirs) = Stream::pair().unwrap();
+        let mut connection = Connection::new(ours);
+        let mut client = Connection::new(theirs);
+        let summary = daemon.sessions.lock().unwrap()[0].summary.clone();
+        let request = crate::messages::ShareRequest {
+            session_id: 1,
+            summary,
+            state: serde_json::Value::Null,
+            verifier: Some(
+                SessionAuthentication::create("the impostor's own")
+                    .unwrap()
+                    .verifier()
+                    .to_owned(),
+            ),
+            key_envelope: None,
+            offered: false,
+        };
+        share(
+            daemon,
+            request,
+            process_id,
+            Some(process_id),
+            None,
+            &mut connection,
+        )
+        .unwrap();
+        client.receive::<Response>().unwrap().0
+    }
+
+    #[test]
+    fn share_refuses_a_process_that_only_has_the_owners_pid() {
+        let process_id = std::process::id();
+        let session = protected_session(1, Some(process_id));
+        let owner = session.owner.unwrap();
+        let (daemon, _directory) = daemon_with(vec![session]);
+        daemon.sessions.lock().unwrap()[0].owner = Some(impostor_of(owner));
+
+        let refused = reprotect(&daemon, process_id);
+        assert!(
+            matches!(&refused, Response::Error { message } if message.contains("cannot be shared")),
+            "{refused:?}"
+        );
+        let sessions = daemon.sessions.lock().unwrap();
+        let authentication = sessions[0].authentication.as_ref().unwrap();
+        assert!(
+            authentication.verify(SECRET).is_some(),
+            "the session's secret was replaced"
+        );
+        drop(sessions);
+
+        // The owner itself still may, which is what makes the refusal above
+        // about the start time rather than about sharing.
+        daemon.sessions.lock().unwrap()[0].owner = Some(owner);
+        let accepted = reprotect(&daemon, process_id);
+        assert!(matches!(accepted, Response::Ok), "{accepted:?}");
+        let sessions = daemon.sessions.lock().unwrap();
+        assert!(
+            sessions[0]
+                .authentication
+                .as_ref()
+                .unwrap()
+                .verify(SECRET)
+                .is_none()
+        );
     }
 }

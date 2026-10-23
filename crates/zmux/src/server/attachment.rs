@@ -232,10 +232,7 @@ fn authorize_attach<'a>(
         // backgrounded session belongs to the window that put it away; another
         // process may only have it once somebody has said so.
         if !session.is_in_scope_for(verified_process_id) {
-            return Err(Box::new(out_of_scope_refusal(
-                session_id,
-                session.owner.unwrap_or_default(),
-            )));
+            return Err(Box::new(out_of_scope_refusal(session_id, session.owner)));
         }
 
         let authentication = session.authentication.as_ref().filter(|_| {
@@ -255,7 +252,7 @@ fn authorize_attach<'a>(
             // secret was checked let a wrong secret, or none, take an
             // unclaimed protected session's owner controls.
             if !session.offered {
-                session.owner = Some(client_process_id);
+                session.owner = Some(ProcessIdentity::of(client_process_id));
             }
             return Ok(sessions);
         }
@@ -275,11 +272,13 @@ fn authorize_attach<'a>(
 }
 
 /// Why a backgrounded session cannot be attached by this process.
-fn out_of_scope_refusal(session_id: u64, owner: u32) -> Response {
+fn out_of_scope_refusal(session_id: u64, owner: Option<ProcessIdentity>) -> Response {
     // Two different situations, and the way out differs: that window can
     // share the session itself, but a window that has exited cannot, so say
     // which one this is rather than suggesting something impossible.
-    let route = if crate::process_status::is_running(owner) {
+    let running = owner.is_some_and(ProcessIdentity::is_running);
+    let owner = owner.map_or(0, |owner| owner.pid);
+    let route = if running {
         format!("share it from that window, or with `zmux share {session_id}`")
     } else {
         format!(

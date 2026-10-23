@@ -40,16 +40,28 @@ use crate::messages::ClientId;
 /// 9 added [`Handover::lifetime_lock`]. It is always present in what this
 /// image writes, and an image that predates it refuses unknown fields, so the
 /// version says so before `execv` rather than after it.
-pub const HANDOVER_VERSION: u32 = 9;
+///
+/// 10 added [`SessionHandover::owner_started`], for the same reason.
+pub const HANDOVER_VERSION: u32 = 10;
+
+/// The version before [`SessionHandover::owner_started`], which an older daemon
+/// still hands over in; its replacement identifies each owner by the process
+/// holding its PID when the handover is adopted.
+pub const PID_OWNER_HANDOVER_VERSION: u32 = 9;
 
 /// The version before [`Handover::lifetime_lock`], which an older daemon still
 /// hands over in; its replacement takes the lock itself.
-pub const PREVIOUS_HANDOVER_VERSION: u32 = 8;
+pub const LOCKLESS_HANDOVER_VERSION: u32 = 8;
 
 /// Whether this image can adopt a handover of `version`, which is what
 /// `--resume-check` answers.
 pub fn accepts_handover_version(version: u32) -> bool {
-    version == HANDOVER_VERSION || version == PREVIOUS_HANDOVER_VERSION
+    [
+        HANDOVER_VERSION,
+        PID_OWNER_HANDOVER_VERSION,
+        LOCKLESS_HANDOVER_VERSION,
+    ]
+    .contains(&version)
 }
 
 /// Everything the next image needs to carry on.
@@ -108,6 +120,12 @@ pub struct SessionHandover {
     /// every window, which is the opposite of what backgrounding one means.
     #[serde(default)]
     pub owner: Option<u32>,
+    /// When `owner` started, so the replacement goes on recognising the owner
+    /// rather than whichever process holds its PID by then; see
+    /// `process_status::ProcessIdentity`. Absent from an older image, and where
+    /// the platform cannot tell.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_started: Option<u64>,
     /// The Argon2id verifier, so a protected session stays protected across an
     /// upgrade.
     pub verifier: Option<String>,

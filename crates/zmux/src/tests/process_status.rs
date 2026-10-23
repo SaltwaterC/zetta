@@ -57,3 +57,49 @@ fn this_process_description_has_its_pid_without_requiring_procfs() {
         "{described}"
     );
 }
+
+#[test]
+fn a_start_time_is_read_past_a_command_name_with_spaces_and_parentheses() {
+    let fields = "S 9 4242 4242 0 -1 4194560 1 2 3 4 5 6 7 8 20 0 1 0 987654 23 24";
+    assert_eq!(
+        start_time_from_stat(&format!("4242 (zsh) {fields}")),
+        Some(987654)
+    );
+    assert_eq!(
+        start_time_from_stat(&format!("4242 (a (weird) 1 2) name) {fields}")),
+        Some(987654)
+    );
+    assert_eq!(start_time_from_stat("4242 (zsh) S 9"), None);
+}
+
+#[cfg(any(target_os = "linux", target_vendor = "apple", windows))]
+#[test]
+fn this_process_is_recognised_by_its_start_time() {
+    let this = ProcessIdentity::of(std::process::id());
+    assert!(this.started.is_some(), "no start time for this process");
+    assert!(this.is(std::process::id()));
+    assert!(this.is_running());
+
+    // A process that was given the same PID later is somebody else.
+    let later = ProcessIdentity {
+        started: this.started.map(|started| started + 1),
+        ..this
+    };
+    assert!(!later.is(std::process::id()));
+    assert!(!later.is_running());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_reaped_process_is_no_longer_recognised() {
+    let mut child = std::process::Command::new("/bin/sleep")
+        .arg("5")
+        .spawn()
+        .expect("spawning a short-lived process");
+    let identity = ProcessIdentity::of(child.id());
+    assert!(identity.is_running());
+    child.kill().unwrap();
+    child.wait().expect("reaping the short-lived process");
+    assert!(!identity.is_running());
+    assert!(!identity.is(child.id()));
+}

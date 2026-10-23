@@ -126,7 +126,9 @@ mod authorization {
     }
 
     fn owner(daemon: &Daemon) -> Option<u32> {
-        daemon.sessions.lock().unwrap()[0].owner
+        daemon.sessions.lock().unwrap()[0]
+            .owner
+            .map(|owner| owner.pid)
     }
 
     #[test]
@@ -154,6 +156,29 @@ mod authorization {
                 .unwrap(),
         );
         assert_eq!(owner(&daemon), Some(4321));
+    }
+
+    #[test]
+    fn an_attach_is_out_of_scope_for_a_process_that_only_has_the_owners_pid() {
+        let process_id = std::process::id();
+        let session = protected_session(1, Some(process_id));
+        let owner = session.owner.unwrap();
+        let (daemon, _directory) = daemon_with(vec![session]);
+        daemon.sessions.lock().unwrap()[0].owner = Some(impostor_of(owner));
+
+        // Even with the secret: whose session it is comes first, and it is
+        // still the window that backgrounded it, which has gone.
+        let refusal = authorize_attach(&daemon, 1, Some(SECRET), &attacher(process_id)).err();
+        assert!(
+            matches!(
+                refusal.as_deref(),
+                Some(Response::Error { message }) if message.contains("is scoped to")
+            ),
+            "{refusal:?}"
+        );
+
+        daemon.sessions.lock().unwrap()[0].owner = Some(owner);
+        assert!(authorize_attach(&daemon, 1, Some(SECRET), &attacher(process_id)).is_ok());
     }
 
     #[test]

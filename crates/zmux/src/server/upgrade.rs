@@ -178,7 +178,8 @@ pub(super) fn prepare_upgrade(daemon: &Arc<Daemon>) -> Result<PreparedUpgrade> {
                     shared_state: session.shared_state.clone(),
                     keep: session.keep,
                     offered: session.offered,
-                    owner: session.owner,
+                    owner: session.owner.map(|owner| owner.pid),
+                    owner_started: session.owner.and_then(|owner| owner.started),
                     verifier: session
                         .authentication
                         .as_ref()
@@ -337,7 +338,8 @@ pub(super) fn prepare_upgrade(daemon: &Arc<Daemon>) -> Result<(PathBuf, crate::u
                 shared_state: session.shared_state.clone(),
                 keep: session.keep,
                 offered: session.offered,
-                owner: session.owner,
+                owner: session.owner.map(|owner| owner.pid),
+                owner_started: session.owner.and_then(|owner| owner.started),
                 verifier: session
                     .authentication
                     .as_ref()
@@ -465,6 +467,27 @@ pub(super) fn adopt_attachment(attachment: crate::upgrade::AttachmentHandover) -
     }
 }
 
+/// A session's owner as the previous image recorded it.
+///
+/// An image from before owners carried a start time handed over the PID alone,
+/// and the process holding that PID now is taken to be the owner — the one
+/// check that image would itself have made. Anything this image wrote is taken
+/// as written, start time or none: guessing one for an owner that had already
+/// gone would hand its session to whichever process holds the PID next.
+#[cfg(any(unix, windows))]
+pub(super) fn adopt_owner(
+    owner: Option<u32>,
+    started: Option<u64>,
+    version: u32,
+) -> Option<ProcessIdentity> {
+    let pid = owner?;
+    Some(if version == crate::upgrade::HANDOVER_VERSION {
+        ProcessIdentity { pid, started }
+    } else {
+        ProcessIdentity::of(pid)
+    })
+}
+
 #[cfg(unix)]
 pub(super) fn adopt_handover(
     daemon: &Arc<Daemon>,
@@ -473,6 +496,7 @@ pub(super) fn adopt_handover(
     let retention = *daemon.retention.lock().unwrap();
     let mut sessions = daemon.sessions.lock().unwrap();
     let now = std::time::Instant::now();
+    let version = handover.version;
     for session in handover.sessions {
         // Adopting one twice would leave the multiplexer holding two entries
         // that no client could tell apart.
@@ -549,7 +573,7 @@ pub(super) fn adopt_handover(
             panes,
             keep: session.keep,
             offered: session.offered,
-            owner: session.owner,
+            owner: adopt_owner(session.owner, session.owner_started, version),
             sealed_to: session.sealed_to,
         });
     }
@@ -681,7 +705,7 @@ pub(super) fn adopt_handover(
             panes,
             keep: session.keep,
             offered: session.offered,
-            owner: session.owner,
+            owner: adopt_owner(session.owner, session.owner_started, version),
             sealed_to: session.sealed_to,
         });
     }

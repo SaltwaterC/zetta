@@ -1253,7 +1253,7 @@ pub(super) fn spawn(
                 panes: Vec::new(),
                 keep: false,
                 offered: restored.request.shared_state.is_some(),
-                owner: Some(client_process_id),
+                owner: Some(ProcessIdentity::of(client_process_id)),
                 sealed_to: None,
             });
             let restored_session = sessions.last_mut().expect("the session was just pushed");
@@ -1288,7 +1288,7 @@ pub(super) fn spawn(
                 // The window that spawned it owns it from the start, so a tab
                 // backgrounded later is already this process's and needs no
                 // separate claim.
-                owner: Some(request.client_process_id),
+                owner: Some(ProcessIdentity::of(request.client_process_id)),
                 sealed_to: None,
             });
             #[cfg(feature = "session-persistence")]
@@ -1939,7 +1939,7 @@ pub(super) fn detach(
     // another process. Preserve the offer through the handoff so closing a
     // keep-running tab does not narrow it back to the process that just closed.
     if !session.offered {
-        session.owner = Some(client_process_id);
+        session.owner = Some(ProcessIdentity::of(client_process_id));
     }
     if let Some(verifier) = request.verifier {
         session.authentication = Some(SessionAuthentication::from_verifier(verifier)?);
@@ -2134,7 +2134,7 @@ pub(super) fn share(
     if !request.offered {
         // Scoped back to the window that asked, which the check above has
         // established is the one showing it.
-        session.owner = Some(client_process_id);
+        session.owner = Some(ProcessIdentity::of(client_process_id));
     }
     if let Some(verifier) = request.verifier {
         session.authentication = Some(SessionAuthentication::from_verifier(verifier)?);
@@ -2419,10 +2419,7 @@ pub(super) fn set_session_scope(
         protected_by(daemon, session, peer_process_id);
     }
     if !shared {
-        let Some(owner) = session
-            .owner
-            .filter(|owner| crate::process_status::is_running(*owner))
-        else {
+        let Some(owner) = session.owner.filter(|owner| owner.is_running()) else {
             return connection.send(&Response::Error {
                 message: format!(
                     "session {session_id} has no window to scope it back to; attach it first, \
@@ -2515,7 +2512,7 @@ pub(super) fn stranded_session_may_be_offered(
     shared: bool,
     replaces_verifier: bool,
 ) -> bool {
-    shared && !replaces_verifier && !session.owner.is_some_and(crate::process_status::is_running)
+    shared && !replaces_verifier && !session.owner.is_some_and(ProcessIdentity::is_running)
 }
 
 /// Whether `peer_process_id` may control a protected session.
@@ -2540,7 +2537,8 @@ pub(super) fn session_control_authorized(
 /// control a protected session without presenting the secret.
 pub(super) fn session_identity_authorized(session: &Session, peer_process_id: Option<u32>) -> bool {
     peer_process_id.is_some_and(|process_id| {
-        session.owner == Some(process_id) || session_is_held_by(session, process_id)
+        session.owner.is_some_and(|owner| owner.is(process_id))
+            || session_is_held_by(session, process_id)
     })
 }
 
