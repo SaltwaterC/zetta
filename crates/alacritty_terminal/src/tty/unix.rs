@@ -162,7 +162,12 @@ enum PtyChild {
     /// with `execv`. The process ID is still a child of this one — an exec does
     /// not change that — so it is reaped here, but there is no `Child` to do it
     /// through because that was a value in the previous image.
-    Reclaimed { pid: u32 },
+    ///
+    /// `status` caches the exit once reaped, as `Child` does for an owned
+    /// child. The pane outlives its child, and after the reap the pid may
+    /// belong to another of this process's children, which `Drop` would
+    /// otherwise hang up.
+    Reclaimed { pid: u32, status: Option<ExitStatus> },
 }
 
 /// One child event, as written into an attached PTY's event socket.
@@ -209,7 +214,7 @@ impl Pty {
         match &self.child {
             PtyChild::Owned(child) => child.id(),
             PtyChild::Attached { pid, .. } => *pid,
-            PtyChild::Reclaimed { pid } => *pid,
+            PtyChild::Reclaimed { pid, .. } => *pid,
         }
     }
 
@@ -229,17 +234,27 @@ impl Pty {
         match &mut self.child {
             PtyChild::Owned(child) => child.try_wait(),
             PtyChild::Attached { .. } => Ok(None),
-            PtyChild::Reclaimed { pid } => {
-                let mut status = 0;
-                // SAFETY: a reclaimed child is still this process's own, and
-                // `status` is writable for the duration of the call.
-                match unsafe { libc::waitpid(*pid as i32, &mut status, libc::WNOHANG) } {
-                    0 => Ok(None),
-                    result if result < 0 => Err(Error::last_os_error()),
-                    _ => Ok(Some(ExitStatus::from_raw(status))),
-                }
-            },
+            PtyChild::Reclaimed { pid, status } => try_wait_reclaimed(*pid, status),
         }
+    }
+}
+
+/// Polls a reclaimed child, reaping it at most once.
+///
+/// Returns the cached status after the first reap rather than asking again:
+/// a second `waitpid` fails with `ECHILD` at best, and at worst reaps whatever
+/// child of this process has since been given the same pid.
+fn try_wait_reclaimed(pid: u32, status: &mut Option<ExitStatus>) -> Result<Option<ExitStatus>> {
+    if let Some(status) = status {
+        return Ok(Some(*status));
+    }
+    let mut raw_status = 0;
+    // SAFETY: a reclaimed child is still this process's own, and `raw_status`
+    // is writable for the duration of the call.
+    match unsafe { libc::waitpid(pid as libc::pid_t, &mut raw_status, libc::WNOHANG) } {
+        0 => Ok(None),
+        result if result < 0 => Err(Error::last_os_error()),
+        _ => Ok(Some(*status.insert(ExitStatus::from_raw(raw_status)))),
     }
 }
 
@@ -248,7 +263,17 @@ impl Pty {
 /// `execv` keeps both the descriptor and the parent/child relationship, so the
 /// exit status is still reapable here — unlike [`attach`], where the child
 /// belongs to a different process entirely.
+///
+/// `child_pid` comes from the previous image, so it is checked before anything
+/// can signal it: as a `pid_t`, 0 names this process's own group and a value
+/// past `i32::MAX` wraps to -1, which is every process the user may signal.
 pub fn reclaim(master: OwnedFd, child_pid: u32) -> Result<Pty> {
+    if !(1..=i32::MAX as u32).contains(&child_pid) {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            format!("reclaimed child pid {child_pid} is not a single process"),
+        ));
+    }
     let master_fd = master.as_raw_fd();
     unsafe {
         set_nonblocking(master_fd)?;
@@ -257,7 +282,7 @@ pub fn reclaim(master: OwnedFd, child_pid: u32) -> Result<Pty> {
     let sig_id = signal_pipe::register(sigconsts::SIGCHLD, sender)?;
     signals.set_nonblocking(true)?;
     Ok(Pty {
-        child: PtyChild::Reclaimed { pid: child_pid },
+        child: PtyChild::Reclaimed { pid: child_pid, status: None },
         file: File::from(master),
         signals,
         sig_id: Some(sig_id),
@@ -513,8 +538,11 @@ impl Drop for Pty {
             // kill the session the multiplexer is holding, and waiting on it
             // would reap a process this one did not spawn.
             PtyChild::Attached { .. } => {},
-            PtyChild::Reclaimed { pid } => {
-                terminate_child(*pid as i32, &self.file);
+            // Same rule as an owned child, through the status cached here.
+            PtyChild::Reclaimed { pid, status } => {
+                if matches!(try_wait_reclaimed(*pid, status), Ok(None)) {
+                    terminate_child(*pid as i32, &self.file);
+                }
             },
         }
     }
@@ -711,15 +739,11 @@ impl EventedPty for Pty {
                     }
                     return None;
                 }
-                let pid = self.child_pid() as i32;
-                let mut status = 0;
-                // SAFETY: `pid` is a child of this process and `status` is
-                // writable for the duration of the call.
-                let reaped = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
-                match reaped {
-                    0 => None,
-                    result if result < 0 => Some(ChildEvent::ExitStatusUnavailable),
-                    _ => Some(ChildEvent::Exited(ExitStatus::from_raw(status))),
+                let PtyChild::Reclaimed { pid, status } = &mut self.child else { return None };
+                match try_wait_reclaimed(*pid, status) {
+                    Err(_) => Some(ChildEvent::ExitStatusUnavailable),
+                    Ok(None) => None,
+                    Ok(Some(exit_status)) => Some(ChildEvent::Exited(exit_status)),
                 }
             },
         }
@@ -1267,7 +1291,11 @@ mod attached_tests {
         child.stdout.take().unwrap().read_exact(&mut ready).unwrap();
         let pid = child.id();
         let (mut pty, _events) = attached_pty(pid);
-        pty.child = if reclaimed { PtyChild::Reclaimed { pid } } else { PtyChild::Owned(child) };
+        pty.child = if reclaimed {
+            PtyChild::Reclaimed { pid, status: None }
+        } else {
+            PtyChild::Owned(child)
+        };
         let started = Instant::now();
         drop(pty);
         assert!(started.elapsed() < Duration::from_secs(1), "PTY drop waited on its child");
@@ -1275,6 +1303,75 @@ mod attached_tests {
         // after its final close. Signal zero sees zombies too, proving reaping.
         assert_eq!(unsafe { libc::kill(pid as i32, 0) }, -1);
         assert_eq!(Error::last_os_error().raw_os_error(), Some(libc::ESRCH));
+    }
+
+    #[test]
+    fn reclaim_rejects_a_pid_that_names_more_than_one_process() {
+        // As a `pid_t`, 0 is this process's group and anything past `i32::MAX`
+        // wraps negative: `u32::MAX` would become `kill(-1, ..)`.
+        for pid in [0, i32::MAX as u32 + 1, u32::MAX] {
+            let terminal = openpty(None, None).unwrap();
+            match reclaim(terminal.controller, pid) {
+                Err(error) => assert_eq!(error.kind(), ErrorKind::InvalidInput, "pid {pid}"),
+                Ok(pty) => {
+                    // Dropping it would send exactly the signals this guards
+                    // against, to the test runner or to every user process.
+                    std::mem::forget(pty);
+                    panic!("reclaim accepted pid {pid}");
+                },
+            }
+        }
+    }
+
+    /// A pane reclaimed around a child that exits with `code`, which the PTY
+    /// is left to reap.
+    #[expect(clippy::zombie_processes, reason = "the reclaimed PTY owns reaping")]
+    fn reclaimed_pty_with_exiting_child(code: i32) -> Pty {
+        let child = Command::new("/bin/sh").args(["-c", &format!("exit {code}")]).spawn().unwrap();
+        let terminal = openpty(None, None).unwrap();
+        reclaim(terminal.controller, child.id()).unwrap()
+    }
+
+    fn wait_for_reclaimed_exit(pty: &mut Pty) -> ExitStatus {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(status) = pty.try_wait().unwrap() {
+                return status;
+            }
+            assert!(Instant::now() < deadline, "reclaimed child did not exit");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn a_reaped_reclaimed_child_keeps_reporting_its_status() {
+        // zmux keeps the pane after its child exits and polls it again; a
+        // second `waitpid` on the reaped pid used to fail with ECHILD.
+        let mut pty = reclaimed_pty_with_exiting_child(7);
+        let status = wait_for_reclaimed_exit(&mut pty);
+        assert_eq!(status.code(), Some(7));
+        assert_eq!(pty.try_wait().unwrap(), Some(status));
+        assert_eq!(pty.try_wait().unwrap(), Some(status));
+    }
+
+    #[test]
+    fn dropping_a_reaped_reclaimed_pane_does_not_signal_whoever_has_its_pid() {
+        let mut pty = reclaimed_pty_with_exiting_child(0);
+        wait_for_reclaimed_exit(&mut pty);
+
+        // Once reaped, the pid is free for the kernel to hand to another child
+        // of this process, such as a second pane's shell. Stand that in
+        // directly rather than waiting for the kernel to recycle it.
+        let mut sentinel = Command::new("sleep").arg("30").spawn().unwrap();
+        let PtyChild::Reclaimed { pid, .. } = &mut pty.child else { unreachable!() };
+        *pid = sentinel.id();
+        drop(pty);
+
+        // ECHILD means the drop reaped it as well as signalling it.
+        let alive = matches!(sentinel.try_wait(), Ok(None));
+        let _ = sentinel.kill();
+        let _ = sentinel.wait();
+        assert!(alive, "dropping the reaped pane signalled the pid's new owner");
     }
 
     #[test]

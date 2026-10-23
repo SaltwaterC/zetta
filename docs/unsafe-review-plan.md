@@ -58,7 +58,7 @@ macOS cross-checks need the Apple SDK, so macOS code needs a run on a macOS host
 | --- | --- | --- | --- | --- | --- |
 | P1.1 | High | fixed | zmux | Upgrade leaves every pane master and the listener inheritable | M |
 | P1.2 | Medium, UB | fixed | zetta_profiles | 1-byte heap overflow in the MSYS2 registry reader | S |
-| P1.3 | Medium | confirmed | alacritty_terminal | Reclaimed pane signals a pid it already reaped | S |
+| P1.3 | Medium | fixed | alacritty_terminal | Reclaimed pane signals a pid it already reaped | S |
 | P1.4 | Medium | confirmed | alacritty_terminal | ConPTY `pause()` spins on a closed handle after a reader panic | S |
 | P2.1 | Medium | reported | zmux | Session owner identified by pid alone | M |
 | P2.2 | Medium | reported | console-server | Client-sized allocations can abort the host process | S–M |
@@ -235,6 +235,23 @@ the previous image, so this is hardening.
   check it is still alive.
 
 **Validate:** the `alacritty_terminal` and `terminal` suites; the zmux suite.
+
+**Done.** `try_wait_reclaimed` is the one place a reclaimed child is reaped:
+`try_wait`, `next_child_event` and `Drop` all go through it, and it returns the
+cached status once one is set. `Drop` follows the owned child's rule rather than
+only checking the cache: it polls first and calls `terminate_child` only on
+`Ok(None)`, so an `ECHILD` also skips the signals. `reclaim` rejects a pid
+outside `1..=i32::MAX` with `InvalidInput` before touching the descriptor.
+
+`reclaim_rejects_a_pid_that_names_more_than_one_process`,
+`a_reaped_reclaimed_child_keeps_reporting_its_status` and
+`dropping_a_reaped_reclaimed_pane_does_not_signal_whoever_has_its_pid` all fail
+with the fix removed. The last stands a live `sleep` in for the recycled pid
+rather than waiting for the kernel to reuse one; without the fix the drop
+signals and reaps it. The first `mem::forget`s a `Pty` it should not have been
+given: dropping one built around pid 0 hung up the test run's process group
+when this was checked, and `u32::MAX` would signal every process the user owns.
+Not yet checked on macOS.
 
 ### P1.4 ConPTY `pause()` spins after a reader panic
 
