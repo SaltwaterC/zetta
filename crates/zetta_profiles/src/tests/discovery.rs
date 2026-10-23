@@ -513,3 +513,88 @@ fn reads_custom_msys2_root_from_an_installer_shortcut() {
         CoUninitialize();
     }
 }
+
+#[cfg(windows)]
+#[test]
+fn registry_strings_of_odd_length_are_read_within_their_size() {
+    use windows::{
+        Win32::{
+            Foundation::ERROR_SUCCESS,
+            System::Registry::{
+                HKEY, HKEY_CURRENT_USER, KEY_READ, KEY_WRITE, REG_DWORD, REG_OPTION_VOLATILE,
+                REG_SZ, RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegSetValueExW,
+            },
+        },
+        core::{HSTRING, w},
+    };
+
+    /// Closes and deletes the scratch key even when an assertion fails.
+    struct ScratchKey(HKEY, HSTRING);
+    impl Drop for ScratchKey {
+        fn drop(&mut self) {
+            unsafe {
+                let _ = RegCloseKey(self.0);
+                let _ = RegDeleteTreeW(HKEY_CURRENT_USER, &self.1);
+            }
+        }
+    }
+
+    let path = HSTRING::from(format!(
+        r"Software\zetta_profiles-registry-string-test-{}",
+        std::process::id()
+    ));
+    let mut key = HKEY::default();
+    assert_eq!(
+        unsafe {
+            RegCreateKeyExW(
+                HKEY_CURRENT_USER,
+                &path,
+                None,
+                None,
+                REG_OPTION_VOLATILE,
+                KEY_READ | KEY_WRITE,
+                None,
+                &mut key,
+                None,
+            )
+        },
+        ERROR_SUCCESS
+    );
+    let key = ScratchKey(key, path);
+    let utf16 = |text: &str| {
+        text.encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>()
+    };
+
+    // "MSYS2", its terminator, and a stray byte: 13 bytes.
+    let terminated = [utf16("MSYS2"), vec![0, 0, b'x']].concat();
+    // "MSYS2" and a stray byte, with no terminator at all: 11 bytes.
+    let unterminated = [utf16("MSYS2"), vec![b'x']].concat();
+    for (name, data) in [
+        (w!("terminated"), &terminated[..]),
+        (w!("unterminated"), &unterminated[..]),
+        (w!("one byte"), &b"x"[..]),
+    ] {
+        assert_eq!(
+            unsafe { RegSetValueExW(key.0, name, None, REG_SZ, Some(data)) },
+            ERROR_SUCCESS
+        );
+    }
+    assert_eq!(
+        unsafe { RegSetValueExW(key.0, w!("number"), None, REG_DWORD, Some(&[1, 0, 0, 0])) },
+        ERROR_SUCCESS
+    );
+
+    assert_eq!(
+        registry_string(key.0, w!("terminated")).as_deref(),
+        Some("MSYS2")
+    );
+    assert_eq!(
+        registry_string(key.0, w!("unterminated")).as_deref(),
+        Some("MSYS2")
+    );
+    assert_eq!(registry_string(key.0, w!("one byte")), None);
+    assert_eq!(registry_string(key.0, w!("number")), None);
+    assert_eq!(registry_string(key.0, w!("missing")), None);
+}

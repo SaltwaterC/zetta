@@ -371,6 +371,72 @@ fn shortcut_working_directory(shortcut: &Path) -> Option<PathBuf> {
     }
 }
 
+/// Reads a `REG_SZ` or `REG_EXPAND_SZ` value, unexpanded, as far as its first NUL.
+///
+/// The one reader of registry strings in this module. Its buffer is a `u8`
+/// buffer of exactly the size the first query reports, because that size need
+/// not be even: an odd-length value in a `u16` buffer of half the size let the
+/// second query write one byte past it. Neither a terminating NUL nor an even
+/// length is assumed; a trailing odd byte is dropped.
+#[cfg(windows)]
+fn registry_string(
+    key: windows::Win32::System::Registry::HKEY,
+    name: windows::core::PCWSTR,
+) -> Option<String> {
+    use windows::Win32::{
+        Foundation::ERROR_SUCCESS,
+        System::Registry::{REG_EXPAND_SZ, REG_SZ, RegQueryValueExW},
+    };
+
+    let mut value_type = REG_SZ;
+    let mut byte_len = 0u32;
+    // SAFETY: The first query writes only the value type and size to local variables.
+    if unsafe {
+        RegQueryValueExW(
+            key,
+            name,
+            None,
+            Some(&mut value_type),
+            None,
+            Some(&mut byte_len),
+        )
+    } != ERROR_SUCCESS
+        || (value_type != REG_SZ && value_type != REG_EXPAND_SZ)
+        || byte_len < 2
+    {
+        return None;
+    }
+
+    let mut value = vec![0u8; byte_len as usize];
+    // SAFETY: `value` is exactly `byte_len` bytes, the size passed in `byte_len`, so
+    // the query cannot write past it; a value that grew since fails with
+    // `ERROR_MORE_DATA` instead.
+    if unsafe {
+        RegQueryValueExW(
+            key,
+            name,
+            None,
+            Some(&mut value_type),
+            Some(value.as_mut_ptr()),
+            Some(&mut byte_len),
+        )
+    } != ERROR_SUCCESS
+        || (value_type != REG_SZ && value_type != REG_EXPAND_SZ)
+    {
+        return None;
+    }
+
+    let units = value
+        .get(..byte_len as usize)?
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|bytes| u16::from_le_bytes(*bytes))
+        .take_while(|unit| *unit != 0)
+        .collect::<Vec<_>>();
+    String::from_utf16(&units).ok()
+}
+
 #[cfg(windows)]
 fn msys2_registered_installation_roots() -> Vec<PathBuf> {
     use windows::{
@@ -382,49 +448,6 @@ fn msys2_registered_installation_roots() -> Vec<PathBuf> {
         },
         core::w,
     };
-
-    fn read_string(key: HKEY, name: windows::core::PCWSTR) -> Option<String> {
-        use windows::Win32::{
-            Foundation::ERROR_SUCCESS,
-            System::Registry::{REG_SZ, RegQueryValueExW},
-        };
-
-        let mut value_type = REG_SZ;
-        let mut byte_len = 0;
-        // SAFETY: The first query requests only the value size and writes to valid local
-        // variables. The second query uses a buffer sized from that result.
-        if unsafe {
-            RegQueryValueExW(
-                key,
-                name,
-                None,
-                Some(&mut value_type),
-                None,
-                Some(&mut byte_len),
-            )
-        } != ERROR_SUCCESS
-            || value_type != REG_SZ
-            || byte_len < 2
-        {
-            return None;
-        }
-        let mut value = vec![0_u16; byte_len as usize / 2];
-        if unsafe {
-            RegQueryValueExW(
-                key,
-                name,
-                None,
-                Some(&mut value_type),
-                Some(value.as_mut_ptr().cast()),
-                Some(&mut byte_len),
-            )
-        } != ERROR_SUCCESS
-        {
-            return None;
-        }
-        let len = value.iter().position(|character| *character == 0)?;
-        Some(String::from_utf16_lossy(&value[..len]))
-    }
 
     let mut uninstall = HKEY::default();
     // The official MSYS2 installer registers its per-user uninstall entry here.
@@ -468,11 +491,11 @@ fn msys2_registered_installation_roots() -> Vec<PathBuf> {
         {
             continue;
         }
-        let is_msys2 = read_string(entry, w!("DisplayName")).is_some_and(|display_name| {
+        let is_msys2 = registry_string(entry, w!("DisplayName")).is_some_and(|display_name| {
             display_name.eq_ignore_ascii_case("MSYS2")
                 || display_name.to_ascii_lowercase().starts_with("msys2 ")
         });
-        if is_msys2 && let Some(location) = read_string(entry, w!("InstallLocation")) {
+        if is_msys2 && let Some(location) = registry_string(entry, w!("InstallLocation")) {
             roots.push(PathBuf::from(location));
         }
         // SAFETY: `entry` was opened successfully in this iteration.
@@ -595,58 +618,11 @@ fn cygwin_registered_installation_roots() -> Vec<PathBuf> {
             Foundation::ERROR_SUCCESS,
             System::Registry::{
                 HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WOW64_32KEY,
-                KEY_WOW64_64KEY, REG_EXPAND_SZ, REG_SZ, RegCloseKey, RegEnumKeyW, RegEnumValueW,
-                RegOpenKeyExW, RegQueryValueExW,
+                KEY_WOW64_64KEY, RegCloseKey, RegEnumKeyW, RegEnumValueW, RegOpenKeyExW,
             },
         },
         core::{PCWSTR, PWSTR},
     };
-
-    fn registry_string(key: HKEY, name: PCWSTR) -> Option<String> {
-        let mut value_type = REG_SZ;
-        let mut byte_len = 0u32;
-        // SAFETY: The first query writes only the value type and size to local variables.
-        if unsafe {
-            RegQueryValueExW(
-                key,
-                name,
-                None,
-                Some(&mut value_type),
-                None,
-                Some(&mut byte_len),
-            )
-        } != ERROR_SUCCESS
-            || (value_type != REG_SZ && value_type != REG_EXPAND_SZ)
-            || byte_len < 2
-        {
-            return None;
-        }
-
-        let mut value = vec![0u8; byte_len as usize];
-        // SAFETY: `value` is sized from the preceding registry query.
-        if unsafe {
-            RegQueryValueExW(
-                key,
-                name,
-                None,
-                Some(&mut value_type),
-                Some(value.as_mut_ptr()),
-                Some(&mut byte_len),
-            )
-        } != ERROR_SUCCESS
-        {
-            return None;
-        }
-
-        let units = value[..byte_len as usize]
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .map(|bytes| u16::from_le_bytes(*bytes))
-            .take_while(|unit| *unit != 0)
-            .collect::<Vec<_>>();
-        String::from_utf16(&units).ok()
-    }
 
     fn add_value(roots: &mut Vec<PathBuf>, key: HKEY, name: PCWSTR) {
         if let Some(value) = registry_string(key, name)

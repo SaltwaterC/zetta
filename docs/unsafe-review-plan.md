@@ -57,7 +57,7 @@ macOS cross-checks need the Apple SDK, so macOS code needs a run on a macOS host
 | ID | Severity | Status | Area | Summary | Effort |
 | --- | --- | --- | --- | --- | --- |
 | P1.1 | High | fixed | zmux | Upgrade leaves every pane master and the listener inheritable | M |
-| P1.2 | Medium, UB | confirmed | zetta_profiles | 1-byte heap overflow in the MSYS2 registry reader | S |
+| P1.2 | Medium, UB | fixed | zetta_profiles | 1-byte heap overflow in the MSYS2 registry reader | S |
 | P1.3 | Medium | confirmed | alacritty_terminal | Reclaimed pane signals a pid it already reaped | S |
 | P1.4 | Medium | confirmed | alacritty_terminal | ConPTY `pause()` spins on a closed handle after a reader panic | S |
 | P2.1 | Medium | reported | zmux | Session owner identified by pid alone | M |
@@ -182,6 +182,23 @@ and deletes the key.
 
 **Validate:** the `zetta_profiles` suite on a Windows host; `make
 check-windows`; `make clippy-windows`.
+
+**Done.** `registry_string` moved up from inside
+`cygwin_registered_installation_roots` to the top level of `discovery.rs`, and
+the MSYS2 reader now uses it in place of its own `read_string`, so one
+registry-string reader remains. The MSYS2 lookup now accepts what the Cygwin one
+already did: `REG_EXPAND_SZ` as well as `REG_SZ` (left unexpanded), and a value
+with no terminating NUL. It decodes UTF-16 strictly, so an unpaired surrogate
+rejects the value instead of being replaced with U+FFFD. The helper also checks
+the type again after the second query, and slices with `get` rather than
+indexing.
+
+`registry_strings_of_odd_length_are_read_within_their_size` writes 13- and
+11-byte `REG_SZ` values, a 1-byte value and a `REG_DWORD` under a volatile
+scratch HKCU key, and deletes the key on drop. It passes on a Windows host. It
+pins how the helper reads an odd length, but cannot detect the one-byte
+overflow itself, which needs page heap to fault. The RAII key guard from P4.3 is
+not part of this fix.
 
 ### P1.3 Reclaimed pane signals a pid it already reaped
 
