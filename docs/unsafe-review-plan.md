@@ -59,7 +59,7 @@ macOS cross-checks need the Apple SDK, so macOS code needs a run on a macOS host
 | P1.1 | High | fixed | zmux | Upgrade leaves every pane master and the listener inheritable | M |
 | P1.2 | Medium, UB | fixed | zetta_profiles | 1-byte heap overflow in the MSYS2 registry reader | S |
 | P1.3 | Medium | fixed | alacritty_terminal | Reclaimed pane signals a pid it already reaped | S |
-| P1.4 | Medium | confirmed | alacritty_terminal | ConPTY `pause()` spins on a closed handle after a reader panic | S |
+| P1.4 | Medium | fixed | alacritty_terminal | ConPTY `pause()` spins on a closed handle after a reader panic | S |
 | P2.1 | Medium | reported | zmux | Session owner identified by pid alone | M |
 | P2.2 | Medium | reported | console-server | Client-sized allocations can abort the host process | S–M |
 | P2.3 | Medium–Low | reported | zmux (Windows) | `PeerChallenge` attestation can be answered by an impostor | M |
@@ -273,6 +273,20 @@ unrelated I/O in the process, for example another pane's `ReadFile`.
 
 **Validate:** the `alacritty_terminal` suite on a Windows host; `make
 check-windows`; `make clippy-windows`.
+
+**Done.** `ReaderExit`, a drop guard, now publishes `ended` and `finished` and
+wakes the drain, so a normal exit and an unwind take the same path. It is
+declared after the reader's `CancellableSource`, so an unwind drops it first:
+`pause` sees `finished` before the source closes the handle it cancels. A
+panic counts as the end of output, because the source is gone. `pause` also
+leaves its loop once `JoinHandle::is_finished()` is true, which covers a
+thread that ends before it creates the guard.
+
+`pause_returns_after_the_reader_panics` and `a_reader_panic_ends_the_source`
+both fail with the guard's panic path and the `is_finished` check removed,
+pause timing out after 1 s, and pass with them, together with the rest of the
+`alacritty_terminal` suite on a Windows host. The second test fails if only the
+guard is removed, so the `is_finished` fallback cannot mask it.
 
 ## Phase 2: needs a design decision
 

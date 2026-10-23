@@ -53,6 +53,36 @@ struct ReaderControl {
     thread: Mutex<Option<thread::Thread>>,
 }
 
+/// Publishes the source reader's exit when the reader thread leaves, whether
+/// it returns or unwinds. `pause` cancels the source handle until it sees
+/// `finished`, so an exit that skipped this would leave it cancelling a closed
+/// handle value, and with it whatever I/O Windows later reuses that value for.
+struct ReaderExit {
+    control: Arc<ReaderControl>,
+    interest: Arc<Registration>,
+    /// The source reached the end of its output, as opposed to being stopped.
+    ended: bool,
+}
+
+impl Drop for ReaderExit {
+    fn drop(&mut self) {
+        // A panic drops the source, so nothing more will come out of it.
+        let ended = self.ended || thread::panicking();
+        {
+            // Pair the finished predicate with the pauser's condvar wait. Without
+            // this lock, completion could notify between its check and wait.
+            let _state = self.control.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            self.control.ended.store(ended, std::sync::atomic::Ordering::Release);
+            self.control.finished.store(true, std::sync::atomic::Ordering::Release);
+            self.control.changed.notify_all();
+        }
+        // No byte follows to wake a drain waiting on the end of output.
+        if ended {
+            Wake::wake_by_ref(&self.interest);
+        }
+    }
+}
+
 /// Stops new reads after a pause. Cancellation must also cover the interval
 /// between this check and entering `ReadFile`, so the pauser retries it until
 /// the source thread has returned.
@@ -157,13 +187,16 @@ impl<R: Read + Send + AsRawHandle + 'static> UnblockedReader<R> {
         let control_for_reader = control.clone();
         let interest = self.interest.clone();
         let join = spawn_named("alacritty-tty-reader-thread", move || {
+            let mut source = CancellableSource { source, control: control_for_reader.clone() };
+            // Declared after the source so that an unwind publishes the exit
+            // before it drops the source and closes the handle `pause` cancels.
+            let mut exit =
+                ReaderExit { control: control_for_reader.clone(), interest, ended: false };
             *control_for_reader.thread.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) =
                 Some(thread::current());
             let waker = Waker::from(Arc::new(ThreadWaker(thread::current())));
             let mut context = Context::from_waker(&waker);
-            let mut source = CancellableSource { source, control: control_for_reader.clone() };
 
-            let mut ended = false;
             let (source, writer) = loop {
                 if control_for_reader.stop.load(std::sync::atomic::Ordering::Acquire) {
                     break (source, writer);
@@ -171,7 +204,8 @@ impl<R: Read + Send + AsRawHandle + 'static> UnblockedReader<R> {
                 match writer.poll_fill(&mut context, &mut source) {
                     Poll::Ready(Ok(0)) => {
                         // A stopped source also reads as empty.
-                        ended = !control_for_reader.stop.load(std::sync::atomic::Ordering::Acquire);
+                        exit.ended =
+                            !control_for_reader.stop.load(std::sync::atomic::Ordering::Acquire);
                         break (source, writer);
                     },
                     Poll::Ready(Ok(_)) => continue,
@@ -184,7 +218,7 @@ impl<R: Read + Send + AsRawHandle + 'static> UnblockedReader<R> {
                         }
                         // The console closing its end is the end of its output.
                         if error.kind() == io::ErrorKind::BrokenPipe {
-                            ended = true;
+                            exit.ended = true;
                             break (source, writer);
                         }
                         log::error!("error writing to pipe: {error}");
@@ -193,21 +227,7 @@ impl<R: Read + Send + AsRawHandle + 'static> UnblockedReader<R> {
                     Poll::Pending => thread::park(),
                 }
             };
-            {
-                // Pair the finished predicate with the pauser's condvar wait. Without
-                // this lock, completion could notify between its check and wait.
-                let _state = control_for_reader
-                    .state
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                control_for_reader.ended.store(ended, std::sync::atomic::Ordering::Release);
-                control_for_reader.finished.store(true, std::sync::atomic::Ordering::Release);
-                control_for_reader.changed.notify_all();
-            }
-            // No byte follows to wake a drain waiting on the end of output.
-            if ended {
-                Wake::wake_by_ref(&interest);
-            }
+            drop(exit);
             (source.source, writer)
         });
         self.reader_thread = Some(ReaderThread { control, join });
@@ -244,7 +264,11 @@ impl<R: Read + Send + AsRawHandle + 'static> UnblockedReader<R> {
         // `AnonRead` uses synchronous ReadFile. CancelIoEx is explicitly
         // cross-thread and wakes that call without closing the handle, so the
         // reader can return both the source and its still-live piper writer.
-        while !reader_thread.control.finished.load(std::sync::atomic::Ordering::Acquire) {
+        // `ReaderExit` sets `finished` even on a panic. A thread that ended
+        // before creating it never will, and has already closed the handle.
+        while !reader_thread.control.finished.load(std::sync::atomic::Ordering::Acquire)
+            && !reader_thread.join.is_finished()
+        {
             let cancelled = unsafe { CancelIoEx(self.source_handle as HANDLE, std::ptr::null()) };
             if cancelled == 0 {
                 let error = io::Error::last_os_error();
@@ -721,6 +745,58 @@ mod tests {
         }
         pauser.join().unwrap();
         assert!(paused.is_ok(), "pause must not require another byte from the child");
+    }
+
+    /// A source whose first read panics, after reporting that it was entered.
+    struct PanickingRead {
+        source: miow::pipe::AnonRead,
+        entered: mpsc::Sender<()>,
+    }
+
+    impl AsRawHandle for PanickingRead {
+        fn as_raw_handle(&self) -> std::os::windows::io::RawHandle {
+            self.source.as_raw_handle()
+        }
+    }
+
+    impl Read for PanickingRead {
+        fn read(&mut self, _buffer: &mut [u8]) -> io::Result<usize> {
+            self.entered.send(()).unwrap();
+            panic!("the source reader panicked");
+        }
+    }
+
+    fn panicked_reader() -> (UnblockedReader<PanickingRead>, miow::pipe::AnonWrite) {
+        let (source, output) = miow::pipe::anonymous(0).unwrap();
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let mut reader = UnblockedReader::new(PanickingRead { source, entered: entered_tx }, 128);
+        assert_eq!(reader.try_read(&mut [0; 128]), 0);
+        entered_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while !reader.reader_thread.as_ref().unwrap().join.is_finished() {
+            assert!(Instant::now() < deadline, "the reader thread did not unwind");
+            thread::yield_now();
+        }
+        (reader, output)
+    }
+
+    #[test]
+    fn pause_returns_after_the_reader_panics() {
+        let (mut reader, _output) = panicked_reader();
+        let (paused_tx, paused_rx) = mpsc::channel();
+        // A hung pause leaks this thread; there is no byte that would free it.
+        thread::spawn(move || {
+            paused_tx.send(reader.pause().is_err()).unwrap();
+        });
+        let reported = paused_rx.recv_timeout(Duration::from_secs(1));
+        assert_eq!(reported, Ok(true), "pause must report the panic instead of spinning");
+    }
+
+    #[test]
+    fn a_reader_panic_ends_the_source() {
+        let (reader, _output) = panicked_reader();
+        // Without this, the pane would wait forever for output nothing can produce.
+        assert!(reader.source_ended());
     }
 
     #[test]
