@@ -5,6 +5,7 @@ fn buffer(width: i16, height: i16) -> ScreenBuffer {
         size: (width, height),
         window: (width, height),
         cells: vec![CharInfo::blank(0x07); (width * height) as usize],
+        blank: CharInfo::blank(0x07),
         saved: Saved {
             output_mode: 0x7,
             cursor_size: 25,
@@ -17,10 +18,13 @@ fn buffer(width: i16, height: i16) -> ScreenBuffer {
     }
 }
 fn text(screen: &ScreenBuffer) -> String {
-    screen
-        .cells
-        .chunks(screen.size.0 as usize)
-        .map(|row| String::from_utf16_lossy(&row.iter().map(|cell| cell.ch).collect::<Vec<_>>()))
+    (0..i32::from(screen.size.1))
+        .map(|y| {
+            let row: Vec<u16> = (0..i32::from(screen.size.0))
+                .map(|x| screen.cell(x, y).unwrap().ch)
+                .collect();
+            String::from_utf16_lossy(&row)
+        })
         .collect::<Vec<_>>()
         .join("|")
 }
@@ -28,7 +32,7 @@ fn text(screen: &ScreenBuffer) -> String {
 #[test]
 fn off_screen_text_wraps_scrolls_and_skips_escape_sequences() {
     let mut screen = buffer(4, 2);
-    screen.write_text("ab\x1b[31mcdef\r\nxy");
+    screen.write_text("ab\x1b[31mcdef\r\nxy").unwrap();
     // "abcd" fills the first row, "ef" wraps, then CRLF scrolls it up.
     assert_eq!(text(&screen), "ef  |xy  ");
     assert_eq!(screen.saved.cursor, (2, 1));
@@ -38,7 +42,7 @@ fn off_screen_text_wraps_scrolls_and_skips_escape_sequences() {
 #[test]
 fn off_screen_control_characters_move_the_cursor() {
     let mut screen = buffer(10, 1);
-    screen.write_text("abc\x08X\tY\rZ");
+    screen.write_text("abc\x08X\tY\rZ").unwrap();
     assert_eq!(text(&screen), "ZbX     Y ");
 }
 
@@ -46,11 +50,11 @@ fn off_screen_control_characters_move_the_cursor() {
 fn legacy_off_screen_text_wraps_at_once_or_overwrites_the_last_column() {
     let mut screen = buffer(3, 2);
     screen.saved.output_mode = mode::WRAP_AT_EOL_OUTPUT;
-    screen.write_text("abc");
+    screen.write_text("abc").unwrap();
     assert_eq!(screen.saved.cursor, (0, 1));
     let mut screen = buffer(3, 2);
     screen.saved.output_mode = 0;
-    screen.write_text("abcd");
+    screen.write_text("abcd").unwrap();
     assert_eq!(text(&screen), "abd|   ");
     assert_eq!(screen.saved.cursor, (2, 0));
 }
@@ -77,14 +81,14 @@ fn reading_characters_returns_wide_glyphs_once_or_a_space_when_cut() {
 #[test]
 fn resizing_keeps_what_fits_where_it_was_and_clamps_the_cursor() {
     let mut screen = buffer(3, 2);
-    screen.write_text("abcdef");
+    screen.write_text("abcdef").unwrap();
     assert_eq!(text(&screen), "abc|def");
-    screen.resize((2, 3));
+    screen.resize((2, 3)).unwrap();
     assert_eq!(text(&screen), "ab|de|  ");
     assert_eq!(screen.saved.cursor, (1, 1));
     assert!(screen.dirty);
     screen.window = (2, 3);
-    screen.resize((4, 1));
+    screen.resize((4, 1)).unwrap();
     assert_eq!(text(&screen), "ab  ");
     assert_eq!(screen.window, (2, 1));
 }
@@ -138,18 +142,22 @@ fn a_lead_byte_ending_one_ansi_input_write_joins_the_next_writes_first_key() {
     // Shift-JIS "あ" is 0x82 0xa0.
     server.state.input_cp = 932;
     assert_eq!(
-        chars(&server.widen_input_records(&[key(b'a'), key(0x82)])),
+        chars(&server.widen_input_records(&[key(b'a'), key(0x82)]).unwrap()),
         [97]
     );
     assert_eq!(
-        chars(&server.widen_input_records(&[key(0xa0), key(b'b')])),
+        chars(&server.widen_input_records(&[key(0xa0), key(b'b')]).unwrap()),
         [0x3042, 98]
     );
     // A lead byte whose trail is not a key is dropped with it.
     let mut focus = [0; 20];
     focus[0] = 0x10;
     assert_eq!(
-        chars(&server.widen_input_records(&[key(0x82), focus, key(b'c')])),
+        chars(
+            &server
+                .widen_input_records(&[key(0x82), focus, key(b'c')])
+                .unwrap()
+        ),
         [99]
     );
 }
@@ -186,4 +194,170 @@ fn ansi_cells_take_lead_and_trail_from_the_code_page_one_row_at_a_time() {
             (99, 0x07),
         ]
     );
+}
+
+#[test]
+fn scrolling_moves_the_written_rows_up_and_leaves_the_rest_unwritten() {
+    let mut screen = buffer(3, 3);
+    screen.cells.clear();
+    screen.saved.attributes = 0x07;
+    screen.write_text("a").unwrap();
+    assert_eq!(screen.cells.len(), 3);
+    screen.saved.cursor = (0, 2);
+    screen.write_text("\nb").unwrap();
+    assert_eq!(text(&screen), "   |   |b  ");
+    // A row in other attributes scrolling in means writing every row.
+    screen.saved.attributes = 0x1f;
+    screen.saved.cursor = (0, 2);
+    screen.write_text("\nc").unwrap();
+    assert_eq!(text(&screen), "   |b  |c  ");
+    assert_eq!(screen.cells.len(), 9);
+    assert_eq!(screen.cell(1, 2).unwrap().attributes, 0x1f);
+}
+
+#[test]
+fn resizing_a_partly_written_buffer_keeps_the_blanks_it_had() {
+    let mut screen = buffer(2, 2);
+    screen.cells.clear();
+    screen.write_text("ab").unwrap();
+    // The new blank is 0x1f, so the unwritten row keeps reading as 0x07.
+    screen.resize((3, 3)).unwrap();
+    assert_eq!(screen.cell(0, 1).unwrap().attributes, 0x07);
+    assert_eq!(screen.cell(2, 0).unwrap().attributes, 0x1f);
+    assert_eq!(screen.cell(0, 2).unwrap().attributes, 0x1f);
+    // Once the blanks agree, rows never written stay unwritten.
+    screen.resize((3, 30000)).unwrap();
+    assert_eq!(screen.cells.len(), 6);
+}
+
+/// An 80x24 terminal of 'x' cells that records the ranges it is asked to
+/// read and how much VT it is given.
+#[derive(Clone, Default)]
+struct Probe(std::sync::Arc<std::sync::Mutex<ProbeLog>>);
+#[derive(Default)]
+struct ProbeLog {
+    reads: Vec<(std::ops::Range<i16>, std::ops::Range<i16>)>,
+    written: usize,
+}
+impl Probe {
+    fn log(&self) -> std::sync::MutexGuard<'_, ProbeLog> {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+impl ConsoleOutput for Probe {
+    fn write(&mut self, bytes: &[u8], _: crate::output::OutputMode) -> io::Result<()> {
+        self.log().written += bytes.len();
+        Ok(())
+    }
+    fn read_cells(
+        &self,
+        rows: std::ops::Range<i16>,
+        columns: std::ops::Range<i16>,
+    ) -> Option<Vec<Cell>> {
+        let count = rows.len() * columns.len();
+        self.log().reads.push((rows, columns));
+        Some(vec![
+            Cell {
+                ch: 'x',
+                ..Cell::BLANK
+            };
+            count
+        ])
+    }
+}
+
+#[test]
+fn a_buffer_sized_at_the_limit_holds_only_the_rows_written_to_it() {
+    let mut server = Server::new(Probe::default(), false);
+    let object = server.create_screen_buffer(Access::SHARED).unwrap();
+    let buffer = server.output_buffer(object).unwrap();
+    // About 4.3 GB of cells, which Windows would refuse to commit.
+    assert_eq!(
+        server.set_off_screen_size(buffer, (32766, 32766)).unwrap(),
+        0
+    );
+    server
+        .write_off_screen(buffer, Deferred::Bytes(b"ab".to_vec()))
+        .unwrap();
+    let screen = &server.buffers[&buffer];
+    assert_eq!(screen.cells.len(), 32766);
+    assert_eq!(screen.cell(1, 0).unwrap().ch, u16::from(b'b'));
+    assert_eq!(screen.cell(32765, 32765), Some(screen.blank));
+}
+
+#[test]
+fn activating_a_buffer_larger_than_the_terminal_reads_and_draws_only_the_terminal() {
+    let probe = Probe::default();
+    let mut server = Server::new(probe.clone(), false);
+    assert!(server.state.set_buffer_size((80, 24), (32766, 32766)));
+    // A created buffer is the size of the main one.
+    let object = server.create_screen_buffer(Access::SHARED).unwrap();
+    server.set_active_screen_buffer(object).unwrap();
+    server.flush_output().unwrap();
+    let log = probe.log();
+    assert_eq!(log.reads, [(0..24, 0..80)]);
+    assert!(log.written < 64 * 1024, "{} bytes of VT", log.written);
+}
+
+#[test]
+fn the_active_buffer_past_the_terminal_reads_blank_and_draws_nothing() {
+    let probe = Probe::default();
+    let mut server = Server::new(probe.clone(), false);
+    assert!(server.state.set_buffer_size((80, 24), (32766, 32766)));
+    let rect = Rect {
+        left: 70,
+        top: 20,
+        right: 89,
+        bottom: 29,
+    };
+    let cells = server.read_rect(MAIN, rect).unwrap().unwrap();
+    assert_eq!(probe.log().reads, [(20..24, 70..80)]);
+    assert_eq!(cells.len(), 200);
+    let x = |cell: &CharInfo| cell.ch == u16::from(b'x');
+    // Each of rows 20-23 has ten cells on screen, then ten past its edge.
+    for (row, cells) in cells.chunks(20).enumerate() {
+        assert!(cells[..10].iter().all(|cell| x(cell) == (row < 4)));
+        assert!(!cells[10..].iter().any(x));
+    }
+    let mut out = String::new();
+    let cell = CharInfo {
+        ch: u16::from(b'y'),
+        attributes: 0x07,
+    };
+    let below = Rect {
+        left: 0,
+        top: 24,
+        right: 9,
+        bottom: 24,
+    };
+    server
+        .write_rect(MAIN, below, &[cell; 10], &mut out)
+        .unwrap();
+    assert_eq!(out, "");
+    let edge = Rect {
+        left: 78,
+        top: 0,
+        right: 81,
+        bottom: 0,
+    };
+    server.write_rect(MAIN, edge, &[cell; 4], &mut out).unwrap();
+    assert_eq!(out.matches('y').count(), 2);
+}
+
+#[test]
+fn main_buffer_text_past_the_replay_limit_is_redrawn_from_its_cells() {
+    let mut server = Server::new(Probe::default(), false);
+    let object = server.create_screen_buffer(Access::SHARED).unwrap();
+    server.set_active_screen_buffer(object).unwrap();
+    server
+        .write_off_screen(MAIN, Deferred::Bytes(vec![b'a'; REPLAY_LIMIT]))
+        .unwrap();
+    assert_eq!(server.deferred_main.len(), 1);
+    server
+        .write_off_screen(MAIN, Deferred::Bytes(b"b".to_vec()))
+        .unwrap();
+    assert!(server.deferred_main.is_empty());
+    assert!(server.buffers[&MAIN].dirty);
 }

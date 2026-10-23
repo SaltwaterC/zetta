@@ -61,7 +61,7 @@ macOS cross-checks need the Apple SDK, so macOS code needs a run on a macOS host
 | P1.3 | Medium | fixed | alacritty_terminal | Reclaimed pane signals a pid it already reaped | S |
 | P1.4 | Medium | fixed | alacritty_terminal | ConPTY `pause()` spins on a closed handle after a reader panic | S |
 | P2.1 | Medium | fixed | zmux | Session owner identified by pid alone | M |
-| P2.2 | Medium | reported | console-server | Client-sized allocations can abort the host process | S–M |
+| P2.2 | Medium | fixed | console-server | Client-sized allocations can abort the host process | S–M |
 | P2.3 | Medium–Low | reported | zmux (Windows) | `PeerChallenge` attestation can be answered by an impostor | M |
 | P3.1 | Low–Medium | reported | zosh | Wake pipes not close-on-exec atomically | S |
 | P3.2 | Low | confirmed | zntfy | `/tmp` fallback directory used without validation | S |
@@ -376,6 +376,68 @@ choosing numbers.
 
 **Validate:** the `console-server` suite and `make conformance-windows` on a
 Windows host.
+
+**Done.** Matched conhost, which caps neither: `SetConsoleScreenBufferSizeImpl`
+checks only the viewport and `SHORT_MAX`, `TextBuffer` reserves address space
+and commits a row when it is first touched, and `ApiSorter` turns a failed
+allocation into `E_OUTOFMEMORY`. The plan's caps were therefore not added.
+
+- `ScreenBuffer` holds the rows from the top down to the lowest one written.
+  The rows below read as the buffer's blank and cost nothing, so a
+  32766x32766 buffer costs one row for each row written. A resize keeps
+  unwritten rows unwritten unless they would read as a different blank. A
+  scroll at the bottom moves only the written rows, unless the row it brings
+  in has other attributes.
+- Every allocation a client sizes is fallible (`try_vec`,
+  `try_with_capacity`). `Server::serve` answers an `OutOfMemory` error with
+  `NO_MEMORY` (`0xC007000E`) instead of ending the server. This covers
+  `api_input`, `read_console`, committing rows, resizing, scrolling and the
+  `Read`/`WriteConsoleOutput*` paths. Conhost's exact code varies by path;
+  this answers `E_OUTOFMEMORY` on all of them.
+- `Input::inject` has no cap, as `InputBuffer` has none. When the records do
+  not fit it writes none and reports 0, as `InputBuffer::Write` does when its
+  storage throws. A Unicode `WriteConsoleInput` no longer copies its records.
+- There is no cap on buffers per client either: an unwritten buffer is about
+  a hundred bytes, as a conhost handle is.
+
+Found beyond the report:
+
+- `read_output` allocated the request rectangle, up to 16 GiB, before
+  checking that the output buffer could hold it.
+- The grid answers a blank for every cell outside the terminal, and a main
+  buffer an application enlarges to 32766x32766 used to be read whole:
+  leaving it for another buffer, reading it, and scrolling it each asked for
+  about a billion cells. Reads are now clamped to the terminal and padded
+  with `Cell::BLANK`. Writes to the active buffer past the terminal emit no
+  VT, which used to land on its last row or wrap.
+- Activating a buffer drew every row it had. It now draws what fits on the
+  terminal, as `WriteScreenInfo` draws only the old buffer's size.
+- Text written to the main buffer while another one is on screen was kept
+  without bound, to be replayed. Past 16 MiB (`REPLAY_LIMIT`) the main buffer
+  is redrawn from its cells instead, which `WriteScreenInfo` always does.
+
+Not covered:
+
+- A buffer that is written to its last row still commits all of its cells,
+  about 4.3 GB at the limit, as conhost does. On the Windows host a 16 GiB
+  allocation succeeded, so "Windows does not overcommit" does not hold there:
+  a huge request can succeed and is then heavy, though not fatal.
+- Allocations that are each fine can still exhaust memory together, and a
+  later infallible allocation then aborts the process. Conhost has the same
+  exposure, but in its own process.
+- Scrolling a fully written buffer moves all of its cells on every newline.
+
+`a_buffer_sized_at_the_limit_holds_only_the_rows_written_to_it`,
+`activating_a_buffer_larger_than_the_terminal_reads_and_draws_only_the_terminal`,
+`the_active_buffer_past_the_terminal_reads_blank_and_draws_nothing` and
+`main_buffer_text_past_the_replay_limit_is_redrawn_from_its_cells` each fail
+with their fix removed, on the Windows host. No test pins the order in
+`read_output`: the host committed the 16 GiB in 27 s, so a test passed with
+the old order too.
+
+The whole `console-server` suite, unit and integration, passes natively on
+the Windows host, and so does `make check-windows`. The ft_host suite gives
+251 passed, 39 failed and 45 skipped, exactly `expected-pass.txt`.
 
 ### P2.3 Windows `PeerChallenge` can be answered by an impostor
 

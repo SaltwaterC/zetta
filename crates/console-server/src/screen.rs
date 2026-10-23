@@ -120,7 +120,7 @@ impl Server {
     pub(super) fn set_buffer_size(&mut self, object: usize) -> io::Result<(i32, usize)> {
         let size = (i16_at(&self.reply, 0), i16_at(&self.reply, 2));
         if let Some(buffer) = self.off_screen(object) {
-            return Ok((self.set_off_screen_size(buffer, size), 0));
+            return Ok((self.set_off_screen_size(buffer, size)?, 0));
         }
         let terminal = Self::window(&self.screen()?);
         let valid = if self.active == buffers::MAIN {
@@ -149,7 +149,7 @@ impl Server {
             bottom,
         };
         if let Some(buffer) = self.off_screen(object) {
-            return Ok((self.set_off_screen_window(buffer, requested, absolute), 0));
+            return Ok((self.set_off_screen_window(buffer, requested, absolute)?, 0));
         }
         let terminal = Self::window(&self.screen()?);
         let current = if self.active == buffers::MAIN {

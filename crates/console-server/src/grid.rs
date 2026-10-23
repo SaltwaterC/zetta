@@ -62,16 +62,7 @@ pub fn read_cells<T>(
     columns: std::ops::Range<i16>,
 ) -> Vec<Cell> {
     let grid = term.grid();
-    let blank = Cell {
-        ch: ' ',
-        pen: Pen {
-            foreground: PenColor::Default,
-            background: PenColor::Default,
-            reverse: false,
-            underline: false,
-        },
-        half: Half::Whole,
-    };
+    let blank = Cell::BLANK;
     let mut cells = Vec::new();
     for row in rows {
         for column in columns.clone() {

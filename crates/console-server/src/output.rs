@@ -47,6 +47,20 @@ pub struct Cell {
     pub pen: Pen,
     pub half: Half,
 }
+impl Cell {
+    /// A space in the default colors: what the grid answers for a cell it
+    /// does not have.
+    pub const BLANK: Self = Self {
+        ch: ' ',
+        pen: Pen {
+            foreground: PenColor::Default,
+            background: PenColor::Default,
+            reverse: false,
+            underline: false,
+        },
+        half: Half::Whole,
+    };
+}
 /// What screen-buffer queries report, read in one go after a flush.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Screen {

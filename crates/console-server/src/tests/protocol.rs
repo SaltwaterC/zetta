@@ -18,3 +18,8 @@ fn negative_status_preserves_the_ntstatus_bits() {
     let value = Completion::new(Identifier::default(), INVALID_PARAMETER, 0, &mut []);
     assert_eq!(value.status.status, 0xc000000d);
 }
+#[test]
+fn an_allocation_too_large_to_make_is_an_out_of_memory_error() {
+    let error = try_vec(0u64, usize::MAX).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::OutOfMemory);
+}

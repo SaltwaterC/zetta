@@ -24,7 +24,8 @@ impl Server {
         size: usize,
     ) -> io::Result<Vec<u8>> {
         let offset = 8 + size;
-        let mut bytes = vec![0; (d.input_size as usize).saturating_sub(offset)];
+        // Up to 4 GiB; GetInputBuffer allocates it as a client declares it.
+        let mut bytes = try_vec(0, (d.input_size as usize).saturating_sub(offset))?;
         if !bytes.is_empty() {
             native::transfer(handle, READ_INPUT, d.id, offset as u32, &mut bytes)?;
         }

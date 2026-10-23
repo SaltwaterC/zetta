@@ -211,17 +211,25 @@ impl Input {
     /// WriteConsoleInput: records an application queues itself, after or
     /// before what is waiting. In VT input mode a key press becomes its VT
     /// text, as InputBuffer::_WriteBuffer encodes it; Ctrl+C is not special.
+    /// The queue has no cap, as InputBuffer's has none: records that do not
+    /// fit in memory are not written, and the count is 0, as
+    /// InputBuffer::Write answers when its storage throws.
     pub fn inject(&self, records: &[[u8; 20]], append: bool) -> usize {
         let vt = self.input_mode() & VIRTUAL_TERMINAL_INPUT != 0;
-        let mut queued = Vec::with_capacity(records.len());
+        let mut queued = Vec::new();
         for record in records {
-            match keys::vt_text(record).filter(|_| vt) {
+            let text = keys::vt_text(record).filter(|_| vt);
+            let units = text.as_ref().map_or(1, |text| text.encode_utf16().count());
+            if queued.try_reserve(units).is_err() {
+                return 0;
+            }
+            match text {
                 Some(text) => queued.extend(text.encode_utf16().map(record_char)),
                 None => queued.push(*record),
             }
         }
         let mut state = lock(&self.0.state);
-        if state.closed {
+        if state.closed || state.records.try_reserve(queued.len()).is_err() {
             return 0;
         }
         if append {

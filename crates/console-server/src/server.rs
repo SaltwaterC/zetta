@@ -78,8 +78,10 @@ pub struct Server {
     buffers: BTreeMap<u32, buffers::ScreenBuffer>,
     next_buffer: u32,
     active: u32,
-    /// Text for the main buffer while another buffer is on screen.
+    /// Text for the main buffer while another buffer is on screen, and its
+    /// length in bytes.
     deferred_main: Vec<buffers::Deferred>,
+    deferred_main_size: usize,
     /// GetConsoleWindow's window, its owner, and where it reports ShowWindow.
     window: Option<crate::window::PseudoWindow>,
     pub(crate) window_owner: Option<usize>,
@@ -140,6 +142,7 @@ impl Server {
             next_buffer: 1,
             active: buffers::MAIN,
             deferred_main: Vec::new(),
+            deferred_main_size: 0,
             window: None,
             window_owner: None,
             window_output: None,
@@ -220,7 +223,10 @@ impl Server {
             self.reply.clear();
             self.apply_pending_palette();
             let available = received - size_of::<Descriptor>();
-            let (status, information) = self.dispatch(handle, &packet, available)?;
+            let (status, information) = match self.dispatch(handle, &packet, available) {
+                Err(error) if error.kind() == io::ErrorKind::OutOfMemory => (NO_MEMORY, 0),
+                result => result?,
+            };
             if status == 0x103 {
                 completion = None;
                 continue;
@@ -392,12 +398,12 @@ impl Server {
                     if buffer == self.active {
                         self.write_wide(&wide, d.process)?;
                     } else {
-                        self.write_off_screen(buffer, buffers::Deferred::Wide(wide));
+                        self.write_off_screen(buffer, buffers::Deferred::Wide(wide))?;
                     }
                 } else if buffer == self.active {
                     self.write_bytes(&data, d.process)?;
                 } else {
-                    self.write_off_screen(buffer, buffers::Deferred::Bytes(data.clone()));
+                    self.write_off_screen(buffer, buffers::Deferred::Bytes(data.clone()))?;
                 }
                 consumed += size;
             }

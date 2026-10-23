@@ -4,6 +4,7 @@
 //! ConDrv wire layouts, derived from Microsoft's MIT-licensed condrv.h.
 //! Tokens are opaque integers owned by this server, never dereferenced pointers.
 use std::ffi::c_void;
+use std::io;
 
 pub const READ_IO: u32 = 0x500006;
 pub const READ_INPUT: u32 = 0x50000f;
@@ -68,6 +69,28 @@ pub mod api {
 pub const INVALID_PARAMETER: i32 = 0xc000000du32 as i32;
 pub const INVALID_HANDLE: i32 = 0xc0000008u32 as i32;
 pub const NOT_SUPPORTED: i32 = 0xc00000bbu32 as i32;
+/// NTSTATUS_FROM_HRESULT(E_OUTOFMEMORY): what OpenConsole's ApiSorter
+/// answers when an API's allocation throws, and what `Server::serve`
+/// answers for an [`out_of_memory`] error.
+pub const NO_MEMORY: i32 = 0xc007_000e_u32 as i32;
+
+/// An allocation whose size a client chose could not be made. The request
+/// fails with NO_MEMORY; the server, and the process hosting it, go on.
+pub fn out_of_memory(_: std::collections::TryReserveError) -> io::Error {
+    io::ErrorKind::OutOfMemory.into()
+}
+/// `Vec::with_capacity` for a capacity a client chose.
+pub fn try_with_capacity<T>(capacity: usize) -> io::Result<Vec<T>> {
+    let mut vec = Vec::new();
+    vec.try_reserve_exact(capacity).map_err(out_of_memory)?;
+    Ok(vec)
+}
+/// `vec![value; len]` for a `len` a client chose.
+pub fn try_vec<T: Clone>(value: T, len: usize) -> io::Result<Vec<T>> {
+    let mut vec = try_with_capacity(len)?;
+    vec.resize(len, value);
+    Ok(vec)
+}
 
 #[repr(C)]
 #[derive(Default, Clone, Copy)]
