@@ -44,10 +44,6 @@ fn the_lock_is_private_and_never_inherited() {
         .permissions()
         .mode();
     assert_eq!(mode & 0o777, 0o600);
-
-    lock.set_inherited_across_exec(true).unwrap();
-    let flags = unsafe { libc::fcntl(lock.raw_fd(), libc::F_GETFD) };
-    assert_eq!(flags & libc::FD_CLOEXEC, 0);
 }
 
 #[cfg(unix)]
@@ -104,7 +100,9 @@ fn a_replacement_takes_over_the_descriptor_that_holds_the_lock() {
     let lock = LifetimeLock::try_acquire(directory.path())
         .unwrap()
         .unwrap();
-    // As across the `execv`: the same descriptor, now owned by the new image.
+    // As across the `execv`: the same descriptor, inheritable so that it
+    // survived, now owned by the new image.
+    crate::upgrade::set_close_on_exec(std::os::fd::AsFd::as_fd(&lock.file), false).unwrap();
     let descriptor = lock.file.into_raw_fd();
 
     let adopted = LifetimeLock::adopt(descriptor, directory.path()).unwrap();

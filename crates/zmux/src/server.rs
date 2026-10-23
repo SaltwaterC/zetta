@@ -35,10 +35,10 @@ use anyhow::{Context as _, Result};
 
 #[cfg(all(unix, not(target_os = "macos")))]
 use std::os::fd::BorrowedFd;
-#[cfg(all(unix, not(target_os = "macos")))]
-use std::os::fd::RawFd;
 #[cfg(unix)]
-use std::os::fd::{AsRawFd as _, FromRawFd as _};
+use std::os::fd::{AsFd as _, AsRawFd as _, RawFd};
+#[cfg(unix)]
+use std::sync::RwLock;
 
 use crate::{
     auth::SessionAuthentication,
@@ -804,6 +804,11 @@ pub struct Daemon {
     /// `None` only for a replacement that could neither take over nor take
     /// the lock, which carries on rather than drop its sessions.
     lifetime_lock: Mutex<Option<LifetimeLock>>,
+    /// Held for reading while a pane's process starts, and for writing while
+    /// an upgrade has the descriptors it carries inheritable; see
+    /// `exec_carrying`.
+    #[cfg(unix)]
+    spawn_gate: RwLock<()>,
     /// Set once a Windows replacement has taken over the socket and endpoint.
     handed_over: AtomicBool,
 }
@@ -992,6 +997,8 @@ impl Daemon {
             connections: Arc::new(AtomicUsize::new(0)),
             snapshot_budget: SnapshotBudget::default(),
             lifetime_lock: Mutex::new(None),
+            #[cfg(unix)]
+            spawn_gate: RwLock::new(()),
             handed_over: AtomicBool::new(false),
         }
     }
@@ -1017,6 +1024,10 @@ pub fn run(
     #[cfg(unix)] resume_listener: Option<i32>,
     #[cfg(windows)] resume_ready: Option<PathBuf>,
 ) -> Result<()> {
+    // First, before anything is claimed: whatever is not claimed must not reach
+    // the shells this daemon starts.
+    #[cfg(unix)]
+    crate::upgrade::mark_inherited_close_on_exec();
     retention.validate()?;
     #[cfg(not(feature = "session-persistence"))]
     if persistence_recipients.is_some() {
@@ -1297,13 +1308,11 @@ fn bind_listener(
     #[cfg(unix)]
     if let Some(descriptor) = resume_listener {
         anyhow::ensure!(resumed, "--resume-listener requires --resume-from");
-        anyhow::ensure!(
-            crate::upgrade::descriptor_is_open(descriptor),
-            "the inherited listener descriptor {descriptor} was not inherited"
-        );
         // SAFETY: the descriptor was inherited from the previous image and is
         // claimed by this listener exactly once.
-        return Ok(unsafe { Listener::from_raw_fd(descriptor) });
+        let descriptor = unsafe { crate::upgrade::claim_inherited_fd(descriptor) }
+            .context("claiming the inherited listener")?;
+        return Ok(Listener::from(descriptor));
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     anyhow::ensure!(!resumed, "an upgrade did not carry its listening socket");

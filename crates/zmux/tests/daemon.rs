@@ -236,6 +236,35 @@ impl TestDaemon {
     fn log(&self) -> String {
         std::fs::read_to_string(self.config.join("zmux.log")).unwrap_or_default()
     }
+
+    /// A client of the image that replaced this daemon after `upgrade`.
+    fn wait_for_replacement(&self) -> Client {
+        // Waiting for a connection to succeed is not enough: until the
+        // replacement has rebound, a connection can still land in the old
+        // listener's backlog and be reset when the exec tears it down.
+        // Readiness is a request that answers, not a socket that accepts.
+        //
+        // Generous, because an upgrade is several steps — a pre-flight
+        // subprocess, the exec, re-adopting the sessions, rebinding — and these
+        // tests are about whether they happen at all, not how quickly. A machine
+        // busy compiling was enough to make a ten-second bound report a failure
+        // that was not one.
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            if let Ok(Some(connected)) = Client::connect_ready_at(&self.sessions_dir())
+                && connected.list().is_ok()
+            {
+                return connected;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the replacement never came back (process: {}); daemon log:\n{}",
+                self.process.id(),
+                self.log()
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
 }
 
 impl Drop for TestDaemon {
@@ -2249,30 +2278,7 @@ fn an_upgrade_keeps_the_sessions_and_their_processes() {
 
     client.upgrade().unwrap();
 
-    // Waiting for a connection to succeed is not enough: until the replacement
-    // has rebound, a connection can still land in the old listener's backlog
-    // and be reset when the exec tears it down. Readiness is a request that
-    // answers, not a socket that accepts.
-    //
-    // Generous, because an upgrade is several steps — a pre-flight subprocess,
-    // the exec, re-adopting the sessions, rebinding — and this test is about
-    // whether they happen at all, not how quickly. A machine busy compiling
-    // was enough to make a ten-second bound report a failure that was not one.
-    let deadline = Instant::now() + Duration::from_secs(60);
-    let client = loop {
-        if let Ok(Some(connected)) = Client::connect_ready_at(&daemon.sessions_dir())
-            && connected.list().is_ok()
-        {
-            break connected;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "the replacement never came back (process: {}); daemon log:\n{}",
-            daemon.process.id(),
-            daemon.log()
-        );
-        std::thread::sleep(Duration::from_millis(20));
-    };
+    let client = daemon.wait_for_replacement();
 
     assert!(
         process_is_alive(pane.child_pid),
@@ -2321,6 +2327,96 @@ fn an_upgrade_keeps_the_sessions_and_their_processes() {
     }
 }
 
+/// A process's descriptors above standard error, as `/proc` lists them: the
+/// number, what it refers to, and whether it is close-on-exec.
+#[cfg(target_os = "linux")]
+fn open_descriptors(pid: u32) -> Vec<(i32, String, bool)> {
+    let mut descriptors = std::fs::read_dir(format!("/proc/{pid}/fd"))
+        .unwrap()
+        .filter_map(|entry| entry.unwrap().file_name().to_str()?.parse::<i32>().ok())
+        .filter(|descriptor| *descriptor > 2)
+        .filter_map(|descriptor| {
+            // Gone in between: the listing's own descriptor, when `pid` is
+            // this process, or one the process closed.
+            let target = std::fs::read_link(format!("/proc/{pid}/fd/{descriptor}")).ok()?;
+            let info = std::fs::read_to_string(format!("/proc/{pid}/fdinfo/{descriptor}")).ok()?;
+            let flags = info
+                .lines()
+                .find_map(|line| line.strip_prefix("flags:"))
+                .map(|flags| i32::from_str_radix(flags.trim(), 8).unwrap())
+                .unwrap();
+            Some((
+                descriptor,
+                target.display().to_string(),
+                flags & libc::O_CLOEXEC != 0,
+            ))
+        })
+        .collect::<Vec<_>>();
+    descriptors.sort();
+    descriptors
+}
+
+/// The upgrade has to clear close-on-exec on every pane's terminal and the
+/// listener for them to survive the `execv`. The replacement has to set it
+/// again on each one it claims, or every shell it starts holds them all.
+#[cfg(target_os = "linux")]
+#[test]
+fn an_upgrade_leaves_no_descriptor_inheritable() {
+    let _upgrade_test_guard = upgrade_test_guard();
+    let daemon = TestDaemon::start();
+    let client = daemon.client();
+    let pane = client
+        .spawn(spawn_request(None, "printf ready; sleep 60"))
+        .unwrap();
+    read_until(&std::fs::File::from(pane.descriptor), "ready");
+
+    client.upgrade().unwrap();
+    let _client = daemon.wait_for_replacement();
+
+    let inheritable = open_descriptors(daemon.process_id())
+        .into_iter()
+        .filter(|(_, _, close_on_exec)| !close_on_exec)
+        .collect::<Vec<_>>();
+    assert!(
+        inheritable.is_empty(),
+        "the replacement holds inheritable descriptors: {inheritable:?}"
+    );
+}
+
+/// What makes an inheritable descriptor matter: a shell holding another
+/// session's terminal can read it and type into it without its secret, and one
+/// holding the listener can take connections meant for the daemon.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_shell_started_after_an_upgrade_inherits_nothing_from_the_daemon() {
+    let _upgrade_test_guard = upgrade_test_guard();
+    let daemon = TestDaemon::start();
+    let client = daemon.client();
+    let other = client
+        .spawn(spawn_request(None, "printf ready; sleep 60"))
+        .unwrap();
+    read_until(&std::fs::File::from(other.descriptor), "ready");
+
+    client.upgrade().unwrap();
+    let client = daemon.wait_for_replacement();
+    let pane = client.spawn(spawn_request(None, "exec sleep 60")).unwrap();
+    // Once it is `sleep`, the shell has made no descriptors of its own, and
+    // whatever it holds came from the daemon.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while std::fs::read_to_string(format!("/proc/{}/comm", pane.child_pid))
+        .is_ok_and(|name| name.trim() != "sleep")
+    {
+        assert!(Instant::now() < deadline, "the shell never became sleep");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    let inherited = open_descriptors(pane.child_pid);
+    assert!(
+        inherited.is_empty(),
+        "a shell started after the upgrade holds {inherited:?}"
+    );
+}
+
 #[cfg(feature = "session-persistence")]
 #[test]
 fn an_upgrade_keeps_live_disk_records_unrestorable() {
@@ -2346,20 +2442,7 @@ fn an_upgrade_keeps_live_disk_records_unrestorable() {
     assert!(client.list_with_restorable().unwrap().1.is_empty());
 
     client.upgrade().unwrap();
-    let deadline = Instant::now() + Duration::from_secs(60);
-    let client = loop {
-        if let Ok(Some(connected)) = Client::connect_ready_at(&daemon.sessions_dir())
-            && connected.list().is_ok()
-        {
-            break connected;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "the replacement never came back; daemon log:\n{}",
-            daemon.log()
-        );
-        std::thread::sleep(Duration::from_millis(20));
-    };
+    let client = daemon.wait_for_replacement();
 
     let (sessions, records) = client.list_with_restorable().unwrap();
     assert!(

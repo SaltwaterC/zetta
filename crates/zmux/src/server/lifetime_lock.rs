@@ -18,7 +18,7 @@
 //!
 //! - **Unix** replaces the image in place. The lock's descriptor is kept open
 //!   across the `execv` and named in the handover, so the replacement holds the
-//!   same lock from its first instruction (see `prepare_and_exec`).
+//!   same lock from its first instruction (see `exec_carrying`).
 //! - **Windows** starts a separate replacement. The old daemon duplicates its
 //!   lock handle into it before it stops, so the file stays held while both
 //!   run and after the old one exits.
@@ -181,17 +181,15 @@ impl LifetimeLock {
     /// lock file, and locking it has to succeed — which, for the descriptor
     /// that already holds the lock, it does.
     pub(super) fn adopt(descriptor: CarriedLock, directory: &Path) -> Result<Self> {
-        use std::os::{fd::FromRawFd as _, unix::fs::MetadataExt as _};
+        use std::os::unix::fs::MetadataExt as _;
 
-        anyhow::ensure!(
-            crate::upgrade::descriptor_is_open(descriptor),
-            "the lock descriptor {descriptor} was not inherited"
-        );
         // SAFETY: the previous image kept this descriptor open for this image to
         // own, and it is claimed exactly once.
-        let file = unsafe { File::from_raw_fd(descriptor) };
+        let file = File::from(
+            unsafe { crate::upgrade::claim_inherited_fd(descriptor) }
+                .context("claiming the multiplexer lock")?,
+        );
         let lock = Self { file };
-        lock.set_inherited_across_exec(false)?;
         let carried = lock.file.metadata()?;
         let expected = std::fs::symlink_metadata(Self::path(directory))?;
         anyhow::ensure!(
@@ -209,31 +207,12 @@ impl LifetimeLock {
         self.file.as_raw_fd()
     }
 
-    /// Clears or restores close-on-exec. Cleared only immediately before the
-    /// upgrade's `execv`, and restored if it fails, because any process
+    /// The descriptor, for the upgrade's `execv` to carry. Its close-on-exec
+    /// flag is cleared only immediately before that, because any process
     /// started while it is clear would share the lock for as long as it lives.
-    pub(super) fn set_inherited_across_exec(&self, inherited: bool) -> Result<()> {
-        let descriptor = self.raw_fd();
-        // SAFETY: the descriptor is owned by `self.file` and open for the call.
-        let flags = unsafe { libc::fcntl(descriptor, libc::F_GETFD) };
-        anyhow::ensure!(
-            flags >= 0,
-            "reading the lock's descriptor flags: {}",
-            std::io::Error::last_os_error()
-        );
-        let flags = if inherited {
-            flags & !libc::FD_CLOEXEC
-        } else {
-            flags | libc::FD_CLOEXEC
-        };
-        // SAFETY: as above, with a flag set derived from the one just read.
-        let result = unsafe { libc::fcntl(descriptor, libc::F_SETFD, flags) };
-        anyhow::ensure!(
-            result >= 0,
-            "setting the lock's close-on-exec flag: {}",
-            std::io::Error::last_os_error()
-        );
-        Ok(())
+    pub(super) fn as_fd(&self) -> std::os::fd::BorrowedFd<'_> {
+        use std::os::fd::AsFd as _;
+        self.file.as_fd()
     }
 }
 

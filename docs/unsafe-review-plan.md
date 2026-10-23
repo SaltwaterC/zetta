@@ -32,7 +32,8 @@ what follows is about handle, descriptor and process ownership, not parsing.
 ## How to read this plan
 
 **Status** is `confirmed` if the finding was checked by reading the code after
-the review agent reported it, and `reported` if it was not. Nothing below has
+the review agent reported it, `reported` if it was not, and `fixed` once the
+fix has landed; a fixed item's section says what was done. Nothing below has
 been reproduced at runtime. Windows and macOS code was reviewed statically from
 Linux.
 
@@ -55,7 +56,7 @@ macOS cross-checks need the Apple SDK, so macOS code needs a run on a macOS host
 
 | ID | Severity | Status | Area | Summary | Effort |
 | --- | --- | --- | --- | --- | --- |
-| P1.1 | High | confirmed | zmux | Upgrade leaves every pane master and the listener inheritable | M |
+| P1.1 | High | fixed | zmux | Upgrade leaves every pane master and the listener inheritable | M |
 | P1.2 | Medium, UB | confirmed | zetta_profiles | 1-byte heap overflow in the MSYS2 registry reader | S |
 | P1.3 | Medium | confirmed | alacritty_terminal | Reclaimed pane signals a pid it already reaped | S |
 | P1.4 | Medium | confirmed | alacritty_terminal | ConPTY `pause()` spins on a closed handle after a reader panic | S |
@@ -139,6 +140,25 @@ Check that both tests fail with the fix removed.
 
 **Validate:** the zmux suite; `make check-features`; `make check-macos` if the
 SDK is available, otherwise a macOS host, because the listener is rebound there.
+
+**Done.** All four steps, with both options for step 3:
+
+- `crate::upgrade::claim_inherited_fd` claims the pane masters, the listener,
+  the handover and the lifetime lock.
+- `InheritedAcrossExec` clears close-on-exec on everything carried in
+  `exec_carrying`, immediately before `execv`, and sets it again when dropped,
+  which only a failed `execv` reaches. The handover memfd is `MFD_CLOEXEC`.
+- `Daemon::spawn_gate` is held for writing across that step and for reading
+  around every pane start (`start_terminal`). Other subprocesses the daemon
+  runs are not gated, but now only the clear-to-`execv` step is exposed.
+- `mark_inherited_close_on_exec` runs first in `server::run`. On FreeBSD
+  without fdescfs, `/dev/fd` lists only 0–2, so the sweep misses there.
+
+`an_upgrade_leaves_no_descriptor_inheritable` and
+`a_shell_started_after_an_upgrade_inherits_nothing_from_the_daemon` (Linux)
+both fail with the claim and the backstop removed: the new shell held the lock,
+the listener and the other pane's `/dev/ptmx`. Either half alone passes them.
+Not yet checked on macOS.
 
 ### P1.2 Heap overflow in the MSYS2 registry reader
 

@@ -306,15 +306,55 @@ fn the_handover_never_reaches_a_named_path() {
     }
 }
 
+fn close_on_exec(descriptor: &impl std::os::fd::AsRawFd) -> bool {
+    let flags = unsafe { libc::fcntl(descriptor.as_raw_fd(), libc::F_GETFD) };
+    assert!(flags >= 0);
+    flags & libc::FD_CLOEXEC != 0
+}
+
 #[test]
-fn descriptors_marked_to_survive_are_no_longer_close_on_exec() {
+fn descriptors_carried_across_exec_are_inheritable_only_until_dropped() {
+    use std::os::fd::AsFd as _;
+
     let file = tempfile::tempfile().unwrap();
+    let inherited = InheritedAcrossExec::clear([file.as_fd()]).unwrap();
     // A descriptor left close-on-exec is silently gone after the exec, and the
     // first sign of it would be a session whose terminal stops responding.
-    keep_across_exec(&file).unwrap();
+    assert!(!close_on_exec(&file));
 
-    let flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFD) };
-    assert_eq!(flags & libc::FD_CLOEXEC, 0);
+    // An exec that failed leaves the daemon running, and every shell it starts
+    // after that must not inherit what was meant for the replacement.
+    drop(inherited);
+    assert!(close_on_exec(&file));
+}
+
+#[test]
+fn the_handover_is_not_inheritable_before_the_exec() {
+    // It holds every session's verifier, and anything started from the daemon
+    // between writing it and the exec would otherwise inherit it.
+    let file = write_handover(&handover()).unwrap();
+
+    assert!(close_on_exec(&file));
+}
+
+#[test]
+fn an_inherited_descriptor_is_claimed_close_on_exec() {
+    use std::os::fd::AsFd as _;
+
+    let file = tempfile::tempfile().unwrap();
+    set_close_on_exec(file.as_fd(), false).unwrap();
+    // As across the `execv`: the same descriptor, now owned by the new image.
+    let descriptor = file.into_raw_fd();
+
+    let claimed = unsafe { claim_inherited_fd(descriptor) }.unwrap();
+    // Left inheritable, it would reach every shell the replacement starts.
+    assert!(close_on_exec(&claimed));
+}
+
+#[test]
+fn a_descriptor_that_was_not_inherited_is_not_claimed() {
+    // Claiming one would abort the process when it was closed.
+    assert!(unsafe { claim_inherited_fd(-1) }.is_err());
 }
 
 #[test]

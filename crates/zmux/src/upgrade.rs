@@ -24,7 +24,7 @@
 
 use std::{
     ffi::CString,
-    os::fd::{AsRawFd, RawFd},
+    os::fd::{AsRawFd as _, BorrowedFd, FromRawFd as _, OwnedFd, RawFd},
     time::Duration,
 };
 
@@ -208,20 +208,136 @@ pub struct SharedClientHandover {
     pub input_sent: bool,
 }
 
-/// Clears close-on-exec so a descriptor survives into the next image.
+/// Descriptors made inheritable for the next image, made close-on-exec again
+/// when this is dropped — which, for an `execv` that succeeds, it never is.
 ///
-/// Everything the daemon intends to keep has to be cleared explicitly: a
-/// descriptor that stays close-on-exec is silently gone after the `execv`, and
-/// the first sign of it would be a session whose terminal no longer responds.
-pub fn keep_across_exec(descriptor: &impl AsRawFd) -> Result<()> {
+/// Cleared as late as possible and all at once, because every process the
+/// daemon starts while one is clear inherits it. A carried pane master in a
+/// shell lets that shell read and type into a session it has no secret for,
+/// and a carried listener lets it accept connections meant for the daemon.
+#[must_use = "the descriptors are inheritable only while this is held"]
+pub struct InheritedAcrossExec<'a> {
+    descriptors: Vec<BorrowedFd<'a>>,
+}
+
+impl<'a> InheritedAcrossExec<'a> {
+    /// Clears close-on-exec on every one of `descriptors`, or on none of them.
+    ///
+    /// Everything the daemon intends to keep has to be cleared explicitly: a
+    /// descriptor that stays close-on-exec is silently gone after the `execv`,
+    /// and the first sign of it would be a session whose terminal no longer
+    /// responds.
+    pub fn clear(descriptors: impl IntoIterator<Item = BorrowedFd<'a>>) -> Result<Self> {
+        let mut inherited = Self {
+            descriptors: Vec::new(),
+        };
+        for descriptor in descriptors {
+            set_close_on_exec(descriptor, false)?;
+            inherited.descriptors.push(descriptor);
+        }
+        Ok(inherited)
+    }
+}
+
+impl Drop for InheritedAcrossExec<'_> {
+    fn drop(&mut self) {
+        for descriptor in &self.descriptors {
+            if let Err(error) = set_close_on_exec(*descriptor, true) {
+                log::error!(
+                    "descriptor {} is left inheritable after a failed upgrade: {error:#}",
+                    descriptor.as_raw_fd()
+                );
+            }
+        }
+    }
+}
+
+/// Sets or clears a descriptor's close-on-exec flag.
+pub fn set_close_on_exec(descriptor: BorrowedFd<'_>, close: bool) -> Result<()> {
     let raw = descriptor.as_raw_fd();
-    // SAFETY: the descriptor is owned by the caller and open for the duration.
+    // SAFETY: the borrow keeps the descriptor open for the call.
     let flags = unsafe { libc::fcntl(raw, libc::F_GETFD) };
     anyhow::ensure!(flags >= 0, "reading descriptor flags: {}", last_error());
-    // SAFETY: as above; the flag set is the one just read.
-    let result = unsafe { libc::fcntl(raw, libc::F_SETFD, flags & !libc::FD_CLOEXEC) };
-    anyhow::ensure!(result >= 0, "clearing close-on-exec: {}", last_error());
+    let flags = if close {
+        flags | libc::FD_CLOEXEC
+    } else {
+        flags & !libc::FD_CLOEXEC
+    };
+    // SAFETY: as above, with a flag set derived from the one just read.
+    let result = unsafe { libc::fcntl(raw, libc::F_SETFD, flags) };
+    anyhow::ensure!(result >= 0, "setting close-on-exec: {}", last_error());
     Ok(())
+}
+
+/// Takes ownership of a descriptor the previous image left open across the
+/// `execv`, and makes it close-on-exec again before anything can inherit it.
+///
+/// The previous image had to clear the flag for the descriptor to survive, and
+/// nothing on the spawn path closes strays: a descriptor claimed without
+/// setting it back reaches every shell this image starts.
+///
+/// # Safety
+///
+/// Nothing else in this process may own `descriptor`, and it must be claimed
+/// at most once.
+pub unsafe fn claim_inherited_fd(descriptor: RawFd) -> Result<OwnedFd> {
+    // Checked first, because taking ownership of a descriptor that is not open
+    // aborts the process on close.
+    anyhow::ensure!(
+        descriptor_is_open(descriptor),
+        "descriptor {descriptor} was not inherited"
+    );
+    // SAFETY: open, as just checked; the caller guarantees nothing else owns
+    // it, and the borrow ends before ownership is taken.
+    set_close_on_exec(unsafe { BorrowedFd::borrow_raw(descriptor) }, true)?;
+    // SAFETY: as above.
+    Ok(unsafe { OwnedFd::from_raw_fd(descriptor) })
+}
+
+/// Marks every descriptor above standard error close-on-exec.
+///
+/// Run when the daemon starts, before it claims anything. Marking does not
+/// close, so descriptors a previous image carried can still be claimed; what it
+/// stops is anything left unclaimed — or inherited from whatever started the
+/// daemon — reaching the shells it starts. Best effort: a descriptor this
+/// misses is one the daemon was already going to leak.
+pub fn mark_inherited_close_on_exec() {
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: `close_range` with `CLOSE_RANGE_CLOEXEC` only sets a flag on
+        // whichever descriptors in the range are open. Called through
+        // `syscall` because not every libc this builds against wraps it.
+        let marked = unsafe {
+            libc::syscall(
+                libc::SYS_close_range,
+                3 as libc::c_uint,
+                libc::c_uint::MAX,
+                libc::CLOSE_RANGE_CLOEXEC,
+            )
+        };
+        if marked == 0 {
+            return;
+        }
+        // Kernels before 5.11 do not know the flag; sweep instead.
+    }
+    let descriptors = match std::fs::read_dir("/dev/fd") {
+        Ok(entries) => entries
+            .filter_map(|entry| entry.ok()?.file_name().to_str()?.parse::<RawFd>().ok())
+            .filter(|descriptor| *descriptor > 2)
+            .collect::<Vec<_>>(),
+        Err(error) => {
+            log::warn!("could not list this process's descriptors: {error}");
+            return;
+        }
+    };
+    // The listing's own descriptor is among these and closed by now, which
+    // the check skips.
+    for descriptor in descriptors {
+        if descriptor_is_open(descriptor) {
+            // SAFETY: open, as just checked, and borrowed only for the call.
+            let _ = set_close_on_exec(unsafe { BorrowedFd::borrow_raw(descriptor) }, true);
+        }
+    }
 }
 
 fn last_error() -> std::io::Error {
@@ -232,14 +348,16 @@ fn last_error() -> std::io::Error {
 ///
 /// Anonymous because it carries session verifiers: a named path would put them
 /// on the filesystem, however briefly, where the security model says they never
-/// go. The descriptor is inherited by the next image and named in its argv.
+/// go. The descriptor is inherited by the next image and named in its argv, but
+/// stays close-on-exec until the `execv` itself (see [`InheritedAcrossExec`]):
+/// anything else started from this process in between would inherit every
+/// session's verifier.
 pub fn write_handover(handover: &Handover) -> Result<std::fs::File> {
     let encoded = serde_json::to_vec(handover).context("serializing the handover")?;
     let mut file = tempfile_anonymous()?;
     use std::io::{Seek as _, Write as _};
     file.write_all(&encoded).context("writing the handover")?;
     file.rewind().context("rewinding the handover")?;
-    keep_across_exec(&file)?;
     Ok(file)
 }
 
@@ -256,13 +374,11 @@ pub fn descriptor_is_open(descriptor: RawFd) -> bool {
 
 pub fn read_handover(descriptor: RawFd) -> Result<Handover> {
     use std::io::Read as _;
-    anyhow::ensure!(
-        descriptor_is_open(descriptor),
-        "the handover descriptor {descriptor} was not inherited"
-    );
     // SAFETY: the descriptor was inherited from the previous image, which
     // opened it, and this takes ownership of it exactly once.
-    let mut file = unsafe { <std::fs::File as std::os::fd::FromRawFd>::from_raw_fd(descriptor) };
+    let mut file = std::fs::File::from(
+        unsafe { claim_inherited_fd(descriptor) }.context("claiming the handover")?,
+    );
     let mut encoded = Vec::new();
     file.read_to_end(&mut encoded)
         .context("reading the handover")?;
@@ -279,7 +395,7 @@ pub fn read_handover(descriptor: RawFd) -> Result<Handover> {
 fn tempfile_anonymous() -> Result<std::fs::File> {
     let name = c"zmux-handover";
     // SAFETY: the name is a valid C string and the flags are a valid set.
-    let raw = unsafe { libc::memfd_create(name.as_ptr(), 0) };
+    let raw = unsafe { libc::memfd_create(name.as_ptr(), libc::MFD_CLOEXEC) };
     anyhow::ensure!(raw >= 0, "creating the handover: {}", last_error());
     // SAFETY: memfd_create returned a fresh descriptor this owns.
     Ok(unsafe { <std::fs::File as std::os::fd::FromRawFd>::from_raw_fd(raw) })
@@ -288,7 +404,7 @@ fn tempfile_anonymous() -> Result<std::fs::File> {
 #[cfg(not(target_os = "linux"))]
 fn tempfile_anonymous() -> Result<std::fs::File> {
     // Unlinked immediately, so it has no name for anything else to open even
-    // while it exists.
+    // while it exists. Opened close-on-exec, as `std` opens everything.
     tempfile::tempfile().context("creating the handover")
 }
 

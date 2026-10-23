@@ -355,7 +355,7 @@ fn start_shared_draft(
         escape_args: false,
     };
     #[cfg(unix)]
-    let pty = tty::new(&options, window_size(draft.size), 0)
+    let pty = start_terminal(daemon, &options, draft.size)
         .context("starting a shared terminal process")?;
     // Before the pane is attachable and before anything is retained, so the
     // exchange reaches no viewer and appears in no replay.
@@ -404,6 +404,21 @@ fn start_shared_draft(
         child_events,
         size: draft.size,
     })
+}
+
+/// Starts a pane's process, never while an upgrade has made the descriptors it
+/// carries inheritable: the shell would hold every other pane's terminal.
+#[cfg(unix)]
+fn start_terminal(
+    daemon: &Daemon,
+    options: &tty::Options,
+    size: TerminalSize,
+) -> std::io::Result<tty::Pty> {
+    let _no_upgrade = daemon
+        .spawn_gate
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    tty::new(options, window_size(size), 0)
 }
 
 #[cfg(unix)]
@@ -1160,8 +1175,8 @@ pub(super) fn spawn(
         escape_args: false,
     };
     #[cfg(unix)]
-    let pty = tty::new(&options, window_size(request.size), 0)
-        .context("starting the terminal process")?;
+    let pty =
+        start_terminal(daemon, &options, request.size).context("starting the terminal process")?;
     #[cfg(unix)]
     let child_pid = pty.child_pid();
     #[cfg(windows)]

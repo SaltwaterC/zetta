@@ -38,7 +38,6 @@ pub(super) fn prepare_and_exec(
     connection: &mut Connection,
 ) -> std::result::Result<(), UpgradeRefused> {
     let prepared = prepare_upgrade(daemon).map_err(UpgradeRefused::Before)?;
-    let (executable, file) = prepared;
 
     // Answered before the exec, because the exec never returns to answer. The
     // pre-flight has already established that the replacement can take over, so
@@ -58,30 +57,84 @@ pub(super) fn prepare_and_exec(
 
     // Past this point the process becomes the replacement, so anything that
     // was going to fail had to have failed already.
+    Err(UpgradeRefused::AfterAnswering(exec_carrying(
+        daemon, &prepared,
+    )))
+}
+
+/// What [`prepare_upgrade`] settled on, for [`exec_carrying`] to carry out.
+#[cfg(unix)]
+pub(super) struct PreparedUpgrade {
+    executable: PathBuf,
+    /// The handover, still close-on-exec.
+    handover: std::fs::File,
+    /// Every pane the handover names, by id and by the descriptor it names.
+    /// A pane that has closed since is not carried, and neither is one that
+    /// started since, even if it was given a closed pane's descriptor number.
+    panes: HashSet<(u64, RawFd)>,
+}
+
+/// Makes everything the handover names inheritable and replaces this image,
+/// returning only if that could not be done — with every descriptor
+/// close-on-exec again.
+///
+/// No pane starts from clearing the first flag to the `execv`: it would
+/// inherit every pane's terminal, the listener and the handover.
+#[cfg(unix)]
+fn exec_carrying(daemon: &Daemon, prepared: &PreparedUpgrade) -> anyhow::Error {
+    let _no_spawns = daemon
+        .spawn_gate
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let sessions = daemon.sessions.lock().unwrap();
+    let lifetime_lock = daemon
+        .lifetime_lock
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let panes = sessions
+        .iter()
+        .flat_map(|session| session.panes.iter())
+        .filter(|pane| {
+            prepared
+                .panes
+                .contains(&(pane.id, pane.pty.file().as_raw_fd()))
+        })
+        .map(|pane| pane.pty.file());
+    // Keep the listener together with the PTY masters where the platform
+    // preserves its local peer-credential state across exec. macOS has to
+    // rebind: inheriting a Darwin local listener makes every new connection
+    // fail the credential lookup in the replacement.
     #[cfg(target_os = "macos")]
     let listener = None;
+    // SAFETY: the daemon's listener stays open for the daemon's lifetime, and
+    // this borrow ends with this function.
     #[cfg(not(target_os = "macos"))]
-    let listener = Some(daemon.listener_fd);
-    // The lifetime lock goes across too, as late as possible: anything started
-    // while its close-on-exec flag is clear would share it. If it cannot be
-    // carried, the replacement takes it itself.
-    let carried = held_lock(daemon, |lock| lock.set_inherited_across_exec(true).is_ok());
-    let error = match crate::upgrade::exec_replacement(&executable, file.as_raw_fd(), listener) {
+    let listener = Some(unsafe { BorrowedFd::borrow_raw(daemon.listener_fd) });
+    // If the lock cannot be carried, the replacement takes it itself.
+    let lock = lifetime_lock.as_ref().map(LifetimeLock::as_fd);
+    let carried = panes
+        .map(std::os::fd::AsFd::as_fd)
+        .chain(listener)
+        .chain(lock)
+        .chain(std::iter::once(prepared.handover.as_fd()));
+    let _inherited = match crate::upgrade::InheritedAcrossExec::clear(carried) {
+        Ok(inherited) => inherited,
+        Err(error) => return error.context("keeping descriptors open for the replacement"),
+    };
+    match crate::upgrade::exec_replacement(
+        &prepared.executable,
+        prepared.handover.as_raw_fd(),
+        listener.map(|listener| listener.as_raw_fd()),
+    ) {
         Ok(never) => match never {},
         Err(error) => error,
-    };
-    if carried == Some(true)
-        && let Some(Err(restore)) = held_lock(daemon, |lock| lock.set_inherited_across_exec(false))
-    {
-        log::error!("the multiplexer lock is left inheritable after a failed upgrade: {restore:#}");
     }
-    Err(UpgradeRefused::AfterAnswering(error))
 }
 
 /// Everything that can still be refused: resolving the image, checking it can
 /// take over, and writing the handover.
 #[cfg(unix)]
-pub(super) fn prepare_upgrade(daemon: &Arc<Daemon>) -> Result<(PathBuf, std::fs::File)> {
+pub(super) fn prepare_upgrade(daemon: &Arc<Daemon>) -> Result<PreparedUpgrade> {
     let executable = daemon
         .executable
         .clone()
@@ -166,26 +219,22 @@ pub(super) fn prepare_upgrade(daemon: &Arc<Daemon>) -> Result<(PathBuf, std::fs:
             .collect(),
     };
 
+    drop(sessions);
     // Only the terminals. The `SIGCHLD` pipes are deliberately left
     // close-on-exec: the replacement registers its own, and a carried one is
     // worse than useless — see `PaneHandover::descriptor`.
-    for session in sessions.iter() {
-        for pane in &session.panes {
-            crate::upgrade::keep_across_exec(pane.pty.file())?;
-        }
-    }
-    // Keep the listener together with the PTY masters where the platform
-    // preserves its local peer-credential state across exec. macOS has to
-    // rebind: inheriting a Darwin local listener makes every new connection
-    // fail the credential lookup in the replacement.
-    #[cfg(not(target_os = "macos"))]
-    {
-        let listener = unsafe { BorrowedFd::borrow_raw(daemon.listener_fd) };
-        crate::upgrade::keep_across_exec(&listener)?;
-    }
-    let file = crate::upgrade::write_handover(&handover)?;
-    drop(sessions);
-    Ok((executable, file))
+    let panes = handover
+        .sessions
+        .iter()
+        .flat_map(|session| session.panes.iter())
+        .map(|pane| (pane.id, pane.descriptor))
+        .collect();
+    let handover = crate::upgrade::write_handover(&handover)?;
+    Ok(PreparedUpgrade {
+        executable,
+        handover,
+        panes,
+    })
 }
 
 #[cfg(windows)]
@@ -421,8 +470,6 @@ pub(super) fn adopt_handover(
     daemon: &Arc<Daemon>,
     handover: crate::upgrade::Handover,
 ) -> Result<usize> {
-    use std::os::fd::FromRawFd as _;
-
     let retention = *daemon.retention.lock().unwrap();
     let mut sessions = daemon.sessions.lock().unwrap();
     let now = std::time::Instant::now();
@@ -442,14 +489,12 @@ pub(super) fn adopt_handover(
         summary.id = session.id;
         let mut panes = Vec::new();
         for pane in session.panes {
-            anyhow::ensure!(
-                crate::upgrade::descriptor_is_open(pane.descriptor),
-                "pane {}'s terminal did not survive the upgrade",
-                pane.id
-            );
-            // SAFETY: checked open just above; it was kept across the exec by
-            // the previous image, and is claimed here exactly once.
-            let descriptor = unsafe { std::os::fd::OwnedFd::from_raw_fd(pane.descriptor) };
+            // SAFETY: it was kept across the exec by the previous image, and is
+            // claimed here exactly once.
+            let descriptor = unsafe { crate::upgrade::claim_inherited_fd(pane.descriptor) }
+                .with_context(|| {
+                    format!("pane {}'s terminal did not survive the upgrade", pane.id)
+                })?;
             // Reclaimed regardless of who was holding it. An `execv` does not
             // change parentage, so every one of these shells is still this
             // process's own child and is reaped here with `waitpid` — which is
