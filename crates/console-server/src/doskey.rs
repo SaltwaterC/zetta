@@ -5,6 +5,7 @@
 //! history.cpp). Strings follow each message in its input, results go after
 //! it in the output, and ANSI callers use the input code page throughout.
 use super::*;
+use crate::budget::Charged;
 use crate::editing;
 
 /// HRESULT_FROM_WIN32 as the driver carries it (NTSTATUS_FROM_WIN32).
@@ -22,10 +23,12 @@ impl Server {
         handle: &Handle,
         d: Descriptor,
         size: usize,
-    ) -> io::Result<Vec<u8>> {
+    ) -> io::Result<Charged<u8>> {
         let offset = 8 + size;
         // Up to 4 GiB; GetInputBuffer allocates it as a client declares it.
-        let mut bytes = try_vec(0, (d.input_size as usize).saturating_sub(offset))?;
+        let mut bytes = self
+            .budget
+            .vec(0, (d.input_size as usize).saturating_sub(offset))?;
         if !bytes.is_empty() {
             native::transfer(handle, READ_INPUT, d.id, offset as u32, &mut bytes)?;
         }
@@ -56,7 +59,7 @@ impl Server {
         handle: &Handle,
         d: Descriptor,
         size: usize,
-        mut bytes: Vec<u8>,
+        bytes: &mut [u8],
     ) -> io::Result<(i32, usize)> {
         if bytes.is_empty() {
             return Ok((0, 0));
@@ -64,7 +67,7 @@ impl Server {
         if bytes.len() > (d.output_size as usize).saturating_sub(size) {
             return Ok((win32(ERROR_BUFFER_OVERFLOW), 0));
         }
-        native::transfer(handle, WRITE_OUTPUT, d.id, size as u32, &mut bytes)?;
+        native::transfer(handle, WRITE_OUTPUT, d.id, size as u32, bytes)?;
         Ok((0, bytes.len()))
     }
 
@@ -125,7 +128,7 @@ impl Server {
             return Ok((win32(ERROR_GEN_FAILURE), 0));
         };
         target.push(0);
-        let bytes = self.encode(&target, unicode);
+        let mut bytes = self.encode(&target, unicode);
         let capacity = (d.output_size as usize).saturating_sub(size);
         if bytes.len() > capacity {
             // GetConsoleAliasAImpl reports the buffer's size in wide
@@ -139,7 +142,7 @@ impl Server {
             return Ok((BUFFER_TOO_SMALL, 0));
         }
         set_u16(&mut self.reply, 2, bytes.len() as u16);
-        self.reply_output(handle, d, size, bytes)
+        self.reply_output(handle, d, size, &mut bytes)
     }
 
     /// GetConsoleAliasesLength: bytes for "source=target\0" per alias.
@@ -167,8 +170,8 @@ impl Server {
         let input = self.api_input(handle, d, size)?;
         let exe = self.text(&input, unicode);
         let list = editing::lock(&self.editing).aliases.list(&exe);
-        let bytes = self.encode(&list, unicode);
-        let result = self.reply_output(handle, d, size, bytes)?;
+        let mut bytes = self.encode(&list, unicode);
+        let result = self.reply_output(handle, d, size, &mut bytes)?;
         set_u32(&mut self.reply, 4, result.1 as u32);
         Ok(result)
     }
@@ -187,8 +190,8 @@ impl Server {
     ) -> io::Result<(i32, usize)> {
         let unicode = self.reply[4] != 0;
         let exes = editing::lock(&self.editing).aliases.exes();
-        let bytes = self.encode(&exes, unicode);
-        let result = self.reply_output(handle, d, size, bytes)?;
+        let mut bytes = self.encode(&exes, unicode);
+        let result = self.reply_output(handle, d, size, &mut bytes)?;
         set_u32(&mut self.reply, 0, result.1 as u32);
         Ok(result)
     }
@@ -256,8 +259,8 @@ impl Server {
         let unicode = self.reply[4] != 0;
         let input = self.api_input(handle, d, size)?;
         let exe = self.text(&input, unicode);
-        let bytes = self.encode(&self.history_text(&exe), unicode);
-        let result = self.reply_output(handle, d, size, bytes)?;
+        let mut bytes = self.encode(&self.history_text(&exe), unicode);
+        let result = self.reply_output(handle, d, size, &mut bytes)?;
         set_u32(&mut self.reply, 0, result.1 as u32);
         Ok(result)
     }

@@ -2,6 +2,7 @@ use super::*;
 fn state() -> State {
     State {
         records: VecDeque::new(),
+        charge: crate::budget::Budget::session().empty(),
         pending: Default::default(),
         ignore_next_keyup: false,
         first_event: None,
@@ -35,6 +36,9 @@ fn event() -> Handle {
     .unwrap()
 }
 fn input() -> Input {
+    input_within(crate::budget::Budget::session())
+}
+fn input_within(budget: Arc<crate::budget::Budget>) -> Input {
     struct Output;
     impl ConsoleOutput for Output {
         fn write(&mut self, _: &[u8], _: OutputMode) -> io::Result<()> {
@@ -47,6 +51,7 @@ fn input() -> Input {
         Arc::new(Mutex::new(Box::new(Output))),
         None,
         Default::default(),
+        budget,
     )
 }
 fn read(records: bool, process: usize) -> Request {
@@ -209,6 +214,7 @@ fn input_backpressure_never_takes_the_blocked_output_lock() {
         output.clone(),
         Some(Arc::new(move |value| ready.send(value).unwrap())),
         Default::default(),
+        crate::budget::Budget::session(),
     );
     lock(&input.0.state)
         .records
@@ -260,4 +266,21 @@ fn a_record_read_with_room_for_none_completes_at_once_while_input_is_queued() {
     // With nothing queued it waits, as any record read does.
     lock(&input.0.state).records.clear();
     assert_eq!(input.fulfill(&mut request).unwrap(), None);
+}
+
+#[test]
+fn records_written_past_the_session_budget_are_not_queued() {
+    let budget = Arc::new(crate::budget::Budget::new(1000, None));
+    let input = input_within(Arc::clone(&budget));
+    let mut key = [0; 20];
+    key[0] = 1;
+    // Ten records, with room for the queue to double.
+    assert_eq!(input.inject(&[key; 10], true), 10);
+    assert_eq!(lock(&input.0.state).records.len(), 10);
+    assert!(budget.used() <= 1000);
+    // Thirty would need 1200 bytes of queue.
+    assert_eq!(input.inject(&[key; 20], true), 0);
+    assert_eq!(lock(&input.0.state).records.len(), 10);
+    drop(input);
+    assert_eq!(budget.used(), 0);
 }

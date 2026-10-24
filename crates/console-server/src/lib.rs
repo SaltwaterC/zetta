@@ -3,6 +3,8 @@
 #[cfg(windows)]
 mod alias;
 #[cfg(windows)]
+mod budget;
+#[cfg(windows)]
 mod cells;
 #[cfg(windows)]
 pub mod codepage;
@@ -32,6 +34,8 @@ pub mod native;
 pub mod output;
 #[cfg(windows)]
 pub mod protocol;
+#[cfg(windows)]
+mod screen_buffer;
 #[cfg(windows)]
 pub mod server;
 #[cfg(windows)]

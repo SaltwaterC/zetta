@@ -228,7 +228,7 @@ impl Server {
         {
             return Ok((INVALID_PARAMETER, 0));
         }
-        let mut bytes = try_vec(0, exe_bytes + initial_bytes)?;
+        let mut bytes = self.budget.vec(0, exe_bytes + initial_bytes)?;
         if !bytes.is_empty() {
             native::transfer(handle, READ_INPUT, d.id, input_offset as u32, &mut bytes)?;
         }

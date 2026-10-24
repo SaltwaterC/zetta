@@ -382,21 +382,30 @@ checks only the viewport and `SHORT_MAX`, `TextBuffer` reserves address space
 and commits a row when it is first touched, and `ApiSorter` turns a failed
 allocation into `E_OUTOFMEMORY`. The plan's caps were therefore not added.
 
-- `ScreenBuffer` holds the rows from the top down to the lowest one written.
-  The rows below read as the buffer's blank and cost nothing, so a
-  32766x32766 buffer costs one row for each row written. A resize keeps
-  unwritten rows unwritten unless they would read as a different blank. A
-  scroll at the bottom moves only the written rows, unless the row it brings
-  in has other attributes.
+- `ScreenBuffer` (`screen_buffer.rs`) keeps a row whose cells are all the
+  same (never written, filled with one cell, or scrolled in blank) as that one
+  cell. A 32766x32766 buffer costs a table of 32766 rows, under a megabyte,
+  plus a row of cells for each row holding more than one cell. A
+  newline at the bottom rotates the rows and refunds the one that leaves, so it
+  costs the same however full the buffer is. An off-screen
+  `ScrollConsoleScreenBuffer` moves the rows in place, a row at a time, rather
+  than copying the region.
+- Everything a client can size is charged to a per-session budget of 256 MiB,
+  and every session's charge is also charged to a per-process budget of 1 GiB
+  (`budget.rs`). That covers screen buffer rows, the input queue, text kept
+  for replay, and each request's working memory. A request that would go over
+  either budget fails with `NO_MEMORY`, so the memory clients can make Zetta or
+  zmux hold together stays bounded, however the allocations are split.
 - Every allocation a client sizes is fallible (`try_vec`,
   `try_with_capacity`). `Server::serve` answers an `OutOfMemory` error with
   `NO_MEMORY` (`0xC007000E`) instead of ending the server. This covers
   `api_input`, `read_console`, committing rows, resizing, scrolling and the
   `Read`/`WriteConsoleOutput*` paths. Conhost's exact code varies by path;
   this answers `E_OUTOFMEMORY` on all of them.
-- `Input::inject` has no cap, as `InputBuffer` has none. When the records do
-  not fit it writes none and reports 0, as `InputBuffer::Write` does when its
-  storage throws. A Unicode `WriteConsoleInput` no longer copies its records.
+- `Input::inject` has no record cap, as `InputBuffer` has none, only the
+  budget. When the records do not fit, it writes none and reports 0, as
+  `InputBuffer::Write` does when its storage throws. A Unicode
+  `WriteConsoleInput` no longer copies its records.
 - There is no cap on buffers per client either: an unwritten buffer is about
   a hundred bytes, as a conhost handle is.
 
@@ -416,24 +425,33 @@ Found beyond the report:
   without bound, to be replayed. Past 16 MiB (`REPLAY_LIMIT`) the main buffer
   is redrawn from its cells instead, which `WriteScreenInfo` always does.
 
+Where this differs from conhost: conhost lets one console commit as much as
+the machine will give it, about 4.3 GB for a 32766x32766 buffer written in
+full. Here a session stops at 256 MiB, and a write past that answers
+`NO_MEMORY`. That is far beyond what applications use: the largest buffer
+the console properties dialog allows, 9999 rows, is under 5 MB at 120
+columns.
+
 Not covered:
 
-- A buffer that is written to its last row still commits all of its cells,
-  about 4.3 GB at the limit, as conhost does. On the Windows host a 16 GiB
-  allocation succeeded, so "Windows does not overcommit" does not hold there:
-  a huge request can succeed and is then heavy, though not fatal.
-- Allocations that are each fine can still exhaust memory together, and a
-  later infallible allocation then aborts the process. Conhost has the same
-  exposure, but in its own process.
-- Scrolling a fully written buffer moves all of its cells on every newline.
+- The budget bounds what clients make the server hold, not what the machine
+  has free. If Zetta cannot get 1 GiB more than it otherwise uses, an
+  infallible allocation elsewhere can still fail first.
+- Allocations of at most a row, such as the row a scroll moves or the fill
+  it writes, are not charged.
 
 `a_buffer_sized_at_the_limit_holds_only_the_rows_written_to_it`,
 `activating_a_buffer_larger_than_the_terminal_reads_and_draws_only_the_terminal`,
 `the_active_buffer_past_the_terminal_reads_blank_and_draws_nothing` and
 `main_buffer_text_past_the_replay_limit_is_redrawn_from_its_cells` each fail
-with their fix removed, on the Windows host. No test pins the order in
-`read_output`: the host committed the 16 GiB in 27 s, so a test passed with
-the old order too.
+with their fix removed, on the Windows host. So do the tests in
+`tests/screen_buffer.rs` and `tests/budget.rs`, and
+`records_written_past_the_session_budget_are_not_queued`, each against
+removing one of the following: the refund on a newline, keeping a uniform row
+as one cell, keeping unwidened rows on resize, charging a row, scrolling
+bottom-up, the process budget, and charging the input queue. No test pins
+the order in `read_output`: the host committed the 16 GiB in 27 s, so a test
+passed with the old order too.
 
 The whole `console-server` suite, unit and integration, passes natively on
 the Windows host, and so does `make check-windows`. The ft_host suite gives

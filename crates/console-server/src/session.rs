@@ -118,6 +118,7 @@ impl Session {
             shared,
             readiness,
             Arc::clone(&server.editing),
+            Arc::clone(&server.budget),
         );
         server.input = Some(input.clone());
         server.modes_changed();

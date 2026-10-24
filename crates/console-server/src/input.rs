@@ -1,6 +1,7 @@
 //! Pending console reads and the keyboard/paste input queue. Requests are
 //! owned until completed or cancelled; servicing input never holds the
 //! parser/grid lock. Text reads, raw and cooked, are in read.rs.
+use crate::budget::{Budget, Charge};
 use crate::codepage;
 use crate::editing::SharedEditing;
 use crate::keys;
@@ -39,6 +40,8 @@ pub(crate) struct ReadParams {
 }
 struct State {
     records: VecDeque<[u8; 20]>,
+    /// What WriteConsoleInput can grow `records` to.
+    charge: Charge,
     pending: std::collections::HashMap<usize, read::Pending>,
     /// CONSOLE_IGNORE_NEXT_KEYUP: the Enter release after a cooked read.
     ignore_next_keyup: bool,
@@ -88,10 +91,12 @@ impl Input {
         output: SharedOutput,
         readiness: Option<Arc<dyn Fn(bool) + Send + Sync>>,
         editing: SharedEditing,
+        budget: Arc<Budget>,
     ) -> Self {
         Self(Arc::new(Shared {
             state: Mutex::new(State {
                 records: VecDeque::new(),
+                charge: budget.empty(),
                 pending: Default::default(),
                 ignore_next_keyup: false,
                 first_event: None,
@@ -211,31 +216,38 @@ impl Input {
     /// WriteConsoleInput: records an application queues itself, after or
     /// before what is waiting. In VT input mode a key press becomes its VT
     /// text, as InputBuffer::_WriteBuffer encodes it; Ctrl+C is not special.
-    /// The queue has no cap, as InputBuffer's has none: records that do not
-    /// fit in memory are not written, and the count is 0, as
-    /// InputBuffer::Write answers when its storage throws.
+    /// The queue has no cap of its own, as InputBuffer's has none, only the
+    /// session's budget: records that do not fit are not written, and the
+    /// count is 0, as InputBuffer::Write answers when its storage throws.
     pub fn inject(&self, records: &[[u8; 20]], append: bool) -> usize {
         let vt = self.input_mode() & VIRTUAL_TERMINAL_INPUT != 0;
-        let mut queued = Vec::new();
+        let text = |record| keys::vt_text(record).filter(|_| vt);
+        let units = records
+            .iter()
+            .map(|record| text(record).map_or(1, |text| text.encode_utf16().count()))
+            .sum();
+        let mut state = lock(&self.0.state);
+        let Ok(mut queued) = state.charge.budget().with_capacity(units) else {
+            return 0;
+        };
         for record in records {
-            let text = keys::vt_text(record).filter(|_| vt);
-            let units = text.as_ref().map_or(1, |text| text.encode_utf16().count());
-            if queued.try_reserve(units).is_err() {
-                return 0;
-            }
-            match text {
+            match text(record) {
                 Some(text) => queued.extend(text.encode_utf16().map(record_char)),
                 None => queued.push(*record),
             }
         }
-        let mut state = lock(&self.0.state);
-        if state.closed || state.records.try_reserve(queued.len()).is_err() {
+        // Growing the queue at most doubles its capacity past what it holds.
+        let bytes = (state.records.len() + units) * 2 * size_of::<[u8; 20]>();
+        if state.closed
+            || state.charge.at_least(bytes).is_err()
+            || state.records.try_reserve(units).is_err()
+        {
             return 0;
         }
         if append {
-            state.records.extend(queued);
+            state.records.extend(queued.drain(..));
         } else {
-            for record in queued.into_iter().rev() {
+            for record in queued.drain(..).rev() {
                 state.records.push_front(record);
             }
         }

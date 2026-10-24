@@ -1,6 +1,7 @@
 //! ConDrv request dispatch and object ownership. Output/state hooks belong to
 //! the embedder; pending input requests are completed by the input worker.
 //! Unsupported console APIs fail explicitly.
+use crate::budget::{Budget, Charge};
 use crate::codepage::{self, Decoder};
 use crate::editing::{self, SharedEditing};
 use crate::input::ReadParams;
@@ -76,12 +77,14 @@ pub struct Server {
     next_token: usize,
     /// Created screen buffers, and which buffer is on screen.
     buffers: BTreeMap<u32, buffers::ScreenBuffer>,
+    /// What this session's clients can make it hold; see `budget`.
+    pub(crate) budget: std::sync::Arc<Budget>,
     next_buffer: u32,
     active: u32,
-    /// Text for the main buffer while another buffer is on screen, and its
-    /// length in bytes.
+    /// Text for the main buffer while another buffer is on screen, and the
+    /// charge for it.
     deferred_main: Vec<buffers::Deferred>,
-    deferred_main_size: usize,
+    deferred_main_charge: Charge,
     /// GetConsoleWindow's window, its owner, and where it reports ShowWindow.
     window: Option<crate::window::PseudoWindow>,
     pub(crate) window_owner: Option<usize>,
@@ -127,6 +130,7 @@ impl Server {
         ctrl_probe: bool,
         state: ConsoleState,
     ) -> Self {
+        let budget = Budget::session();
         Self {
             sink: Box::new(sink),
             ascii_output: codepage::ascii_compatible(state.output_cp),
@@ -142,7 +146,8 @@ impl Server {
             next_buffer: 1,
             active: buffers::MAIN,
             deferred_main: Vec::new(),
-            deferred_main_size: 0,
+            deferred_main_charge: budget.empty(),
+            budget,
             window: None,
             window_owner: None,
             window_output: None,

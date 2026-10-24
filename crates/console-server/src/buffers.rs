@@ -19,9 +19,11 @@
 //! own fields, so writing to it is the plain output path; an inactive
 //! buffer keeps them in its `Saved`.
 use super::*;
+use crate::budget::Charged;
 use crate::cells::{self, CharInfo, Fill, Rect};
 use crate::legacy;
 use crate::output::Cell;
+pub use crate::screen_buffer::{Saved, ScreenBuffer};
 use crate::state::mode;
 
 pub const MAIN: u32 = 0;
@@ -34,207 +36,6 @@ const E_UNEXPECTED: i32 = 0xc007_ffff_u32 as i32;
 /// Past it, the main buffer is redrawn from its cells when it comes back,
 /// as WriteScreenInfo always redraws it.
 const REPLAY_LIMIT: usize = 16 << 20;
-
-/// Per-buffer settings that belong to whichever buffer is active.
-#[derive(Clone, Copy, Debug)]
-pub struct Saved {
-    pub output_mode: u32,
-    pub cursor_size: u32,
-    pub attributes: u16,
-    pub cursor_visible: bool,
-    pub cursor: (i16, i16),
-}
-
-pub struct ScreenBuffer {
-    size: (i16, i16),
-    /// The window's size; its origin is the buffer's.
-    window: (i16, i16),
-    /// The rows from the top down to the lowest one written, row-major.
-    /// A client can size a buffer at 32766x32766 cells, so the rows below
-    /// hold `blank` and take no memory until written, as TextBuffer commits
-    /// a row only when it is first touched.
-    cells: Vec<CharInfo>,
-    blank: CharInfo,
-    saved: Saved,
-    /// Open handles; the buffer goes with the last one.
-    handles: usize,
-    /// The main buffer was changed off screen by more than text, so it is
-    /// redrawn from `cells` when it comes back.
-    dirty: bool,
-}
-impl ScreenBuffer {
-    fn width(&self) -> usize {
-        self.size.0.max(0) as usize
-    }
-    fn height(&self) -> usize {
-        self.size.1.max(0) as usize
-    }
-    /// TextBuffer::_commit: the rows above `rows` become real cells.
-    fn commit(&mut self, rows: usize) -> io::Result<()> {
-        let (width, height) = (self.width(), self.height());
-        let wanted = rows.min(height) * width;
-        if wanted > self.cells.len() {
-            // Doubling, so that a buffer written top down is not copied once
-            // per row, but never past the buffer's own size.
-            let capacity = wanted
-                .max(self.cells.capacity().saturating_mul(2))
-                .min(width * height);
-            self.cells
-                .try_reserve_exact(capacity - self.cells.len())
-                .map_err(out_of_memory)?;
-            self.cells.resize(wanted, self.blank);
-        }
-        Ok(())
-    }
-    /// ResizeTraditional: what fits stays where it was; the rest is blank.
-    fn resize(&mut self, size: (i16, i16)) -> io::Result<()> {
-        let blank = CharInfo::blank(self.saved.attributes);
-        let (width, height) = (size.0.max(0) as usize, size.1.max(0) as usize);
-        let old_width = self.width();
-        // Rows never written stay unwritten, unless they would now read as
-        // a different blank.
-        let rows = if blank == self.blank {
-            self.cells.len() / old_width.max(1)
-        } else {
-            self.height()
-        }
-        .min(height);
-        let kept = old_width.min(width);
-        let mut cells = try_with_capacity(rows * width)?;
-        for y in 0..rows {
-            let start = y * old_width;
-            match self.cells.get(start..start + kept) {
-                Some(old) => cells.extend_from_slice(old),
-                None => cells.extend(std::iter::repeat_n(self.blank, kept)),
-            }
-            cells.extend(std::iter::repeat_n(blank, width - kept));
-        }
-        self.cells = cells;
-        self.blank = blank;
-        self.size = size;
-        self.window = (self.window.0.min(size.0), self.window.1.min(size.1));
-        self.saved.cursor = (
-            self.saved.cursor.0.min(size.0 - 1).max(0),
-            self.saved.cursor.1.min(size.1 - 1).max(0),
-        );
-        self.dirty = true;
-        Ok(())
-    }
-    fn index(&self, x: i32, y: i32) -> Option<usize> {
-        let (width, height) = (i32::from(self.size.0), i32::from(self.size.1));
-        ((0..width).contains(&x) && (0..height).contains(&y)).then(|| (y * width + x) as usize)
-    }
-    fn cell(&self, x: i32, y: i32) -> Option<CharInfo> {
-        let index = self.index(x, y)?;
-        Some(self.cells.get(index).copied().unwrap_or(self.blank))
-    }
-    fn cell_mut(&mut self, x: i32, y: i32) -> io::Result<Option<&mut CharInfo>> {
-        let Some(index) = self.index(x, y) else {
-            return Ok(None);
-        };
-        self.commit(y as usize + 1)?;
-        Ok(self.cells.get_mut(index))
-    }
-    /// What of the buffer fits on a terminal of `terminal` cells, as VT.
-    /// WriteScreenInfo draws no more than the screen either.
-    fn draw(&self, out: &mut String, terminal: (i16, i16), row_width: i16, defaults: u16) {
-        let columns = self.width().min(terminal.0.max(0) as usize);
-        if columns == 0 {
-            return;
-        }
-        let blank = vec![self.blank; columns];
-        for y in 0..self.height().min(terminal.1.max(0) as usize) {
-            let start = y * self.width();
-            let row = self.cells.get(start..start + columns).unwrap_or(&blank);
-            cells::write_infos(out, (0, y as i16), row, defaults, row_width);
-        }
-    }
-    /// Moves the cursor to the next row, scrolling the buffer up one at the
-    /// bottom. A blank in the buffer's own attributes leaves the rows below
-    /// the written ones unwritten; any other means writing them all.
-    fn newline(&mut self, y: &mut i32, attributes: u16) -> io::Result<()> {
-        *y += 1;
-        let (width, height) = (self.width(), self.height());
-        if *y as usize >= height {
-            let blank = CharInfo::blank(attributes);
-            if blank != self.blank || self.cells.len() == width * height {
-                self.commit(height)?;
-                self.cells.drain(..width);
-                self.cells.extend(std::iter::repeat_n(blank, width));
-            } else {
-                self.cells.drain(..width.min(self.cells.len()));
-            }
-            *y = height as i32 - 1;
-        }
-        Ok(())
-    }
-    /// The rows a text write to an inactive buffer would produce: printable
-    /// text at the cursor with wrapping and CR/LF/BS/TAB. VT sequences are
-    /// not interpreted off screen; they are skipped.
-    fn write_text(&mut self, text: &str) -> io::Result<()> {
-        let (width, height) = (i32::from(self.size.0), i32::from(self.size.1));
-        if width <= 0 || height <= 0 {
-            return Ok(());
-        }
-        let auto_return = self.saved.output_mode & mode::DISABLE_NEWLINE_AUTO_RETURN == 0;
-        let wrap = self.saved.output_mode & mode::WRAP_AT_EOL_OUTPUT != 0;
-        // A VT buffer defers the wrap to the next character, as a terminal
-        // does; the legacy writer moves to the next line at once.
-        let delayed = self.saved.output_mode & mode::VIRTUAL_TERMINAL_PROCESSING != 0;
-        let attributes = self.saved.attributes;
-        let (mut x, mut y) = (
-            i32::from(self.saved.cursor.0),
-            i32::from(self.saved.cursor.1),
-        );
-        let mut chars = text.chars().peekable();
-        while let Some(ch) = chars.next() {
-            match ch {
-                '\x1b' => {
-                    // Skip one CSI or two-character escape.
-                    if chars.peek() == Some(&'[') {
-                        chars.next();
-                        for next in chars.by_ref() {
-                            if ('\x40'..='\x7e').contains(&next) {
-                                break;
-                            }
-                        }
-                    } else {
-                        chars.next();
-                    }
-                }
-                '\r' => x = 0,
-                '\n' => {
-                    if auto_return {
-                        x = 0;
-                    }
-                    self.newline(&mut y, attributes)?;
-                }
-                '\x08' => x = (x - 1).max(0),
-                '\t' => x = (x + 8 - x % 8).min(width - 1),
-                c if (c as u32) < 0x20 => {}
-                c => {
-                    if x >= width {
-                        x = 0;
-                        self.newline(&mut y, attributes)?;
-                    }
-                    let ch = u16::try_from(u32::from(c)).unwrap_or(0xfffd);
-                    if let Some(cell) = self.cell_mut(x, y)? {
-                        *cell = CharInfo { ch, attributes };
-                    }
-                    x += 1;
-                    if x >= width && !wrap {
-                        x = width - 1;
-                    } else if x >= width && !delayed {
-                        x = 0;
-                        self.newline(&mut y, attributes)?;
-                    }
-                }
-            }
-        }
-        self.saved.cursor = (x.min(width - 1) as i16, y as i16);
-        Ok(())
-    }
-}
 
 /// Text written to a buffer that is not on screen.
 pub enum Deferred {
@@ -280,28 +81,20 @@ impl Server {
     /// one, blank in the current attributes.
     pub(super) fn create_screen_buffer(&mut self, access: Access) -> io::Result<usize> {
         let size = self.active_size()?;
+        let saved = Saved {
+            output_mode: mode::PROCESSED_OUTPUT
+                | mode::WRAP_AT_EOL_OUTPUT
+                | mode::VIRTUAL_TERMINAL_PROCESSING,
+            cursor_size: 25,
+            attributes: self.attributes,
+            cursor_visible: true,
+            cursor: (0, 0),
+        };
+        let blank = CharInfo::blank(self.attributes);
+        let screen = ScreenBuffer::new(&self.budget, size, size, blank, saved)?;
         let id = self.next_buffer;
         self.next_buffer += 1;
-        self.buffers.insert(
-            id,
-            ScreenBuffer {
-                size,
-                window: size,
-                cells: Vec::new(),
-                blank: CharInfo::blank(self.attributes),
-                saved: Saved {
-                    output_mode: mode::PROCESSED_OUTPUT
-                        | mode::WRAP_AT_EOL_OUTPUT
-                        | mode::VIRTUAL_TERMINAL_PROCESSING,
-                    cursor_size: 25,
-                    attributes: self.attributes,
-                    cursor_visible: true,
-                    cursor: (0, 0),
-                },
-                handles: 0,
-                dirty: false,
-            },
-        );
+        self.buffers.insert(id, screen);
         Ok(self.object(Object::Output(id), access))
     }
     pub(super) fn output_opened(&mut self, buffer: u32) {
@@ -357,29 +150,15 @@ impl Server {
             let terminal = (screen.columns, screen.rows);
             let size = self.state.buffer_size(terminal);
             let window = self.state.window_size(terminal);
-            let (cells, blank) = self.read_screen(size, terminal)?;
-            self.buffers.insert(
-                MAIN,
-                ScreenBuffer {
-                    size,
-                    window,
-                    cells,
-                    blank,
-                    saved: leaving,
-                    handles: 0,
-                    dirty: false,
-                },
-            );
+            let main = self.read_screen(size, window, terminal, leaving)?;
+            self.buffers.insert(MAIN, main);
         } else {
             // Record what the alternate screen shows, to redraw it later.
             let size = (screen.columns, screen.rows);
-            let (cells, blank) = self.read_screen(size, size)?;
+            let mut shown = self.read_screen(size, size, size, leaving)?;
             if let Some(buffer) = self.buffers.get_mut(&self.active) {
-                buffer.size = size;
-                buffer.window = size;
-                buffer.cells = cells;
-                buffer.blank = blank;
-                buffer.saved = leaving;
+                (shown.handles, shown.dirty) = (buffer.handles, buffer.dirty);
+                *buffer = shown;
             }
         }
         let previous = self.active;
@@ -417,7 +196,7 @@ impl Server {
                     out.push_str(&format!("\x1b[{};{}H", y + 1, x + 1));
                     // The cells already hold what was written as text.
                     self.deferred_main.clear();
-                    self.deferred_main_size = 0;
+                    self.deferred_main_charge.shrink(usize::MAX);
                 }
             }
         } else {
@@ -450,7 +229,7 @@ impl Server {
         }
         self.write_vt(&out)?;
         if target == MAIN {
-            self.deferred_main_size = 0;
+            self.deferred_main_charge.shrink(usize::MAX);
             for deferred in std::mem::take(&mut self.deferred_main) {
                 match deferred {
                     Deferred::Bytes(bytes) => self.write_bytes(&bytes, 0)?,
@@ -479,14 +258,15 @@ impl Server {
         screen.write_text(&text)?;
         // A dirty main buffer is redrawn from its cells, not replayed.
         if buffer == MAIN && !screen.dirty {
-            self.deferred_main_size += match &deferred {
+            let bytes = match &deferred {
                 Deferred::Bytes(bytes) => bytes.len(),
                 Deferred::Wide(wide) => wide.len() * 2,
             };
-            if self.deferred_main_size > REPLAY_LIMIT {
+            let charge = &mut self.deferred_main_charge;
+            if charge.bytes() + bytes > REPLAY_LIMIT || charge.grow(bytes).is_err() {
                 screen.dirty = true;
                 self.deferred_main.clear();
-                self.deferred_main_size = 0;
+                charge.shrink(usize::MAX);
             } else {
                 self.deferred_main.push(deferred);
             }
@@ -494,34 +274,38 @@ impl Server {
         Ok(())
     }
 
-    /// The grid's cells for a buffer of `size`, and what the rows below them
-    /// hold. Only what the terminal has is read: the grid answers a blank for
-    /// the rest, and a client can size the main buffer at 32766x32766.
+    /// The grid as a buffer of `size`. Only what the terminal has is read:
+    /// the grid answers a blank for the rest, and a client can size the main
+    /// buffer at 32766x32766.
     fn read_screen(
         &mut self,
         size: (i16, i16),
+        window: (i16, i16),
         terminal: (i16, i16),
-    ) -> io::Result<(Vec<CharInfo>, CharInfo)> {
+        saved: Saved,
+    ) -> io::Result<ScreenBuffer> {
         self.flush_output()?;
         let palette = self.state.palette;
-        let width = size.0.max(0) as usize;
         let (rows, columns) = (size.1.min(terminal.1).max(0), size.0.min(terminal.0).max(0));
         let Some(read) = self.sink.read_cells(0..rows, 0..columns) else {
-            return Ok((Vec::new(), CharInfo::blank(self.attributes)));
+            let blank = CharInfo::blank(self.attributes);
+            return ScreenBuffer::new(&self.budget, size, window, blank, saved);
         };
         let blank = cells::char_info(&Cell::BLANK, &palette);
-        let mut cells = try_with_capacity(rows as usize * width)?;
-        for row in read.chunks(columns.max(1) as usize).take(rows as usize) {
-            cells.extend(row.iter().map(|cell| cells::char_info(cell, &palette)));
-            cells.extend(std::iter::repeat_n(blank, width - row.len()));
+        let mut screen = ScreenBuffer::new(&self.budget, size, window, blank, saved)?;
+        let mut row = Vec::with_capacity(columns as usize);
+        for (y, cells) in read.chunks(columns.max(1) as usize).enumerate() {
+            row.clear();
+            row.extend(cells.iter().map(|cell| cells::char_info(cell, &palette)));
+            screen.write_row(0, y as i32, &row)?;
         }
-        Ok((cells, blank))
+        Ok(screen)
     }
 
     /// Cells of `rect` (clamped by the caller), row by row.
-    fn read_rect(&mut self, buffer: u32, rect: Rect) -> io::Result<Option<Vec<CharInfo>>> {
+    fn read_rect(&mut self, buffer: u32, rect: Rect) -> io::Result<Option<Charged<CharInfo>>> {
         if !rect.is_valid() {
-            return Ok(Some(Vec::new()));
+            return self.budget.with_capacity(0).map(Some);
         }
         if self.is_active(buffer) {
             return self.read_terminal(rect);
@@ -529,7 +313,9 @@ impl Server {
         let Some(screen) = self.buffers.get(&buffer) else {
             return Ok(None);
         };
-        let mut out = try_with_capacity((rect.width() * rect.height()) as usize)?;
+        let mut out = self
+            .budget
+            .with_capacity((rect.width() * rect.height()) as usize)?;
         for y in rect.top..=rect.bottom {
             for x in rect.left..=rect.right {
                 out.push(
@@ -545,7 +331,7 @@ impl Server {
     /// read from the grid, which answers a blank for the rest, so a main
     /// buffer a client made larger than the terminal costs what is asked of
     /// it rather than sixteen bytes a cell more.
-    fn read_terminal(&mut self, rect: Rect) -> io::Result<Option<Vec<CharInfo>>> {
+    fn read_terminal(&mut self, rect: Rect) -> io::Result<Option<Charged<CharInfo>>> {
         let palette = self.state.palette;
         let (columns, rows) = self.sink.size();
         let on_screen = rect.clamp(&Rect::from_size(i32::from(columns), i32::from(rows)));
@@ -556,11 +342,10 @@ impl Server {
             return Ok(None);
         };
         let mut read = read.iter().map(|cell| cells::char_info(cell, &palette));
-        if on_screen == rect {
-            return Ok(Some(read.collect()));
-        }
         let blank = cells::char_info(&Cell::BLANK, &palette);
-        let mut out = try_with_capacity((rect.width() * rect.height()) as usize)?;
+        let mut out = self
+            .budget
+            .with_capacity((rect.width() * rect.height()) as usize)?;
         for y in rect.top..=rect.bottom {
             for x in rect.left..=rect.right {
                 let inside = (on_screen.left..=on_screen.right).contains(&x)
@@ -608,13 +393,7 @@ impl Server {
         if let Some(screen) = self.buffers.get_mut(&buffer) {
             screen.dirty = true;
             for (row, cells) in cells_in.chunks(width).enumerate() {
-                for (column, cell) in cells.iter().enumerate() {
-                    if let Some(target) =
-                        screen.cell_mut(rect.left + column as i32, rect.top + row as i32)?
-                    {
-                        *target = *cell;
-                    }
-                }
+                screen.write_row(rect.left, rect.top + row as i32, cells)?;
             }
         }
         Ok(())
@@ -804,7 +583,8 @@ impl Server {
         if self.is_active(buffer) {
             self.flush_output()?;
         }
-        let mut cells = Vec::new();
+        let remaining = (height - start.1) as usize * width as usize - start.0 as usize;
+        let mut cells = self.budget.with_capacity(wanted.min(remaining))?;
         let mut y = start.1;
         while y < height && cells.len() < wanted {
             let begin = if y == start.1 { start.0 } else { 0 };
@@ -817,16 +597,15 @@ impl Server {
             let Some(row) = self.read_rect(buffer, rect)? else {
                 return Ok((ERROR_INVALID_FUNCTION, 0));
             };
-            let more = row.len().min(wanted - cells.len());
-            cells.try_reserve(more).map_err(out_of_memory)?;
-            cells.extend(row.into_iter().take(more));
+            let more = wanted - cells.len();
+            cells.extend(row.iter().copied().take(more));
             y += 1;
         }
         let mut units: Vec<u16> = match kind {
             3 => cells.iter().map(|cell| cell.attributes).collect(),
             _ => characters(&cells),
         };
-        let bytes = if kind == 1 {
+        let mut bytes = if kind == 1 {
             let mut bytes = codepage::from_utf16(self.state.output_cp, &units);
             bytes.truncate(wanted);
             bytes
@@ -840,7 +619,7 @@ impl Server {
             bytes.len() / 2
         };
         set_u32(&mut self.reply, 8, count as u32);
-        self.reply_output(handle, d, size, bytes)
+        self.reply_output(handle, d, size, &mut bytes)
     }
 
     /// The request rectangle of Read/WriteConsoleOutput clipped to the
@@ -885,7 +664,7 @@ impl Server {
         if !request.is_valid() || input.len() / 4 < area {
             return Ok((INVALID_PARAMETER, 0));
         }
-        let mut all = try_with_capacity(area)?;
+        let mut all = self.budget.with_capacity(area)?;
         all.extend(
             input.as_chunks::<4>().0[..area]
                 .iter()
@@ -896,7 +675,9 @@ impl Server {
         }
         if clipped.is_valid() {
             let stride = request.width() as usize;
-            let mut cells = try_with_capacity((clipped.width() * clipped.height()) as usize)?;
+            let mut cells = self
+                .budget
+                .with_capacity((clipped.width() * clipped.height()) as usize)?;
             for y in clipped.top..=clipped.bottom {
                 let row = (y - request.top) as usize * stride;
                 let from = row + (clipped.left - request.left) as usize;
@@ -931,7 +712,7 @@ impl Server {
         if (d.output_size as usize).saturating_sub(size) < area * 4 {
             return Ok((INVALID_PARAMETER, 0));
         }
-        let mut all = try_vec(CharInfo::default(), area)?;
+        let mut all = self.budget.vec(CharInfo::default(), area)?;
         if clipped.is_valid() {
             if self.is_active(buffer) {
                 self.flush_output()?;
@@ -950,9 +731,9 @@ impl Server {
             self.cells_to_ansi(&mut all);
         }
         self.set_region(clipped);
-        let mut bytes = try_with_capacity(area * 4)?;
+        let mut bytes = self.budget.with_capacity(area * 4)?;
         bytes.extend(all.iter().flat_map(|cell| cell.to_bytes()));
-        self.reply_output(handle, d, size, bytes)
+        self.reply_output(handle, d, size, &mut bytes)
     }
 
     /// _ConvertCellsToWInplace: the caller's lead/trail flags are ignored and
@@ -1108,30 +889,35 @@ impl Server {
                 "{SAVE_CURSOR}{sgr}\x1b[H\x1b[{lines}{operation}{RESTORE_CURSOR}"
             ));
         }
-        let (fill_rect, copy_target) = if active {
-            self.flush_output()?;
-            // Only the terminal's cells are drawn, so only they are moved.
-            let (columns, rows) = self.sink.size();
-            let screen = Rect::from_size(i32::from(columns), i32::from(rows));
-            (fill_rect.clamp(&screen), copy_target.clamp(&screen))
-        } else {
-            (fill_rect, copy_target)
-        };
+        if !active {
+            if let Some(screen) = self.buffers.get_mut(&buffer) {
+                screen.scroll(fill_rect, copy_source, copy_target, fill)?;
+            }
+            return Ok(());
+        }
+        self.flush_output()?;
+        // Only the terminal's cells are drawn, so only they are moved.
+        let (columns, rows) = self.sink.size();
+        let screen = Rect::from_size(i32::from(columns), i32::from(rows));
+        let (fill_rect, copy_target) = (fill_rect.clamp(&screen), copy_target.clamp(&screen));
         let copy_source = copy_target.offset(-distance.0, -distance.1);
         let backup = if copy_source.is_valid() {
-            self.read_rect(buffer, copy_source)?.unwrap_or_default()
+            self.read_rect(buffer, copy_source)?
         } else {
-            Vec::new()
+            None
         };
         let mut out = String::new();
         if fill_rect.is_valid() {
-            let cells = try_vec(fill, (fill_rect.width() * fill_rect.height()) as usize)?;
+            let cells = self
+                .budget
+                .vec(fill, (fill_rect.width() * fill_rect.height()) as usize)?;
             self.write_rect(buffer, fill_rect, &cells, &mut out)?;
         }
-        if copy_target.is_valid()
+        if let Some(backup) = &backup
+            && copy_target.is_valid()
             && backup.len() == (copy_source.width() * copy_source.height()) as usize
         {
-            self.write_rect(buffer, copy_target, &backup, &mut out)?;
+            self.write_rect(buffer, copy_target, backup, &mut out)?;
         }
         self.submit(out)
     }
@@ -1157,7 +943,7 @@ impl Server {
             records
         } else {
             widened = self.widen_input_records(records)?;
-            &widened
+            &widened[..]
         };
         let Some(input_queue) = &self.input else {
             return Ok((NOT_SUPPORTED, 0));
@@ -1171,7 +957,7 @@ impl Server {
     /// and a DBCS lead byte is joined with the key after it. A lead byte that
     /// ends the call waits for the next call's first record, and a pair whose
     /// trail is not a key is dropped.
-    fn widen_input_records(&mut self, records: &[[u8; 20]]) -> io::Result<Vec<[u8; 20]>> {
+    fn widen_input_records(&mut self, records: &[[u8; 20]]) -> io::Result<Charged<[u8; 20]>> {
         let code_page = self.state.input_cp;
         let is_key = |record: &[u8; 20]| record[..2] == [1, 0];
         // One record per UTF-16 unit, each a copy of the lead's.
@@ -1182,7 +968,9 @@ impl Server {
                 out.push(record);
             }
         };
-        let mut out = try_with_capacity(records.len())?;
+        // A record gives one unit at most, and a lead byte left by the last
+        // call gives one more with its trail.
+        let mut out = self.budget.with_capacity(records.len() + 1)?;
         let mut records = records.iter();
         if let Some(lead) = self.input_lead.take()
             && let Some(trail) = records.as_slice().first().filter(|trail| is_key(trail))
