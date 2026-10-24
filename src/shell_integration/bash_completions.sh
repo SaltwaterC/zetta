@@ -1197,3 +1197,17 @@ _zhttp_complete() {
     fi
 }
 complete -F _zhttp_complete zhttp
+
+# ZETTA_DIFF_INTEGRATION_BEGIN
+_zdiff_complete() {
+    local current=${COMP_WORDS[COMP_CWORD]} previous=${COMP_WORDS[COMP_CWORD-1]}
+    if [[ $previous == --columns || $previous == --width ]]; then
+        _zetta_compgen '40 60 80 100 120'
+    elif [[ $current == -* ]]; then
+        _zetta_compgen '--columns --width --no-color --help'
+    else
+        COMPREPLY=()
+    fi
+}
+complete -o default -F _zdiff_complete zdiff
+# ZETTA_DIFF_INTEGRATION_END

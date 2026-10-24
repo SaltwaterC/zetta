@@ -16,6 +16,7 @@ param(
     [string]$SourceZoshBinary,
     [string]$SourceZoshServerBinary,
     [string]$SourceZwtBinary,
+    [string]$SourceZdiffBinary,
     [string]$SourceNotifyBinary,
     [string]$SourceTftpBinary,
     [string]$SourceHttpBinary,
@@ -108,6 +109,7 @@ $installedZoshBinary = Join-Path $InstallDirectory "zosh.exe"
 $installedZoshServerBinary = Join-Path $InstallDirectory "zosh-server.exe"
 $legacyMoshServerBinary = Join-Path $InstallDirectory "mosh-server.exe"
 $installedZwtBinary = Join-Path $InstallDirectory "zwt.exe"
+$installedZdiffBinary = Join-Path $InstallDirectory "zdiff.exe"
 $installedTftpBinary = Join-Path $InstallDirectory "ztftp.exe"
 $installedHttpBinary = Join-Path $InstallDirectory "zhttp.exe"
 $installedNotifyBinary = Join-Path $InstallDirectory "zntfy.exe"
@@ -179,6 +181,9 @@ function Get-InstallFiles {
     if ($WorktreeEnabled) {
         $files += [pscustomobject]@{ Source = $SourceZwtBinary; Destination = $installedZwtBinary }
     }
+    if ($SourceZdiffBinary) {
+        $files += [pscustomobject]@{ Source = $SourceZdiffBinary; Destination = $installedZdiffBinary }
+    }
     if ($NotifyEnabled) {
         $files += [pscustomobject]@{ Source = $SourceNotifyBinary; Destination = $installedNotifyBinary }
     }
@@ -223,6 +228,26 @@ function Remove-DisabledWorktreeFiles {
                 Write-Host "Removed $path"
             } catch {
                 Write-Warning "Could not remove disabled worktree executable ${path}: $_"
+            }
+        }
+    }
+}
+
+function Remove-DisabledDiffFiles {
+    if ($SourceZdiffBinary) {
+        return
+    }
+    foreach ($path in @(
+        $installedZdiffBinary,
+        (Get-VersionedPath $installedZdiffBinary "new"),
+        (Get-VersionedPath $installedZdiffBinary "old")
+    )) {
+        if (Test-Path -LiteralPath $path) {
+            try {
+                Remove-Item -LiteralPath $path -Force
+                Write-Host "Removed $path"
+            } catch {
+                Write-Warning "Could not remove disabled diff executable ${path}: $_"
             }
         }
     }
@@ -471,6 +496,7 @@ function Install-Binary {
         $replacePty = -not (Test-PtyInstallCurrent $sourcePtyVersion)
     }
     Remove-DisabledWorktreeFiles
+    Remove-DisabledDiffFiles
     Remove-DisabledNotifyFiles
     Remove-DisabledClipboardFiles
     Remove-DisabledTftpFiles
@@ -685,6 +711,9 @@ function Uninstall-Binary {
     }
     if (-not $WorktreeEnabled) {
         $filesToRemove += [pscustomobject]@{ Source = $null; Destination = $installedZwtBinary }
+    }
+    if (-not $SourceZdiffBinary) {
+        $filesToRemove += [pscustomobject]@{ Source = $null; Destination = $installedZdiffBinary }
     }
     if (-not $SourceTftpBinary) {
         $filesToRemove += [pscustomobject]@{ Source = $null; Destination = $installedTftpBinary }

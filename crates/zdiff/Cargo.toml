@@ -1,0 +1,25 @@
+[package]
+name = "zdiff"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "GPL-3.0-or-later"
+description = "Terminal pager for Git diff output"
+
+[lib]
+doctest = false
+
+[[bin]]
+name = "zdiff"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+crossterm = "0.29"
+unicode-width = "0.2.2"
+
+[lints.clippy]
+manual_let_else = "deny"
+map_unwrap_or = "deny"
+redundant_closure = "deny"
+semicolon_if_nothing_returned = "deny"

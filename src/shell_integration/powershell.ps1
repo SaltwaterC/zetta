@@ -1,4 +1,8 @@
 # Zetta shell integration for PowerShell.
+# ZETTA_DIFF_INTEGRATION_BEGIN
+$env:GIT_PAGER = 'zdiff'
+# ZETTA_DIFF_INTEGRATION_END
+
 $terminalTrackerActive = Get-Variable -Name __ZettaCwdTrackerInstalled -Scope Global -ErrorAction SilentlyContinue
 $zettaPaneIdentityAvailable =
     (-not [string]::IsNullOrEmpty($env:ZETTA_PANE_ROUTING_ID)) -or
@@ -240,6 +244,9 @@ Register-ArgumentCompleter -Native -CommandName zmux -ScriptBlock $zettaLazyComp
 # ZETTA_ZMUX_INTEGRATION_END
 Register-ArgumentCompleter -CommandName ztftp -ScriptBlock $zettaLazyCompletions
 Register-ArgumentCompleter -CommandName zhttp -ScriptBlock $zettaLazyCompletions
+# ZETTA_DIFF_INTEGRATION_BEGIN
+Register-ArgumentCompleter -CommandName zdiff -ScriptBlock $zettaLazyCompletions
+# ZETTA_DIFF_INTEGRATION_END
 Register-ArgumentCompleter -CommandName zntfy -ScriptBlock $zettaLazyCompletions
 # ZETTA_CLIPBOARD_INTEGRATION_BEGIN
 Register-ArgumentCompleter -CommandName zcopy -ScriptBlock $zettaLazyCompletions

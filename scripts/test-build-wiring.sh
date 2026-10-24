@@ -17,7 +17,7 @@ run_make() {
     make --no-print-directory -C "$repository" OS=Unix UNAME_S="$platform" CARGO_BUILD_JOBS=2 \
         RELEASE="$release" SERIAL=1 HTTP=1 TFTP=1 TFTP_SERVER=1 TFTP_CLIENT=1 \
         NOTIFY=1 CLIPBOARD=1 SYNTAX_HIGHLIGHTING=1 ZMUX=1 \
-        SESSION_PERSISTENCE=1 WORKTREE=1 ZOSH=1 ZOSH_CLIENT=1 ZOSH_SERVER=1 \
+        SESSION_PERSISTENCE=1 WORKTREE=1 ZDIFF=1 ZOSH=1 ZOSH_CLIENT=1 ZOSH_SERVER=1 \
         "$@"
 }
 
@@ -25,7 +25,7 @@ for platform in Linux Darwin; do
     for release in 0 1; do
         artifact_dir="$test_root/$platform/$release"
         mkdir -p "$artifact_dir"
-        for binary in zetta zntfy ztftp zhttp zcopy zpaste zmux zosh zosh-server zwt; do
+        for binary in zetta zntfy ztftp zhttp zcopy zpaste zmux zosh zosh-server zwt zdiff; do
             : > "$artifact_dir/$binary"
             chmod +x "$artifact_dir/$binary"
         done
@@ -48,18 +48,21 @@ for platform in Linux Darwin; do
         # Tools disabled for installation are not required artifacts.
         run_make check-build-binaries BUILD_TARGET_DIR="$artifact_dir" HTTP=0 TFTP_SERVER=0 TFTP_CLIENT=0
 
-        for binary in zntfy zcopy zpaste zmux zosh zosh-server zwt; do
+        for binary in zntfy zcopy zpaste zmux zosh zosh-server zwt zdiff; do
             rm "$artifact_dir/$binary"
         done
         run_make check-build-binaries BUILD_TARGET_DIR="$artifact_dir" \
             HTTP=0 TFTP_SERVER=0 TFTP_CLIENT=0 NOTIFY=0 CLIPBOARD=0 \
-            ZMUX=0 WORKTREE=0 ZOSH_CLIENT=0 ZOSH_SERVER=0
+            ZMUX=0 WORKTREE=0 ZDIFF=0 ZOSH_CLIENT=0 ZOSH_SERVER=0
 
         run_make -n build > "$test_root/plan"
         for crate in zntfy ztftp zhttp zclip; do
             grep -F -- "--manifest-path crates/$crate/Cargo.toml --target-dir target" "$test_root/plan" > /dev/null ||
                 fail "$platform build omitted $crate from the shared artifact directory"
         done
+        run_make -n build-tools TOOLS=zdiff > "$test_root/tools-plan"
+        grep -F -- "--manifest-path crates/zdiff/Cargo.toml --target-dir target/tools --bin zdiff" "$test_root/tools-plan" > /dev/null ||
+            fail "$platform standalone tools build omitted zdiff"
         if [ "$release" = 1 ]; then
             [ "$(grep -c 'build --release' "$test_root/plan")" -eq 5 ] ||
                 fail "$platform did not apply release to every Cargo build"

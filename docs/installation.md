@@ -22,12 +22,13 @@ make install RELEASE=1
 GNU Make reserves options beginning with `--`, so `RELEASE=1` is the portable
 Makefile equivalent of Cargo's `--release` flag.
 
-The default build includes the standalone `zwt` Git worktree command and the
-`zetta wt` compatibility route, plus the bundled Zosh client (`zosh`) and
-`zosh-server`. Set `WORKTREE=0` on both build and install commands to omit the
-worktree command, and `ZOSH=0` to omit the bundled Zosh client and server
-executables and the `zetta mosh` compatibility route. `ZOSH_CLIENT=0` and
-`ZOSH_SERVER=0` omit either component independently.
+The default build includes the standalone `zwt` Git worktree command, the
+`zdiff` Git diff pager, and the `zetta wt` compatibility route, plus the
+bundled Zosh client (`zosh`) and `zosh-server`. Set `WORKTREE=0` on both build
+and install commands to omit the worktree command. Set `ZDIFF=0` to omit
+`zdiff`, or `ZOSH=0` to omit the bundled Zosh client and server executables and
+the `zetta mosh` compatibility route. `ZOSH_CLIENT=0` and `ZOSH_SERVER=0`
+omit either Zosh component independently.
 
 The `zmux` session multiplexer is enabled by default. Set `ZMUX=0` on both
 build and install commands, or omit the Cargo `zmux` feature, to build a
@@ -157,8 +158,9 @@ make install
 
 This installs `~/Applications/Zetta.app`, including the Zetta icon and the
 development binaries, and creates `~/.local/bin/zetta`, `~/.local/bin/zmux`,
-`~/.local/bin/zosh`, `~/.local/bin/zosh-server`, `~/.local/bin/zwt`, and
-`~/.local/bin/zntfy` as command-line launchers or binaries for the bundled tools.
+`~/.local/bin/zosh`, `~/.local/bin/zosh-server`, `~/.local/bin/zwt`,
+`~/.local/bin/zdiff`, and `~/.local/bin/zntfy` as command-line launchers or
+binaries for the bundled tools.
 It also adds `~/.local/bin` to the installing user's shell startup file so new
 shells can invoke them directly. See [user-local shell PATH setup](#user-local-shell-path-setup)
 for the shell-specific startup files. Native panes prepend the running
@@ -224,6 +226,7 @@ The build produces the following runtime files in `target\debug`:
 - `zosh.exe`, the bundled standalone Zosh client
 - `zosh-server.exe`, the bundled Rust Zosh server
 - `zwt.exe`, the standalone Git worktree executable
+- `zdiff.exe`, the Git diff pager
 - `zntfy.exe`, the standalone desktop notification executable when enabled
 - `conpty.dll`
 - `OpenConsole.exe`
@@ -311,8 +314,8 @@ make install
 ```
 
 The Linux user-local install stores the application in `~/.local/zetta.app`,
-links `~/.local/bin/zetta`, `~/.local/bin/zmux`, `~/.local/bin/zwt`, and
-`~/.local/bin/zntfy` to their
+links `~/.local/bin/zetta`, `~/.local/bin/zmux`, `~/.local/bin/zwt`,
+`~/.local/bin/zdiff`, and `~/.local/bin/zntfy` to their
 binaries, and installs the desktop entry under
 `~/.local/share/applications`. The desktop entry uses the installed binary and
 icon paths directly, so it works even when the desktop session does not have
@@ -343,8 +346,8 @@ preference when it can be configured.
 
 To build a restricted binary, pass build flags to both the build and install
 steps. `SERIAL`, `HTTP`, `TFTP`, `TFTP_SERVER`, `TFTP_CLIENT`, `NOTIFY`,
-`CLIPBOARD`, `WORKTREE`, `ZOSH`, `ZOSH_CLIENT`, and
-`ZOSH_SERVER` accept `0`, `false`, `no`, and `off`.
+`CLIPBOARD`, `WORKTREE`, `ZDIFF`, `ZOSH`, `ZOSH_CLIENT`, and `ZOSH_SERVER`
+accept `0`, `false`, `no`, and `off`.
 `TFTP=0`
 disables both TFTP components; the server and client switches can be used
 independently:
@@ -362,6 +365,10 @@ make build X11=1
 # Omit both the in-process route and the standalone zwt binary.
 make build WORKTREE=0
 make install WORKTREE=0
+
+# Omit the Git diff pager.
+make build ZDIFF=0
+make install ZDIFF=0
 
 # Omit the bundled Zosh client/server executables and the zetta mosh route.
 make build ZOSH=0

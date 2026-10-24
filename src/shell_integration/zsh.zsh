@@ -1,4 +1,8 @@
 # Zetta shell integration for Zsh.
+# ZETTA_DIFF_INTEGRATION_BEGIN
+export GIT_PAGER=zdiff
+# ZETTA_DIFF_INTEGRATION_END
+
 if (( ! $+functions[__zetta_filter_startup_history] )); then
     function __zetta_filter_startup_history() {
         if [[ "$1" == *"__zed_init_command_history_"* ]]; then
@@ -387,6 +391,9 @@ function __zetta_register_lazy_completions {
     (( $+functions[compdef] )) || return 1
     if (( ${__zetta_completions_loaded:-0} == 0 )); then
         compdef __zetta_lazy_complete zetta zosh zvi ztftp zhttp zntfy
+# ZETTA_DIFF_INTEGRATION_BEGIN
+        compdef __zetta_lazy_complete zdiff
+# ZETTA_DIFF_INTEGRATION_END
         (( _zetta_vi_missing )) && compdef __zetta_lazy_complete vi
         (( _zetta_mosh_missing )) && compdef __zetta_lazy_complete mosh
 # ZETTA_WORKTREE_INTEGRATION_BEGIN

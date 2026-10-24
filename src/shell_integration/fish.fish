@@ -1,4 +1,8 @@
 # Zetta shell integration for Fish.
+# ZETTA_DIFF_INTEGRATION_BEGIN
+set -gx GIT_PAGER zdiff
+# ZETTA_DIFF_INTEGRATION_END
+
 if not set -q __zetta_platform
     set -g __zetta_platform (uname)
 end
@@ -417,6 +421,9 @@ function __zetta_lazy_complete
 end
 if not set -q __zetta_completions_loaded
     set -g __zetta_completion_commands zetta zosh zvi ztftp zhttp zntfy
+# ZETTA_DIFF_INTEGRATION_BEGIN
+    set -a __zetta_completion_commands zdiff
+# ZETTA_DIFF_INTEGRATION_END
 # ZETTA_WORKTREE_INTEGRATION_BEGIN
     set -a __zetta_completion_commands zwt
 # ZETTA_WORKTREE_INTEGRATION_END

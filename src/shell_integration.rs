@@ -184,11 +184,15 @@ fn render_integration(template: &str, shell: ShellIntegration) -> String {
     const END: &str = "ZETTA_WORKTREE_INTEGRATION_END";
     const ZMUX_BEGIN: &str = "ZETTA_ZMUX_INTEGRATION_BEGIN";
     const ZMUX_END: &str = "ZETTA_ZMUX_INTEGRATION_END";
+    const ZDIFF_BEGIN: &str = "ZETTA_DIFF_INTEGRATION_BEGIN";
+    const ZDIFF_END: &str = "ZETTA_DIFF_INTEGRATION_END";
     let worktree_enabled = cfg!(feature = "worktree");
     let zmux_enabled = cfg!(feature = "zmux");
+    let zdiff_enabled = cfg!(feature = "zdiff");
     let mut rendered = String::with_capacity(template.len());
     let mut in_optional_section = false;
     let mut in_zmux_section = false;
+    let mut in_zdiff_section = false;
     let mut in_clipboard_section = false;
     let colors = render_overlay_color_names(shell);
 
@@ -298,6 +302,14 @@ fn render_integration(template: &str, shell: ShellIntegration) -> String {
                 "'__zetta_worktree_disabled__'"
             },
         ),
+        (
+            "ZETTA_DIFF_COMPLETION_CHECK",
+            if zdiff_enabled {
+                "($commandName -eq 'zdiff')"
+            } else {
+                "($false)"
+            },
+        ),
     ];
     for line in template.split_inclusive('\n') {
         if line.contains("ZETTA_CLIPBOARD_INTEGRATION_BEGIN") {
@@ -324,8 +336,17 @@ fn render_integration(template: &str, shell: ShellIntegration) -> String {
             in_zmux_section = false;
             continue;
         }
+        if line.contains(ZDIFF_BEGIN) {
+            in_zdiff_section = true;
+            continue;
+        }
+        if line.contains(ZDIFF_END) {
+            in_zdiff_section = false;
+            continue;
+        }
         if (!in_optional_section || worktree_enabled)
             && (!in_zmux_section || zmux_enabled)
+            && (!in_zdiff_section || zdiff_enabled)
             && (!in_clipboard_section || cfg!(feature = "clipboard"))
         {
             // Render only the selected payload, filtering and substituting each line once.
@@ -794,9 +815,14 @@ pub(crate) fn shell_integration_help() -> String {
     } else {
         ""
     };
+    let zdiff_help = if cfg!(feature = "zdiff") {
+        " The zdiff Git diff pager sets GIT_PAGER=zdiff and completes its columns, width, color, and help options."
+    } else {
+        ""
+    };
     let mosh_help = "\n\nThe generated integration also defines a mosh wrapper only when no real mosh command, alias, function, or builtin already exists; it routes through zetta mosh and completes Mosh options and SSH targets. The bundled zosh command is the full Mosh-compatible launcher and terminal client, with the same option surface available through zosh --help.";
     format!(
-        "{help}{mosh_help}{worktree_help}\n\nProfile administration also completes the fixed icon values auto, zetta, bash, zsh, and fish."
+        "{help}{mosh_help}{worktree_help}{zdiff_help}\n\nProfile administration also completes the fixed icon values auto, zetta, bash, zsh, and fish."
     )
 }
 

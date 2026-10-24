@@ -273,6 +273,9 @@ $zettaCompletions = {
         } else {
             @(& $zettaSshTargets) + '--client', '--server', '--predict', '-a', '-n', '-o', '--predict-overwrite', '--no-predict-overwrite', '-k', '--keep-alive', '--scrollback', '--no-scrollback', '-4', '-s', '--forward-agent', '--no-forward-agent', '-6', '--family', '-p', '--port', '--bind-server', '--ssh', '--ssh-pty', '--no-ssh-pty', '--init', '--no-init', '--local', '--experimental-remote-ip', '-h', '--help', '-V', '--version', '--'
         }
+    } elseif ZETTA_DIFF_COMPLETION_CHECK {
+        if ($previous -in '--columns', '--width') { '40', '60', '80', '100', '120' }
+        elseif ($wordToComplete -like '-*') { '--columns', '--width', '--no-color', '--help' }
     } elseif ($commandName -eq 'zhttp') {
         if ($words.Count -le 1) { 'server', '--help' }
         else { '--root', '--port', '--serve-dotfiles', '--allow-host', '--allow-any-host', '--help' }
@@ -658,6 +661,9 @@ Register-ArgumentCompleter -Native -CommandName zmux -ScriptBlock $zettaCompleti
 # ZETTA_ZMUX_INTEGRATION_END
 Register-ArgumentCompleter -CommandName ztftp -ScriptBlock $zettaCompletions
 Register-ArgumentCompleter -CommandName zhttp -ScriptBlock $zettaCompletions
+# ZETTA_DIFF_INTEGRATION_BEGIN
+Register-ArgumentCompleter -CommandName zdiff -ScriptBlock $zettaCompletions
+# ZETTA_DIFF_INTEGRATION_END
 Register-ArgumentCompleter -CommandName zntfy -ScriptBlock $zettaCompletions
 # ZETTA_CLIPBOARD_INTEGRATION_BEGIN
 Register-ArgumentCompleter -CommandName zcopy -ScriptBlock $zettaCompletions

@@ -24,6 +24,7 @@ if not defined SYNTAX_HIGHLIGHTING set "SYNTAX_HIGHLIGHTING=1"
 if not defined ZMUX set "ZMUX=1"
 if not defined SESSION_PERSISTENCE set "SESSION_PERSISTENCE=1"
 if not defined WORKTREE set "WORKTREE=1"
+if not defined ZDIFF set "ZDIFF=1"
 if not defined ZOSH set "ZOSH=1"
 if not defined ZOSH_CLIENT set "ZOSH_CLIENT=%ZOSH%"
 if not defined ZOSH_SERVER set "ZOSH_SERVER=%ZOSH%"
@@ -50,6 +51,7 @@ call :append_feature "%SYNTAX_HIGHLIGHTING%" syntax-highlighting
 call :append_feature "%ZMUX%" zmux
 if /i not "%ZMUX%"=="0" if /i not "%ZMUX%"=="false" if /i not "%ZMUX%"=="no" if /i not "%ZMUX%"=="off" call :append_feature "%SESSION_PERSISTENCE%" session-persistence
 call :append_feature "%WORKTREE%" worktree
+call :append_feature "%ZDIFF%" zdiff
 call :append_feature "%ZOSH_CLIENT%" zosh-client
 call :append_feature "%ZOSH_SERVER%" zosh-server
 
@@ -71,6 +73,10 @@ if /i not "%ZOSH_SERVER%"=="0" if /i not "%ZOSH_SERVER%"=="false" if /i not "%ZO
 if /i not "%WORKTREE%"=="0" if /i not "%WORKTREE%"=="false" if /i not "%WORKTREE%"=="no" if /i not "%WORKTREE%"=="off" (
     set "BINARIES=!BINARIES! --bin zwt"
     set "VERIFY_ARGS=!VERIFY_ARGS! -WorktreeBinaryPath !TARGET_DIR!\zwt.exe"
+)
+if /i not "%ZDIFF%"=="0" if /i not "%ZDIFF%"=="false" if /i not "%ZDIFF%"=="no" if /i not "%ZDIFF%"=="off" (
+    set "BINARIES=!BINARIES! --bin zdiff"
+    set "VERIFY_ARGS=!VERIFY_ARGS! -DiffBinaryPath !TARGET_DIR!\zdiff.exe"
 )
 call scripts\cargo-windows.cmd build %PROFILE_ARGS% --jobs %CARGO_BUILD_JOBS% --locked --no-default-features --features %FEATURES% !BINARIES!
 if errorlevel 1 exit /b !errorlevel!

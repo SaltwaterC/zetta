@@ -1291,3 +1291,10 @@ complete -c zhttp -n '__fish_seen_subcommand_from server' -a '(__zetta_long_opti
 complete -c zhttp -s r -r -a '(__fish_complete_directories)' -n '__fish_seen_subcommand_from server; and __zetta_short_option -r'
 complete -c zhttp -s p -r -n '__fish_seen_subcommand_from server; and __zetta_short_option -p'
 complete -c zhttp -s a -x -n '__fish_seen_subcommand_from server; and __zetta_short_option -a'
+
+# ZETTA_DIFF_INTEGRATION_BEGIN
+complete -c zdiff -l columns -r -a '40 60 80 100 120' -d 'Minimum terminal width per side before stacking'
+complete -c zdiff -l width -r -a '40 60 80 100 120' -d 'Maximum width per pane'
+complete -c zdiff -l no-color -d 'Disable syntax colors in the terminal view'
+complete -c zdiff -l help -d 'Print help'
+# ZETTA_DIFF_INTEGRATION_END
