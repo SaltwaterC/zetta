@@ -529,11 +529,9 @@ mod tests {
         // These tests supply the internal pipe themselves, without starting
         // the source thread or depending on the kernel's refill timing.
         reader.paused = true;
-        let waker = Waker::from(Arc::new(ThreadWaker(thread::current())));
-        assert!(matches!(
-            reader.writer.as_mut().unwrap().poll_fill_bytes(&mut Context::from_waker(&waker), bytes),
-            Poll::Ready(count) if count == bytes.len()
-        ));
+        // Not poll_fill_bytes: given a context, piper yields at random one
+        // fill in a hundred even when there is room.
+        assert_eq!(reader.writer.as_mut().unwrap().try_fill(bytes), bytes.len());
         reader
     }
 
@@ -649,6 +647,9 @@ mod tests {
             let mut bytes = [0; 32];
             assert_eq!(reader.try_read(&mut bytes), 0);
             reader.rearm();
+            // A read that yields wakes the poller too. Drop any such wake, so
+            // that only the burst's own can satisfy the wait below.
+            poller.wait(&mut events, Some(Duration::ZERO)).unwrap();
             events.clear();
             output.write_all(burst).unwrap();
             poller.wait(&mut events, Some(Duration::from_secs(1))).unwrap();
