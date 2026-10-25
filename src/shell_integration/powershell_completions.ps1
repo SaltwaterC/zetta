@@ -662,7 +662,7 @@ Register-ArgumentCompleter -Native -CommandName zmux -ScriptBlock $zettaCompleti
 Register-ArgumentCompleter -CommandName ztftp -ScriptBlock $zettaCompletions
 Register-ArgumentCompleter -CommandName zhttp -ScriptBlock $zettaCompletions
 # ZETTA_DIFF_INTEGRATION_BEGIN
-Register-ArgumentCompleter -CommandName zdiff -ScriptBlock $zettaCompletions
+Register-ArgumentCompleter -CommandName zpager -ScriptBlock $zettaCompletions
 # ZETTA_DIFF_INTEGRATION_END
 Register-ArgumentCompleter -CommandName zntfy -ScriptBlock $zettaCompletions
 # ZETTA_CLIPBOARD_INTEGRATION_BEGIN

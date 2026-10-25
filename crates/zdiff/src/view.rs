@@ -112,6 +112,19 @@ impl Pane {
     }
 }
 
+fn line_background(kind: LineKind, selected: bool) -> Option<Color> {
+    // Keep the original diff colors on ordinary rows; use explicit RGB shades
+    // for the cursor row so its cue remains visible across terminal palettes.
+    match (kind, selected) {
+        (LineKind::Added, true) => Some(Color::Rgb { r: 0, g: 48, b: 0 }),
+        (LineKind::Added, false) => Some(Color::DarkGreen),
+        (LineKind::Removed, true) => Some(Color::Rgb { r: 64, g: 0, b: 0 }),
+        (LineKind::Removed, false) => Some(Color::DarkRed),
+        (_, true) => Some(Color::DarkGrey),
+        (_, false) => None,
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum LayoutMode {
     SideBySide,
@@ -286,10 +299,10 @@ impl ViewState {
 
     fn draw_title(&self, output: &mut impl Write, geometry: LayoutGeometry) -> Result<()> {
         let title = self.current_file().map_or_else(
-            || format!("zdiff · {} files", self.files.len()),
+            || format!("zpager · {} files", self.files.len()),
             |(index, file)| {
                 format!(
-                    "zdiff · file {}/{} · {}",
+                    "zpager · file {}/{} · {}",
                     index + 1,
                     self.files.len(),
                     file.label
@@ -483,14 +496,7 @@ impl ViewState {
             return Ok(());
         };
         if self.color {
-            let background = match (cell.kind, selected) {
-                (LineKind::Added, true) => Some(Color::Green),
-                (LineKind::Added, false) => Some(Color::DarkGreen),
-                (LineKind::Removed, true) => Some(Color::Red),
-                (LineKind::Removed, false) => Some(Color::DarkRed),
-                (_, true) => Some(Color::DarkGrey),
-                (_, false) => None,
-            };
+            let background = line_background(cell.kind, selected);
             if let Some(background) = background {
                 queue!(
                     output,
@@ -534,14 +540,7 @@ impl ViewState {
         selected: bool,
     ) -> Result<()> {
         if self.color {
-            let background = match (cell.kind, selected) {
-                (LineKind::Added, true) => Some(Color::Green),
-                (LineKind::Added, false) => Some(Color::DarkGreen),
-                (LineKind::Removed, true) => Some(Color::Red),
-                (LineKind::Removed, false) => Some(Color::DarkRed),
-                (_, true) => Some(Color::DarkGrey),
-                (_, false) => None,
-            };
+            let background = line_background(cell.kind, selected);
             if let Some(background) = background {
                 queue!(
                     output,

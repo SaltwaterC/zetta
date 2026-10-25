@@ -1,4 +1,4 @@
-//! Parsing for `zdiff`'s pager options.
+//! Parsing for `zpager`'s pager options.
 
 use anyhow::{Context as _, Result, bail};
 use std::ffi::OsString;
@@ -55,7 +55,7 @@ pub(crate) fn parse(arguments: Vec<OsString>) -> Result<ParsedArgs> {
                 width_override = Some(parse_column_text(&value[2..], "-w")?);
             }
             Some(option) => bail!(
-                "unknown option {option:?}; zdiff reads a diff from standard input, see --help"
+                "unknown option {option:?}; zpager reads a diff from standard input, see --help"
             ),
             None => bail!("arguments must be valid UTF-8; see --help"),
         }

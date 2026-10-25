@@ -1088,12 +1088,12 @@ _zhttp() {
 compdef _zhttp zhttp
 
 # ZETTA_DIFF_INTEGRATION_BEGIN
-_zdiff() {
+_zpager() {
     _arguments \
         '--columns[Minimum terminal width per side before stacking]:columns:(40 60 80 100 120)' \
         '--width[Cap each pane width]:columns:(40 60 80 100 120)' \
         '--no-color[Disable syntax colors in the terminal view]' \
         '--help[Print this help]'
 }
-compdef _zdiff zdiff
+compdef _zpager zpager
 # ZETTA_DIFF_INTEGRATION_END

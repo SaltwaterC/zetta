@@ -305,7 +305,7 @@ fn render_integration(template: &str, shell: ShellIntegration) -> String {
         (
             "ZETTA_DIFF_COMPLETION_CHECK",
             if zdiff_enabled {
-                "($commandName -eq 'zdiff')"
+                "($commandName -eq 'zpager')"
             } else {
                 "($false)"
             },
@@ -816,7 +816,7 @@ pub(crate) fn shell_integration_help() -> String {
         ""
     };
     let zdiff_help = if cfg!(feature = "zdiff") {
-        " The zdiff Git diff pager sets GIT_PAGER=zdiff and completes its columns, width, color, and help options."
+        " The zpager Git diff pager sets GIT_PAGER=zpager and completes its columns, width, color, and help options."
     } else {
         ""
     };

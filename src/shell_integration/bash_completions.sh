@@ -1199,7 +1199,7 @@ _zhttp_complete() {
 complete -F _zhttp_complete zhttp
 
 # ZETTA_DIFF_INTEGRATION_BEGIN
-_zdiff_complete() {
+_zpager_complete() {
     local current=${COMP_WORDS[COMP_CWORD]} previous=${COMP_WORDS[COMP_CWORD-1]}
     if [[ $previous == --columns || $previous == --width ]]; then
         _zetta_compgen '40 60 80 100 120'
@@ -1209,5 +1209,5 @@ _zdiff_complete() {
         COMPREPLY=()
     fi
 }
-complete -o default -F _zdiff_complete zdiff
+complete -o default -F _zpager_complete zpager
 # ZETTA_DIFF_INTEGRATION_END

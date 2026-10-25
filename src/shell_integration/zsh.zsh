@@ -1,6 +1,6 @@
 # Zetta shell integration for Zsh.
 # ZETTA_DIFF_INTEGRATION_BEGIN
-export GIT_PAGER=zdiff
+export GIT_PAGER=zpager
 # ZETTA_DIFF_INTEGRATION_END
 
 if (( ! $+functions[__zetta_filter_startup_history] )); then
@@ -392,7 +392,7 @@ function __zetta_register_lazy_completions {
     if (( ${__zetta_completions_loaded:-0} == 0 )); then
         compdef __zetta_lazy_complete zetta zosh zvi ztftp zhttp zntfy
 # ZETTA_DIFF_INTEGRATION_BEGIN
-        compdef __zetta_lazy_complete zdiff
+        compdef __zetta_lazy_complete zpager
 # ZETTA_DIFF_INTEGRATION_END
         (( _zetta_vi_missing )) && compdef __zetta_lazy_complete vi
         (( _zetta_mosh_missing )) && compdef __zetta_lazy_complete mosh

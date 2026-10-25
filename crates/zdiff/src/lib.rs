@@ -9,7 +9,7 @@ use anyhow::{Context as _, Result, bail};
 use std::ffi::OsString;
 use std::io::{self, IsTerminal as _, Read as _, Write as _};
 
-/// Runs `zdiff` with the supplied process arguments.
+/// Runs `zpager` with the supplied process arguments.
 pub fn run<I>(arguments: I) -> Result<()>
 where
     I: IntoIterator<Item = OsString>,
@@ -23,7 +23,7 @@ where
             let stdin = io::stdin();
             if stdin.is_terminal() {
                 bail!(
-                    "expected diff text on standard input; try `git diff | zdiff` or `GIT_PAGER=zdiff git --paginate diff`"
+                    "expected diff text on standard input; try `git diff | zpager` or `GIT_PAGER=zpager git --paginate diff`"
                 );
             }
 
@@ -57,7 +57,7 @@ where
 /// Entry point shared by the standalone tool build and root package binary.
 pub fn cli_main() {
     if let Err(error) = run(std::env::args_os().skip(1)) {
-        eprintln!("zdiff: {error:#}");
+        eprintln!("zpager: {error:#}");
         std::process::exit(1);
     }
 }

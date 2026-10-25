@@ -229,7 +229,7 @@ MAC_CLI_DIR := $(DESTDIR)$(PREFIX)/bin
 MAC_CLI_PATH := $(MAC_CLI_DIR)/zetta
 MAC_ZMUX_CLI_PATH := $(MAC_CLI_DIR)/zmux
 MAC_ZWT_CLI_PATH := $(MAC_CLI_DIR)/zwt
-MAC_ZDIFF_CLI_PATH := $(MAC_CLI_DIR)/zdiff
+MAC_ZPAGER_CLI_PATH := $(MAC_CLI_DIR)/zpager
 MAC_ZNTFY_CLI_PATH := $(MAC_CLI_DIR)/zntfy
 MAC_ZTFTP_CLI_PATH := $(MAC_CLI_DIR)/ztftp
 MAC_ZHTTP_CLI_PATH := $(MAC_CLI_DIR)/zhttp
@@ -241,14 +241,14 @@ LINUX_USER_BIN_DIR := $(DESTDIR)$(HOME)/.local/bin
 LINUX_USER_DESKTOP_DIR := $(LINUX_USER_DATA_DIR)/applications
 LINUX_USER_CLI_PATH := $(LINUX_USER_BIN_DIR)/zetta
 LINUX_USER_ZWT_PATH := $(LINUX_USER_BIN_DIR)/zwt
-LINUX_USER_ZDIFF_PATH := $(LINUX_USER_BIN_DIR)/zdiff
+LINUX_USER_ZPAGER_PATH := $(LINUX_USER_BIN_DIR)/zpager
 LINUX_USER_ZNTFY_PATH := $(LINUX_USER_BIN_DIR)/zntfy
 LINUX_USER_ZTFTP_PATH := $(LINUX_USER_BIN_DIR)/ztftp
 LINUX_USER_ZHTTP_PATH := $(LINUX_USER_BIN_DIR)/zhttp
 LINUX_USER_ZOSH_PATH := $(LINUX_USER_BIN_DIR)/zosh
 
 WINDOWS_ZWT_ARGS := $(if $(call tool_enabled,$(WORKTREE)), -SourceZwtBinary "$(BUILD_TARGET_DIR)/zwt.exe",)
-WINDOWS_ZDIFF_ARGS := $(if $(call tool_enabled,$(ZDIFF)), -SourceZdiffBinary "$(BUILD_TARGET_DIR)/zdiff.exe",)
+WINDOWS_ZDIFF_ARGS := $(if $(call tool_enabled,$(ZDIFF)), -SourcePagerBinary "$(BUILD_TARGET_DIR)/zpager.exe",)
 WINDOWS_CLIP_ARGS := $(if $(call tool_enabled,$(CLIPBOARD)), -SourceCopyBinary "$(BUILD_TARGET_DIR)/zcopy.exe" -SourcePasteBinary "$(BUILD_TARGET_DIR)/zpaste.exe",)
 WINDOWS_HTTP_ARGS := $(if $(call tool_enabled,$(HTTP)), -SourceHttpBinary "$(BUILD_TARGET_DIR)/zhttp.exe",)
 WINDOWS_TFTP_ARGS := $(if $(or $(call tool_enabled,$(TFTP_SERVER)),$(call tool_enabled,$(TFTP_CLIENT))), -SourceTftpBinary "$(BUILD_TARGET_DIR)/ztftp.exe",)
@@ -614,7 +614,7 @@ UNIX_INSTALL_BINARIES := zetta \
 	$(if $(filter zosh-client,$(BUILD_FEATURES)),zosh) \
 	$(if $(filter zosh-server,$(BUILD_FEATURES)),zosh-server) \
 	$(if $(filter worktree,$(BUILD_FEATURES)),zwt) \
-	$(if $(filter zdiff,$(BUILD_FEATURES)),zdiff)
+	$(if $(filter zdiff,$(BUILD_FEATURES)),zpager)
 
 ifneq ($(OS),Windows_NT)
 build:
@@ -744,12 +744,12 @@ endif
 		$(RM) "$(MAC_BUNDLE)/Contents/MacOS/zwt"; \
 	fi
 	if [ -n "$(call tool_enabled,$(ZDIFF))" ]; then \
-		$(INSTALL) -m 755 "$(BUILD_TARGET_DIR)/zdiff" "$(MAC_BUNDLE)/Contents/MacOS/zdiff"; \
-		$(RM) "$(MAC_ZDIFF_CLI_PATH)"; \
-		sed 's|@MAC_RUNTIME_BUNDLE@|$(MAC_RUNTIME_BUNDLE)|g' resources/macos/zdiff-cli.in > "$(MAC_ZDIFF_CLI_PATH)"; \
-		chmod 755 "$(MAC_ZDIFF_CLI_PATH)"; \
+		$(INSTALL) -m 755 "$(BUILD_TARGET_DIR)/zpager" "$(MAC_BUNDLE)/Contents/MacOS/zpager"; \
+		$(RM) "$(MAC_ZPAGER_CLI_PATH)"; \
+		sed 's|@MAC_RUNTIME_BUNDLE@|$(MAC_RUNTIME_BUNDLE)|g' resources/macos/zpager-cli.in > "$(MAC_ZPAGER_CLI_PATH)"; \
+		chmod 755 "$(MAC_ZPAGER_CLI_PATH)"; \
 	else \
-		$(RM) "$(MAC_BUNDLE)/Contents/MacOS/zdiff" "$(MAC_ZDIFF_CLI_PATH)"; \
+		$(RM) "$(MAC_BUNDLE)/Contents/MacOS/zpager" "$(MAC_ZPAGER_CLI_PATH)"; \
 	fi
 	$(RM) "$(MAC_CLI_PATH)"
 	sed 's|@MAC_RUNTIME_BUNDLE@|$(MAC_RUNTIME_BUNDLE)|g' resources/macos/zetta-cli.in > "$(MAC_CLI_PATH)"
@@ -835,7 +835,7 @@ uninstall-binary:
 	$(RM) "$(MAC_CLI_PATH)"
 	$(RM) "$(MAC_ZMUX_CLI_PATH)"
 	$(RM) "$(MAC_ZWT_CLI_PATH)"
-	$(RM) "$(MAC_ZDIFF_CLI_PATH)"
+	$(RM) "$(MAC_ZPAGER_CLI_PATH)"
 	$(RM) "$(MAC_ZOSH_CLI_PATH)"
 	$(RM) "$(MAC_ZOSH_SERVER_PATH)"
 	$(RM) "$(MAC_ZNTFY_CLI_PATH)"
@@ -851,7 +851,7 @@ uninstall-binary:
 	$(RM) "$(MAC_BUNDLE)/Contents/MacOS/zmux"
 	$(RM) "$(MAC_BUNDLE)/Contents/MacOS/zosh"
 	$(RM) "$(MAC_BUNDLE)/Contents/MacOS/zwt"
-	$(RM) "$(MAC_BUNDLE)/Contents/MacOS/zdiff"
+	$(RM) "$(MAC_BUNDLE)/Contents/MacOS/zpager"
 	$(MAKE) uninstall-user-path
 
 uninstall-assets:
@@ -926,9 +926,9 @@ else
 	$(RM) $(BINDIR)/zwt
 endif
 ifneq ($(call tool_enabled,$(ZDIFF)),)
-	$(INSTALL) -Dm755 "$(BUILD_TARGET_DIR)/zdiff" $(BINDIR)/zdiff
+	$(INSTALL) -Dm755 "$(BUILD_TARGET_DIR)/zpager" $(BINDIR)/zpager
 else
-	$(RM) $(BINDIR)/zdiff
+	$(RM) $(BINDIR)/zpager
 endif
 ifneq ($(LINUX_USER_INSTALL),)
 	mkdir -p "$(LINUX_USER_BIN_DIR)"
@@ -953,10 +953,10 @@ else
 	$(RM) "$(LINUX_USER_ZWT_PATH)"
 endif
 ifneq ($(call tool_enabled,$(ZDIFF)),)
-	$(RM) "$(LINUX_USER_ZDIFF_PATH)"
-	ln -s "$(BINDIR)/zdiff" "$(LINUX_USER_ZDIFF_PATH)"
+	$(RM) "$(LINUX_USER_ZPAGER_PATH)"
+	ln -s "$(BINDIR)/zpager" "$(LINUX_USER_ZPAGER_PATH)"
 else
-	$(RM) "$(LINUX_USER_ZDIFF_PATH)"
+	$(RM) "$(LINUX_USER_ZPAGER_PATH)"
 endif
 ifneq ($(call tool_enabled,$(NOTIFY)),)
 	$(RM) "$(LINUX_USER_ZNTFY_PATH)"
@@ -1046,7 +1046,7 @@ uninstall-binary:
 	$(RM) $(BINDIR)/zosh-server
 	$(RM) $(BINDIR)/mosh-server
 	$(RM) $(BINDIR)/zwt
-	$(RM) $(BINDIR)/zdiff
+	$(RM) $(BINDIR)/zpager
 	$(RM) $(BINDIR)/zntfy
 	$(RM) $(BINDIR)/ztftp
 	$(RM) $(BINDIR)/zhttp
@@ -1056,7 +1056,7 @@ ifneq ($(LINUX_USER_INSTALL),)
 	$(RM) "$(LINUX_USER_BIN_DIR)/zmux"
 	$(RM) "$(LINUX_USER_ZOSH_PATH)"
 	$(RM) "$(LINUX_USER_ZWT_PATH)"
-	$(RM) "$(LINUX_USER_ZDIFF_PATH)"
+	$(RM) "$(LINUX_USER_ZPAGER_PATH)"
 	$(RM) "$(LINUX_USER_ZNTFY_PATH)"
 	$(RM) "$(LINUX_USER_ZTFTP_PATH)"
 	$(RM) "$(LINUX_USER_ZHTTP_PATH)"
@@ -1109,8 +1109,8 @@ endif
 # directory would have each overwrite the other's binary. `zmux` here is the
 # standalone daemon, so it does not read Zetta's configuration for identity
 # paths — the trade `crates/zmux` exists to make for a constrained host.
-KNOWN_TOOLS := zmux zosh zosh-server zcopy zpaste zwt zdiff zntfy ztftp zhttp
-TOOLS ?= zmux zosh zosh-server zcopy zpaste ztftp zhttp zdiff
+KNOWN_TOOLS := zmux zosh zosh-server zcopy zpaste zwt zpager zntfy ztftp zhttp
+TOOLS ?= zmux zosh zosh-server zcopy zpaste ztftp zhttp zpager
 ifeq ($(OS),Windows_NT)
 TOOLS_BINDIR ?=
 EXE := .exe
@@ -1137,8 +1137,8 @@ TOOL_CRATE_zpaste := crates/zclip
 TOOL_BINS_zpaste := zpaste
 TOOL_CRATE_zwt := crates/zwt
 TOOL_BINS_zwt := zwt
-TOOL_CRATE_zdiff := crates/zdiff
-TOOL_BINS_zdiff := zdiff
+TOOL_CRATE_zpager := crates/zdiff
+TOOL_BINS_zpager := zpager
 TOOL_CRATE_zhttp := crates/zhttp
 TOOL_BINS_zhttp := zhttp
 TOOL_CRATE_ztftp := crates/ztftp

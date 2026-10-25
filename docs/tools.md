@@ -2,27 +2,27 @@
 
 ## Git diff pager
 
-`zdiff` reads unified diff text from standard input and shows a full-screen
+`zpager` reads unified diff text from standard input and shows a full-screen
 side-by-side view with old and new line numbers. Git produces the diff, so Git
 options select the change set and paths. Long lines wrap at word boundaries
 within each side, with long words split only when needed to fit the terminal.
-When Zetta's shell integration is enabled, it sets `GIT_PAGER=zdiff` in the
+When Zetta's shell integration is enabled, it sets `GIT_PAGER=zpager` in the
 integrated shell, so Git commands there use the pager automatically.
 
 ```sh
-GIT_PAGER=zdiff git --paginate diff
-GIT_PAGER=zdiff git --paginate diff --cached -- src/
-GIT_PAGER="zdiff -c 80 -w 80" git --paginate diff
-ZDIFF_COLUMNS=100 GIT_PAGER=zdiff git --paginate diff
-ZDIFF_WIDTH=100 GIT_PAGER=zdiff git --paginate diff
-git diff --word-diff | zdiff
+GIT_PAGER=zpager git --paginate diff
+GIT_PAGER=zpager git --paginate diff --cached -- src/
+GIT_PAGER="zpager -c 80 -w 80" git --paginate diff
+ZDIFF_COLUMNS=100 GIT_PAGER=zpager git --paginate diff
+ZDIFF_WIDTH=100 GIT_PAGER=zpager git --paginate diff
+git diff --word-diff | zpager
 ```
 
 The `GIT_PAGER` assignment applies to that Git invocation only and does not
 change Git config. `--paginate` forces Git to use the pager for `diff`. You can
-also pipe any compatible diff output directly with `git diff | zdiff`. Use the
+also pipe any compatible diff output directly with `git diff | zpager`. Use the
 arrow keys or `j`/`k` to scroll, `n`/`p` to jump between files, and `q` to close
-the view. When standard output is redirected, `zdiff` passes its input through
+the view. When standard output is redirected, `zpager` passes its input through
 unchanged. `-c`/`--columns` or `ZDIFF_COLUMNS` sets the minimum width per side
 needed for side-by-side layout; the default is 80, requiring a 161-column
 terminal. The panes expand to use available width. `-w`/`--width` or
@@ -30,8 +30,8 @@ terminal. The panes expand to use available width. `-w`/`--width` or
 terminal. Narrower terminals stack old and new lines vertically. Command-line
 values take precedence over their matching environment variables.
 
-The normal Zetta build includes `zdiff`. Build it without the graphical
-application with `make build-tools TOOLS=zdiff`, or omit it from a Zetta build
+The normal Zetta build includes `zpager`. Build it without the graphical
+application with `make build-tools TOOLS=zpager`, or omit it from a Zetta build
 with `make build ZDIFF=0` and `make install ZDIFF=0`.
 
 ## Serial and network tools

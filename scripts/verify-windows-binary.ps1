@@ -9,7 +9,7 @@ param(
     [string]$ZoshBinaryPath,
     [string]$ZoshServerBinaryPath,
     [string]$WorktreeBinaryPath,
-    [string]$DiffBinaryPath,
+    [string]$PagerBinaryPath,
     [string]$NotifyBinaryPath,
     [string]$TftpBinaryPath,
     [string]$HttpBinaryPath,
@@ -131,11 +131,11 @@ if ($worktreeBinary) {
         throw "$worktreeBinary uses PE subsystem $actualWorktreeSubsystem; expected console subsystem $consoleSubsystem"
     }
 }
-$diffBinary = $null
-if ($DiffBinaryPath) {
-    $diffBinary = (Resolve-Path -LiteralPath $DiffBinaryPath).Path
-    if ((Get-PeSubsystem $diffBinary) -ne $consoleSubsystem) {
-        throw "$diffBinary does not use the console subsystem"
+$pagerBinary = $null
+if ($PagerBinaryPath) {
+    $pagerBinary = (Resolve-Path -LiteralPath $PagerBinaryPath).Path
+    if ((Get-PeSubsystem $pagerBinary) -ne $consoleSubsystem) {
+        throw "$pagerBinary does not use the console subsystem"
     }
 }
 if ($notifyBinary) {
@@ -257,12 +257,12 @@ if ($zoshServerBinary) {
 if ($worktreeBinary) {
     Write-Host "Verified standalone worktree executable: $worktreeBinary"
 }
-if ($diffBinary) {
-    $diffHelp = ((& $diffBinary --help | Out-String).Trim() -replace "`r", "")
-    if ($LASTEXITCODE -ne 0 -or $diffHelp -notmatch '(?m)^Usage: zdiff \[OPTIONS\]$') {
-        throw "$diffBinary --help failed its CLI smoke test"
+if ($pagerBinary) {
+    $diffHelp = ((& $pagerBinary --help | Out-String).Trim() -replace "`r", "")
+    if ($LASTEXITCODE -ne 0 -or $diffHelp -notmatch '(?m)^Usage: zpager \[OPTIONS\]$') {
+        throw "$pagerBinary --help failed its CLI smoke test"
     }
-    Write-Host "Verified standalone diff executable: $diffBinary"
+    Write-Host "Verified standalone diff pager executable: $pagerBinary"
 }
 if ($notifyBinary) {
     Write-Host "Verified standalone notification executable: $notifyBinary"

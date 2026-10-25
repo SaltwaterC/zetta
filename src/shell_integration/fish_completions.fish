@@ -1293,8 +1293,8 @@ complete -c zhttp -s p -r -n '__fish_seen_subcommand_from server; and __zetta_sh
 complete -c zhttp -s a -x -n '__fish_seen_subcommand_from server; and __zetta_short_option -a'
 
 # ZETTA_DIFF_INTEGRATION_BEGIN
-complete -c zdiff -l columns -r -a '40 60 80 100 120' -d 'Minimum terminal width per side before stacking'
-complete -c zdiff -l width -r -a '40 60 80 100 120' -d 'Maximum width per pane'
-complete -c zdiff -l no-color -d 'Disable syntax colors in the terminal view'
-complete -c zdiff -l help -d 'Print help'
+complete -c zpager -l columns -r -a '40 60 80 100 120' -d 'Minimum terminal width per side before stacking'
+complete -c zpager -l width -r -a '40 60 80 100 120' -d 'Maximum width per pane'
+complete -c zpager -l no-color -d 'Disable syntax colors in the terminal view'
+complete -c zpager -l help -d 'Print help'
 # ZETTA_DIFF_INTEGRATION_END

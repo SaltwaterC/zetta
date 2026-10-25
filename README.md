@@ -18,10 +18,10 @@ TFTP builds ship standalone `ztftp` client and server commands. `zetta tftp`
 forwards to the sibling executable, and the **Start TFTP Server** action still
 opens a server log pane.
 
-Git builds also ship `zdiff`, a full-screen side-by-side pager for Git diff
-output. Zetta's shell integration sets `GIT_PAGER=zdiff` in integrated shells;
-select it for one command elsewhere with `GIT_PAGER=zdiff git --paginate diff`,
-or pipe diff output to it. Set `ZDIFF_COLUMNS` or pass `zdiff -c N` to choose
+Git builds also ship `zpager`, a full-screen side-by-side pager for Git diff
+output. Zetta's shell integration sets `GIT_PAGER=zpager` in integrated shells;
+select it for one command elsewhere with `GIT_PAGER=zpager git --paginate diff`,
+or pipe diff output to it. Set `ZDIFF_COLUMNS` or pass `zpager -c N` to choose
 the minimum terminal width per side before the view stacks old and new lines.
 The panes expand to use available width; set `ZDIFF_WIDTH` or pass `-w N` to
 cap each pane's displayed width.
@@ -84,7 +84,7 @@ environment they started with; create a new remote pane to apply this context.
   command-palette entry that opens each registered project
 - Serial consoles plus built-in HTTP and TFTP tools, usable from panes or the
   CLI
-- `zdiff`, an interactive pager for Git diff output
+- `zpager`, an interactive pager for Git diff output
 - Git worktree workflow with the standalone `zwt` command (also available as
   `zetta wt`), status, and conflict-resolution helpers; shell integration adds
   the `zwt` directory wrapper
@@ -304,13 +304,13 @@ The default build also produces the standalone `zwt` Git worktree command. Set
 bundled Zosh client and server executables and the `zetta mosh` route. Set
 `ZOSH_CLIENT=0` or `ZOSH_SERVER=0` to omit either component independently.
 
-The default build also produces `zdiff`. Set `ZDIFF=0` on `make build` and
+The default build also produces `zpager`. Set `ZDIFF=0` on `make build` and
 `make install` to omit the binary and its shell completion entries.
 
 Headless hosts (a Raspberry Pi, say) can build and install only the
 command-line tools, without compiling the GUI: `make install-tools RELEASE=1
 TOOLS_BINDIR=$HOME/bin`. `TOOLS` selects the subset from `zmux`, `zosh`,
-`zosh-server`, `zcopy`, `zpaste`, `ztftp`, `zhttp`, `zdiff`, `zwt` and `zntfy`
+`zosh-server`, `zcopy`, `zpaste`, `ztftp`, `zhttp`, `zpager`, `zwt` and `zntfy`
 (default: all except `zwt` and `zntfy`; Windows also gets `zmux-pty` with `zmux`),
 so `make build-tools TOOLS="zmux zosh"` builds two of them. `TOOLS_BINDIR`
 defaults to `BINDIR`. They build into `target/tools`, and `zmux` there is the

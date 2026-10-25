@@ -16,7 +16,7 @@ param(
     [string]$SourceZoshBinary,
     [string]$SourceZoshServerBinary,
     [string]$SourceZwtBinary,
-    [string]$SourceZdiffBinary,
+    [string]$SourcePagerBinary,
     [string]$SourceNotifyBinary,
     [string]$SourceTftpBinary,
     [string]$SourceHttpBinary,
@@ -109,7 +109,7 @@ $installedZoshBinary = Join-Path $InstallDirectory "zosh.exe"
 $installedZoshServerBinary = Join-Path $InstallDirectory "zosh-server.exe"
 $legacyMoshServerBinary = Join-Path $InstallDirectory "mosh-server.exe"
 $installedZwtBinary = Join-Path $InstallDirectory "zwt.exe"
-$installedZdiffBinary = Join-Path $InstallDirectory "zdiff.exe"
+$installedPagerBinary = Join-Path $InstallDirectory "zpager.exe"
 $installedTftpBinary = Join-Path $InstallDirectory "ztftp.exe"
 $installedHttpBinary = Join-Path $InstallDirectory "zhttp.exe"
 $installedNotifyBinary = Join-Path $InstallDirectory "zntfy.exe"
@@ -181,8 +181,8 @@ function Get-InstallFiles {
     if ($WorktreeEnabled) {
         $files += [pscustomobject]@{ Source = $SourceZwtBinary; Destination = $installedZwtBinary }
     }
-    if ($SourceZdiffBinary) {
-        $files += [pscustomobject]@{ Source = $SourceZdiffBinary; Destination = $installedZdiffBinary }
+    if ($SourcePagerBinary) {
+        $files += [pscustomobject]@{ Source = $SourcePagerBinary; Destination = $installedPagerBinary }
     }
     if ($NotifyEnabled) {
         $files += [pscustomobject]@{ Source = $SourceNotifyBinary; Destination = $installedNotifyBinary }
@@ -233,21 +233,21 @@ function Remove-DisabledWorktreeFiles {
     }
 }
 
-function Remove-DisabledDiffFiles {
-    if ($SourceZdiffBinary) {
+function Remove-DisabledPagerFiles {
+    if ($SourcePagerBinary) {
         return
     }
     foreach ($path in @(
-        $installedZdiffBinary,
-        (Get-VersionedPath $installedZdiffBinary "new"),
-        (Get-VersionedPath $installedZdiffBinary "old")
+        $installedPagerBinary,
+        (Get-VersionedPath $installedPagerBinary "new"),
+        (Get-VersionedPath $installedPagerBinary "old")
     )) {
         if (Test-Path -LiteralPath $path) {
             try {
                 Remove-Item -LiteralPath $path -Force
                 Write-Host "Removed $path"
             } catch {
-                Write-Warning "Could not remove disabled diff executable ${path}: $_"
+                Write-Warning "Could not remove disabled diff pager executable ${path}: $_"
             }
         }
     }
@@ -496,7 +496,7 @@ function Install-Binary {
         $replacePty = -not (Test-PtyInstallCurrent $sourcePtyVersion)
     }
     Remove-DisabledWorktreeFiles
-    Remove-DisabledDiffFiles
+    Remove-DisabledPagerFiles
     Remove-DisabledNotifyFiles
     Remove-DisabledClipboardFiles
     Remove-DisabledTftpFiles
@@ -712,8 +712,8 @@ function Uninstall-Binary {
     if (-not $WorktreeEnabled) {
         $filesToRemove += [pscustomobject]@{ Source = $null; Destination = $installedZwtBinary }
     }
-    if (-not $SourceZdiffBinary) {
-        $filesToRemove += [pscustomobject]@{ Source = $null; Destination = $installedZdiffBinary }
+    if (-not $SourcePagerBinary) {
+        $filesToRemove += [pscustomobject]@{ Source = $null; Destination = $installedPagerBinary }
     }
     if (-not $SourceTftpBinary) {
         $filesToRemove += [pscustomobject]@{ Source = $null; Destination = $installedTftpBinary }

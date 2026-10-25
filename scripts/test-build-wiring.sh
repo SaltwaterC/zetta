@@ -25,7 +25,7 @@ for platform in Linux Darwin; do
     for release in 0 1; do
         artifact_dir="$test_root/$platform/$release"
         mkdir -p "$artifact_dir"
-        for binary in zetta zntfy ztftp zhttp zcopy zpaste zmux zosh zosh-server zwt zdiff; do
+        for binary in zetta zntfy ztftp zhttp zcopy zpaste zmux zosh zosh-server zwt zpager; do
             : > "$artifact_dir/$binary"
             chmod +x "$artifact_dir/$binary"
         done
@@ -48,7 +48,7 @@ for platform in Linux Darwin; do
         # Tools disabled for installation are not required artifacts.
         run_make check-build-binaries BUILD_TARGET_DIR="$artifact_dir" HTTP=0 TFTP_SERVER=0 TFTP_CLIENT=0
 
-        for binary in zntfy zcopy zpaste zmux zosh zosh-server zwt zdiff; do
+        for binary in zntfy zcopy zpaste zmux zosh zosh-server zwt zpager; do
             rm "$artifact_dir/$binary"
         done
         run_make check-build-binaries BUILD_TARGET_DIR="$artifact_dir" \
@@ -60,9 +60,9 @@ for platform in Linux Darwin; do
             grep -F -- "--manifest-path crates/$crate/Cargo.toml --target-dir target" "$test_root/plan" > /dev/null ||
                 fail "$platform build omitted $crate from the shared artifact directory"
         done
-        run_make -n build-tools TOOLS=zdiff > "$test_root/tools-plan"
-        grep -F -- "--manifest-path crates/zdiff/Cargo.toml --target-dir target/tools --bin zdiff" "$test_root/tools-plan" > /dev/null ||
-            fail "$platform standalone tools build omitted zdiff"
+        run_make -n build-tools TOOLS=zpager > "$test_root/tools-plan"
+        grep -F -- "--manifest-path crates/zdiff/Cargo.toml --target-dir target/tools --bin zpager" "$test_root/tools-plan" > /dev/null ||
+            fail "$platform standalone tools build omitted zpager"
         if [ "$release" = 1 ]; then
             [ "$(grep -c 'build --release' "$test_root/plan")" -eq 5 ] ||
                 fail "$platform did not apply release to every Cargo build"

@@ -78,8 +78,8 @@ path = "src/bin/zwt.rs"
 required-features = ["worktree"]
 
 [[bin]]
-name = "zdiff"
-path = "src/bin/zdiff.rs"
+name = "zpager"
+path = "src/bin/zpager.rs"
 required-features = ["zdiff"]
 
 [[bin]]

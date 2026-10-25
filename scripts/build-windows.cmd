@@ -75,8 +75,8 @@ if /i not "%WORKTREE%"=="0" if /i not "%WORKTREE%"=="false" if /i not "%WORKTREE
     set "VERIFY_ARGS=!VERIFY_ARGS! -WorktreeBinaryPath !TARGET_DIR!\zwt.exe"
 )
 if /i not "%ZDIFF%"=="0" if /i not "%ZDIFF%"=="false" if /i not "%ZDIFF%"=="no" if /i not "%ZDIFF%"=="off" (
-    set "BINARIES=!BINARIES! --bin zdiff"
-    set "VERIFY_ARGS=!VERIFY_ARGS! -DiffBinaryPath !TARGET_DIR!\zdiff.exe"
+    set "BINARIES=!BINARIES! --bin zpager"
+    set "VERIFY_ARGS=!VERIFY_ARGS! -PagerBinaryPath !TARGET_DIR!\zpager.exe"
 )
 call scripts\cargo-windows.cmd build %PROFILE_ARGS% --jobs %CARGO_BUILD_JOBS% --locked --no-default-features --features %FEATURES% !BINARIES!
 if errorlevel 1 exit /b !errorlevel!

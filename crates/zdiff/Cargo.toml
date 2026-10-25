@@ -10,7 +10,7 @@ description = "Terminal pager for Git diff output"
 doctest = false
 
 [[bin]]
-name = "zdiff"
+name = "zpager"
 path = "src/main.rs"
 
 [dependencies]
