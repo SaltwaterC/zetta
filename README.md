@@ -283,6 +283,10 @@ Tests default to two crate suites at once, four compiler jobs per Cargo process,
 and eight test threads per suite. Override `TEST_CRATE_JOBS`, `TEST_BUILD_JOBS`,
 or `TEST_THREADS` on the Make command line when needed.
 
+On Windows, run several validation targets through one MSVC-initialized Make
+process with `make validate-windows` to avoid repeating Visual Studio
+environment setup for every Cargo command.
+
 Run imported terminal conformance checks with `make test-shitty`. This builds a
 headless adapter against Zetta's terminal engine and runs shell-relevant tests
 and recorded Bash, Zsh, and Vim sessions from the `shitty` submodule. Failures

@@ -99,14 +99,19 @@ impl SessionPersistenceConfig {
     /// even when that path does not exist, so callers can report its useful
     /// name in an error.
     pub fn resolved_identity(&self) -> Option<PathBuf> {
-        let path = self
-            .identity
-            .clone()
-            .or_else(default_session_identity_path)?;
+        self.resolved_identity_with_home(&home_dir(), default_session_identity_path())
+    }
+
+    fn resolved_identity_with_home(
+        &self,
+        home: &Path,
+        default_identity: Option<PathBuf>,
+    ) -> Option<PathBuf> {
+        let path = self.identity.clone().or(default_identity)?;
         let Some(relative) = path.to_str().and_then(|path| path.strip_prefix("~/")) else {
             return Some(path);
         };
-        Some(util::paths::home_dir().join(relative))
+        Some(home.join(relative))
     }
 }
 

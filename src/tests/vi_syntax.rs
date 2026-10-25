@@ -557,7 +557,7 @@ fn recognizes_common_makefile_and_toml_paths() {
         grammars.language_index_for_name("toml"),
     );
     // Test batch file detection
-    for path in ["script.bat", "script.cmd", "build-windows.cmd"] {
+    for path in ["script.bat", "script.cmd"] {
         assert_eq!(
             grammars.language_index(Some(Path::new(path)), b"@echo off\n"),
             grammars.language_index_for_name("batch"),

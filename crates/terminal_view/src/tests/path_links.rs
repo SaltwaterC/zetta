@@ -104,7 +104,7 @@ fn wsl_absolute_paths_do_not_require_a_reported_directory() {
         "/usr/local/bin/zsh",
         "/opt/service/config.toml",
         "/var/log/messages",
-        "/mnt/c/Users/saltw/Desktop/notes.txt",
+        "/mnt/c/Users/testuser/Desktop/notes.txt",
     ] {
         let target = PathLikeTarget {
             maybe_path: path.to_owned(),
@@ -149,9 +149,9 @@ fn absolute_file_links_do_not_use_the_terminal_directory() {
 fn mixed_windows_path_separators_are_normalized_for_the_shell() {
     assert_eq!(
         normalize_windows_path(PathBuf::from(
-            r"C:\Users\saltw\source\repos\zetta/README.md"
+            r"C:\Users\testuser\source\repos\zetta/README.md"
         )),
-        PathBuf::from(r"C:\Users\saltw\source\repos\zetta\README.md")
+        PathBuf::from(r"C:\Users\testuser\source\repos\zetta\README.md")
     );
 }
 
@@ -159,9 +159,9 @@ fn mixed_windows_path_separators_are_normalized_for_the_shell() {
 fn windows_current_directory_components_are_removed_for_the_shell() {
     assert_eq!(
         normalize_windows_path(PathBuf::from(
-            r"C:\Users\saltw\source\repos\zetta/.\README.md"
+            r"C:\Users\testuser\source\repos\zetta/.\README.md"
         )),
-        PathBuf::from(r"C:\Users\saltw\source\repos\zetta\README.md")
+        PathBuf::from(r"C:\Users\testuser\source\repos\zetta\README.md")
     );
     assert_eq!(
         normalize_windows_path(PathBuf::from(r".\.\README.md")),

@@ -27,7 +27,14 @@ MAKE
 run_make() {
     make -s -f "$temporary/test.mk" "SHELL=$test_shell" "$@"
 }
-run_make parallel-check
+run_make_errexit() {
+    make -s -f "$temporary/test.mk" "SHELL=$test_shell" '.SHELLFLAGS=-ec' "$@"
+}
+run_make parallel-check >"$temporary/completion"
+case "$(cat "$temporary/completion")" in
+	*"[WAIT] Pool check: reaping completed workers"*"[WAIT] Pool check: collecting worker results"*"[DONE] Pool check: workers exited, results collected, temporary files removed"*) ;;
+    *) cat "$temporary/completion" >&2; exit 1 ;;
+esac
 awk '
     $1 == "start" { active++; started++; if (active > maximum) maximum = active }
     $1 == "end" { active-- }
@@ -38,9 +45,25 @@ if run_make parallel-failure > "$temporary/failure" 2>&1; then
     exit 1
 fi
 case "$(cat "$temporary/failure")" in
-    *"[FAIL] broken"*"expected-failure"*) ;;
+	*"[FAIL] broken"*"expected-failure"*"[DONE] Pool check: workers exited, results collected, temporary files removed"*) ;;
     *) cat "$temporary/failure" >&2; exit 1 ;;
 esac
+if grep -Fq 'worker exited before reporting completion' "$temporary/failure"; then
+    echo 'A failed worker bypassed normal status reporting' >&2
+    exit 1
+fi
+if run_make_errexit parallel-failure >"$temporary/failure-errexit" 2>&1; then
+    echo 'A failed worker under shell errexit was reported as successful' >&2
+    exit 1
+fi
+case "$(cat "$temporary/failure-errexit")" in
+	*"[FAIL] broken"*"expected-failure"*"[DONE] Pool check: workers exited, results collected, temporary files removed"*) ;;
+	*) cat "$temporary/failure-errexit" >&2; exit 1 ;;
+esac
+if grep -Fq 'worker exited before reporting completion' "$temporary/failure-errexit"; then
+    echo 'A failed worker under shell errexit bypassed normal status reporting' >&2
+    exit 1
+fi
 if run_make parallel-invalid > "$temporary/invalid" 2>&1; then
     echo 'A zero worker limit was accepted' >&2
     exit 1

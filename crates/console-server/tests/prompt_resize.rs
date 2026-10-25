@@ -81,7 +81,7 @@ fn powershell_7_keeps_the_pending_prompt_when_a_pane_is_split() {
 }
 
 fn assert_pending_prompt_survives_split(program: &str) {
-    const PROMPT: &str = "PS C:\\Users\\saltw\\source\\repos\\zetta> ";
+    const PROMPT: &str = "PS C:\\Users\\testuser\\source\\repos\\zetta> ";
     const COMMAND: &str = "zetta benchmark output --output-type unique --size 1000";
     let output = Output(Arc::new(Mutex::new(State {
         term: Term::new(Config::default(), &TermSize::new(180, 24), VoidListener),

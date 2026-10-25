@@ -213,7 +213,7 @@ fn process_directory_supersedes_a_stale_report_while_the_shell_is_foreground() {
 #[test]
 fn msys2_reported_directories_are_normalized_before_selection() {
     let root = Path::new(r"D:\Applications\MSYS2");
-    let reported = msys2_path_to_windows(root, "/c/Users/saltw/source/repos/zetta")
+    let reported = msys2_path_to_windows(root, "/c/Users/testuser/source/repos/zetta")
         .expect("the MSYS2 path should be native-convertible");
 
     assert_eq!(
@@ -226,9 +226,9 @@ fn msys2_reported_directories_are_normalized_before_selection() {
 #[test]
 fn cygwin_reported_directories_are_normalized_before_selection() {
     let root = Path::new(r"D:\Applications\Cygwin");
-    let reported = cygwin_path_to_windows(root, "/cygdrive/c/Users/saltw/source/repos/zetta")
+    let reported = cygwin_path_to_windows(root, "/cygdrive/c/Users/testuser/source/repos/zetta")
         .expect("the Cygwin path should be native-convertible");
-    let process = PathBuf::from(r"C:\Users\saltw");
+    let process = PathBuf::from(r"C:\Users\testuser");
 
     assert_eq!(
         select_current_directory(Some(reported.clone()), Some(process), true, true),
@@ -238,8 +238,8 @@ fn cygwin_reported_directories_are_normalized_before_selection() {
 
 #[test]
 fn tracked_shell_directory_wins_over_a_stale_process_directory() {
-    let reported = PathBuf::from(r"C:\Users\saltw\source\repos\zetta");
-    let process = PathBuf::from(r"C:\Users\saltw");
+    let reported = PathBuf::from(r"C:\Users\testuser\source\repos\zetta");
+    let process = PathBuf::from(r"C:\Users\testuser");
 
     assert_eq!(
         select_current_directory(Some(reported.clone()), Some(process), true, true),

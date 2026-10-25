@@ -17,7 +17,7 @@
 //! guard lives there rather than here because this file is also compiled into a
 //! binary that has no `Config` to compare against.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// The identity files a multiplexer command should try, from configuration or
 /// the conventional `~/.ssh/id_ed25519` fallback.
@@ -32,6 +32,14 @@ pub(crate) fn configured_identity_paths(config_path: Option<PathBuf>) -> Vec<Pat
 pub(crate) fn configured_identity_paths_with_fallback(
     config_path: Option<PathBuf>,
     fallback: Option<PathBuf>,
+) -> Vec<PathBuf> {
+    configured_identity_paths_with_home(config_path, fallback, &home_dir())
+}
+
+pub(crate) fn configured_identity_paths_with_home(
+    config_path: Option<PathBuf>,
+    fallback: Option<PathBuf>,
+    home: &Path,
 ) -> Vec<PathBuf> {
     let fallback = || fallback.clone().into_iter().collect::<Vec<_>>();
     let path =
@@ -50,19 +58,22 @@ pub(crate) fn configured_identity_paths_with_fallback(
         .map(str::trim)
         .filter(|identity| !identity.is_empty());
     identity
-        .map(expand_home)
+        .map(|identity| expand_home(identity, home))
         .map_or_else(fallback, |identity| vec![identity])
 }
 
 /// Expands a leading `~/`, which is how an identity is conventionally written in
 /// configuration and how the application's own parser resolves it.
-fn expand_home(path: &str) -> PathBuf {
+fn expand_home(path: &str, home: &Path) -> PathBuf {
     let Some(relative) = path.strip_prefix("~/") else {
         return PathBuf::from(path);
     };
-    let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
-        .map_or_else(|| PathBuf::from("."), PathBuf::from);
     home.join(relative)
+}
+
+fn home_dir() -> PathBuf {
+    std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+        .map_or_else(|| PathBuf::from("."), PathBuf::from)
 }
 
 /// Whether a `zmux` command can need an identity, and so is worth reading

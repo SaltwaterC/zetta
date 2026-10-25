@@ -470,9 +470,9 @@ mod tests {
         let mut replayed = term_showing(&snapshot);
 
         Processor::<StdSyncHandler>::new()
-            .advance(&mut replayed, b"\x1b[?1049lPS C:\\Users\\saltw> ");
+            .advance(&mut replayed, b"\x1b[?1049lPS C:\\Users\\testuser> ");
 
         assert_eq!(line_text(&replayed, 0), "prompt> htop");
-        assert_eq!(line_text(&replayed, 1), "PS C:\\Users\\saltw>");
+        assert_eq!(line_text(&replayed, 1), "PS C:\\Users\\testuser>");
     }
 }

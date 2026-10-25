@@ -11,6 +11,16 @@ git submodule update --init shitty
 make test-shitty
 ```
 
+When running the full validation chain on Windows, use:
+
+```sh
+make validate-windows
+```
+
+This initializes the MSVC environment once for the whole run. Invoking each
+`make` command separately from a plain PowerShell repeats that setup for every
+Cargo process.
+
 Python 3.10 or newer and the repository's pinned Rust toolchain are required.
 On Windows the Makefile runs `python` rather than `python3`, which there is the
 Microsoft Store shim; override it with `make test-shitty PYTHON=py` if needed.

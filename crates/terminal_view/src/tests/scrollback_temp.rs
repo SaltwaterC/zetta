@@ -76,10 +76,10 @@ fn cleanup_removes_a_file_owned_by_a_dead_process() {
 fn windows_scrollback_root_ignores_an_msys_temporary_directory() {
     assert_eq!(
         windows_fallback_root(
-            Some(PathBuf::from(r"C:\Users\saltw\AppData\Local")),
+            Some(PathBuf::from(r"C:\Users\testuser\AppData\Local")),
             PathBuf::from(r"C:\msys64\tmp"),
         ),
-        PathBuf::from(r"C:\Users\saltw\AppData\Local\Temp\zetta"),
+        PathBuf::from(r"C:\Users\testuser\AppData\Local\Temp\zetta"),
     );
 }
 

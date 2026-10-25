@@ -34,8 +34,8 @@ fn find(term: &Term<VoidListener>, row: usize, column: usize) -> Option<Hyperlin
 #[test]
 fn application_wrapped_paths_resolve_from_every_fragment() {
     for path in [
-        "C:/Users/saltw/source/repos/zetta/crates/terminal/src/alacritty/hyperlinks.rs:124",
-        r"C:\Users\saltw\source\repos\zetta\crates\terminal\src\alacritty\hyperlinks.rs:124",
+        "C:/Users/testuser/source/repos/zetta/crates/terminal/src/alacritty/hyperlinks.rs:124",
+        r"C:\Users\testuser\source\repos\zetta\crates\terminal\src\alacritty\hyperlinks.rs:124",
         "/home/user/source/zetta/crates/terminal/src/alacritty/hyperlinks.rs:124:9",
         "crates/terminal/src/alacritty/hyperlinks.rs",
     ] {

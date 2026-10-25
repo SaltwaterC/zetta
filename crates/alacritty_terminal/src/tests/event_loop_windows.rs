@@ -23,6 +23,97 @@ impl EventListener for Listener {
     }
 }
 
+/// Observes when the event loop receives the underlying ConPTY child event.
+struct ObservedPty {
+    pty: tty::windows::Pty,
+    child_exit_seen: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl event::OnResize for ObservedPty {
+    fn on_resize(&mut self, size: WindowSize) {
+        event::OnResize::on_resize(&mut self.pty, size);
+    }
+}
+
+impl tty::EventedReadWrite for ObservedPty {
+    type Reader = <tty::windows::Pty as tty::EventedReadWrite>::Reader;
+    type Writer = <tty::windows::Pty as tty::EventedReadWrite>::Writer;
+
+    unsafe fn register(
+        &mut self,
+        poller: &Arc<Poller>,
+        event: PollingEvent,
+        mode: polling::PollMode,
+    ) -> io::Result<()> {
+        unsafe { tty::EventedReadWrite::register(&mut self.pty, poller, event, mode) }
+    }
+
+    fn reregister(
+        &mut self,
+        poller: &Arc<Poller>,
+        event: PollingEvent,
+        mode: polling::PollMode,
+    ) -> io::Result<()> {
+        tty::EventedReadWrite::reregister(&mut self.pty, poller, event, mode)
+    }
+
+    fn deregister(&mut self, poller: &Arc<Poller>) -> io::Result<()> {
+        tty::EventedReadWrite::deregister(&mut self.pty, poller)
+    }
+
+    fn rearm_read(&mut self) -> io::Result<()> {
+        tty::EventedReadWrite::rearm_read(&mut self.pty)
+    }
+
+    fn output_mode(&mut self) -> io::Result<Option<crate::hosted_console::OutputMode>> {
+        tty::EventedReadWrite::output_mode(&mut self.pty)
+    }
+
+    fn output_acknowledgement(
+        &self,
+    ) -> Option<Arc<dyn crate::hosted_console::OutputAcknowledgement>> {
+        tty::EventedReadWrite::output_acknowledgement(&self.pty)
+    }
+
+    fn reader(&mut self) -> &mut Self::Reader {
+        tty::EventedReadWrite::reader(&mut self.pty)
+    }
+
+    fn writer(&mut self) -> &mut Self::Writer {
+        tty::EventedReadWrite::writer(&mut self.pty)
+    }
+}
+
+impl tty::EventedPty for ObservedPty {
+    fn is_hangup_error(&self, error: &io::Error) -> bool {
+        tty::EventedPty::is_hangup_error(&self.pty, error)
+    }
+
+    fn next_child_event(&mut self) -> Option<tty::ChildEvent> {
+        let event = tty::EventedPty::next_child_event(&mut self.pty);
+        if event.is_some() {
+            self.child_exit_seen.store(true, std::sync::atomic::Ordering::Release);
+        }
+        event
+    }
+
+    fn output_ended(&self) -> bool {
+        tty::EventedPty::output_ended(&self.pty)
+    }
+
+    fn child_is_foreign(&self) -> bool {
+        tty::EventedPty::child_is_foreign(&self.pty)
+    }
+
+    fn redraw(&mut self) {
+        tty::EventedPty::redraw(&mut self.pty);
+    }
+
+    fn set_console_palette(&mut self, palette: crate::tty::ConsolePalette) {
+        tty::EventedPty::set_console_palette(&mut self.pty, palette);
+    }
+}
+
 fn run_payload(payload: &[u8], hold_grid: bool) -> (String, State, Duration) {
     let sequence = NEXT_PAYLOAD.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let directory =
@@ -55,6 +146,7 @@ fn run_payload(payload: &[u8], hold_grid: bool) -> (String, State, Duration) {
     let size = WindowSize { num_lines: 24, num_cols: 80, cell_width: 8, cell_height: 16 };
     let started = Instant::now();
     let pty = tty::new(&options, size, 0).unwrap();
+    let child_exit_seen = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let child = hold_grid.then(|| {
         // SAFETY: the PID belongs to the child this test just started. The
         // synchronization-only handle is owned and closed exactly once.
@@ -62,6 +154,7 @@ fn run_payload(payload: &[u8], hold_grid: bool) -> (String, State, Duration) {
         assert!(!handle.is_null());
         unsafe { OwnedHandle::from_raw_handle(handle.cast()) }
     });
+    let pty = ObservedPty { pty, child_exit_seen: child_exit_seen.clone() };
     let event_loop =
         EventLoop::new(terminal.clone(), listener, pty, true, false, ReplayBarrier::open())
             .unwrap();
@@ -70,12 +163,18 @@ fn run_payload(payload: &[u8], hold_grid: bool) -> (String, State, Duration) {
     let worker = event_loop.spawn();
     let mut pending = VecDeque::new();
     if let Some(child) = child {
-        // Prove the child has actually exited while parsing is blocked. A
-        // fixed sleep can expire before PowerShell finishes compiling its
-        // producer, leaving the final-drain assertion unexercised.
-        let status = unsafe { WaitForSingleObject(child.as_raw_handle().cast(), 10_000) };
+        // Prove the child exited and the event loop observed its notification
+        // while parsing is still blocked, before the final drain can report it.
+        let status = unsafe { WaitForSingleObject(child.as_raw_handle().cast(), 30_000) };
         assert_eq!(status, WAIT_OBJECT_0, "producer did not exit while the grid was locked");
-        std::thread::sleep(Duration::from_millis(100));
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !child_exit_seen.load(std::sync::atomic::Ordering::Acquire) {
+            assert!(
+                Instant::now() < deadline,
+                "the event loop did not observe child exit while the grid was locked"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
         pending.extend(received.try_iter());
         assert!(
             !pending.iter().any(|event| matches!(event, event::Event::ChildExit(_))),
@@ -155,9 +254,129 @@ fn random_conpty_throughput_benchmark() {
 
 #[test]
 fn final_conpty_output_is_drained_before_child_exit() {
-    let mut payload = b"x\r\n".repeat(256 * 1024);
+    // Exercise multiple parser chunks without filling their bounded read-ahead
+    // pool while the grid is locked; the reader must still reach child exit.
+    let mut payload = b"x\r\n".repeat(64 * 1024);
     payload.extend_from_slice(b"the end");
     let (text, _, _) = run_payload(&payload, true);
+    assert_eq!(text.trim_end(), "the end");
+}
+
+/// A reader whose final bytes arrive after its first empty read.
+struct DelayedOutput {
+    bytes: io::Cursor<Vec<u8>>,
+    ready_at: Option<std::time::Instant>,
+    ended: bool,
+}
+
+impl Read for DelayedOutput {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        if self.ready_at.is_none_or(|ready_at| std::time::Instant::now() < ready_at) {
+            return Err(io::ErrorKind::WouldBlock.into());
+        }
+
+        let count = self.bytes.read(buffer)?;
+        self.ended = count == 0;
+        Ok(count)
+    }
+}
+
+struct DelayedPty {
+    output: DelayedOutput,
+    input: io::Sink,
+}
+
+impl event::OnResize for DelayedPty {
+    fn on_resize(&mut self, _: WindowSize) {}
+}
+
+impl tty::EventedReadWrite for DelayedPty {
+    type Reader = DelayedOutput;
+    type Writer = io::Sink;
+
+    unsafe fn register(
+        &mut self,
+        _: &Arc<Poller>,
+        _: PollingEvent,
+        _: polling::PollMode,
+    ) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn reregister(
+        &mut self,
+        _: &Arc<Poller>,
+        _: PollingEvent,
+        _: polling::PollMode,
+    ) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn deregister(&mut self, _: &Arc<Poller>) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn rearm_read(&mut self) -> io::Result<()> {
+        if self.output.ready_at.is_none() {
+            self.output.ready_at = Some(std::time::Instant::now() + Duration::from_millis(40));
+        }
+        Ok(())
+    }
+
+    fn reader(&mut self) -> &mut Self::Reader {
+        &mut self.output
+    }
+
+    fn writer(&mut self) -> &mut Self::Writer {
+        &mut self.input
+    }
+}
+
+impl tty::EventedPty for DelayedPty {
+    fn next_child_event(&mut self) -> Option<tty::ChildEvent> {
+        None
+    }
+
+    fn output_ended(&self) -> bool {
+        self.output.ended
+    }
+}
+
+#[test]
+fn delayed_final_output_after_an_empty_read_is_drained() {
+    let (sent, _) = mpsc::channel();
+    let listener = Listener(sent);
+    let terminal = Arc::new(FairMutex::new(Term::new(
+        Config::default(),
+        &TermSize::new(80, 24),
+        listener.clone(),
+    )));
+    let pty = DelayedPty {
+        output: DelayedOutput {
+            bytes: io::Cursor::new(b"the end".to_vec()),
+            ready_at: None,
+            ended: false,
+        },
+        input: io::sink(),
+    };
+    let mut event_loop =
+        EventLoop::new(terminal.clone(), listener.clone(), pty, true, false, ReplayBarrier::open())
+            .unwrap();
+    let mut parser = ParserThread::spawn(
+        terminal.clone(),
+        listener,
+        ReplayBarrier::open(),
+        ansi::Processor::new(),
+    );
+    let mut state = State::default();
+
+    event_loop.drain_final_pty(&mut state, &mut parser, None::<&mut io::Sink>);
+    state.finish_parsing(&mut parser);
+
+    assert_eq!(state.profile.bytes, 7);
+    let terminal = terminal.lock();
+    let line = terminal.grid().cursor.point.line;
+    let text: String = (0..80).map(|column| terminal.grid()[line][Column(column)].c).collect();
     assert_eq!(text.trim_end(), "the end");
 }
 

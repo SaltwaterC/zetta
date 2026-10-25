@@ -49,8 +49,8 @@ fn recognizes_detected_msys2_profiles_and_their_custom_root() {
 #[test]
 fn translates_windows_paths_for_msys2_editors() {
     assert_eq!(
-        windows_path_to_msys(Path::new(r"C:\Users\saltw\source\repos\zetta\AGENTS.md")),
-        Some("/c/Users/saltw/source/repos/zetta/AGENTS.md".to_owned())
+        windows_path_to_msys(Path::new(r"C:\Users\testuser\source\repos\zetta\AGENTS.md")),
+        Some("/c/Users/testuser/source/repos/zetta/AGENTS.md".to_owned())
     );
 }
 
@@ -60,12 +60,12 @@ fn converts_reported_msys2_directories_to_native_windows_paths() {
     let root = Path::new(r"D:\Applications\MSYS2");
 
     assert_eq!(
-        msys2_path_to_windows(root, "/c/Users/saltw/source/zetta"),
-        Some(PathBuf::from(r"C:\Users\saltw\source\zetta"))
+        msys2_path_to_windows(root, "/c/Users/testuser/source/zetta"),
+        Some(PathBuf::from(r"C:\Users\testuser\source\zetta"))
     );
     assert_eq!(
-        msys2_path_to_windows(root, "/home/saltw/project"),
-        Some(root.join("home").join("saltw").join("project"))
+        msys2_path_to_windows(root, "/home/testuser/project"),
+        Some(root.join("home").join("testuser").join("project"))
     );
     assert_eq!(
         msys2_path_to_windows(root, "//server/share/project"),
@@ -160,12 +160,12 @@ fn converts_cygwin_paths_in_both_directions() {
     let root = Path::new(r"D:\Applications\Cygwin");
 
     assert_eq!(
-        cygwin_path_to_windows(root, "/cygdrive/c/Users/saltw/source/zetta"),
-        Some(PathBuf::from(r"C:\Users\saltw\source\zetta"))
+        cygwin_path_to_windows(root, "/cygdrive/c/Users/testuser/source/zetta"),
+        Some(PathBuf::from(r"C:\Users\testuser\source\zetta"))
     );
     assert_eq!(
-        cygwin_path_to_windows(root, "/home/saltw/project"),
-        Some(root.join("home").join("saltw").join("project"))
+        cygwin_path_to_windows(root, "/home/testuser/project"),
+        Some(root.join("home").join("testuser").join("project"))
     );
     assert_eq!(
         cygwin_path_to_windows(root, "//server/share/project"),
@@ -175,12 +175,12 @@ fn converts_cygwin_paths_in_both_directions() {
     assert_eq!(cygwin_path_to_windows(root, "/tmp/with\nnewline"), None);
 
     assert_eq!(
-        windows_path_to_cygwin(root, Path::new(r"D:\Applications\Cygwin\home\saltw")),
-        Some("/home/saltw".to_owned())
+        windows_path_to_cygwin(root, Path::new(r"D:\Applications\Cygwin\home\testuser")),
+        Some("/home/testuser".to_owned())
     );
     assert_eq!(
-        windows_path_to_cygwin(root, Path::new(r"C:\Users\saltw\source\zetta")),
-        Some("/cygdrive/c/Users/saltw/source/zetta".to_owned())
+        windows_path_to_cygwin(root, Path::new(r"C:\Users\testuser\source\zetta")),
+        Some("/cygdrive/c/Users/testuser/source/zetta".to_owned())
     );
     assert_eq!(
         windows_path_to_cygwin(root, Path::new(r"\\server\share\project")),
@@ -455,7 +455,7 @@ fn wsl_environment_normalizes_the_host_executable_wslenv_entry_once() {
 #[cfg(windows)]
 #[test]
 fn wsl_environment_converts_the_cwd_marker_without_wslpath() {
-    let marker = Path::new(r"C:\Users\saltw\AppData\Local\Temp\zetta-cwd");
+    let marker = Path::new(r"C:\Users\testuser\AppData\Local\Temp\zetta-cwd");
     let environment = wsl_terminal_environment_for(
         Path::new(r"C:\Zetta\zetta.exe"),
         Some(marker),

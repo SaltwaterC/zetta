@@ -8,7 +8,10 @@
 use super::*;
 use std::time::Duration;
 
-const QUIET_PERIOD: Duration = Duration::from_millis(20);
+// ConPTY can publish its last buffered bytes shortly after the child exit is
+// reported. Leave enough room for the source reader to deliver that refill
+// before treating an empty read as the end of output.
+const QUIET_PERIOD: Duration = Duration::from_millis(100);
 // The parser pool, source pipe and kernel pipe are bounded. A generous cap
 // also ends the drain if a surviving descendant continues writing after the
 // watched child exits; it must not keep the window open indefinitely.

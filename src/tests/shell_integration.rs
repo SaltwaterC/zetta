@@ -1063,7 +1063,7 @@ fn zsh_mosh_completion_offers_ssh_targets_and_options_for_wrapper_and_zetta_mosh
     fs::create_dir_all(&ssh_dir).unwrap();
     fs::write(
         ssh_dir.join("config"),
-        "Host web01 pi\n    User saltw\nHost *\n    StrictHostKeyChecking no\n",
+        "Host web01 pi\n    User testuser\nHost *\n    StrictHostKeyChecking no\n",
     )
     .unwrap();
 
@@ -1166,7 +1166,7 @@ fn bash_ssh_target_completion_reads_the_ssh_config() {
     fs::create_dir_all(&ssh_dir).unwrap();
     fs::write(
         ssh_dir.join("config"),
-        "Host web01 pi\n    User saltw\nHost *\n    StrictHostKeyChecking no\n",
+        "Host web01 pi\n    User testuser\nHost *\n    StrictHostKeyChecking no\n",
     )
     .unwrap();
 
@@ -1246,7 +1246,7 @@ fn fish_mosh_and_zosh_completion_offer_ssh_targets() {
     fs::create_dir_all(&ssh_dir).unwrap();
     fs::write(
         ssh_dir.join("config"),
-        "Host web01 pi\n    User saltw\nHost *\n    StrictHostKeyChecking no\n",
+        "Host web01 pi\n    User testuser\nHost *\n    StrictHostKeyChecking no\n",
     )
     .unwrap();
 

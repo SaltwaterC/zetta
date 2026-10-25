@@ -1,6 +1,6 @@
 $ErrorActionPreference = 'Stop'
 
-$wrapper = Join-Path $PSScriptRoot 'cargo-windows.cmd'
+$wrapper = Join-Path $PSScriptRoot 'cargo-windows.ps1'
 $directory = Join-Path ([IO.Path]::GetTempPath()) ('zetta cargo priority ' + [Guid]::NewGuid())
 [IO.Directory]::CreateDirectory($directory) | Out-Null
 $probe = Join-Path $directory 'probe.ps1'
@@ -34,7 +34,8 @@ exit $ExitCode
     $env:VCToolsInstallDir = $tools + [IO.Path]::DirectorySeparatorChar
     $env:PATH = $gitBin + ';' + $previousPath
     foreach ($exitCode in @(0, 37)) {
-        $output = & $wrapper -NoProfile -ExecutionPolicy Bypass -File $probe 'argument with spaces' $exitCode
+        $output = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $wrapper `
+            -NoProfile -ExecutionPolicy Bypass -File $probe 'argument with spaces' $exitCode
         $actualExitCode = $LASTEXITCODE
         if ($actualExitCode -ne $exitCode) {
             throw "Expected exit $exitCode, got $actualExitCode"

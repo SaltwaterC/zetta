@@ -209,7 +209,7 @@ ifeq ($(OS),Windows_NT)
 # Native build scripts fingerprint the Visual Studio environment. Route every
 # Cargo command through one initializer so lint, test, and build share cache
 # entries instead of alternately invalidating them.
-CARGO_RUN := "$(CURDIR)/scripts/cargo-windows.cmd"
+CARGO_RUN := powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$(CURDIR)/scripts/cargo-windows.ps1"
 TEST_CARGO_RUN := CARGO_BUILD_JOBS=$(TEST_BUILD_JOBS) RUST_TEST_THREADS=$(TEST_THREADS) $(CARGO_RUN)
 else
 CARGO_RUN := $(CARGO)
@@ -261,6 +261,7 @@ WINDOWS_ZMUX_UPGRADE_ARGS := $(if $(call tool_enabled,$(ZMUX)), -UpgradeMux,)
 	check-linux check-windows check-macos \
 	clippy-platforms clippy-features clippy-linux clippy-windows clippy-macos \
 	can-check-linux can-check-windows can-check-macos conformance-windows \
+	validate-windows \
 	install install-binary install-capabilities install-assets install-user-path uninstall \
 	uninstall-binary uninstall-assets uninstall-user-path refresh-desktop-caches upgrade-mux clean
 
@@ -274,14 +275,15 @@ all: fmt lint test build
 # how many are unfinished (including queued items), and by their names once
 # three or fewer remain,
 # so an item that hangs is named on screen instead of stalling the whole call
-# silently. Its captured output is printed at the end only if it failed. The
-# template is evaluated in its own subshell so an `exit` in it still records a
-# status, and that status is published with a rename so the still-running scan
-# never reads one half-written.
+# silently. Every 30 seconds, active items and their elapsed times are reported.
+# Captured output is printed at the end only if an item failed. A worker's
+# status file is its completion signal; publish it even when its command fails,
+# and have the parent recover a status if a worker exits unexpectedly. [DONE]
+# comes after result reporting and temporary-file cleanup, not just reaping.
 define parallel_for
 	@items="$(1)"; \
 	cmd_template='$(2)'; \
-	desc="$(3)"; \
+	desc="$(strip $(3))"; \
 	max_jobs="$(4)"; \
 	if [ -n "$$max_jobs" ] && ! [ "$$max_jobs" -gt 0 ] 2>/dev/null; then \
 		echo "Parallel job limit must be a positive integer" >&2; exit 2; \
@@ -290,27 +292,87 @@ define parallel_for
 	trap 'rm -rf "$$tmpdir"' EXIT; \
 	pids=""; \
 	idx=0; \
+	last_report=$$(date +%s); \
+	recover_dead_workers() { \
+		worker_idx=0; \
+		for worker_pid in $$pids; do \
+			worker_idx=$$((worker_idx + 1)); \
+			report_idx=$$worker_idx; \
+			f="$$tmpdir/name.$$report_idx"; \
+			[ -f "$$f" ] || continue; \
+			[ -f "$$tmpdir/status.$$report_idx" ] && continue; \
+			if ! kill -0 "$$worker_pid" 2>/dev/null; then \
+				if wait "$$worker_pid" 2>/dev/null; then worker_status=0; else worker_status=$$?; fi; \
+				if [ ! -f "$$tmpdir/status.$$report_idx" ]; then \
+					echo 1 >"$$tmpdir/status.$$report_idx.tmp"; \
+					mv "$$tmpdir/status.$$report_idx.tmp" "$$tmpdir/status.$$report_idx"; \
+					worker_name=$$(cat "$$f"); \
+					printf "  [FAIL] %s (worker exited without a status file; exit %s)\n" "$$worker_name" "$$worker_status"; \
+				fi; \
+			fi; \
+		done; \
+	}; \
+	report_running() { \
+		now=$$(date +%s); \
+		[ $$((now - last_report)) -ge 30 ] || return 0; \
+		running=""; \
+		for f in "$$tmpdir"/name.*; do \
+			[ -f "$$f" ] || continue; \
+			report_idx=$${f##*.}; \
+			[ -f "$$tmpdir/status.$$report_idx" ] && continue; \
+			report_name=$$(cat "$$f"); \
+			report_started=$$(cat "$$tmpdir/start.$$report_idx" 2>/dev/null); \
+			[ -n "$$report_started" ] || report_started=$$now; \
+			report_elapsed=$$((now - report_started)); \
+			running="$$running $$report_name ($${report_elapsed}s);"; \
+		done; \
+		[ -z "$$running" ] || echo "  [RUNNING] $$desc:$$running"; \
+		last_report=$$now; \
+	}; \
 	for item in $$items; do \
 		if [ -n "$$max_jobs" ]; then \
 			while :; do \
+				recover_dead_workers; \
 				active=0; n=0; \
 				while [ $$n -lt $$idx ]; do \
 					n=$$((n + 1)); \
 					[ -f "$$tmpdir/status.$$n" ] || active=$$((active + 1)); \
 				done; \
 				[ $$active -lt "$$max_jobs" ] && break; \
+				report_running; \
 				sleep 0.1; \
 			done; \
 		fi; \
 		idx=$$((idx + 1)); \
 		echo "$$item" >"$$tmpdir/name.$$idx"; \
+		item_started=$$(date +%s); \
+		echo "$$item_started" >"$$tmpdir/start.$$idx"; \
 		( \
-			started=$$(date +%s); \
-			( eval "$$cmd_template" ) >"$$tmpdir/out.$$idx" 2>"$$tmpdir/err.$$idx"; \
-			status=$$?; \
+			started=$$item_started; \
+			worker_status_written=0; \
+			publish_unexpected_worker_exit() { \
+				worker_exit=$$?; \
+				[ "$$worker_status_written" -eq 1 ] && return; \
+				[ "$$worker_exit" -ne 0 ] || worker_exit=1; \
+				echo "$$worker_exit" >"$$tmpdir/status.$$idx.tmp" && \
+					mv "$$tmpdir/status.$$idx.tmp" "$$tmpdir/status.$$idx"; \
+				printf "  [FAIL] %s (worker exited before reporting completion)\n" "$$item"; \
+				exit "$$worker_exit"; \
+			}; \
+			trap 'publish_unexpected_worker_exit' EXIT; \
+			if ( eval "$$cmd_template" ) >"$$tmpdir/out.$$idx" 2>"$$tmpdir/err.$$idx"; then \
+				status=0; \
+			else \
+				status=$$?; \
+			fi; \
 			elapsed=$$(( $$(date +%s) - started )); \
-			echo $$status >"$$tmpdir/status.$$idx.tmp"; \
-			mv "$$tmpdir/status.$$idx.tmp" "$$tmpdir/status.$$idx"; \
+			if echo $$status >"$$tmpdir/status.$$idx.tmp" && \
+				mv "$$tmpdir/status.$$idx.tmp" "$$tmpdir/status.$$idx"; then \
+				worker_status_written=1; \
+			else \
+				status=1; \
+			fi; \
+			if [ "$$worker_status_written" -eq 1 ]; then trap - EXIT; fi; \
 			if [ $$status -eq 0 ]; then result="OK"; else result="FAIL"; fi; \
 			running=""; \
 			left=0; \
@@ -329,11 +391,26 @@ define parallel_for
 				printf "  [%s] %s (%ss); %s remaining\n" "$$result" "$$item" "$$elapsed" "$$left"; \
 			fi; \
 		) & \
-		pids="$$pids $$!"; \
+		worker_pid=$$!; \
+		pids="$$pids $$worker_pid"; \
 	done; \
+	while :; do \
+		active=0; \
+		recover_dead_workers; \
+		for f in "$$tmpdir"/name.*; do \
+			[ -f "$$f" ] || continue; \
+			report_idx=$${f##*.}; \
+			[ -f "$$tmpdir/status.$$report_idx" ] || active=$$((active + 1)); \
+		done; \
+		[ $$active -eq 0 ] && break; \
+		report_running; \
+		sleep 1; \
+	done; \
+	echo "  [WAIT] $$desc: reaping completed workers"; \
 	for pid in $$pids; do \
 		wait $$pid || true; \
 	done; \
+	echo "  [WAIT] $$desc: collecting worker results"; \
 	failed=0; \
 	for f in "$$tmpdir"/name.*; do \
 		[ -f "$$f" ] || continue; \
@@ -355,12 +432,22 @@ define parallel_for
 				echo ""; \
 			fi; \
 		done; \
-		exit 1; \
-	fi
+	fi; \
+	if rm -rf "$$tmpdir"; then cleanup_status=0; else cleanup_status=$$?; fi; \
+	trap - EXIT; \
+	if [ $$cleanup_status -ne 0 ]; then \
+		echo "Failed to remove parallel-worker temporary files: $$tmpdir" >&2; \
+		exit $$cleanup_status; \
+	fi; \
+	echo "  [DONE] $$desc: workers exited, results collected, temporary files removed"; \
+	if [ $$failed -eq 1 ]; then exit 1; fi
 endef
 
 test:
+	@echo "  [RUNNING] Root tests"
 	$(TEST_CARGO_RUN) test --locked --quiet --no-default-features --features "$(BUILD_FEATURES)" -- --format=terse
+	@echo "  [DONE] Root tests"
+	@echo "  [RUNNING] Crate tests"
 	$(call parallel_for,$(ZETTA_TEST_CRATE_DIRS), \
 		cd "$$item" && \
 		if [ "$$item" = "crates/zmux" ]; then \
@@ -368,6 +455,7 @@ test:
 		fi && \
 		$(TEST_CARGO_RUN) test --locked --quiet -- --format=terse, \
 		Crate tests,$(TEST_CRATE_JOBS))
+	@echo "  [DONE] Test suites"
 
 ifneq ($(OS),Windows_NT)
 	$(MAKE) test-zosh-interop
@@ -385,7 +473,21 @@ PYTHON ?= python3
 endif
 SHITTY_ARGS ?=
 test-shitty:
+	@echo "  [RUNNING] Imported terminal conformance tests"
 	CARGO="$(CARGO)" $(PYTHON) scripts/shitty/run.py $(SHITTY_ARGS)
+	@echo "  [DONE] Imported terminal conformance tests"
+
+# Run the full native Windows validation chain through one MSVC-initialized
+# Make process, so each Cargo command reuses the same toolchain environment.
+ifeq ($(OS),Windows_NT)
+validate-windows:
+	@echo "  [RUNNING] Windows validation: format, lint, tests, build, feature checks, terminal conformance"
+	powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$(CURDIR)/scripts/make-windows.ps1" all check-features test-shitty
+	@echo "  [DONE] Windows validation"
+else
+validate-windows:
+	@echo "$@: the native Windows validation chain runs on Windows only."; exit 1
+endif
 
 # The scrolling workload is kept out of ordinary validation. Always optimize it
 # and retain the same priority and resource limits as the normal test runner.
@@ -398,13 +500,18 @@ test-zosh-interop:
 	ZOSH_TEST_SERVER="$(CURDIR)/target/zosh-interop/debug/zosh-server" $(TEST_CARGO_RUN) test --locked --manifest-path crates/zosh/Cargo.toml interop_tests -- --ignored
 
 fmt:
+	@echo "  [RUNNING] Root format check"
 	$(CARGO) fmt --check
+	@echo "  [DONE] Root format check"
 	$(call parallel_for,$(ZETTA_CRATE_DIRS), \
 		$(CARGO) fmt --manifest-path "$$item/Cargo.toml" --check, \
 		Format check)
 
 lint:
+	@echo "  [RUNNING] Root clippy"
 	$(CARGO_RUN) clippy --locked --all-targets --no-default-features --features "$(BUILD_FEATURES)" -- -D warnings
+	@echo "  [DONE] Root clippy"
+	@echo "  [RUNNING] Crate lint"
 	$(call parallel_for,$(ZETTA_TEST_CRATE_DIRS), \
 		cd "$$item" && $(CARGO_RUN) clippy --locked --all-targets -- -D warnings, \
 		Crate lint)
@@ -537,8 +644,12 @@ check-macos:
 # windowing-backend selection, and either one with no capability features
 # exercises every `cli_services`/`servers_enabled`/`tftp_enabled` gate.
 check-features:
+	@echo "  [RUNNING] Feature check: x11"
 	$(CARGO_RUN) $(PLATFORM_CARGO_CMD) --locked --all-targets --no-default-features --features x11 $(PLATFORM_CARGO_ARGS)
+	@echo "  [DONE] Feature check: x11"
+	@echo "  [RUNNING] Feature check: wayland"
 	$(CARGO_RUN) $(PLATFORM_CARGO_CMD) --locked --all-targets --no-default-features --features wayland $(PLATFORM_CARGO_ARGS)
+	@echo "  [DONE] Feature check: wayland"
 
 # Every platform this machine can check. The host is always one of them; a
 # platform whose cross toolchain is missing is skipped rather than failing the
@@ -650,7 +761,9 @@ endif
 
 ifeq ($(OS),Windows_NT)
 build:
-	cmd.exe /d /c scripts\build-windows.cmd $(CARGO_PROFILE_ARGS)
+	@echo "  [RUNNING] Windows binary build and verification"
+	powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$(CURDIR)/scripts/build-windows.ps1" $(CARGO_PROFILE_ARGS)
+	@echo "  [DONE] Windows binary build and verification"
 
 install: build
 	powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/install-windows.ps1 -Action Install -SourceBinary "$(BUILD_TARGET_DIR)/zetta.exe" -SourceGuiBinary "$(BUILD_TARGET_DIR)/zetta-gui.exe" -SourceWslxBinary "$(BUILD_TARGET_DIR)/wslx.exe" $(WINDOWS_ZMUX_ARGS)$(WINDOWS_ZMUX_UPGRADE_ARGS) $(WINDOWS_ZOSH_ARGS)$(WINDOWS_ZWT_ARGS)$(WINDOWS_ZDIFF_ARGS)$(WINDOWS_NOTIFY_ARGS)$(WINDOWS_CLIP_ARGS)$(WINDOWS_TFTP_ARGS)$(WINDOWS_HTTP_ARGS)

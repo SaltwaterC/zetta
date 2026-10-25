@@ -467,7 +467,7 @@ struct ProjectOfferBannerHarness;
 impl Render for ProjectOfferBannerHarness {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         let root = format!(
-            r"C:\Users\saltw\{}",
+            r"C:\Users\testuser\{}",
             "nested-project-directory\\".repeat(20)
         );
         div().size_full().child(Zetta::project_offer_banner(

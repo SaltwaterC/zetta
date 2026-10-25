@@ -203,14 +203,16 @@ fn leaving_an_alternate_screen_reveals_the_primary_screen_after_replay() {
     // alternate buffer makes the program's 1049l reveal the blank primary
     // buffer of the fresh terminal, so the next prompt and command are drawn
     // in the wrong place.
-    let original = term_showing(b"PS C:\\Users\\saltw> htop\x1b[?1049h\x1b[2Jpanel");
+    let original = term_showing(b"PS C:\\Users\\testuser> htop\x1b[?1049h\x1b[2Jpanel");
     let snapshot = ansi_snapshot(&original.lock(), 1000);
     let replayed = term_showing(&snapshot);
 
-    Processor::<StdSyncHandler>::new()
-        .advance(&mut *replayed.lock(), b"\x1b[?1049lPS C:\\Users\\saltw> ");
+    Processor::<StdSyncHandler>::new().advance(
+        &mut *replayed.lock(),
+        b"\x1b[?1049lPS C:\\Users\\testuser> ",
+    );
 
-    let expected = term_showing(b"PS C:\\Users\\saltw> htop\r\nPS C:\\Users\\saltw> ");
+    let expected = term_showing(b"PS C:\\Users\\testuser> htop\r\nPS C:\\Users\\testuser> ");
     assert_eq!(
         visible_text(&replayed.lock()),
         visible_text(&expected.lock()),

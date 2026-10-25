@@ -144,10 +144,11 @@ function Invoke-MakeTarget {
             $outputRedirection = '1>"{0}" 2>&1' -f $targetLogPath
             Write-HookProgress "$Target`: output $targetLogPath"
         }
-        # Set priority at launch so Make's shells inherit it too, including
-        # when this script is invoked from an interactive PowerShell session.
-        $processStartInfo.Arguments = '/d /v:on /s /c "start "" /b /belownormal /wait "{0}" /d /s /c ""{1}" {2} {3}" & exit /b !errorlevel!"' -f `
-            $env:ComSpec, `
+        # Lower this launcher before creating CMD so Make and its shells inherit
+        # the priority. START /B /WAIT ignores Ctrl+C and strands a batch wrapper
+        # at CMD's "Terminate batch job (Y/N)?" prompt when the hook is stopped.
+        [Diagnostics.Process]::GetCurrentProcess().PriorityClass = [Diagnostics.ProcessPriorityClass]::BelowNormal
+        $processStartInfo.Arguments = '/d /s /c ""{0}" {1} {2}"' -f `
             $makeCommand.Source, `
             ($makeArguments -join " "), `
             $outputRedirection
@@ -164,15 +165,43 @@ function Invoke-MakeTarget {
         $processStartInfo.Environment["PATH"] = $env:PATH
 
         $process = [Diagnostics.Process]::Start($processStartInfo)
-        Write-HookProgress "$Target`: process $($process.Id) started"
-        while (-not $process.WaitForExit(30000)) {
-            Write-HookProgress "$Target`: waiting for process $($process.Id)"
+        $completedNormally = $false
+        try {
+            Write-HookProgress "$Target`: process $($process.Id) started"
+            while (-not $process.WaitForExit(30000)) {
+                Write-HookProgress "$Target`: waiting for process $($process.Id)"
+                if ($null -ne $targetLogPath -and (Test-Path -LiteralPath $targetLogPath)) {
+                    $targetProgress = Get-Content -LiteralPath $targetLogPath -Tail 80 -ErrorAction SilentlyContinue |
+                        Where-Object { $_ -match '^\s+\[(RUNNING|WAIT|DONE)\]' } |
+                        Select-Object -Last 1
+                    if (-not [string]::IsNullOrWhiteSpace($targetProgress)) {
+                        Write-HookProgress "$Target`: $($targetProgress.Trim())"
+                    }
+                }
+            }
+            $completedNormally = $true
+            Write-HookProgress "$Target`: exited $($process.ExitCode)"
+            if ($process.ExitCode -ne 0 -and $null -ne $targetLogPath) {
+                Write-HookProgress "$Target`: failed; full output is in $targetLogPath"
+            }
+            return $process.ExitCode
+        } finally {
+            if (-not $completedNormally) {
+                # A cancelled hook must not leave Make's shells holding this
+                # terminal. Stop only the process tree launched above.
+                try {
+                    $process.Kill($true)
+                } catch {
+                    $taskkillPath = Join-Path $env:SystemRoot 'System32/taskkill.exe'
+                    & $taskkillPath /F /T /PID $process.Id 2>$null | Out-Null
+                    if (-not $process.HasExited) {
+                        $process.Kill()
+                    }
+                }
+                $process.WaitForExit()
+            }
+            $process.Dispose()
         }
-        Write-HookProgress "$Target`: exited $($process.ExitCode)"
-        if ($process.ExitCode -ne 0 -and $null -ne $targetLogPath) {
-            Write-HookProgress "$Target`: failed; full output is in $targetLogPath"
-        }
-        return $process.ExitCode
     }
 
     $previousErrorActionPreference = $ErrorActionPreference

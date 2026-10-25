@@ -1248,6 +1248,7 @@ fn validates_inactive_pane_opacity() {
 #[test]
 fn the_command_line_identity_reader_agrees_with_the_configuration_parser() {
     let directory = tempfile::tempdir().unwrap();
+    let home = directory.path().join("synthetic-home");
     for identity in ["/keys/zetta.txt", "~/keys/zetta.txt"] {
         let path = directory.path().join("config.json");
         let document = format!(r#"{{"sessions":{{"persistence":{{"identity":"{identity}"}}}}}}"#);
@@ -1257,8 +1258,9 @@ fn the_command_line_identity_reader_agrees_with_the_configuration_parser() {
             .unwrap()
             .sessions
             .persistence
-            .resolved_identity();
-        let read = crate::mux_identity::configured_identity_paths(Some(path));
+            .resolved_identity_with_home(&home, None);
+        let read =
+            crate::mux_identity::configured_identity_paths_with_home(Some(path), None, &home);
 
         assert_eq!(read, parsed.into_iter().collect::<Vec<_>>(), "{identity}");
     }
@@ -1270,23 +1272,42 @@ fn the_command_line_identity_reader_agrees_with_the_configuration_parser() {
 #[test]
 fn both_identity_readers_treat_an_unset_identity_the_same_way() {
     let directory = tempfile::tempdir().unwrap();
-    for document in [
+    let home = directory.path().join("synthetic-home");
+    let ssh_directory = home.join(".ssh");
+    std::fs::create_dir_all(&ssh_directory).unwrap();
+    let default_identity = ssh_directory.join("id_ed25519");
+    let documents = [
         r#"{"sessions":{"persistence":{}}}"#,
         r#"{"sessions":{"persistence":{"identity":null}}}"#,
         r#"{"sessions":{"persistence":{"identity":""}}}"#,
         r#"{"sessions":{"persistence":{"identity":"  "}}}"#,
         r#"{}"#,
-    ] {
-        let path = directory.path().join("config.json");
-        std::fs::write(&path, document).unwrap();
+    ];
 
-        let parsed = Config::parse(document, None, None)
-            .unwrap()
-            .sessions
-            .persistence
-            .resolved_identity();
-        let read = crate::mux_identity::configured_identity_paths(Some(path));
-        assert_eq!(read, parsed.into_iter().collect::<Vec<_>>(), "{document}");
+    for has_default_identity in [false, true] {
+        if has_default_identity {
+            std::fs::write(&default_identity, "test identity").unwrap();
+        } else {
+            let _ = std::fs::remove_file(&default_identity);
+        }
+        let fallback = has_default_identity.then(|| default_identity.clone());
+
+        for document in documents {
+            let path = directory.path().join("config.json");
+            std::fs::write(&path, document).unwrap();
+
+            let parsed = Config::parse(document, None, None)
+                .unwrap()
+                .sessions
+                .persistence
+                .resolved_identity_with_home(&home, fallback.clone());
+            let read = crate::mux_identity::configured_identity_paths_with_home(
+                Some(path),
+                fallback.clone(),
+                &home,
+            );
+            assert_eq!(read, parsed.into_iter().collect::<Vec<_>>(), "{document}");
+        }
     }
 }
 

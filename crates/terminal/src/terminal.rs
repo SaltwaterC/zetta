@@ -11396,8 +11396,8 @@ mod tests {
             ShellKind::Posix
         );
         assert_eq!(
-            wsl_editor_working_directory(&wsl, Some("/home/saltw/source/zetta")),
-            Some(PathBuf::from("/home/saltw/source/zetta"))
+            wsl_editor_working_directory(&wsl, Some("/home/testuser/source/zetta")),
+            Some(PathBuf::from("/home/testuser/source/zetta"))
         );
         assert_eq!(
             wsl_editor_working_directory(&wsl, Some("/etc")),
@@ -11447,20 +11447,20 @@ mod tests {
         assert_eq!(
             cygwin_path_like_to_windows(
                 &cygwin_bash,
-                "/cygdrive/c/Users/saltw/source/zetta/main.rs:12:4"
+                "/cygdrive/c/Users/testuser/source/zetta/main.rs:12:4"
             ),
-            Some(r"C:\Users\saltw\source\zetta\main.rs:12:4".to_owned())
+            Some(r"C:\Users\testuser\source\zetta\main.rs:12:4".to_owned())
         );
         let wsl_path_argument = editor_path_argument(
             ShellKind::Posix,
             &wsl,
-            Path::new("/home/saltw/source/zetta/LICENSE-APACHE"),
+            Path::new("/home/testuser/source/zetta/LICENSE-APACHE"),
             PathStyle::Unix,
         )
         .unwrap();
         assert_eq!(
             wsl_path_argument,
-            "\"$(wslpath -w /home/saltw/source/zetta/LICENSE-APACHE)\""
+            "\"$(wslpath -w /home/testuser/source/zetta/LICENSE-APACHE)\""
         );
         assert_eq!(
             editor_path_argument(
@@ -11477,7 +11477,7 @@ mod tests {
             "/usr/local/bin/zsh",
             "/opt/service/config.toml",
             "/var/log/messages",
-            "/mnt/c/Users/saltw/Desktop/notes.txt",
+            "/mnt/c/Users/testuser/Desktop/notes.txt",
         ] {
             assert_eq!(
                 editor_path_argument(ShellKind::Posix, &wsl, Path::new(path), PathStyle::Unix),
@@ -11511,19 +11511,19 @@ mod tests {
         );
         assert_eq!(
             editor_invocation_command("\"$ZETTA_HOST_EXECUTABLE\"", &wsl_path_argument, false),
-            "\"$ZETTA_HOST_EXECUTABLE\" edit -- \"$(wslpath -w /home/saltw/source/zetta/LICENSE-APACHE)\""
+            "\"$ZETTA_HOST_EXECUTABLE\" edit -- \"$(wslpath -w /home/testuser/source/zetta/LICENSE-APACHE)\""
         );
 
         let scrollback_path_argument = editor_path_argument(
             ShellKind::Posix,
             &wsl,
-            Path::new(r"C:\Users\saltw\AppData\Local\Temp\zetta\scrollback.txt"),
+            Path::new(r"C:\Users\testuser\AppData\Local\Temp\zetta\scrollback.txt"),
             PathStyle::Windows,
         )
         .unwrap();
         assert_eq!(
             scrollback_path_argument,
-            r#""C:\\Users\\saltw\\AppData\\Local\\Temp\\zetta\\scrollback.txt""#
+            r#""C:\\Users\\testuser\\AppData\\Local\\Temp\\zetta\\scrollback.txt""#
         );
         let scrollback_command = editor_invocation_command(
             &zetta_command_for_shell(&wsl).unwrap(),
@@ -11532,41 +11532,41 @@ mod tests {
         );
         assert_eq!(
             scrollback_command,
-            r#""$ZETTA_HOST_EXECUTABLE" edit --delete-after -- "C:\\Users\\saltw\\AppData\\Local\\Temp\\zetta\\scrollback.txt""#
+            r#""$ZETTA_HOST_EXECUTABLE" edit --delete-after -- "C:\\Users\\testuser\\AppData\\Local\\Temp\\zetta\\scrollback.txt""#
         );
         assert!(!scrollback_command.contains("wslpath"));
         let cygwin_bash_path = editor_path_argument(
             ShellKind::Posix,
             &cygwin_bash,
-            Path::new("/cygdrive/c/Users/saltw/source/zetta/file with spaces.txt"),
+            Path::new("/cygdrive/c/Users/testuser/source/zetta/file with spaces.txt"),
             PathStyle::Unix,
         )
         .unwrap();
         assert_eq!(
             cygwin_bash_path,
-            "\"$(cygpath -w '/cygdrive/c/Users/saltw/source/zetta/file with spaces.txt')\""
+            "\"$(cygpath -w '/cygdrive/c/Users/testuser/source/zetta/file with spaces.txt')\""
         );
         let cygwin_fish_path = editor_path_argument(
             ShellKind::Fish,
             &cygwin_fish,
-            Path::new("/cygdrive/c/Users/saltw/file.txt"),
+            Path::new("/cygdrive/c/Users/testuser/file.txt"),
             PathStyle::Unix,
         )
         .unwrap();
         assert_eq!(
             cygwin_fish_path,
-            "(cygpath -w /cygdrive/c/Users/saltw/file.txt)"
+            "(cygpath -w /cygdrive/c/Users/testuser/file.txt)"
         );
         let cygwin_nu_path = editor_path_argument(
             ShellKind::Nushell,
             &cygwin_nu,
-            Path::new("/cygdrive/c/Users/saltw/file.txt"),
+            Path::new("/cygdrive/c/Users/testuser/file.txt"),
             PathStyle::Unix,
         )
         .unwrap();
         assert_eq!(
             cygwin_nu_path,
-            "(cygpath -w /cygdrive/c/Users/saltw/file.txt)"
+            "(cygpath -w /cygdrive/c/Users/testuser/file.txt)"
         );
         assert_eq!(
             editor_path_argument(
