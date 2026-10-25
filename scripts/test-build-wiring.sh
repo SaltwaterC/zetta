@@ -61,7 +61,7 @@ for platform in Linux Darwin; do
                 fail "$platform build omitted $crate from the shared artifact directory"
         done
         run_make -n build-tools TOOLS=zpager > "$test_root/tools-plan"
-        grep -F -- "--manifest-path crates/zdiff/Cargo.toml --target-dir target/tools --bin zpager" "$test_root/tools-plan" > /dev/null ||
+        grep -F -- "--manifest-path crates/zpager/Cargo.toml --target-dir target/tools --bin zpager" "$test_root/tools-plan" > /dev/null ||
             fail "$platform standalone tools build omitted zpager"
         if [ "$release" = 1 ]; then
             [ "$(grep -c 'build --release' "$test_root/plan")" -eq 5 ] ||

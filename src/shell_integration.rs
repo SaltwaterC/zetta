@@ -188,7 +188,7 @@ fn render_integration(template: &str, shell: ShellIntegration) -> String {
     const ZDIFF_END: &str = "ZETTA_DIFF_INTEGRATION_END";
     let worktree_enabled = cfg!(feature = "worktree");
     let zmux_enabled = cfg!(feature = "zmux");
-    let zdiff_enabled = cfg!(feature = "zdiff");
+    let pager_enabled = cfg!(feature = "zdiff");
     let mut rendered = String::with_capacity(template.len());
     let mut in_optional_section = false;
     let mut in_zmux_section = false;
@@ -304,7 +304,7 @@ fn render_integration(template: &str, shell: ShellIntegration) -> String {
         ),
         (
             "ZETTA_DIFF_COMPLETION_CHECK",
-            if zdiff_enabled {
+            if pager_enabled {
                 "($commandName -eq 'zpager')"
             } else {
                 "($false)"
@@ -346,7 +346,7 @@ fn render_integration(template: &str, shell: ShellIntegration) -> String {
         }
         if (!in_optional_section || worktree_enabled)
             && (!in_zmux_section || zmux_enabled)
-            && (!in_zdiff_section || zdiff_enabled)
+            && (!in_zdiff_section || pager_enabled)
             && (!in_clipboard_section || cfg!(feature = "clipboard"))
         {
             // Render only the selected payload, filtering and substituting each line once.
@@ -815,14 +815,14 @@ pub(crate) fn shell_integration_help() -> String {
     } else {
         ""
     };
-    let zdiff_help = if cfg!(feature = "zdiff") {
+    let pager_help = if cfg!(feature = "zdiff") {
         " The zpager Git diff pager sets GIT_PAGER=zpager and completes its columns, width, color, and help options."
     } else {
         ""
     };
     let mosh_help = "\n\nThe generated integration also defines a mosh wrapper only when no real mosh command, alias, function, or builtin already exists; it routes through zetta mosh and completes Mosh options and SSH targets. The bundled zosh command is the full Mosh-compatible launcher and terminal client, with the same option surface available through zosh --help.";
     format!(
-        "{help}{mosh_help}{worktree_help}{zdiff_help}\n\nProfile administration also completes the fixed icon values auto, zetta, bash, zsh, and fish."
+        "{help}{mosh_help}{worktree_help}{pager_help}\n\nProfile administration also completes the fixed icon values auto, zetta, bash, zsh, and fish."
     )
 }
 

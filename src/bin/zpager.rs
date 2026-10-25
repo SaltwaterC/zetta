@@ -1,3 +1,3 @@
 fn main() {
-    zdiff::cli_main();
+    zpager::cli_main();
 }

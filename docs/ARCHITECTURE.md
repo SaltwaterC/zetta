@@ -453,7 +453,7 @@ without that feature, so no call site needs a feature predicate:
 (the multiplexer a client resolves beside its own executable — this is the one
 that runs, not `crates/zmux`'s), `zmux_pty.rs`, `zosh.rs`, `zwt.rs`,
 `zpager.rs` (the `zpager` terminal Git diff pager implemented in
-`crates/zdiff`),
+`crates/zpager`),
 `zetta_gui.rs`, and `wslx.rs` (Windows only and built without any feature;
 everything it does lives in `crates/wslx`).
 

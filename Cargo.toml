@@ -45,7 +45,7 @@ tftp-client = ["dep:ztftp", "ztftp/tftp-client"]
 notifications = ["dep:zntfy"]
 clipboard = ["dep:zclip"]
 worktree = ["dep:zwt", "zwt/recursive-submodules"]
-zdiff = ["dep:zdiff"]
+zdiff = ["dep:zpager"]
 zosh = ["zosh-client", "zosh-server"]
 zosh-client = ["dep:zosh"]
 zosh-server = ["dep:moshcatty", "dep:portable-pty", "dep:vt100", "dep:zclip"]
@@ -99,7 +99,7 @@ required-features = ["zosh-server"]
 
 [dependencies]
 zhttp = { path = "crates/zhttp", optional = true }
-zdiff = { path = "crates/zdiff", optional = true }
+zpager = { path = "crates/zpager", optional = true }
 ztftp = { path = "crates/ztftp", default-features = false, optional = true }
 anyhow = "1"
 async-channel = "2.5.0"

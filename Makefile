@@ -75,7 +75,7 @@ ZETTA_CRATE_DIRS := \
 	crates/ztftp \
 	crates/zhttp \
 	crates/zwt \
-	crates/zdiff \
+	crates/zpager \
 	crates/wslx \
 	crates/zmux \
 	crates/zosh \
@@ -95,7 +95,7 @@ ZETTA_TEST_CRATE_DIRS := \
 	crates/ztftp \
 	crates/zhttp \
 	crates/zwt \
-	crates/zdiff \
+	crates/zpager \
 	crates/wslx \
 	crates/zmux \
 	crates/zosh \
@@ -1137,7 +1137,7 @@ TOOL_CRATE_zpaste := crates/zclip
 TOOL_BINS_zpaste := zpaste
 TOOL_CRATE_zwt := crates/zwt
 TOOL_BINS_zwt := zwt
-TOOL_CRATE_zpager := crates/zdiff
+TOOL_CRATE_zpager := crates/zpager
 TOOL_BINS_zpager := zpager
 TOOL_CRATE_zhttp := crates/zhttp
 TOOL_BINS_zhttp := zhttp
