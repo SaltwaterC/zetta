@@ -9,7 +9,10 @@ use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::style::{
     Attribute, Color, Print, ResetColor, SetAttribute, SetBackgroundColor, SetForegroundColor,
 };
-use crossterm::terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen};
+use crossterm::terminal::{
+    self, BeginSynchronizedUpdate, Clear, ClearType, EndSynchronizedUpdate, EnterAlternateScreen,
+    LeaveAlternateScreen,
+};
 use crossterm::{execute, queue};
 use std::io::{self, Write};
 use std::time::Duration;
@@ -34,9 +37,11 @@ pub(crate) fn run(
         geometry: None,
         rows: Vec::new(),
         files: Vec::new(),
+        drawn_view: None,
     };
     loop {
-        state.draw()?;
+        let (width, height) = terminal::size().context("failed to read terminal size")?;
+        state.draw(&mut io::stdout().lock(), width, height)?;
         if !event::poll(Duration::from_millis(250)).context("failed to read terminal input")? {
             continue;
         }
@@ -220,21 +225,42 @@ struct ViewState {
     geometry: Option<LayoutGeometry>,
     rows: Vec<ViewRow>,
     files: Vec<FileStart>,
+    // The document and display options are immutable while the pager is open.
+    // Polling still checks the terminal size, but idle input must emit no paint.
+    drawn_view: Option<(u16, u16, usize, usize)>,
 }
 
 impl ViewState {
-    fn draw(&mut self) -> Result<()> {
-        let (width, height) = terminal::size().context("failed to read terminal size")?;
+    fn draw(&mut self, output: &mut impl Write, width: u16, height: u16) -> Result<()> {
         let geometry = self.ensure_layout(width);
         let viewport_rows = usize::from(height.saturating_sub(3));
         self.keep_cursor_visible(viewport_rows);
-        let mut output = io::stdout().lock();
-        queue!(output, Hide, MoveTo(0, 0), Clear(ClearType::All))?;
-        self.draw_title(&mut output, geometry)?;
-        self.draw_column_headers(&mut output, geometry)?;
-        self.draw_viewport(&mut output, geometry, viewport_rows)?;
-        self.draw_status(&mut output, width, height)?;
+        let view = (width, height, self.scroll, self.cursor);
+        if self.drawn_view == Some(view) {
+            return Ok(());
+        }
+
+        // Stdout's lock does not buffer writes. Assemble the entire frame before
+        // publishing it, and synchronize presentation across SSH/PTY read splits
+        // so the screen clear cannot appear without its replacement content.
+        let mut frame = Vec::new();
+        queue!(
+            frame,
+            BeginSynchronizedUpdate,
+            Hide,
+            MoveTo(0, 0),
+            Clear(ClearType::All)
+        )?;
+        self.draw_title(&mut frame, geometry)?;
+        self.draw_column_headers(&mut frame, geometry)?;
+        self.draw_viewport(&mut frame, geometry, viewport_rows)?;
+        self.draw_status(&mut frame, width, height)?;
+        queue!(frame, EndSynchronizedUpdate)?;
+        output
+            .write_all(&frame)
+            .context("failed to draw terminal view")?;
         output.flush().context("failed to draw terminal view")?;
+        self.drawn_view = Some(view);
         Ok(())
     }
 
@@ -964,6 +990,7 @@ impl Drop for TerminalGuard {
     fn drop(&mut self) {
         let _ = execute!(
             io::stdout(),
+            EndSynchronizedUpdate,
             ResetColor,
             SetAttribute(Attribute::Reset),
             Show,
@@ -972,3 +999,7 @@ impl Drop for TerminalGuard {
         let _ = terminal::disable_raw_mode();
     }
 }
+
+#[cfg(test)]
+#[path = "tests/view.rs"]
+mod tests;

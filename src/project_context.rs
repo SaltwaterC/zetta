@@ -764,16 +764,15 @@ impl Zetta {
         let Some(pane) = self.project_detection_pane(tab_id, pane_id) else {
             return;
         };
-        // A Mosh client's remote shell cannot report its directory through
-        // the session, so the pane would otherwise keep the local project it
-        // was in when the client started. A change of foreground process
-        // emits `TitleChanged`, which is what re-runs this on both sides of
-        // the session.
+        // Remote directory reports may be absent or match a local project
+        // path. Suspend that project based on the client instead. A change
+        // of foreground process emits `TitleChanged`, which re-runs this on
+        // both sides of the session, even without remote shell integration.
         let remote_foreground = pane.terminal.as_ref().is_some_and(|terminal| {
             terminal
                 .read(cx)
                 .foreground_process_command_line()
-                .is_some_and(|argv| crate::ssh_image_paste::foreground_is_mosh_session(&argv))
+                .is_some_and(|argv| crate::ssh_image_paste::foreground_is_remote_session(&argv))
         });
         if remote_foreground {
             // Placed when the client exits, the tab would move under a user
@@ -807,8 +806,7 @@ impl Zetta {
             ProjectDetectionDirectory::Unverified(directory) => {
                 // The pane appears to be somewhere its shell has not confirmed:
                 // a host it is logged in to, or a forged report. That may take
-                // it out of its project — what an OpenSSH session relies on, see
-                // `foreground_is_mosh_session` — but never into one. The entry
+                // it out of its project, but never into one. The entry
                 // is dropped so the shell's next confirmed report is detected
                 // again even when it names the directory detected last.
                 self.projects.detections.remove(&pane_id);

@@ -186,7 +186,7 @@ impl Zetta {
                     }
                 }
             });
-        let group = self.group_for_new_tab(origin, project.as_deref());
+        let group = self.group_for_new_tab(origin, project.as_deref(), cx);
         let active_pane = self.tabs.get(self.active_tab).and_then(Tab::active_pane);
         let effective = project
             .as_ref()

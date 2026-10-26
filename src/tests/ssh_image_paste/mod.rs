@@ -340,7 +340,7 @@ fn non_ssh_foreground_processes_use_the_native_path() {
 }
 
 #[test]
-fn a_mosh_session_is_recognized_in_every_form_a_pane_reports_it() {
+fn a_remote_session_is_recognized_in_every_form_a_pane_reports_it() {
     let argv = |words: &[&str]| {
         words
             .iter()
@@ -348,26 +348,37 @@ fn a_mosh_session_is_recognized_in_every_form_a_pane_reports_it() {
             .collect::<Vec<_>>()
     };
     for session in [
+        argv(&["ssh", "host"]),
+        argv(&["/usr/bin/ssh", "-p", "2222", "user@host"]),
+        argv(&[r"C:\Windows\System32\OpenSSH\ssh.exe", "host"]),
+        // Theme isolation must not depend on image paste's option allowlist.
+        argv(&["ssh", "-o", "ProxyCommand=custom-proxy %h %p", "host"]),
         argv(&["zosh", "host"]),
         argv(&["/usr/bin/zosh", "host"]),
         argv(&[r"C:\Program Files\Zetta\zosh.exe", "host"]),
         argv(&["mosh", "--ssh=ssh -p 2222", "host"]),
         argv(&["mosh-client", "-# host |", "192.0.2.1", "60001"]),
         // The single-string form MSYS2 and Cygwin report a command line as.
+        argv(&["ssh user@host"]),
+        argv(&["/usr/bin/ssh -p 2222 user@host"]),
         argv(&["zosh user@host"]),
     ] {
-        assert!(foreground_is_mosh_session(&session), "{session:?}");
+        assert!(foreground_is_remote_session(&session), "{session:?}");
     }
     for local in [
-        argv(&["ssh", "host"]),
         argv(&["zsh"]),
         argv(&["bash", "-l"]),
         argv(&["vim", "zosh.txt"]),
         argv(&["zosh-server", "new"]),
+        argv(&["ssh-agent"]),
+        argv(&["ssh-helper", "host"]),
+        argv(&["sshd"]),
+        argv(&["echo", "ssh", "host"]),
+        argv(&["vim ssh"]),
         argv(&["vim zosh"]),
         argv(&[]),
     ] {
-        assert!(!foreground_is_mosh_session(&local), "{local:?}");
+        assert!(!foreground_is_remote_session(&local), "{local:?}");
     }
 }
 

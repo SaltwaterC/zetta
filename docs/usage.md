@@ -95,7 +95,9 @@ running commands, shell directories and pinning are preserved. Escape cancels.
 
 A tab joins the group you are viewing when you open it. Opening a project,
 from the palette or with `zetta project open`, puts its tab in that project's
-group. A worktree group's first tab starts in the worktree. The number on a
+group and opens the sidebar, expanding that project. If the sidebar was disabled,
+this enables it for the current window without changing the saved configuration.
+A worktree group's first tab starts in the worktree. The number on a
 row is how many tabs that group holds. A row's right-click menu opens a tab in
 that group without leaving the one you are in. The **+** beside **Projects**
 opens the project settings, where projects are added and removed. **zetta: new

@@ -11,6 +11,73 @@ fn worktree(project: &str, name: &str) -> TabGroup {
     }
 }
 
+#[gpui::test]
+fn opening_a_project_reveals_its_group_even_when_the_sidebar_was_disabled(
+    cx: &mut gpui::TestAppContext,
+) {
+    cx.update(|cx| {
+        theme_settings::init(theme::LoadThemes::JustBase, cx);
+        terminal::terminal_settings::TerminalSettings::init(cx);
+    });
+    let (zetta, cx) = cx.add_window_view(|window, cx| {
+        let mut config = Config::defaults(None, None);
+        config.profiles.clear(); // No shell or daemon is started by this test.
+        let mut zetta = Zetta::new(
+            config,
+            None,
+            ZettaLaunchOptions {
+                no_mux: true,
+                ..Default::default()
+            },
+            window,
+            cx,
+        );
+        zetta.projects.registry = crate::project::ProjectRegistry::empty();
+        zetta
+    });
+    zetta.update(cx, |zetta, cx| {
+        let project = ProjectConfig {
+            pending_approval: None,
+            root: PathBuf::from("/src/api"),
+            effective: zetta.launch_config.clone(),
+            theme: None,
+            dark_theme: None,
+            environment: HashMap::new(),
+            commands: Default::default(),
+            initial_split: None,
+        };
+        for hidden_by_setting in [false, true] {
+            for already_open in [false, true] {
+                for explicit in [None, Some(worktree("api", "fix"))] {
+                    zetta.launch_config.hide_project_sidebar = hidden_by_setting;
+                    zetta.sidebar.open = already_open;
+                    zetta.sidebar.collapsed.insert(project.root.clone());
+                    zetta.tab_groups.opening = explicit.clone();
+
+                    let group =
+                        zetta.group_for_new_tab(NewTabOrigin::ProjectEntry, Some(&project), cx);
+
+                    assert_eq!(
+                        group,
+                        explicit.unwrap_or_else(|| TabGroup::Project(project.root.clone()))
+                    );
+                    assert!(zetta.sidebar_visible());
+                    assert!(!zetta.sidebar.collapsed.contains(&project.root));
+                    assert!(zetta.tab_groups.opening.is_none());
+
+                    // Closing the sidebar must last through ordinary new tabs,
+                    // including those that inherit a project context.
+                    zetta.launch_config.hide_project_sidebar = hidden_by_setting;
+                    zetta.sidebar.open = false;
+                    zetta.group_for_new_tab(NewTabOrigin::CurrentSession, Some(&project), cx);
+                    assert!(!zetta.sidebar_visible());
+                    assert_eq!(zetta.launch_config.hide_project_sidebar, hidden_by_setting);
+                }
+            }
+        }
+    });
+}
+
 #[test]
 fn a_group_lists_only_its_own_tabs_in_order() {
     let groups = [

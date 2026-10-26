@@ -301,9 +301,9 @@ impl Zetta {
         self.sidebar.open && self.tab_groups_enabled()
     }
 
-    /// Reveals the destination of a restored project tab in this window. This
+    /// Reveals the destination of an opened or restored project tab. This
     /// changes the running window's configuration, not the saved preference.
-    pub(crate) fn reveal_restored_tab_group(&mut self, group: &TabGroup, cx: &mut Context<Self>) {
+    pub(crate) fn reveal_project_tab_group(&mut self, group: &TabGroup, cx: &mut Context<Self>) {
         let Some(project) = group.project_root() else {
             return;
         };

@@ -34,12 +34,12 @@
 //! Saved directories resolved on restore, or earlier detections, place a tab
 //! at once. Unknown directories keep it in Main until all panes are known
 //! ([`TabGroupState::arriving`]); detections after placement leave it alone.
-//! Restoring into a project or worktree reveals the sidebar, enabling grouping
-//! for this window even when the saved configuration hid it.
+//! Opening or restoring into a project or worktree reveals the sidebar,
+//! enabling grouping for this window even when the saved configuration hid it.
 //!
 //! `hide_project_sidebar` turns the whole thing off: every tab is in view,
-//! cycling covers all of them, and new tabs join Main, until a project restore
-//! enables it again. Tabs keep the group
+//! cycling covers all of them, and new tabs join Main, until opening or
+//! restoring a project enables it again. Tabs keep the group
 //! they had, so turning the sidebar back on restores the grouping.
 
 use super::*;
@@ -419,15 +419,10 @@ impl Zetta {
         &mut self,
         origin: NewTabOrigin,
         project: Option<&ProjectConfig>,
+        cx: &mut Context<Self>,
     ) -> TabGroup {
         let explicit = self.tab_groups.opening.take();
-        if !self.tab_groups_enabled() {
-            return TabGroup::Main;
-        }
-        if let Some(group) = explicit {
-            return group;
-        }
-        match (origin, project) {
+        let group = explicit.unwrap_or_else(|| match (origin, project) {
             (NewTabOrigin::ProjectEntry, Some(project)) => TabGroup::Project(
                 self.projects
                     .registry
@@ -437,6 +432,16 @@ impl Zetta {
             ),
             (NewTabOrigin::GroupEntry, _) => TabGroup::Main,
             _ => self.active_tab_group(),
+        });
+        // Enable grouping before assigning the destination, just as restoring
+        // a project does; otherwise a hidden sidebar sends the tab to Main.
+        if origin == NewTabOrigin::ProjectEntry {
+            self.reveal_project_tab_group(&group, cx);
+        }
+        if self.tab_groups_enabled() {
+            group
+        } else {
+            TabGroup::Main
         }
     }
 
@@ -462,7 +467,7 @@ impl Zetta {
             self.tab_groups.arriving.insert(tab.id);
             TabGroup::Main
         };
-        self.reveal_restored_tab_group(&tab.group, cx);
+        self.reveal_project_tab_group(&tab.group, cx);
         insert_tab_in_pin_order(&mut self.tabs, tab)
     }
 
@@ -480,7 +485,7 @@ impl Zetta {
         };
         self.tab_groups.arriving.remove(&tab_id);
         tab.group = group.clone();
-        self.reveal_restored_tab_group(&group, cx);
+        self.reveal_project_tab_group(&group, cx);
     }
 
     /// Settles `active_tab` once the tab at `removed_index`, which belonged to

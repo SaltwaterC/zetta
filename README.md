@@ -95,7 +95,7 @@ environment they started with; create a new remote pane to apply this context.
   Move existing tabs between groups from their context menu or the command palette.
   Reattached tabs return to a project or worktree group only when every pane's
   directory belongs to it; subdirectories count, and mixed directories stay in Main.
-  Restoring into a project or worktree automatically opens the sidebar.
+  Opening or restoring into a project or worktree automatically opens the sidebar.
 - In-memory tab attention badges from `zetta attention`, with optional
   cross-platform desktop notifications that click back to the issuing visible
   tab
@@ -362,6 +362,9 @@ back directly to the local application's theme. **Reset Pane Theme**
 and **Reset Tab Theme** are also available from the command palette. These overrides
 follow their pane or tab through backgrounding, reconnect, and encrypted disk
 resume, but are cleared when the pane or tab closes or configuration reloads.
+Running `ssh`, `zosh`, or `mosh` suspends the pane's local project theme until
+the client exits, even when the remote shell has no Zetta integration. The tab
+stays in its current sidebar group.
 Local reconnect restores each pane's project context from its saved working
 directory and loads the current project configuration before showing the terminal,
 so a running TUI keeps its project theme before new shell metadata arrives.
