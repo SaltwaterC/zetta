@@ -17,7 +17,7 @@ run_make() {
     make --no-print-directory -C "$repository" OS=Unix UNAME_S="$platform" CARGO_BUILD_JOBS=2 \
         RELEASE="$release" SERIAL=1 HTTP=1 TFTP=1 TFTP_SERVER=1 TFTP_CLIENT=1 \
         NOTIFY=1 CLIPBOARD=1 SYNTAX_HIGHLIGHTING=1 ZMUX=1 \
-        SESSION_PERSISTENCE=1 WORKTREE=1 ZDIFF=1 ZOSH=1 ZOSH_CLIENT=1 ZOSH_SERVER=1 \
+        SESSION_PERSISTENCE=1 WORKTREE=1 ZPAGER=1 ZOSH=1 ZOSH_CLIENT=1 ZOSH_SERVER=1 \
         "$@"
 }
 
@@ -53,7 +53,7 @@ for platform in Linux Darwin; do
         done
         run_make check-build-binaries BUILD_TARGET_DIR="$artifact_dir" \
             HTTP=0 TFTP_SERVER=0 TFTP_CLIENT=0 NOTIFY=0 CLIPBOARD=0 \
-            ZMUX=0 WORKTREE=0 ZDIFF=0 ZOSH_CLIENT=0 ZOSH_SERVER=0
+            ZMUX=0 WORKTREE=0 ZPAGER=0 ZOSH_CLIENT=0 ZOSH_SERVER=0
 
         run_make -n build > "$test_root/plan"
         for crate in zntfy ztftp zhttp zclip; do

@@ -1,7 +1,7 @@
 # Zetta shell integration for Bash.
-# ZETTA_DIFF_INTEGRATION_BEGIN
+# ZETTA_PAGER_INTEGRATION_BEGIN
 export GIT_PAGER=zpager
-# ZETTA_DIFF_INTEGRATION_END
+# ZETTA_PAGER_INTEGRATION_END
 
 __zetta_run_path() {
     command zetta "$@"
@@ -343,9 +343,9 @@ __zetta_lazy_complete() {
 }
 if [[ ${__ZETTA_COMPLETIONS_LOADED:-0} != 1 ]]; then
     complete -F __zetta_lazy_complete zetta zosh zvi ztftp zhttp zntfy
-# ZETTA_DIFF_INTEGRATION_BEGIN
+# ZETTA_PAGER_INTEGRATION_BEGIN
     complete -F __zetta_lazy_complete zpager
-# ZETTA_DIFF_INTEGRATION_END
+# ZETTA_PAGER_INTEGRATION_END
     [[ ${__ZETTA_MOSH_WRAPPER:-0} == 1 ]] && complete -F __zetta_lazy_complete mosh
 # ZETTA_WORKTREE_INTEGRATION_BEGIN
     complete -F __zetta_lazy_complete zwt

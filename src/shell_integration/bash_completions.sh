@@ -1198,7 +1198,7 @@ _zhttp_complete() {
 }
 complete -F _zhttp_complete zhttp
 
-# ZETTA_DIFF_INTEGRATION_BEGIN
+# ZETTA_PAGER_INTEGRATION_BEGIN
 _zpager_complete() {
     local current=${COMP_WORDS[COMP_CWORD]} previous=${COMP_WORDS[COMP_CWORD-1]}
     if [[ $previous == --columns || $previous == --width ]]; then
@@ -1210,4 +1210,4 @@ _zpager_complete() {
     fi
 }
 complete -o default -F _zpager_complete zpager
-# ZETTA_DIFF_INTEGRATION_END
+# ZETTA_PAGER_INTEGRATION_END

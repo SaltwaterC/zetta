@@ -25,7 +25,7 @@ Makefile equivalent of Cargo's `--release` flag.
 The default build includes the standalone `zwt` Git worktree command, the
 `zpager` Git diff pager, and the `zetta wt` compatibility route, plus the
 bundled Zosh client (`zosh`) and `zosh-server`. Set `WORKTREE=0` on both build
-and install commands to omit the worktree command. Set `ZDIFF=0` to omit
+and install commands to omit the worktree command. Set `ZPAGER=0` to omit
 `zpager`, or `ZOSH=0` to omit the bundled Zosh client and server executables and
 the `zetta mosh` compatibility route. `ZOSH_CLIENT=0` and `ZOSH_SERVER=0`
 omit either Zosh component independently.
@@ -346,7 +346,7 @@ preference when it can be configured.
 
 To build a restricted binary, pass build flags to both the build and install
 steps. `SERIAL`, `HTTP`, `TFTP`, `TFTP_SERVER`, `TFTP_CLIENT`, `NOTIFY`,
-`CLIPBOARD`, `WORKTREE`, `ZDIFF`, `ZOSH`, `ZOSH_CLIENT`, and `ZOSH_SERVER`
+`CLIPBOARD`, `WORKTREE`, `ZPAGER`, `ZOSH`, `ZOSH_CLIENT`, and `ZOSH_SERVER`
 accept `0`, `false`, `no`, and `off`.
 `TFTP=0`
 disables both TFTP components; the server and client switches can be used
@@ -367,8 +367,8 @@ make build WORKTREE=0
 make install WORKTREE=0
 
 # Omit the Git diff pager.
-make build ZDIFF=0
-make install ZDIFF=0
+make build ZPAGER=0
+make install ZPAGER=0
 
 # Omit the bundled Zosh client/server executables and the zetta mosh route.
 make build ZOSH=0

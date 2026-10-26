@@ -184,15 +184,15 @@ fn render_integration(template: &str, shell: ShellIntegration) -> String {
     const END: &str = "ZETTA_WORKTREE_INTEGRATION_END";
     const ZMUX_BEGIN: &str = "ZETTA_ZMUX_INTEGRATION_BEGIN";
     const ZMUX_END: &str = "ZETTA_ZMUX_INTEGRATION_END";
-    const ZDIFF_BEGIN: &str = "ZETTA_DIFF_INTEGRATION_BEGIN";
-    const ZDIFF_END: &str = "ZETTA_DIFF_INTEGRATION_END";
+    const ZPAGER_BEGIN: &str = "ZETTA_PAGER_INTEGRATION_BEGIN";
+    const ZPAGER_END: &str = "ZETTA_PAGER_INTEGRATION_END";
     let worktree_enabled = cfg!(feature = "worktree");
     let zmux_enabled = cfg!(feature = "zmux");
-    let pager_enabled = cfg!(feature = "zdiff");
+    let pager_enabled = cfg!(feature = "zpager");
     let mut rendered = String::with_capacity(template.len());
     let mut in_optional_section = false;
     let mut in_zmux_section = false;
-    let mut in_zdiff_section = false;
+    let mut in_zpager_section = false;
     let mut in_clipboard_section = false;
     let colors = render_overlay_color_names(shell);
 
@@ -336,17 +336,17 @@ fn render_integration(template: &str, shell: ShellIntegration) -> String {
             in_zmux_section = false;
             continue;
         }
-        if line.contains(ZDIFF_BEGIN) {
-            in_zdiff_section = true;
+        if line.contains(ZPAGER_BEGIN) {
+            in_zpager_section = true;
             continue;
         }
-        if line.contains(ZDIFF_END) {
-            in_zdiff_section = false;
+        if line.contains(ZPAGER_END) {
+            in_zpager_section = false;
             continue;
         }
         if (!in_optional_section || worktree_enabled)
             && (!in_zmux_section || zmux_enabled)
-            && (!in_zdiff_section || pager_enabled)
+            && (!in_zpager_section || pager_enabled)
             && (!in_clipboard_section || cfg!(feature = "clipboard"))
         {
             // Render only the selected payload, filtering and substituting each line once.
@@ -815,7 +815,7 @@ pub(crate) fn shell_integration_help() -> String {
     } else {
         ""
     };
-    let pager_help = if cfg!(feature = "zdiff") {
+    let pager_help = if cfg!(feature = "zpager") {
         " The zpager Git diff pager sets GIT_PAGER=zpager and completes its columns, width, color, and help options."
     } else {
         ""

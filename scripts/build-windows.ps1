@@ -56,7 +56,7 @@ $defaults = @{
     ZMUX = '1'
     SESSION_PERSISTENCE = '1'
     WORKTREE = '1'
-    ZDIFF = '1'
+    ZPAGER = '1'
     ZOSH = '1'
 }
 foreach ($entry in $defaults.GetEnumerator()) {
@@ -88,7 +88,7 @@ foreach ($feature in @(
     @{ Variable = 'SYNTAX_HIGHLIGHTING'; Name = 'syntax-highlighting' },
     @{ Variable = 'ZMUX'; Name = 'zmux' },
     @{ Variable = 'WORKTREE'; Name = 'worktree' },
-    @{ Variable = 'ZDIFF'; Name = 'zdiff' },
+    @{ Variable = 'ZPAGER'; Name = 'zpager' },
     @{ Variable = 'ZOSH_CLIENT'; Name = 'zosh-client' },
     @{ Variable = 'ZOSH_SERVER'; Name = 'zosh-server' }
 )) {
@@ -131,7 +131,7 @@ if (Test-FeatureEnabled $env:WORKTREE) {
     $binaries.Add('zwt')
     $verificationArguments += @('-WorktreeBinaryPath', (Join-Path $targetDirectory 'zwt.exe'))
 }
-if (Test-FeatureEnabled $env:ZDIFF) {
+if (Test-FeatureEnabled $env:ZPAGER) {
     $binaries.Add('zpager')
     $verificationArguments += @('-PagerBinaryPath', (Join-Path $targetDirectory 'zpager.exe'))
 }

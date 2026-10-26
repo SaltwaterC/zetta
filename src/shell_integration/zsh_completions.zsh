@@ -1087,7 +1087,7 @@ _zhttp() {
 }
 compdef _zhttp zhttp
 
-# ZETTA_DIFF_INTEGRATION_BEGIN
+# ZETTA_PAGER_INTEGRATION_BEGIN
 _zpager() {
     _arguments \
         '--columns[Minimum terminal width per side before stacking]:columns:(40 60 80 100 120)' \
@@ -1096,4 +1096,4 @@ _zpager() {
         '--help[Print this help]'
 }
 compdef _zpager zpager
-# ZETTA_DIFF_INTEGRATION_END
+# ZETTA_PAGER_INTEGRATION_END

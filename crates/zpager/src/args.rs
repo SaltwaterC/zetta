@@ -71,21 +71,21 @@ pub(crate) fn parse(arguments: Vec<OsString>) -> Result<ParsedArgs> {
 }
 
 fn configured_width() -> Result<Option<usize>> {
-    match std::env::var("ZDIFF_WIDTH") {
-        Ok(value) => Ok(Some(parse_column_text(&value, "ZDIFF_WIDTH")?)),
+    match std::env::var("ZPAGER_WIDTH") {
+        Ok(value) => Ok(Some(parse_column_text(&value, "ZPAGER_WIDTH")?)),
         Err(std::env::VarError::NotPresent) => Ok(None),
         Err(std::env::VarError::NotUnicode(_)) => {
-            bail!("ZDIFF_WIDTH must be valid UTF-8")
+            bail!("ZPAGER_WIDTH must be valid UTF-8")
         }
     }
 }
 
 fn configured_columns() -> Result<usize> {
-    match std::env::var("ZDIFF_COLUMNS") {
-        Ok(value) => parse_column_text(&value, "ZDIFF_COLUMNS"),
+    match std::env::var("ZPAGER_COLUMNS") {
+        Ok(value) => parse_column_text(&value, "ZPAGER_COLUMNS"),
         Err(std::env::VarError::NotPresent) => Ok(DEFAULT_COLUMNS),
         Err(std::env::VarError::NotUnicode(_)) => {
-            bail!("ZDIFF_COLUMNS must be valid UTF-8")
+            bail!("ZPAGER_COLUMNS must be valid UTF-8")
         }
     }
 }

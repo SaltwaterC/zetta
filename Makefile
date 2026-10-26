@@ -14,7 +14,7 @@ SYNTAX_HIGHLIGHTING ?= 1
 ZMUX ?= 1
 SESSION_PERSISTENCE ?= 1
 WORKTREE ?= 1
-ZDIFF ?= 1
+ZPAGER ?= 1
 ZOSH ?= 1
 ZOSH_CLIENT ?= $(ZOSH)
 ZOSH_SERVER ?= $(ZOSH)
@@ -129,7 +129,7 @@ TEST_BUILD_JOBS ?= 4
 TEST_THREADS ?= 8
 
 # Set any of SERIAL, HTTP, TFTP, TFTP_SERVER, TFTP_CLIENT, NOTIFY, CLIPBOARD,
-# SYNTAX_HIGHLIGHTING, ZMUX, SESSION_PERSISTENCE, WORKTREE, ZDIFF, ZOSH, ZOSH_CLIENT,
+# SYNTAX_HIGHLIGHTING, ZMUX, SESSION_PERSISTENCE, WORKTREE, ZPAGER, ZOSH, ZOSH_CLIENT,
 # or ZOSH_SERVER to 0, false, no, or off to omit that capability from the built
 # binary. ZOSH is a shorthand for disabling both Zosh components.
 # TFTP is a convenient shorthand for disabling both the server and client.
@@ -173,8 +173,8 @@ endif
 ifneq ($(call tool_enabled,$(WORKTREE)),)
 CAPABILITY_FEATURES += worktree
 endif
-ifneq ($(call tool_enabled,$(ZDIFF)),)
-CAPABILITY_FEATURES += zdiff
+ifneq ($(call tool_enabled,$(ZPAGER)),)
+CAPABILITY_FEATURES += zpager
 endif
 ifneq ($(call tool_enabled,$(ZOSH_CLIENT)),)
 CAPABILITY_FEATURES += zosh-client
@@ -200,7 +200,7 @@ endif
 
 BUILD_FEATURES := $(PLATFORM_FEATURES) $(CAPABILITY_FEATURES)
 
-export SERIAL HTTP TFTP TFTP_SERVER TFTP_CLIENT NOTIFY CLIPBOARD SYNTAX_HIGHLIGHTING ZMUX SESSION_PERSISTENCE WORKTREE ZDIFF ZOSH ZOSH_CLIENT ZOSH_SERVER X11
+export SERIAL HTTP TFTP TFTP_SERVER TFTP_CLIENT NOTIFY CLIPBOARD SYNTAX_HIGHLIGHTING ZMUX SESSION_PERSISTENCE WORKTREE ZPAGER ZOSH ZOSH_CLIENT ZOSH_SERVER X11
 export CARGO_BUILD_JOBS
 
 export CARGO
@@ -248,7 +248,7 @@ LINUX_USER_ZHTTP_PATH := $(LINUX_USER_BIN_DIR)/zhttp
 LINUX_USER_ZOSH_PATH := $(LINUX_USER_BIN_DIR)/zosh
 
 WINDOWS_ZWT_ARGS := $(if $(call tool_enabled,$(WORKTREE)), -SourceZwtBinary "$(BUILD_TARGET_DIR)/zwt.exe",)
-WINDOWS_ZDIFF_ARGS := $(if $(call tool_enabled,$(ZDIFF)), -SourcePagerBinary "$(BUILD_TARGET_DIR)/zpager.exe",)
+WINDOWS_ZPAGER_ARGS := $(if $(call tool_enabled,$(ZPAGER)), -SourcePagerBinary "$(BUILD_TARGET_DIR)/zpager.exe",)
 WINDOWS_CLIP_ARGS := $(if $(call tool_enabled,$(CLIPBOARD)), -SourceCopyBinary "$(BUILD_TARGET_DIR)/zcopy.exe" -SourcePasteBinary "$(BUILD_TARGET_DIR)/zpaste.exe",)
 WINDOWS_HTTP_ARGS := $(if $(call tool_enabled,$(HTTP)), -SourceHttpBinary "$(BUILD_TARGET_DIR)/zhttp.exe",)
 WINDOWS_TFTP_ARGS := $(if $(or $(call tool_enabled,$(TFTP_SERVER)),$(call tool_enabled,$(TFTP_CLIENT))), -SourceTftpBinary "$(BUILD_TARGET_DIR)/ztftp.exe",)
@@ -729,7 +729,7 @@ UNIX_INSTALL_BINARIES := zetta \
 	$(if $(filter zosh-client,$(BUILD_FEATURES)),zosh) \
 	$(if $(filter zosh-server,$(BUILD_FEATURES)),zosh-server) \
 	$(if $(filter worktree,$(BUILD_FEATURES)),zwt) \
-	$(if $(filter zdiff,$(BUILD_FEATURES)),zpager)
+	$(if $(filter zpager,$(BUILD_FEATURES)),zpager)
 
 ifneq ($(OS),Windows_NT)
 build:
@@ -770,10 +770,10 @@ build:
 	@echo "  [DONE] Windows binary build and verification"
 
 install: build
-	powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/install-windows.ps1 -Action Install -SourceBinary "$(BUILD_TARGET_DIR)/zetta.exe" -SourceGuiBinary "$(BUILD_TARGET_DIR)/zetta-gui.exe" -SourceWslxBinary "$(BUILD_TARGET_DIR)/wslx.exe" $(WINDOWS_ZMUX_ARGS)$(WINDOWS_ZMUX_UPGRADE_ARGS) $(WINDOWS_ZOSH_ARGS)$(WINDOWS_ZWT_ARGS)$(WINDOWS_ZDIFF_ARGS)$(WINDOWS_NOTIFY_ARGS)$(WINDOWS_CLIP_ARGS)$(WINDOWS_TFTP_ARGS)$(WINDOWS_HTTP_ARGS)
+	powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/install-windows.ps1 -Action Install -SourceBinary "$(BUILD_TARGET_DIR)/zetta.exe" -SourceGuiBinary "$(BUILD_TARGET_DIR)/zetta-gui.exe" -SourceWslxBinary "$(BUILD_TARGET_DIR)/wslx.exe" $(WINDOWS_ZMUX_ARGS)$(WINDOWS_ZMUX_UPGRADE_ARGS) $(WINDOWS_ZOSH_ARGS)$(WINDOWS_ZWT_ARGS)$(WINDOWS_ZPAGER_ARGS)$(WINDOWS_NOTIFY_ARGS)$(WINDOWS_CLIP_ARGS)$(WINDOWS_TFTP_ARGS)$(WINDOWS_HTTP_ARGS)
 
 install-binary:
-	powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/install-windows.ps1 -Action InstallBinary -SourceBinary "$(BUILD_TARGET_DIR)/zetta.exe" -SourceGuiBinary "$(BUILD_TARGET_DIR)/zetta-gui.exe" -SourceWslxBinary "$(BUILD_TARGET_DIR)/wslx.exe" $(WINDOWS_ZMUX_ARGS) $(WINDOWS_ZOSH_ARGS)$(WINDOWS_ZWT_ARGS)$(WINDOWS_ZDIFF_ARGS)$(WINDOWS_NOTIFY_ARGS)$(WINDOWS_CLIP_ARGS)$(WINDOWS_TFTP_ARGS)$(WINDOWS_HTTP_ARGS)
+	powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/install-windows.ps1 -Action InstallBinary -SourceBinary "$(BUILD_TARGET_DIR)/zetta.exe" -SourceGuiBinary "$(BUILD_TARGET_DIR)/zetta-gui.exe" -SourceWslxBinary "$(BUILD_TARGET_DIR)/wslx.exe" $(WINDOWS_ZMUX_ARGS) $(WINDOWS_ZOSH_ARGS)$(WINDOWS_ZWT_ARGS)$(WINDOWS_ZPAGER_ARGS)$(WINDOWS_NOTIFY_ARGS)$(WINDOWS_CLIP_ARGS)$(WINDOWS_TFTP_ARGS)$(WINDOWS_HTTP_ARGS)
 
 install-capabilities:
 
@@ -860,7 +860,7 @@ endif
 	else \
 		$(RM) "$(MAC_BUNDLE)/Contents/MacOS/zwt"; \
 	fi
-	if [ -n "$(call tool_enabled,$(ZDIFF))" ]; then \
+	if [ -n "$(call tool_enabled,$(ZPAGER))" ]; then \
 		$(INSTALL) -m 755 "$(BUILD_TARGET_DIR)/zpager" "$(MAC_BUNDLE)/Contents/MacOS/zpager"; \
 		$(RM) "$(MAC_ZPAGER_CLI_PATH)"; \
 		sed 's|@MAC_RUNTIME_BUNDLE@|$(MAC_RUNTIME_BUNDLE)|g' resources/macos/zpager-cli.in > "$(MAC_ZPAGER_CLI_PATH)"; \
@@ -1042,7 +1042,7 @@ ifneq ($(call tool_enabled,$(WORKTREE)),)
 else
 	$(RM) $(BINDIR)/zwt
 endif
-ifneq ($(call tool_enabled,$(ZDIFF)),)
+ifneq ($(call tool_enabled,$(ZPAGER)),)
 	$(INSTALL) -Dm755 "$(BUILD_TARGET_DIR)/zpager" $(BINDIR)/zpager
 else
 	$(RM) $(BINDIR)/zpager
@@ -1069,7 +1069,7 @@ ifneq ($(call tool_enabled,$(WORKTREE)),)
 else
 	$(RM) "$(LINUX_USER_ZWT_PATH)"
 endif
-ifneq ($(call tool_enabled,$(ZDIFF)),)
+ifneq ($(call tool_enabled,$(ZPAGER)),)
 	$(RM) "$(LINUX_USER_ZPAGER_PATH)"
 	ln -s "$(BINDIR)/zpager" "$(LINUX_USER_ZPAGER_PATH)"
 else

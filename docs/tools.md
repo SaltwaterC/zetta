@@ -13,8 +13,8 @@ integrated shell, so Git commands there use the pager automatically.
 GIT_PAGER=zpager git --paginate diff
 GIT_PAGER=zpager git --paginate diff --cached -- src/
 GIT_PAGER="zpager -c 80 -w 80" git --paginate diff
-ZDIFF_COLUMNS=100 GIT_PAGER=zpager git --paginate diff
-ZDIFF_WIDTH=100 GIT_PAGER=zpager git --paginate diff
+ZPAGER_COLUMNS=100 GIT_PAGER=zpager git --paginate diff
+ZPAGER_WIDTH=100 GIT_PAGER=zpager git --paginate diff
 git diff --word-diff | zpager
 ```
 
@@ -23,16 +23,16 @@ change Git config. `--paginate` forces Git to use the pager for `diff`. You can
 also pipe any compatible diff output directly with `git diff | zpager`. Use the
 arrow keys or `j`/`k` to scroll, `n`/`p` to jump between files, and `q` to close
 the view. When standard output is redirected, `zpager` passes its input through
-unchanged. `-c`/`--columns` or `ZDIFF_COLUMNS` sets the minimum width per side
+unchanged. `-c`/`--columns` or `ZPAGER_COLUMNS` sets the minimum width per side
 needed for side-by-side layout; the default is 80, requiring a 161-column
 terminal. The panes expand to use available width. `-w`/`--width` or
-`ZDIFF_WIDTH` caps each pane's displayed width and centers the diff in the
+`ZPAGER_WIDTH` caps each pane's displayed width and centers the diff in the
 terminal. Narrower terminals stack old and new lines vertically. Command-line
 values take precedence over their matching environment variables.
 
 The normal Zetta build includes `zpager`. Build it without the graphical
 application with `make build-tools TOOLS=zpager`, or omit it from a Zetta build
-with `make build ZDIFF=0` and `make install ZDIFF=0`.
+with `make build ZPAGER=0` and `make install ZPAGER=0`.
 
 ## Serial and network tools
 

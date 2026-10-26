@@ -21,9 +21,9 @@ opens a server log pane.
 Git builds also ship `zpager`, a full-screen side-by-side pager for Git diff
 output. Zetta's shell integration sets `GIT_PAGER=zpager` in integrated shells;
 select it for one command elsewhere with `GIT_PAGER=zpager git --paginate diff`,
-or pipe diff output to it. Set `ZDIFF_COLUMNS` or pass `zpager -c N` to choose
+or pipe diff output to it. Set `ZPAGER_COLUMNS` or pass `zpager -c N` to choose
 the minimum terminal width per side before the view stacks old and new lines.
-The panes expand to use available width; set `ZDIFF_WIDTH` or pass `-w N` to
+The panes expand to use available width; set `ZPAGER_WIDTH` or pass `-w N` to
 cap each pane's displayed width.
 
 Clipboard builds also ship standalone `zcopy` and `zpaste` commands. `zetta copy` and `zetta paste` forward to these sibling executables.
@@ -308,7 +308,7 @@ The default build also produces the standalone `zwt` Git worktree command. Set
 bundled Zosh client and server executables and the `zetta mosh` route. Set
 `ZOSH_CLIENT=0` or `ZOSH_SERVER=0` to omit either component independently.
 
-The default build also produces `zpager`. Set `ZDIFF=0` on `make build` and
+The default build also produces `zpager`. Set `ZPAGER=0` on `make build` and
 `make install` to omit the binary and its shell completion entries.
 
 Headless hosts (a Raspberry Pi, say) can build and install only the

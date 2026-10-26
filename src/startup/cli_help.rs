@@ -114,7 +114,7 @@ pub(crate) fn help_text(profiles: &[Profile]) -> String {
         "Encrypted session retention",
         #[cfg(feature = "worktree")]
         "Git worktree workflow",
-        #[cfg(feature = "zdiff")]
+        #[cfg(feature = "zpager")]
         "Git diff pager",
         #[cfg(feature = "zosh-server")]
         "Zosh server",

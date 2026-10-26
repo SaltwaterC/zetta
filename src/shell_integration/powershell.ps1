@@ -1,7 +1,7 @@
 # Zetta shell integration for PowerShell.
-# ZETTA_DIFF_INTEGRATION_BEGIN
+# ZETTA_PAGER_INTEGRATION_BEGIN
 $env:GIT_PAGER = 'zpager'
-# ZETTA_DIFF_INTEGRATION_END
+# ZETTA_PAGER_INTEGRATION_END
 
 $terminalTrackerActive = Get-Variable -Name __ZettaCwdTrackerInstalled -Scope Global -ErrorAction SilentlyContinue
 $zettaPaneIdentityAvailable =
@@ -244,9 +244,9 @@ Register-ArgumentCompleter -Native -CommandName zmux -ScriptBlock $zettaLazyComp
 # ZETTA_ZMUX_INTEGRATION_END
 Register-ArgumentCompleter -CommandName ztftp -ScriptBlock $zettaLazyCompletions
 Register-ArgumentCompleter -CommandName zhttp -ScriptBlock $zettaLazyCompletions
-# ZETTA_DIFF_INTEGRATION_BEGIN
+# ZETTA_PAGER_INTEGRATION_BEGIN
 Register-ArgumentCompleter -CommandName zpager -ScriptBlock $zettaLazyCompletions
-# ZETTA_DIFF_INTEGRATION_END
+# ZETTA_PAGER_INTEGRATION_END
 Register-ArgumentCompleter -CommandName zntfy -ScriptBlock $zettaLazyCompletions
 # ZETTA_CLIPBOARD_INTEGRATION_BEGIN
 Register-ArgumentCompleter -CommandName zcopy -ScriptBlock $zettaLazyCompletions
