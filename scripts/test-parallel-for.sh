@@ -19,6 +19,10 @@ cat > "$temporary/test.mk" <<'MAKE'
 include Makefile
 parallel-check:
 	$(call parallel_for,one two three four,printf "start %s\n" "$$item" >> "$$PARALLEL_TEST_LOG"; sleep 0.3; printf "end %s\n" "$$item" >> "$$PARALLEL_TEST_LOG",Pool check,2)
+	@echo "[FOLLOW-UP] Pool check recipe continued"
+parallel-external:
+	$(call parallel_for,one two three,powershell.exe -NoProfile -Command "Start-Sleep -Milliseconds 300",External check,2)
+	@echo "[FOLLOW-UP] External worker recipe continued"
 parallel-failure:
 	$(call parallel_for,one broken three,if [ "$$item" = broken ]; then echo expected-failure; exit 7; fi,Pool check,2)
 parallel-invalid:
@@ -32,7 +36,7 @@ run_make_errexit() {
 }
 run_make parallel-check >"$temporary/completion"
 case "$(cat "$temporary/completion")" in
-	*"[WAIT] Pool check: reaping completed workers"*"[WAIT] Pool check: collecting worker results"*"[DONE] Pool check: workers exited, results collected, temporary files removed"*) ;;
+	*"[WAIT] Pool check: reaping completed workers"*"[WAIT] Pool check: collecting worker results"*"[DONE] Pool check: workers exited, results collected, temporary files removed"*"[FOLLOW-UP] Pool check recipe continued"*) ;;
     *) cat "$temporary/completion" >&2; exit 1 ;;
 esac
 awk '
@@ -64,6 +68,11 @@ if grep -Fq 'worker exited before reporting completion' "$temporary/failure-erre
     echo 'A failed worker under shell errexit bypassed normal status reporting' >&2
     exit 1
 fi
+run_make parallel-external >"$temporary/external"
+case "$(cat "$temporary/external")" in
+	*"[DONE] External check: workers exited, results collected, temporary files removed"*"[FOLLOW-UP] External worker recipe continued"*) ;;
+	*) cat "$temporary/external" >&2; exit 1 ;;
+esac
 if run_make parallel-invalid > "$temporary/invalid" 2>&1; then
     echo 'A zero worker limit was accepted' >&2
     exit 1

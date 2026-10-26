@@ -280,8 +280,11 @@ all: fmt lint test build
 # status file is its completion signal; publish it even when its command fails,
 # and have the parent recover a status if a worker exits unexpectedly. [DONE]
 # comes after result reporting and temporary-file cleanup, not just reaping.
+# The recipe and its children are noninteractive; disconnect console stdin so
+# a Git Bash shell cannot linger or consume input after its background jobs.
 define parallel_for
-	@items="$(1)"; \
+	@exec </dev/null; \
+	items="$(1)"; \
 	cmd_template='$(2)'; \
 	desc="$(strip $(3))"; \
 	max_jobs="$(4)"; \
@@ -440,7 +443,8 @@ define parallel_for
 		exit $$cleanup_status; \
 	fi; \
 	echo "  [DONE] $$desc: workers exited, results collected, temporary files removed"; \
-	if [ $$failed -eq 1 ]; then exit 1; fi
+	if [ $$failed -eq 1 ]; then exit 1; fi; \
+	exit 0
 endef
 
 test:
