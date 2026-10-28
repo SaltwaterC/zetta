@@ -166,6 +166,8 @@ function Invoke-MakeTarget {
 
         $process = [Diagnostics.Process]::Start($processStartInfo)
         $completedNormally = $false
+        $lastTargetProgress = $null
+        $lastTargetProgressAt = [DateTime]::UtcNow
         try {
             Write-HookProgress "$Target`: process $($process.Id) started"
             while (-not $process.WaitForExit(30000)) {
@@ -175,7 +177,15 @@ function Invoke-MakeTarget {
                         Where-Object { $_ -match '^\s+\[(RUNNING|WAIT|DONE)\]' } |
                         Select-Object -Last 1
                     if (-not [string]::IsNullOrWhiteSpace($targetProgress)) {
-                        Write-HookProgress "$Target`: $($targetProgress.Trim())"
+                        $targetProgress = $targetProgress.Trim()
+                        if ($targetProgress -ne $lastTargetProgress) {
+                            $lastTargetProgress = $targetProgress
+                            $lastTargetProgressAt = [DateTime]::UtcNow
+                            Write-HookProgress "$Target`: $targetProgress"
+                        } else {
+                            $progressAge = [DateTime]::UtcNow - $lastTargetProgressAt
+                            Write-HookProgress "$Target`: process $($process.Id) still running; last stage marker was $([int] $progressAge.TotalSeconds)s ago: $targetProgress"
+                        }
                     }
                 }
             }

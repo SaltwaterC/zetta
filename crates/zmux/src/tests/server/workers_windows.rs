@@ -34,6 +34,23 @@ fn assert_idle(wait: &mut DrainWait) {
     assert!(started.elapsed() >= Duration::from_millis(80));
 }
 
+// piper may cooperatively yield from a nonblocking read even when bytes are
+// queued. After a readiness event, keep draining until that yield passes.
+fn read_when_available(mut read: impl FnMut() -> usize) -> usize {
+    let deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        let count = read();
+        if count != 0 {
+            return count;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "ready output never became readable"
+        );
+        thread::yield_now();
+    }
+}
+
 #[test]
 fn idle_wait_uses_the_deadline_and_control_work_interrupts_it() {
     let (mut wait, mut control) = wait_pair();
@@ -100,7 +117,7 @@ fn output_after_arming_wakes_the_wait_and_rearms_for_the_next_burst() {
         );
         producer = sender.join().unwrap();
         let mut bytes = [0; 4];
-        assert_eq!(pty.reader().try_read(&mut bytes), 4);
+        assert_eq!(read_when_available(|| pty.reader().try_read(&mut bytes)), 4);
         assert_eq!(&bytes, b"echo");
     }
     pty.pause_reader().unwrap();
@@ -123,7 +140,7 @@ fn buffered_output_survives_disarming_and_exclusive_handover() {
     pty.pause_reader().unwrap();
     arm_pipes(&mut pty, &wait.poller, false, false);
     let mut bytes = [0; 6];
-    assert_eq!(pty.read_buffered(&mut bytes), 6);
+    assert_eq!(read_when_available(|| pty.read_buffered(&mut bytes)), 6);
     assert_eq!(&bytes, b"before");
     settle(&mut wait);
 
@@ -131,12 +148,16 @@ fn buffered_output_survives_disarming_and_exclusive_handover() {
     // Neither disarming nor another idle pass can restart an exclusive reader.
     arm_pipes(&mut pty, &wait.poller, false, false);
     assert_idle(&mut wait);
-    assert_eq!(pty.read_buffered(&mut bytes), 0);
+    // A paused reader must stay idle even when the drain loop arms it again.
+    // Checking readiness avoids confusing piper's cooperative zero-byte yield
+    // with an empty queue.
+    arm_pipes(&mut pty, &wait.poller, true, false);
+    assert_idle(&mut wait);
     pty.resume_reader();
     arm_pipes(&mut pty, &wait.poller, true, false);
     wait_for_pipe(&mut wait, false);
     assert!(wait.events.iter().any(|event| event.key == PIPE));
-    assert_eq!(pty.reader().try_read(&mut bytes), 6);
+    assert_eq!(read_when_available(|| pty.reader().try_read(&mut bytes)), 6);
     assert_eq!(&bytes, b"after!");
     pty.pause_reader().unwrap();
 }
