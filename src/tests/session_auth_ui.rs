@@ -35,13 +35,16 @@ fn partial_or_mismatched_session_authentication_is_incomplete() {
 fn empty_test_zetta(window: &mut Window, cx: &mut Context<Zetta>) -> Zetta {
     let mut config = Config::defaults(None, None);
     config.profiles.clear();
-    Zetta::new(
+    Zetta::new_with_projects(
         config,
         None,
         ZettaLaunchOptions {
             no_mux: true,
             ..Default::default()
         },
+        Ok(crate::project_context::ProjectState::new(
+            crate::project::ProjectRegistry::empty(),
+        )),
         window,
         cx,
     )

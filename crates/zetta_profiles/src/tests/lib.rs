@@ -151,6 +151,10 @@ fn an_interactive_posix_shell_is_sent_its_integration() {
     let command = String::from_utf8(command).unwrap();
 
     assert!(command.contains("zetta init zsh"));
+    assert!(command.contains(&format!(
+        "__ZETTA_LIFECYCLE_TRACKING_VERSION:-0}} != {}",
+        ZSH_LIFECYCLE_TRACKING_VERSION
+    )));
     assert!(
         command.ends_with('\r'),
         "the line is delivered as if typed, so it has to be entered"

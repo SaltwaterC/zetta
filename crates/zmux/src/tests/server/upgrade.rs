@@ -28,19 +28,22 @@ fn resumed_identifiers_never_collide_with_what_was_adopted() {
 #[cfg(any(target_os = "linux", target_vendor = "apple"))]
 #[test]
 fn an_owner_is_adopted_as_the_previous_image_recorded_it() {
-    use crate::upgrade::{HANDOVER_VERSION, PID_OWNER_HANDOVER_VERSION};
-
     let this = ProcessIdentity::of(std::process::id());
     let started = this.started.expect("this platform reports start times");
 
     // Taken as written, including a start time that no longer matches: the
     // owner it named has gone, whoever holds its PID now.
-    let gone = adopt_owner(Some(this.pid), Some(started + 1), HANDOVER_VERSION).unwrap();
+    let gone = adopt_owner(Some(this.pid), Some(started + 1)).unwrap();
     assert!(!gone.is(this.pid));
-    assert_eq!(adopt_owner(None, None, HANDOVER_VERSION), None);
+    assert_eq!(adopt_owner(None, None), None);
 
-    // An image from before start times sent the PID alone; the process holding
-    // it now is what that image would itself have accepted.
-    let previous = adopt_owner(Some(this.pid), None, PID_OWNER_HANDOVER_VERSION).unwrap();
-    assert_eq!(previous, this);
+    // An unavailable start time stays unavailable; adoption must not guess one.
+    let previous = adopt_owner(Some(this.pid), None).unwrap();
+    assert_eq!(
+        previous,
+        ProcessIdentity {
+            pid: this.pid,
+            started: None
+        }
+    );
 }

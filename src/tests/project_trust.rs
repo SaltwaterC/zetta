@@ -315,3 +315,23 @@ fn project_trust_editor_saving_other_fields_does_not_approve_imported_commands()
     assert!(project.commands.is_empty());
     assert_eq!(project.theme.as_deref(), Some("Dracula"));
 }
+
+#[test]
+fn project_trust_version_one_preserves_saved_approvals() {
+    let source = r#"{"commands":{"build":"cargo build"}}"#;
+    let (directory, mut registry, base) = setup(source);
+    let project = ProjectConfig::load_in_registry(directory.path(), &base, &registry).unwrap();
+    registry
+        .approve(
+            directory.path(),
+            &project.pending_approval.unwrap().fingerprint,
+        )
+        .unwrap();
+    registry.save().unwrap();
+    let file: Value = serde_json::from_slice(&fs::read(registry.path()).unwrap()).unwrap();
+    assert_eq!(file["version"], 1);
+    let reloaded = ProjectRegistry::load_from(registry.path().to_owned()).unwrap();
+    let project = ProjectConfig::load_in_registry(directory.path(), &base, &reloaded).unwrap();
+    assert!(project.pending_approval.is_none());
+    assert!(!project.commands.is_empty());
+}

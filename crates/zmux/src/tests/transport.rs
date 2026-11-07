@@ -76,11 +76,11 @@ fn an_endpoint_from_a_future_version_is_refused() {
 
 #[cfg(windows)]
 #[test]
-fn a_legacy_windows_host_endpoint_remains_readable_without_weakening_daemon_endpoints() {
+fn windows_host_and_daemon_endpoints_require_the_current_schema() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("zmux-host.json");
     let mut endpoint = Endpoint {
-        version: 1,
+        version: ENDPOINT_VERSION,
         protocol_version: crate::pty_host::HOST_PROTOCOL_VERSION,
         process_id: std::process::id(),
         socket_path: directory.path().join("zmux-host.sock"),
@@ -89,7 +89,7 @@ fn a_legacy_windows_host_endpoint_remains_readable_without_weakening_daemon_endp
     endpoint.write(&path).unwrap();
 
     assert_eq!(Endpoint::read_host(&path).unwrap(), endpoint);
-    assert!(Endpoint::read(&path).is_err());
+    assert_eq!(Endpoint::read(&path).unwrap(), endpoint);
 
     endpoint.version = ENDPOINT_VERSION + 1;
     endpoint.write(&path).unwrap();

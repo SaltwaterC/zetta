@@ -225,7 +225,7 @@ fn the_binding_is_part_of_the_secret() {
     assert!(sealed.authentication.verify(bare_key).is_none());
 }
 
-/// A version 1 envelope — the bare key — still opens for this machine's own
+/// An unversioned envelope — the bare key — still opens for this machine's own
 /// multiplexer, but names no host, so it is never released to a remote one.
 #[test]
 fn an_unbound_envelope_opens_locally_but_not_for_a_remote_host() {
@@ -289,15 +289,19 @@ fn a_sealed_text_for_another_purpose_or_version_is_refused() {
         |text: &str| STANDARD_NO_PAD.encode(recipients.encrypt(text.as_bytes()).unwrap());
 
     for text in [
-        format!("{SEALED_KEY_TAG}2;purpose=disk-unlock;host={THIS_HOST};key=abc"),
-        format!("{SEALED_KEY_TAG}3;purpose=session-authentication;host={THIS_HOST};key=abc"),
-        format!("{SEALED_KEY_TAG}2;purpose=session-authentication;host={THIS_HOST};key="),
-        format!("{SEALED_KEY_TAG}2;purpose=session-authentication;key=abc"),
         format!(
-            "{SEALED_KEY_TAG}2;purpose=session-authentication;host={ANOTHER_HOST};host={THIS_HOST};key=abc"
+            "{SEALED_KEY_TAG}{SEALED_KEY_VERSION};purpose=disk-unlock;host={THIS_HOST};key=abc"
+        ),
+        format!("{SEALED_KEY_TAG}999;purpose=session-authentication;host={THIS_HOST};key=abc"),
+        format!(
+            "{SEALED_KEY_TAG}{SEALED_KEY_VERSION};purpose=session-authentication;host={THIS_HOST};key="
+        ),
+        format!("{SEALED_KEY_TAG}{SEALED_KEY_VERSION};purpose=session-authentication;key=abc"),
+        format!(
+            "{SEALED_KEY_TAG}{SEALED_KEY_VERSION};purpose=session-authentication;host={ANOTHER_HOST};host={THIS_HOST};key=abc"
         ),
         format!(
-            "{SEALED_KEY_TAG}2;purpose=session-authentication;host={THIS_HOST};key=abc;extra=1"
+            "{SEALED_KEY_TAG}{SEALED_KEY_VERSION};purpose=session-authentication;host={THIS_HOST};key=abc;extra=1"
         ),
     ] {
         let envelope = seal_text(&text);

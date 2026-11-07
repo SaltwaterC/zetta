@@ -10,11 +10,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 /// The schema version written into every published catalog.
-///
-/// A catalog carrying any other version is skipped, and removed once the process
-/// that published it is gone. That is what becomes of the versions up to 4 that
-/// Zetta published from its own process before sessions moved into the
-/// multiplexer: same directory, same `zetta-PROCESS-GENERATION.json` name.
+/// A catalog carrying any other version is skipped.
 pub const CATALOG_VERSION: u32 = 1;
 
 /// Split ratios in the background-session schema use the same thousandths
@@ -55,13 +51,7 @@ pub struct RestorableSessionRecord {
 /// explicit `new_window` launches, the two-phase `run_wait`/`run_complete`
 /// exchange, registered project shell commands, remote session attach, and
 /// payload-free tab-icon resets.
-///
-/// 5 added the protocol a remote session's panes travel over, and the
-/// keep-alive interval that goes with it. 6 adds an optional SSH-agent
-/// forwarding override. 7 lets tab-icon set and reset requests address their
-/// originating tab by attention ID. Zetta uses this constant when built with
-/// multiplexer support; `src/process_control.rs` carries the full history.
-pub const CONTROL_VERSION: u32 = 7;
+pub const CONTROL_VERSION: u32 = 1;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BackgroundSessionCatalog {

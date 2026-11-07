@@ -532,13 +532,16 @@ fn detach_publication_preserves_layout_cwd_and_project_theme(cx: &mut gpui::Test
     let (zetta, cx) = cx.add_window_view(|window, cx| {
         let mut config = Config::defaults(None, None);
         config.profiles.clear();
-        Zetta::new(
+        Zetta::new_with_projects(
             config,
             None,
             crate::ZettaLaunchOptions {
                 no_mux: true,
                 ..Default::default()
             },
+            Ok(crate::project_context::ProjectState::new(
+                ProjectRegistry::empty(),
+            )),
             window,
             cx,
         )
@@ -554,7 +557,7 @@ fn detach_publication_preserves_layout_cwd_and_project_theme(cx: &mut gpui::Test
         std::fs::create_dir_all(root.join(".zetta")).unwrap();
         std::fs::write(
             ProjectConfig::path_for(&root),
-            format!(r#"{{"theme":"{theme}"}}"#),
+            format!(r#"{{"theme":"{theme}","commands":{{"fixture":"echo isolated"}}}}"#),
         )
         .unwrap();
         roots.push(std::fs::canonicalize(root).unwrap());
@@ -566,14 +569,29 @@ fn detach_publication_preserves_layout_cwd_and_project_theme(cx: &mut gpui::Test
             ProjectRegistry::load_from(temporary.path().join("registry.json")).unwrap();
         for root in &roots {
             zetta.projects.registry.add(root).unwrap();
+            let project = ProjectConfig::load_in_registry(
+                root,
+                &zetta.launch_config,
+                &zetta.projects.registry,
+            )
+            .unwrap();
+            zetta
+                .projects
+                .registry
+                .approve(root, &project.pending_approval.unwrap().fingerprint)
+                .unwrap();
         }
         let mut destination = tab_state(vec![pane_state(99, None)])
             .into_tab(99, |_| publication_profile())
             .unwrap();
         destination.theme_override = None;
-        zetta
-            .projects
-            .insert_config(ProjectConfig::load(&roots[2], &zetta.launch_config).unwrap());
+        let project = ProjectConfig::load_in_registry(
+            &roots[2],
+            &zetta.launch_config,
+            &zetta.projects.registry,
+        )
+        .unwrap();
+        zetta.projects.insert_config(project);
         zetta.projects.pane_roots.insert(99, roots[2].clone());
         zetta.tabs.push(destination);
         zetta.active_tab = 0;
@@ -616,12 +634,16 @@ fn detach_publication_preserves_layout_cwd_and_project_theme(cx: &mut gpui::Test
         }
         // Reconnect must read the latest configuration, even if this window
         // already cached the project before it was edited.
-        zetta
-            .projects
-            .insert_config(ProjectConfig::load(&roots[0], &zetta.launch_config).unwrap());
+        let project = ProjectConfig::load_in_registry(
+            &roots[0],
+            &zetta.launch_config,
+            &zetta.projects.registry,
+        )
+        .unwrap();
+        zetta.projects.insert_config(project);
         std::fs::write(
             ProjectConfig::path_for(&roots[0]),
-            r#"{"theme":"Solarized Dark"}"#,
+            r#"{"theme":"Solarized Dark","commands":{"fixture":"echo isolated"}}"#,
         )
         .unwrap();
         for _ in 0..2 {
@@ -688,6 +710,8 @@ fn restore_test_views(
     for (index, pane) in tab.panes.iter_mut().enumerate() {
         let project = zetta.projects.config_for_pane(pane.id).cloned().unwrap();
         assert_eq!(project.root, roots[index % 2]);
+        assert!(project.pending_approval.is_none());
+        assert_eq!(project.commands["fixture"].command, "echo isolated");
         let theme = zetta.restored_terminal_theme(
             None,
             None,

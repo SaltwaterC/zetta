@@ -36,32 +36,12 @@ use crate::messages::ClientId;
 /// Bumped whenever [`Handover`] changes incompatibly. Optional fields with a
 /// serde default deliberately keep the version so an older running daemon can
 /// hand its state to the build that introduced them.
-///
-/// 9 added [`Handover::lifetime_lock`]. It is always present in what this
-/// image writes, and an image that predates it refuses unknown fields, so the
-/// version says so before `execv` rather than after it.
-///
-/// 10 added [`SessionHandover::owner_started`], for the same reason.
-pub const HANDOVER_VERSION: u32 = 10;
-
-/// The version before [`SessionHandover::owner_started`], which an older daemon
-/// still hands over in; its replacement identifies each owner by the process
-/// holding its PID when the handover is adopted.
-pub const PID_OWNER_HANDOVER_VERSION: u32 = 9;
-
-/// The version before [`Handover::lifetime_lock`], which an older daemon still
-/// hands over in; its replacement takes the lock itself.
-pub const LOCKLESS_HANDOVER_VERSION: u32 = 8;
+pub const HANDOVER_VERSION: u32 = 1;
 
 /// Whether this image can adopt a handover of `version`, which is what
 /// `--resume-check` answers.
 pub fn accepts_handover_version(version: u32) -> bool {
-    [
-        HANDOVER_VERSION,
-        PID_OWNER_HANDOVER_VERSION,
-        LOCKLESS_HANDOVER_VERSION,
-    ]
-    .contains(&version)
+    version == HANDOVER_VERSION
 }
 
 /// Everything the next image needs to carry on.
@@ -93,7 +73,7 @@ pub struct Handover {
     pub recipient_grants: Option<crate::server::RecipientGrants>,
     /// The descriptor holding the daemon's lifetime lock, kept open across the
     /// `execv` so the lock is never free while the image is replaced (see
-    /// `server/lifetime_lock.rs`). Absent from a version 8 handover.
+    /// `server/lifetime_lock.rs`). Optional when no lock was inherited.
     #[serde(default)]
     pub lifetime_lock: Option<RawFd>,
 }

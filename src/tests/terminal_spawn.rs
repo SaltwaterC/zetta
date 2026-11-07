@@ -125,9 +125,13 @@ fn native_shell_bootstrap_loads_path_integration_only_when_needed() {
     )
     .unwrap();
     assert!(command.starts_with(
-        "if [[ ${__ZETTA_LIFECYCLE_TRACKING_VERSION:-0} != 3 || ( -n ${ZETTA_PANE_ROUTING_ID:-${ZETTA_PANE_ID:-}} && ${__ZETTA_LIFECYCLE_TRACKING_ENABLED:-0} != 1 ) ]]; then "
+        "if [[ ${__ZETTA_LIFECYCLE_TRACKING_VERSION:-0} != 1 || ( -n ${ZETTA_PANE_ROUTING_ID:-${ZETTA_PANE_ID:-}} && ${__ZETTA_LIFECYCLE_TRACKING_ENABLED:-0} != 1 ) ]]; then "
     ));
     assert!(command.contains(r#"eval "$(command zetta init zsh)"; fi"#));
+    assert!(command.contains(&format!(
+        "__ZETTA_LIFECYCLE_TRACKING_VERSION:-0}} != {}",
+        zetta_profiles::ZSH_LIFECYCLE_TRACKING_VERSION
+    )));
     assert!(!command.contains("ZETTA_HOST_EXECUTABLE"));
     assert!(command.ends_with('\r'));
     assert!(

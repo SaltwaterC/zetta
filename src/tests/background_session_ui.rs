@@ -230,8 +230,13 @@ fn a_tab_arriving_from_elsewhere_inherits_this_windows_project() {
     let registry_path = temporary.path().join("registry.json");
     let mut registry = crate::project::ProjectRegistry::load_from(registry_path).unwrap();
     registry.add(&root).unwrap();
+    let config = crate::project::ProjectConfig::load_in_registry(
+        &root,
+        &Config::defaults(None, None),
+        &registry,
+    )
+    .unwrap();
     let mut projects = crate::project_context::ProjectState::new(registry);
-    let config = crate::project::ProjectConfig::load(&root, &Config::defaults(None, None)).unwrap();
     projects.insert_config(config);
 
     // The pane this window is on already belongs to the project.

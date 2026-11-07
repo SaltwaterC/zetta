@@ -115,7 +115,7 @@ pub fn shell_integration_startup_command(kind: ShellKind, args: &[String]) -> Op
             r#"if [[ ${__ZETTA_LIFECYCLE_TRACKING_INSTALLED:-0} != 1 || ${__ZETTA_LIFECYCLE_TRACKING_ENABLED:-0} != 1 ]]; then eval "$(command zetta init bash)"; fi"#
         }
         ShellKind::Zsh => {
-            r#"if [[ ${__ZETTA_LIFECYCLE_TRACKING_VERSION:-0} != 3 || ( -n ${ZETTA_PANE_ROUTING_ID:-${ZETTA_PANE_ID:-}} && ${__ZETTA_LIFECYCLE_TRACKING_ENABLED:-0} != 1 ) ]]; then eval "$(command zetta init zsh)"; fi"#
+            r#"if [[ ${__ZETTA_LIFECYCLE_TRACKING_VERSION:-0} != 1 || ( -n ${ZETTA_PANE_ROUTING_ID:-${ZETTA_PANE_ID:-}} && ${__ZETTA_LIFECYCLE_TRACKING_ENABLED:-0} != 1 ) ]]; then eval "$(command zetta init zsh)"; fi"#
         }
         ShellKind::Fish => {
             r#"if not set -q __ZETTA_LIFECYCLE_TRACKING_INSTALLED; or test "$__ZETTA_LIFECYCLE_TRACKING_ENABLED" != 1; command zetta init fish | source; end"#

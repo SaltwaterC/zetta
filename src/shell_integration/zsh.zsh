@@ -172,7 +172,7 @@ function __zetta_print_cwd() {
 
 if (( ! $+functions[__zetta_report_cwd] )); then
     typeset -g __ZETTA_LIFECYCLE_TRACKING_INSTALLED=1
-    typeset -g __ZETTA_LIFECYCLE_TRACKING_VERSION=3
+    typeset -g __ZETTA_LIFECYCLE_TRACKING_VERSION=__ZETTA_LIFECYCLE_VERSION__
     if [[ -n ${ZETTA_PANE_ROUTING_ID:-${ZETTA_PANE_ID:-}} ]]; then
         typeset -g __ZETTA_LIFECYCLE_TRACKING_ENABLED=1
     else
@@ -206,11 +206,11 @@ fi
 # Upgrade a shell that loaded an older CWD-only integration. The old script
 # already registered __zetta_report_cwd with precmd, so redefining that
 # function upgrades the existing hook without duplicating it.
-if [[ ${__ZETTA_LIFECYCLE_TRACKING_VERSION:-0} != 3 ||
+if [[ ${__ZETTA_LIFECYCLE_TRACKING_VERSION:-0} != __ZETTA_LIFECYCLE_VERSION__ ||
     ( -n ${ZETTA_PANE_ROUTING_ID:-${ZETTA_PANE_ID:-}} &&
         ${__ZETTA_LIFECYCLE_TRACKING_ENABLED:-0} != 1 ) ]]; then
     typeset -g __ZETTA_LIFECYCLE_TRACKING_INSTALLED=1
-    typeset -g __ZETTA_LIFECYCLE_TRACKING_VERSION=3
+    typeset -g __ZETTA_LIFECYCLE_TRACKING_VERSION=__ZETTA_LIFECYCLE_VERSION__
     if [[ -n ${ZETTA_PANE_ROUTING_ID:-${ZETTA_PANE_ID:-}} ]]; then
         typeset -g __ZETTA_LIFECYCLE_TRACKING_ENABLED=1
         typeset -g __ZETTA_COMMAND_STARTED=0

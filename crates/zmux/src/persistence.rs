@@ -45,6 +45,7 @@ use crate::retention::Retention;
 use crate::{auth::SessionSecret, catalog, protocol::BackgroundSessionSummary, secret_prompt};
 
 mod binding;
+pub use binding::BINDING_VERSION;
 mod identity;
 mod postquantum;
 mod recipients;
@@ -75,7 +76,7 @@ const MAX_STORAGE_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_RECORD_AGE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 const SEGMENT_BYTES: usize = 8 * 1024 * 1024;
 const SEGMENT_INTERVAL: Duration = Duration::from_secs(5 * 60);
-const MANIFEST_VERSION: u32 = 1;
+pub const MANIFEST_VERSION: u32 = 1;
 
 /// The disk settings passed from Zetta to a daemon.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

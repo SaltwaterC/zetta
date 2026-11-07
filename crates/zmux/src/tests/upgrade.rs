@@ -276,42 +276,11 @@ fn an_already_exited_panes_status_survives_the_handover() {
 }
 
 #[test]
-fn a_handover_from_before_the_lifetime_lock_is_still_adopted() {
-    // A daemon built before the lock hands over at version 8, with no lock
-    // field. Refusing it would make rebuilding the one thing an upgrade from
-    // that daemon could not survive.
-    let mut previous = serde_json::to_value(handover()).unwrap();
-    previous["version"] = LOCKLESS_HANDOVER_VERSION.into();
-    previous.as_object_mut().unwrap().remove("lifetime_lock");
-    let mut file = tempfile::tempfile().unwrap();
-    std::io::Write::write_all(&mut file, &serde_json::to_vec(&previous).unwrap()).unwrap();
-    std::io::Seek::rewind(&mut file).unwrap();
-
-    let restored = read_handover(file.into_raw_fd()).unwrap();
-    assert_eq!(restored.version, LOCKLESS_HANDOVER_VERSION);
-    assert_eq!(restored.lifetime_lock, None);
-    assert!(accepts_handover_version(LOCKLESS_HANDOVER_VERSION));
-    assert!(accepts_handover_version(HANDOVER_VERSION));
-}
-
-#[test]
-fn a_handover_from_before_owner_start_times_is_still_adopted() {
-    let mut previous = serde_json::to_value(handover()).unwrap();
-    previous["version"] = PID_OWNER_HANDOVER_VERSION.into();
-    previous["sessions"][0]["owner"] = 4321.into();
-    let mut file = tempfile::tempfile().unwrap();
-    std::io::Write::write_all(&mut file, &serde_json::to_vec(&previous).unwrap()).unwrap();
-    std::io::Seek::rewind(&mut file).unwrap();
-
-    let restored = read_handover(file.into_raw_fd()).unwrap();
-    assert_eq!(restored.sessions[0].owner, Some(4321));
-    assert_eq!(restored.sessions[0].owner_started, None);
-    assert!(accepts_handover_version(PID_OWNER_HANDOVER_VERSION));
-}
-
-#[test]
 fn a_handover_from_an_unknown_version_is_refused() {
     let mut future = handover();
+    assert!(accepts_handover_version(HANDOVER_VERSION));
+    assert!(!accepts_handover_version(0));
+    assert!(!accepts_handover_version(HANDOVER_VERSION + 1));
     future.version = HANDOVER_VERSION + 1;
     let file = write_handover(&future).unwrap();
 

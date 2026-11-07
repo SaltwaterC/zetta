@@ -80,15 +80,15 @@ fn a_handle_that_is_not_a_pipe_is_refused() {
     assert!(error.to_string().contains("not a pipe"), "{error:#}");
 }
 
-/// A daemon from before the pipe still upgrades into this image with a file;
+/// A file handover is read with the same schema as a pipe handover;
 /// it is read once and then gone.
 #[test]
-fn a_file_handover_from_an_older_daemon_is_read_once_and_removed() {
+fn a_file_handover_is_read_once_and_removed() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("zmux-handover-old.json");
     fs::write(
         &path,
-        serde_json::to_vec(&handover(FILE_HANDOVER_VERSION)).unwrap(),
+        serde_json::to_vec(&handover(HANDOVER_VERSION)).unwrap(),
     )
     .unwrap();
 
@@ -102,17 +102,17 @@ fn a_file_handover_from_an_older_daemon_is_read_once_and_removed() {
 }
 
 #[test]
-fn a_transport_only_carries_its_own_version() {
+fn an_unknown_handover_version_is_refused() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("zmux-handover-new.json");
     fs::write(
         &path,
-        serde_json::to_vec(&handover(HANDOVER_VERSION)).unwrap(),
+        serde_json::to_vec(&handover(HANDOVER_VERSION + 1)).unwrap(),
     )
     .unwrap();
     assert!(receive_handover(&HandoverSource::File(path)).is_err());
 
     assert!(accepts_handover_version(HANDOVER_VERSION));
-    assert!(accepts_handover_version(FILE_HANDOVER_VERSION));
+    assert!(!accepts_handover_version(0));
     assert!(!accepts_handover_version(HANDOVER_VERSION + 1));
 }

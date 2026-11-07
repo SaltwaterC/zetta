@@ -380,24 +380,18 @@ fn shared_messages_round_trip_revision_and_operation_id() {
 }
 
 #[test]
-fn version_one_shared_state_migrates_geometry_without_losing_panes() {
-    let summary = shared_summary();
-    let wire = serde_json::json!({
-        "version": 1,
-        "session_id": 4,
-        "revision": 7,
-        "last_operation_id": null,
-        "summary": summary,
-        "state": {"opaque": true}
-    });
-
-    let state: SharedSessionState = serde_json::from_value(wire).unwrap();
-
-    assert_eq!(state.version, SHARED_SESSION_STATE_VERSION);
-    assert_eq!(state.revision, SessionRevision(7));
-    assert_eq!(state.presentation.layout, state.summary.layout);
-    assert_eq!(state.presentation.active_pane, 10);
-    assert_eq!(state.pane_ids().collect::<Vec<_>>(), vec![10, 11]);
+fn current_shared_state_preserves_presentation_and_rejects_unknown_versions() {
+    let mut state =
+        SharedSessionState::new(4, shared_summary(), serde_json::json!({"opaque": true}));
+    state.presentation.maximized_pane = Some(10);
+    let wire = serde_json::to_value(&state).unwrap();
+    let restored: SharedSessionState = serde_json::from_value(wire.clone()).unwrap();
+    assert_eq!(restored, state);
+    for version in [0, SHARED_SESSION_STATE_VERSION + 1] {
+        let mut unknown = wire.clone();
+        unknown["version"] = version.into();
+        assert!(serde_json::from_value::<SharedSessionState>(unknown).is_err());
+    }
 }
 
 #[test]

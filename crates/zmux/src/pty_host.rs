@@ -43,18 +43,15 @@ use crate::{
 
 /// The host protocol. Additive only: a daemon that was just replaced still has
 /// to be able to speak to the host that was already running.
-/// Version 2 adds console-server consoles to `Open`.
-pub const HOST_PROTOCOL_VERSION: u32 = 2;
+/// Includes both ConPTY and console-server consoles in `Open`.
+pub const HOST_PROTOCOL_VERSION: u32 = 1;
 /// The first host that can hold console-server consoles. An older one would
 /// ignore the request's backend and start ConPTY instead.
-pub const CONSOLE_SERVER_HOST_PROTOCOL_VERSION: u32 = 2;
+pub const CONSOLE_SERVER_HOST_PROTOCOL_VERSION: u32 = 1;
 
 /// Installer revision, independent of the additive wire protocol. Bump when
-/// existing installations need new host behavior. Revision 3 clears an inherited
-/// flag that disables Ctrl+C; revision 4 initializes colors without debugging the shell;
-/// revision 5 holds console-server consoles; revision 6 accepts inherited
-/// Windows internal environment names when launching those consoles.
-pub const HOST_INSTALL_REVISION: u32 = 6;
+/// existing installations need new host behavior.
+pub const HOST_INSTALL_REVISION: u32 = 1;
 
 /// The oldest host this daemon can drive. An upgrade is refused rather than
 /// attempted when the running host is older than this, because the alternative

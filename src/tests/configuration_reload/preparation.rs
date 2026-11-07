@@ -33,6 +33,12 @@ struct StubEnvironment {
 }
 
 impl PreparationEnvironment for StubEnvironment {
+    fn project_configuration(&self, root: &Path, config: &Config) -> Result<ProjectConfig> {
+        // Nothing in the reload fixture should read the user's projects.json.
+        let registry = crate::project::ProjectRegistry::empty();
+        ProjectConfig::load_in_registry(root, config, &registry)
+    }
+
     fn user_themes(&self) -> Result<Vec<theme::ThemeFamily>> {
         Ok(Vec::new())
     }

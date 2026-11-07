@@ -12,6 +12,9 @@
 //! while its control traffic stays on SSH.
 
 mod agent;
+
+/// Version of the Zosh SSH-agent forwarding extension.
+pub const AGENT_PROTOCOL_VERSION: u32 = agent::AGENT_PROTOCOL_VERSION;
 mod client;
 mod display;
 mod escape;
@@ -30,6 +33,7 @@ pub use escape::{EscapeAction, EscapeKey, EscapeState};
 pub use launcher::{
     PaneBootstrapOutcome, PaneBootstrapRequest, PaneEndpoint, bootstrap_pane_endpoint,
 };
+pub use mosh_rs::session::CLIPBOARD_PROTOCOL_VERSION;
 pub use mosh_rs::{Base64Key, DisplayPreference};
 pub use stream::{PaneReader, PaneSession, PaneSessionSettings, PaneWriter};
 

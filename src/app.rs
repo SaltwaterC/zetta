@@ -898,8 +898,28 @@ impl Zetta {
 
     pub(crate) fn new(
         config: Config,
+        configuration_error: Option<String>,
+        launch_options: ZettaLaunchOptions,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::new_with_projects(
+            config,
+            configuration_error,
+            launch_options,
+            ProjectState::load(),
+            window,
+            cx,
+        )
+    }
+
+    /// Builds a window with an explicit registry result, so callers can supply
+    /// isolated project state while preserving registry-load error handling.
+    pub(crate) fn new_with_projects(
+        config: Config,
         mut configuration_error: Option<String>,
         launch_options: ZettaLaunchOptions,
+        projects: Result<ProjectState>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -914,7 +934,7 @@ impl Zetta {
             initial_grid,
         } = launch_options;
         let button_layout = system_window_button_layout(cx);
-        let projects = match ProjectState::load() {
+        let projects = match projects {
             Ok(projects) => projects,
             Err(error) => {
                 let message = format!("Could not load the project registry: {error:#}");

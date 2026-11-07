@@ -545,9 +545,14 @@ fn shell_integration_reports_the_shell_cwd_while_children_run() {
 fn zsh_lifecycle_tracker_does_not_assign_to_read_only_status() {
     let zsh = ShellIntegration::Zsh.eager_script();
 
+    assert!(zsh.contains(&format!(
+        "__ZETTA_LIFECYCLE_TRACKING_VERSION={}",
+        zetta_profiles::ZSH_LIFECYCLE_TRACKING_VERSION
+    )));
+    assert!(!zsh.contains("__ZETTA_LIFECYCLE_VERSION__"));
     assert!(zsh.contains("local zetta_status=$?"));
     assert!(!zsh.contains("local status=$?"));
-    assert!(zsh.contains("__ZETTA_LIFECYCLE_TRACKING_VERSION:-0} != 3"));
+    assert!(zsh.contains("__ZETTA_LIFECYCLE_TRACKING_VERSION:-0} != 1"));
 }
 
 #[test]

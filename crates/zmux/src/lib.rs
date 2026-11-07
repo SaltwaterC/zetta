@@ -45,6 +45,7 @@ pub mod upgrade;
 #[cfg(windows)]
 #[path = "upgrade_windows.rs"]
 pub mod upgrade;
+pub mod versions;
 
 use std::ffi::OsString;
 
@@ -1058,9 +1059,10 @@ fn run_command(arguments: &[OsString], defaults: ClientDefaults) -> Result<()> {
                 // that happens to be running, and that is the question anybody
                 // reads a multiplexer's version for.
                 println!(
-                    "zmux {} (protocol {})",
+                    "zmux {} (protocol {})\n{}",
                     env!("CARGO_PKG_VERSION"),
-                    messages::PROTOCOL_VERSION
+                    messages::PROTOCOL_VERSION,
+                    versions::compatibility_version_text(),
                 );
                 return Ok(());
             }

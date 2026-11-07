@@ -587,7 +587,7 @@ pressed; `Escape` cancels. The shortcut can be changed in the keymap.
   keymaps, fonts, and themes
 - [Background sessions](docs/background-sessions.md): detach, share, protect,
   inspect, reconnect, and attach remote sessions, and where their logs go
-- [Compatibility versioning](docs/versioning.md): executable, protocol, and
+- [Compatibility versioning](docs/versioning.md): `zetta -v` reports executable, protocol, and
   persisted-format version markers
 - [Shell integration](docs/shell-integration.md): command completion and the
   `zvi`/`zwt`/`ztftp`/`zntfy`/`vi` shortcuts

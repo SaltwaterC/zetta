@@ -58,6 +58,7 @@ impl Zetta {
     }
 
     /// Resolves saved pane directories before any terminal view is built.
+    /// Uses the window's registry for both root resolution and approvals.
     /// Each distinct project config root is read once, so all panes in a
     /// restore see the same latest project configuration without multiplying
     /// I/O by pane count.
@@ -134,7 +135,11 @@ impl Zetta {
             .collect::<HashSet<_>>();
         let mut unavailable = HashSet::new();
         for root in roots {
-            match ProjectConfig::load(&root, &self.launch_config) {
+            match ProjectConfig::load_in_registry(
+                &root,
+                &self.launch_config,
+                &self.projects.registry,
+            ) {
                 Ok(project) => {
                     self.projects.insert_config(project);
                 }

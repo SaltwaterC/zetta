@@ -48,7 +48,7 @@ use crate::private_fs::{
 /// peer cannot make the daemon allocate without bound.
 pub const MAX_MESSAGE_BYTES: usize = 64 * 1024;
 
-pub const ENDPOINT_VERSION: u32 = 2;
+pub const ENDPOINT_VERSION: u32 = 1;
 
 /// How a client finds the daemon: the socket to connect to, and the token that
 /// authenticates the channel. Written `0600` inside the `0700` session
@@ -86,14 +86,12 @@ impl Endpoint {
         Ok(endpoint)
     }
 
-    /// The Windows pseudoconsole host outlives daemon upgrades. Its version 1
-    /// endpoint has the same fields as version 2, so a new daemon must still
-    /// be able to find and stop a host that published the older version.
+    /// Reads the Windows pseudoconsole host endpoint with the current schema.
     #[cfg(windows)]
     pub fn read_host(path: &Path) -> Result<Self> {
         let endpoint = Self::read_unchecked(path)?;
         anyhow::ensure!(
-            matches!(endpoint.version, 1 | ENDPOINT_VERSION),
+            endpoint.version == ENDPOINT_VERSION,
             "pseudoconsole host endpoint {} has unsupported version {}",
             path.display(),
             endpoint.version

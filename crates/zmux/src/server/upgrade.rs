@@ -467,24 +467,12 @@ pub(super) fn adopt_attachment(attachment: crate::upgrade::AttachmentHandover) -
     }
 }
 
-/// A session's owner as the previous image recorded it.
-///
-/// An image from before owners carried a start time handed over the PID alone,
-/// and the process holding that PID now is taken to be the owner — the one
-/// check that image would itself have made. Anything this image wrote is taken
-/// as written, start time or none: guessing one for an owner that had already
-/// gone would hand its session to whichever process holds the PID next.
+/// Preserves the owner's recorded identity, including an unavailable start time.
 #[cfg(any(unix, windows))]
-pub(super) fn adopt_owner(
-    owner: Option<u32>,
-    started: Option<u64>,
-    version: u32,
-) -> Option<ProcessIdentity> {
-    let pid = owner?;
-    Some(if version == crate::upgrade::HANDOVER_VERSION {
-        ProcessIdentity { pid, started }
-    } else {
-        ProcessIdentity::of(pid)
+pub(super) fn adopt_owner(owner: Option<u32>, started: Option<u64>) -> Option<ProcessIdentity> {
+    Some(ProcessIdentity {
+        pid: owner?,
+        started,
     })
 }
 
@@ -496,7 +484,6 @@ pub(super) fn adopt_handover(
     let retention = *daemon.retention.lock().unwrap();
     let mut sessions = daemon.sessions.lock().unwrap();
     let now = std::time::Instant::now();
-    let version = handover.version;
     for session in handover.sessions {
         // Adopting one twice would leave the multiplexer holding two entries
         // that no client could tell apart.
@@ -573,7 +560,7 @@ pub(super) fn adopt_handover(
             panes,
             keep: session.keep,
             offered: session.offered,
-            owner: adopt_owner(session.owner, session.owner_started, version),
+            owner: adopt_owner(session.owner, session.owner_started),
             sealed_to: session.sealed_to,
         });
     }
@@ -611,7 +598,6 @@ pub(super) fn adopt_handover(
 ) -> Result<usize> {
     let mut sessions = daemon.sessions.lock().unwrap();
     let now = Instant::now();
-    let version = handover.version;
     for session in handover.sessions {
         if sessions.iter().any(|existing| existing.id == session.id) {
             log::warn!("ignoring session {}, which is already held", session.id);
@@ -646,15 +632,7 @@ pub(super) fn adopt_handover(
             // this pane's pipe name, which the instance it passed keeps held.
             // What the pane fell back to did not survive the handover, so this
             // daemon's own agent stands in.
-            let agent_pipe = match pane.agent_pipe {
-                Some(name) => Some(PathBuf::from(name)),
-                // Every pane had a predictable name before names carried a
-                // random part, and no instance came with it.
-                None if version == crate::upgrade::FILE_HANDOVER_VERSION => {
-                    Some(crate::paths::legacy_pane_forwarded_agent_pipe(pane.id))
-                }
-                None => None,
-            };
+            let agent_pipe = pane.agent_pipe.map(PathBuf::from);
             if let Some(name) = agent_pipe {
                 super::agent_pipe::adopt(
                     pane.id,
@@ -705,7 +683,7 @@ pub(super) fn adopt_handover(
             panes,
             keep: session.keep,
             offered: session.offered,
-            owner: adopt_owner(session.owner, session.owner_started, version),
+            owner: adopt_owner(session.owner, session.owner_started),
             sealed_to: session.sealed_to,
         });
     }

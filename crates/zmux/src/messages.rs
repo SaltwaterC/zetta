@@ -16,28 +16,12 @@ use crate::protocol::{BackgroundPaneLayout, BackgroundSessionSummary, Restorable
 
 /// The wire format, and what a client and a multiplexer compare before they
 /// trust each other to understand one another.
-///
-/// 10: profile commands carry a typed Windows console backend; older daemons
-///     must not silently discard the selected console backend.
-/// 9: a pane's relay can name the viewer it is relaying to, so a window whose
-///    panes travel over Mosh is recognized as watching them.
-/// 8: a client can create a complete daemon-owned shared session without an
-///    existing Zetta tab or window.
-/// 7: a shared pane draft can name the pane whose directory to start in, and
-///    ask the daemon to load the shell integration before anybody attaches.
-/// 6: a shared pane draft names its profile and lets the daemon's host resolve
-///    it, instead of carrying the requester's program, arguments and whole
-///    environment.
-///
-/// `SharedPaneDraft` rejects unknown fields, so a client that sends a newer
-/// shape to a daemon that predates it gets a parse failure rather than a
-/// version mismatch — which is why this has to move with every change to it.
-pub const PROTOCOL_VERSION: u32 = 10;
+pub const PROTOCOL_VERSION: u32 = 1;
 
 /// Version of the durable collaboration envelope. This is independent from
 /// [`PROTOCOL_VERSION`]: a daemon upgrade may keep a session state produced by
 /// an older binary even when the live wire protocol has moved on.
-pub const SHARED_SESSION_STATE_VERSION: u32 = 2;
+pub const SHARED_SESSION_STATE_VERSION: u32 = 1;
 
 /// The opening of the refusal a multiplexer sends a client whose protocol
 /// version it does not speak.
@@ -293,21 +277,13 @@ impl SharedSessionState {
         }
     }
 
-    /// Upgrades the durable v1 envelope without touching its live panes.
-    pub fn migrate(mut self) -> anyhow::Result<Self> {
-        match self.version {
-            SHARED_SESSION_STATE_VERSION => {}
-            1 => {
-                self.presentation = SharedPresentationState {
-                    layout: self.summary.layout.clone(),
-                    active_pane: self.summary.active_pane,
-                    maximized_pane: None,
-                    minimized_panes: Vec::new(),
-                };
-                self.version = SHARED_SESSION_STATE_VERSION;
-            }
-            version => anyhow::bail!("unsupported shared session state version {version}"),
-        }
+    /// Validates the durable envelope's schema before interpreting its state.
+    pub fn migrate(self) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            self.version == SHARED_SESSION_STATE_VERSION,
+            "unsupported shared session state version {}",
+            self.version
+        );
         Ok(self)
     }
 

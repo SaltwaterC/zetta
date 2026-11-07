@@ -1,66 +1,79 @@
 # Compatibility and format versions
 
-`zetta -v` begins with the normal package version and then prints the
-compatibility markers that are most useful when diagnosing a running Zetta
-installation:
+`zetta -v` (or `zetta --version`) prints the package version followed by named
+compatibility markers. A default Linux build prints:
 
 ```text
 Zetta 0.1.0
-CONTROL_VERSION=5
+CONTROL_VERSION=1
 CATALOG_VERSION=1
-ZMUX_PROTOCOL_VERSION=9
+ZMUX_PROTOCOL_VERSION=1
+ZMUX_ENDPOINT_VERSION=1
+ZMUX_SHARED_SESSION_STATE_VERSION=1
+ZMUX_HANDOVER_VERSION=1
+ZMUX_MANIFEST_VERSION=1
+ZMUX_PERSISTENCE_BINDING_VERSION=1
+ZMUX_SEALED_KEY_VERSION=1
+PROJECT_REGISTRY_VERSION=1
+PERFORMANCE_REPORT_VERSION=1
+ZSH_LIFECYCLE_TRACKING_VERSION=1
+ZOSH_AGENT_PROTOCOL_VERSION=1
+ZOSH_CLIPBOARD_PROTOCOL_VERSION=1
 ```
 
-The package version identifies the executable. The three following values
-identify contracts that can make otherwise similarly built processes refuse
-one another or ignore persisted data. They are deliberately printed as named
-fields so a bug report can include the complete block without relying on the
-current source tree.
+All Zetta-owned compatibility and format versions start at **1** for the initial
+release. This resets the development counters while retaining the current
+formats and behavior. Development builds and their saved data are not a
+supported upgrade path across this reset; start new sessions with matching
+binaries. The executable package version remains `0.1.0`.
+
+The output reflects the platform and compiled features. Builds without `zmux`
+still report the local process-control and catalog versions. Persistence markers
+require `session-persistence`; Zosh extension markers require `zosh-client`.
+Windows builds with `zmux` also report the host markers below. `zmux -v` and
+`zetta mux -v` print the same multiplexer markers as `zetta -v`, after their
+package/protocol summary.
 
 ## Version inventory
 
-| Marker | Current value | Owned by | What it versions | Compatibility effect |
-| --- | ---: | --- | --- | --- |
-| `CARGO_PKG_VERSION` | package version | Zetta and `zmux` | User-facing executable release | Identifies the build; it is not a wire-protocol negotiation value. |
-| `CONTROL_VERSION` | `5` | `crates/zmux/src/protocol.rs` | The Zetta-to-Zetta process-control endpoint and request meanings, including remote session attach and the protocol its panes travel over, disk-session resume, managed-worktree project opening, the explicit fresh-window launch, `zetta pane wait`, registered project shell commands, and payload-free tab-icon resets | Endpoints with another version are skipped. |
-| `zmux::protocol::CATALOG_VERSION` | `1` | `crates/zmux/src/protocol.rs` | The public background-session catalog JSON | A catalog with another version is ignored until its owner publishes the current schema. |
-| `zmux::messages::PROTOCOL_VERSION` | `9` | `crates/zmux/src/messages.rs` | The client/daemon message protocol, including logical client IDs, stream-only SSH attach, session-secret envelopes, revisioned shared-session collaboration, shared-pane lifecycle events, headless session creation, disk-session resume, the viewer a pane's relay declares itself to be showing the pane to, and length-prefixed transport framing | Normal requests require an exact match. `zmux --upgrade` is the compatibility path for replacing an older daemon. Debug session directories are namespaced by this value. |
-| `zmux::messages::SHARED_SESSION_STATE_VERSION` | `2` | `crates/zmux/src/messages.rs` | The versioned durable envelope containing a shared session's canonical revision, pane summary, layout/focus state, and opaque tab payload, including sessions created without a Zetta window | A daemon preserves and validates this envelope across persistence and upgrade; an unknown state version is not interpreted as a different collaboration schema. |
-| `zmux::transport::ENDPOINT_VERSION` | `2` | `crates/zmux/src/transport.rs` | The `zmux.json` endpoint descriptor (`socket_path`, token, process ID, and protocol advertisement) | An endpoint with an unknown shape is rejected, causing the client to recover by starting or finding a usable daemon. |
-| `zmux::upgrade::HANDOVER_VERSION` | `8` on Unix, `3` on Windows | `crates/zmux/src/upgrade.rs`, `crates/zmux/src/upgrade_windows.rs` | The private state handed from one daemon image to the next during `--upgrade`, including logical shared-client routing metadata and canonical shared-session state | Unix carries descriptors through `execv`; Windows carries session metadata while `zmux-pty.exe` retains the consoles. The replacement is preflighted and refuses an unknown handover shape before the old daemon stops. |
-| `zmux::pty_host::HOST_PROTOCOL_VERSION` | `1` on Windows | `crates/zmux/src/pty_host.rs` | The additive protocol between the Windows pseudoconsole host and a daemon | The host outlives a daemon replacement, so a new daemon must still speak the host's protocol. A daemon refuses an older host it cannot drive. |
-| `resources/windows/zmux-pty.version` / `zmux::pty_host::HOST_INSTALL_REVISION` | `2` on Windows | `scripts/install-windows.ps1` and `crates/zmux/src/pty_host.rs` | The installer marker for the bytes of the long-lived Windows pseudoconsole host | The installer preserves a helper, including locked generations, when this marker is unchanged. Bump it when a host behavior fix or protocol change needs deployment. It is independent of `HOST_PROTOCOL_VERSION`; revision 2 deploys the Ctrl+C bootstrap fix. |
-| `zmux::pty_host::MINIMUM_HOST_PROTOCOL_VERSION` | `1` on Windows | `crates/zmux/src/pty_host.rs` | The oldest Windows host protocol a daemon is willing to drive | An upgrade is refused if the already-running host is too old. |
-| `PROJECT_REGISTRY_VERSION` | `1` | `src/project.rs` | The local `projects.json` registry | A registry with another version is rejected; this affects project discovery and project handoff, but not Zetta-to-Zetta or Zetta-to-zmux communication. |
-| performance report `schema_version` | `3` | `src/performance.rs` | JSON emitted by `zetta benchmark --profile-report` | Consumers of saved performance artifacts need a matching parser; it does not affect application startup or session compatibility. |
+Every marker in this table currently has value **1**. Values come from the
+constants used by the corresponding readers and writers, so version output can
+be included directly in a bug report.
 
-One additional value is a compatibility implementation detail rather than
-the current version of a format:
+| Output marker | Owner | Contract |
+| --- | --- | --- |
+| `CONTROL_VERSION` | `crates/zmux/src/protocol.rs`; fallback in `src/process_control.rs` | Local Zetta process-control endpoint and command meanings. Peers require an exact match. |
+| `CATALOG_VERSION` | `crates/zmux/src/protocol.rs`; fallback in `src/local_sessions.rs` | Published background-session catalog JSON. Unknown catalog versions are ignored. |
+| `ZMUX_PROTOCOL_VERSION` | `crates/zmux/src/messages.rs` | Client/daemon messages. Normal requests require an exact match; debug session directories are namespaced by this value. |
+| `ZMUX_ENDPOINT_VERSION` | `crates/zmux/src/transport.rs` | Daemon and Windows host endpoint descriptors. Unknown versions are rejected. |
+| `ZMUX_SHARED_SESSION_STATE_VERSION` | `crates/zmux/src/messages.rs` | Durable shared-session state, including revisions, geometry, focus, and opaque tab payload. Unknown versions are rejected. |
+| `ZMUX_HANDOVER_VERSION` | `crates/zmux/src/upgrade.rs`, `upgrade_windows.rs` | Platform-specific private state passed to a replacement daemon. The replacement is preflighted before the old image stops. |
+| `ZMUX_MANIFEST_VERSION` | `crates/zmux/src/persistence.rs` | Encrypted session-store manifest schema. |
+| `ZMUX_PERSISTENCE_BINDING_VERSION` | `crates/zmux/src/persistence/binding.rs` | Header binding an encrypted payload to its record, generation, pane, and payload kind. |
+| `ZMUX_SEALED_KEY_VERSION` | `crates/zmux/src/auto_protect.rs` | Host-bound sealed session-key plaintext inside an age envelope. Unknown versions are rejected; unversioned bare keys remain restricted to local use. |
+| `ZMUX_HOST_PROTOCOL_VERSION` | `crates/zmux/src/pty_host.rs` (Windows) | Additive protocol between a daemon and its long-lived console host. |
+| `ZMUX_MINIMUM_HOST_PROTOCOL_VERSION` | `crates/zmux/src/pty_host.rs` (Windows) | Oldest host protocol the daemon can drive. This is a compatibility floor. |
+| `ZMUX_CONSOLE_SERVER_HOST_PROTOCOL_VERSION` | `crates/zmux/src/pty_host.rs` (Windows) | First host protocol supporting console-server consoles. |
+| `ZMUX_HOST_INSTALL_REVISION` | `crates/zmux/src/pty_host.rs`, `resources/windows/zmux-pty.version` (Windows) | Installer marker for host executable bytes; independent of the wire protocol. Bump when a host behavior fix needs deployment. |
+| `PROJECT_REGISTRY_VERSION` | `src/project.rs` | Local `projects.json`, including registered roots and saved project approvals. |
+| `PERFORMANCE_REPORT_VERSION` | `src/performance.rs` | `schema_version` in `zetta benchmark --profile-report` JSON. |
+| `ZSH_LIFECYCLE_TRACKING_VERSION` | `crates/zetta_profiles/src/lib.rs`, `src/shell_integration/zsh.zsh` | Revision used to refresh Zsh command-lifecycle hooks. |
+| `ZOSH_AGENT_PROTOCOL_VERSION` | `crates/zosh/src/agent.rs` | Zosh SSH-agent forwarding extension. |
+| `ZOSH_CLIPBOARD_PROTOCOL_VERSION` | `crates/mosh_rs/src/session.rs` | Zosh clipboard query relay extension. |
 
-- `MINIMUM_HOST_PROTOCOL_VERSION` is a compatibility floor, not a second
-  independently negotiated current host format. It is listed above because a
-  Windows upgrade can fail on that comparison.
+## Other versions
 
-There is also one deliberately versioned local cache artifact: macOS built-in
-notification audio is stored with a `-v1.wav` suffix in
-`crates/zntfy/src/sounds.rs`. Bump that suffix when the waveform or WAV
-encoding changes; it only invalidates regenerated audio and does not affect
-Zetta peers, sessions, or persisted configuration.
+External versions retain their specified values: Mosh protocol **2**, age file
+format **1**, Argon2 version **19**, operating-system and graphics API versions,
+and the external theme index's `max_schema_version` query. Dependency package
+versions and upstream GPUI profiling formats are also independent of Zetta's
+release baseline and are not printed as Zetta compatibility markers.
 
-## What does not belong in `zetta -v`
+The disposable macOS notification-audio cache uses a `-v1.wav` filename suffix
+in `crates/zntfy/src/sounds.rs`. It only invalidates regenerated audio and is not
+a peer protocol or persisted user-data contract.
 
-The repository also contains versions that come from another system or are
-not Zetta compatibility contracts: dependency package versions, operating
-system and graphics API versions, installed theme extension versions, and
-the `max_schema_version=1` query sent to the external theme-extension index.
-Those values can matter to the relevant subsystem, but adding them to the
-application version block would make it look as if they identify a Zetta
-peer or persisted file format. The executable's package version is already
-propagated to `TERM_PROGRAM_VERSION`, the performance report, and the macOS
-bundle metadata where appropriate.
-
-When changing a versioned contract, update its constant and the relevant
-sidecar/integration tests together. The catalog design plan currently mentions
-an intended catalog version of 5, while the implementation publishes version
-1; that discrepancy should be resolved explicitly before a future catalog
-schema change rather than silently treating the plan as a protocol authority.
+When changing a contract, update its owning constant and regression tests.
+The shared multiplexer inventory lives in `crates/zmux/src/versions.rs`; the
+application adds its local markers in `src/startup/cli_help.rs`. Keep the Windows
+host installer marker synchronized with `HOST_INSTALL_REVISION`.

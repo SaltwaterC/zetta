@@ -512,3 +512,11 @@ fn a_record_written_before_bindings_is_bound_when_it_is_next_saved() {
     let text = restored_text(&store.load(7).unwrap(), 1);
     assert!(text.contains("old scrollback"), "{text}");
 }
+
+#[test]
+fn advertised_binding_version_matches_the_written_header() {
+    assert_eq!(
+        MAGIC,
+        format!("\0zmux-binding/{BINDING_VERSION} ").as_bytes()
+    );
+}

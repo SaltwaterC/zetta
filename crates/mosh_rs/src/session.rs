@@ -22,6 +22,9 @@ use crate::statesync::{HostEvent, parse_host_diff};
 use crate::terminal::ClientTerminal;
 use crate::transport::{Fragment, FragmentAssembly, Fragmenter};
 
+/// Version of Zosh's private clipboard query relay extension.
+pub const CLIPBOARD_PROTOCOL_VERSION: u32 = 1;
+
 /// mosh's own overhead inside a datagram (`Connection::ADDED_BYTES`):
 /// the 8-byte nonce prefix and the two timestamps.
 const CONNECTION_ADDED_BYTES: usize = 8 + 4;
@@ -281,7 +284,9 @@ impl<S: Screen> MoshSession<S> {
 
     /// Announce support for private clipboard frames in terminal queries.
     pub fn request_clipboard_relay(&mut self) {
-        self.sender.state_mut().push_clipboard_version(1);
+        self.sender
+            .state_mut()
+            .push_clipboard_version(CLIPBOARD_PROTOCOL_VERSION);
     }
 
     /// What to prepend to a window title before passing it on. Empty

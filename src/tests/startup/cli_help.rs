@@ -31,8 +31,45 @@ fn version_flags_and_output_are_defined() {
     }
     #[cfg(not(feature = "zmux"))]
     {
-        assert!(!version.contains("CATALOG_VERSION="));
+        assert!(version.contains("CATALOG_VERSION=1"));
         assert!(!version.contains("ZMUX_PROTOCOL_VERSION="));
+    }
+}
+
+#[test]
+fn version_output_exposes_local_contracts_and_enabled_features() {
+    let version = version_text();
+    let fields: std::collections::BTreeMap<_, _> = version
+        .lines()
+        .skip(1)
+        .map(|line| line.split_once('=').unwrap())
+        .collect();
+    assert_eq!(
+        fields.len(),
+        version.lines().count() - 1,
+        "duplicate version marker"
+    );
+    for name in [
+        "CONTROL_VERSION",
+        "CATALOG_VERSION",
+        "PROJECT_REGISTRY_VERSION",
+        "PERFORMANCE_REPORT_VERSION",
+        "ZSH_LIFECYCLE_TRACKING_VERSION",
+    ] {
+        assert_eq!(fields.get(name), Some(&"1"), "{name}");
+    }
+    assert_eq!(
+        fields.contains_key("ZOSH_AGENT_PROTOCOL_VERSION"),
+        cfg!(feature = "zosh-client")
+    );
+    assert_eq!(
+        fields.contains_key("ZOSH_CLIPBOARD_PROTOCOL_VERSION"),
+        cfg!(feature = "zosh-client")
+    );
+    #[cfg(feature = "zmux")]
+    for line in zmux::versions::compatibility_version_text().lines() {
+        let (name, value) = line.split_once('=').unwrap();
+        assert_eq!(fields.get(name), Some(&value));
     }
 }
 

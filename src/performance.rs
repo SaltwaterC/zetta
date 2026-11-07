@@ -1,5 +1,9 @@
 use super::*;
+
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
+
+/// Schema of the JSON emitted by `benchmark --profile-report`.
+pub(crate) const PERFORMANCE_REPORT_VERSION: u8 = 1;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize)]
 struct PerformanceCpuMetrics {
@@ -323,7 +327,7 @@ impl PerformanceOverlay {
                 )
             });
         let report = PerformanceReport {
-            schema_version: 3,
+            schema_version: PERFORMANCE_REPORT_VERSION,
             zetta_version: env!("CARGO_PKG_VERSION"),
             build_profile: if cfg!(debug_assertions) {
                 "debug"

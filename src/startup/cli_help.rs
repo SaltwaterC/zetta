@@ -29,23 +29,35 @@ pub(crate) fn parse_tftp_args(_: impl IntoIterator<Item = OsString>) -> Result<T
 }
 
 pub(crate) fn version_text() -> String {
-    let version = format!(
-        "Zetta {}\nCONTROL_VERSION={}",
-        env!("CARGO_PKG_VERSION"),
-        crate::process_control::CONTROL_VERSION,
-    );
+    let mut version = format!("Zetta {}", env!("CARGO_PKG_VERSION"));
     #[cfg(feature = "zmux")]
-    {
-        format!(
-            "{version}\nCATALOG_VERSION={}\nZMUX_PROTOCOL_VERSION={}",
-            zmux::protocol::CATALOG_VERSION,
-            zmux::messages::PROTOCOL_VERSION,
-        )
-    }
+    version.push_str(&format!(
+        "\n{}",
+        zmux::versions::compatibility_version_text()
+    ));
     #[cfg(not(feature = "zmux"))]
-    {
-        version
-    }
+    version.push_str(&format!(
+        "\nCONTROL_VERSION={}\nCATALOG_VERSION={}",
+        crate::process_control::CONTROL_VERSION,
+        crate::local_sessions::protocol::CATALOG_VERSION,
+    ));
+    version.push_str(&format!(
+        "\nPROJECT_REGISTRY_VERSION={}\nPERFORMANCE_REPORT_VERSION={}\nZSH_LIFECYCLE_TRACKING_VERSION={}",
+        crate::project::PROJECT_REGISTRY_VERSION,
+        crate::performance::PERFORMANCE_REPORT_VERSION,
+        zetta_profiles::ZSH_LIFECYCLE_TRACKING_VERSION,
+    ));
+    #[cfg(feature = "zosh-client")]
+    version.push_str(&format!(
+        "\nZOSH_AGENT_PROTOCOL_VERSION={}",
+        zosh::AGENT_PROTOCOL_VERSION
+    ));
+    #[cfg(feature = "zosh-client")]
+    version.push_str(&format!(
+        "\nZOSH_CLIPBOARD_PROTOCOL_VERSION={}",
+        zosh::CLIPBOARD_PROTOCOL_VERSION
+    ));
+    version
 }
 
 pub(crate) fn format_help_table<'a>(rows: impl AsRef<[(&'a str, &'a str)]>) -> String {

@@ -40,11 +40,11 @@
 //! sends, after which the recovered key goes back to that multiplexer. A remote
 //! host holding another session's envelope (sealed to the same recipients)
 //! could therefore offer it as one of its own and be sent that session's key.
-//! So since version 2 the sealed text is not the bare key but a short record
+//! The sealed text is not the bare key but a short record
 //! that also says what the key is for and which host it belongs to:
 //!
 //! ```text
-//! zetta-sealed-session-key/2;purpose=session-authentication;host=SHA256:…,SHA256:…;key=<K>
+//! zetta-sealed-session-key/1;purpose=session-authentication;host=SHA256:…,SHA256:…;key=<K>
 //! ```
 //!
 //! `host` is the SSH host key fingerprints of the machine that sealed it — see
@@ -54,11 +54,11 @@
 //! change, which sends whatever it decrypts, still opens these envelopes.
 //!
 //! [`open`] is for a key going back to *this* machine's multiplexer, and accepts
-//! any version. [`open_for_remote`] is for a key about to be sent to another
+//! current records and unversioned bare keys. [`open_for_remote`] is for a key sent to another
 //! host, and refuses unless that host is one the envelope names, judged by this
-//! machine's own `known_hosts` for the destination the user chose. A version 1
-//! envelope — a bare key, written before the binding existed — names no host,
-//! so it is refused for remote use with an explanation rather than sent on
+//! machine's own `known_hosts` for the destination the user chose. An unversioned
+//! envelope — a bare key — names no host, so it is refused for remote use
+//! with an explanation rather than sent on
 //! trust: there is no way to tell a legitimate one from a substituted one.
 //!
 //! The binding names a host, not a session. Session ids are not known when a
@@ -85,10 +85,9 @@ use crate::{
 /// verifier format identical to a typed secret's.
 const KEY_BYTES: usize = 32;
 
-/// Opens every sealed text from version 2 on; a text without it is version 1,
-/// the bare key.
+/// Prefix of a versioned, host-bound sealed key.
 const SEALED_KEY_TAG: &str = "zetta-sealed-session-key/";
-const SEALED_KEY_VERSION: &str = "2";
+pub const SEALED_KEY_VERSION: &str = "1";
 /// What a sealed key is for. There is one purpose today; naming it means a key
 /// sealed for some later purpose can never be mistaken for a session secret.
 const SESSION_AUTHENTICATION_PURPOSE: &str = "session-authentication";
@@ -228,9 +227,9 @@ fn decrypt(envelope: &str, identities: &IdentitySet) -> Result<Zeroizing<String>
 /// What a sealed text says about its key.
 #[derive(Debug, PartialEq, Eq)]
 enum SealedKey {
-    /// Version 2 or later: bound to the hosts with these SSH host keys.
+    /// Versioned record: bound to the hosts with these SSH host keys.
     Bound { host_keys: Vec<String> },
-    /// Version 1: the bare key, from before envelopes were bound to anything.
+    /// Unversioned: the bare key, from before envelopes were bound to anything.
     Unbound,
 }
 

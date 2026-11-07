@@ -58,6 +58,8 @@ use super::*;
 
 /// The start of every bound plaintext. The leading NUL is what no unbound
 /// payload begins with: metadata is JSON and segments are terminal output.
+pub const BINDING_VERSION: u32 = 1;
+
 const MAGIC: &[u8] = b"\0zmux-binding/1 ";
 /// The longest header accepted, magic and newline included. The longest one
 /// written is under 160 bytes.

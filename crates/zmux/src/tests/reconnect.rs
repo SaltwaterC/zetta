@@ -195,14 +195,13 @@ mod control_endpoints {
     fn reconnect_discovers_a_window_with_tab_targeted_icon_support() {
         let (_root, directory) = private_session_directory();
         let path = own_endpoint_path(&directory);
-        // Version 7 added tab-targeted icons without changing reconnect.
-        // The standalone client previously still required version 6 and
-        // silently discarded every endpoint published by the upgraded GUI.
-        publish_version(&path, &path.with_extension("sock"), 7);
+        // The GUI and standalone reconnect client must use the same marker,
+        // including when other process-control commands change.
+        publish_version(&path, &path.with_extension("sock"), CONTROL_VERSION);
 
         assert_eq!(running_control_endpoints(&directory).unwrap().len(), 1);
 
-        publish_version(&path, &path.with_extension("sock"), 6);
+        publish_version(&path, &path.with_extension("sock"), CONTROL_VERSION + 1);
         assert!(running_control_endpoints(&directory).unwrap().is_empty());
     }
 

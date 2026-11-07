@@ -54,6 +54,8 @@ impl ReloadDaemon for MuxReconfigureHandle {
 pub(crate) trait PreparationEnvironment: Sync {
     /// The user theme files that changed since the last reload, parsed.
     fn user_themes(&self) -> Result<Vec<theme::ThemeFamily>>;
+    /// Loads a project against the environment's registry and trust approvals.
+    fn project_configuration(&self, root: &Path, config: &Config) -> Result<ProjectConfig>;
     /// Resolves the request every daemon is sent; can be a GitHub fetch.
     #[cfg(feature = "zmux")]
     fn daemon_plan(&self, sessions: &crate::config::SessionsConfig) -> Result<MuxReconfiguration>;
@@ -72,6 +74,10 @@ pub(crate) trait PreparationEnvironment: Sync {
 pub(crate) struct HostEnvironment;
 
 impl PreparationEnvironment for HostEnvironment {
+    fn project_configuration(&self, root: &Path, config: &Config) -> Result<ProjectConfig> {
+        ProjectConfig::load(root, config)
+    }
+
     fn user_themes(&self) -> Result<Vec<theme::ThemeFamily>> {
         prepare_user_themes()
     }
@@ -186,7 +192,7 @@ pub(crate) fn prepare(
                 let config = &config;
                 (
                     root.clone(),
-                    scope.spawn(move || load_project_configuration(root, config)),
+                    scope.spawn(move || load_project_configuration(root, config, environment)),
                 )
             })
             .collect::<Vec<_>>();
@@ -254,8 +260,10 @@ struct PreparedParts {
 fn load_project_configuration(
     root: &Path,
     config: &Config,
+    environment: &dyn PreparationEnvironment,
 ) -> std::result::Result<Arc<ProjectConfig>, String> {
-    ProjectConfig::load(root, config)
+    environment
+        .project_configuration(root, config)
         .map(Arc::new)
         .with_context(|| {
             format!(

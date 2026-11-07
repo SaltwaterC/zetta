@@ -25,6 +25,9 @@ mod environment;
 mod installation_trust;
 mod shell_integration;
 
+/// Revision used to reload Zsh command-lifecycle hooks.
+pub const ZSH_LIFECYCLE_TRACKING_VERSION: u32 = 1;
+
 pub use discovery::discovered_profiles;
 pub use environment::{
     FALLBACK_LANG, REMOVED_TERMINAL_ENVIRONMENT, TerminalEnvironmentOptions, terminal_environment,

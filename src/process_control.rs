@@ -80,56 +80,14 @@ pub(crate) use server::ProcessControlServer;
 
 /// Bumped when a control command's meaning changes, so a Zetta that cannot
 /// serve a request is not sent one.
-///
-/// 14 added multiplexer-held sessions: reconnecting one has to reach a window
-/// that knows to ask the multiplexer for it. An older window accepts the
-/// request and reports that the session does not exist, which is exactly the
-/// confusing failure this guards against.
-///
-/// 15 adds the originating tab target to reconnect requests. Without it, a
-/// shared session was sent to whichever process-control endpoint happened to
-/// answer first, and that process then chose its first window.
-/// The shared value is also used by the standalone `zmux reconnect` client.
-///
-/// 16 adds the disk-session resume request. Its private identity payload is
-/// carried in `config_path` so older request construction stays unchanged; the
-/// command is version-gated and the decoder accepts that field only for this
-/// request.
-///
-/// 17 adds passphrases for encrypted identity files to that private payload.
-///
-/// 18 adds an optional working directory to open-project requests, so opening
-/// a registered project from a managed worktree can preserve that directory.
-///
-/// 19 adds a raw shell-command request for registered project commands.
-///
-/// 20 adds `reset_tab_icon`, which clears a tab's
-/// explicit icon override and reapplies its active project or application
-/// default. Tab icon requests may now carry `queue: true` to acknowledge
-/// acceptance into the application command queue before UI completion.
-///
-/// A New Window request may carry an optional profile name and a short-lived Wayland activation token in
-/// the private string payload so an existing process can focus its surface.
-///
-/// The current version also includes an explicit fresh-window request, which
-/// must not resume a dormant session the way the existing plain-launch request
-/// does, and a `pane_theme_revision` on `get_pane_theme` in both directions: a
-/// client that sends the revision it already has is answered `unchanged` by the
-/// connection thread, without the main thread being involved.
-///
-/// 5 adds the protocol a remote session's panes travel over, and the keep-alive
-/// interval that goes with it, to `open_remote_session`. A client that does not
-/// send them asks for the same SSH byte stream every earlier client did.
-/// 6 adds an optional SSH-agent forwarding override, whose absence preserves
-/// the configured default.
-/// 7 lets tab-icon set and reset requests address their originating tab by
-/// attention ID, so background shell hooks cannot change another active tab.
+/// The current baseline includes all process-control commands. Keep the
+/// standalone reconnect client and builds without multiplexer support in sync.
 #[cfg(feature = "zmux")]
 pub(crate) const CONTROL_VERSION: u32 = zmux::protocol::CONTROL_VERSION;
 // Without multiplexer support there is no standalone reconnect client to
 // synchronize with, and the optional zmux dependency is unavailable.
 #[cfg(not(feature = "zmux"))]
-pub(crate) const CONTROL_VERSION: u32 = 7;
+pub(crate) const CONTROL_VERSION: u32 = 1;
 // A 64 KiB argv payload can expand substantially when it contains many
 // one-character arguments and each value is represented as JSON. Keep enough
 // framing headroom for that worst case as well as the endpoint token.

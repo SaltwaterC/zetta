@@ -22,7 +22,7 @@ use crate::worktree_detection::{
 
 pub(crate) const PROJECT_CONFIG_DIRECTORY: &str = ".zetta";
 pub(crate) const PROJECT_CONFIG_FILE: &str = "config.json";
-const PROJECT_REGISTRY_VERSION: u32 = 2;
+pub(crate) const PROJECT_REGISTRY_VERSION: u32 = 1;
 
 #[derive(Clone, Debug)]
 pub(crate) struct ProjectConfig {
@@ -292,7 +292,7 @@ impl ProjectRegistry {
         let file: ProjectRegistryFile = serde_json::from_str(&source)
             .with_context(|| format!("parsing project registry {}", path.display()))?;
         anyhow::ensure!(
-            matches!(file.version, 1 | PROJECT_REGISTRY_VERSION),
+            file.version == PROJECT_REGISTRY_VERSION,
             "unsupported project registry version {}; expected {PROJECT_REGISTRY_VERSION}",
             file.version
         );
@@ -310,11 +310,7 @@ impl ProjectRegistry {
         Ok(Self {
             path,
             roots,
-            approvals: if file.version == 1 {
-                Vec::new()
-            } else {
-                file.approvals
-            },
+            approvals: file.approvals,
         })
     }
 

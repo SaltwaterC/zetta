@@ -48,7 +48,7 @@ fn performance_report_is_portable_json() {
     let report: serde_json::Value =
         serde_json::from_slice(&fs::read(&report_path).unwrap()).unwrap();
     fs::remove_file(report_path).unwrap();
-    assert_eq!(report["schema_version"], 3);
+    assert_eq!(report["schema_version"], PERFORMANCE_REPORT_VERSION);
     assert_eq!(report["zetta_version"], env!("CARGO_PKG_VERSION"));
     assert_eq!(report["requested_duration_ms"], 10_000);
     assert_eq!(report["target"]["os"], std::env::consts::OS);

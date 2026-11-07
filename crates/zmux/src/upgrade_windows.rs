@@ -41,23 +41,7 @@ use crate::messages::ClientId;
 
 /// Bumped whenever the private Windows handover changes incompatibly. Optional
 /// defaulted fields keep the version so an older daemon can upgrade into them.
-///
-/// 4 moved the handover from a file to a pipe, which `--resume-check` has to
-/// tell an older image about: one that cannot read the pipe refuses before the
-/// old daemon starts it, rather than after.
-///
-/// 5 added [`SessionHandover::owner_started`], which an older image would
-/// refuse as an unknown field.
-pub const HANDOVER_VERSION: u32 = 5;
-
-/// The last version before [`SessionHandover::owner_started`]. Its replacement
-/// identifies each owner by the process holding its PID when it is adopted.
-pub const PID_OWNER_HANDOVER_VERSION: u32 = 4;
-
-/// The last version a daemon wrote to a file. A daemon from before the pipe
-/// still upgrades *into* this image that way, so it is still read — the old
-/// image has already written it — and removed as soon as it has been.
-pub const FILE_HANDOVER_VERSION: u32 = 3;
+pub const HANDOVER_VERSION: u32 = 1;
 
 /// The largest handover a replacement reads. Retained output is bounded per
 /// pane, so this only stops a broken sender from exhausting memory.
@@ -66,12 +50,7 @@ const MAX_HANDOVER_BYTES: u64 = 1 << 30;
 /// Whether this image can adopt a handover of `version`, which is what
 /// `--resume-check` answers.
 pub fn accepts_handover_version(version: u32) -> bool {
-    [
-        HANDOVER_VERSION,
-        PID_OWNER_HANDOVER_VERSION,
-        FILE_HANDOVER_VERSION,
-    ]
-    .contains(&version)
+    version == HANDOVER_VERSION
 }
 
 /// Where a replacement reads its handover from.
@@ -162,9 +141,8 @@ pub struct PaneHandover {
     pub exited: bool,
     pub exit_status: Option<i32>,
     pub retained: Vec<u8>,
-    /// The pane's `SSH_AUTH_SOCK` pipe, absent where the old daemon was not
-    /// serving one — or, in a version 3 handover, where it is the predictable
-    /// name every pane had then.
+    /// The pane's `SSH_AUTH_SOCK` pipe, absent where the previous daemon was
+    /// not serving one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_pipe: Option<String>,
     /// An instance of [`Self::agent_pipe`] the old daemon duplicated into the
@@ -329,7 +307,7 @@ pub fn receive_handover(source: &HandoverSource) -> Result<Handover> {
             // Gone as soon as it has been read, whatever happens next: the
             // daemon that wrote it is not going to read it again.
             let _ = fs::remove_file(path);
-            parse_handover(&encoded?, FILE_HANDOVER_VERSION)
+            parse_handover(&encoded?, HANDOVER_VERSION)
         }
     }
 }

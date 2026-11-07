@@ -66,7 +66,10 @@ impl ShellIntegration {
             }
             (Self::Zsh, true) => include_str!("shell_integration/zsh_completions.zsh"),
         };
-        render_integration(template, self)
+        render_integration(template, self).replace(
+            "__ZETTA_LIFECYCLE_VERSION__",
+            &zetta_profiles::ZSH_LIFECYCLE_TRACKING_VERSION.to_string(),
+        )
     }
 
     fn startup_file(self, home: &Path) -> PathBuf {
