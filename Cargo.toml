@@ -1,5 +1,6 @@
 [package]
 name = "zetta"
+# Single source of truth for Zetta's application and bundle version.
 version = "0.1.0"
 edition = "2024"
 license = "GPL-3.0-or-later"

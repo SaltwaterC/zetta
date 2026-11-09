@@ -266,6 +266,10 @@ git submodule update --init
 cargo run
 ```
 
+Zetta's version is maintained only in `[package].version` in the root
+`Cargo.toml`; rebuild after changing it. Fork crate versions are independent.
+See [versioning](docs/versioning.md) for the application and compatibility markers.
+
 Linux defaults to Wayland. Use `make build X11=1` to include the X11 backend
 as well. Linux system dependencies and platform-specific build and desktop
 installation instructions are in the [installation guide](docs/installation.md).

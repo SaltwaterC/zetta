@@ -1,5 +1,25 @@
 use super::*;
 
+#[gpui::test]
+fn application_and_terminal_versions_match_the_cli(cx: &mut gpui::TestAppContext) {
+    cx.update(|cx| {
+        initialize_application_version(cx);
+        let version = release_channel::AppVersion::global(cx);
+        assert_eq!(version.to_string(), env!("CARGO_PKG_VERSION"));
+        assert_eq!(
+            cli_help::version_text().lines().next(),
+            Some(format!("Zetta {version}").as_str())
+        );
+
+        let mut environment = HashMap::new();
+        terminal::insert_zetta_terminal_env(&mut environment, &version);
+        assert_eq!(
+            environment["TERM_PROGRAM_VERSION"],
+            env!("CARGO_PKG_VERSION")
+        );
+    });
+}
+
 #[test]
 fn terminal_rendering_profiler_launches_the_current_executable() {
     let executable = Path::new(if cfg!(windows) {

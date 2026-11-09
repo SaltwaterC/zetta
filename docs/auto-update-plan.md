@@ -24,9 +24,9 @@ files need to change.
 
 ## What exists today
 
-- The root package is version `0.1.0`. `src/startup.rs` currently also passes
-  a hardcoded `0.1.0` to `release_channel::init`; replace that with the package
-  version before exposing release checks.
+- The root `Cargo.toml` defines the application version. `src/startup.rs`
+  passes that package version to `release_channel::init`, keeping application
+  state and CLI version output in sync.
 - There is no root `.github/workflows` directory in this checkout. Release
   automation and the downloadable package contract must be added.
 - Linux user installation puts the application and enabled helpers under

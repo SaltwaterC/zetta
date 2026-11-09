@@ -1,10 +1,26 @@
 # Compatibility and format versions
 
+## Application version
+
+Change only `[package].version` in the root `Cargo.toml` to bump Zetta's
+version, then rebuild. Cargo supplies it through `CARGO_PKG_VERSION` to the
+CLI, application state, terminal `TERM_PROGRAM_VERSION`, HTTP user agent, and
+performance reports. The macOS bundle also reads its version from that manifest.
+Cargo refreshes the root package's generated `Cargo.lock` entry on the next
+build; do not edit the lockfile's version by hand.
+
+Crates under `crates/` keep independently maintained package versions, including
+forks that happen to have the same version as Zetta. Compatibility and format
+markers below are also versioned independently.
+
+## Version output
+
 `zetta -v` (or `zetta --version`) prints the package version followed by named
-compatibility markers. A default Linux build prints:
+compatibility markers. A default Linux build prints the following, with
+`<package-version>` taken from the root manifest:
 
 ```text
-Zetta 0.1.0
+Zetta <package-version>
 CONTROL_VERSION=1
 CATALOG_VERSION=1
 ZMUX_PROTOCOL_VERSION=1
@@ -25,7 +41,7 @@ All Zetta-owned compatibility and format versions start at **1** for the initial
 release. This resets the development counters while retaining the current
 formats and behavior. Development builds and their saved data are not a
 supported upgrade path across this reset; start new sessions with matching
-binaries. The executable package version remains `0.1.0`.
+binaries. These counters are independent of the executable package version.
 
 The output reflects the platform and compiled features. Builds without `zmux`
 still report the local process-control and catalog versions. Persistence markers

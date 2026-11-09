@@ -643,7 +643,7 @@ fn initialize_zetta_settings(launch: &mut ApplicationLaunch, cx: &mut App) {
     cx.set_http_client(launch.http_client.clone());
     menu::init();
     zed_actions::init();
-    release_channel::init(semver::Version::new(0, 1, 0), cx);
+    initialize_application_version(cx);
     TerminalSettings::init(cx);
     if let Some(cell_size) = launch.cell_size {
         cx.set_global(cell_size);
@@ -674,6 +674,15 @@ fn initialize_zetta_settings(launch: &mut ApplicationLaunch, cx: &mut App) {
     );
     #[cfg(target_os = "macos")]
     update_native_macos_dock_menu(cx, &launch.config.profiles, &launch.config.hidden_profiles);
+}
+
+/// Gives terminal environments the same package version as the CLI.
+fn initialize_application_version(cx: &mut App) {
+    release_channel::init(
+        semver::Version::parse(env!("CARGO_PKG_VERSION"))
+            .expect("invalid Zetta package version in Cargo.toml"),
+        cx,
+    );
 }
 
 /// Starts the control server, publishes [`ZettaProcessState`], and starts the

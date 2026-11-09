@@ -105,13 +105,13 @@ fn terminal_regexes_are_cloned_then_moved_into_the_final_spawn() {
 fn terminal_environment_identifies_zetta() {
     let mut env = HashMap::from([("ZED_TERM".to_string(), "true".to_string())]);
 
-    terminal::insert_zetta_terminal_env(&mut env, &"0.1.0");
+    terminal::insert_zetta_terminal_env(&mut env, &env!("CARGO_PKG_VERSION"));
 
     assert_eq!(env.get("ZETTA_TERM").map(String::as_str), Some("true"));
     assert_eq!(env.get("TERM_PROGRAM").map(String::as_str), Some("zetta"));
     assert_eq!(
         env.get("TERM_PROGRAM_VERSION").map(String::as_str),
-        Some("0.1.0")
+        Some(env!("CARGO_PKG_VERSION"))
     );
     assert!(!env.contains_key("ZED_TERM"));
 }
