@@ -1,6 +1,6 @@
 //! The application's connection to the session multiplexer.
 //!
-//! Every pane's process belongs to `zmux`, not to Zetta: that is what lets a
+//! Normally every pane's process belongs to `zmux`, not to Zetta: that lets a
 //! session outlive the window it was started in, and eventually be attached
 //! from another machine. While a pane is attached, Zetta holds the PTY
 //! descriptor itself and reads it directly, so an attached terminal costs
@@ -11,6 +11,8 @@
 //! event subscription and are routed to the terminal that is showing the pane.
 //! And a tab is a session: panes spawned into the same tab have to join the
 //! same session, which is what [`MuxSession`] tracks.
+//! New local terminals can start without the daemon when connecting fails.
+//! Attached sessions and disk replay still require their original provider.
 //!
 //! Every mutex here is taken with
 //! `unwrap_or_else(|poisoned| poisoned.into_inner())` rather than `unwrap`,
@@ -1025,9 +1027,9 @@ impl crate::Zetta {
 
     /// A provider that spawns into `tab_id`'s multiplexer session.
     ///
-    /// Returns `None` only for the explicit `--no-mux` legacy mode. In normal
-    /// mode, a failed daemon connection is returned so a terminal cannot
-    /// silently escape daemon ownership.
+    /// Returns `None` for `--no-mux` or when a new local terminal must fall
+    /// back after a failed daemon connection. Existing sessions and disk
+    /// replay never fall back to a different process.
     pub(crate) fn mux_provider_for_tab(
         &mut self,
         tab_id: u64,
@@ -1053,9 +1055,13 @@ impl crate::Zetta {
         // local daemon.
         let tab_runtime = self.mux_panes.runtime_for_tab(tab_id);
         if tab_runtime.is_none() && self.mux.is_none() {
+            let can_start_locally = replay.is_none() && self.mux_panes.session_id(tab_id).is_none();
             if let Some((failed_at, message)) = self.mux_connect_failure.as_ref()
                 && failed_at.elapsed() < MUX_CONNECT_RETRY_BACKOFF
             {
+                if can_start_locally {
+                    return Ok(None);
+                }
                 anyhow::bail!("{message}");
             }
             match self
@@ -1083,11 +1089,19 @@ impl crate::Zetta {
                     self.install_mux_runtime(runtime, cx);
                 }
                 Err(error) => {
-                    let message = format!(
-                        "Could not reach the session multiplexer, so this terminal cannot be \
-                         backgrounded: {error:#}"
-                    );
+                    let message = format!("Could not reach the session multiplexer: {error:#}");
                     self.mux_connect_failure = Some((Instant::now(), message.clone()));
+                    if can_start_locally {
+                        log::warn!("{message}; starting terminals locally");
+                        self.show_notice(
+                            format!(
+                                "Starting terminals locally because the session multiplexer is unavailable. \
+                                 These terminals will close when Zetta exits and cannot be shared. {error:#}"
+                            ),
+                            cx,
+                        );
+                        return Ok(None);
+                    }
                     self.show_error_notice(message, cx);
                     return Err(error).context("connecting to the session multiplexer");
                 }

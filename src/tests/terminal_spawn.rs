@@ -666,11 +666,9 @@ fn pending_command_waits_for_the_shell_integration_line() {
     );
 }
 
-#[cfg(all(windows, feature = "zmux"))]
+#[cfg(feature = "zmux")]
 #[gpui::test]
-fn console_server_does_not_escape_mux_when_the_daemon_is_unavailable(
-    cx: &mut gpui::TestAppContext,
-) {
+fn unavailable_multiplexer_starts_a_local_terminal(cx: &mut gpui::TestAppContext) {
     cx.update(|cx| {
         theme_settings::init(theme::LoadThemes::JustBase, cx);
         terminal::terminal_settings::TerminalSettings::init(cx);
@@ -686,12 +684,59 @@ fn console_server_does_not_escape_mux_when_the_daemon_is_unavailable(
         zetta.mux_connect_failure = Some((Instant::now(), "test daemon unavailable".into()));
         let config = Config::defaults(None, None);
         let mut profile = config.profiles[0].clone();
+        // Avoid macOS's login helper and the user's shell startup files.
+        profile.command = Shell::Program(if cfg!(windows) {
+            "cmd.exe".to_owned()
+        } else {
+            "/bin/sh".to_owned()
+        });
         profile.console_backend = crate::config::ConsoleBackend::ConsoleServer;
         zetta.open_tab_with_profile(profile, window, cx);
         let pane = zetta.tabs.last().unwrap().active_pane().unwrap();
-        assert!(pane.error.as_deref().is_some_and(|error| {
-            error.contains("session multiplexer") && error.contains("test daemon unavailable")
-        }));
-        assert!(pane.terminal.is_none());
+        assert!(pane.error.is_none(), "{:?}", pane.error);
+    });
+    cx.run_until_parked();
+    zetta.update(cx, |zetta, _| {
+        let pane = zetta.tabs.last().unwrap().active_pane().unwrap();
+        assert!(pane.error.is_none(), "{:?}", pane.error);
+        assert!(
+            pane.terminal.is_some(),
+            "the local terminal must finish spawning"
+        );
+        assert!(zetta.mux_panes.mux_pane_id(pane.id).is_none());
+        assert!(!zetta.no_mux, "later launches must still retry the daemon");
+    });
+}
+
+#[cfg(feature = "zmux")]
+#[gpui::test]
+fn unavailable_multiplexer_preserves_session_and_replay_requirements(
+    cx: &mut gpui::TestAppContext,
+) {
+    cx.update(|cx| {
+        theme_settings::init(theme::LoadThemes::JustBase, cx);
+        terminal::terminal_settings::TerminalSettings::init(cx);
+    });
+    let (zetta, cx) = cx.add_window_view(|window, cx| {
+        let mut config = Config::defaults(None, None);
+        config.profiles.clear();
+        Zetta::new(config, None, Default::default(), window, cx)
+    });
+    zetta.update(cx, |zetta, cx| {
+        // Fail before contacting any real daemon, then exercise the cached
+        // failure as well as the first attempt.
+        zetta.launch_config.sessions.retention = crate::config::SessionRetention::Memory;
+        zetta.launch_config.sessions.ring_bytes = 1;
+        for _ in 0..2 {
+            assert!(zetta.mux_provider_for_tab(17, cx).unwrap().is_none());
+        }
+        assert!(zetta.mux_connect_failure.is_some());
+        assert!(
+            zetta
+                .mux_provider_for_tab_with_restore_replay(17, Some(vec![1]), cx)
+                .is_err()
+        );
+        zetta.mux_panes.session_for_tab(17).set_id(900);
+        assert!(zetta.mux_provider_for_tab(17, cx).is_err());
     });
 }

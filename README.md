@@ -136,6 +136,11 @@ responsibility, so surviving terminals retain Zetta's Local Network identity
 after the GUI exits or is updated. Standalone remote installations still run
 the small `zmux` executable.
 
+If the session multiplexer cannot start, new local terminals start directly in
+Zetta with a notice. They remain usable, but close when Zetta exits and cannot
+be shared. Later terminal launches retry the multiplexer. Reconnecting existing
+sessions and restoring disk sessions still require it.
+
 The Windows client follows the remote shell's application cursor mode for
 arrows, Home, and End, including Zsh/Prezto history substring search bindings.
 
