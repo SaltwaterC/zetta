@@ -19,6 +19,9 @@ Use the Rust toolchain pinned in `rust-toolchain.toml` (Rust 1.99.0 with
 git submodule update --init
 ```
 
+`./scripts/init --check` reports whatever else a fresh machine is missing, and
+`./scripts/init` installs it.
+
 `docs/ARCHITECTURE.md` is the routing table for `src/`: which module owns what.
 Consult it to place a change, but treat each module's own `//!` documentation as
 authoritative — several record constraints that are not visible from the code.

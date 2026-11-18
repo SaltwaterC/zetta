@@ -410,6 +410,8 @@ without that feature, so no call site needs a feature predicate:
 
 - `cli_services.rs`: CLI service dispatch; a module directory —
   `cli_services/serial.rs`, `cli_services/servers.rs` (HTTP + TFTP server),
+  `cli_services/tftp_setcap.rs` (Linux `zetta tftp setcap`, the post-install
+  grant of `cap_net_bind_service`),
   `cli_services/clipboard.rs` (validated proxy to sibling `zcopy` and `zpaste`),
   and `cli_services/raw_terminal.rs`. `crates/zclip` shares the clipboard option
   parser with Zetta and keeps `arboard` behind a binary-only backend feature.

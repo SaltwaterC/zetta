@@ -878,12 +878,20 @@ _zetta_tftp() {
     fi
 
     if (( CURRENT == operation_index )); then
-        compadd -S ' ' -- get put server
+        if [[ $words[1] == ztftp ]]; then
+            compadd -S ' ' -- get put server
+        else
+            compadd -S ' ' -- get put server ZETTA_TFTP_SETCAP_COMMAND
+        fi
         _zetta_options --help
         return
     fi
 
     operation=${words[operation_index]}
+    if [[ $operation == setcap ]]; then
+        [[ $current == -* || -z $current ]] && _zetta_options --check --help
+        return
+    fi
     if [[ $operation == server ]]; then
         if [[ $current == -* || -z $current ]]; then
             if [[ $words[1] == ztftp ]]; then

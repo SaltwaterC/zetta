@@ -134,9 +134,10 @@ still create an ordinary file in any existing directory under `--root`. Point a
 writable server at a directory that holds nothing but transfers — never at a
 home directory or a checkout.
 
-Binding port 69 may require privileges or firewall permission. On Linux, the
-[installation guide](installation.md) explains how to grant the installed
-binary only the required `cap_net_bind_service` capability. TFTP moves to a
+Binding port 69 may require privileges or firewall permission. On Linux, run
+`zetta tftp setcap` to grant the installed binaries only the required
+`cap_net_bind_service` capability; `make install` runs it for you, and the
+[installation guide](installation.md) explains when it asks for `sudo`. TFTP moves to a
 dynamic UDP port after the initial request, so firewalls must permit related
 transfer traffic.
 

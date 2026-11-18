@@ -3,8 +3,8 @@
   "dark_theme": "One Dark",
   "default_tab_icon": "tool_terminal",
   "commands": {
-    "all": {
-      "command": "make"
+    "init": {
+      "command": "./scripts/init"
     }
   }
 }

@@ -189,3 +189,18 @@ fn uploads_refuse_a_symlink_into_a_dot_directory() {
     assert!(PendingUpload::create(&root, "cfg/autostart.desktop").is_err());
     assert!(!root.join(".config/autostart.desktop").exists());
 }
+
+#[test]
+fn a_refused_port_names_the_capability_fix_only_on_linux() {
+    let refused = bind_error(&io::Error::from(io::ErrorKind::PermissionDenied), 69).to_string();
+    assert!(refused.starts_with("binding TFTP server to UDP port 69: "));
+    assert_eq!(
+        refused.contains("zetta tftp setcap"),
+        cfg!(target_os = "linux"),
+        "{refused}"
+    );
+
+    let in_use = bind_error(&io::Error::from(io::ErrorKind::AddrInUse), 69).to_string();
+    assert!(in_use.starts_with("binding TFTP server to UDP port 69: "));
+    assert!(!in_use.contains("setcap"), "{in_use}");
+}

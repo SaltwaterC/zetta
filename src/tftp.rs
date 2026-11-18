@@ -13,7 +13,10 @@ pub(crate) struct TftpCommand {
 
 #[cfg(feature = "tftp-client")]
 pub(crate) fn tftp_help() -> String {
-    ztftp::tftp_help().replace("ztftp", "zetta tftp")
+    let help = ztftp::tftp_help().replace("ztftp", "zetta tftp");
+    #[cfg(tftp_setcap)]
+    let help = format!("{help}\n{}", crate::cli_services::TFTP_SETCAP_HINT);
+    help
 }
 
 #[cfg(feature = "tftp-client")]

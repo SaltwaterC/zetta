@@ -199,8 +199,22 @@ fn render_integration(template: &str, shell: ShellIntegration) -> String {
     let mut in_clipboard_section = false;
     let colors = render_overlay_color_names(shell);
 
+    let tftp_setcap_enabled = cfg!(tftp_setcap);
     let substitutions = [
         ("ZETTA_OVERLAY_COLORS", colors.as_str()),
+        // Before ZETTA_TFTP_SETCAP_COMMAND, which is a prefix of it.
+        (
+            "ZETTA_TFTP_SETCAP_COMMAND_PS",
+            if tftp_setcap_enabled {
+                "'setcap', "
+            } else {
+                ""
+            },
+        ),
+        (
+            "ZETTA_TFTP_SETCAP_COMMAND",
+            if tftp_setcap_enabled { "setcap" } else { "" },
+        ),
         (
             "ZETTA_MUX_ROOT_COMMAND_PS",
             if zmux_enabled { "'mux'," } else { "" },

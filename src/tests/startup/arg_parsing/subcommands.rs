@@ -1048,6 +1048,41 @@ fn tftp_server_subcommand_bypasses_application_startup() {
     assert!(!should_handoff_to_existing_process(&args));
 }
 
+#[cfg(tftp_setcap)]
+#[test]
+fn tftp_setcap_subcommand_bypasses_application_startup() {
+    let args = parse_args_from([
+        OsString::from("tftp"),
+        OsString::from("setcap"),
+        OsString::from("--check"),
+    ])
+    .unwrap();
+    assert!(matches!(
+        args.mode,
+        StartupMode::CliService(CliServiceCommand::TftpSetcap(_))
+    ));
+    assert!(!should_handoff_to_existing_process(&args));
+
+    let error = parse_args_from([
+        OsString::from("tftp"),
+        OsString::from("setcap"),
+        OsString::from("x"),
+    ])
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("unexpected tftp setcap argument")
+    );
+}
+
+#[cfg(all(feature = "tftp-server", not(tftp_setcap)))]
+#[test]
+fn tftp_setcap_explains_that_this_platform_does_not_need_it() {
+    let error = parse_args_from([OsString::from("tftp"), OsString::from("setcap")]).unwrap_err();
+    assert!(error.to_string().contains("only needed on Linux"));
+}
+
 #[cfg(feature = "zmux")]
 #[test]
 fn mux_subcommand_forwards_its_arguments_verbatim() {

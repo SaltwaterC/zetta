@@ -14,6 +14,11 @@ pub(crate) use servers::{http_server_help, parse_http_args};
 #[cfg(feature = "tftp-server")]
 pub(crate) use servers::{parse_tftp_server_args, tftp_server_help};
 
+#[cfg(tftp_setcap)]
+mod tftp_setcap;
+#[cfg(tftp_setcap)]
+pub(crate) use tftp_setcap::{TFTP_SETCAP_HINT, parse_tftp_setcap_args, tftp_setcap_help};
+
 #[cfg(feature = "notifications")]
 mod notify_proxy;
 #[cfg(all(test, notify_cleanup_enabled))]
@@ -82,6 +87,8 @@ pub(crate) enum CliServiceCommand {
     Http(servers::HttpServerCommand),
     #[cfg(feature = "tftp-server")]
     Tftp(servers::TftpServerCommand),
+    #[cfg(tftp_setcap)]
+    TftpSetcap(tftp_setcap::TftpSetcapCommand),
     #[cfg(feature = "notifications")]
     Notify(NotificationRequest),
     #[cfg(notify_cleanup_enabled)]
@@ -102,6 +109,8 @@ impl CliServiceCommand {
             Self::Http(command) => command.run(),
             #[cfg(feature = "tftp-server")]
             Self::Tftp(command) => command.run(),
+            #[cfg(tftp_setcap)]
+            Self::TftpSetcap(command) => command.run(),
             #[cfg(feature = "notifications")]
             Self::Notify(command) => notify_proxy::run_notification_proxy(
                 command,

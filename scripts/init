@@ -1,0 +1,454 @@
+#!/usr/bin/env sh
+#
+# Bootstraps a Zetta development environment on this machine: the system
+# packages the build links against, rustup with the toolchain and targets
+# pinned in rust-toolchain.toml, and the Git submodules. Anything already
+# present is left alone, so it is safe to run again.
+#
+# The project's `init` command runs `./scripts/init`. A POSIX shell runs this
+# file; PowerShell resolves the same path to `init.cmd`, and Git Bash on
+# Windows reaches this file and hands over to `init-windows.ps1`.
+
+set -eu
+
+usage() {
+    cat <<'EOF'
+Usage: scripts/init [OPTIONS]
+
+Installs what a Zetta development build needs on this machine, skipping
+anything already present.
+
+Options:
+  -c, --check  Report what is missing without installing anything
+  -y, --yes    Do not ask the package manager for confirmation
+  -h, --help   Show this help
+
+Linux: apt, dnf, pacman or zypper packages, then rustup.
+macOS: Xcode selection, license and Metal toolchain, Homebrew cmake, then rustup.
+Windows: run from PowerShell or Git Bash; see scripts/init-windows.ps1.
+EOF
+}
+
+check_only=0
+assume_yes=0
+for argument in "$@"; do
+    case $argument in
+        -c | --check) check_only=1 ;;
+        -y | --yes) assume_yes=1 ;;
+        -h | --help)
+            usage
+            exit 0
+            ;;
+        *)
+            echo "scripts/init: unknown option: $argument" >&2
+            usage >&2
+            exit 2
+            ;;
+    esac
+done
+
+root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+cd "$root"
+
+missing=0
+note() { printf '  %s\n' "$*"; }
+present() { printf '  [ok]      %s\n' "$*"; }
+absent() {
+    printf '  [missing] %s\n' "$*"
+    missing=1
+}
+step() { printf '\n%s\n' "$*"; }
+fail() {
+    printf 'scripts/init: %s\n' "$*" >&2
+    exit 1
+}
+have() { command -v "$1" >/dev/null 2>&1; }
+
+# Runs a downloaded installer script with the given interpreter and
+# arguments. Downloading first matters: `curl | sh` reports sh's status, so
+# a failed download would read as success and the bootstrap would carry on.
+run_installer() {
+    url=$1
+    interpreter=$2
+    shift 2
+    installer=$(mktemp)
+    if ! curl --proto '=https' --tlsv1.2 -fsSL "$url" -o "$installer"; then
+        rm -f "$installer"
+        fail "could not download $url"
+    fi
+    status=0
+    "$interpreter" "$installer" "$@" || status=$?
+    rm -f "$installer"
+    [ "$status" -eq 0 ] || fail "the installer from $url failed (exit $status)"
+}
+
+# A command that needs root: run directly as root, otherwise through sudo or
+# doas, whichever the machine has.
+as_root() {
+    if [ "$(id -u)" -eq 0 ]; then
+        "$@"
+    elif have sudo; then
+        sudo "$@"
+    elif have doas; then
+        doas "$@"
+    else
+        fail "installing packages needs root, and neither sudo nor doas is available"
+    fi
+}
+
+# --- Platform and CPU architecture -------------------------------------------
+
+os=$(uname -s)
+case $os in
+    MINGW* | MSYS* | CYGWIN*)
+        # Git Bash: the Windows bootstrap owns Visual Studio, winget and the
+        # MSVC rustup host, none of which this script can reason about.
+        have cygpath || fail "cygpath is required to hand over to init-windows.ps1"
+        exec powershell.exe -NoProfile -ExecutionPolicy Bypass \
+            -File "$(cygpath -w "$root/scripts/init-windows.ps1")" "$@"
+        ;;
+    Linux | Darwin) ;;
+    *) fail "$os is not a supported development host; see docs/installation.md" ;;
+esac
+
+machine=$(uname -m)
+case $machine in
+    x86_64 | amd64) arch=x86_64 ;;
+    aarch64 | arm64) arch=aarch64 ;;
+    *)
+        arch=$machine
+        echo "warning: $machine is not an architecture Zetta is built or tested on" >&2
+        ;;
+esac
+
+if [ "$os" = Darwin ]; then
+    # A shell running under Rosetta reports x86_64 on Apple Silicon, and
+    # rustup would then install an x86_64 host toolchain: everything would
+    # build, but as an emulated Intel binary.
+    if [ "$(sysctl -n sysctl.proc_translated 2>/dev/null || echo 0)" = 1 ]; then
+        fail "this shell runs under Rosetta; re-run from a native arm64 shell (arch -arm64 /bin/zsh)"
+    fi
+    homebrew_prefix=/usr/local
+    [ "$arch" = aarch64 ] && homebrew_prefix=/opt/homebrew
+fi
+
+if [ "$os" = Linux ] && grep -qi microsoft /proc/version 2>/dev/null; then
+    platform="Linux (WSL) $arch"
+elif [ "$os" = Darwin ]; then
+    platform="macOS $(sw_vers -productVersion 2>/dev/null || echo) $arch"
+else
+    platform="Linux $arch"
+fi
+printf 'Bootstrapping a Zetta development environment for %s\n' "$platform"
+[ "$check_only" -eq 1 ] && printf '(check only: nothing will be installed)\n'
+
+# --- Linux system packages ---------------------------------------------------
+
+# The headers the build links against, by pkg-config module. GPUI links both
+# xkbcommon libraries even for the default Wayland-only build, and the
+# notifications feature plays its tones through ALSA.
+linux_pkgconfig_modules='fontconfig xkbcommon xkbcommon-x11 alsa'
+
+linux_package_manager() {
+    for manager in apt-get dnf pacman zypper; do
+        if have "$manager"; then
+            echo "$manager"
+            return
+        fi
+    done
+}
+
+# Prints the package names that provide each missing command or module, for
+# the given package manager.
+linux_packages_for() {
+    manager=$1
+    shift
+    for need in "$@"; do
+        case $manager:$need in
+            apt-get:cc | apt-get:c++ | apt-get:make) echo build-essential ;;
+            apt-get:pkg-config) echo pkg-config ;;
+            apt-get:fontconfig) echo libfontconfig-dev ;;
+            apt-get:xkbcommon) echo libxkbcommon-dev ;;
+            apt-get:xkbcommon-x11) echo libxkbcommon-x11-dev ;;
+            apt-get:alsa) echo libasound2-dev ;;
+            dnf:cc | zypper:cc) echo gcc ;;
+            dnf:c++ | zypper:c++) echo gcc-c++ ;;
+            dnf:pkg-config) echo pkgconf-pkg-config ;;
+            zypper:pkg-config) echo pkg-config ;;
+            dnf:fontconfig | zypper:fontconfig) echo fontconfig-devel ;;
+            dnf:xkbcommon | zypper:xkbcommon) echo libxkbcommon-devel ;;
+            dnf:xkbcommon-x11 | zypper:xkbcommon-x11) echo libxkbcommon-x11-devel ;;
+            dnf:alsa) echo alsa-lib-devel ;;
+            zypper:alsa) echo alsa-devel ;;
+            pacman:cc | pacman:c++ | pacman:make | pacman:pkg-config) echo base-devel ;;
+            pacman:fontconfig) echo fontconfig ;;
+            pacman:xkbcommon) echo libxkbcommon ;;
+            pacman:xkbcommon-x11) echo libxkbcommon-x11 ;;
+            pacman:alsa) echo alsa-lib ;;
+            # The command and package names agree for the rest.
+            *) echo "$need" ;;
+        esac
+    done | sort -u
+}
+
+linux_install() {
+    manager=$1
+    shift
+    yes_flag=
+    case $manager in
+        apt-get)
+            [ "$assume_yes" -eq 1 ] && yes_flag=-y
+            as_root apt-get update
+            # shellcheck disable=SC2086 # yes_flag is empty or one word.
+            as_root apt-get install $yes_flag "$@"
+            ;;
+        dnf)
+            [ "$assume_yes" -eq 1 ] && yes_flag=-y
+            # shellcheck disable=SC2086
+            as_root dnf install $yes_flag "$@"
+            ;;
+        pacman)
+            [ "$assume_yes" -eq 1 ] && yes_flag=--noconfirm
+            # Arch supports no partial upgrades: syncing the database (which a
+            # fresh system does not have yet) means upgrading with it.
+            # shellcheck disable=SC2086
+            as_root pacman -Syu --needed $yes_flag "$@"
+            ;;
+        zypper)
+            [ "$assume_yes" -eq 1 ] && yes_flag=--non-interactive
+            # shellcheck disable=SC2086
+            as_root zypper $yes_flag install "$@"
+            ;;
+    esac
+}
+
+bootstrap_linux_packages() {
+    step "System packages"
+    needs=
+    for tool in cc c++ make pkg-config curl git; do
+        if have "$tool"; then
+            present "$tool"
+        else
+            absent "$tool"
+            needs="$needs $tool"
+        fi
+    done
+    for module in $linux_pkgconfig_modules; do
+        if have pkg-config && pkg-config --exists "$module"; then
+            present "$module (pkg-config)"
+        else
+            absent "$module (pkg-config)"
+            needs="$needs $module"
+        fi
+    done
+    [ -n "$needs" ] || return 0
+
+    manager=$(linux_package_manager)
+    if [ -z "$manager" ]; then
+        note "No supported package manager (apt-get, dnf, pacman, zypper) was found."
+        note "Install the development packages for:$needs"
+        [ "$check_only" -eq 1 ] && return 0
+        fail "install the packages above, then run scripts/init again"
+    fi
+    # shellcheck disable=SC2086 # needs is a word list.
+    packages=$(linux_packages_for "$manager" $needs | tr '\n' ' ')
+    if [ "$check_only" -eq 1 ]; then
+        note "would install with $manager: $packages"
+        return 0
+    fi
+    # shellcheck disable=SC2086 # packages is a word list.
+    linux_install "$manager" $packages
+}
+
+# --- macOS: Xcode and Homebrew -----------------------------------------------
+
+bootstrap_xcode() {
+    step "Xcode"
+    developer_dir=$(xcode-select -p 2>/dev/null || true)
+    case $developer_dir in
+        *.app/Contents/Developer) present "full Xcode selected: $developer_dir" ;;
+        *)
+            # GPUI compiles its shaders with Xcode's Metal compiler, which the
+            # standalone Command Line Tools do not ship.
+            absent "full Xcode is not the selected developer directory (${developer_dir:-none})"
+            xcode_app=
+            for candidate in /Applications/Xcode.app /Applications/Xcode*.app; do
+                if [ -d "$candidate/Contents/Developer" ]; then
+                    xcode_app=$candidate
+                    break
+                fi
+            done
+            if [ -z "$xcode_app" ]; then
+                note "Install Xcode from the App Store (it cannot be installed from a script),"
+                note "open it once, then run scripts/init again."
+                [ "$check_only" -eq 1 ] && return 0
+                fail "Xcode is required"
+            fi
+            if [ "$check_only" -eq 1 ]; then
+                note "would select $xcode_app"
+            else
+                as_root xcode-select --switch "$xcode_app/Contents/Developer"
+            fi
+            ;;
+    esac
+
+    if xcodebuild -license check >/dev/null 2>&1; then
+        present "Xcode license accepted"
+    else
+        absent "Xcode license not accepted"
+        # Accepting a license is the user's decision, so this is the
+        # interactive form even under --yes.
+        [ "$check_only" -eq 1 ] || as_root xcodebuild -license
+    fi
+
+    if xcrun --find metal >/dev/null 2>&1; then
+        present "Metal compiler"
+    else
+        absent "Metal compiler"
+        [ "$check_only" -eq 1 ] || xcodebuild -downloadComponent MetalToolchain
+    fi
+}
+
+bootstrap_homebrew_packages() {
+    step "Homebrew packages"
+    # Homebrew lives under /opt/homebrew on Apple Silicon and /usr/local on
+    # Intel, and is only on PATH once its shellenv has run.
+    if ! have brew && [ -x "$homebrew_prefix/bin/brew" ]; then
+        eval "$("$homebrew_prefix/bin/brew" shellenv)"
+    fi
+    if have cmake; then
+        present "cmake"
+        return 0
+    fi
+    absent "cmake"
+    if ! have brew; then
+        absent "Homebrew"
+        if [ "$check_only" -eq 1 ]; then
+            note "would install Homebrew into $homebrew_prefix, then cmake"
+            return 0
+        fi
+        if [ "$assume_yes" -eq 1 ]; then
+            NONINTERACTIVE=1
+            export NONINTERACTIVE
+        fi
+        run_installer https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh /bin/bash
+        eval "$("$homebrew_prefix/bin/brew" shellenv)"
+        homebrew_installed=1
+    elif [ "$check_only" -eq 1 ]; then
+        note "would run: brew install cmake"
+        return 0
+    fi
+    brew install cmake
+}
+
+# --- Rust --------------------------------------------------------------------
+
+toolchain_channel=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)
+toolchain_targets=$(sed -n 's/^targets *= *\[\(.*\)\]/\1/p' rust-toolchain.toml | tr ',' ' ' | tr -d '"')
+[ -n "$toolchain_channel" ] || fail "rust-toolchain.toml has no channel"
+
+bootstrap_rust() {
+    step "Rust $toolchain_channel"
+    cargo_bin=${CARGO_HOME:-$HOME/.cargo}/bin
+    if ! have rustup && [ -x "$cargo_bin/rustup" ]; then
+        PATH="$cargo_bin:$PATH"
+    fi
+    if have rustup; then
+        present "rustup"
+    else
+        absent "rustup"
+        if have cargo; then
+            # A distribution's Rust ignores rust-toolchain.toml, so it would
+            # build with whatever version it happens to be.
+            note "cargo at $(command -v cargo) is not managed by rustup and ignores rust-toolchain.toml"
+        fi
+        if [ "$check_only" -eq 1 ]; then
+            note "would install rustup from https://sh.rustup.rs"
+            note "would install $toolchain_channel with:$toolchain_targets"
+            return 0
+        fi
+        # The pinned toolchain is installed below; rustup's own default would
+        # only download a second one.
+        run_installer https://sh.rustup.rs sh -y --default-toolchain none
+        PATH="$cargo_bin:$PATH"
+        rustup_installed=1
+    fi
+
+    if rustup toolchain list | grep -q "^$toolchain_channel-"; then
+        present "toolchain $toolchain_channel"
+    else
+        absent "toolchain $toolchain_channel"
+        if [ "$check_only" -eq 0 ]; then
+            # rustup 1.28 and later install the toolchain the file names;
+            # older releases install it implicitly from `rustup show`.
+            rustup toolchain install || rustup show active-toolchain
+        fi
+    fi
+
+    installed_targets=$(rustup target list --installed --toolchain "$toolchain_channel" 2>/dev/null || true)
+    for target in $toolchain_targets; do
+        if printf '%s\n' "$installed_targets" | grep -qx "$target"; then
+            present "target $target"
+        else
+            absent "target $target"
+            [ "$check_only" -eq 1 ] || rustup target add --toolchain "$toolchain_channel" "$target"
+        fi
+    done
+}
+
+# --- Git submodules ----------------------------------------------------------
+
+bootstrap_submodules() {
+    step "Git submodules"
+    if ! have git; then
+        absent "git, which is needed to inspect them"
+        [ "$check_only" -eq 1 ] && return 0
+        fail "git is required"
+    fi
+    # A leading '-' marks a submodule that was never initialized. A '+' (a
+    # different commit checked out) is somebody's work in progress and is
+    # deliberately left alone.
+    uninitialized=$(git submodule status | sed -n 's/^-[0-9a-f]* \([^ ]*\).*/\1/p')
+    git submodule status | sed -n 's/^[ +U][0-9a-f]* \([^ ]*\).*/\1/p' | while read -r path; do
+        present "$path"
+    done
+    [ -n "$uninitialized" ] || return 0
+    for path in $uninitialized; do
+        absent "$path"
+    done
+    if [ "$check_only" -eq 0 ]; then
+        # shellcheck disable=SC2086 # uninitialized is a list of paths without spaces.
+        git submodule update --init -- $uninitialized
+    fi
+}
+
+# --- Run ---------------------------------------------------------------------
+
+homebrew_installed=0
+rustup_installed=0
+case $os in
+    Linux) bootstrap_linux_packages ;;
+    Darwin)
+        bootstrap_xcode
+        bootstrap_homebrew_packages
+        ;;
+esac
+bootstrap_rust
+bootstrap_submodules
+
+echo
+if [ "$check_only" -eq 1 ]; then
+    if [ "$missing" -eq 0 ]; then
+        echo "The development environment is complete."
+        exit 0
+    fi
+    echo "Run scripts/init (or 'zetta cmd init') to install what is missing."
+    exit 1
+fi
+echo "The development environment is ready. Build and test with: make"
+if [ "$rustup_installed" -eq 1 ]; then
+    echo "rustup added ~/.cargo/bin to your shell startup files; open a new shell to use cargo."
+fi
+if [ "$homebrew_installed" -eq 1 ]; then
+    echo "Add Homebrew to your shell as its installer described above, then open a new shell."
+fi

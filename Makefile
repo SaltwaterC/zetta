@@ -1,7 +1,6 @@
 CARGO ?= cargo
 ENV ?= env
 INSTALL ?= install
-SETCAP ?= setcap
 DESTDIR ?=
 SERIAL ?= 1
 HTTP ?= 1
@@ -1102,25 +1101,27 @@ else
 endif
 endif
 
+# Grants cap_net_bind_service so the TFTP server can bind port 69. The
+# installed binary does it (`zetta tftp setcap`): it checks first, and only
+# setcap runs as root, through sudo, so a user-local install no longer has to
+# run as root to get it. A root install fails if the grant fails, as before; a
+# user-local one that cannot grant it (no terminal, sudo declined) is still
+# installed and says how to grant it later.
 install-capabilities:
 	@if [ "$$(uname -s)" = "Linux" ] && [ -n "$(call tool_enabled,$(TFTP_SERVER))" ]; then \
 		if [ -n "$(DESTDIR)" ]; then \
 			echo "Skipping cap_net_bind_service for staged install; apply it in the package install step"; \
-		elif [ "$$(id -u)" -ne 0 ]; then \
-			echo "Skipping cap_net_bind_service: rerun with sufficient privileges to enable the TFTP server" >&2; \
 		else \
 			test -x "$(BINDIR)/zetta" || { \
 				echo "$(BINDIR)/zetta is missing; run 'make install-binary' first" >&2; \
 				exit 1; \
 			}; \
-			command -v "$(SETCAP)" >/dev/null 2>&1 || { \
-				echo "$(SETCAP) is required to grant cap_net_bind_service (install libcap2-bin on Ubuntu)" >&2; \
-				exit 1; \
-			}; \
-			$(SETCAP) cap_net_bind_service=+ep "$(BINDIR)/zetta" cap_net_bind_service=+ep "$(BINDIR)/ztftp" || { \
-				echo "Could not grant cap_net_bind_service to $(BINDIR)/zetta and $(BINDIR)/ztftp" >&2; \
-				exit 1; \
-			}; \
+			if [ "$$(id -u)" -eq 0 ]; then \
+				"$(BINDIR)/zetta" tftp setcap; \
+			else \
+				"$(BINDIR)/zetta" tftp setcap || \
+					echo "Zetta is installed, but its TFTP server cannot bind port 69 until you run: zetta tftp setcap" >&2; \
+			fi; \
 		fi; \
 	fi
 

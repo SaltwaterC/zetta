@@ -571,6 +571,12 @@ pub(super) fn parse_tftp_subcommand(arguments: &[OsString]) -> Result<StartupArg
         anyhow::bail!("TFTP server support is disabled in this build");
     }
     if arguments
+        .first()
+        .is_some_and(|argument| argument == "setcap")
+    {
+        return parse_tftp_setcap_subcommand(&arguments[1..]);
+    }
+    if arguments
         .iter()
         .any(|argument| matches!(argument.to_string_lossy().as_ref(), "--help" | "-h"))
     {
@@ -583,6 +589,34 @@ pub(super) fn parse_tftp_subcommand(arguments: &[OsString]) -> Result<StartupArg
         tftp_command: Some(parse_tftp_args(arguments.iter().cloned())?),
         ..StartupArgs::for_mode(StartupMode::Application)
     })
+}
+
+/// `zetta tftp setcap …`, which only a Linux build with the TFTP server has
+/// anything to do for.
+fn parse_tftp_setcap_subcommand(arguments: &[OsString]) -> Result<StartupArgs> {
+    #[cfg(tftp_setcap)]
+    {
+        if arguments
+            .iter()
+            .any(|argument| matches!(argument.to_string_lossy().as_ref(), "--help" | "-h"))
+        {
+            println!("{}", tftp_setcap_help());
+            std::process::exit(0);
+        }
+        Ok(StartupArgs::for_mode(StartupMode::CliService(
+            parse_tftp_setcap_args(arguments.iter().cloned())?,
+        )))
+    }
+    #[cfg(not(tftp_setcap))]
+    {
+        let _ = arguments;
+        #[cfg(not(feature = "tftp-server"))]
+        anyhow::bail!("TFTP server support is disabled in this build");
+        #[cfg(feature = "tftp-server")]
+        anyhow::bail!(
+            "zetta tftp setcap is only needed on Linux; this platform lets the TFTP server bind port 69 without it"
+        );
+    }
 }
 
 /// `zetta notify [cleanup] …`

@@ -16,6 +16,8 @@ use crate::cli_services::{notify_help, parse_notify_args, requests_notify_help};
 use crate::cli_services::{parse_serial_args, serial_help};
 #[cfg(feature = "tftp-server")]
 use crate::cli_services::{parse_tftp_server_args, tftp_server_help};
+#[cfg(tftp_setcap)]
+use crate::cli_services::{parse_tftp_setcap_args, tftp_setcap_help};
 use crate::process_control::{
     ReplacePaneRequest, TabAttentionRequest, request_existing_process_command,
     request_existing_process_new_window, request_existing_process_pane,

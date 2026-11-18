@@ -1,5 +1,39 @@
 # Installing Zetta
 
+## Bootstrapping a development machine
+
+`./scripts/init` installs what a development build needs and skips anything
+already present, so it is safe to run again. It is also the project's `init`
+command (`zetta cmd init`), which runs it in the active pane. Use `--check`
+(`-c`) to report what is missing without installing anything, and `--yes`
+(`-y`) to skip the package manager's confirmation.
+
+- **Linux** (apt, dnf, pacman or zypper): a C/C++ compiler, `make`,
+  `pkg-config`, `curl`, `git`, and the fontconfig, xkbcommon, xkbcommon-x11 and
+  ALSA development packages listed under
+  [Linux build requirements](#linux-build-requirements). It asks for `sudo` (or
+  `doas`) only when something is missing. On Arch it installs with
+  `pacman -Syu`, since Arch does not support partial upgrades. WSL is
+  bootstrapped as the Linux distribution it is.
+- **macOS**: selects a full Xcode installation if the Command Line Tools are
+  selected, opens the Xcode license for you to accept, downloads the Metal
+  toolchain, and installs `cmake` with Homebrew, installing Homebrew first if
+  it is missing. Xcode itself has to come from the App Store. A shell running
+  under Rosetta is refused, because rustup would install an Intel toolchain.
+- **Windows**: from PowerShell, `./scripts/init` runs `scripts\init.cmd`, which
+  starts `scripts\init-windows.ps1` whatever the execution policy is; Git Bash
+  hands over to the same script. It installs Git, GNU Make
+  (`ezwinports.make`, or Chocolatey's `make` from an elevated shell) and the
+  Visual Studio 2022 Build Tools C++ workload with winget. A Visual Studio
+  installation without the C++ tools is reported, not modified. The build
+  scripts use the x64 MSVC environment, so on an ARM64 machine rustup is set to
+  the `x86_64-pc-windows-msvc` host and Zetta runs under emulation.
+
+On every platform it then installs rustup if needed, the toolchain and targets
+pinned in `rust-toolchain.toml`, and any Git submodule that has never been
+initialized. A submodule checked out at a different commit is left alone. Once
+it finishes, open a new shell if it installed rustup or changed `PATH`.
+
 ## Build and run
 
 Zetta uses the Rust toolchain pinned in `rust-toolchain.toml`. Initialize the
@@ -394,19 +428,27 @@ executable before copying files, so an incomplete build fails before replacing
 installed binaries. Plain `make` builds debug executables; it does not refresh
 `target/release`.
 
-A user-local install cannot grant the
-`cap_net_bind_service` capability needed by the TFTP servers to bind UDP port
-69, so the TFTP server will not be able to bind that port without additional
-privileges. A system-wide install grants the capability to both `zetta`
-(for server panes) and `ztftp` (for CLI servers) when possible. Ubuntu
-provides `setcap` in `libcap2-bin`.
-
-An unprivileged install builds first but cannot grant that capability. Enable
-it separately when required:
+The TFTP servers need the `cap_net_bind_service` capability to bind UDP port
+69: `zetta` for server panes, and `ztftp` for `zetta tftp server`. Installing
+replaces both files, which drops a capability granted earlier, so every Linux
+`make install` runs `zetta tftp setcap` after copying them. It checks both
+binaries and does nothing when they already have the capability, or when
+`net.ipv4.ip_unprivileged_port_start` already lets every user bind port 69.
+Otherwise it runs `sudo setcap cap_net_bind_service=+ep` on exactly those two
+files, so a user-local install asks for a password only for that step and is
+not run as root. Without a terminal to ask on, or if the grant is declined,
+the install still succeeds and prints the command to run later:
 
 ```sh
-sudo make install-capabilities PREFIX="$HOME/.local/zetta.app"
+zetta tftp setcap          # grant it if missing
+zetta tftp setcap --check  # report only; exit 1 when it is missing
 ```
+
+`setcap` comes from `libcap2-bin` on Debian and Ubuntu, `libcap` on Fedora and
+Arch, and `libcap-progs` on openSUSE. Linux ignores file capabilities on a
+`nosuid` filesystem, which `zetta tftp setcap` reports instead of granting.
+A binary with a file capability runs in the kernel's secure-execution mode, so
+`LD_PRELOAD` and `LD_LIBRARY_PATH` do not apply to Zetta once it is granted.
 
 Other supported installation forms are:
 

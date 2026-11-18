@@ -388,6 +388,13 @@ function __zetta_tftp_server
     and test "$words[3]" = server
 end
 
+function __zetta_tftp_setcap
+    set -l words (commandline -opc)
+    test (count $words) -ge 3
+    and test "$words[2]" = tftp
+    and test "$words[3]" = setcap
+end
+
 # ZETTA_ZMUX_INTEGRATION_BEGIN
 function __zetta_mux_session_ids
     set -l command_name zetta
@@ -723,6 +730,10 @@ function __zetta_long_options
                 --help 'Print help'
         case tftp-client ztftp
             printf '%s\t%s\n' --port 'Server port' --help 'Print help'
+        case tftp-setcap
+            printf '%s\t%s\n' \
+                --check 'Report whether the capability is granted' \
+                --help 'Print help'
         case notify zntfy
             printf '%s\t%s\n' \
                 --app-name 'Application name' \
@@ -1090,7 +1101,7 @@ complete -c zetta -s r -r -a '(__fish_complete_directories)' -n '__fish_seen_sub
 complete -c zetta -s p -r -n '__fish_seen_subcommand_from http; and __fish_seen_subcommand_from server; and __zetta_short_option -p'
 complete -c zetta -s c -r -n '__fish_seen_subcommand_from http; and __fish_seen_subcommand_from server; and __zetta_short_option -c'
 complete -c zetta -s a -x -n '__fish_seen_subcommand_from http; and __fish_seen_subcommand_from server; and __zetta_short_option -a'
-complete -c zetta -n '__zetta_at_subcommand tftp' -a 'get put server'
+complete -c zetta -n '__zetta_at_subcommand tftp' -a 'get put server ZETTA_TFTP_SETCAP_COMMAND'
 complete -c zetta -n '__zetta_tftp_client' -l port -r -d 'Server port'
 complete -c zetta -n '__zetta_tftp_server' -l root -r -a '(__fish_complete_directories)' -d 'Directory to serve'
 complete -c zetta -n '__zetta_tftp_server' -l config -r -d 'Configuration file'
@@ -1099,6 +1110,8 @@ complete -c zetta -n '__fish_seen_subcommand_from tftp' -l help -d 'Print help'
 complete -c zetta -n '__zetta_at_subcommand tftp' -a '(__zetta_long_options tftp)'
 complete -c zetta -n '__zetta_tftp_client' -a '(__zetta_long_options tftp-client)'
 complete -c zetta -n '__zetta_tftp_server' -a '(__zetta_long_options tftp-server)'
+complete -c zetta -n '__zetta_tftp_setcap' -l check -d 'Report whether the capability is granted'
+complete -c zetta -n '__zetta_tftp_setcap' -a '(__zetta_long_options tftp-setcap)'
 complete -c zetta -s p -r -n '__zetta_tftp_client; and __zetta_short_option -p'
 complete -c zetta -s r -r -a '(__fish_complete_directories)' -n '__zetta_tftp_server; and __zetta_short_option -r'
 complete -c zetta -s p -r -n '__zetta_tftp_server; and __zetta_short_option -p'

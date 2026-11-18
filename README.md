@@ -271,6 +271,11 @@ git submodule update --init
 cargo run
 ```
 
+On a new machine, `./scripts/init` (also the project's `zetta cmd init`)
+installs the system packages, rustup with the pinned toolchain, and the
+submodules for Linux, macOS or Windows; see
+[bootstrapping a development machine](docs/installation.md#bootstrapping-a-development-machine).
+
 Zetta's version is maintained only in `[package].version` in the root
 `Cargo.toml`; rebuild after changing it. Fork crate versions are independent.
 See [versioning](docs/versioning.md) for the application and compatibility markers.

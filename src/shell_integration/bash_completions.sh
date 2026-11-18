@@ -994,10 +994,18 @@ _zetta_tftp_complete() {
     previous=${COMP_WORDS[COMP_CWORD-1]}
 
     if (( COMP_CWORD == operation_index )); then
-        _zetta_compgen 'get put server --help'
+        if (( operation_index == 1 )); then
+            _zetta_compgen 'get put server --help'
+        else
+            _zetta_compgen 'get put server ZETTA_TFTP_SETCAP_COMMAND --help'
+        fi
         return
     fi
     operation=${COMP_WORDS[operation_index]}
+    if [[ $operation == setcap ]]; then
+        [[ $current == -* || -z $current ]] && _zetta_compgen '--check --help'
+        return
+    fi
     if [[ $operation == server ]]; then
         if [[ $current == -* || -z $current ]]; then
             if (( operation_index == 1 )); then

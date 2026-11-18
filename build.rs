@@ -64,6 +64,7 @@ fn emit_cfg_aliases() {
     println!("cargo::rustc-check-cfg=cfg(byte_stream_panes)");
     println!("cargo::rustc-check-cfg=cfg(cli_services)");
     println!("cargo::rustc-check-cfg=cfg(notify_cleanup_enabled)");
+    println!("cargo::rustc-check-cfg=cfg(tftp_setcap)");
 
     let linux_like = matches!(
         env::var("CARGO_CFG_TARGET_OS").as_deref(),
@@ -77,6 +78,12 @@ fn emit_cfg_aliases() {
         // D-Bus-backed Linux/BSD notification path; other platforms tear
         // their workers down as soon as the notification is submitted.
         println!("cargo::rustc-cfg=notify_cleanup_enabled");
+    }
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux") && feature_enabled("TFTP_SERVER") {
+        // `zetta tftp setcap`: file capabilities are Linux's, and only the
+        // TFTP server binds a privileged port. macOS and Windows let any user
+        // bind port 69.
+        println!("cargo::rustc-cfg=tftp_setcap");
     }
     if feature_enabled("HTTP_SERVER") || feature_enabled("TFTP_SERVER") {
         println!("cargo::rustc-cfg=servers_enabled");

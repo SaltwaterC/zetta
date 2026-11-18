@@ -10838,8 +10838,8 @@ dependencies = [
  "zhttp",
  "zmux",
  "zntfy",
- "zpager",
  "zosh",
+ "zpager",
  "ztftp",
  "zwt",
 ]
@@ -10923,15 +10923,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "zpager"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "crossterm",
- "unicode-width 0.2.2",
-]
-
-[[package]]
 name = "zosh"
 version = "0.1.0"
 dependencies = [
@@ -10945,6 +10936,15 @@ dependencies = [
  "vt100",
  "windows 0.61.3",
  "zclip",
+]
+
+[[package]]
+name = "zpager"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "crossterm",
+ "unicode-width 0.2.2",
 ]
 
 [[package]]

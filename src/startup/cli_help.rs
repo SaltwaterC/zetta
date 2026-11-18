@@ -12,14 +12,21 @@ impl TftpCommand {
 }
 
 #[cfg(not(feature = "tftp-client"))]
-pub(crate) fn tftp_help() -> &'static str {
-    #[cfg(feature = "tftp-server")]
+pub(crate) fn tftp_help() -> String {
+    #[cfg(tftp_setcap)]
     {
-        "Zetta TFTP server\n\nUsage: zetta tftp server [OPTIONS]\n\nRun `zetta tftp server --help` for server options."
+        format!(
+            "Zetta TFTP server\n\nUsage: zetta tftp server [OPTIONS]\n       zetta tftp setcap [OPTIONS]\n\nRun `zetta tftp server --help` for server options.\n{}",
+            crate::cli_services::TFTP_SETCAP_HINT
+        )
+    }
+    #[cfg(all(feature = "tftp-server", not(tftp_setcap)))]
+    {
+        "Zetta TFTP server\n\nUsage: zetta tftp server [OPTIONS]\n\nRun `zetta tftp server --help` for server options.".to_owned()
     }
     #[cfg(not(feature = "tftp-server"))]
     {
-        "TFTP support is disabled in this build"
+        "TFTP support is disabled in this build".to_owned()
     }
 }
 

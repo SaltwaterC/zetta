@@ -583,8 +583,9 @@ $zettaCompletions = {
                 if ($words.Count -le 2) { 'server', '--help' } else { '--root', '--port', '--config', '--serve-dotfiles', '--allow-host', '--allow-any-host', '--help' }
             }
             'tftp' {
-                if ($words.Count -le 2) { 'get', 'put', 'server', '--help' }
+                if ($words.Count -le 2) { 'get', 'put', 'server', ZETTA_TFTP_SETCAP_COMMAND_PS'--help' }
                 elseif ($words[2] -eq 'server') { '--root', '--port', '--config', '--writable', '--help' }
+                elseif ($words[2] -eq 'setcap') { '--check', '--help' }
                 else { '--port', '--help' }
             }
             'notify' {

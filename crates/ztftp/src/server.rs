@@ -33,6 +33,19 @@ pub struct OpenTftpServer {
     pub root: PathBuf,
 }
 
+/// Why the server could not bind `port`. On Linux a refused privileged port
+/// is the missing file capability every reinstall drops, so the error says
+/// how to grant it rather than leaving "Permission denied" to be decoded.
+fn bind_error(error: &io::Error, port: u16) -> anyhow::Error {
+    if cfg!(target_os = "linux") && error.kind() == io::ErrorKind::PermissionDenied {
+        anyhow::anyhow!(
+            "binding TFTP server to UDP port {port}: {error}; run `zetta tftp setcap` to let Zetta's TFTP server bind it without root"
+        )
+    } else {
+        anyhow::anyhow!("binding TFTP server to UDP port {port}: {error}")
+    }
+}
+
 /// Starts a TFTP server. `writable` enables uploads, which are anonymous and
 /// reachable by any host that can route to the port, so callers opt in
 /// explicitly rather than inheriting them.
@@ -40,8 +53,7 @@ pub fn start_server(root: &Path, port: u16, writable: bool) -> Result<OpenTftpSe
     let root = fs::canonicalize(root)
         .with_context(|| format!("resolving TFTP server root {}", root.display()))?;
     anyhow::ensure!(root.is_dir(), "TFTP server root is not a directory");
-    let socket = UdpSocket::bind(("0.0.0.0", port))
-        .with_context(|| format!("binding TFTP server to UDP port {port}"))?;
+    let socket = UdpSocket::bind(("0.0.0.0", port)).map_err(|error| bind_error(&error, port))?;
     socket.set_read_timeout(Some(SERVER_POLL_INTERVAL))?;
     let address = socket.local_addr()?;
     let active = Arc::new(AtomicBool::new(true));

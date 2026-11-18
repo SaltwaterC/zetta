@@ -3109,6 +3109,7 @@ fn fish_script_emits_long_option_candidates_for_every_command_context() {
         "tftp",
         "tftp-client",
         "tftp-server",
+        "tftp-setcap",
         "notify",
         "notify_cleanup",
         "attention",
@@ -3397,6 +3398,10 @@ fn fish_displays_long_option_candidates_and_supports_short_option_values() {
         ),
         ("zetta tftp ", &["--help"][..]),
         ("zetta tftp get ", &["--port", "--help"][..]),
+        #[cfg(tftp_setcap)]
+        ("zetta tftp ", &["setcap"][..]),
+        #[cfg(tftp_setcap)]
+        ("zetta tftp setcap ", &["--check", "--help"][..]),
         (
             "zetta tftp server ",
             &["--root", "--port", "--config", "--help"][..],
@@ -3690,6 +3695,25 @@ fn fish_does_not_repeat_options_and_completes_vi_files() {
             .lines()
             .any(|line| line.starts_with("Cargo.toml"))
     );
+}
+
+#[test]
+fn tftp_setcap_is_offered_only_by_builds_that_have_it() {
+    // `ztftp` has no setcap of its own, so only `zetta tftp` offers it.
+    for (shell, candidates) in [
+        (ShellIntegration::Bash, "'get put server setcap --help'"),
+        (ShellIntegration::Zsh, "-- get put server setcap\n"),
+        (ShellIntegration::Fish, "-a 'get put server setcap'"),
+        (ShellIntegration::PowerShell, "'server', 'setcap', '--help'"),
+    ] {
+        let script = shell.eager_script();
+        assert!(!script.contains("ZETTA_TFTP_SETCAP"), "{shell:?}");
+        assert_eq!(
+            script.contains(candidates),
+            cfg!(tftp_setcap),
+            "{shell:?} should offer setcap exactly when the build has it"
+        );
+    }
 }
 
 #[test]
